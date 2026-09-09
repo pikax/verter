@@ -92,7 +92,7 @@ fn tsserver_checked_drops_mid_surrogate_column() {
     let content = "let x = '😀';";
     // 0-based col 10 == 1-based offset 11 lands on the trailing surrogate half of the emoji.
     assert_eq!(
-        tsserver_pos_to_byte_offset_checked(content, 1, 11),
+        tsserver_pos_to_byte_offset_checked(&SourceIndex::new_utf16(content), 1, 11),
         None,
         "a UTF-16 column inside an astral character is not a scalar boundary and must be dropped"
     );
@@ -102,7 +102,7 @@ fn tsserver_checked_drops_mid_surrogate_column() {
 fn tsserver_checked_accepts_position_after_astral() {
     let content = "let x = '😀';";
     // 0-based col 11 == 1-based offset 12 is the closing quote, immediately AFTER the emoji.
-    let off = tsserver_pos_to_byte_offset_checked(content, 1, 12)
+    let off = tsserver_pos_to_byte_offset_checked(&SourceIndex::new_utf16(content), 1, 12)
         .expect("the position immediately after an astral character is a valid scalar boundary");
     // `let x = '` is 9 bytes, `😀` is 4 UTF-8 bytes → byte offset 13 is the closing quote.
     assert_eq!(off, 13);
@@ -113,7 +113,7 @@ fn tsserver_checked_accepts_position_after_astral() {
 fn tsserver_checked_accepts_eol_insertion_on_astral_line() {
     let content = "let x = '😀';";
     // EOL insertion: 0-based col == line UTF-16 length (13) == 1-based offset 14.
-    let off = tsserver_pos_to_byte_offset_checked(content, 1, 14)
+    let off = tsserver_pos_to_byte_offset_checked(&SourceIndex::new_utf16(content), 1, 14)
         .expect("an end-of-line insertion position is a valid scalar boundary");
     assert_eq!(off as usize, content.len());
 }
@@ -129,7 +129,8 @@ fn test_parse_tsserver_diagnostic() {
         "category": "error"
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), None).unwrap();
+    let parsed =
+        parse_tsserver_diagnostic(&diag, Some(&SourceIndex::new_utf16(content)), None).unwrap();
     assert_eq!(
         parsed.message,
         "Type 'number' is not assignable to type 'string'."
@@ -148,6 +149,56 @@ fn test_parse_tsserver_diagnostic() {
     );
 }
 
+/// A diagnostic pull resolves every diagnostic in every pass against ONE index
+/// built for the response batch. Sharing that index must be indistinguishable in
+/// the parsed result from indexing the source afresh for each diagnostic — the
+/// non-ASCII line is what would expose a stale or mis-encoded shared table.
+#[test]
+fn one_batch_index_parses_diagnostics_identically_to_per_diagnostic_indexing() {
+    let content = "const a😀b = 1;\nconst é: string = 42;\nconst z = 3;";
+    let batch = [
+        serde_json::json!({
+            "start": { "line": 1, "offset": 7 },
+            "end": { "line": 1, "offset": 11 },
+            "text": "first",
+            "code": 2322,
+            "category": "error"
+        }),
+        serde_json::json!({
+            "start": { "line": 2, "offset": 7 },
+            "end": { "line": 2, "offset": 13 },
+            "text": "second",
+            "code": 2322,
+            "category": "error"
+        }),
+        serde_json::json!({
+            "start": { "line": 3, "offset": 7 },
+            "end": { "line": 3, "offset": 8 },
+            "text": "third",
+            "code": 6133,
+            "category": "suggestion"
+        }),
+    ];
+
+    let shared = SourceIndex::new_utf16(content);
+    for diag in &batch {
+        let via_shared = parse_tsserver_diagnostic(diag, Some(&shared), None).unwrap();
+        let via_fresh =
+            parse_tsserver_diagnostic(diag, Some(&SourceIndex::new_utf16(content)), None).unwrap();
+        assert_eq!(
+            (via_shared.start, via_shared.end),
+            (via_fresh.start, via_fresh.end),
+            "shared-index offsets diverged for {}",
+            via_shared.message
+        );
+        // The offsets must be real byte offsets into the content, not packed
+        // line/column sentinels.
+        assert!(via_shared.start <= via_shared.end);
+        assert!(content.is_char_boundary(via_shared.start as usize));
+        assert!(content.is_char_boundary(via_shared.end as usize));
+    }
+}
+
 #[test]
 fn parse_tsserver_diagnostic_reads_reports_unnecessary_tag() {
     // tsserver flags unused-symbol suggestions (e.g. TS6133) with the
@@ -163,7 +214,8 @@ fn parse_tsserver_diagnostic_reads_reports_unnecessary_tag() {
         "reportsUnnecessary": true
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), None).unwrap();
+    let parsed =
+        parse_tsserver_diagnostic(&diag, Some(&SourceIndex::new_utf16(content)), None).unwrap();
     assert_eq!(parsed.code, Some("6133".to_string()));
     assert_eq!(
         parsed.tags,
@@ -187,7 +239,8 @@ fn parse_tsserver_diagnostic_reads_reports_deprecated_tag() {
         "reportsDeprecated": true
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), None).unwrap();
+    let parsed =
+        parse_tsserver_diagnostic(&diag, Some(&SourceIndex::new_utf16(content)), None).unwrap();
     assert_eq!(
         parsed.tags,
         vec![TypeDiagnosticTag::Deprecated],
@@ -209,7 +262,8 @@ fn parse_tsserver_diagnostic_without_tag_flags_stays_untagged() {
         "category": "suggestion"
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), None).unwrap();
+    let parsed =
+        parse_tsserver_diagnostic(&diag, Some(&SourceIndex::new_utf16(content)), None).unwrap();
     assert!(
         parsed.tags.is_empty(),
         "no boolean flags ⇒ no tags, got: {:?}",
@@ -245,7 +299,12 @@ fn parse_tsserver_diagnostic_reads_same_file_related_information() {
         ]
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/dup.ts")).unwrap();
+    let parsed = parse_tsserver_diagnostic(
+        &diag,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/dup.ts"),
+    )
+    .unwrap();
     assert_eq!(
         parsed.related_information.len(),
         1,
@@ -276,7 +335,12 @@ fn parse_tsserver_diagnostic_without_related_information_is_empty() {
         "category": "error"
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/x.ts")).unwrap();
+    let parsed = parse_tsserver_diagnostic(
+        &diag,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/x.ts"),
+    )
+    .unwrap();
     assert!(
         parsed.related_information.is_empty(),
         "absent relatedInformation ⇒ empty list, got: {:?}",
@@ -317,7 +381,12 @@ fn parse_tsserver_diagnostic_drops_cross_file_related_without_content() {
         ]
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/a.ts")).unwrap();
+    let parsed = parse_tsserver_diagnostic(
+        &diag,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/a.ts"),
+    )
+    .unwrap();
     assert!(
         parsed.related_information.is_empty(),
         "a cross-file related span with no content for the related file must be \
@@ -362,7 +431,12 @@ fn parse_tsserver_related_never_stores_packed_position_anti_bogus_link() {
         ]
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/a.ts")).unwrap();
+    let parsed = parse_tsserver_diagnostic(
+        &diag,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/a.ts"),
+    )
+    .unwrap();
     // The exact packed value the pre-fix code would have stored for line 100 col 5.
     let packed = ((100u32 - 1) << 16) | ((5u32 - 1) & 0xFFFF);
     assert_eq!(
@@ -422,7 +496,12 @@ fn parse_tsserver_related_drops_same_file_out_of_range_offset() {
         ]
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/dup.ts")).unwrap();
+    let parsed = parse_tsserver_diagnostic(
+        &diag,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/dup.ts"),
+    )
+    .unwrap();
     // The primary diagnostic survives with its real in-range offsets.
     assert_eq!(parsed.start, 6, "primary start is a real in-range offset");
     assert_eq!(parsed.end, 9, "primary end is a real in-range offset");
@@ -487,7 +566,12 @@ fn parse_tsserver_related_drops_same_file_wrap_to_valid_coordinate() {
         ]
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/dup.ts")).unwrap();
+    let parsed = parse_tsserver_diagnostic(
+        &diag,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/dup.ts"),
+    )
+    .unwrap();
     // The primary diagnostic survives with its real in-range offsets.
     assert_eq!(parsed.start, 6, "primary start is a real in-range offset");
     assert_eq!(parsed.end, 9, "primary end is a real in-range offset");

@@ -2019,7 +2019,12 @@ fn parse_lsp_diagnostic_reads_same_file_related_information() {
     });
     // The primary file path (canonicalized inside the parser) matches the related
     // location URI's path, so the related span resolves to a real byte offset.
-    let diag = parse_lsp_diagnostic(&json, Some(content), Some("/proj/dup.ts")).unwrap();
+    let diag = parse_lsp_diagnostic(
+        &json,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/dup.ts"),
+    )
+    .unwrap();
     assert_eq!(
         diag.related_information.len(),
         1,
@@ -2055,7 +2060,12 @@ fn parse_lsp_diagnostic_without_related_information_is_empty() {
         "code": 1234,
         "message": "some error"
     });
-    let diag = parse_lsp_diagnostic(&json, Some(content), Some("/proj/x.ts")).unwrap();
+    let diag = parse_lsp_diagnostic(
+        &json,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/x.ts"),
+    )
+    .unwrap();
     assert!(
         diag.related_information.is_empty(),
         "absent relatedInformation ⇒ empty list, got: {:?}",
@@ -2094,7 +2104,12 @@ fn parse_lsp_diagnostic_drops_cross_file_related_without_content() {
             }
         ]
     });
-    let diag = parse_lsp_diagnostic(&json, Some(content), Some("/proj/a.ts")).unwrap();
+    let diag = parse_lsp_diagnostic(
+        &json,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/a.ts"),
+    )
+    .unwrap();
     assert!(
         diag.related_information.is_empty(),
         "a cross-file related span with no content for the related file must be \
@@ -2132,7 +2147,12 @@ fn parse_lsp_related_never_stores_packed_position_anti_bogus_link() {
             }
         ]
     });
-    let diag = parse_lsp_diagnostic(&json, Some(content), Some("/proj/a.ts")).unwrap();
+    let diag = parse_lsp_diagnostic(
+        &json,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/a.ts"),
+    )
+    .unwrap();
     let packed = (99u32 << 16) | (4u32 & 0xFFFF);
     assert_eq!(
         packed, 6_488_068,
@@ -2192,7 +2212,12 @@ fn parse_lsp_related_drops_same_file_out_of_range_offset() {
             }
         ]
     });
-    let diag = parse_lsp_diagnostic(&json, Some(content), Some("/proj/dup.ts")).unwrap();
+    let diag = parse_lsp_diagnostic(
+        &json,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/dup.ts"),
+    )
+    .unwrap();
     // The primary diagnostic survives with its real in-range offsets.
     assert_eq!(diag.start, 6, "primary start is a real in-range offset");
     assert_eq!(diag.end, 9, "primary end is a real in-range offset");
@@ -2253,7 +2278,12 @@ fn parse_lsp_related_drops_same_file_wrap_to_valid_coordinate() {
             }
         ]
     });
-    let diag = parse_lsp_diagnostic(&json, Some(content), Some("/proj/dup.ts")).unwrap();
+    let diag = parse_lsp_diagnostic(
+        &json,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/dup.ts"),
+    )
+    .unwrap();
     // The primary diagnostic survives with its real in-range offsets.
     assert_eq!(diag.start, 6, "primary start is a real in-range offset");
     assert_eq!(diag.end, 9, "primary end is a real in-range offset");

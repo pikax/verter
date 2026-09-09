@@ -15,7 +15,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
-use crate::codec::{LineIndex, PositionEncoding};
+use crate::codec::{LineColumn, PositionEncoding, SourceIndex};
 use crate::protocol::*;
 use crate::traits::{ProviderFuture, TypeProvider};
 #[cfg(test)]
@@ -1413,8 +1413,12 @@ async fn read_loop(
                                 }
                             })
                         };
-                        if content.is_some() {
+                        if let Some(content) = content.as_deref() {
                             let diag_file = uri_to_file_path(raw_uri);
+                            // One index for the whole publish batch: every
+                            // diagnostic's start, end and related spans convert
+                            // through the same single scan of this document.
+                            let index = SourceIndex::new_utf16(content);
                             let diags = params
                                 .get("diagnostics")
                                 .and_then(|v| v.as_array())
@@ -1423,7 +1427,7 @@ async fn read_loop(
                                         .filter_map(|d| {
                                             parse_lsp_diagnostic(
                                                 d,
-                                                content.as_deref(),
+                                                Some(&index),
                                                 Some(diag_file.as_str()),
                                             )
                                         })
@@ -1462,14 +1466,17 @@ async fn read_loop(
 
 /// Parse a single LSP Diagnostic JSON value into a `TypeDiagnostic`.
 ///
-/// When `content` is available, resolves LSP positions to byte offsets directly.
+/// When `index` is available, resolves LSP positions to byte offsets directly.
 /// Otherwise falls back to packed `(line<<16)|character` encoding, which only
 /// works for diagnostics on line 0.
 ///
-/// `position_to_offset` interprets `character` as UTF-16 code units (LSP default).
+/// The index is built ONCE per response batch by the caller and shared across
+/// every diagnostic and endpoint in it — a per-endpoint rebuild would rescan the
+/// same document twice per diagnostic. It must be a UTF-16 index: LSP counts
+/// `character` in UTF-16 code units.
 fn parse_lsp_diagnostic(
     d: &serde_json::Value,
-    content: Option<&str>,
+    index: Option<&SourceIndex<'_>>,
     file_path: Option<&str>,
 ) -> Option<TypeDiagnostic> {
     let range = d.get("range")?;
@@ -1514,10 +1521,16 @@ fn parse_lsp_diagnostic(
 
     // When content is available, resolve to actual byte offsets.
     // Without content, fall back to packed positions (only correct for line 0).
-    let (start_offset, end_offset) = if let Some(c) = content {
+    let (start_offset, end_offset) = if let Some(idx) = index {
         (
-            position_to_offset(c, start_line, start_char),
-            position_to_offset(c, end_line, end_char),
+            idx.clamped_position_to_offset(LineColumn {
+                line: start_line,
+                character: start_char,
+            }),
+            idx.clamped_position_to_offset(LineColumn {
+                line: end_line,
+                character: end_char,
+            }),
         )
     } else {
         (
@@ -1539,7 +1552,7 @@ fn parse_lsp_diagnostic(
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|ri| parse_lsp_related_info(ri, content, primary_file.as_deref()))
+                .filter_map(|ri| parse_lsp_related_info(ri, index, primary_file.as_deref()))
                 .collect()
         })
         .unwrap_or_default();
@@ -1572,7 +1585,7 @@ fn parse_lsp_diagnostic(
 /// for the content — fail-closed: a dropped secondary link beats a bogus one.
 fn parse_lsp_related_info(
     ri: &serde_json::Value,
-    primary_content: Option<&str>,
+    primary_index: Option<&SourceIndex<'_>>,
     primary_file: Option<&str>,
 ) -> Option<DiagnosticRelatedInfo> {
     let message = ri.get("message")?.as_str()?.to_string();
@@ -1598,15 +1611,21 @@ fn parse_lsp_related_info(
     // real offset — DROP it rather than store a packed position the merge would
     // mis-read as a byte offset. Both paths are already canonicalized.
     let same_file = primary_file == Some(path.as_str());
-    let content = primary_content.filter(|_| same_file)?;
+    let idx = primary_index.filter(|_| same_file)?;
     // Even a same-file related span can be MALFORMED (a line/col past EOF). The
-    // fail-open `position_to_offset` would CLAMP that to `content.len()` and forge a
-    // bogus "see declaration" link at EOF, so the related-info path uses the CHECKED
-    // converter and DROPS the entry (returns `None`) when the position is out of
-    // range — never clamps. The primary-span path keeps its own clamp/recovery
-    // behavior (out of scope here).
-    let start_byte = position_to_offset_checked(content, start_line, start_char)?;
-    let end_byte = position_to_offset_checked(content, end_line, end_char)?;
+    // fail-open clamp would round that to `content.len()` and forge a bogus "see
+    // declaration" link at EOF, so the related-info path uses the CHECKED converter
+    // and DROPS the entry (returns `None`) when the position is out of range —
+    // never clamps. The primary-span path keeps its own clamp/recovery behavior
+    // (out of scope here).
+    let start_byte = idx.checked_position_to_offset(LineColumn {
+        line: start_line,
+        character: start_char,
+    })?;
+    let end_byte = idx.checked_position_to_offset(LineColumn {
+        line: end_line,
+        character: end_char,
+    })?;
 
     Some(DiagnosticRelatedInfo {
         path,
@@ -1634,17 +1653,15 @@ pub fn position_to_offset_with_encoding(
     character: u32,
     encoding: PositionEncoding,
 ) -> u32 {
-    let idx = LineIndex::new(content, encoding);
-    idx.position_to_offset(crate::codec::LineColumn { line, character })
-        .unwrap_or({
-            // Fallback: clamp to content length
-            content.len() as u32
-        })
+    // Single-position entry point: scans `content` once. A caller converting a
+    // whole response batch should build one `SourceIndex` and convert through it.
+    SourceIndex::new(content, encoding).clamped_position_to_offset(LineColumn { line, character })
 }
 
 /// Convert an LSP `(line, character)` position to a byte offset in content.
 ///
 /// `character` is interpreted as UTF-16 code units (used by TSGO and tsserver).
+/// Single-position entry point — scans `content` once per call.
 fn position_to_offset(content: &str, line: u32, character: u32) -> u32 {
     position_to_offset_with_encoding(content, line, character, PositionEncoding::Utf16)
 }
@@ -1655,31 +1672,10 @@ fn position_to_offset(content: &str, line: u32, character: u32) -> u32 {
 /// [`position_to_offset_with_encoding`] fails OPEN — a past-EOF line or a column past the line end
 /// clamps to `content.len()` / the line end and returns a valid-looking WRONG offset. That is
 /// acceptable for a navigation sentinel, but for an EDIT a clamped wrong offset corrupts the file,
-/// so the edit path validates the position is real and DROPS it otherwise. EDIT-PATH-LOCAL: does
-/// not change the shared codec. `character` is UTF-16 code units.
+/// so the edit path validates the position is real and DROPS it otherwise. `character` is UTF-16
+/// code units. Single-position entry point — scans `content` once per call.
 fn position_to_offset_checked(content: &str, line: u32, character: u32) -> Option<u32> {
-    let idx = LineIndex::new(content, PositionEncoding::Utf16);
-    if line as usize >= idx.line_count() {
-        return None; // past-EOF line
-    }
-    // The line's UTF-16 width; a column past it would clamp.
-    let line_start = idx.line_start(line as usize)?;
-    let line_end = idx.line_end(line as usize)?; // before the newline / EOF
-    let line_text = content.get(line_start as usize..line_end as usize)?;
-    let line_utf16_len: u32 = line_text.encode_utf16().count() as u32;
-    if character > line_utf16_len {
-        return None; // column past the line end
-    }
-    let target = crate::codec::LineColumn { line, character };
-    let offset = idx.position_to_offset(target)?;
-    // A column landing between the two halves of an astral (surrogate-pair) character is not a
-    // UTF-16 scalar boundary; the codec rounds it to an adjacent character, yielding an offset that
-    // does NOT map back to the requested column. Require the round-trip to be exact so an EDIT is
-    // only accepted at a real boundary; drop it otherwise.
-    if idx.offset_to_position(offset)? != target {
-        return None;
-    }
-    Some(offset)
+    SourceIndex::new_utf16(content).checked_position_to_offset(LineColumn { line, character })
 }
 
 /// Split TSGO's PLAINTEXT hover block into (display, documentation).
@@ -2095,7 +2091,7 @@ pub fn offset_to_position_with_encoding(
     offset: u32,
     encoding: PositionEncoding,
 ) -> (u32, u32) {
-    let idx = LineIndex::new(content, encoding);
+    let idx = SourceIndex::new(content, encoding);
     match idx.offset_to_position(offset) {
         Some(pos) => (pos.line, pos.character),
         None => {
@@ -2579,6 +2575,8 @@ impl TsgoTypeProvider {
             )
             .await?;
         let content = self.contents.lock().await.get(&contents_key(path)).cloned();
+        // One index for the whole pull response — see `parse_lsp_diagnostic`.
+        let index = content.as_deref().map(SourceIndex::new_utf16);
         let diagnostics = value
             .get("items")
             .and_then(serde_json::Value::as_array)
@@ -2586,7 +2584,7 @@ impl TsgoTypeProvider {
                 items
                     .iter()
                     .filter_map(|diagnostic| {
-                        parse_lsp_diagnostic(diagnostic, content.as_deref(), Some(path))
+                        parse_lsp_diagnostic(diagnostic, index.as_ref(), Some(path))
                     })
                     .collect::<Vec<_>>()
             })
@@ -4167,10 +4165,12 @@ impl TypeProvider for TsgoTypeProvider {
                         .await
                         .get(&contents_key(&path_owned))
                         .cloned();
+                    // One index for the whole pull response — see `parse_lsp_diagnostic`.
+                    let index = content.as_deref().map(SourceIndex::new_utf16);
                     Ok(items
                         .iter()
                         .filter_map(|d| {
-                            parse_lsp_diagnostic(d, content.as_deref(), Some(path_owned.as_str()))
+                            parse_lsp_diagnostic(d, index.as_ref(), Some(path_owned.as_str()))
                         })
                         .collect())
                 }

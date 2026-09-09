@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, OnceCell};
 
+use verter_type_runtime::codec::SourceIndex;
+
 use crate::server::TsQueryParams;
 use crate::tsserver::ipc::{
     assemble_signature_label, build_completion_entry_details_request, build_entry_names_entry,
@@ -483,16 +485,16 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
             // failures degrade that category to empty rather than failing the
             // whole pull. The union/dedup is the shared `merge_diagnostic_sets`
             // owner (one merge point, not a per-provider fork).
+            // One index for all three passes: they resolve against the same
+            // content snapshot, so the document is scanned once for the whole
+            // pull rather than twice per diagnostic per pass.
+            let index = content.as_deref().map(SourceIndex::new_utf16);
             let parse_body = |body: serde_json::Value| -> Vec<TypeDiagnostic> {
                 body.as_array()
                     .map(|arr| {
                         arr.iter()
                             .filter_map(|d| {
-                                parse_tsserver_diagnostic(
-                                    d,
-                                    content.as_deref(),
-                                    Some(file.as_str()),
-                                )
+                                parse_tsserver_diagnostic(d, index.as_ref(), Some(file.as_str()))
                             })
                             .collect()
                     })
