@@ -1078,3 +1078,154 @@ fn declaration_span_index_preserves_authored_alias_and_shadow_identities() {
         "declaration addressability never invents a value identity for a type-only binder"
     );
 }
+
+/// A site is not a callback identity. Several callables share one
+/// expression site whenever the site is a compound the skeleton does not
+/// open per element — a call's argument list, an array literal — so the
+/// site-level capture union answers "is this cell retained here" and can
+/// never answer "which callback retains it". The per-callable inventory
+/// is the partition that can: exactly one record per authored callable,
+/// in authored order, each carrying only its OWN captures. Without it a
+/// two-callback call is one undifferentiated capture set, and a
+/// capture-free callback is indistinguishable from no callback at all.
+#[test]
+fn each_callable_sharing_one_site_retains_its_own_capture_partition() {
+    for source in [
+        "function root() { const a = 1; const b = 2; sink(() => a, () => b); return 1; }",
+        "function root() { const a = 1; const b = 2; return [() => a, () => b]; }",
+    ] {
+        let prepared = indexed_structure_of(source);
+        let skeleton = prepared.skeleton();
+        let a = single_binding_named(skeleton, "a");
+        let b = single_binding_named(skeleton, "b");
+        let site = skeleton
+            .expr_sites
+            .iter()
+            .find(|site| site.closures.len() > 1)
+            .unwrap_or_else(|| panic!("both callables share one site: {source}"));
+        assert_eq!(
+            site.capture_bindings.as_ref(),
+            &[FlowBindingRef::Local(a), FlowBindingRef::Local(b)],
+            "the site union deliberately merges both callbacks"
+        );
+        let partition: Vec<_> = site
+            .closures
+            .iter()
+            .map(|closure| (closure.correlation, closure.captures.as_ref()))
+            .collect();
+        assert_eq!(
+            partition,
+            vec![
+                (
+                    SkeletonClosureCorrelation::Exact,
+                    &[FlowBindingRef::Local(a)][..]
+                ),
+                (
+                    SkeletonClosureCorrelation::Exact,
+                    &[FlowBindingRef::Local(b)][..]
+                ),
+            ],
+            "each callback keeps exactly its own capture, in authored order: {source}"
+        );
+        assert!(
+            site.closures[0].span.to_absolute(0).start < site.closures[1].span.to_absolute(0).start,
+            "authored order is the record order"
+        );
+    }
+}
+
+/// The three outcomes a consumer must be able to tell apart at one call
+/// site: a callback that provably captures nothing, a callback whose only
+/// free read binds no declaration at all (a global — never a capture),
+/// and a callback the indexed program does not serve (a parameter
+/// default), which asserts NOTHING and must fail closed rather than read
+/// as capture-free.
+#[test]
+fn capture_free_globals_only_and_uncorrelated_callables_stay_distinct() {
+    let prepared = indexed_structure_of("function root() { sink(() => 1); return 1; }");
+    let closures = sole_closure_inventory(prepared.skeleton());
+    assert_eq!(
+        closures.len(),
+        1,
+        "a capture-free callback is still recorded"
+    );
+    assert_eq!(closures[0].correlation, SkeletonClosureCorrelation::Exact);
+    assert!(
+        closures[0].captures.is_empty(),
+        "proved capture-free, not unknown"
+    );
+
+    let prepared = indexed_structure_of("function root() { sink(() => globalThing); return 1; }");
+    let closures = sole_closure_inventory(prepared.skeleton());
+    assert_eq!(closures[0].correlation, SkeletonClosureCorrelation::Exact);
+    assert!(
+        closures[0].captures.is_empty(),
+        "a read that binds no declaration is free, never a capture"
+    );
+
+    let prepared = indexed_structure_of("function root(p, q = () => p) { return q; }");
+    let closures = sole_closure_inventory(prepared.skeleton());
+    assert_eq!(
+        closures[0].correlation,
+        SkeletonClosureCorrelation::Uncorrelated,
+        "a parameter-default callable the index does not serve is a typed unknown"
+    );
+    assert!(
+        closures[0].captures.is_empty(),
+        "an uncorrelated record asserts no capture set"
+    );
+}
+
+/// Capture identity is the binding, never the name: the inner `a` shadows
+/// the outer one, and a callable capturing through an intervening
+/// callable reaches the same exact declaration the direct capture does.
+#[test]
+fn per_callable_captures_are_shadow_exact_and_transitive() {
+    let prepared = indexed_structure_of(
+        "function root() { const a = 1; { const a = 2; sink(() => a); } return a; }",
+    );
+    let skeleton = prepared.skeleton();
+    let shadowed: Vec<_> = skeleton
+        .bindings_named(skeleton.name_id("a").unwrap())
+        .collect();
+    assert_eq!(shadowed.len(), 2);
+    let closures = sole_closure_inventory(skeleton);
+    assert_eq!(
+        closures[0].captures.as_ref(),
+        &[FlowBindingRef::Local(shadowed[1])],
+        "the inner declaration is the captured cell"
+    );
+
+    let prepared =
+        indexed_structure_of("function root() { const a = 1; sink(() => () => a); return 1; }");
+    let skeleton = prepared.skeleton();
+    let a = single_binding_named(skeleton, "a");
+    let closures = sole_closure_inventory(skeleton);
+    assert_eq!(
+        closures[0].captures.as_ref(),
+        &[FlowBindingRef::Local(a)],
+        "a capture through an intervening callable names the same declaration"
+    );
+}
+
+fn single_binding_named(skeleton: &FunctionBodySkeleton, name: &str) -> SkeletonBindingId {
+    let id = skeleton
+        .name_id(name)
+        .unwrap_or_else(|| panic!("`{name}` must be interned"));
+    let mut bindings = skeleton.bindings_named(id);
+    let binding = bindings
+        .next()
+        .unwrap_or_else(|| panic!("`{name}` must be bound"));
+    assert!(bindings.next().is_none(), "`{name}` binds exactly once");
+    binding
+}
+
+fn sole_closure_inventory(skeleton: &FunctionBodySkeleton) -> &[SkeletonClosure] {
+    let mut sites = skeleton
+        .expr_sites
+        .iter()
+        .filter(|site| !site.closures.is_empty());
+    let site = sites.next().expect("the fixture authors one callable");
+    assert!(sites.next().is_none(), "exactly one site holds a callable");
+    &site.closures
+}

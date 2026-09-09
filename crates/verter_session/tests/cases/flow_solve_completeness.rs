@@ -2497,8 +2497,11 @@ fn closure_expression_captures_are_concrete_subjects() {
     );
 }
 
-/// A no-capture closure yields the family's explicit empty-coverage
-/// marker ONLY — no concrete subject, no gap — and the solve completes.
+/// A no-capture closure owes no captured-binding subject and no gap, and
+/// the solve completes. Its emptiness is a POSITIVE fact, carried by the
+/// closure's own obligation: without it "no capture obligation at this
+/// site" cannot be told from "the planner never enumerated this
+/// callable", which is exactly the silence an unserved callable produces.
 #[test]
 fn a_no_capture_closure_proves_the_family_empty() {
     let fixture = flow_graph_fixture_for_tests(NO_CAPTURE_FIXTURE_SOURCE, 24);
@@ -2511,6 +2514,14 @@ fn a_no_capture_closure_proves_the_family_empty() {
             FlowObligationBasis::CapturedBinding { .. } | FlowObligationBasis::Capture { .. }
         )),
         "a no-capture closure has no concrete capture subject and no gap"
+    );
+    assert_eq!(
+        plan.obligation_specs()
+            .iter()
+            .filter(|spec| matches!(spec.basis(), FlowObligationBasis::CaptureFreeClosure { .. }))
+            .count(),
+        1,
+        "the authored callable carries its own proved-capture-free obligation"
     );
     assert!(
         plan.obligation_specs().iter().any(|spec| matches!(
@@ -3176,4 +3187,102 @@ fn capture_value_requirements_are_local_to_each_closure_site() {
     assert_eq!(captures[0].2, FlowCaptureDemand::Effect);
     assert_eq!(captures[1].2, FlowCaptureDemand::Value);
     assert!(plan.obligation_specs().iter().any(|spec| matches!(spec.basis(), FlowObligationBasis::Binding { slot, .. } if &slot.identity == captures[0].1)), "the reader still requires value products for their shared hub");
+}
+
+const TWO_CALLBACK_FIXTURE_SOURCE: &str = r#"
+function two_callbacks(x, y) {
+  return sink(() => x, () => y);
+}
+"#;
+
+const UNSERVED_CALLABLE_FIXTURE_SOURCE: &str = r#"
+function unserved_callable(p, q = () => p) {
+  return q;
+}
+"#;
+
+/// A call's argument list is ONE expression site holding TWO callables.
+/// The capture obligation identity is therefore the CALLBACK, not the
+/// site: `sink(() => x, () => y)` owes one obligation per (callback,
+/// captured binding), so the two subjects sit at the same site under
+/// distinct closure ordinals and each names exactly the cell its own
+/// callback retains. Keyed by the site alone the pairing is unrecoverable
+/// — the plan would say "this site retains x and y" and never which
+/// callback owes which.
+#[test]
+fn call_argument_callbacks_sharing_one_site_own_separate_capture_obligations() {
+    let fixture = flow_graph_fixture_for_tests(TWO_CALLBACK_FIXTURE_SOURCE, 71);
+    let plan = fixture
+        .build_plan(request_named("two_callbacks"))
+        .expect("the two-callback fixture plans");
+    let mut captures: Vec<_> = plan
+        .obligation_specs()
+        .iter()
+        .filter_map(|spec| match spec.basis() {
+            FlowObligationBasis::CapturedBinding {
+                site,
+                closure,
+                identity,
+                ..
+            } => Some((*site, *closure, identity.name.to_string())),
+            _ => None,
+        })
+        .collect();
+    captures.sort_by_key(|(site, closure, _)| (site.index(), closure.index()));
+    assert_eq!(
+        captures.len(),
+        2,
+        "one obligation per (callback, captured binding): {captures:?}"
+    );
+    assert_eq!(
+        captures[0].0, captures[1].0,
+        "both callbacks are argument positions of ONE call site"
+    );
+    assert_ne!(
+        captures[0].1, captures[1].1,
+        "the closure ordinal is what separates two callbacks at one site"
+    );
+    assert_eq!(
+        (captures[0].2.as_str(), captures[1].2.as_str()),
+        ("x", "y"),
+        "each callback owes exactly the cell it retains, in authored order"
+    );
+}
+
+/// An authored callable the indexed program does not serve — here a
+/// parameter default — asserts NOTHING about what it captures. Reading
+/// its absent record as "captures nothing" publishes a wrong-complete
+/// result: the callable really does retain the enclosing `p`. It fails
+/// closed as the capture family's typed gap, so the solve stays a typed
+/// partial and never reaches warm admission.
+#[test]
+fn an_unserved_callable_fails_closed_as_a_capture_gap_not_as_capture_free() {
+    let fixture = flow_graph_fixture_for_tests(UNSERVED_CALLABLE_FIXTURE_SOURCE, 72);
+    let plan = fixture
+        .build_plan(request_named("unserved_callable"))
+        .expect("the unserved-callable fixture plans");
+    assert!(
+        plan.obligation_specs().iter().any(|spec| matches!(
+            spec.basis(),
+            FlowObligationBasis::UncorrelatedClosure { .. }
+        )),
+        "the callable is enumerated as an unknown, never skipped"
+    );
+    assert!(
+        !plan
+            .obligation_specs()
+            .iter()
+            .any(|spec| matches!(spec.basis(), FlowObligationBasis::CaptureFreeClosure { .. })),
+        "an unserved callable is not proved capture-free"
+    );
+    let mut runtime = ObligationRuntime::default();
+    let handle = runtime.install_flow_demand(&plan);
+    assert!(
+        runtime
+            .flow_obligations(handle)
+            .expect("the demand is installed")
+            .iter()
+            .any(|record| matches!(record.state, ObligationState::Gap(FlowGap::ClosureCapture))),
+        "the unknown installs directly in the capture family's typed gap"
+    );
 }

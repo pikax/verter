@@ -2295,6 +2295,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 FlowObligationBasis::Site { node, .. }
                 | FlowObligationBasis::Guard { node, .. }
+                // A callable proved capture-free owes no binding product:
+                // reaching its node IS the evidence that the enumeration
+                // ran and came back empty.
+                | FlowObligationBasis::CaptureFreeClosure { node, .. }
                 | FlowObligationBasis::ContextualTarget { node, .. } => witness
                     .executed_selection
                     .is_some_and(|selection| selection.is_selected(*node)),
@@ -2337,7 +2341,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     site, call_ordinal, ..
                 } => call_evidence_for(*site, *call_ordinal) == Some(true),
                 FlowObligationBasis::UnmodeledBinding { .. }
-                | FlowObligationBasis::Capture { .. } => false,
+                | FlowObligationBasis::Capture { .. }
+                // An unserved callable has no capture set to prove; it
+                // stays the family's typed gap and never discharges.
+                | FlowObligationBasis::UncorrelatedClosure { .. } => false,
             })
             .map(|spec| FlowDischargeEntry {
                 obligation: spec.id(),

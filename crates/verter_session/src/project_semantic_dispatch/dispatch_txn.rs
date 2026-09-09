@@ -1078,8 +1078,8 @@ pub(crate) mod flow_obligation_state {
     use verter_identity::identity::{InputBasisId, ResultContractId};
     use verter_semantic::analysis::flow::flow_graph::{FlowEdgeClass, FlowNodeId, FlowNodeKind};
     use verter_semantic::analysis::flow::{
-        FlowBindingRef, SkeletonBindingId, SkeletonBindingKind, SkeletonExprSiteId,
-        SkeletonRegionId,
+        FlowBindingRef, SkeletonBindingId, SkeletonBindingKind, SkeletonClosureId,
+        SkeletonExprSiteId, SkeletonRegionId,
     };
     use verter_semantic::analysis::function_program::FlowBindingIdentity;
 
@@ -1158,12 +1158,26 @@ pub(crate) mod flow_obligation_state {
         /// obligation installs directly in the family's accepted typed
         /// gap.
         Capture { node: FlowNodeId, binding: SkeletonBindingId, identity: Option<FlowBindingIdentity> },
-        /// A concrete capture subject: ONE binding the closure expression
-        /// at this graph node captures, with its real cross-frame identity
-        /// — one obligation per (closure site, captured binding). The
-        /// structural authority named the subject exactly, so the
-        /// obligation is dischargeable, never a gap.
-        CapturedBinding { node: FlowNodeId, site: SkeletonExprSiteId, identity: FlowBindingIdentity, demand: FlowCaptureDemand },
+        /// A concrete capture subject: ONE binding ONE authored callable
+        /// captures, with its real cross-frame identity — one obligation
+        /// per (callback, captured binding), never per site. A site is not
+        /// a callback: `f(() => a, () => b)` evaluates two callables at one
+        /// expression site, and an obligation keyed by the site alone
+        /// cannot say which callback owes which cell. The structural
+        /// authority named the subject exactly, so the obligation is
+        /// dischargeable, never a gap.
+        CapturedBinding { node: FlowNodeId, site: SkeletonExprSiteId, closure: SkeletonClosureId, identity: FlowBindingIdentity, demand: FlowCaptureDemand },
+        /// One authored callable the structural authority proved captures
+        /// NOTHING. Positive proof, not an absence: without it a
+        /// capture-free callback and an unenumerated one are the same
+        /// silence, and "no capture obligation here" cannot be told from
+        /// "the planner never looked".
+        CaptureFreeClosure { node: FlowNodeId, site: SkeletonExprSiteId, closure: SkeletonClosureId },
+        /// One authored callable the indexed program does not serve, so no
+        /// capture set can be asserted for it. Fail-closed: the obligation
+        /// installs directly in the capture family accepted typed gap,
+        /// never as a capture-free discharge.
+        UncorrelatedClosure { node: FlowNodeId, site: SkeletonExprSiteId, closure: SkeletonClosureId },
     }
     /// Evidence that one live semantic suboperation was consumed. This is
     /// a discharge INPUT: the runtime validates it against the specific
@@ -1653,7 +1667,11 @@ pub(crate) mod flow_obligation_state {
                     // A capture subject's identity is real but its capture
                     // set is beyond the structural authority: the family's
                     // registered accepted gap, never a fabricated discharge.
-                    FlowObligationBasis::Capture { .. } => Some(flow_family_route(&FlowFactFamily::Capture).accepted_gap),
+                    FlowObligationBasis::Capture { .. }
+                    // An authored callable with no indexed record asserts
+                    // no capture set at all: the family accepted gap, never
+                    // a fabricated capture-free discharge.
+                    | FlowObligationBasis::UncorrelatedClosure { .. } => Some(flow_family_route(&FlowFactFamily::Capture).accepted_gap),
                     _ => None,
                 };
                 let registered = require_registered_flow_requirement(spec.requirement().operation, &spec.requirement().requirement).is_ok();
