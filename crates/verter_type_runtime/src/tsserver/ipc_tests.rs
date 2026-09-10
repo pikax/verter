@@ -802,31 +802,31 @@ fn test_format_quickinfo_hover_with_docs() {
 
 #[test]
 fn quickinfo_wire_pos_maps_to_byte_offset() {
-    let content = "const x = 1;\nconst y = 2;\n";
+    let index = SourceIndex::new_utf16("const x = 1;\nconst y = 2;\n");
     // tsserver positions are 1-based: line 2, offset 7 → byte 13 + 6.
     let pos = serde_json::json!({ "line": 2, "offset": 7 });
     assert_eq!(
-        quickinfo_wire_pos_to_byte_offset(content, Some(&pos)),
+        quickinfo_wire_pos_to_byte_offset(&index, Some(&pos)),
         Some(19)
     );
 }
 
 #[test]
 fn quickinfo_wire_pos_fails_closed_on_out_of_range_or_malformed() {
-    let content = "const x = 1;\n";
+    let index = SourceIndex::new_utf16("const x = 1;\n");
     let past_eof = serde_json::json!({ "line": 9, "offset": 1 });
     assert_eq!(
-        quickinfo_wire_pos_to_byte_offset(content, Some(&past_eof)),
+        quickinfo_wire_pos_to_byte_offset(&index, Some(&past_eof)),
         None,
         "a past-EOF wire position must be dropped, not clamped"
     );
     let malformed = serde_json::json!({ "line": 0, "offset": 0 });
     assert_eq!(
-        quickinfo_wire_pos_to_byte_offset(content, Some(&malformed)),
+        quickinfo_wire_pos_to_byte_offset(&index, Some(&malformed)),
         None,
         "a 0-based (malformed) tsserver position must be dropped"
     );
-    assert_eq!(quickinfo_wire_pos_to_byte_offset(content, None), None);
+    assert_eq!(quickinfo_wire_pos_to_byte_offset(&index, None), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -891,6 +891,23 @@ fn kind_labeled_signature_is_idempotent_and_fails_closed() {
     );
 }
 
+/// One tsserver location through the batch parser.
+fn parse_one_tsserver_location(
+    loc: &serde_json::Value,
+    cache: &HashMap<String, Arc<str>>,
+) -> Option<TypeLocation> {
+    parse_tsserver_locations(std::slice::from_ref(loc), cache).pop()
+}
+
+/// One tsserver rename span through the per-file parser.
+fn parse_one_tsserver_rename_span(
+    span: &serde_json::Value,
+    file: &str,
+    cache: &HashMap<String, Arc<str>>,
+) -> Option<RenameLocation> {
+    parse_tsserver_rename_spans(std::slice::from_ref(span), file, cache).pop()
+}
+
 #[test]
 fn test_parse_tsserver_location_with_content() {
     let content = "const x = 1;\nconst y = 2;\nconst z = 3;";
@@ -903,7 +920,7 @@ fn test_parse_tsserver_location_with_content() {
         "end": { "line": 2, "offset": 8 },
     });
 
-    let parsed = parse_tsserver_location(&loc, &cache).unwrap();
+    let parsed = parse_one_tsserver_location(&loc, &cache).unwrap();
     assert_eq!(parsed.path, "d:/test/file.ts");
     // "y" is at byte 19 (line 2, col 7 in 1-based = byte 13 + 6 = 19)
     assert_eq!(parsed.start, 19, "start should be byte offset, not packed");
@@ -925,7 +942,7 @@ fn test_parse_tsserver_location_without_content() {
         "end": { "line": 2, "offset": 8 },
     });
 
-    let parsed = parse_tsserver_location(&loc, &cache).unwrap();
+    let parsed = parse_one_tsserver_location(&loc, &cache).unwrap();
     // Without content, should use packed fallback (0-based)
     let expected_start = ((2 - 1) << 16) | ((7 - 1) & 0xFFFF);
     assert_eq!(
@@ -950,7 +967,7 @@ fn test_parse_tsserver_location_line_10_not_packed() {
         "end": { "line": 10, "offset": 5 },
     });
 
-    let parsed = parse_tsserver_location(&loc, &cache).unwrap();
+    let parsed = parse_one_tsserver_location(&loc, &cache).unwrap();
     // With content, byte offset for line 10 should be reasonable (< 200 bytes)
     assert!(
         parsed.start < (10 << 16),
@@ -976,7 +993,7 @@ fn test_parse_tsserver_location_without_cache_reads_disk_content() {
         "end": { "line": 2, "offset": 8 },
     });
 
-    let parsed = parse_tsserver_location(&loc, &cache).unwrap();
+    let parsed = parse_one_tsserver_location(&loc, &cache).unwrap();
     assert_eq!(parsed.start, 27);
     assert_eq!(parsed.end, 32);
 
@@ -993,7 +1010,7 @@ fn test_parse_tsserver_rename_span_with_content() {
         "end": { "line": 2, "offset": 8 },
     });
 
-    let parsed = parse_tsserver_rename_span(&span, "d:/test/file.ts", &cache).unwrap();
+    let parsed = parse_one_tsserver_rename_span(&span, "d:/test/file.ts", &cache).unwrap();
     assert_eq!(parsed.start, 19, "start should be byte offset");
     assert_eq!(parsed.end, 20, "end should be byte offset");
     assert!(parsed.start < 100, "must not be packed");
@@ -1001,8 +1018,8 @@ fn test_parse_tsserver_rename_span_with_content() {
 
 /// A cross-file rename span whose GROUP file is absent from the in-memory contents cache must
 /// resolve its byte offsets against THAT file's own on-disk content (the per-target disk
-/// fallback) — the SAME content-resolution `parse_tsserver_location` gives references and the
-/// tsgo rename path gives via `parse_range_to_offsets_strict_with_disk_fallback`.
+/// fallback) — the SAME content resolution `parse_tsserver_locations` gives references and the
+/// tsgo rename path gives its workspace edits.
 ///
 /// Fails if a cache-miss span packs a 0-based `(line << 16) | col` sentinel the merge layer cannot
 /// map to a real range, silently dropping the cross-file edit (incomplete rename). The renamed
@@ -1026,7 +1043,7 @@ fn test_parse_tsserver_rename_span_without_cache_reads_disk_content() {
         "end": { "line": 3, "offset": 21 },
     });
 
-    let parsed = parse_tsserver_rename_span(&span, &file_key, &cache).unwrap();
+    let parsed = parse_one_tsserver_rename_span(&span, &file_key, &cache).unwrap();
     let want_start = content.find("renamed").unwrap() as u32;
     let want_end = want_start + "renamed".len() as u32;
     assert_eq!(
@@ -1068,7 +1085,7 @@ fn parse_tsserver_rename_span_drops_span_when_content_unavailable() {
     });
     let cache: HashMap<String, Arc<str>> = HashMap::new();
 
-    let parsed = parse_tsserver_rename_span(&span, &missing, &cache);
+    let parsed = parse_one_tsserver_rename_span(&span, &missing, &cache);
     assert!(
         parsed.is_none(),
         "a rename span whose content is unavailable must be DROPPED (fail-closed), never packed: \
@@ -1089,7 +1106,7 @@ fn parse_tsserver_rename_span_drops_out_of_range_position() {
         "end": { "line": 999, "offset": 4 },
     });
 
-    let parsed = parse_tsserver_rename_span(&span, "d:/proj/r.ts", &cache);
+    let parsed = parse_one_tsserver_rename_span(&span, "d:/proj/r.ts", &cache);
     assert!(
         parsed.is_none(),
         "an out-of-range rename span must be DROPPED, never clamped to EOF: {parsed:?}"
@@ -1115,7 +1132,7 @@ fn parse_tsserver_rename_span_drops_on_position_overflow() {
         "end": { "line": 1, "offset": 2 },
     });
 
-    let parsed = parse_tsserver_rename_span(&span, "d:/proj/r.ts", &cache);
+    let parsed = parse_one_tsserver_rename_span(&span, "d:/proj/r.ts", &cache);
     assert!(
         parsed.is_none(),
         "a u64>u32::MAX rename span must be DROPPED, never truncated into an in-range offset: \
@@ -1127,7 +1144,7 @@ fn parse_tsserver_rename_span_drops_on_position_overflow() {
         "start": { "line": 1, "offset": 1 },
         "end": { "line": 1, "offset": 2 },
     });
-    let ok = parse_tsserver_rename_span(&span_ok, "d:/proj/r.ts", &cache)
+    let ok = parse_one_tsserver_rename_span(&span_ok, "d:/proj/r.ts", &cache)
         .expect("an in-range rename span must still resolve");
     assert_eq!(
         (ok.start, ok.end),
@@ -1150,7 +1167,7 @@ fn test_parse_tsserver_location_non_ascii() {
         "end": { "line": 2, "offset": 6 },
     });
 
-    let parsed = parse_tsserver_location(&loc, &cache).unwrap();
+    let parsed = parse_one_tsserver_location(&loc, &cache).unwrap();
     // "café\n" = 6 bytes (c=1, a=1, f=1, é=2, \n=1)
     // "world" starts at byte 6
     assert_eq!(parsed.start, 6, "start of 'world' should be byte 6");

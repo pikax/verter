@@ -16,6 +16,7 @@ use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use crate::codec::{LineColumn, PositionEncoding, SourceIndex};
+use crate::contents_snapshot::{convert_per_target, with_target_index};
 use crate::protocol::*;
 use crate::traits::{ProviderFuture, TypeProvider};
 #[cfg(test)]
@@ -1658,26 +1659,6 @@ pub fn position_to_offset_with_encoding(
     SourceIndex::new(content, encoding).clamped_position_to_offset(LineColumn { line, character })
 }
 
-/// Convert an LSP `(line, character)` position to a byte offset in content.
-///
-/// `character` is interpreted as UTF-16 code units (used by TSGO and tsserver).
-/// Single-position entry point — scans `content` once per call.
-fn position_to_offset(content: &str, line: u32, character: u32) -> u32 {
-    position_to_offset_with_encoding(content, line, character, PositionEncoding::Utf16)
-}
-
-/// Convert an LSP 0-based `(line, character)` to a byte offset, returning `None` when the position
-/// is OUT OF RANGE for `content` instead of clamping it to EOF.
-///
-/// [`position_to_offset_with_encoding`] fails OPEN — a past-EOF line or a column past the line end
-/// clamps to `content.len()` / the line end and returns a valid-looking WRONG offset. That is
-/// acceptable for a navigation sentinel, but for an EDIT a clamped wrong offset corrupts the file,
-/// so the edit path validates the position is real and DROPS it otherwise. `character` is UTF-16
-/// code units. Single-position entry point — scans `content` once per call.
-fn position_to_offset_checked(content: &str, line: u32, character: u32) -> Option<u32> {
-    SourceIndex::new_utf16(content).checked_position_to_offset(LineColumn { line, character })
-}
-
 /// Split TSGO's PLAINTEXT hover block into (display, documentation).
 ///
 /// SHAPE DEPENDENCY: `build_client_capabilities()` (this file, sent on the
@@ -1712,63 +1693,31 @@ fn split_plaintext_hover_display(contents: &str) -> (Option<&str>, Option<String
 }
 
 /// Parse an LSP wire position object (`{"line": L, "character": C}`, 0-based
-/// UTF-16) into a byte offset against `content`, failing CLOSED on a malformed
+/// UTF-16) into a byte offset through `index`, failing CLOSED on a malformed
 /// or out-of-range position (a hover range is display metadata — a clamped
 /// wrong offset would highlight the wrong span, so it is dropped).
-fn lsp_wire_pos_to_byte_offset(content: &str, pos: Option<&serde_json::Value>) -> Option<u32> {
+fn lsp_wire_pos_to_byte_offset(
+    index: &SourceIndex<'_>,
+    pos: Option<&serde_json::Value>,
+) -> Option<u32> {
     let pos = pos?;
     let line = u32::try_from(pos.get("line")?.as_u64()?).ok()?;
     let character = u32::try_from(pos.get("character")?.as_u64()?).ok()?;
-    position_to_offset_checked(content, line, character)
+    index.checked_position_to_offset(LineColumn { line, character })
 }
 
-/// Parse an LSP Location JSON value into a `TypeLocation`, using content for offset resolution.
-///
-/// Converts TSGO's `file://` URI to a filesystem path so downstream code
-/// (e.g., `path_to_uri()` in merge.rs) can construct correct URIs without
-/// double-wrapping.
-fn parse_lsp_location(loc: &serde_json::Value, content: Option<&str>) -> Option<TypeLocation> {
-    let uri = loc.get("uri")?.as_str()?;
-
-    // Convert file:// URI to filesystem path for consistent downstream handling.
-    // TSGO returns URIs like "file:///d:/dev/.../file.ts", but TypeLocation.path
-    // is treated as a filesystem path everywhere it's consumed.
-    let path = uri_to_file_path(uri);
-
-    let range = loc.get("range")?;
-    let start = range.get("start")?;
-    let end = range.get("end")?;
-    let start_line = start.get("line")?.as_u64()? as u32;
-    let start_char = start.get("character")?.as_u64()? as u32;
-    let end_line = end.get("line")?.as_u64()? as u32;
-    let end_char = end.get("character")?.as_u64()? as u32;
-
-    let disk_content;
-    let content = if let Some(content) = content {
-        Some(content)
-    } else {
-        disk_content = std::fs::read_to_string(&path).ok();
-        disk_content.as_deref()
-    };
-
-    let (start_offset, end_offset) = if let Some(c) = content {
-        (
-            position_to_offset(c, start_line, start_char),
-            position_to_offset(c, end_line, end_char),
-        )
-    } else {
-        // Fallback: store packed positions
-        (
-            pack_position(start_line, start_char),
-            pack_position(end_line, end_char),
-        )
-    };
-
-    Some(TypeLocation {
-        path,
-        start: start_offset,
-        end: end_offset,
-    })
+/// A response target's content: the contents cache (`content_for`) first, then a disk read on a
+/// miss (a cross-file target the session never opened).
+fn cached_or_disk<'a>(
+    target: &str,
+    content_for: impl FnOnce(&str) -> Option<&'a str>,
+) -> Option<std::borrow::Cow<'a, str>> {
+    match content_for(target) {
+        Some(content) => Some(std::borrow::Cow::Borrowed(content)),
+        None => std::fs::read_to_string(target)
+            .ok()
+            .map(std::borrow::Cow::Owned),
+    }
 }
 
 /// Parse a batch of LSP `Location` JSON values into `TypeLocation`s, resolving EACH location's
@@ -1780,22 +1729,32 @@ fn parse_lsp_location(loc: &serde_json::Value, content: Option<&str>) -> Option<
 /// location converts cross-file ranges against the wrong file, packing garbage byte offsets that
 /// surface downstream as line-0 / wrong-position results.
 ///
-/// `content_for(target_path)` hands back the target file's content (from the contents cache);
-/// `parse_lsp_location` falls back to a disk read when it returns `None`.
+/// Each TSGO `file://` URI converts to the canonical filesystem path, so downstream code (e.g.
+/// `path_to_uri()` in merge.rs) never double-wraps it. `content_for(target_path)` hands back the
+/// target file's content (from the contents cache), with a disk read on a miss; each distinct
+/// target resolves and indexes once for the whole batch. A navigation location keeps the
+/// fail-open clamp, and a target with no content falls back to packed positions.
 fn parse_lsp_locations_per_target<'a>(
     locations: &[serde_json::Value],
     content_for: impl Fn(&str) -> Option<&'a str>,
 ) -> Vec<TypeLocation> {
-    locations
-        .iter()
-        .filter_map(|loc| {
-            let target_path = loc
-                .get("uri")
+    convert_per_target(
+        locations,
+        |loc| {
+            loc.get("uri")
                 .and_then(|value| value.as_str())
-                .map(uri_to_file_path)?;
-            parse_lsp_location(loc, content_for(&target_path))
-        })
-        .collect()
+                .map(uri_to_file_path)
+        },
+        |target| cached_or_disk(target, &content_for),
+        |loc, path, index| {
+            let (start, end) = parse_range_to_offsets(loc.get("range")?, index)?;
+            Some(TypeLocation {
+                path: path.to_string(),
+                start,
+                end,
+            })
+        },
+    )
 }
 
 /// Convert a `file://` URI from TSGO into the shared CANONICAL filesystem-path
@@ -1850,7 +1809,13 @@ fn contents_key(path: &str) -> String {
 }
 
 /// Parse an LSP CompletionItem JSON value into a `Completion`.
-fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Option<Completion> {
+///
+/// `index` is the caller's index over the completion document, built once for
+/// the whole completion list.
+fn parse_completion_item(
+    item: &serde_json::Value,
+    index: Option<&SourceIndex<'_>>,
+) -> Option<Completion> {
     let label = item.get("label")?.as_str()?.to_string();
     let kind = item.get("kind").and_then(|v| v.as_u64()).map(|k| match k {
         1 => CompletionKind::Text,
@@ -1935,23 +1900,8 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
     // rather than emitting a packed or clamped offset that would corrupt the file.
     let (edit_range_start, edit_range_end) = item
         .get("textEdit")
-        .and_then(|te| {
-            let range = te.get("range")?;
-            let start = range.get("start")?;
-            let end = range.get("end")?;
-            let sl = u32::try_from(start.get("line")?.as_u64()?).ok()?;
-            let sc = u32::try_from(start.get("character")?.as_u64()?).ok()?;
-            let el = u32::try_from(end.get("line")?.as_u64()?).ok()?;
-            let ec = u32::try_from(end.get("character")?.as_u64()?).ok()?;
-            let c = content?;
-            let s = position_to_offset_checked(c, sl, sc)?;
-            let e = position_to_offset_checked(c, el, ec)?;
-            if s > e {
-                return None;
-            }
-            Some((Some(s), Some(e)))
-        })
-        .unwrap_or((None, None));
+        .and_then(|te| parse_range_to_offsets_strict(te.get("range")?, index?))
+        .map_or((None, None), |(start, end)| (Some(start), Some(end)));
 
     // Preserve the upstream-LSP resolve handle as the provider-pure
     // `CompletionResolveData::Lsp` variant: the item's own `label` plus its
@@ -2091,16 +2041,18 @@ pub fn offset_to_position_with_encoding(
     offset: u32,
     encoding: PositionEncoding,
 ) -> (u32, u32) {
-    let idx = SourceIndex::new(content, encoding);
-    match idx.offset_to_position(offset) {
+    clamped_offset_to_position(&SourceIndex::new(content, encoding), offset)
+}
+
+/// [`offset_to_position_with_encoding`] through an already-built index: an offset
+/// past EOF clamps to the EOF position.
+fn clamped_offset_to_position(idx: &SourceIndex<'_>, offset: u32) -> (u32, u32) {
+    match idx
+        .offset_to_position(offset)
+        .or_else(|| idx.offset_to_position(idx.source_len()))
+    {
         Some(pos) => (pos.line, pos.character),
-        None => {
-            // Fallback: clamp to end of content
-            match idx.offset_to_position(content.len() as u32) {
-                Some(pos) => (pos.line, pos.character),
-                None => (0, 0),
-            }
-        }
+        None => (0, 0),
     }
 }
 
@@ -3054,9 +3006,12 @@ impl TypeProvider for TsgoTypeProvider {
                 });
             };
 
+            // One index for the whole list: every item's replace-range converts
+            // through it instead of rescanning the document per endpoint.
+            let index = content_snapshot.as_deref().map(SourceIndex::new_utf16);
             let items = items_slice
                 .iter()
-                .filter_map(|item| parse_completion_item(item, content_snapshot.as_deref()))
+                .filter_map(|item| parse_completion_item(item, index.as_ref()))
                 .collect();
 
             Ok(CompletionResult {
@@ -3348,13 +3303,19 @@ impl TypeProvider for TsgoTypeProvider {
                     let (range_start, range_end) = {
                         let cache = contents_cache.lock().await;
                         match cache.get(&contents_key(&path_owned)) {
-                            Some(content) => (
-                                lsp_wire_pos_to_byte_offset(
-                                    content,
-                                    result.pointer("/range/start"),
-                                ),
-                                lsp_wire_pos_to_byte_offset(content, result.pointer("/range/end")),
-                            ),
+                            Some(content) => {
+                                let index = SourceIndex::new_utf16(content);
+                                (
+                                    lsp_wire_pos_to_byte_offset(
+                                        &index,
+                                        result.pointer("/range/start"),
+                                    ),
+                                    lsp_wire_pos_to_byte_offset(
+                                        &index,
+                                        result.pointer("/range/end"),
+                                    ),
+                                )
+                            }
                             None => (None, None),
                         }
                     };
@@ -3448,25 +3409,11 @@ impl TypeProvider for TsgoTypeProvider {
             };
 
             let cache = contents_cache.lock().await;
-            Ok(locations
-                .iter()
-                .filter_map(|loc| {
-                    let target_path = loc
-                        .get("uri")
-                        .and_then(|value| value.as_str())
-                        .map(uri_to_file_path)?;
-                    let target_content = if target_path == path_owned {
-                        cache
-                            .get(&contents_key(&path_owned))
-                            .map(|text| text.as_ref())
-                    } else {
-                        cache
-                            .get(&contents_key(&target_path))
-                            .map(|text| text.as_ref())
-                    };
-                    parse_lsp_location(loc, target_content)
-                })
-                .collect())
+            Ok(parse_lsp_locations_per_target(&locations, |target_path| {
+                cache
+                    .get(&contents_key(target_path))
+                    .map(|text| text.as_ref())
+            }))
         })
     }
 
@@ -3518,25 +3465,11 @@ impl TypeProvider for TsgoTypeProvider {
             };
 
             let cache = contents_cache.lock().await;
-            Ok(locations
-                .iter()
-                .filter_map(|loc| {
-                    let target_path = loc
-                        .get("uri")
-                        .and_then(|value| value.as_str())
-                        .map(uri_to_file_path)?;
-                    let target_content = if target_path == path_owned {
-                        cache
-                            .get(&contents_key(&path_owned))
-                            .map(|text| text.as_ref())
-                    } else {
-                        cache
-                            .get(&contents_key(&target_path))
-                            .map(|text| text.as_ref())
-                    };
-                    parse_lsp_location(loc, target_content)
-                })
-                .collect())
+            Ok(parse_lsp_locations_per_target(&locations, |target_path| {
+                cache
+                    .get(&contents_key(target_path))
+                    .map(|text| text.as_ref())
+            }))
         })
     }
 
@@ -3576,7 +3509,7 @@ impl TypeProvider for TsgoTypeProvider {
             let locations = result.as_array().cloned().unwrap_or_default();
             // References are cross-file: each location's byte offsets must be computed against
             // THAT location's own file, not the queried file. Look up each target's content (disk
-            // fallback inside `parse_lsp_location`), exactly as `get_definition` does — reusing the
+            // fallback inside `parse_lsp_locations_per_target`), exactly as `get_definition` does — reusing the
             // queried file's single snapshot for every location packs cross-file offsets against
             // the WRONG file.
             let cache = contents_cache.lock().await;
@@ -3899,8 +3832,9 @@ impl TypeProvider for TsgoTypeProvider {
                 let cache = contents_cache.lock().await;
                 match cache.get(&contents_key(&path_owned)) {
                     Some(c) => {
-                        let (sl, sc) = offset_to_position(c, start_offset);
-                        let (el, ec) = offset_to_position(c, end_offset);
+                        let index = SourceIndex::new_utf16(c);
+                        let (sl, sc) = clamped_offset_to_position(&index, start_offset);
+                        let (el, ec) = clamped_offset_to_position(&index, end_offset);
                         (sl, sc, el, ec, Some(c.clone()))
                     }
                     None => (0, start_offset, 0, end_offset, None),
@@ -4246,11 +4180,7 @@ fn parse_workspace_edit_locations<'a>(
     if let Some(changes) = result.get("changes").and_then(|v| v.as_object()) {
         for (change_uri, edits) in changes {
             if let Some(arr) = edits.as_array() {
-                for edit in arr {
-                    if let Some(loc) = parse_rename_edit(change_uri, edit, content_for) {
-                        locations.push(loc);
-                    }
-                }
+                locations.extend(parse_rename_edits(change_uri, arr, content_for));
             }
         }
     }
@@ -4263,33 +4193,49 @@ fn parse_workspace_edit_locations<'a>(
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
             if let Some(edits) = dc.get("edits").and_then(|v| v.as_array()) {
-                for edit in edits {
-                    if let Some(loc) = parse_rename_edit(dc_uri, edit, content_for) {
-                        locations.push(loc);
-                    }
-                }
+                locations.extend(parse_rename_edits(dc_uri, edits, content_for));
             }
         }
     }
 }
 
-fn parse_rename_edit<'a>(
+/// Parse the rename edits a workspace edit places in ONE target file.
+fn parse_rename_edits<'a>(
     uri: &str,
-    edit: &serde_json::Value,
+    edits: &[serde_json::Value],
     content_for: &impl Fn(&str) -> Option<&'a str>,
-) -> Option<RenameLocation> {
-    let range = edit.get("range")?;
+) -> Vec<RenameLocation> {
+    if edits.is_empty() {
+        return Vec::new();
+    }
     // Canonical filesystem-path ID, matching `TypeLocation.path` and the tsserver provider — NOT
     // the raw `file://` URI (which would split file identity vs the documents/VFS layer on
     // Windows). The same canonical path keys the per-target content lookup.
     let path = uri_to_file_path(uri);
-    // Resolve each rename edit's range against ITS OWN file content, with a per-target disk fallback
-    // for a cache miss. FAIL CLOSED via the STRICT converter: a rename is a WRITE edit, so a total
-    // cache+disk miss or an out-of-range position DROPS the location (returns None) rather than
-    // packing a line-0 / clamped offset that CORRUPTS the file. The caller collects via push-if-Some,
-    // so a dropped location skips only that span.
-    let (start, end) = parse_range_to_offsets_strict_with_disk_fallback(range, &path, content_for)?;
-    Some(RenameLocation { path, start, end })
+    // Resolve the target's OWN content once (cache, then a per-target disk read) and convert every
+    // edit through one index. FAIL CLOSED via the STRICT converter: a rename is a WRITE edit, so a
+    // total cache+disk miss drops every edit of this target, and an out-of-range or inverted range
+    // drops its own edit, rather than packing a line-0 / clamped offset that CORRUPTS the file.
+    with_target_index(
+        &path,
+        |target| cached_or_disk(target, content_for),
+        |index| {
+            let Some(index) = index else {
+                return Vec::new();
+            };
+            edits
+                .iter()
+                .filter_map(|edit| {
+                    let (start, end) = parse_range_to_offsets_strict(edit.get("range")?, index)?;
+                    Some(RenameLocation {
+                        path: path.clone(),
+                        start,
+                        end,
+                    })
+                })
+                .collect()
+        },
+    )
 }
 
 /// Parse an LSP `ParameterInformation.label`, which is EITHER a JSON string OR a
@@ -4424,12 +4370,7 @@ fn parse_code_action<'a>(
         if let Some(changes) = edit.get("changes").and_then(|v| v.as_object()) {
             for (change_uri, text_edits) in changes {
                 if let Some(arr) = text_edits.as_array() {
-                    for te in arr {
-                        if let Some(ce) = parse_text_edit_to_code_edit(change_uri, te, content_for)
-                        {
-                            edits.push(ce);
-                        }
-                    }
+                    edits.extend(parse_text_edits_to_code_edits(change_uri, arr, content_for));
                 }
             }
         }
@@ -4441,11 +4382,7 @@ fn parse_code_action<'a>(
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
                 if let Some(arr) = dc.get("edits").and_then(|v| v.as_array()) {
-                    for te in arr {
-                        if let Some(ce) = parse_text_edit_to_code_edit(dc_uri, te, content_for) {
-                            edits.push(ce);
-                        }
-                    }
+                    edits.extend(parse_text_edits_to_code_edits(dc_uri, arr, content_for));
                 }
             }
         }
@@ -4475,55 +4412,52 @@ fn parse_additional_text_edit(
     edit: &serde_json::Value,
     index: Option<&SourceIndex<'_>>,
 ) -> Option<ResolvedTextEdit> {
-    let range = edit.get("range")?;
-    let start = range.get("start")?;
-    let end = range.get("end")?;
-    let sl = u32::try_from(start.get("line")?.as_u64()?).ok()?;
-    let sc = u32::try_from(start.get("character")?.as_u64()?).ok()?;
-    let el = u32::try_from(end.get("line")?.as_u64()?).ok()?;
-    let ec = u32::try_from(end.get("character")?.as_u64()?).ok()?;
     let new_text = edit.get("newText")?.as_str()?.to_string();
-
-    let idx = index?;
-    let start_offset = idx.checked_position_to_offset(LineColumn {
-        line: sl,
-        character: sc,
-    })?;
-    let end_offset = idx.checked_position_to_offset(LineColumn {
-        line: el,
-        character: ec,
-    })?;
-    if start_offset > end_offset {
-        return None;
-    }
-
+    let (start, end) = parse_range_to_offsets_strict(edit.get("range")?, index?)?;
     Some(ResolvedTextEdit {
-        start: start_offset,
-        end: end_offset,
-        new_text,
-    })
-}
-
-fn parse_text_edit_to_code_edit<'a>(
-    uri: &str,
-    te: &serde_json::Value,
-    content_for: &impl Fn(&str) -> Option<&'a str>,
-) -> Option<TypeCodeEdit> {
-    let range = te.get("range")?;
-    let new_text = te.get("newText")?.as_str()?.to_string();
-    // Canonical filesystem-path ID (see `parse_rename_edit`), not the raw URI; keys the content.
-    let path = uri_to_file_path(uri);
-    // Per-target content with a disk fallback for a cache miss. FAIL CLOSED via the STRICT converter:
-    // a total cache+disk miss or an out-of-range position DROPS the edit (returns None) rather than
-    // packing a line-0 / clamped offset that the merge layer would apply at the WRONG location and
-    // corrupt the file. The caller collects via push-if-Some, so a dropped edit skips only itself.
-    let (start, end) = parse_range_to_offsets_strict_with_disk_fallback(range, &path, content_for)?;
-    Some(TypeCodeEdit {
-        path,
         start,
         end,
         new_text,
     })
+}
+
+/// Parse the text edits a code action places in ONE target file.
+fn parse_text_edits_to_code_edits<'a>(
+    uri: &str,
+    text_edits: &[serde_json::Value],
+    content_for: &impl Fn(&str) -> Option<&'a str>,
+) -> Vec<TypeCodeEdit> {
+    if text_edits.is_empty() {
+        return Vec::new();
+    }
+    // Canonical filesystem-path ID (see `parse_rename_edits`), not the raw URI; keys the content.
+    let path = uri_to_file_path(uri);
+    // The target's content resolves once (cache, then a per-target disk read) behind one index.
+    // FAIL CLOSED via the STRICT converter: a total cache+disk miss drops every edit of this target,
+    // and an out-of-range or inverted range drops its own edit, rather than packing a line-0 /
+    // clamped offset that the merge layer would apply at the WRONG location and corrupt the file.
+    with_target_index(
+        &path,
+        |target| cached_or_disk(target, content_for),
+        |index| {
+            let Some(index) = index else {
+                return Vec::new();
+            };
+            text_edits
+                .iter()
+                .filter_map(|te| {
+                    let new_text = te.get("newText")?.as_str()?.to_string();
+                    let (start, end) = parse_range_to_offsets_strict(te.get("range")?, index)?;
+                    Some(TypeCodeEdit {
+                        path: path.clone(),
+                        start,
+                        end,
+                        new_text,
+                    })
+                })
+                .collect()
+        },
+    )
 }
 
 /// Decode delta-encoded semantic tokens into absolute-offset tokens, remapping
@@ -4707,7 +4641,7 @@ fn parse_range_to_offsets(
 
     if let Some(idx) = index {
         // Navigation range: keeps the fail-open clamp (an EDIT path must use
-        // `parse_range_to_offsets_strict_with_disk_fallback` instead).
+        // `parse_range_to_offsets_strict` instead).
         Some((
             idx.clamped_position_to_offset(LineColumn {
                 line: sl,
@@ -4723,44 +4657,32 @@ fn parse_range_to_offsets(
     }
 }
 
-/// Like [`parse_range_to_offsets`], but FAIL CLOSED for EDIT paths: resolves the target content
-/// (cache → disk) and, when content is unavailable, returns `None` (NO `pack_position` sentinel).
-/// With content present it converts through the CHECKED [`position_to_offset_checked`], so an
-/// out-of-range position DROPS instead of clamping to EOF, and an inverted `start > end` span drops
-/// too.
+/// Like [`parse_range_to_offsets`], but FAIL CLOSED for WRITE edits: a malformed position, a
+/// `line`/`character` exceeding `u32::MAX` (checked `u32::try_from`, never a wrapping `as u32`), a
+/// position out of range for `index`'s content (the CHECKED converter drops it instead of clamping
+/// to EOF), or an inverted `start > end` span yields `None`.
 ///
-/// Edit-producing parsers (`parse_text_edit_to_code_edit`, `parse_rename_edit`) route through this
-/// so a total cache+disk miss or an out-of-range position never packs a line-0 / clamped offset that
-/// the merge layer would apply as a corrupting WRITE. Navigation-only callers keep the lenient
-/// `parse_range_to_offsets` (a packed sentinel is a tolerable display miss).
-fn parse_range_to_offsets_strict_with_disk_fallback<'a>(
+/// Every edit-producing parser — rename, code-action and completion edits — converts through this
+/// with the caller's per-target index; a target whose content is unavailable has no index, so its
+/// edits drop before reaching here (NO `pack_position` sentinel). Navigation-only callers keep the
+/// lenient `parse_range_to_offsets` (a packed sentinel is a tolerable display miss).
+fn parse_range_to_offsets_strict(
     range: &serde_json::Value,
-    path: &str,
-    content_for: &impl Fn(&str) -> Option<&'a str>,
+    index: &SourceIndex<'_>,
 ) -> Option<(u32, u32)> {
     let start = range.get("start")?;
     let end = range.get("end")?;
-    let sl = u32::try_from(start.get("line")?.as_u64()?).ok()?;
-    let sc = u32::try_from(start.get("character")?.as_u64()?).ok()?;
-    let el = u32::try_from(end.get("line")?.as_u64()?).ok()?;
-    let ec = u32::try_from(end.get("character")?.as_u64()?).ok()?;
-
-    let disk_content;
-    let content = match content_for(path) {
-        Some(content) => Some(content),
-        None => {
-            disk_content = std::fs::read_to_string(path).ok();
-            disk_content.as_deref()
-        }
+    let start = LineColumn {
+        line: u32::try_from(start.get("line")?.as_u64()?).ok()?,
+        character: u32::try_from(start.get("character")?.as_u64()?).ok()?,
     };
-    // FAIL CLOSED on a total content miss — never pack a line-0 offset for a WRITE edit.
-    let c = content?;
-    let s = position_to_offset_checked(c, sl, sc)?;
-    let e = position_to_offset_checked(c, el, ec)?;
-    if s > e {
-        return None;
-    }
-    Some((s, e))
+    let end = LineColumn {
+        line: u32::try_from(end.get("line")?.as_u64()?).ok()?,
+        character: u32::try_from(end.get("character")?.as_u64()?).ok()?,
+    };
+    let start = index.checked_position_to_offset(start)?;
+    let end = index.checked_position_to_offset(end)?;
+    (start <= end).then_some((start, end))
 }
 
 /// Extract a string from a MarkupContent or plain string JSON value.
@@ -4798,8 +4720,29 @@ pub fn create_test_project(dir: &Path) -> std::io::Result<()> {
 // `file://` URI — is enforced.
 #[cfg(test)]
 mod dto_path_canonicalization_tests {
-    use super::{parse_rename_edit, parse_text_edit_to_code_edit, uri_to_file_path};
+    use super::{
+        parse_rename_edits, parse_text_edits_to_code_edits, uri_to_file_path, RenameLocation,
+        TypeCodeEdit,
+    };
     use verter_test_support::unique_temp_dir;
+
+    /// One rename edit through the per-target parser.
+    fn rename_edit<'a>(
+        uri: &str,
+        edit: &serde_json::Value,
+        content_for: &impl Fn(&str) -> Option<&'a str>,
+    ) -> Option<RenameLocation> {
+        parse_rename_edits(uri, std::slice::from_ref(edit), content_for).pop()
+    }
+
+    /// One code-action text edit through the per-target parser.
+    fn code_edit<'a>(
+        uri: &str,
+        te: &serde_json::Value,
+        content_for: &impl Fn(&str) -> Option<&'a str>,
+    ) -> Option<TypeCodeEdit> {
+        parse_text_edits_to_code_edits(uri, std::slice::from_ref(te), content_for).pop()
+    }
 
     fn edit_json() -> serde_json::Value {
         serde_json::json!({
@@ -4830,12 +4773,12 @@ mod dto_path_canonicalization_tests {
     #[test]
     fn parse_rename_edit_stores_canonical_path_not_raw_uri() {
         // The DTO path must be the canonical filesystem ID, NEVER the raw URI.
-        // Reverting `parse_rename_edit` to `path: uri.to_string()` fails this.
+        // Reverting `parse_rename_edits` to `path: uri.to_string()` fails this.
         // Seed resolvable content keyed by the CANONICAL path so the fail-closed rename
         // location survives; the assertion under test is the canonical path, not the raw URI.
         let content = "ab";
         let content_for = |p: &str| -> Option<&str> { (p == "d:/proj/App.vue").then_some(content) };
-        let loc = parse_rename_edit("file:///D:/proj/App.vue", &edit_json(), &content_for).unwrap();
+        let loc = rename_edit("file:///D:/proj/App.vue", &edit_json(), &content_for).unwrap();
         assert_eq!(loc.path, "d:/proj/App.vue");
         assert_ne!(loc.path, "file:///D:/proj/App.vue");
         assert!(!loc.path.starts_with("file://"));
@@ -4851,7 +4794,7 @@ mod dto_path_canonicalization_tests {
     /// computed from the target's own content.
     #[test]
     fn parse_rename_edit_resolves_each_target_against_its_own_file_disk_fallback() {
-        use super::{position_to_offset, uri_to_file_path};
+        use super::uri_to_file_path;
 
         // Target file content: the renamed symbol is on line 2 (0-based), not line 0.
         let target_src = "// header line 0\nconst pad = 1;\nexport const renamed = 2;\n";
@@ -4878,11 +4821,10 @@ mod dto_path_canonicalization_tests {
         });
 
         // `content_for` is a CACHE MISS for this path → forces the per-target disk fallback.
-        let loc = parse_rename_edit(&uri, &edit, &|_p: &str| None)
+        let loc = rename_edit(&uri, &edit, &|_p: &str| None)
             .expect("rename edit resolves through the per-target disk fallback");
 
-        let want_end =
-            position_to_offset(target_src, want_line, want_char + "renamed".len() as u32);
+        let want_end = want_off + "renamed".len() as u32;
         assert_eq!(
             (loc.start, loc.end),
             (want_off, want_end),
@@ -4906,7 +4848,7 @@ mod dto_path_canonicalization_tests {
     /// resolved against ITS OWN target file with the per-target disk fallback on a cache miss.
     #[test]
     fn parse_text_edit_resolves_each_target_against_its_own_file_disk_fallback() {
-        use super::{position_to_offset, uri_to_file_path};
+        use super::uri_to_file_path;
 
         let target_src = "import a from 'x';\nconst y = 1;\nexport const fixme = 3;\n";
         let want_off = target_src.find("fixme").expect("symbol present") as u32;
@@ -4931,10 +4873,10 @@ mod dto_path_canonicalization_tests {
             "newText": "fixed"
         });
 
-        let edit = parse_text_edit_to_code_edit(&uri, &te, &|_p: &str| None)
+        let edit = code_edit(&uri, &te, &|_p: &str| None)
             .expect("code-action edit resolves through the per-target disk fallback");
 
-        let want_end = position_to_offset(target_src, want_line, want_char + "fixme".len() as u32);
+        let want_end = want_off + "fixme".len() as u32;
         assert_eq!(
             (edit.start, edit.end),
             (want_off, want_end),
@@ -4963,8 +4905,7 @@ mod dto_path_canonicalization_tests {
         // the assertion under test is that the stored path is canonical, not the raw `file://` URI.
         let content = "ab";
         let content_for = |p: &str| -> Option<&str> { (p == "d:/proj/App.vue").then_some(content) };
-        let edit =
-            parse_text_edit_to_code_edit("file:///D:/proj/App.vue", &te, &content_for).unwrap();
+        let edit = code_edit("file:///D:/proj/App.vue", &te, &content_for).unwrap();
         assert_eq!(edit.path, "d:/proj/App.vue");
         assert_ne!(edit.path, "file:///D:/proj/App.vue");
         assert!(!edit.path.starts_with("file://"));
@@ -4999,7 +4940,7 @@ mod dto_path_canonicalization_tests {
             "newText": "x"
         });
         let uri = absent_target_uri("code_edit_gone");
-        let edit = parse_text_edit_to_code_edit(&uri, &te, &|_p| None);
+        let edit = code_edit(&uri, &te, &|_p| None);
         assert!(
             edit.is_none(),
             "a code-action edit whose content is unavailable must be DROPPED (fail-closed), never \
@@ -5012,7 +4953,7 @@ mod dto_path_canonicalization_tests {
     #[test]
     fn parse_rename_edit_drops_when_content_unavailable() {
         let uri = absent_target_uri("rename_gone");
-        let loc = parse_rename_edit(&uri, &edit_json(), &|_p| None);
+        let loc = rename_edit(&uri, &edit_json(), &|_p| None);
         assert!(
             loc.is_none(),
             "a rename edit whose content is unavailable must be DROPPED (fail-closed), never \
@@ -5034,7 +4975,7 @@ mod dto_path_canonicalization_tests {
         });
         let content = "short";
         let content_for = |p: &str| -> Option<&str> { (p == "d:/proj/oob.ts").then_some(content) };
-        let edit = parse_text_edit_to_code_edit("file:///D:/proj/oob.ts", &te, &content_for);
+        let edit = code_edit("file:///D:/proj/oob.ts", &te, &content_for);
         assert!(
             edit.is_none(),
             "an out-of-range code-action edit must be DROPPED, never clamped to EOF: {edit:?}"
@@ -5059,7 +5000,7 @@ mod dto_path_canonicalization_tests {
         });
         let content = "ab";
         let content_for = |p: &str| -> Option<&str> { (p == "d:/proj/ovf.ts").then_some(content) };
-        let edit = parse_text_edit_to_code_edit("file:///D:/proj/ovf.ts", &te, &content_for);
+        let edit = code_edit("file:///D:/proj/ovf.ts", &te, &content_for);
         assert!(
             edit.is_none(),
             "a u64>u32::MAX position must be DROPPED, never truncated into an in-range offset: \
@@ -5075,7 +5016,7 @@ mod dto_path_canonicalization_tests {
             },
             "newText": "x"
         });
-        let ok = parse_text_edit_to_code_edit("file:///D:/proj/ovf.ts", &te_ok, &content_for)
+        let ok = code_edit("file:///D:/proj/ovf.ts", &te_ok, &content_for)
             .expect("an in-range edit must still be produced");
         assert_eq!((ok.start, ok.end), (0, 1), "in-range offsets unchanged");
     }
@@ -5094,7 +5035,7 @@ mod dto_path_canonicalization_tests {
         });
         let content = "ab";
         let content_for = |p: &str| -> Option<&str> { (p == "d:/proj/ovf.ts").then_some(content) };
-        let loc = parse_rename_edit("file:///D:/proj/ovf.ts", &edit, &content_for);
+        let loc = rename_edit("file:///D:/proj/ovf.ts", &edit, &content_for);
         assert!(
             loc.is_none(),
             "a u64>u32::MAX rename position must be DROPPED, never truncated: {loc:?}"
@@ -5107,7 +5048,7 @@ mod dto_path_canonicalization_tests {
                 "end": { "line": 0, "character": 1 }
             }
         });
-        let ok = parse_rename_edit("file:///D:/proj/ovf.ts", &edit_ok, &content_for)
+        let ok = rename_edit("file:///D:/proj/ovf.ts", &edit_ok, &content_for)
             .expect("an in-range rename span must still resolve");
         assert_eq!((ok.start, ok.end), (0, 1), "in-range offsets unchanged");
     }

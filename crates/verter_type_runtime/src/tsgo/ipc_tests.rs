@@ -47,22 +47,22 @@ fn empty_plaintext_hover_yields_no_display_signature() {
 
 #[test]
 fn lsp_wire_pos_maps_to_byte_offset() {
-    let content = "const x = 1;\nconst y = 2;\n";
+    let index = SourceIndex::new_utf16("const x = 1;\nconst y = 2;\n");
     let pos = serde_json::json!({ "line": 1, "character": 6 });
     assert_eq!(
-        lsp_wire_pos_to_byte_offset(content, Some(&pos)),
+        lsp_wire_pos_to_byte_offset(&index, Some(&pos)),
         Some(13 + 6)
     );
 }
 
 #[test]
 fn lsp_wire_pos_fails_closed_on_out_of_range_or_malformed() {
-    let content = "const x = 1;\n";
+    let index = SourceIndex::new_utf16("const x = 1;\n");
     let past_eof = serde_json::json!({ "line": 9, "character": 0 });
-    assert_eq!(lsp_wire_pos_to_byte_offset(content, Some(&past_eof)), None);
+    assert_eq!(lsp_wire_pos_to_byte_offset(&index, Some(&past_eof)), None);
     let malformed = serde_json::json!({ "line": "zero" });
-    assert_eq!(lsp_wire_pos_to_byte_offset(content, Some(&malformed)), None);
-    assert_eq!(lsp_wire_pos_to_byte_offset(content, None), None);
+    assert_eq!(lsp_wire_pos_to_byte_offset(&index, Some(&malformed)), None);
+    assert_eq!(lsp_wire_pos_to_byte_offset(&index, None), None);
 }
 
 #[test]
@@ -638,11 +638,21 @@ impl Drop for ForcedTraceEnv {
 // `'😀'` occupies 0-based UTF-16 cols 9 (start) and 10 (the trailing surrogate half) on this line:
 // `l e t   x   =   '` = cols 0..=8, `😀` = cols 9,10, closing `'` = col 11, `;` = col 12.
 // tsgo positions are 0-based.
+/// An empty (insertion) edit range at 0-based UTF-16 `character` on line 0, through the strict
+/// converter every tsgo edit path uses.
+fn tsgo_strict_insertion_offset(content: &str, character: u32) -> Option<u32> {
+    let range = serde_json::json!({
+        "start": { "line": 0, "character": character },
+        "end": { "line": 0, "character": character },
+    });
+    parse_range_to_offsets_strict(&range, &SourceIndex::new_utf16(content)).map(|(start, _)| start)
+}
+
 #[test]
 fn tsgo_checked_drops_mid_surrogate_column() {
     let content = "let x = '😀';";
     assert_eq!(
-        position_to_offset_checked(content, 0, 10),
+        tsgo_strict_insertion_offset(content, 10),
         None,
         "a UTF-16 column inside an astral character is not a scalar boundary and must be dropped"
     );
@@ -652,7 +662,7 @@ fn tsgo_checked_drops_mid_surrogate_column() {
 fn tsgo_checked_accepts_position_after_astral() {
     let content = "let x = '😀';";
     // Col 11 is the closing quote, immediately AFTER the emoji.
-    let off = position_to_offset_checked(content, 0, 11)
+    let off = tsgo_strict_insertion_offset(content, 11)
         .expect("the position immediately after an astral character is a valid scalar boundary");
     // `let x = '` is 9 bytes, `😀` is 4 UTF-8 bytes → byte offset 13 is the closing quote.
     assert_eq!(off, 13);
@@ -663,7 +673,7 @@ fn tsgo_checked_accepts_position_after_astral() {
 fn tsgo_checked_accepts_eol_insertion_on_astral_line() {
     let content = "let x = '😀';";
     // EOL insertion: 0-based col == line UTF-16 length (13).
-    let off = position_to_offset_checked(content, 0, 13)
+    let off = tsgo_strict_insertion_offset(content, 13)
         .expect("an end-of-line insertion position is a valid scalar boundary");
     assert_eq!(off as usize, content.len());
 }
@@ -1135,7 +1145,15 @@ fn test_normalize_file_uri_cache_key_match() {
     );
 }
 
-/// @ai-generated — parse_lsp_location stores a filesystem path, not a URI
+/// One LSP location through the per-target batch parser.
+fn parse_one_lsp_location<'a>(
+    loc: &serde_json::Value,
+    content_for: impl Fn(&str) -> Option<&'a str>,
+) -> Option<TypeLocation> {
+    parse_lsp_locations_per_target(std::slice::from_ref(loc), content_for).pop()
+}
+
+/// @ai-generated — parse_lsp_locations_per_target stores a filesystem path, not a URI
 #[test]
 fn test_parse_lsp_location_stores_filesystem_path() {
     let content = "const foo = 1;\nconst bar = 2;\n";
@@ -1147,7 +1165,7 @@ fn test_parse_lsp_location_stores_filesystem_path() {
         }
     });
 
-    let result = parse_lsp_location(&loc, Some(content)).unwrap();
+    let result = parse_one_lsp_location(&loc, |_| Some(content)).unwrap();
 
     // The path should be a filesystem path, NOT a file:// URI.
     // Before the fix, this was "file:///d:/dev/project/src/utils.ts".
@@ -1290,15 +1308,19 @@ async fn test_tsgo_survives_workspace_configuration() {
 
 // ── Parsing helper unit tests ─────────────────────────────────────
 
-/// @ai-generated — position_to_offset converts line/char to byte offset
+fn utf16_position_to_offset(content: &str, line: u32, character: u32) -> u32 {
+    position_to_offset_with_encoding(content, line, character, PositionEncoding::Utf16)
+}
+
+/// @ai-generated — position_to_offset_with_encoding converts line/char to byte offset
 #[test]
 fn test_position_to_offset_fn() {
     let content = "line1\nline2\nline3";
-    assert_eq!(position_to_offset(content, 0, 0), 0);
-    assert_eq!(position_to_offset(content, 0, 3), 3);
-    assert_eq!(position_to_offset(content, 1, 0), 6);
-    assert_eq!(position_to_offset(content, 1, 2), 8);
-    assert_eq!(position_to_offset(content, 2, 0), 12);
+    assert_eq!(utf16_position_to_offset(content, 0, 0), 0);
+    assert_eq!(utf16_position_to_offset(content, 0, 3), 3);
+    assert_eq!(utf16_position_to_offset(content, 1, 0), 6);
+    assert_eq!(utf16_position_to_offset(content, 1, 2), 8);
+    assert_eq!(utf16_position_to_offset(content, 2, 0), 12);
 }
 
 #[test]
@@ -1306,8 +1328,8 @@ fn test_position_to_offset_utf16_bmp() {
     // "café\nworld" — 'é' is 2 bytes UTF-8, 1 UTF-16 code unit
     let content = "café\nworld";
     // UTF-16 char 4 = end of "café" = byte 5
-    assert_eq!(position_to_offset(content, 0, 4), 5);
-    assert_eq!(position_to_offset(content, 1, 0), 6);
+    assert_eq!(utf16_position_to_offset(content, 0, 4), 5);
+    assert_eq!(utf16_position_to_offset(content, 1, 0), 6);
 }
 
 #[test]
@@ -1315,7 +1337,7 @@ fn test_position_to_offset_utf16_supplementary() {
     // "a😀b" — '😀' is 4 bytes UTF-8, 2 UTF-16 code units
     let content = "a😀b";
     // UTF-16: 'a'=1, '😀'=2 (surrogate pair), 'b' at char 3 = byte 5
-    assert_eq!(position_to_offset(content, 0, 3), 5);
+    assert_eq!(utf16_position_to_offset(content, 0, 3), 5);
 }
 
 #[test]
@@ -1395,7 +1417,7 @@ fn parse_completion_item_drops_text_edit_range_on_position_overflow() {
     // Content is valid and large enough for the WRAPPED (line 0 / char 0..5) position, so the only
     // reason the range can drop is the u64>u32 overflow itself.
     let content = "myVar = 1";
-    let item = parse_completion_item(&json, Some(content)).unwrap();
+    let item = parse_completion_item(&json, Some(&SourceIndex::new_utf16(content))).unwrap();
     assert_eq!(item.label, "myVar");
     assert_eq!(
         item.edit_range_start, None,
@@ -1416,7 +1438,7 @@ fn parse_completion_item_drops_text_edit_range_on_position_overflow() {
             "newText": "myVar"
         }
     });
-    let ok = parse_completion_item(&json_ok, Some(content)).unwrap();
+    let ok = parse_completion_item(&json_ok, Some(&SourceIndex::new_utf16(content))).unwrap();
     assert_eq!(
         (ok.edit_range_start, ok.edit_range_end),
         (Some(0), Some(5)),
@@ -1716,7 +1738,7 @@ fn parse_completion_item_drops_out_of_range_text_edit() {
             "newText": "myVar"
         }
     });
-    let item = parse_completion_item(&json, Some(content)).unwrap();
+    let item = parse_completion_item(&json, Some(&SourceIndex::new_utf16(content))).unwrap();
     assert_eq!(
         item.edit_range_start, None,
         "an out-of-range replace-range must be dropped, never clamped"
@@ -1748,7 +1770,7 @@ fn test_parse_completion_item_lsp_kind_16_is_not_property() {
     );
 }
 
-/// @ai-generated — parse_lsp_location parses an LSP Location with content
+/// @ai-generated — an LSP Location parses against its target's content
 #[test]
 fn test_parse_lsp_location() {
     let json = serde_json::json!({
@@ -1759,7 +1781,7 @@ fn test_parse_lsp_location() {
         }
     });
     let content = "line1\nline2\n";
-    let loc = parse_lsp_location(&json, Some(content)).unwrap();
+    let loc = parse_one_lsp_location(&json, |_| Some(content)).unwrap();
     // URI is converted to filesystem path (Unix: /test.ts)
     assert_eq!(loc.path, "/test.ts");
     assert_eq!(loc.start, 6);
@@ -1783,11 +1805,62 @@ fn test_parse_lsp_location_without_inline_content_reads_disk_content() {
         }
     });
 
-    let loc = parse_lsp_location(&json, None).unwrap();
+    let loc = parse_one_lsp_location(&json, |_| None).unwrap();
     assert_eq!(loc.start, 27);
     assert_eq!(loc.end, 32);
 
     let _ = std::fs::remove_dir_all(&temp_root);
+}
+
+/// A references batch converts every location in the same file through ONE resolution of that
+/// file's content: interleaved targets resolve once each, and the results keep response order.
+#[test]
+fn references_batch_resolves_each_distinct_target_once_in_response_order() {
+    let a_path = "/proj/a.ts";
+    let a_content = "let x = 1;\nlet y = x;\n";
+    let b_path = "/proj/b.ts";
+    let b_content = "import { x } from './a';\n";
+    let location = |path: &str, line: u32, start: u32, end: u32| {
+        serde_json::json!({
+            "uri": path_to_file_uri_string(path),
+            "range": {
+                "start": { "line": line, "character": start },
+                "end": { "line": line, "character": end }
+            }
+        })
+    };
+    let locations = vec![
+        location(a_path, 0, 4, 5),
+        location(b_path, 0, 9, 10),
+        location(a_path, 1, 8, 9),
+    ];
+
+    let lookups = std::cell::RefCell::new(Vec::new());
+    let result = parse_lsp_locations_per_target(&locations, |target| {
+        lookups.borrow_mut().push(target.to_string());
+        if target == a_path {
+            Some(a_content)
+        } else if target == b_path {
+            Some(b_content)
+        } else {
+            None
+        }
+    });
+
+    let got: Vec<_> = result
+        .iter()
+        .map(|l| (l.path.as_str(), l.start, l.end))
+        .collect();
+    assert_eq!(
+        got,
+        vec![(a_path, 4, 5), (b_path, 9, 10), (a_path, 19, 20)],
+        "every location converts against its own file and keeps its response position"
+    );
+    assert_eq!(
+        *lookups.borrow(),
+        vec![a_path.to_string(), b_path.to_string()],
+        "each distinct target's content resolves once per batch, not once per location"
+    );
 }
 
 /// Block H regression — cross-file references must convert each location's range against its OWN
@@ -2181,10 +2254,10 @@ fn parse_lsp_related_never_stores_packed_position_anti_bogus_link() {
 /// to `content.len()`. A clamped EOF offset would fabricate a bogus "see
 /// declaration" link landing at the end of the file.
 ///
-/// Pre-fix (fail-open `position_to_offset`): line 99 clamps to `content.len()` (15),
-/// so `related_information` is NON-empty with start == end == 15 — this assertion
-/// fires. Post-fix (`position_to_offset_checked`): the entry is dropped, the list is
-/// empty, and the PRIMARY diagnostic still survives.
+/// A fail-open clamped conversion would map line 99 to `content.len()` (15), leaving
+/// `related_information` NON-empty with start == end == 15 — this assertion fires.
+/// The checked conversion (`SourceIndex::checked_position_to_offset`) drops the
+/// entry: the list is empty, and the PRIMARY diagnostic still survives.
 #[test]
 fn parse_lsp_related_drops_same_file_out_of_range_offset() {
     let content = "const dup = 1;\n"; // 15 bytes, 2 lines (1 trailing empty)

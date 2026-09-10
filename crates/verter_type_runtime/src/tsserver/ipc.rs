@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use crate::codec::{
     line_column_to_offset_utf16, offset_to_line_column_utf16, LineColumn, SourceIndex,
 };
+use crate::contents_snapshot::{convert_per_target, with_target_index};
 use crate::protocol::*;
 use crate::traits::{ProviderFuture, TypeProvider};
 
@@ -1750,17 +1751,17 @@ fn tsserver_pos_to_byte_offset_indexed(idx: &SourceIndex<'_>, line: u32, offset:
 }
 
 /// Parse a tsserver wire position object (`{"line": L, "offset": C}`, 1-based)
-/// into a byte offset against `content`, failing CLOSED on a malformed or
+/// into a byte offset through `index`, failing CLOSED on a malformed or
 /// out-of-range position (the quickinfo hover range is display metadata — a
 /// clamped wrong offset would highlight the wrong span, so it is dropped).
 pub fn quickinfo_wire_pos_to_byte_offset(
-    content: &str,
+    index: &SourceIndex<'_>,
     pos: Option<&serde_json::Value>,
 ) -> Option<u32> {
     let pos = pos?;
     let line = u32::try_from(pos.get("line")?.as_u64()?).ok()?;
     let offset = u32::try_from(pos.get("offset")?.as_u64()?).ok()?;
-    tsserver_pos_to_byte_offset_checked(&SourceIndex::new_utf16(content), line, offset)
+    tsserver_pos_to_byte_offset_checked(index, line, offset)
 }
 
 /// Convert tsserver's 1-based (line, offset) to a byte offset, returning `None` when the position
@@ -3659,16 +3660,19 @@ impl TypeProvider for TsserverTypeProvider {
                             let (range_start, range_end) = {
                                 let cache = contents_cache.lock().await;
                                 match cache.get(&file) {
-                                    Some(content) => (
-                                        quickinfo_wire_pos_to_byte_offset(
-                                            content,
-                                            body.get("start"),
-                                        ),
-                                        quickinfo_wire_pos_to_byte_offset(
-                                            content,
-                                            body.get("end"),
-                                        ),
-                                    ),
+                                    Some(content) => {
+                                        let index = SourceIndex::new_utf16(content);
+                                        (
+                                            quickinfo_wire_pos_to_byte_offset(
+                                                &index,
+                                                body.get("start"),
+                                            ),
+                                            quickinfo_wire_pos_to_byte_offset(
+                                                &index,
+                                                body.get("end"),
+                                            ),
+                                        )
+                                    }
                                     None => (None, None),
                                 }
                             };
@@ -4123,11 +4127,7 @@ impl TypeProvider for TsserverTypeProvider {
                 let cache = contents_cache.lock().await;
                 result
                     .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
-                            .collect()
-                    })
+                    .map(|arr| parse_tsserver_locations(arr, &cache))
                     .unwrap_or_default()
             };
             for location in &mut locs {
@@ -4181,11 +4181,7 @@ impl TypeProvider for TsserverTypeProvider {
                 let cache = contents_cache.lock().await;
                 result
                     .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
-                            .collect()
-                    })
+                    .map(|arr| parse_tsserver_locations(arr, &cache))
                     .unwrap_or_default()
             };
             for location in &mut locs {
@@ -4236,11 +4232,7 @@ impl TypeProvider for TsserverTypeProvider {
                 result
                     .get("refs")
                     .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
-                            .collect()
-                    })
+                    .map(|arr| parse_tsserver_locations(arr, &cache))
                     .unwrap_or_default()
             };
             for location in &mut locs {
@@ -4319,16 +4311,11 @@ impl TypeProvider for TsserverTypeProvider {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or_default(),
                                 );
-                                group
+                                let spans = group
                                     .get("locs")
                                     .and_then(|v| v.as_array())
-                                    .into_iter()
-                                    .flat_map(move |spans| {
-                                        let fp = file_path.clone();
-                                        spans.iter().filter_map(move |span| {
-                                            parse_tsserver_rename_span(span, &fp, cache)
-                                        })
-                                    })
+                                    .map_or(&[][..], Vec::as_slice);
+                                parse_tsserver_rename_spans(spans, &file_path, cache)
                             })
                             .collect()
                     })
@@ -5491,20 +5478,52 @@ fn tsserver_completion_documentation(detail: &serde_json::Value) -> Option<Strin
     Some(combined)
 }
 
-/// Parse a tsserver location (used in definition/references responses).
+/// A response target's content: `contents_cache` first, then a disk read on a miss (a
+/// cross-file target the session never opened).
+fn cached_or_disk<'a>(
+    target: &str,
+    contents_cache: &'a HashMap<String, Arc<str>>,
+) -> Option<std::borrow::Cow<'a, str>> {
+    match contents_cache.get(target) {
+        Some(content) => Some(std::borrow::Cow::Borrowed(content.as_ref())),
+        None => std::fs::read_to_string(target)
+            .ok()
+            .map(std::borrow::Cow::Owned),
+    }
+}
+
+/// Parse a tsserver location batch (definition / references responses).
 ///
 /// tsserver locations have: `{ file, start: {line, offset}, end: {line, offset} }`
 /// where line and offset are 1-based, and offset counts UTF-16 code units.
 ///
-/// When content is available in `contents_cache`, positions are converted to proper
-/// byte offsets. Otherwise, falls back to packed 0-based `(line << 16) | col` format.
-pub fn parse_tsserver_location(
-    loc: &serde_json::Value,
+/// Each location converts against ITS OWN file's content — `contents_cache` first, then a disk
+/// read on a miss — and each distinct file resolves and indexes once for the whole batch. With
+/// content, positions become proper byte offsets; otherwise they fall back to packed 0-based
+/// `(line << 16) | col` format. Results keep the response order.
+pub fn parse_tsserver_locations(
+    locs: &[serde_json::Value],
     contents_cache: &HashMap<String, Arc<str>>,
+) -> Vec<TypeLocation> {
+    convert_per_target(
+        locs,
+        |loc| {
+            Some(verter_span::path::canonicalize_path(
+                loc.get("file").and_then(|v| v.as_str()).unwrap_or_default(),
+            ))
+        },
+        |file| cached_or_disk(file, contents_cache),
+        parse_tsserver_location,
+    )
+}
+
+/// One tsserver location in `file`, converted through that file's batch index (`None` when the
+/// file has no content: the packed fallback).
+fn parse_tsserver_location(
+    loc: &serde_json::Value,
+    file: &str,
+    index: Option<&SourceIndex<'_>>,
 ) -> Option<TypeLocation> {
-    let file = verter_span::path::canonicalize_path(
-        loc.get("file").and_then(|v| v.as_str()).unwrap_or_default(),
-    );
     let start = loc.get("start")?;
     let end = loc.get("end")?;
     let sl = start.get("line")?.as_u64()? as u32;
@@ -5512,20 +5531,10 @@ pub fn parse_tsserver_location(
     let el = end.get("line")?.as_u64()? as u32;
     let eo = end.get("offset")?.as_u64()? as u32;
 
-    let disk_content;
-    let content = if let Some(content) = contents_cache.get(&file) {
-        Some(content.as_ref())
-    } else {
-        disk_content = std::fs::read_to_string(&file).ok();
-        disk_content.as_deref()
-    };
-
-    let (s, e) = if let Some(content) = content {
-        // One index serves both endpoints of the span.
-        let idx = SourceIndex::new_utf16(content);
+    let (s, e) = if let Some(idx) = index {
         (
-            tsserver_pos_to_byte_offset_indexed(&idx, sl, so),
-            tsserver_pos_to_byte_offset_indexed(&idx, el, eo),
+            tsserver_pos_to_byte_offset_indexed(idx, sl, so),
+            tsserver_pos_to_byte_offset_indexed(idx, el, eo),
         )
     } else {
         // Fallback: store packed 0-based positions
@@ -5536,32 +5545,57 @@ pub fn parse_tsserver_location(
     };
 
     Some(TypeLocation {
-        path: file,
+        path: file.to_string(),
         start: s,
         end: e,
     })
 }
 
-/// Parse a tsserver rename span into a RenameLocation.
+/// Parse the spans a tsserver rename response groups under ONE `file` into RenameLocations.
 ///
-/// A tsserver rename response groups spans by file, so each span's REAL byte offset is into the
-/// GROUP's `file` — which may be a cross-file rename target the queried session never opened
-/// (e.g. an imported component's carrier or a `.ts` declaration). Resolve each span against THAT
-/// file's own content: the in-memory `contents_cache` first, then a per-target disk read on a
-/// cache miss — the SAME content-resolution [`parse_tsserver_location`] gives references /
-/// definition, and the tsgo rename path gives via `parse_range_to_offsets_strict_with_disk_fallback`.
+/// Each span's REAL byte offset is into the GROUP's `file` — which may be a cross-file rename
+/// target the queried session never opened (e.g. an imported component's carrier or a `.ts`
+/// declaration). Resolve the group against THAT file's own content, once for all of its spans:
+/// the in-memory `contents_cache` first, then a per-target disk read on a cache miss — the SAME
+/// content resolution [`parse_tsserver_locations`] gives references / definition and the tsgo
+/// rename path gives its workspace edits.
 ///
-/// The disk fallback recovers a cross-file target absent from the cache, so its rename edit lands
-/// at the real range instead of being dropped. FAIL CLOSED otherwise: when NEITHER cache nor disk
-/// has the content the span is DROPPED (returns `None`) — a rename location is a WRITE edit, so a
-/// packed `(line << 16) | col` sentinel applied at a bogus byte offset would CORRUPT the file. An
-/// out-of-range position (the shared codec would clamp it to EOF) and an inverted `start > end`
-/// span also drop. The caller collects via `filter_map`, so one dropped span never aborts the
+/// The disk fallback recovers a cross-file target absent from the cache, so its rename edits land
+/// at the real range instead of being dropped. FAIL CLOSED otherwise: a rename location is a WRITE
+/// edit — same corruption class as a code edit — so when NEITHER cache nor disk has the content
+/// every span of the group is DROPPED, never packed into a `(line << 16) | col` sentinel the merge
+/// layer would apply at a bogus byte offset. The checked converter additionally drops an
+/// out-of-range position (the shared codec would clamp it to a valid-looking EOF offset), and an
+/// inverted `start > end` span drops too; a dropped span skips only that one location, never the
 /// whole rename.
-pub fn parse_tsserver_rename_span(
-    span: &serde_json::Value,
+pub fn parse_tsserver_rename_spans(
+    spans: &[serde_json::Value],
     file: &str,
     contents_cache: &HashMap<String, Arc<str>>,
+) -> Vec<RenameLocation> {
+    if spans.is_empty() {
+        return Vec::new();
+    }
+    with_target_index(
+        file,
+        |file| cached_or_disk(file, contents_cache),
+        |index| {
+            let Some(index) = index else {
+                return Vec::new();
+            };
+            spans
+                .iter()
+                .filter_map(|span| parse_tsserver_rename_span(span, file, index))
+                .collect()
+        },
+    )
+}
+
+/// One tsserver rename span in `file`, converted through the group's index.
+fn parse_tsserver_rename_span(
+    span: &serde_json::Value,
+    file: &str,
+    index: &SourceIndex<'_>,
 ) -> Option<RenameLocation> {
     let start = span.get("start")?;
     let end = span.get("end")?;
@@ -5570,25 +5604,8 @@ pub fn parse_tsserver_rename_span(
     let el = u32::try_from(end.get("line")?.as_u64()?).ok()?;
     let eo = u32::try_from(end.get("offset")?.as_u64()?).ok()?;
 
-    let disk_content;
-    let content = if let Some(content) = contents_cache.get(file) {
-        Some(content.as_ref())
-    } else {
-        disk_content = std::fs::read_to_string(file).ok();
-        disk_content.as_deref()
-    };
-
-    // FAIL CLOSED: a rename location is a WRITE edit — same corruption class as a code edit. When the
-    // target content is unavailable (cache miss AND disk read fails) DROP the span — never pack a
-    // `(line << 16) | col` sentinel the merge layer would apply at a bogus byte offset and corrupt
-    // the file. The checked converter additionally drops an out-of-range position (the shared codec
-    // would clamp it to a valid-looking EOF offset), and an inverted `start > end` span drops too.
-    // The caller collects via `filter_map`, so a dropped span skips that one location, not the
-    // whole rename.
-    // One index serves both endpoints of the span.
-    let idx = SourceIndex::new_utf16(content?);
-    let s = tsserver_pos_to_byte_offset_checked(&idx, sl, so)?;
-    let e = tsserver_pos_to_byte_offset_checked(&idx, el, eo)?;
+    let s = tsserver_pos_to_byte_offset_checked(index, sl, so)?;
+    let e = tsserver_pos_to_byte_offset_checked(index, el, eo)?;
     if s > e {
         return None;
     }
@@ -5643,15 +5660,9 @@ fn parse_tsserver_file_code_edits(
                 .and_then(|v| v.as_str())
                 .unwrap_or_default(),
         );
-        let disk_content;
-        let content = if let Some(content) = contents_cache.get(&file) {
-            Some(content.as_ref())
-        } else {
-            disk_content = std::fs::read_to_string(&file).ok();
-            disk_content.as_deref()
-        };
         // One index per target file, shared by every edit landing in it.
-        let index = content.map(SourceIndex::new_utf16);
+        let content = cached_or_disk(&file, contents_cache);
+        let index = content.as_deref().map(SourceIndex::new_utf16);
         if let Some(text_changes) = change.get("textChanges").and_then(|v| v.as_array()) {
             for tc in text_changes {
                 let start = tc.get("start")?;

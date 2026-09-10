@@ -107,7 +107,10 @@ delegate to the same private conversion core, so they cannot disagree about an e
 check, or a clamp. A caller converting more than one position against one immutable source — a
 diagnostic pull, a semantic-token stream, an inlay-hint or highlight batch, a rename/code-fix
 batch, a span's two endpoints — builds ONE `SourceIndex` and converts every endpoint through it;
-the per-call convenience functions rescan the source each time.
+the per-call convenience functions rescan the source each time. A response whose endpoints span
+several target files (definition/references locations, rename and code-action edits) resolves each
+distinct target's content (snapshot, then disk) and indexes it once, through
+`contents_snapshot::{with_target_index, convert_per_target}`; results keep the response order.
 
 Each index offers both conventions explicitly: `clamped_position_to_offset` fails OPEN (out-of-range
 clamps to EOF — the navigation-sentinel default) and `checked_position_to_offset` fails CLOSED
@@ -124,8 +127,9 @@ corrupts a file or forges a bogus "see declaration" link at EOF.
 | LSP Position → byte offset | `LineIndex::position_to_offset()` | `crates/verter_lsp/src/documents/line_index.rs` |
 | Byte offset → LSP Position | `LineIndex::offset_to_position()` | `crates/verter_lsp/src/documents/line_index.rs` |
 | Provider response batch → byte offsets | One `SourceIndex` per source snapshot, reused for every endpoint | `crates/verter_type_runtime/src/codec.rs` |
-| TSGO response → byte offset | `position_to_offset_with_encoding()` | `crates/verter_type_runtime/src/tsgo/ipc.rs` |
-| tsserver response → byte offset | `tsserver_pos_to_byte_offset()` (1-based wire positions) | `crates/verter_type_runtime/src/tsserver/ipc.rs` |
+| Multi-file provider response → byte offsets | One content resolution + index per distinct target | `crates/verter_type_runtime/src/contents_snapshot.rs` |
+| TSGO response range → byte offsets | `parse_range_to_offsets()` (navigation, clamped) / `parse_range_to_offsets_strict()` (edits, checked) over the batch index | `crates/verter_type_runtime/src/tsgo/ipc.rs` |
+| tsserver response → byte offset | `tsserver_pos_to_byte_offset_indexed()` (clamped) / `tsserver_pos_to_byte_offset_checked()` (edits) over the batch index; 1-based wire positions | `crates/verter_type_runtime/src/tsserver/ipc.rs` |
 
 ## VS Code Extension
 
