@@ -7,7 +7,9 @@
   acceptable outcome", "Source-specific scope" (dead-operand proof),
   "Acceptance IDs" TE2-AC1, and "Abort conditions"
 - Ledger: `authority/state/implemented.toml` row `"TE2"` stays
-  `status = "pending"`. No production source was mutated.
+  `status = "pending"`. The only production change on this candidate is
+  the ratification-independent dead-operand dependency-fact fix recorded
+  under "Delivered"; the operand cutover is not implemented.
 
 ## Disposition
 
@@ -351,15 +353,21 @@ and `extends`; the decided arm binds `result` to the winner alone
 with sources `[check, extends]` only — the loser receives no origin
 edge, no force, no nested dispatch and no fact read.
 
-One residue remains even under the narrow reading, and it is small,
-in-scope and concrete: `build.rs:9018` derives the result's observed
+One residue remained even under the narrow reading, and it was small,
+in-scope and concrete: `build_conditional` derived the result's observed
 self-roots from all FOUR nodes, including the loser. That is not a
 content re-read (`observed_self_roots_from_nodes` only projects the
 identity each node already carries), and AC3 explicitly tolerates a
 conservative same-owner rejection — but when the losing branch is owned
-by a DIFFERENT file it contributes a cross-file root the winner's value
-does not depend on, which is the one place the landed decided arm still
-contradicts *"dead operands add no semantic dependency facts"*.
+by a DIFFERENT file it contributed a cross-file root the winner's value
+does not depend on, which was the one place the landed decided arm still
+contradicted *"dead operands add no semantic dependency facts"*.
+
+**That residue is now closed** — see "Delivered" below. It is the only
+part of TE2 that was reachable without a ratification, because it is
+required under BOTH readings of the counter list: a decided
+conditional's dependency facts are wrong on the loser however the
+intern/substitute events are accounted.
 
 **Finding 2 survives BOTH readings.** It does not concern lifetime
 accounting: forcing an `Authored` `ConditionalTrue` operand whose
@@ -376,10 +384,49 @@ clause, not merely restate AC1.
 strict, option 2. If narrow, option 1 is small and concrete — keep
 `Node`-arm operands at the six materialized construction sites, fold the
 request's five `ProjectionReductionContext` axes into the currently
-context-free `FamilyKey::Conditional`, fix the `build.rs:9018` self-root
-set to the winner plus check/extends, and restate AC1 as
+context-free `FamilyKey::Conditional`, and restate AC1 as
 zero-forcing / zero-nested-dispatch / zero-origin-edge / zero-fact-read
-on the loser of the decided evaluation.
+on the loser of the decided evaluation. (The self-root half of that list
+is already done — see "Delivered".)
+
+The `FamilyKey::Conditional` context axis is deliberately NOT landed
+ahead of the ratification. Conditional reduction does not read a
+projection context today: `build_conditional` takes only the four nodes
+plus `distributive`. Folding five context axes into the key before the
+operand cutover makes the value context-dependent adds nothing and
+fragments one warm entry into up to five axes' worth of duplicates — a
+pure cache regression against the charter's own "zero warm-candidate
+growth" budget. It is correct only together with the operand half that
+makes the forced branch context-sensitive.
+
+## Delivered
+
+The dead-operand DEPENDENCY-FACT residue above is fixed on this
+candidate, because it is required under both readings and needs no
+ratification:
+
+- `build_conditional` no longer roots a DECIDED conditional on the
+  losing branch. The two decided arms (relation selection, and the
+  binding-producing infer selection, which is always decided-true) root
+  on `check`, `extends`, and the WINNER only. The deferred shell and the
+  distributive per-member union publish both branch references in their
+  value, so those keep the full four-node set.
+- Staleness is impossible in the other direction: the memo key carries
+  both branch node ids, so an edit that changes the losing branch mints
+  a different id and therefore a different key rather than serving a
+  stale hit. The change only removes rejections of values that never
+  read the rejecting file.
+- Discriminating proof: `decided_conditional_roots_only_on_check_extends_and_the_winner`
+  (`project_semantic_dispatch/tests.rs`) puts the two branch shells in
+  DISTINCT files and asserts the decided-true root set is exactly the
+  true branch's file, the decided-false root set is exactly the false
+  branch's file (so the assertion cannot pass by always dropping one
+  fixed branch), and the deferred shell keeps both. Restoring the
+  four-node root set fails it.
+
+Nothing else in TE2 is landed. The operand cutover, the lazy `lower.rs`
+branches, the conditional family context axis, and TE2-AC1/AC2/AC4 all
+remain blocked on one of the three ratifications above.
 
 ## Why this surfaced at TE2 and not earlier
 
