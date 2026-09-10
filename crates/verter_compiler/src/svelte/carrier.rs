@@ -253,7 +253,8 @@ pub fn open_svelte_carrier(artifact: &FrameworkParseArtifact) -> Option<Arc<dyn 
 }
 
 impl SvelteCarrierCompiler {
-    /// The adapter id this compiler answers to (the registry key).
+    /// The adapter identity this compiler answers to in the immutable
+    /// capability catalog.
     #[must_use]
     pub fn adapter_id(&self) -> FrameworkAdapterId {
         FrameworkAdapterId::svelte()
@@ -532,8 +533,8 @@ pub(crate) fn svelte_carrier_bundle(
             opts.filename.clone(),
             IdeProductRequest {
                 // Per-leg override for a request-derived caller;
-                // `None` couples the IDE map to the runtime output
-                // axis (the compatibility route's historical behavior).
+                // `None` couples the IDE map demand to the runtime
+                // output axis.
                 want_source_map: opts.ide_source_map.unwrap_or(opts.source_map),
                 embed_ambient_types: opts.embed_ambient_types,
                 ..Default::default()
@@ -603,9 +604,9 @@ mod tests {
     use verter_language::ScriptRegionKind;
 
     /// Test-only direct route onto the shared bundle orchestration, mirroring
-    /// the grant-minting the registry route used to perform — the same
-    /// production path `svelte_host_integration.rs` drives, called directly
-    /// rather than through a host admission.
+    /// the grant-minting the registry-route grants helper performs — the
+    /// same production path `svelte_host_integration.rs` drives, called
+    /// directly rather than through a host admission.
     fn compile_bundle_direct(
         source: &str,
         artifact: &FrameworkParseArtifact,
