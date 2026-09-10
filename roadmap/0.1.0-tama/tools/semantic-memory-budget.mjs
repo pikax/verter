@@ -21,9 +21,10 @@
 //
 //   * the required lifecycle classes are transcribed here from the binding
 //     resource contract, so dropping a class from the catalog fails;
-//   * the retained-storage inventory is derived from the FIELDS OF
-//     `ProjectTypeStore` in the source, so dropping an allocation class or
-//     adding a store field fails.
+//   * the retained-storage inventory is derived from the production FIELDS
+//     of `VerterHost` in the source, and of every struct those fields
+//     delegate to, so dropping an allocation class, adding a host-lifetime
+//     field, or cutting a subsystem out of the walk fails.
 //
 // One table is validated for the opposite reason. `[[memory_observation]]`
 // records byte-valued memory the process really does report, which the
@@ -48,7 +49,39 @@ export const REPO_ROOT = path.resolve(PACKAGE_ROOT, "..", "..");
 export const CATALOG_RELATIVE = "catalogs/semantic-memory-budget.toml";
 export const SCHEMA_NAME = "semantic-memory-budget.schema.json";
 const AUDIT_SITE_SCHEMA = "crates/verter_audit/src/attribution/schema.rs";
-const PROJECT_TYPE_STORE = "crates/verter_session/src/project_type_store.rs";
+
+/**
+ * The root of the retained-state walk. Everything the host retains for its
+ * lifetime hangs off this struct, so its production field list is where the
+ * inventory's required population starts. The walk then follows every
+ * `delegated` disposition into the struct that field holds.
+ */
+export const RETAINED_STATE_ROOT = Object.freeze({
+  struct: "VerterHost",
+  file: "crates/verter_session/src/lib.rs",
+});
+
+/**
+ * Subsystems the walk MUST reach. A `delegated` disposition is what carries
+ * the walk into a subsystem, so re-labelling one as non-retaining would
+ * silently drop every cache behind it. These are the host-lifetime cache
+ * owners, transcribed here for the same reason as the lists below.
+ */
+export const REQUIRED_RETAINED_STRUCTS = Object.freeze([
+  "ProjectTypeStore",
+  "UnifiedResolverRuntime",
+  "FallthroughResolverState",
+  "FrameworkRegistration",
+  "FrameworkScriptCaches",
+]);
+
+/** How a walked field that no allocation class charges may be accounted. */
+export const FIELD_DISPOSITIONS = Object.freeze([
+  "non_retaining",
+  "delegated",
+  "shared_reference",
+  "outside_inventory",
+]);
 
 /**
  * The lifecycle population the workload MUST cover, transcribed from
@@ -96,10 +129,10 @@ export const REQUIRED_LIFECYCLE_CLASSES = Object.freeze([
  * public result pins", plus the request-active classes the resource
  * contract's cache-owned / request-owned / externally-pinned split needs.
  *
- * The `ProjectTypeStore` field list below is the independent inventory for
- * everything the store itself retains, but these classes live elsewhere —
- * on the lowering service, on the request, at the public boundary — so
- * nothing in the store would notice their removal. This list lives HERE
+ * The retained-state walk below is the independent inventory for
+ * everything the host retains, but several of these classes are sub-regions
+ * of one field or live on the request or at the public boundary, so the
+ * walk alone would not notice their removal. This list lives HERE
  * for the same reason the lifecycle list does: an omission check whose
  * required population comes from the submission cannot detect an omission.
  */
@@ -186,24 +219,45 @@ export function declaredWorkSites() {
 }
 
 /**
- * The declared fields of `ProjectTypeStore`, in source order.
+ * The PRODUCTION fields of struct `name` in `file`, in source order.
  *
  * This is the INDEPENDENT retained-storage inventory: the contract has to
- * account for every one of them, so an allocation class cannot be dropped
- * without the store field it covered becoming unaccounted, and a field
- * cannot be added to the store without the contract going red.
+ * account for every field the walk reaches, so an allocation class cannot
+ * be dropped without the field it covered becoming unaccounted, and a field
+ * cannot be added without the contract going red. A field gated behind a
+ * `cfg` naming `test` never exists in a shipped build, so it retains nothing
+ * there and is not part of the population; a target gate such as
+ * `not(target_arch = "wasm32")` is production and stays in.
  */
-export function projectTypeStoreFields() {
-  const source = readRepoFile(PROJECT_TYPE_STORE).toString("utf8");
-  const start = source.indexOf("pub struct ProjectTypeStore {");
-  if (start === -1) throw new Error("ProjectTypeStore struct not found");
+export function structFields(file, name) {
+  const source = readRepoFile(file).toString("utf8");
+  const header = new RegExp(String.raw`^(?:pub(?:\([^)]*\))?\s+)?struct\s+${name}\b[^;{]*\{`, "mu");
+  const match = header.exec(source);
+  if (!match) throw new Error(`struct ${name} not found in ${file}`);
+  const start = match.index + match[0].length;
   const end = source.indexOf("\n}", start);
-  if (end === -1) throw new Error("ProjectTypeStore struct is unterminated");
-  const body = source.slice(start, end);
+  if (end === -1) throw new Error(`struct ${name} in ${file} is unterminated`);
   const fields = [];
-  for (const match of body.matchAll(/^ {4}(?:pub )?([a-z_][a-z0-9_]*)\s*:/gmu))
-    fields.push(match[1]);
+  let testOnly = false;
+  for (const line of source.slice(start, end).split(/\r?\n/u)) {
+    const cfg = /^ {4}#\[cfg\((.*)\)\]\s*$/u.exec(line);
+    if (cfg) {
+      testOnly = /\btest\b/u.test(cfg[1]);
+      continue;
+    }
+    const field = /^ {4}(?:pub(?:\([^)]*\))?\s+)?([a-z_][a-z0-9_]*)\s*:/u.exec(line);
+    if (!field) continue;
+    if (!testOnly) fields.push(field[1]);
+    testOnly = false;
+  }
   return fields;
+}
+
+/** Split a `path#Struct` delegate anchor. */
+function delegateTarget(anchor) {
+  const hash = anchor.indexOf("#");
+  if (hash === -1) return null;
+  return { file: anchor.slice(0, hash), struct: anchor.slice(hash + 1) };
 }
 
 /** Every `.rs` file reachable from a file or directory anchor. */
@@ -644,7 +698,7 @@ function allocationErrors(catalog) {
   const ids = new Set();
   const owners = new Map();
   const ownerships = new Set();
-  const coveredFields = new Set();
+  const coveredFields = new Map();
   for (const row of rows) {
     if (ids.has(row.id)) errors.push(`allocation class: duplicate id ${row.id}`);
     ids.add(row.id);
@@ -659,7 +713,10 @@ function allocationErrors(catalog) {
       errors.push(...anchorErrors(producer, `allocation class ${row.id} producer`));
     for (const consumer of row.consumers || [])
       errors.push(...anchorErrors(consumer, `allocation class ${row.id} consumer`));
-    for (const field of row.covers_store_fields || []) coveredFields.add(field);
+    for (const field of row.covers_fields || []) {
+      if (!coveredFields.has(field)) coveredFields.set(field, new Set());
+      coveredFields.get(field).add(row.id);
+    }
     for (const metric of row.metric_rows || [])
       if (!declaredMetrics.has(metric))
         errors.push(`allocation class ${row.id}: metric row ${metric} is not declared`);
@@ -713,42 +770,154 @@ function allocationErrors(catalog) {
         `allocation inventory: the charter requires allocation class ${id}, which this catalog does not declare`,
       );
 
-  // The omission check. The retained-storage inventory is the store's own
-  // field list, so a deleted allocation class leaves its field unaccounted
-  // and a new store field is unaccounted until the contract covers it.
-  let fields;
-  try {
-    fields = projectTypeStoreFields();
-  } catch (error) {
-    return [...errors, `allocation inventory: cannot read the store field list: ${error.message}`];
+  // The omission check. The required population is the production field
+  // list of every struct the retained-state walk reaches, read from source,
+  // so a deleted allocation class leaves its field unaccounted, a new
+  // host-lifetime field is unaccounted until the contract covers it, and a
+  // subsystem cut out of the walk is refused.
+  errors.push(...retainedWalkErrors(catalog, coveredFields));
+  return errors;
+}
+
+/**
+ * Walk the host's retained state from `VerterHost`, following `delegated`
+ * dispositions, and require every production field reached to be EITHER
+ * charged by an allocation class OR carry exactly one `[[struct_field]]`
+ * disposition — never both, never neither.
+ */
+function retainedWalkErrors(catalog, coveredFields) {
+  const errors = [];
+  const dispositions = new Map();
+  for (const row of catalog.struct_field || []) {
+    const key = `${row.struct}.${row.field}`;
+    if (dispositions.has(key)) errors.push(`struct field ${key}: declared more than once`);
+    dispositions.set(key, row);
   }
-  if (fields.length === 0)
-    return [...errors, "allocation inventory: the store field list came back empty"];
-  const nonRetaining = new Map();
-  for (const row of catalog.store_field || []) {
-    if (nonRetaining.has(row.field))
-      errors.push(`store field ${row.field}: declared more than once`);
-    nonRetaining.set(row.field, row);
-    if (!fields.includes(row.field))
+
+  const walked = new Map();
+  const queue = [RETAINED_STATE_ROOT];
+  while (queue.length > 0) {
+    const { struct, file } = queue.shift();
+    if (walked.has(struct)) continue;
+    let fields;
+    try {
+      fields = structFields(file, struct);
+    } catch (error) {
+      errors.push(`retained-state walk: cannot read ${struct}: ${error.message}`);
+      walked.set(struct, []);
+      continue;
+    }
+    if (fields.length === 0)
+      errors.push(`retained-state walk: ${struct} declares no production fields`);
+    walked.set(struct, fields);
+    for (const field of fields) {
+      const key = `${struct}.${field}`;
+      const row = dispositions.get(key);
+      const charging = coveredFields.get(key);
+      if (charging && row) {
+        errors.push(
+          `struct field ${key}: charged by ${[...charging].join(", ")} AND dispositioned ${row.disposition}; it is one or the other`,
+        );
+        continue;
+      }
+      if (!charging && !row) {
+        errors.push(
+          `allocation inventory: ${struct} field ${field} is retained but has no allocation class and no disposition`,
+        );
+        continue;
+      }
+      if (row?.disposition === "delegated") {
+        const target = delegateTarget(row.delegate || "");
+        if (target) queue.push(target);
+      }
+    }
+  }
+
+  for (const struct of REQUIRED_RETAINED_STRUCTS)
+    if (!walked.has(struct))
       errors.push(
-        `store field ${row.field}: ProjectTypeStore has no such field; the disposition is stale`,
+        `retained-state walk: never reaches ${struct}, so every cache behind it is unaccounted`,
       );
-    if (coveredFields.has(row.field))
+
+  const observations = new Map((catalog.memory_observation || []).map((row) => [row.id, row]));
+  const attributions = new Map();
+  for (const [key, row] of dispositions) {
+    const fields = walked.get(row.struct);
+    if (!fields) {
       errors.push(
-        `store field ${row.field}: declared non-retaining AND covered by an allocation class; it is one or the other`,
+        `struct field ${key}: the retained-state walk never reaches ${row.struct}; the disposition is stale`,
+      );
+      continue;
+    }
+    if (!fields.includes(row.field)) {
+      errors.push(
+        `struct field ${key}: ${row.struct} has no such production field; the disposition is stale`,
+      );
+      continue;
+    }
+    const allowed = {
+      non_retaining: [],
+      delegated: ["delegate"],
+      shared_reference: ["charged_at"],
+      outside_inventory: ["attributed_by"],
+    }[row.disposition];
+    if (!allowed) continue;
+    for (const extra of ["delegate", "charged_at", "attributed_by"]) {
+      if (allowed.includes(extra) && row[extra] === undefined)
+        errors.push(`struct field ${key}: a ${row.disposition} field must name its ${extra}`);
+      if (!allowed.includes(extra) && row[extra] !== undefined)
+        errors.push(`struct field ${key}: a ${row.disposition} field may not carry ${extra}`);
+    }
+    if (
+      row.disposition === "delegated" &&
+      row.delegate !== undefined &&
+      !delegateTarget(row.delegate)
+    )
+      errors.push(`struct field ${key}: delegate ${row.delegate} is not a path#Struct anchor`);
+    // A shared reference is charged nothing HERE because its payload is
+    // charged at exactly one other field. That field has to actually be
+    // charged, or the payload disappears in the hand-off.
+    if (
+      row.disposition === "shared_reference" &&
+      row.charged_at !== undefined &&
+      !coveredFields.has(row.charged_at)
+    )
+      errors.push(
+        `struct field ${key}: shared reference to ${row.charged_at}, which no allocation class charges; the payload would be counted nowhere`,
+      );
+    // Only the file authority sits outside the semantic inventory, and only
+    // because a live observation attributes its bytes separately.
+    if (row.disposition === "outside_inventory" && row.attributed_by !== undefined) {
+      const observation = observations.get(row.attributed_by);
+      if (!observation || observation.coverage !== "workspace")
+        errors.push(
+          `struct field ${key}: outside_inventory must be attributed to a workspace memory observation, not ${row.attributed_by}`,
+        );
+      // One observation reports one authority's bytes. Letting a second
+      // field lean on it would move that field's bytes out of the budget
+      // with nothing reporting them.
+      if (attributions.has(row.attributed_by))
+        errors.push(
+          `struct field ${key}: ${row.attributed_by} already attributes ${attributions.get(row.attributed_by)}; one observation cannot excuse two fields`,
+        );
+      else attributions.set(row.attributed_by, key);
+    }
+  }
+
+  for (const [key, classes] of coveredFields) {
+    const dot = key.indexOf(".");
+    const struct = key.slice(0, dot);
+    const field = key.slice(dot + 1);
+    const fields = walked.get(struct);
+    if (!fields)
+      errors.push(
+        `allocation inventory: ${[...classes].join(", ")} covers ${key}, but the retained-state walk never reaches ${struct}`,
+      );
+    else if (!fields.includes(field))
+      errors.push(
+        `allocation inventory: an allocation class covers ${key}, which ${struct} no longer has`,
       );
   }
-  for (const field of fields) {
-    if (coveredFields.has(field) || nonRetaining.has(field)) continue;
-    errors.push(
-      `allocation inventory: ProjectTypeStore field ${field} is retained by the store but has no allocation class and no non-retaining disposition`,
-    );
-  }
-  for (const field of coveredFields)
-    if (!fields.includes(field))
-      errors.push(
-        `allocation inventory: an allocation class covers store field ${field}, which ProjectTypeStore no longer has`,
-      );
   return errors;
 }
 

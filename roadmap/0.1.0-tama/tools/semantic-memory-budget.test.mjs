@@ -33,7 +33,8 @@ import {
   overlapGroupErrors,
   PACKAGE_ROOT,
   postMutationErrors,
-  projectTypeStoreFields,
+  RETAINED_STATE_ROOT,
+  structFields,
   trancheErrors,
   validateSemanticMemoryBudgetModel,
 } from "./semantic-memory-budget.mjs";
@@ -518,38 +519,128 @@ test("dropping an ownership category from the inventory is refused", () => {
 });
 
 test("deleting an allocation class leaves its retained storage unaccounted", () => {
-  // The omission check that the previous inventory did not have: the
-  // required population is the store's own field list, so removing a row
-  // cannot quietly shrink the contract.
+  // The required population is the walked structs' own field lists, so
+  // removing a row cannot quietly shrink the contract.
   const catalog = freshCatalog();
   const victim = catalog.allocation_class.find((row) => row.id === "route_db");
   assert.ok(victim, "pre-state: the route cache is inventoried");
-  assert.deepEqual(victim.covers_store_fields, ["routes"]);
+  assert.deepEqual(victim.covers_fields, ["ProjectTypeStore.routes"]);
   const before = catalog.allocation_class.length;
   catalog.allocation_class = catalog.allocation_class.filter((row) => row.id !== "route_db");
   assert.equal(catalog.allocation_class.length, before - 1, "post-state: the row was not removed");
   refusedBecause(
     validate(catalog),
-    "ProjectTypeStore field routes is retained by the store but has no allocation class",
+    "ProjectTypeStore field routes is retained but has no allocation class",
   );
 });
 
-test("deleting a class that covers no store field is refused", () => {
-  // The store's field list cannot notice this one: retained parse
-  // snapshots live on the lowering service, not on the store. The
-  // charter's own named categories are the independent inventory for it.
+test("deleting a host-lifetime cache outside the project store is refused", () => {
+  // The walk starts at VerterHost, not at the project store, so a cache
+  // that lives on a framework subsystem is part of the population too.
   const catalog = freshCatalog();
-  const victim = catalog.allocation_class.find((row) => row.id === "retained_parse_snapshot");
-  assert.deepEqual(victim.covers_store_fields, [], "pre-state: it is not a store field");
+  const victim = catalog.allocation_class.find(
+    (row) => row.id === "framework_script_candidate_store",
+  );
+  assert.deepEqual(victim.covers_fields, ["FrameworkScriptCaches.candidates"]);
+  const before = catalog.allocation_class.length;
+  catalog.allocation_class = catalog.allocation_class.filter((row) => row !== victim);
+  assert.equal(catalog.allocation_class.length, before - 1, "post-state: the row was not removed");
+  refusedBecause(
+    validate(catalog),
+    "FrameworkScriptCaches field candidates is retained but has no allocation class",
+  );
+});
+
+test("cutting a subsystem out of the walk is refused", () => {
+  // Re-labelling a delegated field as non-retaining would otherwise drop
+  // every cache behind it without any field ever being walked.
+  const catalog = freshCatalog();
+  const row = catalog.struct_field.find(
+    (entry) => entry.struct === "VerterHost" && entry.field === "resolver",
+  );
+  assert.equal(row.disposition, "delegated", "pre-state: the resolver is walked");
+  row.disposition = "non_retaining";
+  delete row.delegate;
+  assert.equal(row.disposition, "non_retaining");
+  refusedBecause(validate(catalog), "never reaches UnifiedResolverRuntime");
+});
+
+test("a shared reference to a payload no class charges is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.struct_field.find(
+    (entry) => entry.struct === "UnifiedResolverRuntime" && entry.field === "routes",
+  );
+  assert.equal(row.charged_at, "ProjectTypeStore.routes", "pre-state: charged at the store");
+  row.charged_at = "ProjectTypeStore.counters";
+  assert.equal(row.charged_at, "ProjectTypeStore.counters");
+  refusedBecause(validate(catalog), "which no allocation class charges");
+});
+
+test("outside-inventory attribution to a non-workspace observation is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.struct_field.find(
+    (entry) => entry.struct === "VerterHost" && entry.field === "workspace",
+  );
+  assert.equal(row.attributed_by, "memory.workspace_bytes", "pre-state");
+  row.attributed_by = "memory.process_rss";
+  assert.equal(row.attributed_by, "memory.process_rss");
+  refusedBecause(validate(catalog), "must be attributed to a workspace memory observation");
+});
+
+test("moving a second field outside the inventory on the workspace observation is refused", () => {
+  // Otherwise any retained field could be excused by pointing at the one
+  // observation that reports VFS bytes.
+  const catalog = freshCatalog();
+  const victim = catalog.allocation_class.find((row) => row.id === "scheduler_file_state");
+  assert.deepEqual(victim.covers_fields, ["VerterHost.scheduler"]);
+  catalog.allocation_class = catalog.allocation_class.filter((row) => row !== victim);
+  catalog.struct_field.push({
+    struct: "VerterHost",
+    field: "scheduler",
+    disposition: "outside_inventory",
+    attributed_by: "memory.workspace_bytes",
+    reason: "Claiming the scheduler's source versions are VFS bytes the workspace reports.",
+  });
+  assert.ok(!catalog.allocation_class.some((row) => row.id === "scheduler_file_state"));
+  refusedBecause(validate(catalog), "one observation cannot excuse two fields");
+});
+
+test("the walked population is the production field set", () => {
+  const fields = structFields(RETAINED_STATE_ROOT.file, RETAINED_STATE_ROOT.struct);
+  // A target gate is production and stays in.
+  assert.ok(fields.includes("host_cpu_pool"));
+  assert.ok(fields.includes("framework_script_caches"));
+  // Test-only fields never exist in a shipped build.
+  assert.ok(!fields.includes("materialize_seam_hook"));
+  assert.ok(!fields.includes("_test_worker_pool_lease"));
+
+  // Charging a test-only field is charging something that does not ship.
+  const catalog = freshCatalog();
+  const row = catalog.allocation_class.find((entry) => entry.id === "host_path_bookkeeping");
+  row.covers_fields = [...row.covers_fields, "VerterHost.materialize_seam_hook"];
+  assert.ok(row.covers_fields.includes("VerterHost.materialize_seam_hook"));
+  refusedBecause(
+    validate(catalog),
+    "covers VerterHost.materialize_seam_hook, which VerterHost no longer has",
+  );
+});
+
+test("deleting a class that covers no walked field is refused", () => {
+  // The walk cannot notice this one: the declaration body memo is a
+  // sub-region reached through file artifacts, not a field of its own.
+  // The charter's own named categories are the independent inventory for it.
+  const catalog = freshCatalog();
+  const victim = catalog.allocation_class.find((row) => row.id === "declaration_body_memo");
+  assert.deepEqual(victim.covers_fields, [], "pre-state: it covers no walked field");
   assert.equal(victim.ownership, "cache_owned");
   const before = catalog.allocation_class.length;
   catalog.allocation_class = catalog.allocation_class.filter(
-    (row) => row.id !== "retained_parse_snapshot",
+    (row) => row.id !== "declaration_body_memo",
   );
   assert.equal(catalog.allocation_class.length, before - 1, "post-state: the row was not removed");
   refusedBecause(
     validate(catalog),
-    "the charter requires allocation class retained_parse_snapshot, which this catalog does not declare",
+    "the charter requires allocation class declaration_body_memo, which this catalog does not declare",
   );
 });
 
@@ -565,21 +656,26 @@ test("deleting the caller-owned copy class is refused", () => {
   refusedBecause(validate(catalog), "the charter requires allocation class public_result_copy");
 });
 
-test("a store field disposition the struct no longer has is refused", () => {
+test("a field disposition the struct no longer has is refused", () => {
   const catalog = freshCatalog();
-  const fields = projectTypeStoreFields();
+  const fields = structFields(
+    "crates/verter_session/src/project_type_store.rs",
+    "ProjectTypeStore",
+  );
   assert.ok(fields.includes("counters"), "pre-state: the field list resolves from source");
-  catalog.store_field.push({
+  catalog.struct_field.push({
+    struct: "ProjectTypeStore",
     field: "a_field_that_was_deleted",
     disposition: "non_retaining",
     reason: "A stale disposition for a field the store no longer declares at all.",
   });
-  refusedBecause(validate(catalog), "ProjectTypeStore has no such field");
+  refusedBecause(validate(catalog), "ProjectTypeStore has no such production field");
 });
 
-test("declaring a retained store field non-retaining while also charging it is refused", () => {
+test("declaring a charged field non-retaining as well is refused", () => {
   const catalog = freshCatalog();
-  catalog.store_field.push({
+  catalog.struct_field.push({
+    struct: "ProjectTypeStore",
     field: "routes",
     disposition: "non_retaining",
     reason: "Claiming a real cache holds no payload while a class also charges it.",

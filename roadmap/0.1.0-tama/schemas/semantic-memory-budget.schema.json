@@ -25,7 +25,7 @@
     "workload_step",
     "command",
     "limit_derivation",
-    "store_field",
+    "struct_field",
     "workload_materialization",
     "workload_edit_delta",
     "memory_observation"
@@ -513,7 +513,7 @@
           "admission_owner",
           "shared_reference_rule",
           "metric_rows",
-          "covers_store_fields",
+          "covers_fields",
           "charge_observability",
           "gap",
           "completion_owner"
@@ -590,13 +590,13 @@
               "minLength": 1
             }
           },
-          "covers_store_fields": {
+          "covers_fields": {
             "type": "array",
             "minItems": 0,
             "uniqueItems": true,
             "items": {
               "type": "string",
-              "minLength": 1
+              "pattern": "^[A-Z][A-Za-z0-9]*\\.[a-z][a-z0-9_]*$"
             }
           },
           "charge_observability": {
@@ -1093,28 +1093,50 @@
         }
       }
     },
-    "store_field": {
+    "struct_field": {
       "type": "array",
       "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": [
+          "struct",
           "field",
           "disposition",
           "reason"
         ],
         "properties": {
+          "struct": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Za-z0-9]*$"
+          },
           "field": {
             "type": "string",
             "pattern": "^[a-z][a-z0-9_]*$"
           },
           "disposition": {
-            "const": "non_retaining"
+            "enum": [
+              "non_retaining",
+              "delegated",
+              "shared_reference",
+              "outside_inventory"
+            ]
           },
           "reason": {
             "type": "string",
             "minLength": 20
+          },
+          "delegate": {
+            "type": "string",
+            "pattern": "^[^#]+#[A-Z][A-Za-z0-9]*$"
+          },
+          "charged_at": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Za-z0-9]*\\.[a-z][a-z0-9_]*$"
+          },
+          "attributed_by": {
+            "type": "string",
+            "minLength": 1
           }
         }
       }

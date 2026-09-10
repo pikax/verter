@@ -21,7 +21,7 @@
 #      footprint, and a host-cache figure that sums ONLY the
 #      `FileArtifactStore` rows' canonical id plus their raw and eval
 #      source text. That last one is a source-text proxy for ONE of the
-#      twenty-odd cache-owned classes — not the aggregate retained set
+#      many cache-owned classes — not the aggregate retained set
 #      this budget bounds — and no observation reports any other class's
 #      retained bytes. So no allocation class records
 #      `charge_instrumented` and the aggregate figure stays
@@ -572,12 +572,18 @@ noise_multiplier_permille = 2000
 # leaving the contract describing code that no longer exists.
 #
 # COMPLETENESS IS CHECKED AGAINST THE CODE, NOT AGAINST THIS LIST. The
-# validator reads the fields of `ProjectTypeStore` directly and requires
-# every one of them to be dispositioned — either covered by an allocation
-# class (`covers_store_fields`) or declared non-retaining with a reason in
-# a `[[store_field]]` row. Deleting a row here therefore fails validation
-# rather than silently shrinking the inventory, and adding a field to the
-# store turns this contract red until it is accounted for.
+# validator reads the production fields of `VerterHost` from the source
+# and follows every field marked `delegated` into the struct it holds —
+# `ProjectTypeStore`, the resolver runtime and its fallthrough state, the
+# framework registry and its registrations, the framework script caches,
+# the audit runtime. EVERY field the walk reaches must be either charged
+# by an allocation class (`covers_fields`, as `Struct.field`) or carry
+# exactly one `[[struct_field]]` disposition with a reason. Deleting a
+# class therefore fails validation rather than silently shrinking the
+# inventory, adding a host-lifetime field turns this contract red until it
+# is accounted for, and relabelling a subsystem so the walk stops reaching
+# it is refused. Fields compiled only for tests are not in the population:
+# they do not exist in a shipped build.
 #
 # current_bound_kind records what bounds the class TODAY, truthfully:
 #
@@ -597,9 +603,9 @@ noise_multiplier_permille = 2000
 #                        emitter reports this class's retained bytes
 #   proxy_instrumented   cited rows report ACTIVITY at this class but not
 #                        its retained byte charge
-#   uninstrumented       no site observes this class at all
+#   uninstrumented       no declared metric row observes this class
 #
-# Exactly one class is byte-bounded today and NONE is charge-instrumented.
+# Two classes are byte-bounded today and NONE is charge-instrumented.
 # That is the gap E4 and MEM1 exist to close, and stating it plainly is
 # the point of this inventory.
 # ─────────────────────────────────────────────────────────────────────────
@@ -611,7 +617,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/decl_lowering.rs#SnapshotShard"
 producers = ["crates/verter_session/src/decl_lowering.rs#DeclLoweringService"]
 consumers = ["crates/verter_session/src/decl_lowering.rs#SnapshotLease", "crates/verter_session/src/decl_body_memo.rs#DeclBodyMemo"]
-covers_store_fields = []
+covers_fields = ["VerterHost.decl_lowering"]
 current_bound_kind = "lease_refcount"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -629,7 +635,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/decl_body_memo.rs#DeclBodyMemo"
 producers = ["crates/verter_session/src/decl_lowering.rs#DeclLoweringService"]
 consumers = ["crates/verter_session/src/project_semantic_dispatch"]
-covers_store_fields = []
+covers_fields = []
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -647,7 +653,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/file_artifact_store.rs#FileArtifactStore"
 producers = ["crates/verter_session/src/file_artifact_store.rs#FileArtifactStore"]
 consumers = ["crates/verter_session/src/file_artifact_store.rs#FileArtifactRoot"]
-covers_store_fields = ["indexed"]
+covers_fields = ["ProjectTypeStore.indexed"]
 current_bound_kind = "logical_retirement"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -665,7 +671,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/project_type_store.rs#AnalysisReadyDb"
 producers = ["crates/verter_session/src/project_type_store.rs#AnalysisReadyDb"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["analysis"]
+covers_fields = ["ProjectTypeStore.analysis"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -683,7 +689,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/resolver_core/route_db.rs#RouteDb"
 producers = ["crates/verter_session/src/resolver_core/route_db.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["routes"]
+covers_fields = ["ProjectTypeStore.routes"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -701,7 +707,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/resolver_core/imported_root_db.rs#ImportedRootDb"
 producers = ["crates/verter_session/src/resolver_core/imported_root_db.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["imported_roots"]
+covers_fields = ["ProjectTypeStore.imported_roots"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -719,7 +725,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/semantic_query_memo/arena.rs#NodeArena"
 producers = ["crates/verter_session/src/project_semantic_dispatch"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
-covers_store_fields = ["semantic_graph"]
+covers_fields = ["ProjectTypeStore.semantic_graph"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -737,7 +743,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/bounded_query_retention.rs#DEFAULT_BUDGET_CAP"
 producers = ["crates/verter_session/src/project_semantic_dispatch"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
-covers_store_fields = ["semantic_graph"]
+covers_fields = ["ProjectTypeStore.semantic_graph"]
 current_bound_kind = "entry_count"
 current_bound_value = 4096
 lifetime_owner = "E4"
@@ -755,7 +761,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/semantic_query_memo/family.rs#candidate_cap"
 producers = ["crates/verter_session/src/semantic_query_memo/family.rs#FamilyKey"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
-covers_store_fields = ["semantic_graph"]
+covers_fields = ["ProjectTypeStore.semantic_graph"]
 current_bound_kind = "entry_count"
 current_bound_value = 8
 lifetime_owner = "E4"
@@ -773,7 +779,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/semantic_query_memo/hash_cons_memos.rs#HASH_CONS_MEMO_RETENTION_CAP"
 producers = ["crates/verter_session/src/semantic_query_memo/hash_cons_memos.rs"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
-covers_store_fields = ["semantic_graph"]
+covers_fields = ["ProjectTypeStore.semantic_graph"]
 current_bound_kind = "entry_count"
 current_bound_value = 100000
 lifetime_owner = "E4"
@@ -791,7 +797,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/semantic_query_memo/member_index.rs#MEMBER_ORDINAL_INDEX_RETENTION_CAP"
 producers = ["crates/verter_session/src/semantic_query_memo/member_index.rs"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
-covers_store_fields = ["semantic_graph"]
+covers_fields = ["ProjectTypeStore.semantic_graph"]
 current_bound_kind = "entry_count"
 current_bound_value = 16384
 lifetime_owner = "E4"
@@ -809,7 +815,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/semantic_query_memo/derivation.rs#DERIVATION_EDGE_BUCKET_CAP"
 producers = ["crates/verter_session/src/semantic_query_memo/derivation.rs"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
-covers_store_fields = ["semantic_graph"]
+covers_fields = ["ProjectTypeStore.semantic_graph"]
 current_bound_kind = "entry_count"
 current_bound_value = 4096
 lifetime_owner = "E4"
@@ -827,7 +833,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/semantic_query_memo/interner.rs#DepSignatureInterner"
 producers = ["crates/verter_session/src/semantic_query_memo/interner.rs#DepSignatureInterner"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
-covers_store_fields = ["semantic_graph"]
+covers_fields = ["ProjectTypeStore.semantic_graph"]
 current_bound_kind = "weak_reference"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -845,7 +851,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/identity_interner.rs#IdentityInterner"
 producers = ["crates/verter_session/src/identity_interner.rs#IdentityInterner"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["identity_interner"]
+covers_fields = ["ProjectTypeStore.identity_interner"]
 current_bound_kind = "retained_bytes"
 current_bound_value = 4194304
 lifetime_owner = "E4"
@@ -853,7 +859,7 @@ admission_owner = "MEM1"
 shared_reference_rule = "The pool charges the summed str payload of the entries IT still references. Eviction drops only the pool's reference; an Arc already handed out stays alive, and its charge moves to the holder rather than disappearing."
 charge_observability = "proxy_instrumented"
 metric_rows = ["session.source_text_copy"]
-gap = "The pool is the ONLY byte-bounded class in this inventory, but its budget is enforced internally and not reported through any declared work site; the cited row counts unrelated source-sized copies."
+gap = "The pool's byte budget is enforced internally and not reported through any declared work site; the cited row counts unrelated source-sized copies."
 completion_owner = "E4"
 
 [[allocation_class]]
@@ -863,7 +869,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_workspace/src/fact_cache.rs#ReadSetSignature"
 producers = ["crates/verter_workspace/src/fact_read_set.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = []
+covers_fields = []
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -881,7 +887,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/owner_import_surface.rs#OwnerImportSurfaceDb"
 producers = ["crates/verter_session/src/owner_import_surface.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["owner_import_surfaces"]
+covers_fields = ["ProjectTypeStore.owner_import_surfaces"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -899,7 +905,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/component_meta_caches.rs#MaterializeStructureDb"
 producers = ["crates/verter_session/src/component_meta_materialize.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["materialize_structure_db"]
+covers_fields = ["ProjectTypeStore.materialize_structure_db"]
 current_bound_kind = "entry_count"
 current_bound_value = 2048
 lifetime_owner = "E4"
@@ -917,7 +923,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/component_meta_caches.rs#ShapeCacheDb"
 producers = ["crates/verter_session/src/component_meta_caches.rs#ShapeCacheDb"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["shape_cache_db"]
+covers_fields = ["ProjectTypeStore.shape_cache_db"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -935,7 +941,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/component_meta_caches.rs#ImportedRegistryDb"
 producers = ["crates/verter_session/src/component_meta_caches.rs#ImportedRegistryDb"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["imported_registry_db"]
+covers_fields = ["ProjectTypeStore.imported_registry_db"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -953,7 +959,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/component_meta_caches.rs#DeclarationLookupDb"
 producers = ["crates/verter_session/src/component_meta_caches.rs#DeclarationLookupDb"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["declaration_lookup_db"]
+covers_fields = ["ProjectTypeStore.declaration_lookup_db"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -971,7 +977,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/component_meta_caches.rs#ResolvabilityDb"
 producers = ["crates/verter_session/src/component_meta_caches.rs#ResolvabilityDb"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["resolvability_db"]
+covers_fields = ["ProjectTypeStore.resolvability_db"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -989,7 +995,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/component_meta_caches.rs#OwnerCollectionDb"
 producers = ["crates/verter_session/src/component_meta_caches.rs#OwnerCollectionDb"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["owner_collection_db"]
+covers_fields = ["ProjectTypeStore.owner_collection_db"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -1007,7 +1013,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/app_config_proof_db.rs#AppConfigNoOverrideProofDb"
 producers = ["crates/verter_session/src/app_config_proof_db.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["app_config_no_override_proof"]
+covers_fields = ["ProjectTypeStore.app_config_no_override_proof"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -1025,7 +1031,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/intrinsic_registry.rs#IntrinsicRegistry"
 producers = ["crates/verter_session/src/intrinsic_registry.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["intrinsic_registry"]
+covers_fields = ["ProjectTypeStore.intrinsic_registry"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -1043,7 +1049,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/component_meta_result_db.rs#ComponentMetaResultDb"
 producers = ["crates/verter_session/src/component_meta_host.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["component_meta_results"]
+covers_fields = ["ProjectTypeStore.component_meta_results"]
 current_bound_kind = "entry_count"
 current_bound_value = 4
 lifetime_owner = "E4"
@@ -1061,7 +1067,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/project_type_store.rs#CompileCacheDb"
 producers = ["crates/verter_session/src/compile.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["compile_cache_db"]
+covers_fields = ["ProjectTypeStore.compile_cache_db"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -1079,7 +1085,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/project_type_store.rs#DerivedRawCacheDb"
 producers = ["crates/verter_session/src/compile.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["derived_raw_cache_db"]
+covers_fields = ["ProjectTypeStore.derived_raw_cache_db"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -1097,7 +1103,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/project_type_store.rs#DependencyCacheDb"
 producers = ["crates/verter_session/src/compile.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["dependency_cache_db"]
+covers_fields = ["ProjectTypeStore.dependency_cache_db"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -1115,7 +1121,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/cache_runtime/compile_output_node.rs#CompileOutputNodePureContent"
 producers = ["crates/verter_session/src/compile.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["compile_output_pure_content"]
+covers_fields = ["ProjectTypeStore.compile_output_pure_content"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -1133,7 +1139,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/cache_runtime/flow_slice_node.rs#FlowSliceStores"
 producers = ["crates/verter_session/src/cache_runtime/flow_slice_node.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["flow_slice"]
+covers_fields = ["ProjectTypeStore.flow_slice"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -1151,7 +1157,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_semantic/src/db.rs#SemanticDb"
 producers = ["crates/verter_semantic/src/db.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["semantic_db"]
+covers_fields = ["ProjectTypeStore.semantic_db"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -1169,7 +1175,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/resolved_import_facts.rs#ResolvedImportFactsDb"
 producers = ["crates/verter_session/src/resolved_import_facts.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["resolved_import_facts"]
+covers_fields = ["ProjectTypeStore.resolved_import_facts"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -1187,7 +1193,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/member_semantic_fact_store.rs#MemberSemanticFactStore"
 producers = ["crates/verter_session/src/member_semantic_fact_store.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["member_semantic_facts"]
+covers_fields = ["ProjectTypeStore.member_semantic_facts"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -1205,7 +1211,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/member_display_fact_store.rs#MemberDisplayFactStore"
 producers = ["crates/verter_session/src/member_display_fact_store.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["member_display_facts"]
+covers_fields = ["ProjectTypeStore.member_display_facts"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -1223,7 +1229,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/binder_identity_facts.rs#BinderIdentityFactsStore"
 producers = ["crates/verter_session/src/binder_identity_facts.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["binder_identity_facts"]
+covers_fields = ["ProjectTypeStore.binder_identity_facts"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -1241,7 +1247,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/mapper_binder_registry.rs#MapperBinderRegistry"
 producers = ["crates/verter_session/src/mapper_binder_registry.rs"]
 consumers = ["crates/verter_session/src/project_type_store.rs#ProjectTypeStore"]
-covers_store_fields = ["mapper_binder_registry"]
+covers_fields = ["ProjectTypeStore.mapper_binder_registry"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -1259,7 +1265,7 @@ ownership = "request_active"
 charge_owner = "crates/verter_session/src/parsed_eval_program.rs#ParsedEvalProgram"
 producers = ["crates/verter_session/src/parsed_eval_program.rs"]
 consumers = ["crates/verter_session/src/decl_lowering.rs#DeclLoweringService"]
-covers_store_fields = []
+covers_fields = []
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -1277,15 +1283,33 @@ ownership = "request_active"
 charge_owner = "crates/verter_session/src/block_content.rs"
 producers = ["crates/verter_session/src/block_content.rs"]
 consumers = ["crates/verter_session/src/compile.rs"]
-covers_store_fields = []
+covers_fields = []
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
 admission_owner = "MEM1"
-shared_reference_rule = "Charged to the active request for the life of the request, then released. It is never promoted into a retained charge."
+shared_reference_rule = "Charged to the active request while the caller's supplied block is validated. Admission moves the block into the host-retained supplied store: the charge TRANSFERS to supplied_block_content_store and is never held by both. A block that is not admitted is released with its request."
 charge_observability = "proxy_instrumented"
 metric_rows = ["session.store_retained_bytes", "session.source_text_copy"]
-gap = "The only production emitter of session.store_retained_bytes reports THIS class's per-request supplied bytes. It is not an aggregate retained-byte gauge, which is exactly why every retained-byte limit above is recorded provisional."
+gap = "The source-text copy row counts copies, not this class's bytes, and session.store_retained_bytes reports the supplied STORE's footprint after admission, not what a request holds before it. Request-active supplied bytes are not observable."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "supplied_block_content_store"
+name = "Host-retained supplied block content"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/block_content.rs#BlockContentState"
+producers = ["crates/verter_session/src/block_content.rs#insert_supplied"]
+consumers = ["crates/verter_session/src/compile.rs"]
+covers_fields = ["VerterHost.block_content"]
+current_bound_kind = "retained_bytes"
+current_bound_value = 67108864
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "Each admitted supplied artifact is charged once here, taken over from request_supplied_block_content at admission. The store evicts oldest-first past its artifact-count and total-byte caps and drops an owner's artifacts when that owner is removed; eviction drops the charge. The pending and terminal correlation tables beside it are charged here too and are capped at 4,096 entries each."
+charge_observability = "proxy_instrumented"
+metric_rows = ["session.store_retained_bytes"]
+gap = "The cited gauge is a high-water mark raised only when an artifact is admitted. It never falls on eviction or owner removal, so the store's live retained charge is not observable, only its peak."
 completion_owner = "E4"
 
 [[allocation_class]]
@@ -1295,7 +1319,7 @@ ownership = "externally_pinned"
 charge_owner = "crates/verter_session/src/decl_lowering.rs#SnapshotLease"
 producers = ["crates/verter_session/src/decl_lowering.rs#DeclLoweringService"]
 consumers = ["crates/verter_napi/src", "crates/verter_wasm/src", "crates/verter_lsp/src"]
-covers_store_fields = []
+covers_fields = []
 current_bound_kind = "caller_lifetime"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -1313,7 +1337,7 @@ ownership = "externally_pinned"
 charge_owner = "crates/verter_semantic/src/analysis/component_meta.rs#ComponentMetaAnalysis"
 producers = ["crates/verter_session/src/host_manage/component_meta_entry.rs"]
 consumers = ["crates/verter_napi/src", "crates/verter_wasm/src", "crates/verter_lsp/src"]
-covers_store_fields = []
+covers_fields = []
 current_bound_kind = "caller_lifetime"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -1325,23 +1349,542 @@ gap = "No declared work site observes the copy at all: neither the clone that pr
 completion_owner = "E4"
 
 # ─────────────────────────────────────────────────────────────────────────
-# ProjectTypeStore field dispositions.
+# Host-lifetime retained state outside ProjectTypeStore.
 #
-# The validator reads the field list of `ProjectTypeStore` from the source
-# and requires EVERY field to appear exactly once across the union of the
-# allocation classes' `covers_store_fields` and the rows below. A field
-# that is neither charged nor declared non-retaining fails validation, and
-# so does a row naming a field the struct no longer has.
-#
-# These are the only two fields that retain no payload.
+# The host retains more than the project store. These classes charge the
+# caches, stores and execution state the retained-state walk reaches on
+# `VerterHost`, the resolver runtime, the framework registry and the
+# framework script caches. Each is charged at the field that owns it; a
+# field that merely holds a second Arc to one of them is a shared
+# reference in the dispositions below, charged nothing.
 # ─────────────────────────────────────────────────────────────────────────
 
-[[store_field]]
+[[allocation_class]]
+id = "carrier_publication_state"
+name = "Carrier publication authority state"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/carrier_publication_store/mod.rs#CarrierPublicationHostHandles"
+producers = ["crates/verter_session/src/carrier_publication_store/mod.rs#CarrierPublicationStore", "crates/verter_language/src/registered_source_authority.rs#RegisteredSourceAuthority"]
+consumers = ["crates/verter_session/src/block_content.rs"]
+covers_fields = ["VerterHost.carrier_publication"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "Charged once here: the registered-source snapshots current per file incarnation, the per-artifact publication lanes, the candidates the in-memory persistence holds, the publication audit event log, and cross-host envelope entries awaiting intake. A lane holds its published envelope WEAKLY, so the envelope's payload is charged to whoever holds it strongly, never to the lane. An envelope entry and a persisted candidate each leave this charge when they are taken."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes this state. The publication audit log is appended on every publication and only copied on read, never drained, so it grows for the host's lifetime."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "host_path_bookkeeping"
+name = "Host alias and prop-constness bookkeeping"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/lib.rs#VerterHost"
+producers = ["crates/verter_session/src/types.rs#UpsertRequest"]
+consumers = ["crates/verter_session/src/lib.rs#alias_to_canonical", "crates/verter_session/src/lib.rs#last_const_prop_overrides"]
+covers_fields = ["VerterHost.alias_to_canonical", "VerterHost.last_const_prop_overrides"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "Both maps own their strings outright and are charged once here. Neither caches a resolution result: one maps caller-supplied aliases to canonical ids, the other records the last computed prop-constness overrides for diffing. Both grow with the files and aliases the host has seen."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes either map."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "cached_base_store_view"
+name = "Cached base store-view snapshot"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/resolver_store.rs#StoreViewManager"
+producers = ["crates/verter_session/src/resolver_store.rs#from_host_read"]
+consumers = ["crates/verter_session/src/resolver_store.rs#HostStoreView"]
+covers_fields = ["VerterHost.store_view_manager"]
+current_bound_kind = "entry_count"
+current_bound_value = 1
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "The manager keeps at most one base view, and that view's snapshot is charged once here. A job served from it receives an Arc clone of the same snapshot and is charged nothing. A session overlay that re-roots it copies on write, and the copy belongs to the request that made it. Anything the snapshot shares by reference with another store stays charged at that store."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes the snapshot's size. The host's store-view read counter counts reads, not bytes, and is not a declared metric row."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "scheduler_file_state"
+name = "Scheduler per-file nodes and source versions"
+ownership = "cache_owned"
+charge_owner = "crates/verter_scheduler/src/scheduler.rs#Scheduler"
+producers = ["crates/verter_scheduler/src/node.rs#FileNode", "crates/verter_scheduler/src/source_root.rs#SchedulerSourceDirectory"]
+consumers = ["crates/verter_scheduler/src/source_root.rs#SchedulerSourceRoot"]
+covers_fields = ["VerterHost.scheduler"]
+current_bound_kind = "logical_retirement"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "The scheduler is charged once for its file nodes and their current source snapshots, the source-directory version chains, the edge index, the DAG and admission tables, tombstones and generation floors. A captured source root reads a directory version rather than copying it and adds no charge. A superseded version stays charged until no root reaches it and the directory reclaims it."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared metric row observes this state. The scheduler's own submission, execution and queue-depth sites count activity, not retained bytes, and none of them is a declared row."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "audit_record_store"
+name = "Finished audit records awaiting collection"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/component_meta_audit/audit_records_store.rs#AuditRecordsStore"
+producers = ["crates/verter_session/src/component_meta_audit/mod.rs#emit_audit_trace"]
+consumers = ["crates/verter_session/src/host_manage/component_meta_entry.rs#take_audit_record"]
+covers_fields = ["VerterHost.audit_records"]
+current_bound_kind = "entry_count"
+current_bound_value = 256
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "Each finished record is charged once here until the caller takes it or it is evicted oldest-first at capacity. Taking a record moves it to the caller, so the charge leaves this store rather than being duplicated. The audit runtime holds a second Arc to this same store and is charged nothing for it."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes the store. Records exist only while auditing is enabled, and the cap bounds their count, not their size."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "typeinfo_scratch_uri_cache"
+name = "Typeinfo scratch-expression URI cache"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/typeinfo/scratch_cache.rs#ScratchCache"
+producers = ["crates/verter_session/src/typeinfo/evaluate_type_expression.rs#evaluate_type_expression_with_audit"]
+consumers = ["crates/verter_session/src/typeinfo/evaluate_type_expression.rs"]
+covers_fields = ["VerterHost.typeinfo_scratch_cache"]
+current_bound_kind = "entry_count"
+current_bound_value = 64
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "Each entry holds a scratch URI and a semantic node id, never the synthesised source or the node payload. The scratch source is upserted through the host's normal file path and charged wherever that path retains it; the node is charged at the semantic graph arena."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes the cache. The recorded bound is the default capacity; host configuration can set another."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "framework_surface_dto_store"
+name = "Per-adapter framework-surface DTO stores"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/framework/surface_store.rs#FrameworkSurfaceStore"
+producers = ["crates/verter_session/src/typeinfo/framework_surface/vue_exec/mod.rs", "crates/verter_session/src/typeinfo/framework_surface/svelte_exec.rs"]
+consumers = ["crates/verter_session/src/typeinfo/framework_surface/vue_exec/mod.rs", "crates/verter_session/src/typeinfo/framework_surface/svelte_exec.rs"]
+covers_fields = ["FrameworkRegistration.surface_store"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One store per registered adapter, each charged for the surface DTOs it retains. Readers receive an Arc to the stored DTO and add no charge. Two concurrent cold callers for one key both build a DTO and the last insert wins; the replaced DTO stays alive only while its own caller holds it and is never a second retained charge."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes these stores, and they have no eviction: content-addressed entries accumulate for the registry's lifetime."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "framework_script_candidate_store"
+name = "Framework script-fact candidate store"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/framework/script_facts.rs#FrameworkScriptCandidateStore"
+producers = ["crates/verter_session/src/framework/script_facts.rs#CapturedCandidateEvidence"]
+consumers = ["crates/verter_session/src/framework/script_facts.rs#FrameworkScriptFactStore"]
+covers_fields = ["FrameworkScriptCaches.candidates"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "Content-addressed: each exact candidate inventory is charged once at its slot and handed out as an Arc, so readers add no charge. Candidates from a recovered parse are never admitted; they stay with the request that captured them."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes the store, and it has no eviction."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "framework_script_fact_store"
+name = "Framework resolved script-fact store"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/framework/script_facts.rs#FrameworkScriptFactStore"
+producers = ["crates/verter_session/src/framework/script_facts.rs#publish_if_cacheable"]
+consumers = ["crates/verter_session/src/framework/script_facts.rs#get_with_view"]
+covers_fields = ["FrameworkScriptCaches.facts"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "Each published resolved fact is charged once at its slot and shared as an Arc. Only exact, cacheable results are published; partial, unavailable and signature-overflowing results are returned to the request without being retained."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes the store, and it has no eviction."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "resolver_component_meta_state"
+name = "Resolver-runtime component-meta request state"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/resolver_core/resolver_runtime.rs#component_meta: StableRequestState"
+producers = ["crates/verter_session/src/host_manage/component_meta_methods.rs#insert_arc_with_kind"]
+consumers = ["crates/verter_session/src/component_meta_result_db.rs"]
+covers_fields = ["UnifiedResolverRuntime.component_meta"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "A host-lifetime validated fact cache of resolved component-meta state, distinct from component_meta_result_candidates. Its payload is charged once here; a result candidate that references the same state by Arc holds a reference, not a second charge. The field's singleflight lanes are per-burst rendezvous reaped at the last pin and carry no retained charge."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes it. Each key's candidate list is capped, but the number of keys is not."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "prepared_decl_bundle_cache"
+name = "Prepared declaration bundles"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/resolver_core/resolver_runtime.rs#prepared_decl_bundles: StableRequestState"
+producers = ["crates/verter_session/src/host_manage/prepared_decl.rs"]
+consumers = ["crates/verter_session/src/host_manage/prepared_decl.rs"]
+covers_fields = ["UnifiedResolverRuntime.prepared_decl_bundles"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One validated bundle set per canonical file, checked against the file's whole hash and import-route facts, charged once here and shared as an Arc. The field's singleflight lanes are per-burst rendezvous and carry no retained charge."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes it. Each key's candidate list is capped, but the number of files is not."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "fallthrough_node_cache"
+name = "Fallthrough resolver node cache"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/resolver_core/fallthrough_resolver.rs#FallthroughResolverState"
+producers = ["crates/verter_session/src/resolver_core/fallthrough_resolver.rs#compute_and_maybe_admit"]
+consumers = ["crates/verter_session/src/resolver_core/fallthrough_resolver.rs#get_cached_node"]
+covers_fields = ["FallthroughResolverState.cache"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "Each admitted fallthrough node result, with its fact versions and diagnostics, is charged once at its key until the runtime clears it. Only stable results are admitted; a refused compute is returned to its request and retains nothing."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes it. Each key's candidate list is capped, but the number of keys is not."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "in_flight_singleflight_lanes"
+name = "In-flight resolver singleflight lanes"
+ownership = "request_active"
+charge_owner = "crates/verter_session/src/resolver_core/mod.rs#SingleflightGroup"
+producers = ["crates/verter_session/src/resolver_core/mod.rs#run_retaining"]
+consumers = ["crates/verter_session/src/resolver_core/mod.rs#participate"]
+covers_fields = ["UnifiedResolverRuntime.top_level_fallthrough_singleflight", "UnifiedResolverRuntime.indexed_singleflight"]
+current_bound_kind = "lease_refcount"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "A lane's value is charged once, to the request whose leader computed it, while any participant pins the lane. Followers share it and add nothing. A retained result is a per-burst rendezvous, not a cache entry: the lane is reaped when its last pin releases, and a non-retained result is removed at publish, so no lane outlives the requests using it."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes lane occupancy or the values lanes hold."
+completion_owner = "E4"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Retained-state walk dispositions.
+#
+# Every production field the walk reaches that no allocation class above
+# charges carries exactly one row here:
+#
+#   non_retaining      holds no request- or content-derived payload; what
+#                      it holds is fixed-size or keyed by configuration
+#   delegated          holds a struct whose own fields are walked in turn;
+#                      `delegate` names it as path#Struct
+#   shared_reference   a second Arc to a payload charged at `charged_at`,
+#                      which must be a field an allocation class charges,
+#                      so the payload is counted exactly once
+#   outside_inventory  the file authority, whose bytes a live workspace
+#                      observation (`attributed_by`) reports separately
+#
+# A row naming a field the struct no longer has, or a struct the walk no
+# longer reaches, is stale and fails validation.
+# ─────────────────────────────────────────────────────────────────────────
+
+[[struct_field]]
+struct = "VerterHost"
+field = "instance_id"
+disposition = "non_retaining"
+reason = "A u64 host identity. Constant size, no payload."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "config"
+disposition = "non_retaining"
+reason = "Construction-time host configuration held by value. It is not a cache and does not grow with requests."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "language_classifier"
+disposition = "non_retaining"
+reason = "The static language registry plus the capability snapshot the host was built with. It retains no request or file content."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "workspace"
+disposition = "outside_inventory"
+attributed_by = "memory.workspace_bytes"
+reason = "The VFS workspace is the file authority, not a semantic cache. Its overlay and snapshot bytes are reported by the workspace observation and are never folded into the cache-owned total."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "tick"
+disposition = "non_retaining"
+reason = "An atomic compile-recency counter. Constant size, no payload."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "store_view_epoch"
+disposition = "non_retaining"
+reason = "An atomic semantic mutation epoch. Constant size, no payload."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "load_generation"
+disposition = "non_retaining"
+reason = "An atomic first-time-load generation. Constant size, no payload."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "metrics"
+disposition = "non_retaining"
+reason = "Atomic host counters plus two u64 tables keyed by compile-profile hash. They hold no request or file payload and grow only with distinct compile profiles."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "provenance"
+disposition = "non_retaining"
+reason = "Atomic provenance counters, shared by Arc with the carrier publication store. No payload."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "resolver"
+disposition = "delegated"
+delegate = "crates/verter_session/src/host_construction.rs#HostResolverState"
+reason = "Wraps the unified resolver runtime; its caches are dispositioned on the runtime."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "query_profile"
+disposition = "non_retaining"
+reason = "The execution-policy query profile. It memoises no query result."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "project_type_store"
+disposition = "delegated"
+delegate = "crates/verter_session/src/project_type_store.rs#ProjectTypeStore"
+reason = "The project-global cache graph; every one of its fields is dispositioned in turn."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "request_id_counter"
+disposition = "non_retaining"
+reason = "An atomic request-id generator. Constant size, no payload."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "host_audit_runtime"
+disposition = "delegated"
+delegate = "crates/verter_session/src/host_audit_runtime.rs#HostAuditRuntime"
+reason = "The audit runtime: configuration, sampler state and a second handle to the audit record store."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "framework_registry"
+disposition = "delegated"
+delegate = "crates/verter_session/src/framework/registry.rs#FrameworkAdapterRegistry"
+reason = "The adapter registry; each registration row owns a surface-DTO store."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "framework_script_caches"
+disposition = "delegated"
+delegate = "crates/verter_session/src/framework/script_facts.rs#FrameworkScriptCaches"
+reason = "The framework script-fact candidate and resolved-fact stores."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "host_cpu_pool"
+disposition = "non_retaining"
+reason = "Host coordinator worker threads, sized by the resource policy. No cached payload."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "compile_force_overflow_observations"
+disposition = "non_retaining"
+reason = "An atomic test-injection knob that ships in production builds. Constant size, no payload."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "materialize_force_overflow_observations"
+disposition = "non_retaining"
+reason = "An atomic test-injection knob that ships in production builds. Constant size, no payload."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "materialize_force_in_scope_partial"
+disposition = "non_retaining"
+reason = "An atomic test-injection knob that ships in production builds. Constant size, no payload."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "materialize_force_mid_compute_generation_bump"
+disposition = "non_retaining"
+reason = "An atomic test-injection knob that ships in production builds. Constant size, no payload."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "relation_knobs"
+disposition = "non_retaining"
+reason = "Three atomic relation-engine knobs. Constant size, no payload."
+
+[[struct_field]]
+struct = "VerterHost"
+field = "signature_overflow_at_install"
+disposition = "non_retaining"
+reason = "An atomic overflow counter. Constant size, no payload."
+
+[[struct_field]]
+struct = "HostResolverState"
+field = "runtime"
+disposition = "delegated"
+delegate = "crates/verter_session/src/resolver_core/resolver_runtime.rs#UnifiedResolverRuntime"
+reason = "The unified resolver runtime and its host-lifetime caches."
+
+[[struct_field]]
+struct = "UnifiedResolverRuntime"
+field = "fallthrough"
+disposition = "delegated"
+delegate = "crates/verter_session/src/resolver_core/fallthrough_resolver.rs#FallthroughResolverState"
+reason = "The fallthrough resolver state and its node cache."
+
+[[struct_field]]
+struct = "UnifiedResolverRuntime"
+field = "counters"
+disposition = "non_retaining"
+reason = "Shared atomic resolver counters. Constant size, no payload."
+
+[[struct_field]]
+struct = "UnifiedResolverRuntime"
+field = "routes"
+disposition = "shared_reference"
+charged_at = "ProjectTypeStore.routes"
+reason = "An Arc clone of the project store's route cache; the routes are charged there, once."
+
+[[struct_field]]
+struct = "UnifiedResolverRuntime"
+field = "imported_roots"
+disposition = "shared_reference"
+charged_at = "ProjectTypeStore.imported_roots"
+reason = "An Arc clone of the project store's imported-root cache; the proofs are charged there, once."
+
+[[struct_field]]
+struct = "FallthroughResolverState"
+field = "counters"
+disposition = "non_retaining"
+reason = "An Arc clone of the runtime's atomic counters. No payload."
+
+[[struct_field]]
+struct = "HostAuditRuntime"
+field = "config"
+disposition = "non_retaining"
+reason = "The audit configuration snapshot fixed at construction."
+
+[[struct_field]]
+struct = "HostAuditRuntime"
+field = "records"
+disposition = "shared_reference"
+charged_at = "VerterHost.audit_records"
+reason = "A second Arc to the host's audit record store; the records are charged there, once."
+
+[[struct_field]]
+struct = "HostAuditRuntime"
+field = "sampler"
+disposition = "non_retaining"
+reason = "Sampler control state plus one entry per in-flight audited request, removed when that request's registration is released. Each entry is a Weak to a counter, never request payload."
+
+[[struct_field]]
+struct = "HostAuditRuntime"
+field = "sampler_started"
+disposition = "non_retaining"
+reason = "An atomic one-shot sampler start latch. Constant size, no payload."
+
+[[struct_field]]
+struct = "HostAuditRuntime"
+field = "sampler_thread"
+disposition = "non_retaining"
+reason = "The sampler thread's join handle. Constant size, no payload."
+
+[[struct_field]]
+struct = "FrameworkAdapterRegistry"
+field = "registrations"
+disposition = "delegated"
+delegate = "crates/verter_session/src/framework/registry.rs#FrameworkRegistration"
+reason = "One registration row per built-in adapter; every retained byte behind a row is dispositioned on the row."
+
+[[struct_field]]
+struct = "FrameworkAdapterRegistry"
+field = "active_provider_index"
+disposition = "non_retaining"
+reason = "Provider lookup tables built once with the registry. They hold adapter objects, not request or file content."
+
+[[struct_field]]
+struct = "FrameworkRegistration"
+field = "descriptor"
+disposition = "non_retaining"
+reason = "The adapter's static descriptor row."
+
+[[struct_field]]
+struct = "FrameworkRegistration"
+field = "carrier"
+disposition = "non_retaining"
+reason = "A function-pointer carrier opener. Constant size, no payload."
+
+[[struct_field]]
+struct = "FrameworkRegistration"
+field = "synth"
+disposition = "non_retaining"
+reason = "An adapter synthesis object shared by Arc. It retains no request or file content."
+
+[[struct_field]]
+struct = "FrameworkRegistration"
+field = "api_projector"
+disposition = "non_retaining"
+reason = "An adapter projection object shared by Arc. It retains no request or file content."
+
+[[struct_field]]
+struct = "FrameworkRegistration"
+field = "script_fact_providers"
+disposition = "non_retaining"
+reason = "Adapter provider objects. The facts they produce are charged at the framework script caches."
+
+[[struct_field]]
+struct = "FrameworkRegistration"
+field = "surface"
+disposition = "non_retaining"
+reason = "The adapter's surface disposition. Resolved surfaces are charged at the surface store."
+
+[[struct_field]]
+struct = "ProjectTypeStore"
 field = "project_generation"
 disposition = "non_retaining"
 reason = "An AtomicU64 generation counter. It holds no payload and its size does not vary with workload."
 
-[[store_field]]
+[[struct_field]]
+struct = "ProjectTypeStore"
 field = "counters"
 disposition = "non_retaining"
 reason = "A fixed set of Arc<AtomicU64> diagnostic counters. Constant size, no payload, and shared with the DBs that update them in place."
@@ -1368,7 +1911,7 @@ unit = "Gauge"
 role = "aggregate cache-owned retained bytes"
 emitter_status = "partial"
 emitter_anchor = "crates/verter_session/src/block_content.rs"
-gap = "The only production emitter reports one request's supplied block bytes. No emitter aggregates retained bytes across the allocation classes above. Byte-valued memory is not wholly unobserved — see [[memory_observation]] — but the live surface reports whole-process RSS and one store's source text, never a per-class retained charge, so the aggregate cache-owned figure this budget bounds is still not measurable. The per-entry limits are provisional against this row; the aggregate ones are provisional against memory.host_cache_bytes, which is the observation that must widen."
+gap = "The only production emitter is a high-water mark of one store, the host-retained supplied block content, raised when an artifact is admitted. No emitter aggregates retained bytes across the allocation classes above. Byte-valued memory is not wholly unobserved — see [[memory_observation]] — but the live surface reports whole-process RSS and one store's source text, never a per-class retained charge, so the aggregate cache-owned figure this budget bounds is still not measurable. The per-entry limits are provisional against this row; the aggregate ones are provisional against memory.host_cache_bytes, which is the observation that must widen."
 completion_owner = "E4"
 
 [[metric_row]]
