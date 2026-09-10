@@ -20,7 +20,7 @@ import {
   transitionToImplemented,
 } from "./ledger.mjs";
 import { parseToml } from "./toml.mjs";
-import { deriveState, loadAuthority, validateAuthority } from "./lib.mjs";
+import { deriveState, loadAuthority, validateAuthority, validateSchemaObject } from "./lib.mjs";
 
 const TOOLS_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -336,4 +336,15 @@ test("inline-table parser rejects duplicates and prototype-bearing keys", () => 
   assert.throws(() => parseToml('[implementation]\n"__proto__" = { status = "pending" }'), /unsafe/u);
   const nested = parseToml('a = { b = { c = 1 }, d = "x, y = }" }');
   assert.deepEqual(nested, { a: { b: { c: 1 }, d: "x, y = }" } });
+});
+
+test("the ledger schema keeps the per-status shapes mutually exclusive, like recordErrors", () => {
+  const schema = JSON.parse(fs.readFileSync(path.join(TOOLS_DIR, "..", "schemas", "implementation-ledger.schema.json"), "utf8"));
+  const check = (implementation) => validateSchemaObject({ schema: 2, implementation }, schema, "ledger");
+  assert.deepEqual(check({ A0: EVIDENCE, D4: { status: "pending" }, D5: { status: "cancelled", reason: "superseded" }, D6: { status: "cancelled" } }), []);
+  assert.ok(check({ A0: { ...EVIDENCE, reason: "why" } }).length, "implemented rows reject reason");
+  assert.ok(check({ D4: { status: "cancelled", commit_message: "sneaky" } }).length, "cancelled rows reject evidence");
+  assert.ok(check({ D4: { status: "pending", reason: "why" } }).length, "pending rows reject reason");
+  assert.ok(check({ D4: { status: "implemented" } }).length, "implemented rows require evidence");
+  assert.ok(check({ D4: { status: "CLAIMED" } }).length, "unknown statuses match no branch");
 });

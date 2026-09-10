@@ -123,6 +123,12 @@ function schemaTypeMatches(value, type) {
 
 function schemaErrors(value, schema, location) {
   const errors = [];
+  if (Array.isArray(schema.oneOf)) {
+    // Mutually exclusive shapes (the ledger's per-status rows): exactly one branch may accept the value.
+    const matched = schema.oneOf.filter((branch) => schemaErrors(value, branch, location).length === 0).length;
+    if (matched !== 1)
+      errors.push(`${location}: must match exactly one of ${schema.oneOf.length} alternatives (matched ${matched})`);
+  }
   if (schema.const !== undefined && JSON.stringify(value) !== JSON.stringify(schema.const))
     errors.push(`${location}: expected constant ${JSON.stringify(schema.const)}`);
   if (Array.isArray(schema.enum) && !schema.enum.includes(value))
@@ -821,7 +827,11 @@ export function validateAuthority(authority, options = {}) {
       errors.push(`implementation ledger: invalid node id ${row.node_id}`);
   }
   const cancelled = new Set();
-  for (const row of authority.ledger.cancelled || []) {
+  // Programmatic mutations may hand in anything; a malformed container is a
+  // validation error, not an exception (absent or null still means "none").
+  if (authority.ledger.cancelled != null && !Array.isArray(authority.ledger.cancelled))
+    errors.push("implementation ledger: cancelled rows must be an array");
+  for (const row of Array.isArray(authority.ledger.cancelled) ? authority.ledger.cancelled : []) {
     if (!knownNodes.has(row.node_id))
       errors.push(`implementation ledger: unknown node ${row.node_id}`);
     if (implemented.has(row.node_id) || cancelled.has(row.node_id))

@@ -12,18 +12,38 @@
       "patternProperties": {
         "^[A-Z][A-Z0-9-]*$": {
           "type": "object",
-          "additionalProperties": false,
           "required": ["status"],
-          "properties": {
-            "status": { "enum": ["pending", "implemented", "cancelled"] },
-            "reason": { "type": "string", "minLength": 1 },
-            "commit_message": { "type": "string", "minLength": 1 },
-            "commit_date": {
-              "type": "string",
-              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:Z|[+-]\\d{2}:\\d{2})$"
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["status"],
+              "properties": { "status": { "const": "pending" } }
             },
-            "pull_request": { "type": "integer", "minimum": 1 }
-          }
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["status"],
+              "properties": {
+                "status": { "const": "cancelled" },
+                "reason": { "type": "string", "minLength": 1 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["status", "commit_message", "commit_date"],
+              "properties": {
+                "status": { "const": "implemented" },
+                "commit_message": { "type": "string", "minLength": 1 },
+                "commit_date": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:Z|[+-]\\d{2}:\\d{2})$"
+                },
+                "pull_request": { "type": "integer", "minimum": 1 }
+              }
+            }
+          ]
         }
       }
     },

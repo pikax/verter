@@ -14,7 +14,7 @@ Production LOC and file budgets are planning references rather than hard accepta
 
 There are no commit-SHA, tree, parent, ancestry, receipt, lease, activation-journal, authority-digest, or prompt/report-digest checks in the lifecycle. Agents are trusted to transition accurate rows to implemented and to obey charters, review profiles, and gates.
 
-`programctl frontier` is only a stateless convenience report. It derives the currently dispatchable nodes from DAG ancestors and implemented-line presence; it does not start, reserve, activate, or write anything. A node with no unimplemented ancestor can start immediately.
+`programctl frontier` is only a stateless convenience report. It derives the currently dispatchable nodes from DAG ancestors and the ledger's settled rows (implemented or cancelled); it does not start, reserve, activate, or write anything. A node whose every ancestor is settled can start immediately.
 
 Core commands from the repository root:
 

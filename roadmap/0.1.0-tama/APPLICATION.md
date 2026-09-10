@@ -40,9 +40,10 @@ This row identifies the native GitHub parent for all active mapped blocks in tha
 A node is READY when:
 
 - it is dispatchable;
-- every transitive DAG ancestor is implemented.
+- it is not cancelled;
+- every transitive DAG ancestor is settled: implemented, or cancelled (retired work is not waited for).
 
-No other lifecycle state is consulted. A recorded direct predecessor cannot hide a missing earlier ancestor. Conflict/resource/external-requirement fields are planning instructions for agents and maintainers, not locks or machine-validated authorizations.
+Only the ledger's `status` rows are consulted; no other lifecycle state is. A recorded direct predecessor cannot hide a missing earlier ancestor. Conflict/resource/external-requirement fields are planning instructions for agents and maintainers, not locks or machine-validated authorizations.
 
 The frontier command is read-only and stateless. It is just a convenient rendering of this rule; there is no start record or start commit. A node with no unimplemented ancestor can start immediately.
 
