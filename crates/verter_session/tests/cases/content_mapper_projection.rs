@@ -151,12 +151,12 @@ fn an_elided_carrier_position_answers_with_no_projection_rather_than_a_neighbour
     }
     assert_eq!(
         mapper.to_projected(12),
-        ProjectionAnswer::Complete(vec![span(17, 19)]),
+        ProjectionAnswer::Complete(vec![span(18, 19)]),
         "the byte immediately before the elided run still projects"
     );
     assert_eq!(
         mapper.to_projected(25),
-        ProjectionAnswer::Complete(vec![span(27, 33)]),
+        ProjectionAnswer::Complete(vec![span(27, 28)]),
         "the byte immediately after it does too"
     );
 }
@@ -189,6 +189,16 @@ fn rewritten_text_answers_at_region_granularity_and_refuses_inside_itself() {
         CarrierAnswer::Span(span(1, 4)),
         "identity bytes are still exact at byte granularity"
     );
+    assert_eq!(
+        mapper.to_projected(10),
+        ProjectionAnswer::Complete(vec![span(15, 17)]),
+        "a rewritten carrier byte answers with the whole rewritten region, \n         which is the only granularity its correspondence carries"
+    );
+    assert_eq!(
+        mapper.to_projected(7),
+        ProjectionAnswer::Complete(vec![span(12, 13)]),
+        "an identity carrier byte answers with the one projected byte its \n         offset delta names, not the region around it"
+    );
 }
 
 #[test]
@@ -206,14 +216,14 @@ fn a_carrier_position_answers_with_every_projection_in_ascending_projected_order
 
     assert_eq!(
         mapper.to_projected(2),
-        ProjectionAnswer::Complete(vec![span(0, 6), span(6, 7)]),
+        ProjectionAnswer::Complete(vec![span(2, 3), span(6, 7)]),
         "a carrier position derived into two projections answers with both, \
          in projected order — a caller reaching only the first would leave the \
          projected surface internally inconsistent"
     );
     assert_eq!(
         mapper.to_projected(1),
-        ProjectionAnswer::Complete(vec![span(0, 6)]),
+        ProjectionAnswer::Complete(vec![span(1, 2)]),
         "a position before the anchored point produced one projection and \
          answers with one — completeness is the position's own derivation, \
          not the widest list in the file"
@@ -239,6 +249,11 @@ fn relocated_preimages_with_a_gap_between_them_refuse_instead_of_spanning_it() {
         mapper.to_carrier(span(0, 2)),
         CarrierAnswer::Span(span(4, 6)),
         "relocated bytes keep an exact region-to-region correspondence"
+    );
+    assert_eq!(
+        mapper.to_projected(5),
+        ProjectionAnswer::Complete(vec![span(1, 2)]),
+        "a relocated carrier byte answers with the one projected byte it \n         was copied to"
     );
     // Output 0..3 is carrier 4..6 followed by carrier 0..1. Answering with the
     // hull 0..6 would claim carrier 1..4, which this range does not name.

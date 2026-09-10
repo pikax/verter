@@ -55,7 +55,7 @@
 //! step that replaces the route it displaces rather than answering beside it.
 
 use verter_compiler::code_transform::{
-    CarrierClass, InsertionAnchor, MappingProduct, MappingSpan, ProjectedClass,
+    CarrierClass, InsertionAnchor, MappingProduct, MappingSpan, ProjectedClass, ProjectedRegion,
 };
 use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{ContentId, SourceUnitId};
@@ -371,8 +371,14 @@ impl ContentMapper {
     /// ascending projected order.
     ///
     /// One authored region is routinely emitted more than once, so this is the
-    /// complete list rather than the first match. An elided position answers
-    /// [`Refusal::NoProjection`] — never a neighbour's projection.
+    /// complete list rather than the first match. Each projection answers at
+    /// the granularity its class carries: an
+    /// [`Identity`](ProjectedClass::Identity) or
+    /// [`Relocated`](ProjectedClass::Relocated) projection with the one
+    /// projected byte its offset delta names, a
+    /// [`Rewritten`](ProjectedClass::Rewritten) projection with its whole
+    /// region. An elided position answers [`Refusal::NoProjection`] — never a
+    /// neighbour's projection.
     #[must_use]
     pub fn to_projected(&self, carrier_offset: u32) -> ProjectionAnswer {
         let Some(region) = self.product.carrier_at(carrier_offset) else {
@@ -385,12 +391,34 @@ impl ContentMapper {
             .product
             .projections_at_carrier(carrier_offset)
             .into_iter()
-            .map(|projection| projection.generated)
+            .map(|projection| projected_extent(projection, carrier_offset))
             .collect();
         if spans.is_empty() {
             return ProjectionAnswer::Refused(Refusal::NoProjection);
         }
         ProjectionAnswer::Complete(spans)
+    }
+}
+
+/// The projected extent one carrier byte corresponds to through `projection`.
+///
+/// Identity and Relocated bytes are exact, so the correspondence is the offset
+/// delta and the byte answers with the one projected byte it became — the
+/// region around it would claim projected bytes the position does not name.
+/// Every projection the product attaches to a carrier byte's region covers
+/// that byte, so the delta is always in range. Rewritten text, including a
+/// projection standing at a carrier point, has no byte inside it to single
+/// out and answers with its whole region.
+fn projected_extent(projection: &ProjectedRegion, carrier_offset: u32) -> MappingSpan {
+    match (projection.class, projection.carrier) {
+        (ProjectedClass::Identity | ProjectedClass::Relocated, Some(carrier)) => {
+            let start = projection.generated.start + (carrier_offset - carrier.start);
+            MappingSpan {
+                start,
+                end: start + 1,
+            }
+        }
+        _ => projection.generated,
     }
 }
 
