@@ -9027,9 +9027,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // a different id, so an edit that changes the loser changes the
         // key rather than serving a stale hit.)
         //
-        // A DEFERRED shell and a distributive per-member union genuinely
-        // carry both branch shells in the published value, so those keep
-        // the full input set.
+        // A deferred shell carries both branch references. Distribution
+        // instead inherits branch facts from the per-member query reads;
+        // only the original/resolved check and extends need direct self-roots.
         let selected_self_roots =
             |winner: SemanticNodeId| self.observed_self_roots_from_nodes([check, extends, winner]);
         let suspended_self_roots =
@@ -9050,7 +9050,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // path below so the caller sees a well-formed conditional node
         // rather than a partial distribution.
         if distributive {
-            if let Some(members) = self.distributive_check_union_members(check) {
+            if let Some((resolved_check, members)) = self.distributive_check_union_members(check) {
                 let mut per_member: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
                 let mut distribution_ok = true;
                 // Two-signal fold: accumulate the partiality of every
@@ -9088,7 +9088,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 QueryResult::Value(normalised),
                                 fence,
                             ))
-                            .with_observed_self_roots(suspended_self_roots());
+                            .with_observed_self_roots(
+                                self.observed_self_roots_from_nodes([
+                                    check,
+                                    resolved_check,
+                                    extends,
+                                ]),
+                            );
                         output.result_is_partial = distribution_is_partial;
                         return output;
                     }
@@ -9215,8 +9221,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         .with_observed_self_roots(observed_self_roots)
     }
 
-    /// Union members of a DISTRIBUTIVE conditional's instantiated check
-    /// surface, or `None` when the check does not distribute.
+    /// The resolved check and its union members, or `None` when the check
+    /// does not distribute. Retain the resolved node so its file scope can
+    /// root the result even when the input is a global alias.
     ///
     /// Distribution semantics follow the check's INSTANTIATED surface,
     /// not the check node's raw shape: a naked-type-param check whose
@@ -9242,15 +9249,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn distributive_check_union_members(
         &self,
         check: SemanticNodeId,
-    ) -> Option<Arc<[SemanticNodeId]>> {
+    ) -> Option<(SemanticNodeId, Arc<[SemanticNodeId]>)> {
         let union_members_of = |node: SemanticNodeId| {
             self.graph().node_data(node).and_then(|data| match &*data {
-                SemanticNodeData::Union(members) => Some(members.members_arc()),
+                SemanticNodeData::Union(members) => Some((node, members.members_arc())),
                 _ => None,
             })
         };
-        if let Some(members) = union_members_of(check) {
-            return Some(members);
+        if let Some(surface) = union_members_of(check) {
+            return Some(surface);
         }
         // Only carrier / deferred-shell shapes can still hide a union;
         // every other shape is already terminal for the union-ness fact.
