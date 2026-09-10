@@ -5327,6 +5327,120 @@ fn closed_conditional_does_not_materialise_losing_branch_body() {
     );
 }
 
+/// The losing branch of a DECIDED conditional is a dead operand: it
+/// contributes no semantic dependency fact, so its origin file must not
+/// enter the result's observed self-roots. Rooting a decided conditional
+/// on the loser makes an edit to a file that only the dead branch was
+/// lowered from reject a cached value whose computation never read that
+/// file.
+///
+/// Both branch shells here are lowered from DISTINCT files, so a root set
+/// is attributable to exactly one branch. The deferred shell is the
+/// contrast arm: it publishes both branch references as part of its
+/// value, so both files stay rooted.
+#[test]
+fn decided_conditional_roots_only_on_check_extends_and_the_winner() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let file_scope = |canonical: &str, hash: u8| NodeScopeId::File {
+        canonical_id: Arc::from(canonical),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: [hash; 16],
+        local_scope: None,
+    };
+
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+    let true_branch = graph.intern_node_with_scope(
+        SemanticNodeData::Array {
+            element: string_node,
+            readonly: false,
+        },
+        file_scope("/w/true_branch.ts", 1),
+    );
+    let false_branch = graph.intern_node_with_scope(
+        SemanticNodeData::Array {
+            element: number_node,
+            readonly: false,
+        },
+        file_scope("/w/false_branch.ts", 2),
+    );
+    assert_ne!(
+        true_branch, false_branch,
+        "the two branch shells must be distinct nodes for the root set to \
+         attribute to one branch"
+    );
+
+    let rooted_files = |output: &crate::project_semantic_dispatch::walk::QueryBuildOutput| {
+        let mut files: Vec<String> = output
+            .observed_self_roots
+            .iter()
+            .map(|(canonical, _)| canonical.to_string())
+            .collect();
+        files.sort();
+        files
+    };
+
+    // `string extends string` decides TRUE: only the true branch's file
+    // is a dependency of the answer.
+    let decided_true =
+        dispatch.build_conditional(string_node, string_node, true_branch, false_branch, false);
+    assert!(
+        matches!(decided_true.result, QueryResult::Value(id) if id == true_branch),
+        "the closed check must select the true branch, got {:?}",
+        decided_true.result
+    );
+    assert_eq!(
+        rooted_files(&decided_true),
+        vec!["/w/true_branch.ts".to_string()],
+        "a decided-true conditional must not root on the dead false branch"
+    );
+
+    // `number extends string` decides FALSE: the mirror case, so the
+    // assertion cannot pass by always dropping one fixed branch.
+    let decided_false =
+        dispatch.build_conditional(number_node, string_node, true_branch, false_branch, false);
+    assert!(
+        matches!(decided_false.result, QueryResult::Value(id) if id == false_branch),
+        "the closed check must select the false branch, got {:?}",
+        decided_false.result
+    );
+    assert_eq!(
+        rooted_files(&decided_false),
+        vec!["/w/false_branch.ts".to_string()],
+        "a decided-false conditional must not root on the dead true branch"
+    );
+
+    // An OPEN check keeps both branch references in the published shell,
+    // so both files remain genuine dependencies.
+    let open_check = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("OpenCheck"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("OpenCheck"),
+    });
+    let open_extends = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("OpenExtends"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("OpenExtends"),
+    });
+    let deferred =
+        dispatch.build_conditional(open_check, open_extends, true_branch, false_branch, false);
+    assert_eq!(
+        rooted_files(&deferred),
+        vec![
+            "/w/false_branch.ts".to_string(),
+            "/w/true_branch.ts".to_string()
+        ],
+        "a deferred shell publishes both branch refs, so both stay rooted"
+    );
+}
+
 /// An open/undecidable conditional keeps both branch references
 /// intact in a `Conditional` shell node. Neither branch is recursively
 /// expanded; the shell's fields point at the as-supplied branch ids.

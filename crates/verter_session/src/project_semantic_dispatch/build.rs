@@ -8970,7 +8970,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   [`BranchSelection::True`] or [`BranchSelection::False`]. The
     ///   unselected branch is NOT materialised beyond its shell
     ///   reference (it already has one via the key's
-    ///   `true_branch` / `false_branch` fields).
+    ///   `true_branch` / `false_branch` fields), and it is a dead
+    ///   operand for dependency purposes: the result's observed
+    ///   self-roots cover `check`, `extends`, and the WINNER only.
     /// - **Open/undecidable check** — a
     ///   [`SemanticNodeData::Conditional`] shell with both branch
     ///   references intact. Emits
@@ -9010,12 +9012,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let graph = self.graph();
         let fence = self.project_generation_signature();
-        // Self-version rooting: the conditional's resolution depends on
-        // the `check`, `extends`, and both branch shells — all
-        // already-interned nodes. Root the memo entry on the file
-        // content version each file-derived input was lowered from.
-        let observed_self_roots =
-            self.observed_self_roots_from_nodes([check, extends, true_branch, false_branch]);
+        // Self-version rooting: root the memo entry on the file content
+        // version each input the ANSWER actually consumed was lowered
+        // from. Branch selection always consumes `check` and `extends`.
+        //
+        // A DECIDED conditional's value is the winning branch alone, so
+        // the losing branch is dead: it contributes no dependency fact
+        // and must not enter the root set. Rooting a decided result on
+        // the loser makes an edit to a file only the dead branch was
+        // lowered from reject a cached value whose computation never read
+        // that file — a cross-file rejection the answer does not depend
+        // on. (Staleness is impossible in the other direction: the memo
+        // key carries both branch node ids, and a re-lowered branch mints
+        // a different id, so an edit that changes the loser changes the
+        // key rather than serving a stale hit.)
+        //
+        // A DEFERRED shell and a distributive per-member union genuinely
+        // carry both branch shells in the published value, so those keep
+        // the full input set.
+        let selected_self_roots =
+            |winner: SemanticNodeId| self.observed_self_roots_from_nodes([check, extends, winner]);
+        let suspended_self_roots =
+            || self.observed_self_roots_from_nodes([check, extends, true_branch, false_branch]);
 
         // Distributive distribution is the dispatch layer's
         // responsibility. When `distributive == true`
@@ -9070,7 +9088,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 QueryResult::Value(normalised),
                                 fence,
                             ))
-                            .with_observed_self_roots(observed_self_roots.clone());
+                            .with_observed_self_roots(suspended_self_roots());
                         output.result_is_partial = distribution_is_partial;
                         return output;
                     }
@@ -9140,11 +9158,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 QueryResult::Value(result),
                 fence,
             ))
-            .with_observed_self_roots(observed_self_roots.clone());
+            // A binding-producing selection is decided TRUE: the false
+            // branch is dead and contributes no root.
+            .with_observed_self_roots(selected_self_roots(true_branch));
         }
-        let (result, branch, is_deferred) = match selection {
-            ConditionalBranchSelection::True => (true_branch, BranchSelection::True, false),
-            ConditionalBranchSelection::False => (false_branch, BranchSelection::False, false),
+        let (result, branch, is_deferred, observed_self_roots) = match selection {
+            ConditionalBranchSelection::True => (
+                true_branch,
+                BranchSelection::True,
+                false,
+                selected_self_roots(true_branch),
+            ),
+            ConditionalBranchSelection::False => (
+                false_branch,
+                BranchSelection::False,
+                false,
+                selected_self_roots(false_branch),
+            ),
             ConditionalBranchSelection::Deferred => {
                 let node = graph.intern_node(SemanticNodeData::Conditional {
                     check,
@@ -9153,7 +9183,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     false_branch_ref: false_branch,
                     distributive,
                 });
-                (node, BranchSelection::Deferred, true)
+                (
+                    node,
+                    BranchSelection::Deferred,
+                    true,
+                    suspended_self_roots(),
+                )
             }
         };
         graph.record_origin_edge(
