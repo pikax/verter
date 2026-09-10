@@ -156,6 +156,39 @@ export function linkInstalledModuleTrees(repoRoot, destRoot) {
 }
 
 /**
+ * Give every file of a freshly copied mirror a modification time of NOW.
+ *
+ * The control lane's cargo target directory persists across runs, and cargo
+ * decides freshness by comparing each source file's mtime against the
+ * artifact it last built from it. A mutated run builds an artifact from the
+ * planted source, the plant is restored, and the next run recreates the
+ * mirror from a copy — a copy that, on Windows, keeps the checkout's older
+ * timestamps (`fs.cpSync` goes through `CopyFile`, which preserves them). To
+ * cargo the artifact built from the MUTATED source is then newer than every
+ * source it depends on, so it is reused, and the clean run fails on the
+ * previous run's mutation: a refusal no edit in this run produced, on a tree
+ * that is not red. A mirror younger than anything the target directory holds
+ * is what makes those fingerprints decide from the bytes actually on disk, on
+ * every platform. Linked dependency trees are left alone: nothing is built
+ * from them and they are not this mirror's copy.
+ */
+export function freshenMirrorTimestamps(root) {
+  const now = new Date();
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) continue;
+      const child = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!MIRROR_OUTPUT_BASENAMES.has(entry.name)) walk(child);
+        continue;
+      }
+      fs.utimesSync(child, now, now);
+    }
+  };
+  walk(root);
+}
+
+/**
  * The control lane's own entry point and the command line CI issues for it.
  *
  * Held here rather than in either suite so the instrument suite resolves the

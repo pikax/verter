@@ -57,6 +57,7 @@ import {
   CONTROL_LANE_ENTRY,
   MIRROR_OUTPUT_BASENAMES,
   controlsFor,
+  freshenMirrorTimestamps,
   installedModuleRelatives,
   linkInstalledModuleTrees,
   reapply,
@@ -94,6 +95,10 @@ function mirrorRepository() {
     recursive: true,
     filter: (source) => !EXCLUDED.has(path.basename(source)),
   });
+  // The copy must be younger than anything the persistent target directory
+  // holds, or cargo reuses the artifact the PREVIOUS run built from a planted
+  // source — see `freshenMirrorTimestamps`.
+  freshenMirrorTimestamps(root);
   // A cargo record the lane re-applies can run tests that resolve the
   // workspace's `node_modules` — the tsgo-backed typecheck gate locates its rc
   // typescript launcher at the root, and real-tsserver recovery canonicalizes
@@ -203,6 +208,44 @@ test("the control-lane mirror links nested package node_modules", () => {
   } finally {
     fs.rmSync(src, { recursive: true, force: true });
     fs.rmSync(dest, { recursive: true, force: true });
+  }
+});
+
+test("a fresh mirror is younger than any artifact the lane's target directory holds", () => {
+  // `fs.cpSync` preserves timestamps on Windows, so a mirror copied from the
+  // checkout carries mtimes older than the artifact a previous run built from
+  // a planted source, and cargo reuses that artifact for the clean run. The
+  // copy is therefore re-stamped, files only, without following the linked
+  // dependency trees or descending into output basenames.
+  const src = fs.mkdtempSync(path.join(os.tmpdir(), "ctl-stamp-src-"));
+  const dest = fs.mkdtempSync(path.join(os.tmpdir(), "ctl-stamp-dest-"));
+  try {
+    const old = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    fs.mkdirSync(path.join(src, "crates", "x", "src"), { recursive: true });
+    fs.writeFileSync(path.join(src, "crates", "x", "src", "lib.rs"), "pub fn x() {}\n");
+    fs.utimesSync(path.join(src, "crates", "x", "src", "lib.rs"), old, old);
+    fs.mkdirSync(path.join(src, "node_modules", "dep"), { recursive: true });
+    fs.writeFileSync(path.join(src, "node_modules", "dep", "index.js"), "");
+    fs.utimesSync(path.join(src, "node_modules", "dep", "index.js"), old, old);
+    fs.cpSync(src, dest, { recursive: true, filter: (s) => !EXCLUDED.has(path.basename(s)) });
+    linkInstalledModuleTrees(src, dest);
+
+    const copied = path.join(dest, "crates", "x", "src", "lib.rs");
+    const linked = path.join(dest, "node_modules", "dep", "index.js");
+    const before = Date.now();
+    freshenMirrorTimestamps(dest);
+    assert.ok(
+      fs.statSync(copied).mtimeMs >= before - 2000,
+      `a copied source still carries its checkout mtime: ${fs.statSync(copied).mtime.toISOString()}`,
+    );
+    assert.equal(
+      fs.statSync(linked).mtimeMs,
+      fs.statSync(path.join(src, "node_modules", "dep", "index.js")).mtimeMs,
+      "a linked dependency tree was re-stamped through the link",
+    );
+  } finally {
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.rmSync(src, { recursive: true, force: true });
   }
 });
 
