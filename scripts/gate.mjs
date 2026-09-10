@@ -98,8 +98,8 @@
 //
 // SAFETY MODEL (pure Node + OS-native tools; ZERO new compiled binaries)
 //   1. Runner-owned targets: the archive/list front half uses <runnerTarget>; post-list Surface and shipped
-//      lanes use pairwise-disjoint <runnerTarget>/lanes/<lane>/target plus separate gate work/extract/output
-//      roots. CARGO_TARGET_DIR is forced per lane (override controls only the runner parent), so no lane
+//      lanes use pairwise-disjoint <runnerTarget>/l/<lane> Cargo targets (terse, so Windows linker outputs
+//      stay inside MAX_PATH) plus separate gate work/extract/output roots. CARGO_TARGET_DIR is forced per lane (override controls only the runner parent), so no lane
 //      shares a Cargo lock or timing source with another and cleanup never targets developer target/debug.
 //   2. Single-flight mutex: an atomic mkdir lockdir with a gate-owned sentinel (storing the owning repo
 //      realpath) + owner.json + start-identity. A LIVE holder => REFUSE (LOCK-REFUSED). A dead/stale

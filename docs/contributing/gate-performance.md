@@ -40,10 +40,14 @@ This choice is argv-only; no ambient CI environment variable changes it.
 The overlap boundary is deliberately narrow. Oracle, harness, Vue-macro,
 the single dev archive, its one list, sidecar restoration, suite inventory, and provider partition all settle
 before fan-out. Surface 1 then reads that immutable archive using
-`<runnerTarget>/lanes/surface-1/target` and `gate-work/lanes/surface-1/{work,extract,output.log}`. The shipped
-check and contract use `<runnerTarget>/lanes/shipped-cfg/target` and
+`<runnerTarget>/l/s1` and `gate-work/lanes/surface-1/{work,extract,output.log}`. The shipped
+check and contract use `<runnerTarget>/l/sc` and
 `gate-work/lanes/shipped-cfg/{work,output.log}`. These mutable roots are validated as absolute,
-runner-contained, and pairwise disjoint before creation. Command `cwd` remains the repository. The shipped
+runner-contained, and pairwise disjoint before creation. Lane Cargo target segments are terse on purpose:
+MSVC `link.exe` cannot write an output past MAX_PATH (259 characters) and fails with `LNK1104`, and the
+deepest linked output — a build script under the shipped `no-debug-assertions` profile — sits more than 110
+characters below the lane target. The default runner root inside a nested orchestrator worktree must still
+link. Command `cwd` remains the repository. The shipped
 target is intentionally cold relative to the front archive target; its check warms its following contract.
 
 One supervisor owns both lanes. Its deadline remains the original whole-gate absolute deadline, its stall
@@ -84,7 +88,7 @@ Two halves:
   lanes — serialized: no other
   Cargo is live, so the lane takes the whole build ceiling rather than a share of it, under the same
   supervisor, deadline, stall clock and process-forest RSS ceiling as every other phase, on its own
-  `<runnerTarget>/lanes/wasm-js-boundary/target` root. Each scoped package runs
+  `<runnerTarget>/l/wj` root. Each scoped package runs
   `cargo test --target wasm32-unknown-unknown -p <pkg> --tests` with
   `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER` set to the resolved absolute runner (so `.cargo/config.toml`
   never acquires a repo-wide runner every unrelated wasm invocation would inherit).

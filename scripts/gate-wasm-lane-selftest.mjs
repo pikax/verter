@@ -16,7 +16,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -739,6 +739,33 @@ test("the lane owns a mutable root disjoint from every other lane", () => {
   assert.equal(new Set(roots).size, roots.length);
   assert.equal(layout.wasmJsBoundary.laneId, WASM_LANE_ID);
   assert.ok(layout.wasmJsBoundary.targetDir.startsWith(runnerTarget));
+});
+
+test("every lane Cargo target links inside Windows MAX_PATH from a nested orchestrator worktree", () => {
+  // MSVC link.exe cannot write an output past MAX_PATH (259 usable characters) and fails with LNK1104.
+  // The deepest output a lane links is a build script under the lane's Cargo profile directory. The
+  // budget: the default runner root of a nested orchestrator worktree checkout (118 characters, a
+  // 64-hex job directory under a worktree root), plus a 32-character build-script package name (the
+  // longest in this workspace today is 27).
+  const WINDOWS_MAX_PATH = 259;
+  const runnerRootChars = 118 + "\\target\\gate-runner".length;
+  const hash = "0".repeat(16);
+  const deepestBuildScriptChars = (profileDir) =>
+    `\\${profileDir}\\build\\${"p".repeat(32)}-${hash}\\build_script_build-${hash}.exe`.length;
+  const runnerTarget = join(tempTree(), "target", "gate-runner");
+  const layout = deriveGateLaneLayout(runnerTarget, join(runnerTarget, "gate-work"));
+  for (const [lane, profileDir] of [
+    [layout.surface1, "debug"],
+    [layout.shippedCfg, "no-debug-assertions"],
+    [layout.wasmJsBoundary, "debug"],
+  ]) {
+    const laneChars = 1 + relative(runnerTarget, lane.targetDir).length;
+    const projected = runnerRootChars + laneChars + deepestBuildScriptChars(profileDir);
+    assert.ok(
+      projected <= WINDOWS_MAX_PATH,
+      `${lane.laneId}: deepest linker output would be ${projected} characters (> ${WINDOWS_MAX_PATH})`,
+    );
+  }
 });
 
 test("the lane argv selects cargo's own testable targets and honours execution policy only", () => {

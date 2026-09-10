@@ -2027,18 +2027,26 @@ export function deriveGateLaneLayout(runnerTarget, gateDir) {
   const surfaceGateRoot = join(gateRoot, "lanes", "surface-1");
   const shippedGateRoot = join(gateRoot, "lanes", "shipped-cfg");
   const wasmGateRoot = join(gateRoot, "lanes", WASM_LANE_ID);
+  // Lane Cargo targets use deliberately terse segments. MSVC link.exe is not long-path aware: a linker
+  // output past MAX_PATH (259 usable characters) fails with LNK1104. The deepest output a lane links is a
+  // build script, `<profile>\build\<package>-<hash>\build_script_build-<hash>.exe`, which sits more than
+  // 110 characters below the shipped lane's target for this workspace's longest build-script package
+  // under `no-debug-assertions`. Every character between the runner root and a lane target is taken from
+  // the checkout root's budget, and the default runner root inside a nested orchestrator worktree must
+  // still link.
+  const laneCargoRoot = join(runnerRoot, "l");
   const layout = {
     front: { targetDir: runnerRoot, gateDir: gateRoot },
     surface1: {
       laneId: "surface-1",
-      targetDir: join(runnerRoot, "lanes", "surface-1", "target"),
+      targetDir: join(laneCargoRoot, "s1"),
       workDir: join(surfaceGateRoot, "work"),
       extractDir: join(surfaceGateRoot, "extract"),
       outputFile: join(surfaceGateRoot, "output.log"),
     },
     shippedCfg: {
       laneId: "shipped-cfg",
-      targetDir: join(runnerRoot, "lanes", "shipped-cfg", "target"),
+      targetDir: join(laneCargoRoot, "sc"),
       workDir: join(shippedGateRoot, "work"),
       outputFile: join(shippedGateRoot, "output.log"),
     },
@@ -2046,7 +2054,7 @@ export function deriveGateLaneLayout(runnerTarget, gateDir) {
     // the host lanes' target locks and lets a cache layer retain it beside them under one runner root.
     wasmJsBoundary: {
       laneId: WASM_LANE_ID,
-      targetDir: join(runnerRoot, "lanes", WASM_LANE_ID, "target"),
+      targetDir: join(laneCargoRoot, "wj"),
       workDir: join(wasmGateRoot, "work"),
       outputFile: join(wasmGateRoot, "output.log"),
     },
