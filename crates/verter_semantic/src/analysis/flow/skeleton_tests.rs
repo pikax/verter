@@ -1246,6 +1246,53 @@ fn callables_the_index_cannot_serve_never_read_as_an_exact_capture_set() {
     }
 }
 
+/// A computed key inside a destructuring pattern is evaluated at bind
+/// time, so a callable authored there is created — and retains its
+/// captures — exactly like one in an initializer. Every binding-pattern
+/// home (declarator, iteration declarator, catch parameter, parameter
+/// list) must enumerate it; an unenumerated callable is invisible, and
+/// its capture family would seal complete over a retained cell.
+#[test]
+fn callables_in_binding_pattern_computed_keys_are_enumerated() {
+    use SkeletonClosureCorrelation::{Exact, Uncorrelated};
+    for (source, expected) in [
+        (
+            "function root(o) { const a = 1; const { [reg(() => a)]: x } = o; return x; }",
+            Exact,
+        ),
+        (
+            "function root(o) { const a = 1; for (const { [reg(() => a)]: x } of o) {} return 1; }",
+            Exact,
+        ),
+        (
+            "function root() { const a = 1; try {} catch ({ [reg(() => a)]: x }) {} return 1; }",
+            Exact,
+        ),
+        (
+            "function root(o) { const a = 1; const [{ [reg(() => a)]: x } = o] = o; return x; }",
+            Exact,
+        ),
+        (
+            "function root(a, { [reg(() => a)]: x }) { return x; }",
+            Uncorrelated,
+        ),
+    ] {
+        let prepared = indexed_structure_of(source);
+        let skeleton = prepared.skeleton();
+        let closures = sole_closure_inventory(skeleton);
+        assert_eq!(closures.len(), 1, "one authored callable: {source}");
+        assert_eq!(closures[0].correlation, expected, "{source}");
+        if expected == Exact {
+            let a = single_binding_named(skeleton, "a");
+            assert_eq!(
+                closures[0].captures.as_ref(),
+                &[FlowBindingRef::Local(a)],
+                "the key callable's capture is named exactly: {source}"
+            );
+        }
+    }
+}
+
 fn single_binding_named(skeleton: &FunctionBodySkeleton, name: &str) -> SkeletonBindingId {
     let id = skeleton
         .name_id(name)

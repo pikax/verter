@@ -2604,8 +2604,11 @@ fn collect_static_callee_path(
     true
 }
 
-/// Collect every bound identifier (name, span) and every default-value
-/// expression of one binding pattern.
+/// Collect every bound identifier (name, span) and every expression one
+/// binding pattern evaluates at bind time — default values AND computed
+/// keys, in evaluation order. A computed key is as much an evaluated
+/// position as a default: a callable authored there is created and
+/// retains its captures, so dropping it would hide it from the frame.
 fn collect_binding_pattern<'a, 'ast>(
     pattern: &'a BindingPattern<'ast>,
     destructured: bool,
@@ -2622,6 +2625,11 @@ fn collect_binding_pattern<'a, 'ast>(
         }
         BindingPattern::ObjectPattern(object) => {
             for property in &object.properties {
+                if property.computed {
+                    if let Some(key) = property.key.as_expression() {
+                        defaults.push(key);
+                    }
+                }
                 collect_binding_pattern(&property.value, true, identifiers, defaults);
             }
             if let Some(rest) = object.rest.as_ref() {
