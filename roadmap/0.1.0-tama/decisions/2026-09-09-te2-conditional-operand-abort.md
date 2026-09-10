@@ -408,21 +408,44 @@ ratification:
 - `build_conditional` no longer roots a DECIDED conditional on the
   losing branch. The two decided arms (relation selection, and the
   binding-producing infer selection, which is always decided-true) root
-  on `check`, `extends`, and the WINNER only. The deferred shell and the
-  distributive per-member union publish both branch references in their
-  value, so those keep the full four-node set.
+  on `check`, `extends`, and the WINNER only. The deferred shell
+  publishes both branch references in its value, so it keeps the full
+  four-node set.
+- A DISTRIBUTED conditional no longer roots on both branches
+  unconditionally either. Its value is the normalised union of the
+  per-member sub-conditionals, each of which is a nested
+  `SemanticQueryKey::Conditional` read whose own fact rail (the
+  member's winner, or both branches for a member that stays open)
+  bubbles into the parent's read set exactly as every other nested
+  dependency does. The parent therefore roots directly only on the
+  distributive `check`, the resolved union surface it distributed over
+  (so a global alias over a file-scoped union still roots the union's
+  file), and `extends`; the branch files arrive as member-observed
+  facts. When every member selects the same winner, the other branch
+  contributes no dependency fact — the clause the charter states for
+  dead operands, previously violated on the distributed arm.
 - Staleness is impossible in the other direction: the memo key carries
   both branch node ids, so an edit that changes the losing branch mints
   a different id and therefore a different key rather than serving a
   stale hit. The change only removes rejections of values that never
   read the rejecting file.
-- Discriminating proof: `decided_conditional_roots_only_on_check_extends_and_the_winner`
+- Discriminating proof, decided arm:
+  `decided_conditional_roots_only_on_check_extends_and_the_winner`
   (`project_semantic_dispatch/tests.rs`) puts the two branch shells in
   DISTINCT files and asserts the decided-true root set is exactly the
   true branch's file, the decided-false root set is exactly the false
   branch's file (so the assertion cannot pass by always dropping one
   fixed branch), and the deferred shell keeps both. Restoring the
   four-node root set fails it.
+- Discriminating proof, distributed arm:
+  `distributed_conditional_dependencies_follow_member_selections`
+  (same file) lowers check, extends and both branches from FOUR distinct
+  files and table-drives all-true, all-false, mixed and open member
+  sets, asserting the parent's completed read set carries exactly the
+  files the members consumed — for a raw union check and for a global
+  alias over it, on the cold build and again on the warm hit (which
+  must not rebuild members). Restoring the unconditional four-node root
+  set on the distributed arm fails the all-true and all-false rows.
 
 Nothing else in TE2 is landed. The operand cutover, the lazy `lower.rs`
 branches, the conditional family context axis, and TE2-AC1/AC2/AC4 all
