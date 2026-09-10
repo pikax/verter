@@ -61,8 +61,8 @@ was ever formed:
 
 | site | shape |
 | --- | --- |
-| `project_semantic_dispatch/evaluate.rs:1001` | deferred-evaluator re-reduction of a substituted shell |
-| `project_semantic_dispatch/relation.rs:5542` | `reduce_relation_conditional` |
+|  `project_semantic_dispatch/evaluate.rs:1008` | deferred-evaluator re-reduction of a substituted shell |
+|  `project_semantic_dispatch/relation.rs:5554` | `reduce_relation_conditional` |
 | `project_semantic_dispatch/raise.rs:1228` | `dispatch_operator_with_recurse` |
 | `project_semantic_dispatch/locator_view_worklist.rs:633` | projection finish frame |
 | `meta_resolve/dispatch_helpers.rs:167` | callable-surface realization |
@@ -80,14 +80,14 @@ conditional can only be handed materialized branches.
 That path is the dominant lifecycle for a generic conditional, not an
 edge case. `build_instantiate`'s declaration-source route lowers the body
 **unsubstituted**, with header parameters as `TypeParam` shells
-(`project_semantic_dispatch/locator_shape_binder.rs:258` onward). An open
+(`project_semantic_dispatch/locator_shape_binder.rs:262-272`, `build_lower_locator`: the deref'd body is graph-lowered "with the decl's type parameters bound as `TypeParam` shells"). An open
 `TypeParam` check is a stable stop of the selection oracle, so the
 conditional interns as a deferred shell with both branches lowered
 (`build.rs:9148`). Substitution then rewrites that shell — descending all
 four subtrees, already counted by the existing
 `AuditEvent::SubstituteConditionalDescend` counter
 (`project_semantic_dispatch/substitute.rs:699-743`) — and the decision
-finally happens in `evaluate.rs:1001`. By then the losing branch has been
+finally happens in `evaluate.rs:1008`. By then the losing branch has been
 interned *and* substituted. TE2-AC1's zero-intern, zero-substitution
 proof cannot hold for it without also removing the deferred-shell
 carrier, which the same charter forbids.
@@ -176,3 +176,53 @@ One of the following, as a DAG amendment before TE2 is re-dispatched:
 
 Until one of these is recorded, the TE2 row stays `pending` and no
 production source under `crates/verter_session/src` is changed.
+
+## Independent re-verification
+
+The findings above were re-checked against the candidate tree from the
+source rather than accepted from the record. Each item below was
+confirmed to be a property of the landed code:
+
+- **Closed operand vocabulary.** `SemanticOperandKind` has exactly two
+  arms, `Node { store_identity, generation, node, evidence }` and
+  `Authored(Box<AuthoredSemanticOperand>)`
+  (`semantic_query/operand.rs`). Only the authored arm defers lowering,
+  so a zero-intern dead operand must be nameable as an
+  `AuthoredBodyLocator`.
+- **Eager branch lowering at the one authored-syntax site.**
+  `lower.rs:2226` and `lower.rs:2237` lower `true_type` and `false_type`
+  before the `SemanticQueryKey::Conditional` dispatch at `lower.rs:2248`.
+  This is the site the charter names for replacement.
+- **Seven production construction sites**, six of which can only supply
+  materialized branch ids (table above).
+- **Generic conditionals materialize both branches before any
+  selection is possible.** `build_lower_locator` lowers a declaration
+  body with header parameters bound as `TypeParam` shells, so the check
+  of `type X<T> = T extends string ? A : Heavy` is an unbound shell at
+  lowering time. Selection cannot occur there — it is a stable open stop
+  — so `build_conditional` interns the deferred shell with `Heavy`
+  already lowered, and only a later substitution + re-reduction decides.
+  This covers the entire generic-conditional class, which is every
+  conditional utility type in practice. It is the charter's first abort
+  clause verbatim: *conditional selection cannot occur without first
+  materializing both branches under the existing relation authority.*
+- **Infer scoping has no TE1 axis.** `step_crosses_binder_scope`
+  (`decl_body_memo/locator_deref.rs`) returns true for
+  `TypeBodyPathStep::ConditionalTrue` whenever the sibling `extends`
+  declares an `infer`; the crossing route in
+  `locator_shape_binder.rs` (`DerefedBodyShape::Single` with
+  `lexical_root`) lowers the whole ancestor expression and then
+  navigates, so forcing the true operand lowers the false branch too.
+  `OperandBinderVisibility` is `Body | Constraint{ordinal} |
+  Default{ordinal}` — there is no conditional-`infer` frame to seal.
+  The lowering-side binding is an environment mechanism
+  (`InferRef` nodes inserted into the true branch's `env` at
+  `lower.rs`), not a positional substitution, so it cannot be carried on
+  the operand's declaration-header-ordinal substitution axis either.
+- **Vocabulary gap is real.** `InferSyntaxPathStep` declares 46 steps;
+  `TypeBodyPathStep` declares 25. Positions with no locator spelling
+  include `ParenthesizedInner`, `ArrayElement`, `RestInner`,
+  `KeyOfOperand`, `TemplateExpression`, `ImportTypeArgument`,
+  `TypeOfTypeArgument`, `ObjectSpread`, and every object-method /
+  call-signature / construct-signature type-parameter step. A
+  conditional at any of those positions cannot be addressed at all.
