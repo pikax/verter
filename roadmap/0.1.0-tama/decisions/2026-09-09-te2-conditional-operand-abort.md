@@ -46,14 +46,18 @@ substitution)`; the `Node` arm is by definition an already-materialized
 handle. So every conditional-dispatch site must be able to name each
 branch as an authored locator.
 
-## Finding 1 — six of the nine conditional dispatch sites have only materialized branches
+## Finding 1 — six of the seven conditional dispatch sites have only materialized branches
 
-`SemanticQueryKey::Conditional` is constructed at nine production sites.
-Six of them start from an **already-interned
-`SemanticNodeData::Conditional` shell** and take `true_branch_ref` /
-`false_branch_ref` straight off it. At those sites there is no authored
-locator, no `TypeExpr`, and nothing lazily addressable — the branches
-were interned before the deciding dispatch was ever formed:
+`SemanticQueryKey::Conditional` is *constructed* at seven production
+sites (every other production mention destructures an existing key
+rather than building one; the remaining matches are tests). Only the
+lowering site has authored syntax in hand. Five of the other six start
+from an **already-interned `SemanticNodeData::Conditional` shell** and
+take `true_branch_ref` / `false_branch_ref` straight off it; the sixth
+re-dispatches the branch ids of the key it was already handed. At those
+sites there is no authored locator, no `TypeExpr`, and nothing lazily
+addressable — the branches were interned before the deciding dispatch
+was ever formed:
 
 | site | shape |
 | --- | --- |
