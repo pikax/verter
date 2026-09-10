@@ -6,6 +6,9 @@ schema = 2
 # commit_message, commit_date, and optionally pull_request) is the complete
 # implementation fact. Evidence fields are loose human locators; tooling never
 # resolves or validates them against Git, content, ancestry, or GitHub.
+# status = "cancelled" (with an optional reason) retires a node whose work
+# will never land under this identity: it is never READY, and descendants
+# treat it as settled; flipping it back to "pending" reopens it.
 # Serialization is canonical: nodes sorted by id, one line per node, so
 # independent transitions merge mechanically. [[github_issue]] rows map
 # node_id to gh_issue; sync_to_github is one-way-refresh policy only and never
@@ -16,7 +19,7 @@ schema = 2
 "A0" = { status = "implemented", commit_message = "chore(*): add the architecture-lock program documents, state validator, and gate wiring", commit_date = "2026-08-10T01:40:28+01:00" }
 "A1" = { status = "implemented", commit_message = "docs(*): reference command-truth evidence in the capability matrix", commit_date = "2026-08-10T08:17:25+01:00" }
 "A2" = { status = "implemented", commit_message = "test(session): strengthen the U6 flow-return corpus with recursive expectations, a fully modelled two-call boundary, checker-syntax semantic cross-validation, and per-clause comparator controls", commit_date = "2026-08-10T17:18:39+01:00" }
-"A2C" = { status = "pending" }
+"A2C" = { status = "cancelled", reason = "superseded: retired completion predecessor, deferred to D6" }
 "A3" = { status = "implemented", commit_message = "fix(session): retract unsupported flow-return results from warm admission", commit_date = "2026-08-11T15:42:17+01:00" }
 "A4" = { status = "implemented", commit_message = "feat(audit): install measurement-only work-attribution substrate and capture baseline", commit_date = "2026-08-12T00:12:56+01:00" }
 "A5" = { status = "implemented", commit_message = "docs(arch): accept the current-owner inventories and the implementation lock record into the program ledger", commit_date = "2026-08-12T08:32:50+01:00" }
@@ -32,7 +35,7 @@ schema = 2
 "B5" = { status = "implemented", commit_message = "feat(core): expose the accepted framework algorithms through one direct core", commit_date = "2026-08-22T16:48:49+01:00" }
 "B6" = { status = "implemented", commit_message = "perf(core): group batch items by map probe instead of a linear scan", commit_date = "2026-08-24T18:43:38+01:00" }
 "BA0" = { status = "implemented", commit_message = "fix(core): make a compile request atomic over the products it asks for", commit_date = "2026-08-17T23:47:24+01:00" }
-"BCSS0" = { status = "pending" }
+"BCSS0" = { status = "cancelled", reason = "superseded: the charter is a v2 identity wrapper for history already landed under the Rev11 compiler foundation" }
 "BF1" = { status = "implemented", commit_message = "chore(arch): freeze the oracle-manifest enumeration performance cells", commit_date = "2026-08-12T17:05:21+01:00" }
 "BF2" = { status = "implemented", commit_message = "fix(meta): correct three official-invocation option-propagation defects and rebuild the mapping axis on authored-source truthfulness", commit_date = "2026-08-14T19:02:10+01:00" }
 "BF3" = { status = "implemented", commit_message = "docs(arch): record the maintainer act closing the two held-open review items", commit_date = "2026-08-17T12:53:47+01:00" }

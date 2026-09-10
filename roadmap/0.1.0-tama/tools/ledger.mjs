@@ -19,11 +19,18 @@ import { parseToml, serializeInlineTable } from "./toml.mjs";
 export const LEDGER_SCHEMA_VERSION = 2;
 export const STATUS_PENDING = "pending";
 export const STATUS_IMPLEMENTED = "implemented";
+/**
+ * The node's work will never be done under this identity (superseded,
+ * withdrawn, folded into another node). A cancelled row is neither pending
+ * nor implemented: readiness never offers the node, and descendants treat it
+ * as settled. Flipping it back to pending reopens it.
+ */
+export const STATUS_CANCELLED = "cancelled";
 
 export const NODE_ID_PATTERN = /^[A-Z][A-Z0-9-]*$/u;
 export const COMMIT_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$/u;
 
-const RECORD_FIELDS = ["status", "commit_message", "commit_date", "pull_request"];
+const RECORD_FIELDS = ["status", "commit_message", "commit_date", "pull_request", "reason"];
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -45,7 +52,13 @@ export function recordErrors(nodeId, record, location = "implementation ledger")
   if (record.status === STATUS_PENDING) {
     for (const key of Object.keys(record))
       if (key !== "status") errors.push(`${at}: pending rows carry no ${key}`);
+  } else if (record.status === STATUS_CANCELLED) {
+    for (const key of Object.keys(record))
+      if (key !== "status" && key !== "reason") errors.push(`${at}: cancelled rows carry no ${key}`);
+    if (record.reason !== undefined && (typeof record.reason !== "string" || record.reason.length === 0))
+      errors.push(`${at}: reason must be a non-empty string`);
   } else if (record.status === STATUS_IMPLEMENTED) {
+    if (record.reason !== undefined) errors.push(`${at}: implemented rows carry no reason`);
     if (typeof record.commit_message !== "string" || record.commit_message.length === 0)
       errors.push(`${at}: implemented rows require commit_message`);
     if (typeof record.commit_date !== "string" || !COMMIT_DATE_PATTERN.test(record.commit_date))
@@ -56,7 +69,7 @@ export function recordErrors(nodeId, record, location = "implementation ledger")
     )
       errors.push(`${at}: pull_request must be a positive integer`);
   } else {
-    errors.push(`${at}: status must be "pending" or "implemented"`);
+    errors.push(`${at}: status must be "pending", "implemented" or "cancelled"`);
   }
   return errors;
 }
@@ -124,8 +137,27 @@ export function implementedRows(parsed) {
   return rows.sort((left, right) => (left.node_id < right.node_id ? -1 : left.node_id > right.node_id ? 1 : 0));
 }
 
+/**
+ * Cancelled rows: [{ node_id, reason? }], sorted by node_id. deriveState
+ * treats them as settled without evidence; they never become READY.
+ */
+export function cancelledRows(parsed) {
+  const rows = [];
+  for (const [nodeId, record] of Object.entries(parsed.implementation || {})) {
+    if (!isPlainObject(record) || record.status !== STATUS_CANCELLED) continue;
+    const row = { node_id: nodeId };
+    if (record.reason !== undefined) row.reason = record.reason;
+    rows.push(row);
+  }
+  return rows.sort((left, right) => (left.node_id < right.node_id ? -1 : left.node_id > right.node_id ? 1 : 0));
+}
+
 function canonicalRecord(record) {
   const out = { status: record.status };
+  if (record.status === STATUS_CANCELLED) {
+    if (record.reason !== undefined) out.reason = record.reason;
+    return out;
+  }
   if (record.status === STATUS_IMPLEMENTED) {
     out.commit_message = record.commit_message;
     out.commit_date = record.commit_date;
@@ -140,6 +172,9 @@ const HEADER = `# Trusted implementation ledger (schema 2). Every DAG node is pr
 # commit_message, commit_date, and optionally pull_request) is the complete
 # implementation fact. Evidence fields are loose human locators; tooling never
 # resolves or validates them against Git, content, ancestry, or GitHub.
+# status = "cancelled" (with an optional reason) retires a node whose work
+# will never land under this identity: it is never READY, and descendants
+# treat it as settled; flipping it back to "pending" reopens it.
 # Serialization is canonical: nodes sorted by id, one line per node, so
 # independent transitions merge mechanically. [[github_issue]] rows map
 # node_id to gh_issue; sync_to_github is one-way-refresh policy only and never
@@ -195,6 +230,10 @@ export function transitionToImplemented(parsed, nodeId, { commitMessage, commitD
   };
   const problems = recordErrors(nodeId, replacement);
   if (problems.length) throw new Error(problems.join("; "));
+  if (record.status === STATUS_CANCELLED)
+    throw new Error(
+      `implementation ledger: ${nodeId} is cancelled; mark it pending before recording an implementation`,
+    );
   if (record.status === STATUS_IMPLEMENTED) {
     const same =
       record.commit_message === replacement.commit_message &&
@@ -235,6 +274,23 @@ export function markPending(parsed, nodeId) {
   if (!next.implementation?.[nodeId])
     throw new Error(`implementation ledger: unknown node ${nodeId}`);
   next.implementation[nodeId] = { status: STATUS_PENDING };
+  return next;
+}
+
+/**
+ * Retire a node: its work will never land under this identity. Idempotent;
+ * refuses an implemented node (flip it to pending first, deliberately).
+ */
+export function markCancelled(parsed, nodeId, { reason } = {}) {
+  const next = cloneParsed(parsed);
+  const record = next.implementation?.[nodeId];
+  if (!record) throw new Error(`implementation ledger: unknown node ${nodeId}`);
+  if (record.status === STATUS_IMPLEMENTED)
+    throw new Error(`implementation ledger: ${nodeId} is implemented; mark it pending before cancelling`);
+  const replacement = { status: STATUS_CANCELLED, ...(reason === undefined ? {} : { reason }) };
+  const problems = recordErrors(nodeId, replacement);
+  if (problems.length) throw new Error(problems.join("; "));
+  next.implementation[nodeId] = replacement;
   return next;
 }
 
