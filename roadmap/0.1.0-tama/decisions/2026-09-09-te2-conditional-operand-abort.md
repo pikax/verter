@@ -309,3 +309,74 @@ confirmed to be a property of the landed code:
   load-bearing, and closing it still means changing `TypeBodyPathStep`
   and its deref, navigator, identity and witness mirrors in a third
   crate.
+
+## The one question that decides which ratification applies
+
+Findings 1 and 1b rest on a reading of TE2-AC1's counter list that the
+charter does not disambiguate, and the choice between ratification
+options 1 and 2 turns entirely on it. Stating it explicitly is the point
+of this section; nothing below withdraws a finding.
+
+The list is:
+
+> for the losing branch of a decided conditional, attributable semantic
+> counters must be exactly zero: forcing attempts, locator
+> dereferences, substitutions, nested dispatches (including relation
+> reads), semantic allocations/interns/origin edges, and semantic fact
+> reads.
+
+**Strict reading — every such event over the losing branch's lifetime.**
+Findings 1/1b apply: for a generic conditional the branch is interned
+while the conditional is still OPEN and is descended by `substitute`
+before any decision exists, so `interns` and `substitutions` are
+non-zero no matter how the decided arm behaves. TE2 is unreachable and
+ratification option 2 (a new predecessor) is the only route.
+
+**Narrow reading — events attributable to the DECIDED conditional's own
+evaluation.** Then the two Finding-1 events fall outside the count, and
+each is already licensed elsewhere in the same charter:
+
+- The deferred intern happens in the OPEN arm, which the charter itself
+  mandates (*"Open/deferred: preserve a `SemanticNodeData::Conditional`
+  shell"*) and where it explicitly permits demand in both branch
+  operands.
+- The substitution descend happens in `substitute`, not in
+  `build_conditional`, and rewrites a shell the charter requires to
+  exist.
+
+Under that reading the decided arm is already close to compliant.
+`build_conditional`'s selection (`build.rs:9100`) consumes only `check`
+and `extends`; the decided arm binds `result` to the winner alone
+(`build.rs:9146-9148`) and records the `ConditionalSelect` origin edge
+with sources `[check, extends]` only — the loser receives no origin
+edge, no force, no nested dispatch and no fact read.
+
+One residue remains even under the narrow reading, and it is small,
+in-scope and concrete: `build.rs:9018` derives the result's observed
+self-roots from all FOUR nodes, including the loser. That is not a
+content re-read (`observed_self_roots_from_nodes` only projects the
+identity each node already carries), and AC3 explicitly tolerates a
+conservative same-owner rejection — but when the losing branch is owned
+by a DIFFERENT file it contributes a cross-file root the winner's value
+does not depend on, which is the one place the landed decided arm still
+contradicts *"dead operands add no semantic dependency facts"*.
+
+**Finding 2 survives BOTH readings.** It does not concern lifetime
+accounting: forcing an `Authored` `ConditionalTrue` operand whose
+sibling `extends` declares an `infer` re-lowers the whole enclosing
+conditional, false branch included, at the moment of the force — and
+`OperandBinderVisibility` has no frame to seal the binding against. So
+even under the narrow reading the lower.rs lazy-branch replacement that
+"Source-specific scope" mandates stays unreachable, and the charter's
+own REQUIRED "nested same-name infer binders" fixture cannot pass. A
+narrow-reading option 1 must therefore also drop or re-express that
+clause, not merely restate AC1.
+
+**Requested of the maintainer:** state which reading was intended. If
+strict, option 2. If narrow, option 1 is small and concrete — keep
+`Node`-arm operands at the six materialized construction sites, fold the
+request's five `ProjectionReductionContext` axes into the currently
+context-free `FamilyKey::Conditional`, fix the `build.rs:9018` self-root
+set to the winner plus check/extends, and restate AC1 as
+zero-forcing / zero-nested-dispatch / zero-origin-edge / zero-fact-read
+on the loser of the decided evaluation.
