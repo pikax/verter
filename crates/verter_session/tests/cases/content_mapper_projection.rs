@@ -192,12 +192,14 @@ fn rewritten_text_answers_at_region_granularity_and_refuses_inside_itself() {
     assert_eq!(
         mapper.to_projected(10),
         ProjectionAnswer::Complete(vec![span(15, 17)]),
-        "a rewritten carrier byte answers with the whole rewritten region, \n         which is the only granularity its correspondence carries"
+        "a rewritten carrier byte answers with the whole rewritten region, \
+         which is the only granularity its correspondence carries"
     );
     assert_eq!(
         mapper.to_projected(7),
         ProjectionAnswer::Complete(vec![span(12, 13)]),
-        "an identity carrier byte answers with the one projected byte its \n         offset delta names, not the region around it"
+        "an identity carrier byte answers with the one projected byte its \
+         offset delta names, not the region around it"
     );
 }
 
@@ -253,7 +255,8 @@ fn relocated_preimages_with_a_gap_between_them_refuse_instead_of_spanning_it() {
     assert_eq!(
         mapper.to_projected(5),
         ProjectionAnswer::Complete(vec![span(1, 2)]),
-        "a relocated carrier byte answers with the one projected byte it \n         was copied to"
+        "a relocated carrier byte answers with the one projected byte it \
+         was copied to"
     );
     // Output 0..3 is carrier 4..6 followed by carrier 0..1. Answering with the
     // hull 0..6 would claim carrier 1..4, which this range does not name.
