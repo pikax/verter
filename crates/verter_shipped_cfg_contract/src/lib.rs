@@ -30,7 +30,13 @@
 //!   `meta_resolve/projection_demand.rs`, `host_manage/eval_env.rs`) — all
 //!   non-breaking oracle cross-checks. `shipped_cfg_behaviour` below pins
 //!   the observable result of the surviving fast path through real
-//!   `VerterHost` scenarios.
+//!   `VerterHost` scenarios, and
+//!   [`shipped_cfg_behaviour::alias_registration_state_change_survives_under_shipped_cfg`]
+//!   pins a single required upsert-path state change so the crate
+//!   DISCRIMINATES the macro-argument class rather than merely asserting
+//!   coverage of it: with that mutation moved inside a raw
+//!   `debug_assert!` argument the test FAILS under this profile and
+//!   PASSES under `dev`.
 //! - `verter_compiler`: ZERO. `compiler_behaviour` below is a forward-
 //!   looking behavioral pin on real template-codegen arithmetic
 //!   (`StandaloneCompiler`, bypassing `verter_session`), not a response to
@@ -112,13 +118,27 @@ mod support {
     }
 
     pub fn upsert(host: &VerterHost, id: &str, src: &str, lang: FileLanguage) {
+        upsert_with_aliases(host, id, src, lang, Vec::new());
+    }
+
+    /// Same ingest, with caller-declared alternate spellings for the same
+    /// file. The alias set is the input to the ONE alias-map write the
+    /// upsert path performs, so a test that queries by an alias observes
+    /// whether that write actually happened.
+    pub fn upsert_with_aliases(
+        host: &VerterHost,
+        id: &str,
+        src: &str,
+        lang: FileLanguage,
+        aliases: Vec<String>,
+    ) {
         let _ = host
             .upsert(UpsertRequest {
                 canonical_id: None,
                 input_id: id.to_string(),
                 source: Arc::from(src),
                 file_language: lang,
-                aliases: Vec::new(),
+                aliases,
             })
             .unwrap_or_else(|e| panic!("upsert {id}: {e:?}"));
     }
@@ -136,7 +156,7 @@ mod support {
 /// still fails here even though the debug-only oracle comparison cannot run.
 #[cfg(test)]
 mod shipped_cfg_behaviour {
-    use super::support::{build_host, upsert};
+    use super::support::{build_host, upsert, upsert_with_aliases};
     use verter_session::FileLanguage;
 
     #[test]
@@ -299,6 +319,72 @@ mod shipped_cfg_behaviour {
             names,
             vec!["a", "b"],
             "an in-place edit must invalidate and re-resolve under shipped cfg, not serve a stale result"
+        );
+    }
+
+    /// A required STATE CHANGE performed by the upsert path, asserted
+    /// unconditionally through the public host entry point.
+    ///
+    /// Registering an alternate spelling for a file is a mutation of the
+    /// host's alias map, performed exactly once per upsert. Every later
+    /// query resolves its caller-supplied id through that map first, so if
+    /// the mutation does not happen the alias resolves to itself, no source
+    /// is found, and the query answers `None`.
+    ///
+    /// This is the shape the whole shipped-cfg lane exists for. A required
+    /// state change written INSIDE a `debug_assert!` argument still runs in
+    /// every debug build — Surface 1 included — and runs in NO shipped
+    /// build, because `debug_assert!` does not evaluate its argument when
+    /// `debug_assertions` is off. `cargo check --workspace --release`
+    /// compiles that configuration but executes nothing, so it cannot see
+    /// the omission either. The assertion below is deliberately
+    /// UNCONDITIONAL — it is not itself a `debug_assert!`, is not behind
+    /// `#[cfg(debug_assertions)]`, and does not consult `cfg!` — so it is
+    /// evaluated under exactly the configuration that drops the mutation.
+    #[test]
+    fn alias_registration_state_change_survives_under_shipped_cfg() {
+        let host = build_host();
+        upsert_with_aliases(
+            &host,
+            "/src/Comp.vue",
+            "<script setup lang=\"ts\">\n\
+             defineProps<{ a: number }>();\n\
+             </script>\n\
+             <template><div /></template>\n",
+            FileLanguage::vue(),
+            vec!["/alias/Comp.vue".to_string()],
+        );
+
+        // Positive control: the canonical spelling resolves. If this fails
+        // the fixture is broken and the alias assertion below proves
+        // nothing, so keep the two claims separate.
+        let by_canonical = host
+            .get_component_meta("/src/Comp.vue")
+            .expect("the canonical spelling must resolve under the shipped-cfg profile");
+        assert_eq!(
+            by_canonical
+                .props
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"],
+        );
+
+        // The claim under test: the alias-map write actually happened, so
+        // the alternate spelling resolves to the same component.
+        let by_alias = host.get_component_meta("/alias/Comp.vue").expect(
+            "the declared alias must resolve to the same component under the shipped-cfg \
+             profile — a None here means the upsert path's alias-map mutation did not run \
+             with debug_assertions off",
+        );
+        assert_eq!(
+            by_alias
+                .props
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"],
+            "the alias must project the SAME published surface as the canonical spelling"
         );
     }
 

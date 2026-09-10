@@ -75,11 +75,8 @@ const completeShippedReceipt = (overrides = {}) => ({
   const runnerTarget = join(tmpdir(), "verter-gate-block-b-layout", "target");
   const gateDir = join(runnerTarget, "gate-work");
   const layout = deriveGateLaneLayout(runnerTarget, gateDir);
-  assert.equal(layout.surface1.targetDir, resolve(runnerTarget, "lanes", "surface-1", "target"));
-  assert.equal(
-    layout.shippedCfg.targetDir,
-    resolve(runnerTarget, "lanes", "shipped-cfg", "target"),
-  );
+  assert.equal(layout.surface1.targetDir, resolve(runnerTarget, "l", "s1"));
+  assert.equal(layout.shippedCfg.targetDir, resolve(runnerTarget, "l", "sc"));
   const roots = [
     layout.surface1.targetDir,
     layout.surface1.workDir,

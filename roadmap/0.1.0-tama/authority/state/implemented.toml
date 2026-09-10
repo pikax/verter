@@ -372,7 +372,7 @@ schema = 2
 "SCP5" = { status = "pending" }
 "SCP6" = { status = "pending" }
 "SCP7" = { status = "pending" }
-"SG0" = { status = "pending" }
+"SG0" = { status = "implemented", commit_message = "ci(ci): execute the shipped configuration in the canonical gate and CI", commit_date = "2026-09-08T00:00:00+01:00" }
 "SIMP1" = { status = "pending" }
 "SIMP10" = { status = "pending" }
 "SIMP11" = { status = "pending" }

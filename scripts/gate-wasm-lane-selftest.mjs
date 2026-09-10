@@ -16,7 +16,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -627,6 +627,16 @@ const completeSurface = {
   toleratedOccurred: false,
   coverage: { parseable: true, complete: true },
 };
+// The shipped-cfg lane has no enable flag either, so every row below carries a complete shipped
+// receipt: an isolated wasm-lane FAIL here is attributable to the wasm receipt under test and not to a
+// second missing lane.
+const completeShipped = {
+  hardFailure: false,
+  failures: [],
+  check: { status: "ok" },
+  contract: { status: "ok", parseable: true, complete: true },
+  parity: { complete: true, matches: true },
+};
 const completeWasm = {
   laneId: WASM_LANE_ID,
   hardFailure: false,
@@ -638,9 +648,8 @@ const completeWasm = {
 test("the verdict reducer requires a complete wasm receipt in every direction", () => {
   const green = reduceGateLaneReceipts({
     surface: completeSurface,
-    shipped: null,
+    shipped: completeShipped,
     wasm: completeWasm,
-    shippedCfgLaneEnabled: false,
   });
   assert.equal(green.verdict, "PASS", "the positive control must actually PASS");
 
@@ -672,9 +681,8 @@ test("the verdict reducer requires a complete wasm receipt in every direction", 
   for (const [label, wasm] of rows) {
     const decision = reduceGateLaneReceipts({
       surface: completeSurface,
-      shipped: null,
+      shipped: completeShipped,
       wasm,
-      shippedCfgLaneEnabled: false,
     });
     assert.equal(decision.verdict, "FAIL", `${label} must FAIL`);
     assert.equal(decision.coverageComplete, false, `${label} must not read as complete coverage`);
@@ -688,13 +696,12 @@ test("the verdict reducer requires a complete wasm receipt in every direction", 
 test("a failing wasm case is attributed to the lane and defeats a tolerated-only PASS", () => {
   const decision = reduceGateLaneReceipts({
     surface: { ...completeSurface, toleratedOccurred: true },
-    shipped: null,
+    shipped: completeShipped,
     wasm: {
       ...completeWasm,
       hardFailure: true,
       failures: [{ surface: "wasm:verter_wasm", name: "js_boundary::an_unknown_key_is_refused" }],
     },
-    shippedCfgLaneEnabled: false,
   });
   assert.equal(decision.verdict, "FAIL");
   assert.deepEqual(
@@ -707,9 +714,8 @@ test("a failing wasm case is attributed to the lane and defeats a tolerated-only
 test("a lane infrastructure abort propagates its exit code, never a verdict", () => {
   const decision = reduceGateLaneReceipts({
     surface: completeSurface,
-    shipped: null,
+    shipped: completeShipped,
     wasm: { ...completeWasm, exitCode: 124 },
-    shippedCfgLaneEnabled: false,
   });
   assert.equal(decision.verdict, null);
   assert.equal(decision.exitCode, 124);
@@ -733,6 +739,33 @@ test("the lane owns a mutable root disjoint from every other lane", () => {
   assert.equal(new Set(roots).size, roots.length);
   assert.equal(layout.wasmJsBoundary.laneId, WASM_LANE_ID);
   assert.ok(layout.wasmJsBoundary.targetDir.startsWith(runnerTarget));
+});
+
+test("every lane Cargo target links inside Windows MAX_PATH from a nested orchestrator worktree", () => {
+  // MSVC link.exe cannot write an output past MAX_PATH (259 usable characters) and fails with LNK1104.
+  // The deepest output a lane links is a build script under the lane's Cargo profile directory. The
+  // budget: the default runner root of a nested orchestrator worktree checkout (118 characters, a
+  // 64-hex job directory under a worktree root), plus a 32-character build-script package name (the
+  // longest in this workspace today is 27).
+  const WINDOWS_MAX_PATH = 259;
+  const runnerRootChars = 118 + "\\target\\gate-runner".length;
+  const hash = "0".repeat(16);
+  const deepestBuildScriptChars = (profileDir) =>
+    `\\${profileDir}\\build\\${"p".repeat(32)}-${hash}\\build_script_build-${hash}.exe`.length;
+  const runnerTarget = join(tempTree(), "target", "gate-runner");
+  const layout = deriveGateLaneLayout(runnerTarget, join(runnerTarget, "gate-work"));
+  for (const [lane, profileDir] of [
+    [layout.surface1, "debug"],
+    [layout.shippedCfg, "no-debug-assertions"],
+    [layout.wasmJsBoundary, "debug"],
+  ]) {
+    const laneChars = 1 + relative(runnerTarget, lane.targetDir).length;
+    const projected = runnerRootChars + laneChars + deepestBuildScriptChars(profileDir);
+    assert.ok(
+      projected <= WINDOWS_MAX_PATH,
+      `${lane.laneId}: deepest linker output would be ${projected} characters (> ${WINDOWS_MAX_PATH})`,
+    );
+  }
 });
 
 test("the lane argv selects cargo's own testable targets and honours execution policy only", () => {
