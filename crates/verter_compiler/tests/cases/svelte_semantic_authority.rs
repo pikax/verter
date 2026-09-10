@@ -5,14 +5,13 @@
 use std::sync::Arc;
 
 use verter_compiler::framework_common::registered_carrier_projection::{
-    eval_source_from_catalog, registered_semantic_for, take_template_facts_producer_invocations,
-    template_facts_from_catalog, TemplateFactsBasis,
+    eval_source_from_catalog, project_registered_accepted, registered_semantic_for,
+    take_template_facts_producer_invocations, template_facts_from_catalog, TemplateFactsBasis,
 };
 use verter_compiler::framework_common::{
-    svelte_semantic_authority_registration, vue_semantic_authority_registration,
-    CarrierCompilerRegistry, CatalogCapability, CatalogRow, FrameworkEpoch, FrameworkParseArtifact,
-    FrameworkSemanticAuthority, ImmutableCapabilityCatalog, SvelteSemanticAuthority,
-    VueSemanticAuthority,
+    svelte_semantic_authority_registration, vue_semantic_authority_registration, CatalogCapability,
+    CatalogRow, FrameworkEpoch, FrameworkParseArtifact, FrameworkSemanticAuthority,
+    ImmutableCapabilityCatalog, SvelteSemanticAuthority, VueSemanticAuthority,
 };
 use verter_compiler::svelte::SvelteSfc5;
 use verter_language::carrier_grammar::{
@@ -61,8 +60,7 @@ fn registered_artifact(canonical: &str, source: &str) -> FrameworkParseArtifact 
     let accepted = grammar_authority
         .accept_registered_source(&source_authority, &snapshot, &config)
         .expect("accepted source");
-    CarrierCompilerRegistry::built_in()
-        .project_registered(&accepted)
+    project_registered_accepted(&accepted)
         .expect("registered projection")
         .into_framework_parse_artifact()
 }
@@ -174,8 +172,7 @@ fn svelte_template_facts_foreign_artifact_is_typed_refusal() {
         let accepted = grammar_authority
             .accept_registered_source(&source_authority, &snapshot, &config)
             .expect("accepted source");
-        CarrierCompilerRegistry::built_in()
-            .project_registered(&accepted)
+        project_registered_accepted(&accepted)
             .expect("registered projection")
             .into_framework_parse_artifact()
     };

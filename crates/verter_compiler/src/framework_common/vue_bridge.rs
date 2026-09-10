@@ -1206,10 +1206,11 @@ mod tests {
             .accept_registered_source(&source_authority, &snapshot, &config)
             .unwrap();
         Arc::new(
-            crate::framework_common::CarrierCompilerRegistry::built_in()
-                .project_registered(&accepted)
-                .expect("fixture source parses")
-                .into_framework_parse_artifact(),
+            crate::framework_common::registered_carrier_projection::project_registered_accepted(
+                &accepted,
+            )
+            .expect("fixture source parses")
+            .into_framework_parse_artifact(),
         )
     }
 

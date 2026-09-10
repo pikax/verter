@@ -115,7 +115,7 @@ schema = 2
 "CCA1O4D" = { status = "implemented", commit_message = "refactor(napi): delete the legacy compile-profile surface", commit_date = "2026-09-06T10:20:00+01:00" }
 "CCA1O5" = { status = "implemented", commit_message = "feat(play): migrate playground compile onto the typed WASM host request", commit_date = "2026-09-04T02:15:00+01:00", pull_request = 484 }
 "CCA1O5D" = { status = "implemented", commit_message = "refactor(wasm): delete the legacy compile-profile routes", commit_date = "2026-09-05T11:10:48+01:00", pull_request = 504 }
-"CCA1T1" = { status = "pending" }
+"CCA1T1" = { status = "implemented", commit_message = "refactor(core): delete the dynamic compiler registry", commit_date = "2026-09-10T14:56:00+01:00" }
 "CCA1T2" = { status = "pending" }
 "CCA1T2S" = { status = "pending" }
 "CCA1T2V" = { status = "pending" }

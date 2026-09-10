@@ -4,10 +4,10 @@ Operational pointer for implementers. **Normative text** lives in
 [`roadmap/0.1.0-tama/contracts/compiler-architecture.md`](../../../../roadmap/0.1.0-tama/contracts/compiler-architecture.md).
 Do not treat this skill file as a second constitution.
 
-The production seam still routes through the combined carrier-compiler
-registry and host compile routes. Those routes remain mechanically live
-until later migration nodes delete them. Combined-registry identity is
-displaced as *authority*, not preserved behind aliases.
+The combined carrier-compiler registry (`CarrierCompilerRegistry`) is
+deleted. The production seam routes through the immutable per-capability
+catalog (`registered_carrier_projection::project_registered_accepted` and
+the `built_in_*_catalog` rows) and host compile routes.
 
 ## Sole owner (summary)
 
@@ -16,7 +16,7 @@ catalog**.
 
 Displaced as authority:
 
-- combined `CarrierCompiler` trait and `CarrierCompilerRegistry`
+- combined `CarrierCompiler` trait and the deleted `CarrierCompilerRegistry`
 - mixed framework/options buckets on one runtime option struct
 - tooling-only runtime stubs that pretend a missing compiler product exists
 - `CompileTarget` bitflags as compiler product/pipeline selector

@@ -14,7 +14,8 @@
 use oxc_allocator::Allocator;
 use std::sync::Arc;
 use verter_compiler::framework_common::carrier_compiler::{CarrierCompiler, RuntimeCompileOptions};
-use verter_compiler::framework_common::{CarrierCompilerRegistry, FrameworkParseArtifact};
+use verter_compiler::framework_common::registered_carrier_projection::project_registered_accepted;
+use verter_compiler::framework_common::FrameworkParseArtifact;
 use verter_compiler::svelte::SvelteCarrierCompiler;
 use verter_language::carrier_grammar::{
     CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
@@ -49,8 +50,7 @@ fn registered_artifact(canonical: &str, source: &str) -> FrameworkParseArtifact 
     let accepted = grammar_authority
         .accept_registered_source(&source_authority, &snapshot, &config)
         .expect("accepted source");
-    CarrierCompilerRegistry::built_in()
-        .project_registered(&accepted)
+    project_registered_accepted(&accepted)
         .expect("registered projection")
         .into_framework_parse_artifact()
 }

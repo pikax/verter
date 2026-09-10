@@ -105,10 +105,11 @@ fn artifact_for(
         .accept_registered_source(&source_authority, &source, &config)
         .unwrap();
     Arc::new(
-        crate::parse::carrier_compiler_registry()
-            .project_registered(&accepted)
-            .expect("fixture source parses")
-            .into_framework_parse_artifact(),
+        verter_compiler::framework_common::registered_carrier_projection::project_registered_accepted(
+            &accepted,
+        )
+        .expect("fixture source parses")
+        .into_framework_parse_artifact(),
     )
 }
 
