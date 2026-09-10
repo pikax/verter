@@ -1178,6 +1178,12 @@ pub(crate) mod flow_obligation_state {
         /// installs directly in the capture family accepted typed gap,
         /// never as a capture-free discharge.
         UncorrelatedClosure { node: FlowNodeId, site: SkeletonExprSiteId, closure: SkeletonClosureId },
+        /// One authored callable whose body creates a callable the indexed
+        /// program does not serve, so its named captures are only a lower
+        /// bound. Each named capture still owes its own `CapturedBinding`;
+        /// this obligation is the unnamed remainder and installs directly
+        /// in the capture family accepted typed gap.
+        PartialClosure { node: FlowNodeId, site: SkeletonExprSiteId, closure: SkeletonClosureId },
     }
     /// Evidence that one live semantic suboperation was consumed. This is
     /// a discharge INPUT: the runtime validates it against the specific
@@ -1669,9 +1675,11 @@ pub(crate) mod flow_obligation_state {
                     // registered accepted gap, never a fabricated discharge.
                     FlowObligationBasis::Capture { .. }
                     // An authored callable with no indexed record asserts
-                    // no capture set at all: the family accepted gap, never
-                    // a fabricated capture-free discharge.
-                    | FlowObligationBasis::UncorrelatedClosure { .. } => Some(flow_family_route(&FlowFactFamily::Capture).accepted_gap),
+                    // no capture set at all, and a partially served one no
+                    // complete set: the family accepted gap, never a
+                    // fabricated capture-free discharge.
+                    | FlowObligationBasis::UncorrelatedClosure { .. }
+                    | FlowObligationBasis::PartialClosure { .. } => Some(flow_family_route(&FlowFactFamily::Capture).accepted_gap),
                     _ => None,
                 };
                 let registered = require_registered_flow_requirement(spec.requirement().operation, &spec.requirement().requirement).is_ok();

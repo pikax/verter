@@ -2342,9 +2342,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } => call_evidence_for(*site, *call_ordinal) == Some(true),
                 FlowObligationBasis::UnmodeledBinding { .. }
                 | FlowObligationBasis::Capture { .. }
-                // An unserved callable has no capture set to prove; it
-                // stays the family's typed gap and never discharges.
-                | FlowObligationBasis::UncorrelatedClosure { .. } => false,
+                // An unserved or partially served callable has no
+                // complete capture set to prove; it stays the family's
+                // typed gap and never discharges.
+                | FlowObligationBasis::UncorrelatedClosure { .. }
+                | FlowObligationBasis::PartialClosure { .. } => false,
             })
             .map(|spec| FlowDischargeEntry {
                 obligation: spec.id(),

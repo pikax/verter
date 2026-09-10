@@ -3195,6 +3195,24 @@ function two_callbacks(x, y) {
 }
 "#;
 
+/// Classes create callables the indexed program serves no record for: a
+/// class passed as an argument, a local class declaration, and a served
+/// callback whose body evaluates a class. Each really retains `a`.
+const UNSERVED_CLASS_FIXTURE_SOURCES: [(&str, &str); 3] = [
+    (
+        "class_argument",
+        "function class_argument() { const a = 1; return sink(class { m() { return a; } }); }",
+    ),
+    (
+        "class_declaration",
+        "function class_declaration() { const a = 1; class C { m() { return a; } } return new C(); }",
+    ),
+    (
+        "callback_creates_class",
+        "function callback_creates_class() { const a = 1; return sink(() => class { m() { return a; } }); }",
+    ),
+];
+
 const UNSERVED_CALLABLE_FIXTURE_SOURCE: &str = r#"
 function unserved_callable(p, q = () => p) {
   return q;
@@ -3285,4 +3303,39 @@ fn an_unserved_callable_fails_closed_as_a_capture_gap_not_as_capture_free() {
             .any(|record| matches!(record.state, ObligationState::Gap(FlowGap::ClosureCapture))),
         "the unknown installs directly in the capture family's typed gap"
     );
+}
+
+/// A class member retains `a` in every fixture, yet no index record names
+/// that capture. Omitting the class, or proving the callback that creates
+/// it capture-free, seals the capture family complete over a retained
+/// cell — a wrong-complete result. Each shape fails closed as the
+/// family's typed gap instead.
+#[test]
+fn class_created_callables_fail_closed_as_capture_gaps() {
+    for (tag, (name, source)) in (73u8..).zip(UNSERVED_CLASS_FIXTURE_SOURCES) {
+        let fixture = flow_graph_fixture_for_tests(source, tag);
+        let plan = fixture
+            .build_plan(request_named(name))
+            .unwrap_or_else(|error| panic!("{name} plans: {error:?}"));
+        assert!(
+            !plan
+                .obligation_specs()
+                .iter()
+                .any(|spec| matches!(spec.basis(), FlowObligationBasis::CaptureFreeClosure { .. })),
+            "{name}: a callable retaining an unserved capture is never proved capture-free"
+        );
+        let mut runtime = ObligationRuntime::default();
+        let handle = runtime.install_flow_demand(&plan);
+        assert!(
+            runtime
+                .flow_obligations(handle)
+                .expect("the demand is installed")
+                .iter()
+                .any(|record| matches!(
+                    record.state,
+                    ObligationState::Gap(FlowGap::ClosureCapture)
+                )),
+            "{name}: the unserved capture installs as the capture family's typed gap"
+        );
+    }
 }

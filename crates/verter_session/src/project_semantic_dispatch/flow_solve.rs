@@ -1260,15 +1260,15 @@ pub(crate) fn build_flow_demand_plan_from_execution(
                 }
             }
             F::Capture => {
-                // Nested function DECLARATIONS anchor on the nested
-                // function's binding identity. The capture SET of a
-                // nested body is beyond this skeleton's authority (nested
-                // bodies carry no reads here), so each nested-function
-                // subject installs as the family's accepted typed gap —
-                // never an omission.
+                // Nested function and class DECLARATIONS anchor on the
+                // declared binding identity. The capture SET of a nested
+                // body is beyond this skeleton's authority (nested bodies
+                // carry no reads here, and no index record serves a class
+                // member), so each such subject installs as the family's
+                // accepted typed gap — never an omission.
                 for node in &selected {
                     let FlowNodeKind::Binding(binding) = graph.node_kind(*node) else { continue };
-                    if bundle.skeleton.binding(binding).kind != SkeletonBindingKind::NestedFunction { continue; }
+                    if !matches!(bundle.skeleton.binding(binding).kind, SkeletonBindingKind::NestedFunction | SkeletonBindingKind::Class) { continue; }
                     let id = push(
                         FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
                         FlowObligationOrigin::Expansion(E::Capture),
@@ -1297,23 +1297,29 @@ pub(crate) fn build_flow_demand_plan_from_execution(
                     for (ordinal, record) in site_record.closures.iter().enumerate() {
                         let closure = SkeletonClosureId::from_index(u32::try_from(ordinal).unwrap_or(u32::MAX));
                         // An authored callable the indexed program does not
-                        // serve asserts NOTHING about what it captures: the
-                        // family's typed gap, never a capture-free
-                        // discharge, and never silence.
-                        if record.correlation == SkeletonClosureCorrelation::Uncorrelated {
+                        // serve asserts NOTHING about what it captures, and
+                        // a partially served one names only a lower bound:
+                        // the family's typed gap, never a capture-free
+                        // discharge, and never silence. A partial callable
+                        // still owes its named captures below.
+                        let unproven = match record.correlation {
+                            SkeletonClosureCorrelation::Exact => None,
+                            SkeletonClosureCorrelation::Partial => Some(FlowObligationBasis::PartialClosure { node: *node, site, closure }),
+                            SkeletonClosureCorrelation::Uncorrelated => Some(FlowObligationBasis::UncorrelatedClosure { node: *node, site, closure }),
+                        };
+                        if let Some(basis) = unproven {
                             let id = push(
                                 FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
                                 FlowObligationOrigin::Expansion(E::Capture),
-                                FlowObligationBasis::UncorrelatedClosure { node: *node, site, closure },
+                                basis,
                                 Arc::from([]), Arc::from([]),
                             )?;
                             expanded.push(id);
-                            continue;
-                        }
-                        // A callable the authority proved captures nothing
-                        // carries its own POSITIVE obligation: "enumerated
-                        // and empty" is a discharge, not an omission.
-                        if record.captures.is_empty() {
+                        } else if record.captures.is_empty() {
+                            // A callable the authority proved captures
+                            // nothing carries its own POSITIVE obligation:
+                            // "enumerated and empty" is a discharge, not an
+                            // omission.
                             let id = push(
                                 FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
                                 FlowObligationOrigin::Expansion(E::Capture),

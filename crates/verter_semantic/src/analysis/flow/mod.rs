@@ -517,15 +517,21 @@ pub enum SkeletonClosureCorrelation {
     /// set. Empty means the callable provably captures nothing — a
     /// positive fact, not an absence of information.
     Exact,
+    /// The indexed program named this callable, but its body creates a
+    /// callable no index record serves (a class, or a parameter-list
+    /// callable), so [`SkeletonClosure::captures`] is only a LOWER BOUND:
+    /// every listed capture is real, and more may exist.
+    Partial,
     /// The authored callable has no correlated record in the indexed
-    /// program (a callable in a parameter default, or any position the
-    /// index does not serve), so no capture set can be asserted for it.
-    /// [`SkeletonClosure::captures`] is empty and means nothing.
+    /// program (a class, a callable in a parameter default, or any
+    /// position the index does not serve), so no capture set can be
+    /// asserted for it. [`SkeletonClosure::captures`] is empty and means
+    /// nothing.
     Uncorrelated,
 }
 
-/// One authored nested callable (arrow, function expression, or
-/// object-literal method) evaluated at one expression site.
+/// One authored nested callable (arrow, function expression,
+/// object-literal method, or class) evaluated at one expression site.
 ///
 /// The site-level [`SkeletonExprSite::capture_bindings`] is the UNION of
 /// every callable at the site, deduplicated: it answers "does anything
@@ -1457,6 +1463,18 @@ impl<'entry> SkeletonBuilder<'entry> {
         id
     }
 
+    /// An authored callable no index record serves asserts nothing about
+    /// what it captures: it is recorded as such, never omitted.
+    fn push_unserved_callable(&mut self, span: verter_span::Span) {
+        let site = self.footprint_site(span);
+        let closure_span = self.frame_span(span);
+        self.sites[site.index()].closures.push(SkeletonClosure {
+            span: closure_span,
+            correlation: SkeletonClosureCorrelation::Uncorrelated,
+            captures: Arc::from([]),
+        });
+    }
+
     fn push_read(&mut self, name: FlowNameId, span: verter_span::Span) {
         self.push_read_path(name, Arc::from(Vec::new().into_boxed_slice()), span);
     }
@@ -1493,17 +1511,12 @@ impl<'entry> SkeletonBuilder<'entry> {
     /// indistinguishable from no callback at all, and a callable the index
     /// does not serve is silently invisible rather than a typed gap.
     fn push_nested_callable(&mut self, span: verter_span::Span) {
-        let record = self.nested_captures.get(&span).copied();
-        let site = self.footprint_site(span);
-        let closure_span = self.frame_span(span);
-        let Some(captures) = record else {
-            self.sites[site.index()].closures.push(SkeletonClosure {
-                span: closure_span,
-                correlation: SkeletonClosureCorrelation::Uncorrelated,
-                captures: Arc::from([]),
-            });
+        let Some(captures) = self.nested_captures.get(&span).copied() else {
+            self.push_unserved_callable(span);
             return;
         };
+        let site = self.footprint_site(span);
+        let closure_span = self.frame_span(span);
         let mut own: Vec<FlowBindingRef> = Vec::new();
         let mut own_seen = FxHashSet::default();
         for identity in captures.bindings.0.iter() {
@@ -1521,7 +1534,11 @@ impl<'entry> SkeletonBuilder<'entry> {
         }
         self.sites[site.index()].closures.push(SkeletonClosure {
             span: closure_span,
-            correlation: SkeletonClosureCorrelation::Exact,
+            correlation: if captures.exhaustive {
+                SkeletonClosureCorrelation::Exact
+            } else {
+                SkeletonClosureCorrelation::Partial
+            },
             captures: Arc::from(own.into_boxed_slice()),
         });
         for read in captures.reads.iter() {
@@ -2021,7 +2038,13 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
         self.push_nested_callable(it.span.into());
     }
 
-    fn visit_class(&mut self, _it: &oxc_ast::ast::Class<'a>) {}
+    // A class expression is itself a callable (its constructor) and
+    // creates more (members, field initializers); no index record serves
+    // any of them. A class DECLARATION binds a name instead and is never
+    // walked here.
+    fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
+        self.push_unserved_callable(it.span.into());
+    }
 
     fn visit_statement(&mut self, it: &Statement<'a>) {
         match it {
