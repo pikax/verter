@@ -333,10 +333,14 @@ jobs:
               # measured corpus and is re-hashed to decide whether that
               # recorded measurement is still equivalent work on this tree;
               # the audit site schema is the closed vocabulary its metric
-              # rows must come from; and `ProjectTypeStore`'s field list is
-              # the INDEPENDENT retained-storage inventory the allocation
-              # classes are checked for completeness against, so adding a
-              # field there turns this job red until the contract accounts
+              # rows must come from; and the production field lists of
+              # `VerterHost` and of every struct its `delegated` fields reach
+              # (`ProjectTypeStore`, `UnifiedResolverRuntime`,
+              # `FallthroughResolverState`, `FrameworkRegistration`,
+              # `FrameworkScriptCaches` and the rest) are the INDEPENDENT
+              # retained-storage inventory the allocation classes are checked
+              # for completeness against, so adding a host-lifetime field to
+              # any of them turns this job red until the contract accounts
               # for it. The session, semantic and workspace source trees are
               # taken whole because the allocation-owner and emitter anchors
               # are spread across them, and the audit tree is taken whole
