@@ -83,7 +83,7 @@ edge case. `build_instantiate`'s declaration-source route lowers the body
 (`project_semantic_dispatch/locator_shape_binder.rs:262-272`, `build_lower_locator`: the deref'd body is graph-lowered "with the decl's type parameters bound as `TypeParam` shells"). An open
 `TypeParam` check is a stable stop of the selection oracle, so the
 conditional interns as a deferred shell with both branches lowered
-(`build.rs:9148`). Substitution then rewrites that shell — descending all
+(`build.rs:9148-9155`). Substitution then rewrites that shell — descending all
 four subtrees, already counted by the existing
 `AuditEvent::SubstituteConditionalDescend` counter
 (`project_semantic_dispatch/substitute.rs:699-743`) — and the decision
@@ -91,6 +91,55 @@ finally happens in `evaluate.rs:1008`. By then the losing branch has been
 interned *and* substituted. TE2-AC1's zero-intern, zero-substitution
 proof cannot hold for it without also removing the deferred-shell
 carrier, which the same charter forbids.
+
+## Finding 1b — the one remaining escape is closed by substitution
+
+Findings 1–3 each block a *route*. This closes the space, so the abort
+does not rest on "no route was found".
+
+If `lower.rs` stops lowering `true_type` / `false_type`, something
+still has to be the value of the enclosing declaration body. That value
+is produced by the shared `LowerLocator` build
+(`locator_shape_binder.rs`, `build_lower_locator`), which graph-lowers
+the whole decl body with header parameters bound as `TypeParam` shells.
+For `type X<T> = T extends string ? A : Heavy` the check is therefore an
+unbound shell, selection is a stable open stop, and `build_conditional`
+MUST intern the deferred carrier the charter mandates
+(`build.rs:9148-9155`).
+
+That carrier is `SemanticNodeData::Conditional { check, extends,
+true_branch_ref, false_branch_ref, distributive }` — five
+`SemanticNodeId` fields. Keeping the branches unlowered therefore
+requires the two branch fields to stop being node ids and start being
+sealed operands. `SemanticNodeData::Conditional` IS inside TE2's
+mutation boundary, so that is not a scope objection. It is closed for a
+different reason:
+
+- **Substitution has to rewrite the branches.** `substitute.rs`'s
+  `Conditional` arm descends into all four sub-trees and rebuilds the
+  node when any changed (`substitute.rs:699-747`), with the
+  capture-avoidance rule that an inner `extends` re-declaring the same
+  `infer` name shadows the extends clause and the TRUE branch while the
+  check and FALSE branch still substitute. Substituting `T := string`
+  into an unlowered branch operand is impossible without lowering it.
+- **The only alternative is a forbidden design.** Deferring the
+  substitution instead — accumulating pending `(param, arg)` rewrites on
+  the operand so the branch can be lowered-and-substituted later —
+  is precisely a recipe for reconstructing a value, which the charter's
+  "Deletions and forbidden designs" rules out: *no `SemanticRecipeId`,
+  closures, AST pointers, `TypeExpr` operands, arbitrary env maps* and
+  *no branch recipe graph*. TE1's substitution axis cannot carry it
+  either — it is a positional `Arc<[SemanticNodeId]>` validated against
+  the anchor declaration's declared header arity
+  (`semantic_operand.rs`, `seal_substitution` /
+  `SemanticOperandMintError::SubstitutionArity`), and a conditional's
+  pending rewrites are not declaration-header ordinals.
+
+So within TE2's own boundary the branch fields must stay node ids, which
+means the branches must be lowered before the deferred carrier is
+interned, which means the losing branch of every generic conditional is
+interned and substituted before selection is even possible. The
+zero-intern / zero-substitution half of TE2-AC1 is not reachable.
 
 ## Finding 2 — the true branch of an infer conditional cannot be forced in isolation
 
@@ -139,8 +188,9 @@ locator-based branch operand:
   (`semantic_query.rs:362-376`). Live production callers include
   `flow_return.rs`, `carrier.rs:676`,
   `structural_carrier_producer/macro_arg_producer.rs:179`,
-  `build.rs:845` and `:1016`, and `mod.rs:1924`. A conditional lowered
-  from any of those has no authored anchor to seal a branch operand
+  `locator_shape.rs:429`, `build.rs:845` and `:1016`, and
+  `mod.rs:1924`. A conditional lowered from any of those has no
+  authored anchor to seal a branch operand
   against, and inventing one would require exactly the `TypeExpr`
   operands / source hashes the charter's "forbidden designs" list rules
   out.
@@ -219,10 +269,43 @@ confirmed to be a property of the landed code:
   (`InferRef` nodes inserted into the true branch's `env` at
   `lower.rs`), not a positional substitution, so it cannot be carried on
   the operand's declaration-header-ordinal substitution axis either.
-- **Vocabulary gap is real.** `InferSyntaxPathStep` declares 46 steps;
-  `TypeBodyPathStep` declares 25. Positions with no locator spelling
-  include `ParenthesizedInner`, `ArrayElement`, `RestInner`,
-  `KeyOfOperand`, `TemplateExpression`, `ImportTypeArgument`,
-  `TypeOfTypeArgument`, `ObjectSpread`, and every object-method /
-  call-signature / construct-signature type-parameter step. A
-  conditional at any of those positions cannot be addressed at all.
+- **Vocabulary gap is real, and narrower than first recorded.**
+  `InferSyntaxPathStep` declares 45 steps
+  (`semantic_query/infer_binder_names.rs:16-60`); `TypeBodyPathStep`
+  declares 23 (`verter_type_expr/src/locators.rs:143-238`). The counts
+  first recorded here (46 / 25) were wrong, and so were two entries of
+  the original unaddressable list — the locator layer reaches both of
+  those positions by other means:
+
+  - `ParenthesizedInner` is NOT a gap. Parenthesization is structurally
+    TRANSPARENT to the locator: every expression arm of
+    `navigate_expr_detecting` calls `unwrap_parenthesized` before
+    matching (`decl_body_memo/locator_deref.rs:1136-1231`), and
+    `step_crosses_binder_scope` peeks through it the same way. A
+    conditional inside parentheses is addressed by the SAME path as the
+    unparenthesized one; the syntax-path step has no locator counterpart
+    because it needs none.
+  - `ObjectSpread` is NOT a gap. A spread member is reached as
+    `Member { ordinal }` and its operand type as that member's VALUE
+    slot: `member_value_expr` maps
+    `ObjectMember::Spread(spread) => spread.ty`
+    (`locator_deref.rs:1532-1534`).
+
+  The positions that genuinely have no locator spelling are
+  `ArrayElement` (`TypeBodyPathStep` has no array arm at all),
+  `RestInner`, `KeyOfOperand`, `TemplateExpression`,
+  `ImportTypeArgument` and `TypeOfTypeArgument` (the `TypeArgument`
+  step derefs `TypeExpr::Ref` ONLY —
+  `locator_deref.rs:1136-1148`), and every NON-HEADER type-parameter
+  bound: `TypeParamBound` is documented and implemented as valid only
+  as the FIRST path step rooted at the declaration header
+  (`locators.rs:159-167`), so a function type's, an object method's, a
+  call signature's, or a construct signature's own type-parameter
+  constraint / default is unaddressable.
+
+  The correction narrows the list but does not change the finding's
+  force: `ArrayElement` alone
+  (`type F<T> = (T extends string ? A : B)[]`) keeps the gap
+  load-bearing, and closing it still means changing `TypeBodyPathStep`
+  and its deref, navigator, identity and witness mirrors in a third
+  crate.
