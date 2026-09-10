@@ -8,7 +8,7 @@
 //! (and its wrapper `merge_definitions`) substituted `Range::default()` (line 0, char 0) for
 //! every non-`.vue` target instead of resolving the type provider's byte offsets to line:col.
 //! The type provider returns a `TypeLocation { path, start, end }` whose `start`/`end` are REAL
-//! byte offsets into the external file (`parse_lsp_location` in
+//! byte offsets into the external file (`parse_lsp_locations_per_target` in
 //! `verter_type_runtime/src/tsgo/ipc.rs` disk-reads the target to compute them); the merge
 //! layer threw those offsets away for any non-`.vue` file and collapsed the range to line 0.
 //!

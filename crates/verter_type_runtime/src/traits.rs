@@ -359,7 +359,7 @@ pub trait TypeProvider: Send + Sync {
     /// `{name}.svelte`); `companion_path` is its generated companion path
     /// (`{name}.vue.tsx` / `{name}.vue.verter.ts`); `content` is the exact bytes the publish store
     /// holds for it (used ONLY for the provider's local position conversion —
-    /// `byte_offset_to_tsserver_pos` / `parse_tsserver_location` — never forwarded
+    /// `byte_offset_to_tsserver_pos` / `parse_tsserver_locations` — never forwarded
     /// to the engine); `project_file_name` is the owning project's tsconfig path
     /// (resolved by the publish path's `ProjectBinding`), threaded into the
     /// `projectFileName` of carrier diagnostics/definition/hover/completion requests
