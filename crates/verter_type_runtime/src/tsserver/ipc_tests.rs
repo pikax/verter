@@ -5336,7 +5336,8 @@ fn inlay_hint_decoder_returns_byte_offsets_and_fails_closed_without_content() {
         "whitespaceBefore": true,
     });
 
-    let parsed = parse_tsserver_inlay_hint(&hint, Some(content)).expect("valid hint");
+    let parsed = parse_tsserver_inlay_hint(&hint, Some(&SourceIndex::new_utf16(content)))
+        .expect("valid hint");
     assert_eq!(
         parsed.position, 15,
         "line/offset is UTF-16 while the provider contract requires bytes"
@@ -5354,5 +5355,7 @@ fn inlay_hint_decoder_returns_byte_offsets_and_fails_closed_without_content() {
         "position": { "line": 200, "offset": 1 },
         "kind": "Type",
     });
-    assert!(parse_tsserver_inlay_hint(&out_of_range, Some(content)).is_none());
+    assert!(
+        parse_tsserver_inlay_hint(&out_of_range, Some(&SourceIndex::new_utf16(content))).is_none()
+    );
 }

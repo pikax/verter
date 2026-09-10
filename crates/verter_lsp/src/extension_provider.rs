@@ -1202,15 +1202,15 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await;
 
+            // One index for the whole hint batch.
+            let index = content_snapshot.as_deref().map(SourceIndex::new_utf16);
             match result {
                 Ok(body) => {
                     let hints = body
                         .as_array()
                         .map(|arr| {
                             arr.iter()
-                                .filter_map(|hint| {
-                                    parse_tsserver_inlay_hint(hint, content_snapshot.as_deref())
-                                })
+                                .filter_map(|hint| parse_tsserver_inlay_hint(hint, index.as_ref()))
                                 .collect()
                         })
                         .unwrap_or_default();

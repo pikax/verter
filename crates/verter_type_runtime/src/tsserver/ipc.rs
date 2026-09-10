@@ -1793,19 +1793,21 @@ fn tsserver_pos_to_byte_offset_checked(
 /// contract's byte-offset representation.
 ///
 /// Both the managed-tsserver and extension-hosted decoders consume this shared
-/// owner. A missing content snapshot or malformed/out-of-range UTF-16 position
-/// drops the hint; packed line/column sentinels are forbidden because carrier
-/// sourcemap merging interprets [`InlayHint::position`] as a byte offset.
+/// owner. A missing index or malformed/out-of-range UTF-16 position drops the
+/// hint; packed line/column sentinels are forbidden because carrier sourcemap
+/// merging interprets [`InlayHint::position`] as a byte offset.
+///
+/// `index` is the caller's UTF-16 index over this file's content, built once for
+/// the hint batch — a per-hint rebuild would rescan the document for every hint.
 pub fn parse_tsserver_inlay_hint(
     hint: &serde_json::Value,
-    content: Option<&str>,
+    index: Option<&SourceIndex<'_>>,
 ) -> Option<InlayHint> {
     let text = hint.get("text")?.as_str()?.to_string();
     let pos = hint.get("position")?;
     let line = u32::try_from(pos.get("line")?.as_u64()?).ok()?;
     let offset = u32::try_from(pos.get("offset")?.as_u64()?).ok()?;
-    let position =
-        tsserver_pos_to_byte_offset_checked(&SourceIndex::new_utf16(content?), line, offset)?;
+    let position = tsserver_pos_to_byte_offset_checked(index?, line, offset)?;
 
     let kind = match hint.get("kind").and_then(|value| value.as_str()) {
         Some("Type") => Some(InlayHintKind::Type),
@@ -4837,15 +4839,15 @@ impl TypeProvider for TsserverTypeProvider {
                 )
                 .await;
 
+            // One index for the whole hint batch.
+            let index = content_snapshot.as_deref().map(SourceIndex::new_utf16);
             match result {
                 Ok(body) => {
                     let hints = body
                         .as_array()
                         .map(|arr| {
                             arr.iter()
-                                .filter_map(|hint| {
-                                    parse_tsserver_inlay_hint(hint, content_snapshot.as_deref())
-                                })
+                                .filter_map(|hint| parse_tsserver_inlay_hint(hint, index.as_ref()))
                                 .collect()
                         })
                         .unwrap_or_default();
