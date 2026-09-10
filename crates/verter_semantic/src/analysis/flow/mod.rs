@@ -592,11 +592,6 @@ pub struct SkeletonExprSite {
     pub closures: Arc<[SkeletonClosure]>,
     /// Call / construct footprints attributed to this site.
     pub calls: Arc<[SkeletonCall]>,
-    /// The site is a destructuring-assignment default. Its value can become
-    /// the target's value through no value edge, so it is an evaluation
-    /// effect of its container even without a write / call footprint — a
-    /// default callable retains its captures all the same.
-    pub destructuring_default: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1161,7 +1156,6 @@ struct SiteDraft {
     capture_bindings: Vec<FlowBindingRef>,
     closures: Vec<SkeletonClosure>,
     calls: Vec<SkeletonCall>,
-    destructuring_default: bool,
 }
 
 struct SkeletonBuilder<'entry> {
@@ -1295,17 +1289,8 @@ impl<'entry> SkeletonBuilder<'entry> {
             capture_bindings: Vec::new(),
             closures: Vec::new(),
             calls: Vec::new(),
-            destructuring_default: false,
         });
         id
-    }
-
-    /// Track a destructuring-assignment default as a child of the
-    /// assignment's site (see [`SkeletonExprSite::destructuring_default`]).
-    fn open_destructuring_default(&mut self, default: &Expression<'_>) {
-        let parent = self.current_site();
-        let site = self.open_site(default, parent);
-        self.sites[site.index()].destructuring_default = true;
     }
 
     fn current_site(&self) -> Option<SkeletonExprSiteId> {
@@ -1799,7 +1784,8 @@ impl<'entry> SkeletonBuilder<'entry> {
                         ) => {
                             let name = self.intern(identifier.binding.name.as_str());
                             if let Some(init) = identifier.init.as_ref() {
-                                self.open_destructuring_default(init);
+                                let parent = self.current_site();
+                                let _ = self.open_site(init, parent);
                             }
                             self.push_write(
                                 SkeletonWriteTarget::Named(name),
@@ -1837,7 +1823,8 @@ impl<'entry> SkeletonBuilder<'entry> {
     ) {
         match target {
             AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(with_default) => {
-                self.open_destructuring_default(&with_default.init);
+                let parent = self.current_site();
+                let _ = self.open_site(&with_default.init, parent);
                 self.record_assignment_targets(
                     &with_default.binding,
                     SkeletonWriteCertainty::Definite,
@@ -2027,7 +2014,6 @@ impl<'entry> SkeletonBuilder<'entry> {
                         capture_bindings: Arc::from(draft.capture_bindings.into_boxed_slice()),
                         closures: Arc::from(draft.closures.into_boxed_slice()),
                         calls: Arc::from(draft.calls.into_boxed_slice()),
-                        destructuring_default: draft.destructuring_default,
                     })
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),

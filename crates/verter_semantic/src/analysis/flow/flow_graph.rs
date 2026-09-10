@@ -339,14 +339,17 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
         FlowNodeId(binding_count + expr_site_count + return_site_count + id.index() as u32)
     };
 
-    // Effectful closure per site: own write / call footprint, or an
-    // effectful child (children always follow their parents in the table).
+    // Effectful closure per site: own write / call / callable-creation
+    // footprint, or an effectful child (children always follow their parents
+    // in the table). Creating a callable retains its captured cells with no
+    // write or call, so a container evaluating it — an object key, a sibling
+    // property, a destructuring default — owns it as an evaluation effect.
     let mut effectful = vec![false; skeleton.expr_sites.len()];
     for write in skeleton.writes.iter() {
         effectful[write.site.index()] = true;
     }
     for (index, site) in skeleton.expr_sites.iter().enumerate() {
-        if !site.calls.is_empty() {
+        if !site.calls.is_empty() || !site.closures.is_empty() {
             effectful[index] = true;
         }
     }
@@ -534,7 +537,7 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                 }
             }
         }
-        if effectful[index] || site.destructuring_default {
+        if effectful[index] {
             if let Some(parent) = site.parent {
                 edges.push((site_node(parent), node, FlowEdgeKind::EvalEffect));
             }
