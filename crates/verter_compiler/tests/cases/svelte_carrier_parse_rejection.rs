@@ -1,4 +1,3 @@
-use verter_compiler::framework_common::CarrierCompiler;
 use verter_compiler::svelte::runtime::{compile_client, ClientCompileError, SvelteRuntimeOptions};
 use verter_compiler::svelte::{parse_svelte, SvelteCarrierCompiler};
 use verter_language::{ParseOptions, SyntaxReject};
