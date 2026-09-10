@@ -367,6 +367,12 @@ pub struct SkeletonBinding {
     /// but cannot model" — the latter must fail closed, never fall
     /// through to an outer same-named declaration.
     pub destructured: bool,
+    /// The sites the declaring pattern evaluates while it binds — nested
+    /// defaults and computed keys, in evaluation order. Producing the
+    /// binding runs every one of them, so each is an evaluation effect of
+    /// the binding: a callable authored there is created and retains its
+    /// captures whenever the binding is demanded.
+    pub pattern_sites: Arc<[SkeletonExprSiteId]>,
 }
 
 // ---------------------------------------------------------------------------
@@ -586,6 +592,11 @@ pub struct SkeletonExprSite {
     pub closures: Arc<[SkeletonClosure]>,
     /// Call / construct footprints attributed to this site.
     pub calls: Arc<[SkeletonCall]>,
+    /// The site is a destructuring-assignment default. Its value can become
+    /// the target's value through no value edge, so it is an evaluation
+    /// effect of its container even without a write / call footprint — a
+    /// default callable retains its captures all the same.
+    pub destructuring_default: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1150,6 +1161,7 @@ struct SiteDraft {
     capture_bindings: Vec<FlowBindingRef>,
     closures: Vec<SkeletonClosure>,
     calls: Vec<SkeletonCall>,
+    destructuring_default: bool,
 }
 
 struct SkeletonBuilder<'entry> {
@@ -1283,8 +1295,17 @@ impl<'entry> SkeletonBuilder<'entry> {
             capture_bindings: Vec::new(),
             closures: Vec::new(),
             calls: Vec::new(),
+            destructuring_default: false,
         });
         id
+    }
+
+    /// Track a destructuring-assignment default as a child of the
+    /// assignment's site (see [`SkeletonExprSite::destructuring_default`]).
+    fn open_destructuring_default(&mut self, default: &Expression<'_>) {
+        let parent = self.current_site();
+        let site = self.open_site(default, parent);
+        self.sites[site.index()].destructuring_default = true;
     }
 
     fn current_site(&self) -> Option<SkeletonExprSiteId> {
@@ -1629,7 +1650,18 @@ impl<'entry> SkeletonBuilder<'entry> {
             initializer,
             annotation_span: None,
             destructured,
+            pattern_sites: Arc::from([]),
         });
+    }
+
+    /// Open every expression one binding pattern evaluates while it binds
+    /// as its own root site, so no footprint is dropped; the pattern's
+    /// bindings then own the sites as evaluation effects.
+    fn open_pattern_sites(&mut self, evaluated: Vec<&Expression<'_>>) -> Arc<[SkeletonExprSiteId]> {
+        evaluated
+            .into_iter()
+            .map(|expression| self.open_root_site(expression))
+            .collect()
     }
 
     fn push_implicit_return(&mut self, argument: SkeletonExprSiteId, span: verter_span::Span) {
@@ -1670,11 +1702,7 @@ impl<'entry> SkeletonBuilder<'entry> {
         let mut identifiers = Vec::new();
         let mut defaults = Vec::new();
         collect_binding_pattern(inner, false, &mut identifiers, &mut defaults);
-        // Nested pattern defaults still evaluate at bind time: track each
-        // as a root site so its footprint is never dropped.
-        for default in defaults {
-            self.open_root_site(default);
-        }
+        let pattern_sites = self.open_pattern_sites(defaults);
         for (name, span, destructured) in identifiers {
             self.push_binding(
                 &name,
@@ -1683,6 +1711,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                 initializer,
                 destructured,
             );
+            self.bindings.last_mut().unwrap().pattern_sites = Arc::clone(&pattern_sites);
         }
     }
 
@@ -1696,11 +1725,10 @@ impl<'entry> SkeletonBuilder<'entry> {
         let mut identifiers = Vec::new();
         let mut defaults = Vec::new();
         collect_binding_pattern(pattern, false, &mut identifiers, &mut defaults);
-        for default in defaults {
-            self.open_root_site(default);
-        }
+        let pattern_sites = self.open_pattern_sites(defaults);
         for (name, span, destructured) in identifiers {
             self.push_binding(&name, kind, span, initializer, destructured);
+            self.bindings.last_mut().unwrap().pattern_sites = Arc::clone(&pattern_sites);
             if !destructured {
                 self.bindings.last_mut().unwrap().annotation_span = annotation_span;
             }
@@ -1771,8 +1799,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                         ) => {
                             let name = self.intern(identifier.binding.name.as_str());
                             if let Some(init) = identifier.init.as_ref() {
-                                let parent = self.current_site();
-                                let _ = self.open_site(init, parent);
+                                self.open_destructuring_default(init);
                             }
                             self.push_write(
                                 SkeletonWriteTarget::Named(name),
@@ -1810,8 +1837,7 @@ impl<'entry> SkeletonBuilder<'entry> {
     ) {
         match target {
             AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(with_default) => {
-                let parent = self.current_site();
-                let _ = self.open_site(&with_default.init, parent);
+                self.open_destructuring_default(&with_default.init);
                 self.record_assignment_targets(
                     &with_default.binding,
                     SkeletonWriteCertainty::Definite,
@@ -2001,6 +2027,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                         capture_bindings: Arc::from(draft.capture_bindings.into_boxed_slice()),
                         closures: Arc::from(draft.closures.into_boxed_slice()),
                         calls: Arc::from(draft.calls.into_boxed_slice()),
+                        destructuring_default: draft.destructuring_default,
                     })
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
@@ -2497,12 +2524,12 @@ impl SkeletonBuilder<'_> {
                     let mut identifiers = Vec::new();
                     let mut defaults = Vec::new();
                     collect_binding_pattern(&declarator.id, false, &mut identifiers, &mut defaults);
-                    for default in defaults {
-                        self.open_root_site(default);
-                    }
+                    let pattern_sites = self.open_pattern_sites(defaults);
                     for (name, span, destructured) in identifiers {
                         let interned = self.intern(&name);
                         self.push_binding(&name, kind, span, None, destructured);
+                        self.bindings.last_mut().unwrap().pattern_sites =
+                            Arc::clone(&pattern_sites);
                         if !destructured {
                             let annotation_span = declarator
                                 .type_annotation

@@ -3213,6 +3213,111 @@ const UNSERVED_CLASS_FIXTURE_SOURCES: [(&str, &str); 3] = [
     ),
 ];
 
+/// How the capture family must account for `a` in a pattern fixture.
+#[derive(Clone, Copy, Debug)]
+enum PatternCaptureOutcome {
+    /// A served callable: an exact obligation names the retained cell.
+    Captured,
+    /// A callable the index does not serve: the family's typed gap.
+    Gap,
+}
+
+/// Every destructuring pattern evaluates its defaults and computed keys
+/// while it binds or assigns, so a callable authored there is created — and
+/// retains `a` — as part of producing the demanded binding. Each fixture
+/// returns a target of such a pattern; none may seal the capture family
+/// without `a`.
+const BINDING_PATTERN_CAPTURE_FIXTURES: [(&str, &str, PatternCaptureOutcome); 8] = [
+    (
+        "declarator_key",
+        "function declarator_key(o) { const a = 1; const { [reg(() => a)]: x } = o; return x; }",
+        PatternCaptureOutcome::Captured,
+    ),
+    (
+        "declarator_default",
+        "function declarator_default(o) { const a = 1; const { x = () => a } = o; return x; }",
+        PatternCaptureOutcome::Captured,
+    ),
+    (
+        "sibling_binding",
+        "function sibling_binding(o) { const a = 1; const { [reg(() => a)]: x, y } = o; return y; }",
+        PatternCaptureOutcome::Captured,
+    ),
+    (
+        "for_of_key",
+        "function for_of_key(o) { const a = 1; for (const { [reg(() => a)]: x } of o) { return x; } return 0; }",
+        PatternCaptureOutcome::Captured,
+    ),
+    (
+        "catch_key",
+        "function catch_key() { const a = 1; try { run(); } catch ({ [reg(() => a)]: x }) { return x; } return 0; }",
+        PatternCaptureOutcome::Captured,
+    ),
+    (
+        "param_key",
+        "function param_key(a, { [reg(() => a)]: x }) { return x; }",
+        PatternCaptureOutcome::Gap,
+    ),
+    (
+        "assignment_default",
+        "function assignment_default(o) { const a = 1; let x; ({ x = () => a } = o); return x; }",
+        PatternCaptureOutcome::Captured,
+    ),
+    (
+        "for_of_assignment_default",
+        "function for_of_assignment_default(o) { const a = 1; let x; for ([x = () => a] of o) { return x; } return 0; }",
+        PatternCaptureOutcome::Captured,
+    ),
+];
+
+#[test]
+fn binding_pattern_callables_are_capture_subjects_of_the_bindings_they_produce() {
+    for (tag, (name, source, outcome)) in (76u8..).zip(BINDING_PATTERN_CAPTURE_FIXTURES) {
+        let fixture = flow_graph_fixture_for_tests(source, tag);
+        let plan = fixture
+            .build_plan(request_named(name))
+            .unwrap_or_else(|error| panic!("{name} plans: {error:?}"));
+        let specs = plan.obligation_specs();
+        assert!(
+            !specs
+                .iter()
+                .any(|spec| matches!(spec.basis(), FlowObligationBasis::CaptureFreeClosure { .. })),
+            "{name}: the pattern callable retains `a`, so it is never proved capture-free"
+        );
+        match outcome {
+            PatternCaptureOutcome::Captured => assert!(
+                specs.iter().any(|spec| matches!(
+                    spec.basis(),
+                    FlowObligationBasis::CapturedBinding { identity, .. } if &*identity.name == "a"
+                )),
+                "{name}: the pattern callable owes an exact obligation for `a`"
+            ),
+            PatternCaptureOutcome::Gap => {
+                assert!(
+                    specs.iter().any(|spec| matches!(
+                        spec.basis(),
+                        FlowObligationBasis::UncorrelatedClosure { .. }
+                    )),
+                    "{name}: the unserved pattern callable is enumerated as an unknown"
+                );
+                let mut runtime = ObligationRuntime::default();
+                let handle = runtime.install_flow_demand(&plan);
+                assert!(
+                    runtime
+                        .flow_obligations(handle)
+                        .expect("the demand is installed")
+                        .iter()
+                        .any(|record| matches!(
+                            record.state,
+                            ObligationState::Gap(FlowGap::ClosureCapture)
+                        )),
+                    "{name}: the unserved capture installs as the capture family's typed gap"
+                );
+            }
+        }
+    }
+}
+
 const UNSERVED_CALLABLE_FIXTURE_SOURCE: &str = r#"
 function unserved_callable(p, q = () => p) {
   return q;

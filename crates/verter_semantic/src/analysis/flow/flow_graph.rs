@@ -447,6 +447,13 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
         if let Some(initializer) = binding.initializer {
             edges.push((node, site_node(initializer), FlowEdgeKind::ValueDef));
         }
+        // Binding a pattern evaluates its defaults and computed keys, so a
+        // slice that demands the binding also selects their evaluation —
+        // unconditionally, because a default callable retains its captures
+        // without any write / call footprint.
+        for site in binding.pattern_sites.iter() {
+            edges.push((node, site_node(*site), FlowEdgeKind::EvalEffect));
+        }
     }
 
     // Expression sites: region membership, reads, call effects, container
@@ -527,7 +534,7 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                 }
             }
         }
-        if effectful[index] {
+        if effectful[index] || site.destructuring_default {
             if let Some(parent) = site.parent {
                 edges.push((site_node(parent), node, FlowEdgeKind::EvalEffect));
             }
