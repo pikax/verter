@@ -1146,7 +1146,6 @@ impl From<NapiVirtualQuery> for FfiVirtualQuery {
             raw_id: n.rawId,
             canonical_id: n.canonicalId,
             node_kind: n.nodeKind.map(Into::into),
-            compile_profile: None,
         }
     }
 }
@@ -2874,7 +2873,6 @@ impl NapiVerterHost {
             .collect::<Result<Vec<_>>>()?;
         let ffi_req = FfiBlockOverrideRequest {
             canonical_id: request.canonicalId,
-            compile_profile: None,
             overrides,
         };
         let host_req = ffi_block_override_to_host(ffi_req).map_err(ffi_err)?;
