@@ -380,3 +380,37 @@ context-free `FamilyKey::Conditional`, fix the `build.rs:9018` self-root
 set to the winner plus check/extends, and restate AC1 as
 zero-forcing / zero-nested-dispatch / zero-origin-edge / zero-fact-read
 on the loser of the decided evaluation.
+
+## Why this surfaced at TE2 and not earlier
+
+The forcing boundary TE2 is asked to consume has **no production
+consumer today**. `ProjectSemanticDispatch::force_semantic_operand` is
+called only from its co-located tests
+(`semantic_operand_tests.rs`, `semantic_operand_binder_tests.rs`);
+`SemanticOperand::from_authored_authority` and `SemanticOperand::node`
+are minted nowhere outside the boundary module and those tests. Every
+other production mention of the name is `QueryError` plumbing
+(`ForeignSemanticOperand` / `StaleSemanticOperand` /
+`IncompleteSemanticOperand`) in `broad_runtime.rs`,
+`symbol_identity.rs`, `component_meta_query_engine/surface.rs` and
+`compat_spelling.rs`.
+
+The request vocabulary is likewise present and unwired:
+`SemanticOperandForceRequest::new` / `::projecting` / `::key_domain` and
+`SemanticOperandForceProjection` all exist and are exercised only by
+tests.
+
+TE2 would therefore be the FIRST production wiring of the boundary. That
+reframes ratification option 2: the missing capability — an authored
+path vocabulary that reaches every position a real consumer must name,
+and a binder frame for a conditional `infer` — is a completeness gap in
+the TE1 substrate, not something specific to conditionals. Any later
+node that tries to force an authored operand at a position the locator
+cannot spell will hit the same wall. Sizing the predecessor as a TE1
+completion rather than a TE2 prerequisite is likely the cheaper reading
+for the program.
+
+This also explains how TE3 landed without exposing the gap: it extended
+the force REQUEST vocabulary (the projection and key-domain arms above)
+rather than standing up a production consumer that had to address
+arbitrary authored positions.
