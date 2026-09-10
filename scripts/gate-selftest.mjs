@@ -8814,39 +8814,15 @@ fi
         "lsp-server-unit",
         "cfg(windows)",
       ) === 0 &&
-      exactOverrideCount(
-        "default",
-        "test(/^cases::g_compile::compile_fail::/)",
-        null,
-        null,
-        '{ period = "120s", terminate-after = 3 }',
-      ) === 1 &&
-      exactOverrideCount(
-        "ci",
-        "test(/^cases::g_compile::compile_fail::/)",
-        null,
-        null,
-        '{ period = "120s", terminate-after = 3 }',
-      ) === 1 &&
-      exactOverrideCount(
-        "default",
-        "test(/^cases::resolver_observation_compile_fail::/)",
-        null,
-        null,
-        '{ period = "120s", terminate-after = 3 }',
-      ) === 1 &&
-      exactOverrideCount(
-        "ci",
-        "test(/^cases::resolver_observation_compile_fail::/)",
-        null,
-        null,
-        '{ period = "120s", terminate-after = 3 }',
-      ) === 1;
+      // Compile-fail contracts run from the standalone `scripts/compile-contracts.mjs` executable, not
+      // the nextest inventory, so no nextest override may widen the hang budget for them.
+      overrideRows.every((row) => row.slowTimeout !== '{ period = "120s", terminate-after = 3 }') &&
+      overrideRows.every((row) => !/compile_fail/.test(row.filter || ""));
     if (!configOk) {
       fail(
         `(GB18.7) full CI capacity forbids both Windows-only serialized nextest groups and their ` +
-          `default/ci assignments while preserving the all-platform shared-provider timeout and every ` +
-          `platform-neutral trybuild timeout override; parsed rows=` +
+          `default/ci assignments while preserving the all-platform shared-provider timeout, and no ` +
+          `nextest override may widen the hang budget for compile-fail contracts; parsed rows=` +
           JSON.stringify(overrideRows),
       );
       ok = false;
@@ -8901,7 +8877,7 @@ fi
         : "";
     if (
       supervisorFactoryCount !== 1 ||
-      productionRunStepCount !== 9 ||
+      productionRunStepCount !== 8 ||
       gateSource.includes("await runContainedStep({") ||
       !gateSource.includes('ctx.supervisor.runStep("surface-1", {') ||
       !gateSource.includes('ctx.supervisor.runStep("shipped-cfg", {') ||
@@ -8911,7 +8887,7 @@ fi
         teardownSource.indexOf("mutex.release()")
     ) {
       fail(
-        `(GB18.10) production must construct exactly one supervisor, route all nine currently ` +
+        `(GB18.10) production must construct exactly one supervisor, route all eight currently ` +
           `sequential contained commands through it (including the wasm JS-boundary, Surface 1 and ` +
           `shipped lanes), and await its ` +
           `close before mutex release; factory=${supervisorFactoryCount} runStep=${productionRunStepCount}`,
@@ -8923,7 +8899,8 @@ fi
       pass(
         "(GB18) measured build resources are CPU/memory-tiered while the independent 12-thread cap " +
           "remains CPU-clamped and both stay explicitly overrideable; both " +
-          "Windows-only serialized nextest groups/selectors are forbidden while safety timeouts remain pinned; every Windows proc-macro suite (including a " +
+          "Windows-only serialized nextest groups/selectors are forbidden while the shared-provider safety timeout remains pinned and " +
+          "no compile-fail override widens the hang budget; every Windows proc-macro suite (including a " +
           "novel future id) remains warmable with its listed host libdir prepended to one canonical PATH; " +
           "malformed metadata and every non-zero/no-status/signal outcome fail closed; a real cargo-free " +
           "child receives the environment; production wires it into the unfiltered suite loop; the `gate-lane` " +
