@@ -503,6 +503,10 @@ export function reapply({ model, control, mirror, spawn }) {
     observedNow,
     `${control.id}: the clean run of ${argv.join(" ")} emitted no ${adapter.summary_grammar} summary:\n${cleanOutput}`,
   );
+  // A listing is read from STDOUT alone: cargo prints its build progress on
+  // stderr around the runner's output, and a JSON listing with `Compiling`
+  // lines appended to it is not JSON. The whole output still goes into the
+  // failure message, so a refused listing says why.
   let inventory = null;
   const listing = inventoryCommand(adapter, argv);
   if (listing) {
@@ -513,7 +517,7 @@ export function reapply({ model, control, mirror, spawn }) {
       0,
       `${control.id}: the runner refused to list the selection of ${argv.join(" ")}, so the clean run cannot be held to the tree's own inventory\n${listedOutput}`,
     );
-    inventory = parseInventory(adapter.summary_grammar, listedOutput);
+    inventory = parseInventory(adapter.summary_grammar, listed.stdout ?? "");
     assert.ok(
       inventory,
       `${control.id}: ${listing.join(" ")} emitted no ${adapter.summary_grammar} listing:\n${listedOutput}`,
@@ -532,7 +536,7 @@ export function reapply({ model, control, mirror, spawn }) {
         0,
         `${control.id}: the runner refused to list the ignored subset of ${argv.join(" ")}\n${ignoredOutput}`,
       );
-      const ignoredInventory = parseInventory(adapter.summary_grammar, ignoredOutput);
+      const ignoredInventory = parseInventory(adapter.summary_grammar, ignored.stdout ?? "");
       assert.ok(
         ignoredInventory,
         `${control.id}: ${ignoredListing.join(" ")} emitted no ${adapter.summary_grammar} listing:\n${ignoredOutput}`,
