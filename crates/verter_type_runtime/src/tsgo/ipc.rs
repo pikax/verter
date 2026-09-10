@@ -3874,9 +3874,12 @@ impl TypeProvider for TsgoTypeProvider {
                 .await?;
 
             let items = result.as_array().cloned().unwrap_or_default();
+            // One index for the whole highlight batch — every highlight converts
+            // two endpoints against this same content snapshot.
+            let index = content_snapshot.as_deref().map(SourceIndex::new_utf16);
             Ok(items
                 .iter()
-                .filter_map(|item| parse_document_highlight(item, content_snapshot.as_deref()))
+                .filter_map(|item| parse_document_highlight(item, index.as_ref()))
                 .collect())
         })
     }
@@ -3917,9 +3920,11 @@ impl TypeProvider for TsgoTypeProvider {
                 .await?;
 
             let items = result.as_array().cloned().unwrap_or_default();
+            // One index for the whole hint batch.
+            let index = content_snapshot.as_deref().map(SourceIndex::new_utf16);
             Ok(items
                 .iter()
-                .filter_map(|item| parse_inlay_hint(item, content_snapshot.as_deref()))
+                .filter_map(|item| parse_inlay_hint(item, index.as_ref()))
                 .collect())
         })
     }
@@ -3970,9 +3975,11 @@ impl TypeProvider for TsgoTypeProvider {
                 cache.get(&contents_key(&path_owned)).cloned()
             };
 
+            // One index for every edit this resolve carries.
+            let index = content_snapshot.as_deref().map(SourceIndex::new_utf16);
             let additional_text_edits: Vec<ResolvedTextEdit> = edits
                 .iter()
-                .filter_map(|edit| parse_additional_text_edit(edit, content_snapshot.as_deref()))
+                .filter_map(|edit| parse_additional_text_edit(edit, index.as_ref()))
                 .collect();
 
             // The resolve response may also carry the lazy detail/documentation
@@ -4466,7 +4473,7 @@ fn parse_code_action<'a>(
 /// itself.
 fn parse_additional_text_edit(
     edit: &serde_json::Value,
-    content: Option<&str>,
+    index: Option<&SourceIndex<'_>>,
 ) -> Option<ResolvedTextEdit> {
     let range = edit.get("range")?;
     let start = range.get("start")?;
@@ -4477,9 +4484,15 @@ fn parse_additional_text_edit(
     let ec = u32::try_from(end.get("character")?.as_u64()?).ok()?;
     let new_text = edit.get("newText")?.as_str()?.to_string();
 
-    let c = content?;
-    let start_offset = position_to_offset_checked(c, sl, sc)?;
-    let end_offset = position_to_offset_checked(c, el, ec)?;
+    let idx = index?;
+    let start_offset = idx.checked_position_to_offset(LineColumn {
+        line: sl,
+        character: sc,
+    })?;
+    let end_offset = idx.checked_position_to_offset(LineColumn {
+        line: el,
+        character: ec,
+    })?;
     if start_offset > end_offset {
         return None;
     }
@@ -4533,6 +4546,10 @@ fn decode_semantic_tokens(
     if data.len() < 5 {
         return vec![];
     }
+    // One index for the whole token stream. Every token converts two endpoints,
+    // so a per-endpoint rebuild would rescan the document 2N times for N tokens —
+    // the largest response batch this provider decodes.
+    let idx = SourceIndex::new_utf16(content);
     let mut tokens = Vec::new();
     let mut current_line = 0u32;
     let mut current_start = 0u32;
@@ -4590,10 +4607,16 @@ fn decode_semantic_tokens(
         let Some(end_character) = current_start.checked_add(length) else {
             break;
         };
-        let Some(start) = position_to_offset_checked(content, current_line, current_start) else {
+        let Some(start) = idx.checked_position_to_offset(LineColumn {
+            line: current_line,
+            character: current_start,
+        }) else {
             continue;
         };
-        let Some(end) = position_to_offset_checked(content, current_line, end_character) else {
+        let Some(end) = idx.checked_position_to_offset(LineColumn {
+            line: current_line,
+            character: end_character,
+        }) else {
             continue;
         };
         let Some(length) = end.checked_sub(start) else {
@@ -4614,10 +4637,10 @@ fn decode_semantic_tokens(
 /// Parse a DocumentHighlight from a JSON value.
 fn parse_document_highlight(
     item: &serde_json::Value,
-    content: Option<&str>,
+    index: Option<&SourceIndex<'_>>,
 ) -> Option<TypeDocumentHighlight> {
     let range = item.get("range")?;
-    let (start, end) = parse_range_to_offsets(range, content)?;
+    let (start, end) = parse_range_to_offsets(range, index)?;
     let kind = match item.get("kind").and_then(|v| v.as_u64()) {
         Some(2) => TypeDocumentHighlightKind::Read,
         Some(3) => TypeDocumentHighlightKind::Write,
@@ -4627,11 +4650,18 @@ fn parse_document_highlight(
 }
 
 /// Parse an LSP InlayHint JSON value into an `InlayHint`.
-fn parse_inlay_hint(item: &serde_json::Value, content: Option<&str>) -> Option<InlayHint> {
+///
+/// `index` is the caller's index over this file's content, built once for the
+/// hint batch; without it the hint is dropped rather than positioned by a packed
+/// sentinel.
+fn parse_inlay_hint(
+    item: &serde_json::Value,
+    index: Option<&SourceIndex<'_>>,
+) -> Option<InlayHint> {
     let pos = item.get("position")?;
     let line = u32::try_from(pos.get("line")?.as_u64()?).ok()?;
     let character = u32::try_from(pos.get("character")?.as_u64()?).ok()?;
-    let offset = position_to_offset_checked(content?, line, character)?;
+    let offset = index?.checked_position_to_offset(LineColumn { line, character })?;
 
     // label can be a string or an array of InlayHintLabelPart
     let label = if let Some(s) = item.get("label").and_then(|v| v.as_str()) {
@@ -4664,7 +4694,10 @@ fn parse_inlay_hint(item: &serde_json::Value, content: Option<&str>) -> Option<I
 }
 
 /// Parse a JSON range `{ start: { line, character }, end: { line, character } }` to byte offsets.
-fn parse_range_to_offsets(range: &serde_json::Value, content: Option<&str>) -> Option<(u32, u32)> {
+fn parse_range_to_offsets(
+    range: &serde_json::Value,
+    index: Option<&SourceIndex<'_>>,
+) -> Option<(u32, u32)> {
     let start = range.get("start")?;
     let end = range.get("end")?;
     let sl = start.get("line")?.as_u64()? as u32;
@@ -4672,8 +4705,19 @@ fn parse_range_to_offsets(range: &serde_json::Value, content: Option<&str>) -> O
     let el = end.get("line")?.as_u64()? as u32;
     let ec = end.get("character")?.as_u64()? as u32;
 
-    if let Some(c) = content {
-        Some((position_to_offset(c, sl, sc), position_to_offset(c, el, ec)))
+    if let Some(idx) = index {
+        // Navigation range: keeps the fail-open clamp (an EDIT path must use
+        // `parse_range_to_offsets_strict_with_disk_fallback` instead).
+        Some((
+            idx.clamped_position_to_offset(LineColumn {
+                line: sl,
+                character: sc,
+            }),
+            idx.clamped_position_to_offset(LineColumn {
+                line: el,
+                character: ec,
+            }),
+        ))
     } else {
         Some((pack_position(sl, sc), pack_position(el, ec)))
     }

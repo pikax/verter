@@ -1440,7 +1440,7 @@ fn parse_additional_text_edit_drops_on_position_overflow() {
         "newText": "import { foo } from './foo';\n"
     });
     let content = "const a = 1;";
-    let resolved = parse_additional_text_edit(&edit, Some(content));
+    let resolved = parse_additional_text_edit(&edit, Some(&SourceIndex::new_utf16(content)));
     assert!(
         resolved.is_none(),
         "a u64>u32::MAX additionalTextEdit position must be DROPPED, never truncated into an \
@@ -1455,7 +1455,7 @@ fn parse_additional_text_edit_drops_on_position_overflow() {
         },
         "newText": "import { foo } from './foo';\n"
     });
-    let ok = parse_additional_text_edit(&edit_ok, Some(content))
+    let ok = parse_additional_text_edit(&edit_ok, Some(&SourceIndex::new_utf16(content)))
         .expect("an in-range additionalTextEdit must still be produced");
     assert_eq!((ok.start, ok.end), (0, 0), "in-range offsets unchanged");
     assert_eq!(ok.new_text, "import { foo } from './foo';\n");
@@ -2648,6 +2648,48 @@ fn test_decode_semantic_tokens_converts_utf16_lengths_to_bytes() {
     );
 }
 
+/// A token stream is decoded against ONE index built for the whole response. The
+/// tokens are delta-encoded across lines, so a shared index that went stale after
+/// the first line — or that measured a later line against the first line's start —
+/// would misplace every token after the first. Non-ASCII on more than one line is
+/// what makes a byte-offset slip visible.
+#[test]
+fn decode_semantic_tokens_places_every_token_in_a_multiline_non_ascii_stream() {
+    let content = "const π𝛛a = 1;\nconst é_b = 2;\nconst c𝛛 = 3;\n";
+    let legend =
+        crate::semantic_tokens::SemanticTokenLegendMap::from_names(&["variable"], &["declaration"]);
+    // Three tokens, one per line. `deltaLine` advances the line and resets the
+    // column, so token N's byte offset depends on the index knowing line N's start.
+    let data: Vec<serde_json::Value> = vec![
+        // line 0, UTF-16 col 6, "π𝛛a" = 1 + 2 + 1 = 4 units
+        0.into(),
+        6.into(),
+        4.into(),
+        0.into(),
+        1.into(),
+        // line 1, UTF-16 col 6, "é_b" = 3 units
+        1.into(),
+        6.into(),
+        3.into(),
+        0.into(),
+        1.into(),
+        // line 2, UTF-16 col 6, "c𝛛" = 1 + 2 = 3 units
+        1.into(),
+        6.into(),
+        3.into(),
+        0.into(),
+        1.into(),
+    ];
+
+    let tokens = decode_semantic_tokens(&data, Some(content), &legend);
+    assert_eq!(tokens.len(), 3, "{tokens:?}");
+    let sliced: Vec<&str> = tokens
+        .iter()
+        .map(|t| &content[t.start as usize..(t.start + t.length) as usize])
+        .collect();
+    assert_eq!(sliced, vec!["π𝛛a", "é_b", "c𝛛"]);
+}
+
 // @ai-generated - Guards checked conversion of tsgo semantic-token fields.
 #[test]
 fn test_decode_semantic_tokens_stops_on_numeric_field_overflow() {
@@ -2745,7 +2787,8 @@ fn test_parse_inlay_hint_requires_content_and_an_exact_position() {
         "kind": 1,
     });
 
-    let parsed = parse_inlay_hint(&hint, Some(content)).expect("valid inlay hint");
+    let parsed =
+        parse_inlay_hint(&hint, Some(&SourceIndex::new_utf16(content))).expect("valid inlay hint");
     assert_eq!(
         parsed.position, 9,
         "the UTF-16 line/column must resolve to a byte offset"
@@ -2761,7 +2804,7 @@ fn test_parse_inlay_hint_requires_content_and_an_exact_position() {
         "kind": 1,
     });
     assert!(
-        parse_inlay_hint(&out_of_range, Some(content)).is_none(),
+        parse_inlay_hint(&out_of_range, Some(&SourceIndex::new_utf16(content))).is_none(),
         "an out-of-range inlay position must be dropped, never clamped to EOF"
     );
 
@@ -2772,7 +2815,7 @@ fn test_parse_inlay_hint_requires_content_and_an_exact_position() {
         "kind": 1,
     });
     assert!(
-        parse_inlay_hint(&overflowing, Some(content)).is_none(),
+        parse_inlay_hint(&overflowing, Some(&SourceIndex::new_utf16(content))).is_none(),
         "an overflowing inlay position must be dropped, never truncated to line 0"
     );
 }
@@ -2788,7 +2831,7 @@ fn test_parse_document_highlight() {
         "kind": 2
     });
     let content = "const msg = 'hello';\n";
-    let hl = parse_document_highlight(&json, Some(content)).unwrap();
+    let hl = parse_document_highlight(&json, Some(&SourceIndex::new_utf16(content))).unwrap();
     assert_eq!(hl.start, 6);
     assert_eq!(hl.end, 9);
     assert!(matches!(hl.kind, TypeDocumentHighlightKind::Read));

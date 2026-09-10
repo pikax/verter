@@ -105,8 +105,9 @@ Spans computed as `content_offset + local_offset` during CSS scanning, where `co
 index in `documents/mod.rs`) and a borrowing `SourceIndex<'a>` (owns only the line-start table). Both
 delegate to the same private conversion core, so they cannot disagree about an encoding, a bound
 check, or a clamp. A caller converting more than one position against one immutable source — a
-diagnostic pull, a rename/code-fix batch, a span's two endpoints — builds ONE `SourceIndex` and
-converts every endpoint through it; the per-call convenience functions rescan the source each time.
+diagnostic pull, a semantic-token stream, an inlay-hint or highlight batch, a rename/code-fix
+batch, a span's two endpoints — builds ONE `SourceIndex` and converts every endpoint through it;
+the per-call convenience functions rescan the source each time.
 
 Each index offers both conventions explicitly: `clamped_position_to_offset` fails OPEN (out-of-range
 clamps to EOF — the navigation-sentinel default) and `checked_position_to_offset` fails CLOSED
