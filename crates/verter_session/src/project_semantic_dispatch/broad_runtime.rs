@@ -317,7 +317,25 @@ impl ProjectSemanticDispatch<'_> {
                 }
                 SemanticNodeData::BareRef(_)
                 | SemanticNodeData::ImportType(_)
-                | SemanticNodeData::TypeOf(_) => {
+                | SemanticNodeData::TypeOf(_)
+                | SemanticNodeData::TypeOfNominal(_) => {
+                    // The runtime constructor is a STRUCTURAL question: a
+                    // `unique symbol`-typed prop emits `Symbol`, exactly as
+                    // its widened inhabitant does. A nominal carrier is
+                    // terminal under carrier resolution, so the
+                    // `resolved == item.node` rail below would read it as an
+                    // unresolved reference and collapse the WHOLE
+                    // constructor list to empty (`Unknown` with no
+                    // Boolean/Function present clears `constructors`), not
+                    // merely this one entry. Widen first; the deferred
+                    // shell falls through to its ordinary resolution.
+                    if let Some(widened) = self.widened_nominal_typeof(item.node) {
+                        work.push(RuntimeWork {
+                            node: widened,
+                            filter_unknown: item.filter_unknown,
+                        });
+                        continue;
+                    }
                     let (resolved, nested_partial) = self.capture_runtime_node_resolution(|| {
                         self.resolve_carrier_subject_node(item.node, transit)
                     });

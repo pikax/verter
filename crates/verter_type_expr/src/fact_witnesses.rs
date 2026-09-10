@@ -1766,6 +1766,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
     // instead — never a fabricated authored locator.
     let inferred = ValueTypeAnnotationFact {
         is_unique_symbol: false,
+        unique_symbol_members: std::sync::Arc::from([]),
         typeof_alias_target: None,
         classification: ValueAnnotationClass::Direct,
         annotation: Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
@@ -1780,6 +1781,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
     // one.
     let authored = ValueTypeAnnotationFact {
         is_unique_symbol: false,
+        unique_symbol_members: std::sync::Arc::from([]),
         typeof_alias_target: None,
         classification: ValueAnnotationClass::Direct,
         annotation: Some(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(
@@ -1797,6 +1799,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
     // replacement) and is orthogonal to the annotation source.
     let typeof_target = ValueTypeAnnotationFact {
         is_unique_symbol: false,
+        unique_symbol_members: std::sync::Arc::from([]),
         typeof_alias_target: Some(ValueDeclIdentityPart {
             canonical_id: std::sync::Arc::from("/ws/a.ts"),
             owner: crate::TopLevelOwnerId::ordinary_file(),

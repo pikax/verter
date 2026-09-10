@@ -2224,6 +2224,7 @@ fn ambient_call_member(
             env.type_env_hash,
             env.lib_env_hash,
         ),
+        path: Arc::from([]),
         context: crate::semantic_query::TypeOfContext::new(
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,

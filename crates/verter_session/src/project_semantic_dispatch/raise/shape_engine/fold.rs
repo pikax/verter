@@ -233,7 +233,11 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             };
             alg.mapped(parameter, source, value, optional, readonly, name_type)
         }
-        SemanticNodeData::TypeOf(_) => {
+        SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_) => {
+            // The nominal terminal folds through the same head path with NO
+            // instantiation arguments (`carrier_type_args` answers empty for
+            // it); the declaring identity is semantic content the raise
+            // algebra does not carry — the relation reads it off the node.
             let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
             let type_args = data.carrier_type_args();
             let mut segments = value_root

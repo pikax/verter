@@ -4203,6 +4203,41 @@ fn relation_budget_exceeded_is_public_and_admits_nothing() {
     assert_eq!(graph.relation_memo_count(), before + 1);
 }
 
+#[test]
+fn comparable_budget_exhaustion_is_typed_and_non_admissible() {
+    use crate::semantic_query::{QueryResult, RelationKind, RelationOutcome, SemanticQueryValue};
+
+    let host = host_for_relation_tests();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+        required_member("kind", string),
+    ])));
+    let target = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+        required_member("kind", string),
+    ])));
+    let key = dispatch.relate_key_for_kind(source, target, RelationKind::Comparable);
+
+    host.relation_knobs
+        .force_budget_exhaustion
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let before = graph.relation_memo_count();
+    let result = dispatch.execute(key.to_query_key());
+    host.relation_knobs
+        .force_budget_exhaustion
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    assert!(matches!(
+        result,
+        QueryResult::Value(output)
+            if matches!(&output.value, SemanticQueryValue::Relation(payload)
+                if matches!(payload.outcome, RelationOutcome::BudgetExceeded(_)))
+    ));
+    assert_eq!(graph.relation_memo_count(), before);
+    assert!(graph.get_relation_payload(&host, &key).is_none());
+}
+
 /// D7.5: the paired strict-on/off fixture — `null → string` flips its
 /// verdict between the TS-strict regime (NotAssignable) and the relaxed
 /// `strictNullChecks`-off regime (Assignable), and the two judgements
@@ -4578,15 +4613,15 @@ fn contravariant_infer_candidates_intersect_not_union() {
     );
 }
 
-/// Axis refusal: a relation key on a NOT-YET-IMPLEMENTED axis (a
-/// non-`Assignable` relation kind, a non-default overload-selection
-/// policy) must REFUSE — undecided, ReturnOnly, zero admission — never a
-/// silent assignability answer. `Identity(string, unknown)` through the
-/// assignability reducer would hit the `(_, Unknown) => Assignable`
-/// prefilter arm and PUBLISH a false `Assignable` for an identity
-/// judgement. The `Fresh` freshness axis and the excess-property policy
-/// are IMPLEMENTED (the fresh excess prepass) and no longer refuse — see
-/// `fresh_excess_property_checking`.
+/// Axis refusal: a relation key outside a live relation's bounded domain, or
+/// with an unsupported overload-selection policy, must REFUSE — undecided,
+/// ReturnOnly, zero admission — never a silent assignability answer.
+/// `Identity` is live only for two nominal subjects, so
+/// `Identity(string, unknown)` is deliberately outside its domain. Routing
+/// that pair through assignability would hit the `(_, Unknown) => Assignable`
+/// prefilter arm and publish a false identity verdict. The `Fresh` freshness
+/// axis and the excess-property policy are implemented and no longer refuse —
+/// see `fresh_excess_property_checking`.
 #[test]
 fn non_default_relation_axes_refuse_instead_of_answering_assignability() {
     use crate::semantic_query::{

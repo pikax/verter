@@ -12,7 +12,6 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::flow::flow_graph::build_function_flow_graph;
 use verter_semantic::analysis::flow::lower::lower_slice_plan;
 use verter_semantic::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
 use verter_semantic::analysis::function_program::{
@@ -80,18 +79,17 @@ fn selection_for(
     path: &[Arc<str>],
 ) -> (
     FlowSliceSelection,
-    Arc<verter_semantic::analysis::flow::FunctionBodySkeleton>,
+    crate::cache_runtime::flow_slice_node::BoundFlowGraph,
 ) {
-    let skeleton = memo
-        .function_body_skeleton(entry)
-        .expect("the skeleton must build for an indexed function");
-    let graph = build_function_flow_graph(&skeleton);
-    let demand = SliceDemand::for_return_projection(&skeleton, path);
-    let plan = ReturnPathPeeker::new(&graph)
+    let bound = memo.flow_bound_graph_for_tests(entry);
+    let skeleton = &bound.bundle().skeleton;
+    let graph = &bound.bundle().graph;
+    let demand = SliceDemand::for_return_projection(skeleton, path);
+    let plan = ReturnPathPeeker::new(graph)
         .plan(&demand, &FlowSliceBudget::default())
         .expect("the default budget admits these fixtures");
-    let ir = lower_slice_plan(&plan, &graph, &skeleton);
-    (FlowSliceSelection::from_slice_ir(&ir), Arc::new(skeleton))
+    let ir = lower_slice_plan(&plan, graph, skeleton);
+    (FlowSliceSelection::from_slice_ir(&ir), bound)
 }
 
 fn content_for_path(source: &str, name: &str, path: &[Arc<str>]) -> Arc<SliceContent> {
@@ -99,12 +97,381 @@ fn content_for_path(source: &str, name: &str, path: &[Arc<str>]) -> Arc<SliceCon
     let index = memo.function_program_index();
     let entry = entry_of(&index, name);
     let (selection, skeleton) = selection_for(&memo, entry, path);
-    memo.flow_slice_content(entry, selection, skeleton)
+    memo.flow_slice_content(entry, selection, &skeleton)
         .expect("slice content must build for an indexed function")
 }
 
 fn content_for(source: &str, name: &str) -> Arc<SliceContent> {
     content_for_path(source, name, &[])
+}
+
+#[test]
+fn nested_descriptor_defers_mutable_capture_annotation_content() {
+    let content = content_for(
+        "function f() { let captured: 'capture-annotation-content-sentinel' = 'value' as any; return (): number => 1; }",
+        "f",
+    );
+    let context = content
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| {
+            let SliceStatement::Return {
+                argument: Some(SliceExpr::NestedFunctionValue { context, .. }),
+                ..
+            } = statement
+            else {
+                return None;
+            };
+            Some(context)
+        })
+        .expect("selected nested descriptor");
+    assert!(
+        !format!("{context:?}").contains("capture-annotation-content-sentinel"),
+        "building a nested descriptor must not lower enclosing mutable annotations"
+    );
+}
+
+#[test]
+fn nested_signature_typeof_uses_lexical_siblings_without_runtime_captures() {
+    let source = "const sibling = 'module'; function f() { const sibling = 1; return (): typeof sibling => 1; }";
+    let memo = memo_for(source);
+    let content = content_for(source, "f");
+    let nested = content
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::Return {
+                argument: Some(nested @ SliceExpr::NestedFunctionValue { .. }),
+                ..
+            } => Some(nested),
+            _ => None,
+        })
+        .expect("nested descriptor");
+    let SliceExpr::NestedFunctionValue { function, .. } = nested else {
+        unreachable!()
+    };
+    let index = memo.function_program_index();
+    assert!(
+        index
+            .get(function)
+            .expect("indexed child")
+            .entry()
+            .captures
+            .0
+            .is_empty(),
+        "type syntax is absent from runtime captures"
+    );
+    let child = nested_content(&memo, nested);
+    assert!(child.declared_return.as_ref().expect("declared return").shadowed().iter().any(|name| {
+        matches!(name, crate::flow_slice_content::FrameShadowedName::Value(name) if name.as_ref() == "sibling")
+    }), "the lexical sibling must prevent a module-scope typeof answer");
+}
+
+#[test]
+fn selected_capture_authority_rejects_a_different_outer_source_snapshot() {
+    let source =
+        "const outer = 'one'; function f() { let captured: typeof outer; return () => captured; }";
+    let memo = memo_for(source);
+    let content = content_for(source, "f");
+    let (function, context) = content
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::Return {
+                argument:
+                    Some(SliceExpr::NestedFunctionValue {
+                        function, context, ..
+                    }),
+                ..
+            } => Some((function, context)),
+            _ => None,
+        })
+        .expect("nested descriptor");
+    let index = memo.function_program_index();
+    let capture = &index
+        .get(function)
+        .expect("indexed child")
+        .entry()
+        .captures
+        .0[0];
+    let locator = context
+        .mutable_authorities(capture)
+        .into_iter()
+        .next()
+        .expect("exact mutable source locator");
+    assert!(memo
+        .flow_capture_authority(&locator)
+        .is_some_and(|authority| authority.is_some()));
+    let changed = memo_for(&source.replace("'one'", "'two'"));
+    assert!(changed.flow_capture_authority(&locator).is_none(),
+        "unchanged function bytes cannot attach a lexical gate from a different outer source snapshot");
+    let changed_index = changed.function_program_index();
+    let changed_entry = changed_index
+        .get(function)
+        .expect("same indexed child")
+        .entry();
+    let (_, changed_bound) = selection_for(&changed, changed_entry, &[]);
+    assert!(
+        changed
+            .flow_slice_content_with_context(
+                changed_entry,
+                None,
+                &changed_bound,
+                Some(Arc::clone(context)),
+            )
+            .is_none(),
+        "signature-only lowering must reject an older linked lexical gate too"
+    );
+}
+
+#[test]
+fn selected_capture_locators_skip_known_unannotated_local_declarations() {
+    let source =
+        "function f() { let plain; let typed: 'declared'; return () => ({ plain, typed }); }";
+    let memo = memo_for(source);
+    let content = content_for(source, "f");
+    let (function, context) = content
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::Return {
+                argument:
+                    Some(SliceExpr::NestedFunctionValue {
+                        function, context, ..
+                    }),
+                ..
+            } => Some((function, context)),
+            _ => None,
+        })
+        .expect("selected closure");
+    let index = memo.function_program_index();
+    let captures = &index
+        .get(function)
+        .expect("indexed child")
+        .entry()
+        .captures
+        .0;
+    let plain = captures
+        .iter()
+        .find(|identity| identity.name.as_ref() == "plain")
+        .expect("plain capture");
+    let typed = captures
+        .iter()
+        .find(|identity| identity.name.as_ref() == "typed")
+        .expect("typed capture");
+    assert!(
+        context.mutable_authorities(plain).is_empty(),
+        "known annotation absence must never schedule a retained source lookup"
+    );
+    let locators = context.mutable_authorities(typed);
+    assert_eq!(locators.len(), 1);
+    let Some(Some(authority)) = memo.flow_capture_authority(&locators[0]) else {
+        panic!("selected annotation must hydrate");
+    };
+    assert_eq!(
+        authority.declared.ty(),
+        &TypeExpr::Literal(LiteralValue::String("declared".to_string()))
+    );
+}
+
+#[test]
+fn runtime_occurrence_classification_does_not_rescan_hoisted_alias_groups() {
+    use std::sync::atomic::Ordering;
+    for count in [32, 128] {
+        let aliases = "var x=0;".repeat(count);
+        let members = (0..count)
+            .map(|i| format!("p{i}:x"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!("function f(x:number){{{aliases}return {{{members}}};}}");
+        let memo = memo_for(&source);
+        let index = memo.function_program_index();
+        let entry = entry_of(&index, "f");
+        let (selection, bound) = selection_for(&memo, entry, &[]);
+        memo.capture_lookup_work.store(0, Ordering::Relaxed);
+        let content = memo.flow_slice_content(entry, selection, &bound).unwrap();
+        assert!(matches!(
+            content.body.statements.last(),
+            Some(SliceStatement::Return {
+                argument: Some(SliceExpr::Object { .. }),
+                ..
+            })
+        ));
+        let inspected = memo.capture_lookup_work.load(Ordering::Relaxed);
+        assert!(
+            inspected <= count * 8,
+            "{count} selected alias reads inspected {inspected} binding entries"
+        );
+    }
+}
+
+#[test]
+fn selected_captured_parameters_retrieve_without_repeated_frame_inventory_scans() {
+    use std::sync::atomic::Ordering;
+    let count = 48;
+    let parameters = (0..count)
+        .map(|i| format!("p{i}: number"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let captures = (0..count)
+        .map(|i| format!("p{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let source = format!("function f({parameters}) {{ return () => ({{{captures}}}); }}");
+    let memo = memo_for(&source);
+    let content = content_for(&source, "f");
+    let (function, context) = content
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::Return {
+                argument:
+                    Some(SliceExpr::NestedFunctionValue {
+                        function, context, ..
+                    }),
+                ..
+            } => Some((function, context)),
+            _ => None,
+        })
+        .expect("selected closure");
+    let index = memo.function_program_index();
+    let child = index.get(function).unwrap().entry();
+    memo.capture_lookup_work.store(0, Ordering::Relaxed);
+    let locators = {
+        let _probe = crate::flow_slice_content::capture_lookup_probe::enter(Arc::clone(
+            &memo.capture_lookup_work,
+        ));
+        child
+            .captures
+            .0
+            .iter()
+            .flat_map(|capture| context.mutable_authorities(capture))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(locators.len(), count);
+    let authorities = memo
+        .flow_capture_authorities(&locators)
+        .expect("retained source lease");
+    assert!(authorities
+        .iter()
+        .all(
+            |authority| authority.as_ref().is_some_and(|authority| authority
+                .as_ref()
+                .is_some_and(|authority| authority.declared.ty()
+                    == &TypeExpr::Primitive(PrimitiveName::Number)))
+        ));
+    let inspected = memo.capture_lookup_work.load(Ordering::Relaxed);
+    assert!(inspected <= count * 3, "full selected capture retrieval inspected {inspected} inventory entries for {count} parameters");
+}
+
+#[test]
+fn selected_annotation_descent_inspects_logarithmic_siblings() {
+    use oxc_span::GetSpan;
+    use std::cell::Cell;
+    struct Observed<'a> {
+        span: oxc_span::Span,
+        reads: &'a Cell<usize>,
+    }
+    impl GetSpan for Observed<'_> {
+        fn span(&self) -> oxc_span::Span {
+            self.reads.set(self.reads.get() + 1);
+            self.span
+        }
+    }
+    let mut source = String::new();
+    for index in 0..2048 {
+        source.push_str(&format!(
+            "function sibling{index}() {{ let value: 'unused{index}'; }}\n"
+        ));
+    }
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, &source, oxc_span::SourceType::ts()).parse();
+    assert!(parsed.errors.is_empty());
+    let reads = Cell::new(0);
+    let siblings: Vec<_> = parsed
+        .program
+        .body
+        .iter()
+        .map(|statement| Observed {
+            span: statement.span(),
+            reads: &reads,
+        })
+        .collect();
+    let target = siblings[1900].span;
+    let selected =
+        crate::flow_slice_content::selected_span_child(&siblings, target).expect("target sibling");
+    assert_eq!(selected.span, target);
+    assert!(
+        reads.get() <= 16,
+        "exact source descent inspected {} of 2048 siblings",
+        reads.get()
+    );
+}
+
+#[test]
+fn slice_binding_references_preserve_shadowed_capture_frames() {
+    use verter_semantic::analysis::flow::FlowBindingRef;
+    let source = "function f(flag: boolean) { if (flag) { let twin = 1; return () => twin; } else { let twin = 2; return () => twin; } }";
+    let content = content_for(source, "f");
+    let memo = memo_for(source);
+    let SliceStatement::If {
+        consequent,
+        alternate: Some(alternate),
+        ..
+    } = &content.body.statements[0]
+    else {
+        panic!("conditional fixture");
+    };
+    let mut identities = Vec::new();
+    let mut functions = Vec::new();
+    for region in [consequent, alternate] {
+        let mut region: &SliceRegion = region;
+        while let [SliceStatement::Block(block)] = region.statements.as_ref() {
+            region = block;
+        }
+        let [SliceStatement::Binding { binding, .. }, SliceStatement::Return {
+            argument: Some(nested @ SliceExpr::NestedFunctionValue { .. }),
+            ..
+        }] = region.statements.as_ref()
+        else {
+            panic!("one declaration and one captured closure: {region:?}");
+        };
+        let identity = content
+            .bindings
+            .identity(*binding)
+            .expect("declaration identity");
+        let child = nested_content(&memo, nested);
+        let body = &child.body;
+        let bindings = &child.bindings;
+        let [SliceStatement::Return {
+            argument:
+                Some(SliceExpr::Local {
+                    binding: FlowBindingRef::Captured(captured),
+                    ..
+                }),
+            ..
+        }] = body.statements.as_ref()
+        else {
+            panic!("the nested frame reads an exact capture: {body:?}");
+        };
+        assert_eq!(captured, identity);
+        assert_ne!(bindings.function(), content.bindings.function());
+        identities.push(identity.clone());
+        functions.push(bindings.function().clone());
+    }
+    assert_ne!(
+        identities[0], identities[1],
+        "shadowed declarations never share capture storage"
+    );
+    assert_ne!(
+        functions[0], functions[1],
+        "each closure owns its local ID space"
+    );
 }
 
 #[test]
@@ -979,18 +1346,39 @@ fn instanceof_constructor_binds_through_the_frame_before_owner_scope() {
 }
 
 /// The body region of the ONE nested function value `name` returns.
-fn returned_nested_body(node: &SliceContent) -> &SliceRegion {
-    node.body
+fn nested_content(memo: &DeclBodyMemo, nested: &SliceExpr) -> Arc<SliceContent> {
+    let SliceExpr::NestedFunctionValue {
+        function, context, ..
+    } = nested
+    else {
+        panic!("nested descriptor");
+    };
+    let index = memo.function_program_index();
+    let entry = index.get(function).expect("indexed child").entry();
+    let (selection, skeleton) = selection_for(memo, entry, &[]);
+    memo.flow_slice_content_with_context(
+        entry,
+        Some(selection),
+        &skeleton,
+        Some(Arc::clone(context)),
+    )
+    .expect("selected child content")
+}
+
+fn returned_nested_body(source: &str, node: &SliceContent) -> Arc<SliceContent> {
+    let nested = node
+        .body
         .statements
         .iter()
         .find_map(|statement| match statement {
             SliceStatement::Return {
-                argument: Some(SliceExpr::NestedFunctionValue { body, .. }),
+                argument: Some(nested @ SliceExpr::NestedFunctionValue { .. }),
                 ..
-            } => Some(body),
+            } => Some(nested),
             _ => None,
         })
-        .expect("the function returns a nested function value")
+        .expect("the function returns a nested function value");
+    nested_content(&memo_for(source), nested)
 }
 
 /// The number of `if` statements of `region` guarded by a predicate fact.
@@ -1083,21 +1471,19 @@ fn predicate_target_over_caller_bindings_never_resolves_in_the_caller_environmen
         );
     }
 
-    let enclosing = content_for(
-        &format!(
-            "{PRELUDE}function outer<T extends number>() {{ \
+    let source = format!(
+        "{PRELUDE}function outer<T extends number>() {{ \
              return (x: number | string) => {{ if (isNum(x)) return x; return false }} }}"
-        ),
-        "outer",
     );
-    let nested = returned_nested_body(&enclosing);
+    let enclosing = content_for(&source, "outer");
+    let nested = returned_nested_body(&source, &enclosing);
     assert_eq!(
-        region_predicate_guard_count(nested),
+        region_predicate_guard_count(&nested.body),
         0,
         "an ENCLOSING frame's type parameter rebinds the target too: {enclosing:?}"
     );
     assert_eq!(
-        region_guard_gap_count(nested),
+        region_guard_gap_count(&nested.body),
         1,
         "the nested control test gaps: {enclosing:?}"
     );
@@ -2752,7 +3138,7 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
     let entry = member_entry_of(&index, "C", 1);
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
     let brand = memo
-        .flow_slice_content(entry, selection, skeleton)
+        .flow_slice_content(entry, selection, &skeleton)
         .expect("the class member slice content must build");
     assert_eq!(
         guard_gap_count(&brand),
@@ -3279,7 +3665,10 @@ fn return_of_parameter_is_param_carrier() {
     assert_eq!(
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
-            argument: Some(SliceExpr::Param { ordinal: 0 }),
+            argument: Some(SliceExpr::Param {
+                ordinal: 0,
+                binding: node.params[0].binding.expect("parameter binding")
+            }),
             freshness: SliceFreshness::Pinned,
         }],
     );
@@ -3326,6 +3715,7 @@ fn local_reaching_definition_is_binding_and_local() {
     );
     assert_eq!(node.body.statements.len(), 2);
     let SliceStatement::Binding {
+        binding,
         name,
         kind,
         init,
@@ -3356,6 +3746,7 @@ fn local_reaching_definition_is_binding_and_local() {
         node.body.statements[1],
         SliceStatement::Return {
             argument: Some(SliceExpr::Local {
+                binding: verter_semantic::analysis::flow::FlowBindingRef::Local(*binding),
                 name: Arc::from("x"),
                 param: None,
                 captured: false,
@@ -3416,7 +3807,7 @@ fn symbolic_and_unrepresentable_calls() {
     let entry = member_entry_of(&index, "Service", 1);
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
     let node = memo
-        .flow_slice_content(entry, selection, skeleton)
+        .flow_slice_content(entry, selection, &skeleton)
         .expect("the class method slice content must build");
     assert_eq!(
         node.body.statements.as_ref(),
@@ -3465,7 +3856,7 @@ fn object_return_lowers_a_spread_entry_structurally() {
         panic!("the spread entry precedes the direct member in source order: {entries:?}");
     };
     assert!(
-        matches!(source, SliceExpr::Type(leaf) if matches!(leaf.ty(), TypeExpr::TypeOf(_))),
+        matches!(source.as_ref(), SliceExpr::Type(leaf) if matches!(leaf.ty(), TypeExpr::TypeOf(_))),
         "a FREE spread operand takes the owner-scope leaf lowering: {source:?}"
     );
     assert_eq!(member.key.static_name(), Some("x"));
@@ -3520,7 +3911,7 @@ fn member_demand_selects_the_spread_source_and_elides_the_unrelated_sibling() {
         panic!("the spread entry precedes the direct member: {entries:?}");
     };
     assert!(
-        !matches!(spread, SliceExpr::Elided),
+        !matches!(spread.as_ref(), SliceExpr::Elided),
         "a demand for `a` reaches the SPREAD source (the only entry that can \
          provision it): {spread:?}"
     );
@@ -3549,7 +3940,7 @@ fn member_demand_selects_the_spread_source_and_elides_the_unrelated_sibling() {
         panic!("the spread entry precedes the direct member: {entries:?}");
     };
     assert!(
-        !matches!(spread, SliceExpr::Elided),
+        !matches!(spread.as_ref(), SliceExpr::Elided),
         "a whole-return demand reaches the spread source: {spread:?}"
     );
     assert!(
@@ -3597,8 +3988,11 @@ fn object_return_spread_of_a_frame_binding_reads_the_frame_binding() {
         panic!("the spread entry precedes the direct member in source order: {entries:?}");
     };
     assert_eq!(
-        source,
-        &SliceExpr::Param { ordinal: 0 },
+        source.as_ref(),
+        &SliceExpr::Param {
+            ordinal: 0,
+            binding: node.params[0].binding.expect("parameter binding")
+        },
         "the frame-owned spread operand IS the parameter"
     );
     assert_eq!(member.key.static_name(), Some("x"));
@@ -3710,12 +4104,8 @@ fn locator_miss_is_typed_none() {
     let mut missing_contributor = entry.clone();
     missing_contributor.locator.contributor.contributor_index = 9999;
     assert!(
-        memo.flow_slice_content(
-            &missing_contributor,
-            selection.clone(),
-            Arc::clone(&skeleton)
-        )
-        .is_none(),
+        memo.flow_slice_content(&missing_contributor, selection.clone(), &skeleton)
+            .is_none(),
         "an out-of-range contributor is a typed miss"
     );
 
@@ -3724,7 +4114,7 @@ fn locator_miss_is_typed_none() {
         declarator_ordinal: 99,
     }]);
     assert!(
-        memo.flow_slice_content(&bad_descent, selection, skeleton)
+        memo.flow_slice_content(&bad_descent, selection, &skeleton)
             .is_none(),
         "a mismatched descent is a typed miss"
     );
@@ -3999,7 +4389,8 @@ fn typeof_guard_models_all_eight_kinds() {
             panic!("{spelling}: the test must model a Typeof guard: {guard:?}");
         };
         assert!(
-            matches!(subject.root, SliceNarrowRoot::Param(0)) && subject.path.is_empty(),
+            matches!(subject.root, SliceNarrowRoot::Param { ordinal: 0, .. })
+                && subject.path.is_empty(),
             "{spelling}: the subject is the bare parameter: {guard:?}"
         );
         assert_eq!(
@@ -4082,7 +4473,8 @@ fn typeof_and_equality_guards_support_both_operand_orders_and_negation() {
             panic!("the test must model an EqLiteral guard: {guard:?}");
         };
         assert!(
-            matches!(subject.root, SliceNarrowRoot::Param(0)) && subject.path.is_empty(),
+            matches!(subject.root, SliceNarrowRoot::Param { ordinal: 0, .. })
+                && subject.path.is_empty(),
             "{guard:?}"
         );
         assert!(
@@ -4123,7 +4515,7 @@ fn in_guard_and_instanceof_guard_model_their_closed_forms_and_negation() {
         };
         assert_eq!(key.as_ref(), "a", "{guard:?}");
         assert!(
-            matches!(subject.root, SliceNarrowRoot::Param(0)) && subject.path.is_empty(),
+            matches!(subject.root, SliceNarrowRoot::Param { ordinal: 0, .. }) && subject.path.is_empty(),
             "{guard:?}"
         );
         assert_eq!(*n, negated, "{guard:?}");
@@ -4151,7 +4543,7 @@ fn in_guard_and_instanceof_guard_model_their_closed_forms_and_negation() {
             panic!("the test must model an Instanceof guard: {guard:?}");
         };
         assert!(
-            matches!(subject.root, SliceNarrowRoot::Param(0)) && subject.path.is_empty(),
+            matches!(subject.root, SliceNarrowRoot::Param { ordinal: 0, .. }) && subject.path.is_empty(),
             "{guard:?}"
         );
         assert_eq!(ctor.as_ref(), "A", "{guard:?}");
@@ -4185,7 +4577,7 @@ fn truthy_guard_models_a_bare_parameter_and_a_member_path_subject() {
                 SliceGuard::Truthy {
                     ref subject,
                     negated: n,
-                } if matches!(subject.root, SliceNarrowRoot::Param(0)) && subject.path.is_empty() && n == negated
+                } if matches!(subject.root, SliceNarrowRoot::Param { ordinal: 0, .. }) && subject.path.is_empty() && n == negated
             ),
             "a bare parameter's truthiness narrows the parameter itself, path-empty: {guard:?}"
         );
@@ -4207,7 +4599,7 @@ fn truthy_guard_models_a_bare_parameter_and_a_member_path_subject() {
         let SliceGuard::Truthy { subject, negated: n } = &guard else {
             panic!("the test must model a Truthy guard: {guard:?}");
         };
-        assert!(matches!(subject.root, SliceNarrowRoot::Param(0)), "{guard:?}");
+        assert!(matches!(subject.root, SliceNarrowRoot::Param { ordinal: 0, .. }), "{guard:?}");
         assert_eq!(
             subject.path.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
             vec!["y"],
@@ -4436,7 +4828,7 @@ fn a_binding_ineligible_for_the_alias_channel_still_models_its_own_truthiness() 
             matches!(
                 &guard,
                 SliceGuard::Truthy { subject, negated: false }
-                    if matches!(subject.root, SliceNarrowRoot::Local(ref name) if name.as_ref() == "c")
+                    if matches!(subject.root, SliceNarrowRoot::Local { ref name, .. } if name.as_ref() == "c")
                         && subject.path.is_empty()
             ),
             "{case}: the binding models its OWN truthiness, never the discarded initializer fact: {guard:?}"
@@ -4710,7 +5102,10 @@ fn truthiness_of_a_non_null_asserted_member_subject_names_the_asserted_reference
     assert!(!negated, "a bare truthiness test is not negated: {node:?}");
     assert_eq!(
         subject.root,
-        SliceNarrowRoot::Param(0),
+        SliceNarrowRoot::Param {
+            ordinal: 0,
+            binding: node.params[0].binding.expect("parameter binding")
+        },
         "the assertion is peeled to the parameter it wraps: {node:?}"
     );
     assert_eq!(
@@ -4722,5 +5117,108 @@ fn truthiness_of_a_non_null_asserted_member_subject_names_the_asserted_reference
         guard_gap_count(&node),
         0,
         "a reference this half CAN express carries no guard gap: {node:?}"
+    );
+}
+
+#[test]
+fn selected_assignment_definition_lookup_ignores_unrelated_write_inventory() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for count in [64usize, 256] {
+        let writes = "unrelated=0;".repeat(count);
+        let source = format!("function f(){{let x=0;let unrelated=0;{writes}x=1;return x;}}");
+        let memo = memo_for(&source);
+        let index = memo.function_program_index();
+        let entry = entry_of(&index, "f");
+        let (mut selection, bound) = selection_for(&memo, entry, &[]);
+        let work = Arc::new(AtomicUsize::new(0));
+        selection.assignment_lookup_work = Some(Arc::clone(&work));
+        let content = memo.flow_slice_content(entry, selection, &bound).unwrap();
+        let definitions: Vec<_> = content
+            .body
+            .statements
+            .iter()
+            .filter_map(|statement| match statement {
+                SliceStatement::Assignment { definition, .. } => Some(*definition),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            definitions.len(),
+            1,
+            "only the demanded x assignment lowers"
+        );
+        let rhs_start = source.rfind("x=1").unwrap() + 2;
+        assert_eq!(
+            bound
+                .bundle()
+                .skeleton
+                .expr_site(definitions[0])
+                .span
+                .to_absolute(entry.span.start),
+            verter_span::Span::new(rhs_start as u32, (rhs_start + 1) as u32)
+        );
+        let inspected = work.load(Ordering::Relaxed);
+        eprintln!("{count} unrelated writes: {inspected} selected assignment identity probes");
+        assert!(inspected > 0);
+        assert!(
+            inspected <= 4,
+            "fixed selected assignment inspected {inspected} sites with {count} unrelated writes"
+        );
+    }
+}
+
+#[test]
+fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
+    let source = "function f(){let x=0;x=1;return x;}";
+    let memo = memo_for(source);
+    let index = memo.function_program_index();
+    let entry = entry_of(&index, "f");
+    let bound = memo.flow_bound_graph_for_tests(entry);
+    let skeleton = &bound.bundle().skeleton;
+    let graph = &bound.bundle().graph;
+    let demand = SliceDemand::for_return_projection(skeleton, &[]);
+    let plan = ReturnPathPeeker::new(graph)
+        .plan(&demand, &FlowSliceBudget::default())
+        .unwrap();
+    let mut ir = lower_slice_plan(&plan, graph, skeleton);
+    let rhs_start = source.find("x=1").unwrap() + 2;
+    let rhs_span = verter_semantic::analysis::flow::FrameSpan::rebase(
+        entry.span.start,
+        verter_span::Span::new(rhs_start as u32, (rhs_start + 1) as u32),
+    );
+    let original = ir
+        .exprs
+        .iter()
+        .find(|expression| expression.span == rhs_span)
+        .unwrap()
+        .clone();
+    let distinct_site = ir
+        .exprs
+        .iter()
+        .find(|expression| expression.site != original.site)
+        .unwrap()
+        .site;
+    let mut expressions = ir.exprs.to_vec();
+    expressions.push(original.clone());
+    ir.exprs = expressions.clone().into();
+    let content = memo
+        .flow_slice_content(entry, FlowSliceSelection::from_slice_ir(&ir), &bound)
+        .unwrap();
+    assert!(content.body.statements.iter().any(|statement| matches!(statement,SliceStatement::Assignment{definition,..} if *definition==original.site)),"repeated identical addresses preserve the same selected site");
+    expressions.push(verter_semantic::analysis::flow::flow_ir::FlowExpr {
+        site: distinct_site,
+        ..original
+    });
+    ir.exprs = expressions.into();
+    let content = memo
+        .flow_slice_content(entry, FlowSliceSelection::from_slice_ir(&ir), &bound)
+        .unwrap();
+    assert!(
+        !content
+            .body
+            .statements
+            .iter()
+            .any(|statement| matches!(statement, SliceStatement::Assignment { .. })),
+        "conflicting addresses must not attach either site's execution evidence"
     );
 }

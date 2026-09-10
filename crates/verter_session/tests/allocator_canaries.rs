@@ -888,3 +888,9 @@ mod canary_fact_emission_allocation_volume_class {
         );
     }
 }
+
+#[path = "allocation_cases/flow_products.rs"]
+mod flow_product_allocation;
+
+#[path = "allocation_cases/flow_literal_provenance.rs"]
+mod flow_literal_provenance_allocation;

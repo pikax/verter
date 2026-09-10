@@ -2946,6 +2946,7 @@ fn event_names_residual_carrier_arm_fails_whole_not_partial() {
 }
 
 #[test]
+// @ai-generated - Nominal symbols are complete non-string leaves just like primitive symbols.
 fn event_names_concrete_non_literal_arm_is_skipped_not_failed() {
     // CONTROL against over-failing: a mixed union `'a' | number` — the `number`
     // arm is a CONCRETE non-literal that is definitively NOT (and cannot hide) a
@@ -2963,17 +2964,34 @@ fn event_names_concrete_non_literal_arm_is_skipped_not_failed() {
     let void = prim(&graph, PrimitiveKind::Void);
     let a = string_literal(&graph, "a");
     let number = prim(&graph, PrimitiveKind::Number);
-    let names_union = union(&graph, vec![a, number]);
-    let f = function(
-        &graph,
-        vec![param(Some("e"), names_union, false, false)],
-        void,
-    );
-    assert_eq!(
-        CallableNodeView::new(&dispatch, f).event_names(navigate()).resolved_for_tests(),
-        Some(vec![Arc::<str>::from("a")]),
-        "a concrete non-literal arm (`number`) is SKIPPED (complete-no-name), not fail-closed — `'a' | number` yields `[\"a\"]`"
-    );
+    let symbol = prim(&graph, PrimitiveKind::Symbol);
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let nominal = graph.intern_node(SemanticNodeData::new_nominal_typeof(
+        crate::semantic_query::ValueRootKey {
+            scope: ScopeId::file(Arc::from("/events.ts"), owner),
+            name: Arc::from("TOKEN"),
+        },
+        Arc::from([]),
+        verter_type_expr::facts::ValueDeclIdentityPart {
+            canonical_id: Arc::from("/events.ts"),
+            owner,
+            symbol: Arc::from("TOKEN"),
+            member_path: Arc::from([]),
+        },
+    ));
+    for (label, leaf) in [("number", number), ("symbol", symbol), ("nominal", nominal)] {
+        let names_union = union(&graph, vec![a, leaf]);
+        let f = function(
+            &graph,
+            vec![param(Some("e"), names_union, false, false)],
+            void,
+        );
+        assert_eq!(
+            CallableNodeView::new(&dispatch, f).event_names(navigate()).resolved_for_tests(),
+            Some(vec![Arc::<str>::from("a")]),
+            "a concrete {label} arm contributes no string name without making enumeration incomplete"
+        );
+    }
 }
 
 #[test]

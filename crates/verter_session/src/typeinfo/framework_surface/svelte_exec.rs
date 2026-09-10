@@ -1800,16 +1800,82 @@ pub(crate) fn resolve_svelte_value_export_member(
         if reduced.result_is_partial() {
             crate::request_context::mark_request_result_partial();
         }
+        // The projected surface DECLARES this binding, so it cannot name the
+        // binding's own nominal identity: a `unique symbol` export rendered
+        // as `export declare const TOKEN: typeof TOKEN` would be a
+        // self-referential annotation the checker rejects outright. The
+        // declaration-context projection for a nominal export is the
+        // AUTHORED spelling — `unique symbol` — which preserves the public
+        // API's nominal distinction (`typeof TOKEN` stays assignable to
+        // `typeof TOKEN` and to nothing else); widening to `symbol` here
+        // would make every exported token interchangeable.
+        //
+        // That projection belongs to the DECLARING export alone. A carrier
+        // whose declaring identity names a DIFFERENT declaration (`export
+        // const A: typeof EXT_TOKEN = EXT_TOKEN`, `export const k =
+        // Tokens.A`) must keep the precise reference spelling AND its
+        // reference retention — `export declare const A: unique symbol`
+        // would mint a FRESH nominal type the source never declared, strand
+        // the consumer's `A`-to-`EXT_TOKEN` assignability, and drop the
+        // import the rendered `typeof` names. So the `unique symbol` arm
+        // fires only when the carrier's declaring identity IS this binding
+        // (same file, same owner, same symbol, no member path); everything
+        // else falls through to the display + reference-retention path
+        // below, where the carrier's AUTHORED head renders and its lexical
+        // root is retained. Structural questions (the shallow member
+        // output) still take the widened inhabitant through the one shared
+        // widen helper, and the declaring identity stays on the graph for
+        // the relation authority.
+        let graph = ctx.project_type_store().semantic_graph();
+        let is_declaring_export = graph
+            .node_data(reduced.node_id())
+            .as_deref()
+            .and_then(|data| data.typeof_nominal_identity())
+            .is_some_and(|identity| {
+                identity.member_path.is_empty()
+                    && identity.canonical_id.as_ref() == owner
+                    && identity.owner == binding_key.owner
+                    && identity.symbol == binding_key.name
+            });
+        if is_declaring_export {
+            // `unique symbol` names a builtin — no references to retain.
+            // Collecting off the carrier's AUTHORED head would instead retain
+            // the export's OWN name as an import of the surface that declares
+            // it.
+            let shallow =
+                crate::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
+                    &dispatch,
+                    dispatch
+                        .widened_nominal_typeof(reduced.node_id())
+                        .unwrap_or_else(|| reduced.node_id()),
+                )
+                .map(NamedTypeMemberOutput::from_raised_shallow)
+                .unwrap_or(NamedTypeMemberOutput::Opaque);
+            return (Some(shallow), Some("unique symbol".to_string()), Vec::new());
+        }
+        let member_node = dispatch
+            .widened_nominal_typeof(reduced.node_id())
+            .unwrap_or_else(|| reduced.node_id());
         let shallow =
             crate::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
                 &dispatch,
-                reduced.node_id(),
+                member_node,
             )
             .map(NamedTypeMemberOutput::from_raised_shallow)
             .unwrap_or(NamedTypeMemberOutput::Opaque);
-        let graph = ctx.project_type_store().semantic_graph();
-        let display_node = instance_export_display_node(graph, reduced.node_id());
-        let type_annotation = crate::semantic_query::display::display(
+        // A NON-declaring nominal carrier renders its AUTHORED head (`typeof
+        // EXT_TOKEN` / `typeof Tokens.A`) — the precise type — so the display
+        // and the retained references read the carrier, not the widened
+        // primitive that backed the shallow output.
+        let display_node = if graph
+            .node_data(reduced.node_id())
+            .is_some_and(|data| data.typeof_nominal_identity().is_some())
+        {
+            reduced.node_id()
+        } else {
+            instance_export_display_node(graph, member_node)
+        };
+        let type_annotation: String = crate::semantic_query::display::display(
             graph,
             &SemanticQueryValue::TypeNode(display_node),
             DisplayNeeds::empty(),

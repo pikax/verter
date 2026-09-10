@@ -29,9 +29,9 @@ pub(crate) use super::output_materialization::{MaterializedOutputTypeExpr, Outpu
 use super::ProjectSemanticDispatch;
 use crate::instant::Instant;
 use crate::semantic_query::{
-    DepSignature, IndexKey, MapperKey, PathSegment, ProjectionMode, ProjectionReductionContext,
-    QueryError, QueryResult, ReductionDemand, ResolveDeclKey, ScopeId, SemanticNodeData,
-    SemanticNodeId, SemanticQueryKey, SurfaceMember, TupleElement,
+    DepSignature, IndexKey, MapperKey, ProjectionMode, ProjectionReductionContext, QueryError,
+    QueryResult, ReductionDemand, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId,
+    SemanticQueryKey, SurfaceMember, TupleElement,
 };
 // `HotTypeRef` is only referenced by the test-only `materialize_type_expr`
 // harness wrapper below; the production reverse boundaries take a
@@ -794,6 +794,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::TemplateLiteral { .. }
             | SemanticNodeData::TypeOf(_)
+            // The nominal terminal self-resolves; the reducer returns it
+            // unchanged and there is no operand child to pre-resolve.
+            | SemanticNodeData::TypeOfNominal(_)
             | SemanticNodeData::DeclRef { .. }
             // Unresolved bare-name / dynamic-import / raw-fallback /
             // synthetic-binding carriers are resolved as a whole by the
@@ -1291,6 +1294,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     state,
                 )
             }
+            // The TERMINAL nominal carrier self-resolves: its content is the
+            // declaring identity it already carries, so no typeof dispatch,
+            // path projection, or instantiation apply runs for it at all.
+            SemanticNodeData::TypeOfNominal(_) => node,
             SemanticNodeData::TypeOf(_) => {
                 // `typeof value.path<args>`: resolve the value root through the
                 // single typeof query, PROJECT the carrier's dotted path, THEN
@@ -1304,60 +1311,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
                 let value_root = value_root.clone();
                 let path = Arc::clone(path);
-                // Read the carrier args from the SAME borrow (owned copy so the
-                // `data` borrow is not held across the apply call).
                 let type_args: Vec<SemanticNodeId> = data.carrier_type_args().to_vec();
 
-                // 1. Resolve the typeof value root.
-                let typeof_key = self.typeof_key_for(value_root, context);
+                let typeof_key = self.typeof_key_with_path(value_root, path, context);
                 let root_read = self.execute_read(typeof_key);
                 state.merge_dep_signature(&root_read.dep_signature);
                 if root_read.result_is_partial {
                     state.result_is_partial = true;
                     crate::request_context::mark_request_result_partial();
                 }
-                let root = match root_read.value {
+                let projected = match root_read.value {
                     QueryResult::Value(id) => id,
                     QueryResult::Recursive(_) | QueryResult::Error(_) => return node,
                 };
 
-                // 2. Project the carrier's dotted path (intermediate hops run in
-                //    Navigate per the path-precision rule, mirroring evaluate).
-                let projected = if path.is_empty() {
-                    root
-                } else {
-                    let projection_path: Arc<[PathSegment]> = Arc::from(
-                        path.iter()
-                            .map(|segment| {
-                                PathSegment::Member(
-                                    crate::semantic_query::PropertyKey::identifier(Arc::clone(
-                                        segment,
-                                    )),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    );
-                    let path_read = self.execute_read(SemanticQueryKey::ProjectPath {
-                        base: root,
-                        path: projection_path,
-                        context: ProjectionReductionContext::published(ProjectionMode::Navigate)
-                            .with_orthogonal_axes_from(context),
-                    });
-                    state.merge_dep_signature(&path_read.dep_signature);
-                    if path_read.result_is_partial {
-                        state.result_is_partial = true;
-                        crate::request_context::mark_request_result_partial();
-                    }
-                    match path_read.value {
-                        QueryResult::Value(id) => id,
-                        QueryResult::Recursive(_) | QueryResult::Error(_) => return node,
-                    }
-                };
-
-                // 3. Apply the instantiation `type_args` to the projected
-                //    signature. An arity/shape mismatch composes an honest
-                //    `Opaque(Miss)` AFTER the projection.
                 let final_node = if type_args.is_empty() {
                     projected
                 } else {
@@ -4264,6 +4231,9 @@ impl<'a> OpenWalk<'a> {
                     .any(|a| self.node_is_open(ctx, *a))
                     || self.role.question().undecidable_is_open()
             }
+            // A terminal nominal carrier holds NO outer generic and its key
+            // domain is the one declared symbol — closed for both questions.
+            SemanticNodeData::TypeOfNominal(_) => false,
             // A `BareRef` / `ImportType` carrier names an UNRESOLVED type-position
             // reference head (`Foo` / `Foo<Arg>` / `import("m").G<Arg>`). The
             // closed-vs-open decision must consult the UNDERLYING declaration's

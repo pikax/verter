@@ -533,6 +533,18 @@ fn finish_prepared_type_decl(
     }
     prepared.type_parameters = lowered.narrow_type_parameters.clone();
     prepared.vue_ignored_heritage = Arc::clone(&lowered.vue_ignored_heritage);
+    let mut unique_symbol_members = Vec::new();
+    for contributor in lowered.contributor_facts.iter() {
+        for member in contributor.unique_symbol_members.iter() {
+            if !unique_symbol_members
+                .iter()
+                .any(|existing| existing == member)
+            {
+                unique_symbol_members.push(member.clone());
+            }
+        }
+    }
+    prepared.unique_symbol_members = Arc::from(unique_symbol_members.into_boxed_slice());
     prepared.local_deps = deps.local_deps.clone();
     prepared.external_deps = external_deps;
     prepared.name_resolution = name_resolution;

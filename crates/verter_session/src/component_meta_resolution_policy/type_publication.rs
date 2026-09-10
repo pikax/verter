@@ -69,6 +69,11 @@ enum ProofReferenceIdentity {
         decl: DeclIdentity,
         param_index: u16,
     },
+    /// The declaring identity a terminal nominal `typeof` carrier denotes.
+    /// Distinct from [`Self::Decl`]: a `unique symbol` VALUE declaration is
+    /// identified by its [`ValueDeclIdentityPart`], not by a type-decl
+    /// [`DeclIdentity`].
+    Nominal(verter_type_expr::facts::ValueDeclIdentityPart),
 }
 
 type ProofReferenceMap = rustc_hash::FxHashMap<Vec<ProofPathStep>, ProofReferenceIdentity>;
@@ -397,6 +402,16 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
                     );
                 }
             }
+            // A terminal nominal carrier names a VALUE declaration; its
+            // declaring identity is exactly the identity-bearing reference
+            // this map exists to retain, because the shape comparison below
+            // renders only the carrier's head.
+            SemanticNodeData::TypeOfNominal(_) => {
+                let identity = data
+                    .typeof_nominal_identity()
+                    .expect("TypeOfNominal carrier identity");
+                references.insert(path, ProofReferenceIdentity::Nominal(identity.clone()));
+            }
             SemanticNodeData::ObjectSpreadProgram(program) => {
                 for (index, child) in program.child_nodes().enumerate() {
                     push_proof_child(
@@ -685,6 +700,34 @@ fn normalized_projection_shape_equivalent(
                     return Some(false);
                 }
                 stack.extend(left_args.iter().copied().zip(right_args.iter().copied()));
+            }
+            // Terminal nominal carriers compare by head AND declaring
+            // identity: two carriers with the same authored head shape but
+            // different declaring symbols are DIFFERENT types, and the
+            // equivalence proof must never certify them equal.
+            (SemanticNodeData::TypeOfNominal(_), SemanticNodeData::TypeOfNominal(_)) => {
+                let (left_root, left_path) = left_data.typeof_head().expect("TypeOf carrier head");
+                let (right_root, right_path) =
+                    right_data.typeof_head().expect("TypeOf carrier head");
+                let left_identity = left_data
+                    .typeof_nominal_identity()
+                    .expect("TypeOfNominal carrier identity");
+                let right_identity = right_data
+                    .typeof_nominal_identity()
+                    .expect("TypeOfNominal carrier identity");
+                if left_root != right_root
+                    || left_path != right_path
+                    || left_identity != right_identity
+                {
+                    return Some(false);
+                }
+            }
+            // A deferred shell and a terminal nominal carrier are different
+            // semantic classes; an equivalence proof over that pair is a
+            // mismatch, not a match.
+            (SemanticNodeData::TypeOf(_), SemanticNodeData::TypeOfNominal(_))
+            | (SemanticNodeData::TypeOfNominal(_), SemanticNodeData::TypeOf(_)) => {
+                return Some(false);
             }
             (
                 SemanticNodeData::TypeParam {

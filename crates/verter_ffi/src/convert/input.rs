@@ -68,106 +68,6 @@ pub fn ffi_config_to_host(input: FfiHostConfig) -> Result<host::HostConfig, FfiC
     Ok(out)
 }
 
-/// Convert FFI compile profile to internal compile profile.
-///
-/// EXHAUSTIVELY destructures `FfiCompileProfile` (no `..` rest pattern) so
-/// a field added to the wire struct without a corresponding admission arm
-/// here is a COMPILE ERROR, not a silently-dropped option — the
-/// per-field-admission half of the boundary's "no silently ignored
-/// option" contract. `#[serde(deny_unknown_fields)]` on `FfiCompileProfile`
-/// itself is the companion decode-time half: an unrecognized wire KEY
-/// refuses before this function ever runs; this exhaustive match is what
-/// keeps every recognized field's mapping honest once it does.
-pub fn ffi_profile_to_host(
-    input: Option<FfiCompileProfile>,
-) -> Result<host::CompileProfile, FfiConversionError> {
-    let mut out = host::CompileProfile::default();
-    let Some(input) = input else {
-        return Ok(out);
-    };
-    let FfiCompileProfile {
-        filename,
-        is_production,
-        custom_element,
-        ssr,
-        ssr_module_id,
-        hmr_strategy,
-        component_id,
-        delimiters,
-        custom_elements,
-        comments,
-        runtime_module_name,
-        types_module_name,
-        force_vapor,
-        force_js,
-        source_map,
-        target,
-        inline,
-        strict_slots,
-        requested_mode,
-    } = input;
-
-    out.filename = filename;
-    if let Some(is_production) = is_production {
-        out.is_production = is_production;
-    }
-    if let Some(custom_element) = custom_element {
-        out.custom_element = custom_element;
-    }
-    if let Some(ssr) = ssr {
-        out.ssr = ssr;
-    }
-    out.ssr_module_id = ssr_module_id;
-    if let Some(hmr_strategy) = hmr_strategy {
-        out.hmr_strategy = if hmr_strategy.eq_ignore_ascii_case("vite") {
-            host::HmrStrategy::Vite
-        } else if hmr_strategy.eq_ignore_ascii_case("webpack") {
-            host::HmrStrategy::Webpack
-        } else if hmr_strategy.eq_ignore_ascii_case("none") {
-            host::HmrStrategy::None
-        } else {
-            return Err(FfiConversionError::InvalidHmrStrategy(hmr_strategy));
-        };
-    }
-    out.component_id = component_id;
-    out.delimiters = if let Some(d) = delimiters {
-        if d.len() != 2 {
-            return Err(FfiConversionError::InvalidDelimiters(d.len()));
-        }
-        Some((d[0].clone(), d[1].clone()))
-    } else {
-        None
-    };
-    out.custom_elements = custom_elements;
-    out.comments = comments;
-    if let Some(runtime_module_name) = runtime_module_name {
-        out.runtime_module_name = Some(runtime_module_name);
-    }
-    if let Some(types_module_name) = types_module_name {
-        out.types_module_name = Some(types_module_name);
-    }
-    if let Some(force_vapor) = force_vapor {
-        out.force_vapor = force_vapor;
-    }
-    if let Some(force_js) = force_js {
-        out.force_js = force_js;
-    }
-    if let Some(source_map) = source_map {
-        out.source_map = source_map;
-    }
-    if let Some(target) = target {
-        out.target = ffi_target_to_compile_target(&target)?;
-    }
-    out.inline = inline;
-    if let Some(strict_slots) = strict_slots {
-        out.strict_slots = strict_slots;
-    }
-    if let Some(requested_mode) = requested_mode {
-        out.requested_mode = ffi_compile_cache_mode_to_host(&requested_mode)?;
-    }
-    Ok(out)
-}
-
 /// Parse a compile-cache-mode string to the host enum. Defaults are
 /// applied by the caller (a missing field keeps the profile default
 /// `Session`); this only parses an explicitly-supplied value. Exposed
@@ -226,20 +126,6 @@ fn ffi_preprocessor_diagnostic_to_host(
         line: diagnostic.line,
         column: diagnostic.column,
     })
-}
-
-/// Convert a target string to `CompileTarget` bitflags.
-pub(super) fn ffi_target_to_compile_target(
-    target: &str,
-) -> Result<host::CompileTarget, FfiConversionError> {
-    use host::CompileTarget;
-    match target.to_ascii_lowercase().as_str() {
-        "bundler" => Ok(CompileTarget::BUNDLER),
-        "ide" => Ok(CompileTarget::IDE),
-        "analysis" => Ok(CompileTarget::ANALYSIS),
-        "full" => Ok(CompileTarget::BUNDLER | CompileTarget::TSX | CompileTarget::TEMPLATE_DATA),
-        other => Err(FfiConversionError::InvalidTarget(other.to_string())),
-    }
 }
 
 /// Resolve the FFI `fileKind` string (plus the request's canonical
@@ -355,13 +241,12 @@ pub fn ffi_block_override_to_host(
 ) -> Result<host::BlockOverrideRequest, FfiConversionError> {
     let FfiBlockOverrideRequest {
         canonical_id,
-        compile_profile,
         overrides,
     } = input;
     let captured_canonical_id = canonical_id.clone();
     Ok(host::BlockOverrideRequest {
         canonical_id,
-        compile_profile: ffi_profile_to_host(compile_profile)?,
+        compile_profile: host::CompileProfile::default(),
         overrides: overrides
             .into_iter()
             .map(|entry| {
@@ -875,6 +760,6 @@ pub fn ffi_virtual_query_to_host(
         raw_id: input.raw_id,
         canonical_id: input.canonical_id,
         node_kind,
-        compile_profile: ffi_profile_to_host(input.compile_profile)?,
+        compile_profile: host::CompileProfile::default(),
     })
 }

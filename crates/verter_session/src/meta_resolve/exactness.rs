@@ -45,6 +45,9 @@ pub(crate) fn node_root_should_stay_symbolic(
                 | SemanticNodeData::Conditional { .. }
                 | SemanticNodeData::IndexedAccess { .. }
                 | SemanticNodeData::TypeOf(_)
+                // The nominal terminal raises to the same `typeof …`
+                // reference shape, so it takes the same operator arm.
+                | SemanticNodeData::TypeOfNominal(_)
         )
     )
 }
@@ -68,6 +71,7 @@ fn object_is_closed_node(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticN
                         | SemanticNodeData::TypeParam { .. }
                         | SemanticNodeData::BareRef(_)
                         | SemanticNodeData::TypeOf(_)
+                        | SemanticNodeData::TypeOfNominal(_)
                         | SemanticNodeData::ImportType(_)
                 )
             },

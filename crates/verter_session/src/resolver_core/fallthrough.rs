@@ -2616,6 +2616,7 @@ mod tests {
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
                 is_unique_symbol: false,
+                unique_symbol_members: std::sync::Arc::from([]),
                 typeof_alias_target: None,
                 classification: ValueAnnotationClass::Direct,
                 annotation: Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
@@ -2648,6 +2649,7 @@ mod tests {
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
                 is_unique_symbol: false,
+                unique_symbol_members: std::sync::Arc::from([]),
                 typeof_alias_target: Some(ValueDeclIdentityPart {
                     canonical_id: std::sync::Arc::from("/source"),
                     owner: target_owner,
@@ -2718,6 +2720,7 @@ mod tests {
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
                 is_unique_symbol: false,
+                unique_symbol_members: std::sync::Arc::from([]),
                 typeof_alias_target: Some(ValueDeclIdentityPart {
                     canonical_id: std::sync::Arc::from("/App.vue"),
                     owner: verter_type_expr::TopLevelOwnerId::instance(0),
@@ -2827,6 +2830,7 @@ mod tests {
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
                 is_unique_symbol: false,
+                unique_symbol_members: std::sync::Arc::from([]),
                 typeof_alias_target: None,
                 classification: ValueAnnotationClass::Direct,
                 annotation: Some(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(

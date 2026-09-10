@@ -631,7 +631,7 @@ fn collect_dynamic_root_candidates_from_node_inner(
             // arm (`value_ref.path.len() == 1`). The carrier head splits the
             // reference as `(value_root.name, path)`, so single-segment is an
             // empty trailing `path` with the head name as the binding name.
-            SemanticNodeData::TypeOf(_) => {
+            SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_) => {
                 let mut set = DynamicRootCandidateSet::default();
                 if let Some((value_root, path)) = data.typeof_head() {
                     if path.is_empty() {

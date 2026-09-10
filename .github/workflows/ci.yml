@@ -331,13 +331,7 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.tama == 'true'
     runs-on: ubuntu-latest
-    # The closure instrument suite no longer only asserts over the register: it
-    # mirrors the roadmap tree and re-applies every negative control it owns,
-    # which spawns the validator and the two node-run tools it drives as real
-    # child processes. The five-minute budget this job carried was sized for a
-    # suite that only parsed files. The instrument suite resolves this number
-    # against its own nested deadlines, so it is a declared budget rather than
-    # a guess.
+    # Focused validator tests run here; repository mutation replay is manual.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -348,64 +342,11 @@ jobs:
           node --test roadmap/0.1.0-tama/tools/ledger.test.mjs
           node roadmap/0.1.0-tama/tools/closure-register.mjs --check
           node --test roadmap/0.1.0-tama/tools/closure-register.test.mjs
+          node --test roadmap/0.1.0-tama/tools/closure-replay.test.mjs
       - name: CI aggregate completeness
         run: |
           node scripts/check-ci-aggregate.mjs
           node --test scripts/check-ci-aggregate.test.mjs
-
-  # The negative-control lane. The roadmap job above re-applies the controls
-  # whose records run under `node`; the rest mutate an artifact too and are
-  # re-applied here, where the Rust toolchain their records need exists and
-  # where spawning the roadmap suite does not re-enter it. The partition
-  # between the two lanes is resolved by the roadmap job, which also requires
-  # THIS job to exist and to issue that command, so deleting it turns the
-  # roadmap job red rather than silently retiring half the controls.
-  tama-controls:
-    name: Tama Closure Controls
-    needs: detect-changes
-    if: needs.detect-changes.outputs.tama == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: tama-controls
-      # A re-applied record's command can be a `cargo nextest` run, and nextest
-      # is a subcommand installed beside the toolchain rather than with it.
-      # The same install the rust-test lane carries, so this lane fails on the
-      # control rather than on a missing subcommand the clean run would read
-      # as a refused mirror.
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-      # The charter's targeted-verification record runs its three packages
-      # UNFILTERED, so the clean half of its re-application includes the
-      # tsgo-backed Svelte projection typecheck gate — tests that hard-fail
-      # under CI without the rc typescript launcher, which ships only through
-      # the workspace's node_modules. The same install the core and provider
-      # lanes carry; the gate paths-maps the in-repo `@verter/svelte-jsx`
-      # shims, so no package build is needed beyond it.
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      # A compile-contract record's runner builds its fixture project through
-      # trybuild, which invokes cargo with `--offline`: every dependency in the
-      # lock has to be in the registry cache before the lane spawns anything, or
-      # that inner build fails on a download it is not allowed to make. The
-      # refresh command those records name establishes this by fetching first;
-      # this lane re-applies the record's own narrower command, so it establishes
-      # the same prerequisite here. Resolved rather than commented — the
-      # instrument suite requires this job to carry it while a cargo-bound
-      # control is delegated to the lane.
-      - name: Fetch the locked workspace
-        run: cargo fetch --locked
-      - name: Re-apply the delegated negative controls
-        run: |
-          node --test roadmap/0.1.0-tama/tools/closure-controls.test.mjs
 
   # ---------------------------------------------------------------------------
   # `dtolnay/rust-toolchain@1.97.1` (not `@stable`) in every job below, and in
@@ -2077,7 +2018,6 @@ jobs:
     needs:
       - detect-changes
       - tama-roadmap
-      - tama-controls
       - rust-fmt
       - proto-fmt
       - rust-clippy

@@ -1,0 +1,10 @@
+error[E0624]: associated function `new` is private
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/retained_flow_slice_constructor_is_private.rs
+  |
+  |     let _ = PlannedFlowSlice::new;
+  |                               ^^^ private associated function
+  |
+ ::: $WORKSPACE/crates/verter_session/src/cache_runtime/flow_slice_node.rs
+  |
+  |     fn new(hash: FlowSliceHash, selection: ReturnSlicePlan) -> Self {
+  |     --------------------------------------------------------------- private associated function defined here

@@ -95,7 +95,8 @@ pub(crate) fn node_root_is_explicit_selector_operator(
         Some(
             SemanticNodeData::IndexedAccess { .. }
             | SemanticNodeData::KeyOf { .. }
-            | SemanticNodeData::TypeOf(_),
+            | SemanticNodeData::TypeOf(_)
+            | SemanticNodeData::TypeOfNominal(_),
         ) => true,
         Some(SemanticNodeData::DeclRef { identity }) => {
             is_selector_util(identity.decl_name.as_ref())

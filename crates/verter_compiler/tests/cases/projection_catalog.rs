@@ -81,10 +81,11 @@ fn registered_artifact(canonical: &str, source: &str, svelte: bool) -> Framework
     let accepted = grammar_authority
         .accept_registered_source(&source_authority, &snapshot, &config)
         .expect("accepted source");
-    verter_compiler::framework_common::CarrierCompilerRegistry::built_in()
-        .project_registered(&accepted)
-        .expect("registered projection")
-        .into_framework_parse_artifact()
+    verter_compiler::framework_common::registered_carrier_projection::project_registered_accepted(
+        &accepted,
+    )
+    .expect("registered projection")
+    .into_framework_parse_artifact()
 }
 
 fn vue_ide_request(filename: &str) -> CompileRequest {

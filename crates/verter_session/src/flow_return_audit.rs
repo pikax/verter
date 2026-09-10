@@ -72,6 +72,9 @@ pub fn record_flow_slice_budget_exceeded(exceeded: &FlowSliceBudgetExceeded) {
             verter_semantic::analysis::flow::peeker::FlowSliceBudgetAxis::SelectedNodes => {
                 FlowSliceBudgetAxisTag::SelectedNodes
             }
+            verter_semantic::analysis::flow::peeker::FlowSliceBudgetAxis::ValueStates => {
+                FlowSliceBudgetAxisTag::ValueStates
+            }
         },
         limit: exceeded.limit,
         observed: exceeded.observed,

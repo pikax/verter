@@ -7,8 +7,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  cancelledRows,
   implementedRows,
   ledgerErrors,
+  markCancelled,
   mergeLedgerTexts,
   markPending,
   parseLedgerText,
@@ -18,7 +20,7 @@ import {
   transitionToImplemented,
 } from "./ledger.mjs";
 import { parseToml } from "./toml.mjs";
-import { deriveState, loadAuthority, validateAuthority } from "./lib.mjs";
+import { deriveState, loadAuthority, validateAuthority, validateSchemaObject } from "./lib.mjs";
 
 const TOOLS_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -69,8 +71,34 @@ test("pending rows carry no evidence; implemented rows require evidence", () => 
 
   const badStatus = doc({ D4: { status: "CLAIMED" } });
   assert.ok(
-    ledgerErrors(badStatus).some((error) => error.includes('status must be "pending" or "implemented"')),
+    ledgerErrors(badStatus).some((error) => error.includes('status must be "pending", "implemented" or "cancelled"')),
     "transient orchestration states are structurally invalid in the ledger",
+  );
+});
+
+test("cancelled rows carry only an optional reason and are neither implemented nor pending", () => {
+  const cancelled = doc({ A0: EVIDENCE, D4: { status: "cancelled", reason: "superseded by D5" }, D5: { status: "cancelled" } });
+  assert.deepEqual(ledgerErrors(cancelled), []);
+  assert.deepEqual(implementedRows(cancelled).map((row) => row.node_id), ["A0"]);
+  assert.deepEqual(cancelledRows(cancelled), [{ node_id: "D4", reason: "superseded by D5" }, { node_id: "D5" }]);
+
+  const withEvidence = doc({ D4: { status: "cancelled", commit_message: "sneaky" } });
+  assert.ok(ledgerErrors(withEvidence).some((error) => error.includes("cancelled rows carry no commit_message")));
+  const emptyReason = doc({ D4: { status: "cancelled", reason: "" } });
+  assert.ok(ledgerErrors(emptyReason).some((error) => error.includes("reason must be a non-empty string")));
+  const implementedWithReason = doc({ A0: { ...EVIDENCE, reason: "why" } });
+  assert.ok(ledgerErrors(implementedWithReason).some((error) => error.includes("implemented rows carry no reason")));
+
+  // The transition is a one-line diff like every other, round-trips through the canonical text, and is reversible.
+  const before = textOf({ A0: EVIDENCE, D4: { status: "pending" } });
+  const after = serializeLedger(markCancelled(parseLedgerText(before), "D4", { reason: "superseded by D5" }));
+  assert.match(after, /^"D4" = \{ status = "cancelled", reason = "superseded by D5" \}$/mu);
+  assert.equal(after.split("\n").filter((line) => !before.split("\n").includes(line)).length, 1);
+  assert.deepEqual(markPending(parseLedgerText(after), "D4").implementation.D4, { status: "pending" });
+  assert.throws(() => markCancelled(parseLedgerText(before), "A0"), /is implemented; mark it pending before cancelling/u);
+  assert.throws(
+    () => transitionToImplemented(parseLedgerText(after), "D4", { commitMessage: "m", commitDate: "2026-09-01T10:00:00+01:00" }),
+    /is cancelled; mark it pending before recording an implementation/u,
   );
 });
 
@@ -294,9 +322,10 @@ test("live authority loads the schema-2 ledger, derives state, and validates cle
 
 test("transient orchestration states never appear in the live ledger", () => {
   const authority = loadAuthority();
+  // pending, implemented and cancelled are durable ledger facts; anything else is runtime state.
   for (const [nodeId, record] of Object.entries(authority.ledger.implementation)) {
     assert.ok(
-      record.status === "pending" || record.status === "implemented",
+      ["pending", "implemented", "cancelled"].includes(record.status),
       `${nodeId} carries runtime state ${record.status}`,
     );
   }
@@ -307,4 +336,15 @@ test("inline-table parser rejects duplicates and prototype-bearing keys", () => 
   assert.throws(() => parseToml('[implementation]\n"__proto__" = { status = "pending" }'), /unsafe/u);
   const nested = parseToml('a = { b = { c = 1 }, d = "x, y = }" }');
   assert.deepEqual(nested, { a: { b: { c: 1 }, d: "x, y = }" } });
+});
+
+test("the ledger schema keeps the per-status shapes mutually exclusive, like recordErrors", () => {
+  const schema = JSON.parse(fs.readFileSync(path.join(TOOLS_DIR, "..", "schemas", "implementation-ledger.schema.json"), "utf8"));
+  const check = (implementation) => validateSchemaObject({ schema: 2, implementation }, schema, "ledger");
+  assert.deepEqual(check({ A0: EVIDENCE, D4: { status: "pending" }, D5: { status: "cancelled", reason: "superseded" }, D6: { status: "cancelled" } }), []);
+  assert.ok(check({ A0: { ...EVIDENCE, reason: "why" } }).length, "implemented rows reject reason");
+  assert.ok(check({ D4: { status: "cancelled", commit_message: "sneaky" } }).length, "cancelled rows reject evidence");
+  assert.ok(check({ D4: { status: "pending", reason: "why" } }).length, "pending rows reject reason");
+  assert.ok(check({ D4: { status: "implemented" } }).length, "implemented rows require evidence");
+  assert.ok(check({ D4: { status: "CLAIMED" } }).length, "unknown statuses match no branch");
 });

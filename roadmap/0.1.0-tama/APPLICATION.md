@@ -40,11 +40,12 @@ This row identifies the native GitHub parent for all active mapped blocks in tha
 A node is READY when:
 
 - it is dispatchable;
-- every transitive DAG ancestor is implemented.
+- it is not cancelled;
+- every transitive DAG ancestor is settled: implemented, or cancelled (retired work is not waited for).
 
-No other lifecycle state is consulted. A recorded direct predecessor cannot hide a missing earlier ancestor. Conflict/resource/external-requirement fields are planning instructions for agents and maintainers, not locks or machine-validated authorizations.
+Only the ledger's `status` rows are consulted; no other lifecycle state is. A recorded direct predecessor cannot hide a missing earlier ancestor. Conflict/resource/external-requirement fields are planning instructions for agents and maintainers, not locks or machine-validated authorizations.
 
-The frontier command is read-only and stateless. It is just a convenient rendering of this rule; there is no start record or start commit. A node with no unimplemented ancestor can start immediately.
+The frontier command is read-only and stateless. It is just a convenient rendering of this rule; there is no start record or start commit. A node whose every ancestor is settled (implemented or cancelled) can start immediately.
 
 Inspect the frontier with:
 
@@ -97,6 +98,16 @@ For implementation, resolve the mapped issue locally and create the node's dedic
 If the user or maintainer explicitly selects a non-PR landing instead, keep the same local issue identity but put each included node's `Closes #<gh_issue>` line in the final squash commit body rather than a PR body. The reviewed commit is then pushed or merged through the normal repository workflow. GitHub closes the issues only when it reaches the origin default branch; mark each opt-in node Done in Project 3 only after that point, while protected mappings remain maintainer-owned.
 
 To represent an existing GitHub issue in the DAG, follow `ManualDagAuthoring`: manually author the node, charter, and `[[github_issue]]` row with `sync_to_github = false` in the same reviewed patch. No sync command imports or generates those local authority changes, and the existing issue remains protected from rewrite.
+
+## Retiring a node
+
+A node whose work will never land under its identity is retired, not left pending forever:
+
+```toml
+"BCSS0" = { status = "cancelled", reason = "superseded: the charter is a v2 identity wrapper for history already landed" }
+```
+
+`reason` is optional free text for the reader. A cancelled node is never READY and never emits a work packet; its descendants treat it as settled and wait only for their other ancestors. It is not implemented: `programctl implemented` omits it and product reports count it separately. Flipping the row back to `status = "pending"` reopens the node; an implemented node must be flipped to pending before it can be cancelled.
 
 ## Corrections
 

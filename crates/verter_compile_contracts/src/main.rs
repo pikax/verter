@@ -134,6 +134,7 @@ fn main() {
                     | Some("flow_solve_sealed_witnesses_not_constructible.rs")
                     | Some("flow_solve_plan_and_spec_no_struct_literal.rs")
                     | Some("flow_solve_plan_and_spec_are_sealed.rs")
+                    | Some("retained_flow_slice_constructor_is_private.rs")
             )
         });
     }

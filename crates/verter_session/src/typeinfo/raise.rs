@@ -184,6 +184,40 @@ impl VerterHost {
         )
     }
 
+    /// Project a [`SemanticNodeId`] to its bounded wire
+    /// [`SemanticTypeGraph`](verter_protocol::typeinfo::graph::SemanticTypeGraph)
+    /// export — the graph-protocol answer for the typeinfo graph
+    /// operations.
+    ///
+    /// Materializes the node into a sealed output carrier through the
+    /// typeinfo [`OutputProjector`] capability (the same sealed path
+    /// [`Self::project_node_to_type_expr_json_bytes`] rides), unwraps
+    /// it, and hands the terminal `TypeExpr` to the pure bounded
+    /// encoder (`verter_protocol::typeinfo::graph_export`). The
+    /// returned graph's `query` identity is left unset — the executing
+    /// operation fills it from its validated request.
+    ///
+    /// Returns `None` on a raise miss (the node id has no current graph
+    /// entry — the established miss signal), which the caller maps to
+    /// its typed miss answer.
+    #[must_use]
+    pub fn project_node_to_semantic_type_graph(
+        &self,
+        node: SemanticNodeId,
+        budgets: &verter_protocol::typeinfo::graph_export::GraphExportBudgets,
+    ) -> Option<verter_protocol::typeinfo::graph::SemanticTypeGraph> {
+        // Query-RETURNER: same proven-current-snapshot contract as the
+        // JSON bytes facade above.
+        let current_view = crate::typeinfo::current_store_view_for_query(self)?;
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx =
+            crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        let cap = TypeinfoRaiseOutputCap::new(&dispatch);
+        let type_expr = cap.materialize_output_type_expr(node)?.into_type_expr(&cap);
+        Some(verter_protocol::typeinfo::graph_export::encode_type_expr_graph(&type_expr, budgets))
+    }
+
     /// Test-only sibling of [`Self::project_node_to_type_expr_json_bytes`]
     /// that returns the raised [`verter_type_expr::TypeExpr`] directly
     /// (rather than wire bytes) so the typeinfo / dispatch-equivalence /

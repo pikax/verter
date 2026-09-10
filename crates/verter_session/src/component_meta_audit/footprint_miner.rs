@@ -456,7 +456,9 @@ fn map_node_kind(data: &SemanticNodeData) -> SemanticNodeKind {
         SemanticNodeData::KeyOf { .. } => SemanticNodeKind::KeyOf,
         SemanticNodeData::IndexedAccess { .. } => SemanticNodeKind::IndexedAccess,
         SemanticNodeData::Mapped { .. } => SemanticNodeKind::Mapped,
-        SemanticNodeData::TypeOf(_) => SemanticNodeKind::TypeOf,
+        SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_) => {
+            SemanticNodeKind::TypeOf
+        }
         SemanticNodeData::TypeParam { .. } => SemanticNodeKind::TypeParam,
         SemanticNodeData::Infer { .. } | SemanticNodeData::InferRef { .. } => {
             SemanticNodeKind::Other {
@@ -524,9 +526,19 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
             Arc::from(format!("IndexedAccess({})", index_key_label(index)))
         }
         SemanticNodeData::Mapped { .. } => Arc::from("Mapped"),
+        // The two `typeof` classes are ONE audit kind (an additive wire
+        // change would be needed to split them) but they are NOT one
+        // semantic class: the deferred shell is always unresolved, while
+        // the nominal terminal IS the type. The label says which, so a
+        // footprint reader can tell a pending carrier from a resolved
+        // terminal without decoding the structural hash.
         SemanticNodeData::TypeOf(_) => {
             let (value_root, _path) = data.typeof_head().expect("TypeOf carrier head");
             Arc::from(format!("typeof {}", value_root.name))
+        }
+        SemanticNodeData::TypeOfNominal(_) => {
+            let (value_root, _path) = data.typeof_head().expect("TypeOf carrier head");
+            Arc::from(format!("typeof {} (nominal)", value_root.name))
         }
         SemanticNodeData::TypeParam { display_name, .. } => Arc::clone(display_name),
         SemanticNodeData::Infer { name, .. } | SemanticNodeData::InferRef { name, .. } => {

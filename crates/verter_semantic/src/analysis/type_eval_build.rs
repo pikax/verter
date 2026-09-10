@@ -58,6 +58,26 @@ pub use verter_type_expr::{
     IndexedValueCall, IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression,
 };
 
+/// Exact source authority for an indexed value's whole binding input.
+/// Spans use the input AST's coordinate system; composite values have no root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexedValueReadRoot {
+    /// No whole identifier read supplied this result. This does not certify
+    /// that names inside a composite or asserted type are free/module names.
+    NonBinding,
+    Identifier(verter_span::Span),
+    /// The result is an authored whole `typeof name` type query. This is
+    /// lexical type authority, never an operand read or freshness signal.
+    SourceTypeQuery(verter_span::Span),
+}
+
+/// One direct input of an indexed call, excluding inputs of nested calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexedCallReadSite {
+    Argument(usize),
+    Receiver,
+}
+
 /// Rebase substring-relative program points to their containing source file.
 pub fn offset_indexed_value_expression(expression: &mut IndexedValueExpression, base: u32) {
     match expression {
@@ -235,6 +255,10 @@ pub struct LoweredTypeDeclParts {
     pub type_parameters: Vec<TypeParam>,
     /// The fully-lowered declaration body.
     pub body: TypeExpr,
+    /// Statically-named members whose authored annotations are exactly
+    /// `unique symbol` — object-type-literal and interface property
+    /// members, including intersection arms.
+    pub unique_symbol_members: Vec<String>,
 }
 
 /// Where a transient signature's authored function node lives, relative to its
@@ -288,6 +312,12 @@ pub struct LoweredValueDeclParts {
     /// Exact declaration-site nominality for an authored `unique symbol`
     /// annotation.
     pub is_unique_symbol: bool,
+    /// Statically-named MEMBERS whose authored annotations are exactly
+    /// `unique symbol` — class statics and object-type-literal annotation
+    /// members. The lowered [`TypeExpr`] erases the `unique` keyword, so this
+    /// list is the only member-level nominal record; a `typeof Root.Member`
+    /// reference to a listed member denotes the member's own nominal type.
+    pub unique_symbol_members: Vec<String>,
     /// The lowered annotation typed IR: the authored TS annotation, the JSDoc
     /// `@type` payload, or the initializer-inferred type (in that precedence).
     pub type_annotation: Option<TypeExpr>,
@@ -383,6 +413,15 @@ pub fn build_eval_env_with_owners(
     // declaration of the same name always wins (TS-decl precedence).
     register_jsdoc_typedefs(program, source, ctx, owners, &mut env);
 
+    // NOTE: a value whose annotation REFERENCES a named type (`a: Shape`) does
+    // NOT copy that type's `unique_symbol_members` onto its own fact here. A
+    // same-file bare-name match is scope-blind (shadowing, imports), and the
+    // copy would anchor the member's nominal identity on the VALUE — where tsc
+    // unifies `typeof a.K` and `typeof b.K` through the one interface member
+    // type. Certification through a named type happens at consumption, in
+    // `ProjectSemanticDispatch::member_nominal_typeof`, through the annotation
+    // fact's own `name_resolution` (the proper scope-aware authority), and
+    // anchors the identity on the TYPE declaration it resolves to.
     env
 }
 
@@ -634,6 +673,7 @@ fn lower_jsdoc_typedef_named_matching(
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
             body: typedef.body.clone(),
+            unique_symbol_members: Vec::new(),
         };
         env.add_type(mint_type_decl(&parts, &ctx.canonical_id, owner));
         return Some(typedef);
@@ -672,6 +712,7 @@ fn register_jsdoc_typedefs(
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
             body: typedef.body,
+            unique_symbol_members: Vec::new(),
         };
         env.add_type(mint_type_decl(
             &parts,
@@ -836,6 +877,7 @@ fn mint_type_decl(
         kind: parts.kind,
         type_parameters: narrow_decl_header_type_params(&parts.type_parameters, &anchor),
         direct_member_headers: member_header_facts_from_body(&parts.body),
+        unique_symbol_members: Arc::from(parts.unique_symbol_members.clone().into_boxed_slice()),
         body: anchored_slot(&anchor, Vec::new()),
     }
 }
@@ -1217,6 +1259,7 @@ fn mint_value_decl(
     let type_annotation = value_type_annotation_fact(
         parts.type_annotation.as_ref(),
         parts.is_unique_symbol,
+        &parts.unique_symbol_members,
         &parts.name,
         canonical_id,
         owner,
@@ -1318,6 +1361,70 @@ fn format_enum_number(value: f64) -> String {
     format!("{value}")
 }
 
+/// Whether an authored type is exactly `unique symbol` — TypeScript's one
+/// nominal type. The lowered [`TypeExpr`] models both `symbol` and
+/// `unique symbol` as the same primitive, so the authored distinction is
+/// preserved as declaration facts (root and member) instead. The AUTHORED
+/// annotation is the only spelling that certifies: an `as unique symbol` /
+/// `<unique symbol>` assertion is a TS1335 error in every position, so a
+/// program carrying one is ill-typed and must not mint nominal identity.
+fn ts_type_is_unique_symbol(ty: &TSType<'_>) -> bool {
+    matches!(
+        ty,
+        TSType::TSTypeOperatorType(operator)
+            if operator.operator == TSTypeOperatorOperator::Unique
+                && matches!(&operator.type_annotation, TSType::TSSymbolKeyword(_))
+    )
+}
+
+/// The statically-named members of an authored type whose annotations are
+/// exactly `unique symbol`. Walks object literals, parenthesized types, and
+/// intersection arms; a type reference is resolved later against same-file
+/// aliases. Only plain property members with static keys qualify.
+///
+/// READONLY members only: tsc widens a mutable `K: unique symbol` member to
+/// the bare `symbol` primitive (with an error at the declaration site), so a
+/// mutable annotation never denotes a nominal member type.
+fn unique_symbol_members_of_ts_type(ty: &TSType<'_>) -> Vec<String> {
+    let mut members = Vec::new();
+    collect_unique_symbol_members_of_ts_type(ty, &mut members);
+    members
+}
+
+fn collect_unique_symbol_members_of_ts_type(ty: &TSType<'_>, out: &mut Vec<String>) {
+    match ty {
+        TSType::TSTypeLiteral(literal) => {
+            for member in &literal.members {
+                let TSSignature::TSPropertySignature(property) = member else {
+                    continue;
+                };
+                let Some(key) =
+                    crate::analysis::function_program::static_property_key_name(&property.key)
+                else {
+                    continue;
+                };
+                if property.readonly
+                    && property.type_annotation.as_ref().is_some_and(|annotation| {
+                        ts_type_is_unique_symbol(&annotation.type_annotation)
+                    })
+                    && !out.iter().any(|existing| existing == &key)
+                {
+                    out.push(key);
+                }
+            }
+        }
+        TSType::TSParenthesizedType(parenthesized) => {
+            collect_unique_symbol_members_of_ts_type(&parenthesized.type_annotation, out);
+        }
+        TSType::TSIntersectionType(intersection) => {
+            for arm in &intersection.types {
+                collect_unique_symbol_members_of_ts_type(arm, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Type declarations
 // ---------------------------------------------------------------------------
@@ -1402,6 +1509,7 @@ fn lower_named_type_alias_parts(
         kind: TypeDeclKind::Alias,
         type_parameters,
         body,
+        unique_symbol_members: unique_symbol_members_of_ts_type(&decl.type_annotation),
     }
 }
 
@@ -1470,7 +1578,32 @@ fn lower_named_interface_parts(
         kind: TypeDeclKind::Interface,
         type_parameters,
         body,
+        unique_symbol_members: unique_symbol_members_of_interface_body(decl),
     }
+}
+
+/// The READONLY interface members whose annotations are exactly
+/// `unique symbol` — the same mutable-member widening rule
+/// [`unique_symbol_members_of_ts_type`] applies to object-literal members.
+fn unique_symbol_members_of_interface_body(decl: &TSInterfaceDeclaration<'_>) -> Vec<String> {
+    decl.body
+        .body
+        .iter()
+        .filter_map(|member| {
+            let TSSignature::TSPropertySignature(property) = member else {
+                return None;
+            };
+            if !property.readonly {
+                return None;
+            }
+            let key = crate::analysis::function_program::static_property_key_name(&property.key)?;
+            property
+                .type_annotation
+                .as_ref()
+                .filter(|annotation| ts_type_is_unique_symbol(&annotation.type_annotation))
+                .map(|_| key)
+        })
+        .collect()
 }
 
 fn collect_module_declaration(
@@ -1963,6 +2096,7 @@ fn alias_default_export_type_symbol(
         type_parameters: decl.type_parameters.clone(),
         body: decl.body.clone(),
         direct_member_headers: decl.direct_member_headers.clone(),
+        unique_symbol_members: Arc::clone(&decl.unique_symbol_members),
     };
     env.add_type(aliased);
 }
@@ -2101,6 +2235,9 @@ fn collect_named_class(
     // `ConstructSignature` — never a separate field.
     let mut members = Vec::new();
     let mut static_members = Vec::new();
+    // Statically-named statics whose authored annotations are exactly
+    // `unique symbol` — the member-level nominal fact for `typeof C.A`.
+    let mut static_unique_symbol_members = Vec::new();
     let mut ctor_sig = None;
     let mut ctor_fn_spans = FunctionSpans::default();
     let mut inference_unavailable = None;
@@ -2235,6 +2372,20 @@ fn collect_named_class(
                         spans,
                     ));
                 if prop.r#static {
+                    // `static readonly K: unique symbol` is tsc's one member
+                    // spelling of a nominal unique-symbol member: a mutable
+                    // static widens (with an error), and an assertion
+                    // initializer is a TS1335 error in every position.
+                    let annotated_unique = prop.readonly
+                        && prop
+                            .type_annotation
+                            .as_ref()
+                            .is_some_and(|ta| ts_type_is_unique_symbol(&ta.type_annotation));
+                    if annotated_unique {
+                        if let Some(key) = static_property_key_name(&prop.key) {
+                            static_unique_symbol_members.push(key);
+                        }
+                    }
                     static_members.push(member);
                 } else {
                     members.push(member);
@@ -2448,6 +2599,7 @@ fn collect_named_class(
         kind: TypeDeclKind::Class,
         type_parameters,
         body,
+        unique_symbol_members: Vec::new(),
     });
 
     // Also register as a value (for typeof ClassName / InstanceType)
@@ -2499,6 +2651,7 @@ fn collect_named_class(
         name,
         kind: ValueDeclKind::Class,
         is_unique_symbol: false,
+        unique_symbol_members: static_unique_symbol_members,
         type_annotation: None,
         annotation_is_authored: false,
         inference_unavailable,
@@ -2766,6 +2919,7 @@ fn collect_enum(decl: &TSEnumDeclaration<'_>, out: &mut LoweredStatementParts) {
     out.value_decls.push(LoweredValueDeclParts {
         name: name.clone(),
         kind: ValueDeclKind::Enum,
+        unique_symbol_members: Vec::new(),
         is_unique_symbol: false,
         type_annotation: None,
         annotation_is_authored: false,
@@ -2797,6 +2951,7 @@ fn collect_enum(decl: &TSEnumDeclaration<'_>, out: &mut LoweredStatementParts) {
         kind: TypeDeclKind::Alias,
         type_parameters: Vec::new(),
         body: TypeExpr::Primitive(PrimitiveName::Never),
+        unique_symbol_members: Vec::new(),
     });
 }
 
@@ -2822,6 +2977,7 @@ fn lower_function_parts(func: &Function<'_>, source: &str) -> Option<LoweredValu
 
     Some(LoweredValueDeclParts {
         name,
+        unique_symbol_members: Vec::new(),
         kind,
         is_unique_symbol: false,
         type_annotation: None,
@@ -2982,7 +3138,7 @@ fn apply_svelte_rune_initializer_inference(
             continue;
         };
         if !parts.annotation_is_authored {
-            if has_authoritative_value_assertion(initializer, source) {
+            if has_authoritative_value_assertion(initializer) {
                 continue;
             }
             if let Some(callback_point) = inline_svelte_derived_by_callback_point(initializer) {
@@ -3205,7 +3361,7 @@ fn unwrap_expression_wrappers<'a>(mut expr: &'a Expression<'a>) -> &'a Expressio
     }
 }
 
-fn has_authoritative_value_assertion(mut expr: &Expression<'_>, source: &str) -> bool {
+fn has_authoritative_value_assertion(mut expr: &Expression<'_>) -> bool {
     loop {
         match expr {
             Expression::ParenthesizedExpression(parenthesized) => {
@@ -3213,13 +3369,108 @@ fn has_authoritative_value_assertion(mut expr: &Expression<'_>, source: &str) ->
             }
             Expression::TSNonNullExpression(non_null) => expr = &non_null.expression,
             Expression::TSAsExpression(assertion) => {
-                return !is_const_assertion_type_expr(&lower_ts_type(
-                    &assertion.type_annotation,
-                    source,
-                ));
+                return !verter_type_expr_oxc::is_const_assertion_type(&assertion.type_annotation);
             }
             _ => return false,
         }
+    }
+}
+
+/// The indexed producer's existing assertion/unwrap precedence. Shallow
+/// input facts use this same disposition without lowering an annotation.
+enum IndexedValueDisposition<'a> {
+    Asserted(&'a Expression<'a>),
+    Inferred(&'a Expression<'a>),
+}
+
+fn indexed_value_disposition<'a>(expr: &'a Expression<'a>) -> IndexedValueDisposition<'a> {
+    if has_authoritative_value_assertion(expr) {
+        IndexedValueDisposition::Asserted(expr)
+    } else {
+        IndexedValueDisposition::Inferred(unwrap_expression_wrappers(expr))
+    }
+}
+
+enum ValueInferenceCarrier<'a> {
+    Parenthesized(&'a Expression<'a>),
+    Satisfies(&'a Expression<'a>),
+    Assertion {
+        operand: &'a Expression<'a>,
+        annotation: &'a oxc_ast::ast::TSType<'a>,
+    },
+    Value,
+}
+
+fn value_inference_carrier<'a>(expr: &'a Expression<'a>) -> ValueInferenceCarrier<'a> {
+    match expr {
+        Expression::ParenthesizedExpression(paren) => {
+            ValueInferenceCarrier::Parenthesized(&paren.expression)
+        }
+        Expression::TSSatisfiesExpression(satisfies) => {
+            ValueInferenceCarrier::Satisfies(&satisfies.expression)
+        }
+        Expression::TSAsExpression(assertion) => ValueInferenceCarrier::Assertion {
+            operand: &assertion.expression,
+            annotation: &assertion.type_annotation,
+        },
+        Expression::TSTypeAssertion(assertion) => ValueInferenceCarrier::Assertion {
+            operand: &assertion.expression,
+            annotation: &assertion.type_annotation,
+        },
+        _ => ValueInferenceCarrier::Value,
+    }
+}
+
+fn indexed_source_type_query<'a>(
+    expr: &'a Expression<'a>,
+) -> Option<&'a oxc_ast::ast::IdentifierReference<'a>> {
+    let (IndexedValueDisposition::Asserted(mut expr) | IndexedValueDisposition::Inferred(mut expr)) =
+        indexed_value_disposition(expr);
+    loop {
+        expr = match value_inference_carrier(expr) {
+            ValueInferenceCarrier::Parenthesized(inner)
+            | ValueInferenceCarrier::Satisfies(inner) => inner,
+            ValueInferenceCarrier::Assertion {
+                operand,
+                annotation,
+            } => {
+                if verter_type_expr_oxc::is_const_assertion_type(annotation) {
+                    operand
+                } else {
+                    return verter_type_expr_oxc::whole_type_query_identifier(annotation);
+                }
+            }
+            ValueInferenceCarrier::Value => return None,
+        };
+    }
+}
+
+fn indexed_call_receiver<'a>(callee: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
+    match unwrap_expression_wrappers(callee) {
+        Expression::StaticMemberExpression(member) => Some(&member.object),
+        Expression::ComputedMemberExpression(member) => Some(&member.object),
+        _ => None,
+    }
+}
+
+/// Content-free query facts for direct indexed call inputs. Uses the actual
+/// producer's carrier policy, with no annotation lowering or additional
+/// whole-function traversal.
+pub(crate) fn for_each_indexed_call_source_type_query<'a>(
+    call: &'a oxc_ast::ast::CallExpression<'a>,
+    mut observe: impl FnMut(&'a oxc_ast::ast::IdentifierReference<'a>),
+) {
+    for argument in &call.arguments {
+        let expression = match argument {
+            oxc_ast::ast::Argument::SpreadElement(spread) => Some(&spread.argument),
+            argument => argument.as_expression(),
+        };
+        if let Some(query) = expression.and_then(indexed_source_type_query) {
+            observe(query);
+        }
+    }
+    if let Some(query) = indexed_call_receiver(&call.callee).and_then(indexed_source_type_query) {
+        observe(query);
     }
 }
 
@@ -3252,14 +3503,15 @@ fn lower_variable_parts(
         VariableDeclarationKind::Var => ValueDeclKind::Var,
     };
 
-    let is_unique_symbol = decl.type_annotation.as_ref().is_some_and(|annotation| {
-        matches!(
-            &annotation.type_annotation,
-            TSType::TSTypeOperatorType(operator)
-                if operator.operator == TSTypeOperatorOperator::Unique
-                    && matches!(&operator.type_annotation, TSType::TSSymbolKeyword(_))
-        )
-    });
+    // The AUTHORED annotation alone certifies: tsc allows `unique symbol`
+    // only as an annotated `declare const`/const annotation, and every
+    // assertion spelling (`as unique symbol`) is a TS1335 error. The fact is
+    // therefore annotation-only: an inferred or asserted initializer never
+    // sets it.
+    let is_unique_symbol = decl
+        .type_annotation
+        .as_ref()
+        .is_some_and(|annotation| ts_type_is_unique_symbol(&annotation.type_annotation));
 
     // Extract type annotation from the variable declarator
     let mut type_annotation = decl
@@ -3314,7 +3566,7 @@ fn lower_variable_parts(
 
         if type_annotation.is_none()
             && value_type_derives_from_a_call(init)
-            && !has_authoritative_value_assertion(init, source)
+            && !has_authoritative_value_assertion(init)
         {
             expression_source_offset = Some(init.span().start);
             inference_unavailable = None;
@@ -3374,6 +3626,15 @@ fn lower_variable_parts(
         name,
         kind: var_kind,
         is_unique_symbol,
+        // INLINE annotation members only: a value's own object-literal
+        // annotation is its own member type. A member reached through a named
+        // type reference is certified at consumption (see the NOTE at
+        // [`build_eval_env_with_owners`]) and anchors on the type declaration.
+        unique_symbol_members: decl
+            .type_annotation
+            .as_ref()
+            .map(|ta| unique_symbol_members_of_ts_type(&ta.type_annotation))
+            .unwrap_or_default(),
         type_annotation,
         annotation_is_authored,
         inference_unavailable: if annotation_is_authored {
@@ -3423,6 +3684,7 @@ fn lower_default_expression_parts(expr: &Expression<'_>, source: &str) -> Lowere
     }
 
     LoweredValueDeclParts {
+        unique_symbol_members: Vec::new(),
         name: "default".to_string(),
         kind: ValueDeclKind::Const,
         is_unique_symbol: false,
@@ -4208,7 +4470,71 @@ fn infer_expression_type_ctx(
     budget: &mut InferenceBudget,
     depth: usize,
 ) -> InferenceResult<TypeExpr> {
+    infer_expression_type_ctx_with_read_root(expr, source, policy, budget, depth, None)
+}
+
+fn infer_expression_type_ctx_with_read_root(
+    expr: &Expression<'_>,
+    source: &str,
+    policy: MemberLiteralPolicy,
+    budget: &mut InferenceBudget,
+    depth: usize,
+    read_root: Option<&mut IndexedValueReadRoot>,
+) -> InferenceResult<TypeExpr> {
     budget.visit(depth)?;
+    match value_inference_carrier(expr) {
+        ValueInferenceCarrier::Parenthesized(inner) => {
+            return infer_expression_type_ctx_with_read_root(
+                inner,
+                source,
+                policy,
+                budget,
+                depth + 1,
+                read_root,
+            )
+        }
+        ValueInferenceCarrier::Satisfies(inner) => {
+            let inner_policy = if policy == MemberLiteralPolicy::ConstAssert {
+                policy
+            } else {
+                MemberLiteralPolicy::Preserve
+            };
+            return infer_expression_type_ctx_with_read_root(
+                inner,
+                source,
+                inner_policy,
+                budget,
+                depth + 1,
+                read_root,
+            );
+        }
+        ValueInferenceCarrier::Assertion {
+            operand,
+            annotation,
+        } => {
+            if verter_type_expr_oxc::is_const_assertion_type(annotation) {
+                return infer_expression_type_ctx_with_read_root(
+                    operand,
+                    source,
+                    MemberLiteralPolicy::ConstAssert,
+                    budget,
+                    depth + 1,
+                    read_root,
+                );
+            }
+            let mut query = None;
+            let asserted = verter_type_expr_oxc::lower_ts_type_with_whole_query(
+                annotation,
+                source,
+                read_root.as_ref().map(|_| &mut query),
+            );
+            if let (Some(root), Some(query)) = (read_root, query) {
+                *root = IndexedValueReadRoot::SourceTypeQuery(query);
+            }
+            return Ok(asserted);
+        }
+        ValueInferenceCarrier::Value => {}
+    }
     match expr {
         // `undefined` is an IDENTIFIER in the grammar (unlike the `null`
         // literal) but its value position IS the `undefined` type — never a
@@ -4216,21 +4542,25 @@ fn infer_expression_type_ctx(
         Expression::Identifier(ident) if ident.name == "undefined" => {
             Ok(TypeExpr::Primitive(PrimitiveName::Undefined))
         }
-        Expression::Identifier(ident) => Ok(TypeExpr::TypeOf(ValueRef {
-            path: vec![ident.name.as_str().to_string()],
-            type_args: Vec::new(),
-        })),
+        Expression::Identifier(ident) => {
+            if let Some(read_root) = read_root {
+                *read_root = IndexedValueReadRoot::Identifier(ident.span.into());
+            }
+            Ok(TypeExpr::TypeOf(ValueRef {
+                path: vec![ident.name.as_str().to_string()],
+                type_args: Vec::new(),
+            }))
+        }
         Expression::StringLiteral(s) => Ok(TypeExpr::string_literal(s.value.as_str())),
         Expression::NumericLiteral(n) => Ok(TypeExpr::number_literal(n.value)),
         Expression::BooleanLiteral(b) => Ok(TypeExpr::boolean_literal(b.value)),
         Expression::NullLiteral(_) => Ok(TypeExpr::Primitive(PrimitiveName::Null)),
         Expression::ConditionalExpression(cond) => Ok(TypeExpr::union(vec![
+            // Both arms contribute to this composite; neither is its whole
+            // identifier origin.
             infer_expression_type_ctx(&cond.consequent, source, policy, budget, depth + 1)?,
             infer_expression_type_ctx(&cond.alternate, source, policy, budget, depth + 1)?,
         ])),
-        Expression::ParenthesizedExpression(paren) => {
-            infer_expression_type_ctx(&paren.expression, source, policy, budget, depth + 1)
-        }
         Expression::ArrayExpression(arr) => {
             // A literal-preserving position keeps the array literal's
             // POSITIONAL structure as a tuple. A spread or an elision makes
@@ -4332,51 +4662,6 @@ fn infer_expression_type_ctx(
                 sig.type_parameters,
                 fn_spans,
             ))))
-        }
-        Expression::TSAsExpression(ts_as) => {
-            // `as const` should preserve the underlying literal/object surface
-            // instead of degrading the inferred type to an opaque `const`
-            // marker — AND it establishes a const context, so nested object
-            // properties keep their literals + become `readonly`.
-            let asserted = lower_ts_type(&ts_as.type_annotation, source);
-            if is_const_assertion_type_expr(&asserted) {
-                infer_expression_type_ctx(
-                    &ts_as.expression,
-                    source,
-                    MemberLiteralPolicy::ConstAssert,
-                    budget,
-                    depth + 1,
-                )
-            } else {
-                Ok(asserted)
-            }
-        }
-        Expression::TSTypeAssertion(assertion) => {
-            let asserted = lower_ts_type(&assertion.type_annotation, source);
-            if is_const_assertion_type_expr(&asserted) {
-                infer_expression_type_ctx(
-                    &assertion.expression,
-                    source,
-                    MemberLiteralPolicy::ConstAssert,
-                    budget,
-                    depth + 1,
-                )
-            } else {
-                Ok(asserted)
-            }
-        }
-        Expression::TSSatisfiesExpression(sat) => {
-            // const x = value satisfies SomeType → infer from the underlying
-            // value expression, not the annotation. `satisfies` validates but
-            // does NOT widen the value's members (the engine performs no
-            // contextual typing) — Preserve, unless an enclosing `as const`
-            // already pinned a stronger (readonly) context.
-            let inner_policy = if policy == MemberLiteralPolicy::ConstAssert {
-                MemberLiteralPolicy::ConstAssert
-            } else {
-                MemberLiteralPolicy::Preserve
-            };
-            infer_expression_type_ctx(&sat.expression, source, inner_policy, budget, depth + 1)
         }
         Expression::StaticMemberExpression(member) => {
             // obj.foo → typeof obj.foo (build a dotted path)
@@ -5697,6 +5982,7 @@ pub fn parse_and_lower_parts(source: &str) -> LoweredFileParts {
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
             body: typedef.body,
+            unique_symbol_members: Vec::new(),
         });
     }
     out
@@ -5707,8 +5993,17 @@ fn lower_value_expression(
     source: &str,
     policy: MemberLiteralPolicy,
 ) -> InferenceResult<TypeExpr> {
+    lower_value_expression_with_read_root(expr, source, policy, None)
+}
+
+fn lower_value_expression_with_read_root(
+    expr: &Expression<'_>,
+    source: &str,
+    policy: MemberLiteralPolicy,
+    read_root: Option<&mut IndexedValueReadRoot>,
+) -> InferenceResult<TypeExpr> {
     let mut budget = InferenceBudget::default();
-    infer_expression_type_ctx(expr, source, policy, &mut budget, 0)
+    infer_expression_type_ctx_with_read_root(expr, source, policy, &mut budget, 0, read_root)
 }
 
 /// Lower an already-parsed value expression into indexed typed IR.
@@ -5739,14 +6034,30 @@ fn lower_indexed_value_expression_with_policy(
     source: &str,
     policy: MemberLiteralPolicy,
 ) -> IndexedValueExpression {
-    if has_authoritative_value_assertion(expr, source) {
-        return lower_value_expression(expr, source, policy)
-            .map(IndexedValueExpression::Value)
-            .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
-                PrimitiveName::Any,
-            )));
+    lower_indexed_value_expression_with_policy_and_read_root(expr, source, policy, None)
+}
+
+fn lower_indexed_value_expression_with_policy_and_read_root(
+    expr: &Expression<'_>,
+    source: &str,
+    policy: MemberLiteralPolicy,
+    mut read_root: Option<&mut IndexedValueReadRoot>,
+) -> IndexedValueExpression {
+    if let Some(read_root) = read_root.as_deref_mut() {
+        *read_root = IndexedValueReadRoot::NonBinding;
     }
-    match unwrap_expression_wrappers(expr) {
+    let input = match indexed_value_disposition(expr) {
+        IndexedValueDisposition::Asserted(input) => {
+            // The assertion supplies the result; its operand's binding does not.
+            return lower_value_expression_with_read_root(input, source, policy, read_root)
+                .map(IndexedValueExpression::Value)
+                .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
+                    PrimitiveName::Any,
+                )));
+        }
+        IndexedValueDisposition::Inferred(input) => input,
+    };
+    match input {
         Expression::CallExpression(call) => {
             IndexedValueExpression::Call(lower_indexed_call_expression(call, source))
         }
@@ -5773,7 +6084,7 @@ fn lower_indexed_value_expression_with_policy(
                 point: unwrapped.span().start,
             }
         }
-        unwrapped => lower_value_expression(unwrapped, source, policy)
+        unwrapped => lower_value_expression_with_read_root(unwrapped, source, policy, read_root)
             .map(IndexedValueExpression::Value)
             .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
                 PrimitiveName::Any,
@@ -5848,16 +6159,21 @@ pub fn indexed_context_sensitive(expr: Option<&Expression<'_>>) -> bool {
 fn indexed_callee_and_receiver(
     callee: &Expression<'_>,
     source: &str,
+    observe: &mut Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
 ) -> (IndexedValueExpression, Option<Box<IndexedValueExpression>>) {
-    let receiver = match unwrap_expression_wrappers(callee) {
-        Expression::StaticMemberExpression(member) => Some(Box::new(
-            lower_indexed_value_expression(&member.object, source),
-        )),
-        Expression::ComputedMemberExpression(member) => Some(Box::new(
-            lower_indexed_value_expression(&member.object, source),
-        )),
-        _ => None,
-    };
+    let receiver = indexed_call_receiver(callee).map(|receiver| {
+        let mut read_root = IndexedValueReadRoot::NonBinding;
+        let lowered = lower_indexed_value_expression_with_policy_and_read_root(
+            receiver,
+            source,
+            MemberLiteralPolicy::Widen,
+            observe.as_ref().map(|_| &mut read_root),
+        );
+        if let Some(observe) = observe {
+            observe(IndexedCallReadSite::Receiver, read_root);
+        }
+        Box::new(lowered)
+    });
     (lower_indexed_value_expression(callee, source), receiver)
 }
 
@@ -5865,14 +6181,42 @@ pub fn lower_indexed_call_expression(
     call: &oxc_ast::ast::CallExpression<'_>,
     source: &str,
 ) -> IndexedValueCall {
-    let (callee, receiver) = indexed_callee_and_receiver(&call.callee, source);
+    lower_indexed_call_expression_observed(call, source, None)
+}
+
+/// Lower one call while reporting exact direct-input source provenance.
+/// Each argument ordinal, including a spread, is reported once. A receiver
+/// is reported exactly when the lowered call contains one. Nested calls use
+/// their ordinary lowering and do not report into this observer.
+/// Authored whole type queries are distinct from runtime operand reads.
+pub fn lower_indexed_call_expression_with_read_roots(
+    call: &oxc_ast::ast::CallExpression<'_>,
+    source: &str,
+    observe: &mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot),
+) -> IndexedValueCall {
+    lower_indexed_call_expression_observed(call, source, Some(observe))
+}
+
+fn lower_indexed_call_expression_observed(
+    call: &oxc_ast::ast::CallExpression<'_>,
+    source: &str,
+    mut observe: Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+) -> IndexedValueCall {
+    let (callee, receiver) = indexed_callee_and_receiver(&call.callee, source, &mut observe);
     let args = call
         .arguments
         .iter()
-        .map(|argument| {
+        .enumerate()
+        .map(|(ordinal, argument)| {
+            let mut read_root = IndexedValueReadRoot::NonBinding;
             let (expression, point, spread, literal_mode, context_sensitive) = match argument {
                 oxc_ast::ast::Argument::SpreadElement(spread) => (
-                    lower_indexed_call_argument_expression(&spread.argument, source),
+                    lower_indexed_value_expression_with_policy_and_read_root(
+                        &spread.argument,
+                        source,
+                        MemberLiteralPolicy::Argument,
+                        observe.as_ref().map(|_| &mut read_root),
+                    ),
                     spread.argument.span().start,
                     true,
                     indexed_literal_mode(Some(&spread.argument)),
@@ -5881,7 +6225,12 @@ pub fn lower_indexed_call_expression(
                 argument => {
                     let expression = argument.to_expression();
                     (
-                        lower_indexed_call_argument_expression(expression, source),
+                        lower_indexed_value_expression_with_policy_and_read_root(
+                            expression,
+                            source,
+                            MemberLiteralPolicy::Argument,
+                            observe.as_ref().map(|_| &mut read_root),
+                        ),
                         expression.span().start,
                         false,
                         indexed_literal_mode(Some(expression)),
@@ -5889,6 +6238,9 @@ pub fn lower_indexed_call_expression(
                     )
                 }
             };
+            if let Some(observe) = observe.as_mut() {
+                observe(IndexedCallReadSite::Argument(ordinal), read_root);
+            }
             IndexedValueCallArg {
                 expression,
                 point,
@@ -5994,8 +6346,8 @@ fn lower_indexed_new_expression(
 /// lowering fixes syntactically answers the same thing however its
 /// sub-expressions evaluate, so a call underneath one is not fabricated
 /// either.
-pub fn value_inference_fabricates_a_call(expr: &Expression<'_>, source: &str) -> bool {
-    !has_authoritative_value_assertion(expr, source) && value_type_derives_from_a_call(expr)
+pub fn value_inference_fabricates_a_call(expr: &Expression<'_>, _source: &str) -> bool {
+    !has_authoritative_value_assertion(expr) && value_type_derives_from_a_call(expr)
 }
 
 fn value_type_derives_from_a_call(expr: &Expression<'_>) -> bool {

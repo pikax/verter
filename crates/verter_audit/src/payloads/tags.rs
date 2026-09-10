@@ -205,6 +205,8 @@ pub enum FlowSliceBudgetAxisTag {
     ReturnSites,
     /// Too many selected nodes.
     SelectedNodes,
+    /// Too many value visits or interned projection tails.
+    ValueStates,
 }
 
 /// Discriminator naming the shape of a parse-domain

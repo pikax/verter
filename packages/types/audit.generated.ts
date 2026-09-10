@@ -1092,7 +1092,7 @@ partiality: FlowPartialityTag | null, };
  * by
  * [`super::super::structured_event::StructuredAuditEvent::FlowSliceBudgetExceeded`].
  */
-export type FlowSliceBudgetAxisTag = "ReturnSites" | "SelectedNodes";
+export type FlowSliceBudgetAxisTag = "ReturnSites" | "SelectedNodes" | "ValueStates";
 
 /**
  * Closed mirror of the per-kind framework-surface support

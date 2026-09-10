@@ -424,8 +424,7 @@ pub(crate) fn parse_registered_source_for_tests(
         .accept_registered_source(&source_authority, &snapshot, &config)
         .expect("accept source");
     Arc::new(
-        super::registry::CarrierCompilerRegistry::built_in()
-            .project_registered(&accepted)
+        project_registered_accepted(&accepted)
             .expect("fixture source parses")
             .into_framework_parse_artifact(),
     )
@@ -1281,7 +1280,8 @@ fn catalog_miss_from_accepted(accepted: &AcceptedRegisteredCarrierSource) -> Syn
 }
 
 /// Project an accepted registered source: catalog frontend parse, then
-/// registered geometry. Callers never look up [`super::CarrierCompilerRegistry`].
+/// registered geometry. The SOLE production entry point — there is no
+/// combined-registry lookup anywhere in this path.
 /// A catalog miss is [`SyntaxReject::UnsupportedProfile`] (`FrontendMismatch`).
 pub fn project_registered_accepted(
     accepted: &AcceptedRegisteredCarrierSource,
@@ -1327,8 +1327,9 @@ pub fn parse_registered_frontend(
 }
 
 /// The registered projection entry, dispatched over the closed compiler
-/// enum. Its sole cross-crate caller is
-/// [`CarrierCompilerRegistry::project_registered`](super::registry::CarrierCompilerRegistry::project_registered).
+/// enum. Its sole caller is [`project_registered_accepted`], which builds
+/// `known` directly from the catalog-selected frontend — never from a
+/// combined registry lookup.
 ///
 /// `Err(SyntaxReject)` means the carrier frontend refused the request before
 /// producing an artifact — no geometry or publishable diagnostic product exists.

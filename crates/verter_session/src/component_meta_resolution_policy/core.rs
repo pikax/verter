@@ -566,6 +566,7 @@ pub(super) fn body_root_is_resolvable(body: SemanticNodeId, ctx: &PolicyCtx<'_, 
             | SemanticNodeData::KeyOf { .. }
             | SemanticNodeData::Mapped { .. }
             | SemanticNodeData::TypeOf(_)
+            | SemanticNodeData::TypeOfNominal(_)
             | SemanticNodeData::Conditional { .. }
             | SemanticNodeData::Signature { .. }
             | SemanticNodeData::MergedDecl { .. },

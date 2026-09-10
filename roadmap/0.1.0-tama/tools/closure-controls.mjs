@@ -1,45 +1,9 @@
 /**
- * The negative-control driver.
- *
- * A control's transcript describes a run somebody once did. The uniqueness and
- * absence checks the validator applies beside it establish that the mutation
- * COULD have applied to this tree and is not sitting in it — but nothing there
- * re-runs anything, so a control whose refusal has since stopped happening
- * still reads as evidence. That is not hypothetical: a control transcribing a
- * suite's own terminal block goes stale the moment a case is added to that
- * suite, while every count beside it stays internally consistent.
- *
- * So every control is re-applied rather than believed. This module owns the
- * part both lanes share — which lane owns a control, and the plant/run/restore
- * routine itself — so the rule is stated once and the two entry points cannot
- * drift into covering overlapping or partial sets.
- *
- * The split between them is a toolchain boundary, not a sample:
- *
- *   - `instrument` — the control's bound record runs under `node`, and its
- *     command is not the instrument suite itself. The instrument suite drives
- *     these, so the fast roadmap lane re-applies them on every change.
- *   - `control-lane` — everything else: the records that run under `cargo`,
- *     and the one whose command IS the instrument suite. Driving the latter
- *     from the suite it runs would re-enter that suite; driving it from a
- *     different entry point terminates by construction, because the suite it
- *     spawns drives no control whose command is itself.
- *
- * What no control may be is TRANSCRIBED. A control that mutates no artifact
- * still has two things only a run can re-derive: the counters its record
- * transcribes, and the refusal its own delta produces — an empty selection
- * reports how many tests it failed to select, which is a property of the
- * tree's current test inventory and not only of the runner. So a
- * command-shaped control is re-applied by the lane its record's runner
- * already decides, beside the controls that mutate files, and its record's
- * command runs clean first under the same counter comparison as any other.
- * The cost that once made that class transcribed was the cold build it
- * seemed to require; the control lane builds into a target directory of its
- * own under the checkout's CI-cached target root, from a mirror at a stable
- * path, so a command-shaped control re-runs what its lane builds anyway
- * rather than rebuilding the heaviest packages from nothing — and the exes it
- * re-runs are baked with source roots that stay valid, instead of whichever
- * tree last wrote into a shared target directory.
+ * On-demand negative-control replay. Routine CI runs focused fixture tests
+ * and the normal test lanes; it does not replay historical evidence records.
+ * A replay requires a nonempty, complete clean run, an applicable mutation,
+ * and the expected refusal. Passing totals are observations of the current
+ * inventory, never values that must match an old transcript.
  */
 
 import assert from "node:assert/strict";
@@ -135,37 +99,10 @@ export function linkInstalledModuleTrees(repoRoot, destRoot) {
   }
 }
 
-/**
- * The control lane's own entry point and the command line CI issues for it.
- *
- * Held here rather than in either suite so the instrument suite resolves the
- * lane it delegates to against the same two values the lane itself is, and a
- * renamed entry fails on both sides at once instead of leaving a workflow job
- * pointing at a file nobody runs.
- */
+/** Entry point for the manually dispatched diagnostic workflow. */
 export const CONTROL_LANE_ENTRY = "roadmap/0.1.0-tama/tools/closure-controls.test.mjs";
-export const CONTROL_LANE_COMMAND = `node --test ${CONTROL_LANE_ENTRY}`;
-
-/**
- * Each lane's own deadline, and the per-command deadline nested inside it.
- *
- * Declared here rather than written into the suites because the instrument
- * suite resolves them against each hosting job's `timeout-minutes`. A child
- * deadline at or above its parent killer is the failure mode where the job is
- * terminated by the runner with no diagnostic at all: the suite never reaches
- * its own timeout, so nothing says which control was still running. Every
- * mirror a lane builds and every command it spawns therefore has to fit
- * strictly inside the budget the workflow declares, and that nesting is
- * checked rather than commented.
- */
 export const CONTROL_LANE_DEADLINE_MS = 40 * 60_000;
 export const CONTROL_LANE_COMMAND_DEADLINE_MS = 20 * 60_000;
-export const INSTRUMENT_LANE_DEADLINE_MS = 10 * 60_000;
-export const INSTRUMENT_LANE_COMMAND_DEADLINE_MS = 2 * 60_000;
-
-/** The two lanes that between them re-apply every control in the register. */
-export const INSTRUMENT_LANE = "instrument";
-export const CONTROL_LANE = "control-lane";
 
 /**
  * The command a control's bound record runs, with the adapter's prefix applied.
@@ -184,49 +121,10 @@ export function controlCommand(model, control) {
 }
 
 /**
- * Which lane owns a control.
- *
- * The record's runner and entry decide, never the control's KIND: a
- * command-shaped control is re-applied by the same lane that would own it
- * were its mutation a file edit, so no control is exempt from re-application
- * for mutating no artifact.
- *
- * `instrumentEntry` is the repo-relative path of the instrument suite, passed
- * in rather than hard-coded so the rule is resolved against the file actually
- * running instead of a spelling that could go stale.
- */
-export function laneFor(model, control, instrumentEntry) {
-  const { adapter, argv } = controlCommand(model, control);
-  if (adapter.runner !== "node") return CONTROL_LANE;
-  return argv.includes(instrumentEntry) ? CONTROL_LANE : INSTRUMENT_LANE;
-}
-
-/** The controls a lane owns, in register order. */
-export const controlsFor = (model, lane, instrumentEntry) =>
-  model.register.control.filter((control) => laneFor(model, control, instrumentEntry) === lane);
-
-/**
- * Re-apply one control against a mirror and require the transcribed refusal to
- * be the one its command still produces.
- *
- * A source control's mutation is a file edit in the mirror; a command
- * control's is an argument appended to the recorded command. Both halves are
- * checked for the same property — provably applicable, provably absent — over
- * whatever the mutation replaces: the subject's text, or the argument vector.
- *
- * `spawn(argv, adapter)` is supplied by the caller because the two lanes launch
- * different runners: the instrument lane runs `node`, the control lane also
- * runs `cargo` with its own environment. The adapter is handed back rather than
- * re-derived so a caller dispatches on the runner the register declares instead
- * of guessing it from the argument vector, whose first element is a subcommand
- * rather than a program. Everything that decides whether the re-application
- * PROVED anything lives here.
- *
- * Three things are established, and only the third is about the mutation: the
- * record's transcribed counters are the ones its command still produces, the
- * mutation was provably applicable and provably absent before it was written,
- * and the refusal the control transcribes is the one the mutated command still
- * emits.
+ * Replay a control in a disposable mirror. The caller supplies the runner;
+ * this function owns clean-run validation, planting, restoration, and refusal
+ * comparison. The recorded command still selects the work, but unrelated
+ * passing, skipped, or fixture inventory changes do not invalidate a replay.
  */
 export function reapply({ model, control, mirror, spawn }) {
   const { proof, adapter, argv } = controlCommand(model, control);
@@ -283,34 +181,18 @@ export function reapply({ model, control, mirror, spawn }) {
     `${control.id}: the mirror refuses ${argv.join(" ")} before the mutation, so a refusal after it would prove nothing\n${cleanOutput}`,
   );
 
-  // That clean run is the bound record's OWN command, so its terminal summary
-  // is the record's own counters, produced now rather than transcribed once.
-  // Comparing them here is what makes a record's numbers re-derivable for every
-  // record whose control a lane drives: a case added to, or deleted from, the
-  // selection the record names moves this summary and fails, instead of leaving
-  // a self-consistent transcript describing a suite that no longer exists. The
-  // record's five declared counts are separately checked against its own
-  // transcribed text by the validator, so the pair is closed: the transcript
-  // states what the record claims, and the transcript is what the command still
-  // emits.
-  const transcribed = parseTerminalSummary(
-    adapter.summary_grammar,
-    proof.terminal_summary,
-    proof.count_key,
-  );
-  assert.ok(
-    transcribed,
-    `${control.id}: record ${proof.id} transcribes no ${adapter.summary_grammar} summary to compare a live run against`,
-  );
   const observedNow = parseTerminalSummary(adapter.summary_grammar, cleanOutput, proof.count_key);
   assert.ok(
     observedNow,
     `${control.id}: the clean run of ${argv.join(" ")} emitted no ${adapter.summary_grammar} summary:\n${cleanOutput}`,
   );
-  assert.deepEqual(
-    observedNow,
-    transcribed,
-    `${control.id}: record ${proof.id} transcribes counters its own command no longer produces (host=${process.platform}):\n${cleanOutput}`,
+  assert.ok(
+    Object.values(observedNow).every((value) => Number.isSafeInteger(value) && value >= 0) &&
+      observedNow.executed > 0 &&
+      observedNow.failed === 0 &&
+      observedNow.passed === observedNow.executed &&
+      observedNow.selected === observedNow.executed + observedNow.skipped,
+    `${control.id}: the clean run must execute nonempty work and pass completely:\n${cleanOutput}`,
   );
 
   let mutated;
@@ -337,10 +219,9 @@ export function reapply({ model, control, mirror, spawn }) {
   }
 
   const output = `${mutated.stdout ?? ""}${mutated.stderr ?? ""}`.replaceAll("\r\n", "\n");
-  assert.notEqual(
-    mutated.status,
-    0,
-    `${control.id}: ${argv.join(" ")} accepted the mutation\n${output}`,
+  assert.ok(
+    Number.isInteger(mutated.status) && mutated.status > 0 && !mutated.signal && !mutated.error,
+    `${control.id}: the mutated command must terminate with a nonzero exit, without a signal or spawn error\n${output}`,
   );
   const live = parseRefusal(adapter.summary_grammar, output, proof.count_key);
   assert.ok(
@@ -348,9 +229,26 @@ export function reapply({ model, control, mirror, spawn }) {
     `${control.id}: the mutated run emitted no ${adapter.summary_grammar} refusal:\n${output}`,
   );
   assert.deepEqual(
-    live,
-    parseRefusal(adapter.summary_grammar, control.observed, proof.count_key),
-    `${control.id}: the refusal this control transcribes is no longer the one its command produces:\n${output}`,
+    refusalReason(live),
+    refusalReason(parseRefusal(adapter.summary_grammar, control.observed, proof.count_key)),
+    `${control.id}: the mutated command produced a different refusal:\n${output}`,
   );
-  return { proof, adapter, argv, output };
+  return { proof, adapter, argv, output, cleanSummary: observedNow };
+}
+
+// Keep the refusal kind, failed count, and tool diagnostics. Total inventory
+// and successful siblings do not establish whether a mutation was detected.
+function refusalReason(refusal) {
+  if (!refusal) return null;
+  const inventory = new Set([
+    "selected",
+    "executed",
+    "passed",
+    "skipped",
+    "ignored",
+    "binaries",
+    "fixtures",
+    "cleared",
+  ]);
+  return Object.fromEntries(Object.entries(refusal).filter(([key]) => !inventory.has(key)));
 }

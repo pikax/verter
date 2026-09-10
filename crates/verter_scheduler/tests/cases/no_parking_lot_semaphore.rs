@@ -9,10 +9,9 @@
 //!
 //! This guard fires if anyone re-introduces a `parking_lot::Semaphore`
 //! reference anywhere in `crates/verter_scheduler/src/`. It is a static
-//! source scan over the whole tree (the same convention as
-//! `dag_arch_guards.rs`), which proves *non-use across every module* —
-//! stronger than a single trybuild fixture, which only proves one file
-//! fails to compile.
+//! source scan over the whole tree, which proves *non-use across every
+//! module* — stronger than a single trybuild fixture, which only proves
+//! one file fails to compile.
 
 use std::fs;
 use std::path::{Path, PathBuf};
