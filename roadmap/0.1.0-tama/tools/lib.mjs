@@ -831,7 +831,11 @@ export function validateAuthority(authority, options = {}) {
   // validation error, not an exception (absent or null still means "none").
   if (authority.ledger.cancelled != null && !Array.isArray(authority.ledger.cancelled))
     errors.push("implementation ledger: cancelled rows must be an array");
-  for (const row of Array.isArray(authority.ledger.cancelled) ? authority.ledger.cancelled : []) {
+  for (const [index, row] of (Array.isArray(authority.ledger.cancelled) ? authority.ledger.cancelled : []).entries()) {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      errors.push(`implementation ledger: cancelled row ${index} must be an object`);
+      continue;
+    }
     if (!knownNodes.has(row.node_id))
       errors.push(`implementation ledger: unknown node ${row.node_id}`);
     if (implemented.has(row.node_id) || cancelled.has(row.node_id))
