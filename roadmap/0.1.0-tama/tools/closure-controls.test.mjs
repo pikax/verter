@@ -31,15 +31,15 @@
  * output. A mutation belongs in a copy, never in the tree under review, where
  * an interrupted run would leave it behind as a real edit.
  *
- * One delegated record transcribes counters shaped by THIS lane's CI platform:
- * its three-package selection contains a `#[cfg(target_os)]`-gated set, so
- * selected, executed, and skipped all move together when the host compiles a
- * different set. Linux and Windows are not symmetric. The transcript is the CI
- * platform's (linux), and the lane that re-applies it in CI re-derives it
- * exactly; a lane run on another OS fails that record's clean-run comparison
- * by exactly those cases, which is the loud, named failure rather than a
- * silent one — re-derive the record on linux, never from another host, and
- * never widen the comparison to tolerate the difference.
+ * One delegated record transcribes counters shaped by the platform they were
+ * taken on: its three-package selection contains a `#[cfg(target_os)]`-gated
+ * set, so selected, executed, and skipped all move together when the host
+ * compiles a different set. The clean run is therefore not held to that
+ * transcript. It is held to the tree's own inventory of the selection, listed
+ * by the same runner on the same host, so a lane run on any platform judges
+ * the run it made against the cases that host compiles, and an unexpected
+ * skip is one the inventory does not mark ignored rather than one that moves
+ * a number transcribed on another OS.
  */
 
 import assert from "node:assert/strict";

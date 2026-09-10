@@ -26,13 +26,13 @@
  *     spawns drives no control whose command is itself.
  *
  * What no control may be is TRANSCRIBED. A control that mutates no artifact
- * still has two things only a run can re-derive: the counters its record
- * transcribes, and the refusal its own delta produces — an empty selection
- * reports how many tests it failed to select, which is a property of the
- * tree's current test inventory and not only of the runner. So a
+ * still has two things only a run can re-derive: whether its record's command
+ * still runs clean on this tree, and the refusal its own delta produces — an
+ * empty selection reports that it selected nothing, which is a property of
+ * the tree's current test inventory and not only of the runner. So a
  * command-shaped control is re-applied by the lane its record's runner
  * already decides, beside the controls that mutate files, and its record's
- * command runs clean first under the same counter comparison as any other.
+ * command runs clean first under the same evidence rule as any other.
  * The cost that once made that class transcribed was the cold build it
  * seemed to require; the control lane builds into a target directory of its
  * own under the checkout's CI-cached target root, from a mirror at a stable
@@ -40,6 +40,26 @@
  * rather than rebuilding the heaviest packages from nothing — and the exes it
  * re-runs are baked with source roots that stay valid, instead of whichever
  * tree last wrote into a shared target directory.
+ *
+ * What a re-application is judged AGAINST is the tree it runs on, never the
+ * numbers a record wrote down once. A record's transcript is its own claim,
+ * and the validator holds the record's five counts to that transcript; but
+ * the clean run here is fresh evidence, and fresh evidence is judged on what
+ * it establishes about THIS tree: it ran to the runner's own terminal
+ * summary, it executed work, it reports zero failures, every skip it reports
+ * is one the tree itself declares, and the work it ran is the work the tree
+ * currently selects for the record's command — re-derived from the runner's
+ * own inventory of that selection where the runner has one, not from a count
+ * transcribed on some other day. Comparing the live counters against the
+ * transcribed ones would turn every case added to a selected suite, and every
+ * `cfg`-gated case that compiles on one host and not another, into a red lane
+ * whose only repair is rewriting the number — a maintenance ritual that
+ * proves nothing about the mutation and blocks the tree until someone
+ * performs it. The refusal is held to the same rule: the mutation's own
+ * signature — how many cases it broke, whether it emptied the selection,
+ * which errors it printed — must be the one the control transcribes, while
+ * the suite-size counters beside it (how many cases still passed, how many
+ * were ignored) are properties of the tree, not of the mutation.
  */
 
 import assert from "node:assert/strict";
@@ -206,6 +226,187 @@ export const controlsFor = (model, lane, instrumentEntry) =>
   model.register.control.filter((control) => laneFor(model, control, instrumentEntry) === lane);
 
 /**
+ * The command a runner exposes to LIST the selection a run command would
+ * execute, or `null` for a runner that has none.
+ *
+ * This is the tree's own inventory of the record's selection, produced by the
+ * same runner and the same selection arguments as the clean run, so a clean
+ * run can be held to what the tree currently selects instead of to a number
+ * transcribed once. `cargo nextest list` re-derives the selection from the
+ * built binaries and reports, per case, whether it matches the run's filter —
+ * which is exactly the split the run summary reports as executed and skipped.
+ * libtest's `--list` prints every case the same filter admits, ignored ones
+ * included; the ignored subset is listed on request with `--ignored`.
+ *
+ * A runner with no listing mode leaves the clean run judged on its own summary
+ * alone: zero failures, nonzero work, and no skip the record does not declare.
+ */
+export function inventoryCommand(adapter, argv, { ignoredOnly = false } = {}) {
+  if (adapter.summary_grammar === "nextest") {
+    // The run command is `nextest run …`; the listing is `nextest list …` over
+    // the same selection, and the format flag is a `list` option that has to
+    // precede any `--` the tail may carry.
+    assert.deepEqual(
+      argv.slice(0, 2),
+      ["nextest", "run"],
+      `a nextest record's command must start with \`nextest run\`, got ${JSON.stringify(argv)}`,
+    );
+    return ["nextest", "list", "--message-format", "json", ...argv.slice(2)];
+  }
+  if (adapter.summary_grammar === "libtest") {
+    // libtest flags follow the `--` separator. A tail that already carries one
+    // (`-- --exact …`) takes `--list` after its own filters, so the listing is
+    // exactly the run's selection.
+    const listed = argv.includes("--") ? [...argv, "--list"] : [...argv, "--", "--list"];
+    return ignoredOnly ? [...listed, "--ignored"] : listed;
+  }
+  return null;
+}
+
+/**
+ * The selection a runner's own listing reports, or `null` when the output is
+ * not a listing of the declared shape.
+ *
+ * nextest lists every case in the selected binaries and marks per case
+ * whether the run's filter matches it; the executed count of the run is the
+ * matching set, and everything else is what the summary counts as skipped.
+ * libtest's listing states only the cases the filter admits, so its executed
+ * and ignored split is read from a second, `--ignored`, listing when the
+ * record declares that its selection carries ignored cases at all.
+ */
+export function parseInventory(grammar, output) {
+  if (grammar === "nextest") {
+    let listing;
+    try {
+      listing = JSON.parse(output);
+    } catch {
+      return null;
+    }
+    const suites = listing?.["rust-suites"];
+    if (!suites || typeof suites !== "object") return null;
+    let executed = 0;
+    let skipped = 0;
+    for (const suite of Object.values(suites))
+      for (const testcase of Object.values(suite?.testcases ?? {}))
+        if (testcase?.["filter-match"]?.status === "matches") executed += 1;
+        else skipped += 1;
+    return { selected: executed + skipped, executed, skipped };
+  }
+  if (grammar === "libtest") {
+    const text = output.replaceAll("\r\n", "\n");
+    // Every binary the command selects prints its cases and then its own
+    // `N tests, M benchmarks` line; a listing with no such line is not a
+    // listing, and one whose per-binary totals disagree with the cases it
+    // printed is a truncated one.
+    const totals = [...text.matchAll(/^(\d+) tests?, (\d+) benchmarks?$/gmu)];
+    if (!totals.length) return null;
+    const listed = [...text.matchAll(/^\S.*: test$/gmu)].length;
+    const selected = totals.reduce((sum, row) => sum + Number(row[1]), 0);
+    if (listed !== selected) return null;
+    return { selected };
+  }
+  return null;
+}
+
+/**
+ * The case names a libtest command selects by exact name, or `null` when it
+ * selects by filter.
+ *
+ * An exact selection states the record's intended work in the command itself,
+ * so the clean run is held to it: a named case that no longer exists on the
+ * tree leaves the run green over fewer cases, which is a selection the record
+ * did not intend rather than a suite that grew.
+ */
+export function exactSelection(argv) {
+  const separator = argv.indexOf("--");
+  if (separator === -1) return null;
+  const tail = argv.slice(separator + 1);
+  if (!tail.includes("--exact")) return null;
+  return tail.filter((token) => !token.startsWith("-"));
+}
+
+/**
+ * The part of a refusal that is the MUTATION's, with the suite-size counters
+ * beside it dropped.
+ *
+ * A mutation's signature is how many cases it broke, whether it emptied the
+ * selection, and which errors it made a tool print. How many cases still
+ * passed around it, and how many were ignored, describe the tree the mutation
+ * was planted in — they move whenever a case is added to the suite or a
+ * `cfg`-gated case compiles on a different host, and a refusal comparison that
+ * reads them turns every such change into a control whose only repair is
+ * rewriting its transcript.
+ */
+export function refusalSignature(grammar, refusal) {
+  if (!refusal) return null;
+  if (grammar === "libtest") return { failing: refusal.failing, failed: refusal.failed };
+  if (grammar === "nextest")
+    return { failed: refusal.failed, selectedNothing: refusal.selectedNothing === true };
+  if (grammar === "node-test" || grammar === "compile-contracts") return { failed: refusal.failed };
+  if (grammar === "tool-line") return { errors: refusal.errors };
+  return null;
+}
+
+/**
+ * What a clean run has to establish about the tree it ran on.
+ *
+ * The record's transcribed counters are NOT among the things it is compared
+ * against: those are the record's claim about a run somebody once did, and
+ * the validator already holds the record's five numbers to that transcript.
+ * A live run is judged on what it proves now — it reached the runner's own
+ * summary with zero failures, it executed work, every skip it reports is one
+ * the record declares its selection carries AND one the tree's own inventory
+ * marks ignored, and the work it ran is the work the tree currently selects
+ * for the command.
+ */
+function assertCleanRunEvidence({ control, proof, adapter, argv, observedNow, inventory }) {
+  const command = argv.join(" ");
+  const grammar = adapter.summary_grammar;
+  assert.equal(
+    observedNow.failed,
+    0,
+    `${control.id}: the clean run of ${command} reports ${observedNow.failed} failed cases, so a refusal after the mutation would prove nothing`,
+  );
+  assert.ok(
+    observedNow.executed >= 1,
+    `${control.id}: the clean run of ${command} executed no case, so its selection is empty on this tree and a refusal after the mutation could be that same empty selection`,
+  );
+  const declaredSkips = proof.expected_skips ?? 0;
+  if (declaredSkips === 0)
+    assert.equal(
+      observedNow.skipped,
+      0,
+      `${control.id}: the clean run of ${command} skipped ${observedNow.skipped} cases, and record ${proof.id} declares that its selection carries none`,
+    );
+  const exact = grammar === "libtest" ? exactSelection(argv) : null;
+  if (exact)
+    assert.equal(
+      observedNow.executed,
+      exact.length,
+      `${control.id}: ${command} names ${exact.length} cases with --exact, but the clean run executed ${observedNow.executed}, so a case the record intends to run no longer exists on this tree`,
+    );
+  if (inventory === null) {
+    assert.equal(
+      declaredSkips,
+      0,
+      `${control.id}: record ${proof.id} declares ${declaredSkips} skips, but a ${grammar} runner exposes no inventory this lane could re-derive them from, so a skip on this tree cannot be told from an unexpected one`,
+    );
+    return;
+  }
+  assert.equal(
+    observedNow.selected,
+    inventory.selected,
+    `${control.id}: the clean run of ${command} selected ${observedNow.selected} cases, but the runner's own listing of that selection on this tree holds ${inventory.selected}`,
+  );
+  if (inventory.skipped !== undefined)
+    assert.equal(
+      observedNow.skipped,
+      inventory.skipped,
+      `${control.id}: the clean run of ${command} skipped ${observedNow.skipped} cases, but this tree marks ${inventory.skipped} of that selection ignored, so the difference is an unexpected skip`,
+    );
+}
+
+/**
  * Re-apply one control against a mirror and require the transcribed refusal to
  * be the one its command still produces.
  *
@@ -223,10 +424,12 @@ export const controlsFor = (model, lane, instrumentEntry) =>
  * PROVED anything lives here.
  *
  * Three things are established, and only the third is about the mutation: the
- * record's transcribed counters are the ones its command still produces, the
- * mutation was provably applicable and provably absent before it was written,
- * and the refusal the control transcribes is the one the mutated command still
- * emits.
+ * record's command still runs clean on this tree — to its runner's own
+ * summary, with zero failures, nonzero work, no undeclared skip, and over the
+ * selection the tree's own inventory reports — the mutation was provably
+ * applicable and provably absent before it was written, and the refusal the
+ * mutated command emits carries the mutation's own signature, the one the
+ * control transcribes.
  */
 export function reapply({ model, control, mirror, spawn }) {
   const { proof, adapter, argv } = controlCommand(model, control);
@@ -284,34 +487,60 @@ export function reapply({ model, control, mirror, spawn }) {
   );
 
   // That clean run is the bound record's OWN command, so its terminal summary
-  // is the record's own counters, produced now rather than transcribed once.
-  // Comparing them here is what makes a record's numbers re-derivable for every
-  // record whose control a lane drives: a case added to, or deleted from, the
-  // selection the record names moves this summary and fails, instead of leaving
-  // a self-consistent transcript describing a suite that no longer exists. The
-  // record's five declared counts are separately checked against its own
-  // transcribed text by the validator, so the pair is closed: the transcript
-  // states what the record claims, and the transcript is what the command still
-  // emits.
-  const transcribed = parseTerminalSummary(
-    adapter.summary_grammar,
-    proof.terminal_summary,
-    proof.count_key,
-  );
-  assert.ok(
-    transcribed,
-    `${control.id}: record ${proof.id} transcribes no ${adapter.summary_grammar} summary to compare a live run against`,
-  );
+  // is fresh evidence about this tree, and it is judged as such: it must be a
+  // summary of the runner's declared shape, report zero failures and nonzero
+  // work, skip nothing the record does not declare, and — where the runner can
+  // list its own selection — cover exactly the cases the tree selects for the
+  // command today. What it is NOT compared against is the record's transcribed
+  // counters: those are the record's claim about a run somebody once did, held
+  // to its own transcript by the validator. A case added to the selected suite,
+  // or a `cfg`-gated case that compiles on this host and not on the one the
+  // transcript came from, moves the live counters without saying anything
+  // about the mutation, and a lane that refused on that would be red until
+  // someone rewrote the number.
   const observedNow = parseTerminalSummary(adapter.summary_grammar, cleanOutput, proof.count_key);
   assert.ok(
     observedNow,
     `${control.id}: the clean run of ${argv.join(" ")} emitted no ${adapter.summary_grammar} summary:\n${cleanOutput}`,
   );
-  assert.deepEqual(
-    observedNow,
-    transcribed,
-    `${control.id}: record ${proof.id} transcribes counters its own command no longer produces (host=${process.platform}):\n${cleanOutput}`,
-  );
+  let inventory = null;
+  const listing = inventoryCommand(adapter, argv);
+  if (listing) {
+    const listed = spawn(listing, adapter);
+    const listedOutput = `${listed.stdout ?? ""}${listed.stderr ?? ""}`;
+    assert.equal(
+      listed.status,
+      0,
+      `${control.id}: the runner refused to list the selection of ${argv.join(" ")}, so the clean run cannot be held to the tree's own inventory\n${listedOutput}`,
+    );
+    inventory = parseInventory(adapter.summary_grammar, listedOutput);
+    assert.ok(
+      inventory,
+      `${control.id}: ${listing.join(" ")} emitted no ${adapter.summary_grammar} listing:\n${listedOutput}`,
+    );
+    // libtest lists ignored cases beside the runnable ones without marking
+    // them, so a record that declares ignored cases in its selection gets
+    // that subset listed on its own; a record declaring none needs no second
+    // listing, because the summary's own skip count is already required to
+    // be zero.
+    if (adapter.summary_grammar === "libtest" && (proof.expected_skips ?? 0) > 0) {
+      const ignoredListing = inventoryCommand(adapter, argv, { ignoredOnly: true });
+      const ignored = spawn(ignoredListing, adapter);
+      const ignoredOutput = `${ignored.stdout ?? ""}${ignored.stderr ?? ""}`;
+      assert.equal(
+        ignored.status,
+        0,
+        `${control.id}: the runner refused to list the ignored subset of ${argv.join(" ")}\n${ignoredOutput}`,
+      );
+      const ignoredInventory = parseInventory(adapter.summary_grammar, ignoredOutput);
+      assert.ok(
+        ignoredInventory,
+        `${control.id}: ${ignoredListing.join(" ")} emitted no ${adapter.summary_grammar} listing:\n${ignoredOutput}`,
+      );
+      inventory = { ...inventory, skipped: ignoredInventory.selected };
+    }
+  }
+  assertCleanRunEvidence({ control, proof, adapter, argv, observedNow, inventory });
 
   let mutated;
   if (control.kind === "source") {
@@ -347,9 +576,17 @@ export function reapply({ model, control, mirror, spawn }) {
     live,
     `${control.id}: the mutated run emitted no ${adapter.summary_grammar} refusal:\n${output}`,
   );
+  // The mutation's own signature, not the whole refusal: how many cases it
+  // broke, whether it emptied the selection, which errors it printed. The
+  // suite-size counters beside those — passed, ignored, skipped — describe
+  // the tree the mutation was planted in, and the clean run above has already
+  // held that tree to its own inventory.
   assert.deepEqual(
-    live,
-    parseRefusal(adapter.summary_grammar, control.observed, proof.count_key),
+    refusalSignature(adapter.summary_grammar, live),
+    refusalSignature(
+      adapter.summary_grammar,
+      parseRefusal(adapter.summary_grammar, control.observed, proof.count_key),
+    ),
     `${control.id}: the refusal this control transcribes is no longer the one its command produces:\n${output}`,
   );
   return { proof, adapter, argv, output };

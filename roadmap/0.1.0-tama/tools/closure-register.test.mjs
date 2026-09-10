@@ -66,6 +66,7 @@ import {
   laneFor,
   linkInstalledModuleTrees,
   reapply,
+  refusalSignature,
 } from "./closure-controls.mjs";
 import { PACKAGE_ROOT } from "./lib.mjs";
 
@@ -1702,13 +1703,26 @@ control("a generated view that no longer matches its register is stale", () => {
 
 // A transcribed counter is only as good as the last time somebody ran the
 // command, and view freshness is a different property entirely. Every live
-// record whose runner is `node` is re-executed here and its five counts are
-// re-derived from the live output, so a drifted count fails rather than reading
-// as current. Comparing derived counts rather than substrings is what stops a
-// grown count whose old value is a prefix of the new one — 26 inside 260 — from
-// still matching. The suite excludes only itself, because re-entering this file
-// would not terminate; that record is bound instead by the declared-case count
-// below.
+// record whose runner is `node` is re-executed here, and the live run is judged
+// as fresh evidence about this tree: it exits clean, it emits a terminal
+// summary of the grammar its adapter declares, that summary reports zero
+// failures and nonzero work, it skips nothing the record does not declare, and
+// the verdict fields of a tool line — its PASS word and every field whose value
+// is not a count — are the ones the record transcribes. What the live counts
+// are NOT compared against is the record's transcribed counts. Those are the
+// record's claim about a run somebody once did, and the validator holds the
+// record's five numbers to that transcript; comparing the live ones to them
+// would turn every case added to a selected suite, and every node added to a
+// DAG a tool line counts, into a red lane whose only repair is rewriting the
+// number — which proves nothing about the tree. The suite excludes only
+// itself, because re-entering this file would not terminate; that record is
+// bound instead by the declared-case count below.
+const verdictFields = (line) =>
+  line
+    .trim()
+    .split(/\s+/u)
+    .filter((token) => !/^[a-z_]+=\d+$/u.test(token));
+
 selfAssertion("every re-derivable evidence record is re-executed against its transcription", () => {
   covers("stale-evidence");
 
@@ -1750,18 +1764,30 @@ selfAssertion("every re-derivable evidence record is re-executed against its tra
     const grammar = adapter.summary_grammar;
     const live = parseTerminalSummary(grammar, output, proof.count_key);
     assert.ok(live, `${proof.id}: the live run emitted no ${grammar} terminal summary:\n${output}`);
-    assert.deepEqual(
-      live,
-      parseTerminalSummary(grammar, proof.terminal_summary, proof.count_key),
-      `${proof.id}: the live counts are no longer the ones this record transcribes`,
+    assert.equal(live.failed, 0, `${proof.id}: the live run reports ${live.failed} failed cases`);
+    assert.ok(live.executed >= 1, `${proof.id}: the live run executed no case`);
+    // A node runner cannot list its own selection, so a declared skip could
+    // not be told from an unexpected one; the record may declare none, and
+    // the live run may skip none.
+    assert.equal(
+      proof.expected_skips ?? 0,
+      0,
+      `${proof.id}: declares skips under a runner whose selection this suite cannot list`,
     );
-    // The counts are the load-bearing half, but a tool line also carries fields
-    // that are not counts. Those are compared as recorded.
-    for (const fragment of proof.terminal_summary.split(" | "))
-      assert.ok(
-        output.includes(fragment.trim()),
-        `${proof.id}: the recorded terminal summary is no longer what the command emits.\nrecorded: ${fragment.trim()}\nemitted:\n${output}`,
-      );
+    assert.equal(
+      live.skipped,
+      0,
+      `${proof.id}: the live run skipped ${live.skipped} cases the record does not declare`,
+    );
+    // A tool line also carries fields that are not counts — its verdict word,
+    // the tool's own name, a derived state. Those are the run's OUTCOME rather
+    // than the size of what it ran over, and are compared as recorded.
+    if (grammar === "tool-line")
+      for (const field of verdictFields(proof.terminal_summary))
+        assert.ok(
+          output.includes(field),
+          `${proof.id}: the recorded verdict field ${field} is no longer what the command emits:\n${output}`,
+        );
     reExecuted += 1;
   }
   // An exact count, not a floor: a record added under an instrument adapter
@@ -1837,7 +1863,8 @@ function mirrorTree(model, repoRoot) {
 // Every control bound to a record this instrument can invoke is therefore
 // re-applied: the mutation goes into the mirror, the record's own command runs
 // against it, and the refusal must be the runner's own, in the grammar its
-// adapter declares, carrying the counts the control transcribes.
+// adapter declares, carrying the mutation's own signature the control
+// transcribes — not the suite-size counters beside it, which are the tree's.
 //
 // The clean run BEFORE the mutation is what makes that refusal attributable.
 // Without it a mirror that was already red would report every control as
@@ -2090,32 +2117,45 @@ selfAssertion("every control is owned by a re-applying lane, and that lane runs 
 });
 
 // The re-application routine is itself new machinery, and machinery that cannot
-// fail is not a control. Two ways it could report a green re-application while
-// proving nothing, both planted here against a control this lane already drives:
+// fail is not a control. Three ways it could report a green re-application while
+// proving nothing, all planted here against a control this lane already drives:
 //
-//   - the transcribed refusal stops being the one the command produces, which
-//     is exactly how the control this register delegates to the other lane went
-//     stale — its transcript described a suite one case smaller than the suite
-//     it names, and every count beside it stayed internally consistent;
+//   - the transcribed refusal stops being the one the command produces — the
+//     mutation breaks a different number of cases than the control records;
+//   - the clean run is not clean: it reports a failure, executes nothing, or
+//     skips cases the record never declared, so a refusal after the mutation
+//     would be the tree's rather than the edit's;
 //   - the mutation is already in the subject, so a "refusal" after writing it
 //     is a refusal the tree was producing anyway.
 //
-// Both are planted in a copy and against a copy of the control row, never in
+// And one way it could be RED while proving nothing: refusing because the
+// suite the record selects has grown since the transcript was written. That is
+// a property of the tree, not of the mutation, and a lane that refuses on it is
+// red until someone rewrites the transcript's numbers — so a grown suite is
+// planted here too, and required to be accepted.
+//
+// All are planted in a copy and against a copy of the control row, never in
 // the tree or the register under review.
 selfAssertion("the re-application routine plants and refuses what the register says", () => {
   // A libtest refusal and its successor one case later differ ONLY in the
-  // passing count: the same mutation still fails exactly once. Comparing failed
-  // counts alone cannot see that, which is how this register's own lineage
-  // control transcribed a binary one case smaller than the binary it names
-  // while every number beside it stayed self-consistent.
-  const libtest = (passed) =>
-    `test result: FAILED. ${passed} passed; 1 failed; 0 ignored; 0 measured; 0 filtered out`;
-  assert.notDeepEqual(
-    parseRefusal("libtest", libtest(24)),
-    parseRefusal("libtest", libtest(25)),
-    "a refusal comparison that cannot see a moved passing count greens a stale transcript",
+  // passing count: the same mutation still fails exactly once. The parsed
+  // refusal tells them apart, because that is what the transcript records; the
+  // signature the routine compares does not, because the passing count is the
+  // suite's size and not the mutation's doing. A second broken case IS the
+  // mutation's doing, and the signature still sees it.
+  const libtest = (passed, failed = 1) =>
+    `test result: FAILED. ${passed} passed; ${failed} failed; 0 ignored; 0 measured; 0 filtered out`;
+  assert.notDeepEqual(parseRefusal("libtest", libtest(24)), parseRefusal("libtest", libtest(25)));
+  assert.deepEqual(
+    refusalSignature("libtest", parseRefusal("libtest", libtest(24))),
+    refusalSignature("libtest", parseRefusal("libtest", libtest(25))),
+    "a refusal signature that reads the passing count refuses every suite that grew by a case",
   );
-  assert.deepEqual(parseRefusal("libtest", libtest(25)), parseRefusal("libtest", libtest(25)));
+  assert.notDeepEqual(
+    refusalSignature("libtest", parseRefusal("libtest", libtest(25, 1))),
+    refusalSignature("libtest", parseRefusal("libtest", libtest(24, 2))),
+    "a refusal signature that cannot see a second broken case greens a mutation that broke more than the control records",
+  );
 
   const { model } = analyze(PACKAGE_ROOT);
   const repoRoot = path.resolve(PACKAGE_ROOT, "..", "..");
@@ -2152,38 +2192,304 @@ selfAssertion("the re-application routine plants and refuses what the register s
     "a transcript whose counts no longer match the live refusal was accepted",
   );
 
-  // The clean run is the record's OWN command, so the record's own counters are
-  // re-derived from it rather than transcribed once. That is what closes a
-  // record's numbers against a change to the work it selects, so it needs its
-  // own refusal: a record whose transcript no longer describes what its command
-  // emits must fail before the mutation is even written.
+  // The clean run is the record's OWN command, and it is judged as fresh
+  // evidence about the mirror — never against the record's transcribed
+  // counters, which are the record's claim about a run somebody once did and
+  // are held to its own transcript by the validator. Each leg below stubs the
+  // runs: they are about what the routine refuses, not about node, and the
+  // mutated run returns the control's own refusal so nothing else in the
+  // routine is what fails.
   const boundProof = model.register.proof.find((row) => row.control === subject.id);
-  const staleModel = {
+  const transcribed = parseTerminalSummary("node-test", boundProof.terminal_summary);
+  assert.equal(
+    boundProof.expected_skips ?? 0,
+    0,
+    "the legs below assume a bound record that declares no skips",
+  );
+  const block = (tests, pass, fail, skipped) =>
+    `tests ${tests} | pass ${pass} | fail ${fail} | cancelled 0 | skipped ${skipped} | todo 0`;
+  const stubbedRuns = (cleanStdout, refusalStdout = subject.observed) => {
+    let runs = 0;
+    return () => {
+      runs += 1;
+      return runs === 1
+        ? { status: 0, stdout: cleanStdout, stderr: "" }
+        : { status: 1, stdout: refusalStdout, stderr: "" };
+    };
+  };
+
+  // The suite the record selects grew by a case since the transcript was
+  // written, and the mutation still breaks exactly the cases the control
+  // records. That is a property of the tree, not of the mutation, and a lane
+  // that refused on it would be red until someone rewrote the transcript — so
+  // it is ACCEPTED on both halves: a clean run one case larger, and a refusal
+  // one passing case larger.
+  const grownRefusal = subject.observed
+    .replace(/tests (\d+)/u, (_, n) => `tests ${Number(n) + 1}`)
+    .replace(/pass (\d+)/u, (_, n) => `pass ${Number(n) + 1}`);
+  assert.notEqual(grownRefusal, subject.observed, "the grown-suite plant did not apply");
+  reapply({
+    model,
+    control: subject,
+    mirror,
+    spawn: stubbedRuns(block(transcribed.selected + 1, transcribed.passed + 1, 0, 0), grownRefusal),
+  });
+
+  // A clean run that exits 0 but reports a failure is not clean.
+  assert.throws(
+    () =>
+      reapply({
+        model,
+        control: subject,
+        mirror,
+        spawn: stubbedRuns(block(transcribed.selected, transcribed.passed - 1, 1, 0)),
+      }),
+    /reports 1 failed cases/u,
+    "a clean run reporting a failure was accepted as clean",
+  );
+  // A clean run that executed nothing proves nothing about the mutation: the
+  // mutated run's refusal could be that same empty selection.
+  assert.throws(
+    () => reapply({ model, control: subject, mirror, spawn: stubbedRuns(block(0, 0, 0, 0)) }),
+    /executed no case/u,
+    "a clean run that executed nothing was accepted as clean",
+  );
+  // A clean run that skipped a case the record never declared.
+  assert.throws(
+    () =>
+      reapply({
+        model,
+        control: subject,
+        mirror,
+        spawn: stubbedRuns(block(transcribed.selected + 1, transcribed.passed, 0, 1)),
+      }),
+    /declares that its selection carries none/u,
+    "a clean run skipping an undeclared case was accepted as clean",
+  );
+  // A record that declares skips under a runner with no listing of its own
+  // selection cannot tell a declared skip from an unexpected one, and is
+  // refused rather than trusted.
+  const declaringModel = {
     ...model,
     register: {
       ...model.register,
       proof: model.register.proof.map((row) =>
-        row.id === boundProof.id
-          ? {
-              ...row,
-              terminal_summary: row.terminal_summary.replace(
-                /pass (\d+)/u,
-                (_, n) => `pass ${Number(n) + 1}`,
-              ),
-            }
-          : row,
+        row.id === boundProof.id ? { ...row, expected_skips: 1, skip_basis: "planted" } : row,
       ),
     },
   };
-  assert.notEqual(
-    staleModel.register.proof.find((row) => row.id === boundProof.id).terminal_summary,
-    boundProof.terminal_summary,
-    "the stale-summary plant did not apply",
-  );
   assert.throws(
-    () => reapply({ model: staleModel, control: subject, mirror, spawn }),
-    /transcribes counters its own command no longer produces/u,
-    "a record whose transcribed counters no longer match its own clean run was accepted",
+    () =>
+      reapply({
+        model: declaringModel,
+        control: subject,
+        mirror,
+        spawn: stubbedRuns(block(transcribed.selected + 1, transcribed.passed, 0, 1)),
+      }),
+    /exposes no inventory/u,
+    "a declared skip under a runner with no inventory was trusted",
+  );
+
+  // The runners that CAN list their own selection hold the clean run to the
+  // tree's inventory instead. Synthetic records under the two cargo grammars,
+  // with stubbed runs: these legs are about what the routine spawns and what
+  // it refuses, and no cargo is needed for that.
+  const nextestModel = {
+    register: {
+      adapter: [
+        {
+          id: "cargo-nextest",
+          runner: "cargo",
+          argv_prefix: ["nextest", "run", "--locked"],
+          summary_grammar: "nextest",
+        },
+      ],
+      proof: [
+        {
+          id: "P-synthetic-nextest",
+          adapter: "cargo-nextest",
+          argv_tail: ["-p", "synthetic"],
+          expected_skips: 2,
+          skip_basis: "two opt-in cases",
+          terminal_summary: "Summary [   1.000s] 5 tests run: 5 passed, 2 skipped",
+          control: "CTL-synthetic-nextest",
+        },
+      ],
+      control: [
+        {
+          id: "CTL-synthetic-nextest",
+          kind: "command",
+          argv_delta: ["-E", "test(zzz)"],
+          observed: "Summary [   0.010s] 0 tests run: 0 passed, 7 skipped",
+        },
+      ],
+    },
+  };
+  const nextestControl = nextestModel.register.control[0];
+  const nextestListing = (matching, ignored) =>
+    JSON.stringify({
+      "rust-suites": {
+        synthetic: {
+          testcases: Object.fromEntries([
+            ...Array.from({ length: matching }, (_, i) => [
+              `runs_${i}`,
+              { ignored: false, "filter-match": { status: "matches" } },
+            ]),
+            ...Array.from({ length: ignored }, (_, i) => [
+              `ignored_${i}`,
+              { ignored: true, "filter-match": { status: "mismatch", reason: "ignored" } },
+            ]),
+          ]),
+        },
+      },
+    });
+  const nextestRuns = ({ clean, listing, refusal = nextestControl.observed }) => {
+    const spawned = [];
+    const spawn = (argv) => {
+      spawned.push(argv);
+      if (argv[1] === "list") return { status: 0, stdout: listing, stderr: "" };
+      if (argv.includes("-E")) return { status: 4, stdout: refusal, stderr: "" };
+      return { status: 0, stdout: clean, stderr: "" };
+    };
+    return { spawn, spawned };
+  };
+  // A selection that grew by a case, with the tree's own listing agreeing:
+  // accepted — and the listing asked for is the record's own selection.
+  {
+    const { spawn: nextestSpawn, spawned } = nextestRuns({
+      clean: "Summary [   1.000s] 6 tests run: 6 passed, 2 skipped",
+      listing: nextestListing(6, 2),
+      refusal: "Summary [   0.010s] 0 tests run: 0 passed, 8 skipped",
+    });
+    reapply({ model: nextestModel, control: nextestControl, mirror, spawn: nextestSpawn });
+    assert.deepEqual(
+      spawned.map((argv) => argv.join(" ")),
+      [
+        "nextest run --locked -p synthetic",
+        "nextest list --message-format json --locked -p synthetic",
+        "nextest run --locked -p synthetic -E test(zzz)",
+      ],
+      "the routine did not run clean, list the same selection, then run mutated",
+    );
+  }
+  // A skip the listing does not mark ignored is an unexpected one.
+  assert.throws(
+    () =>
+      reapply({
+        model: nextestModel,
+        control: nextestControl,
+        mirror,
+        spawn: nextestRuns({
+          clean: "Summary [   1.000s] 4 tests run: 4 passed, 3 skipped",
+          listing: nextestListing(5, 2),
+        }).spawn,
+      }),
+    /unexpected skip/u,
+    "a skip the tree's inventory does not declare was accepted",
+  );
+  // Fewer cases than the tree lists for the selection.
+  assert.throws(
+    () =>
+      reapply({
+        model: nextestModel,
+        control: nextestControl,
+        mirror,
+        spawn: nextestRuns({
+          clean: "Summary [   1.000s] 5 tests run: 5 passed, 2 skipped",
+          listing: nextestListing(6, 2),
+        }).spawn,
+      }),
+    /listing of that selection on this tree holds 8/u,
+    "a clean run over fewer cases than the tree lists was accepted",
+  );
+  // A mutation whose refusal breaks a case rather than emptying the selection
+  // is not the mutation the control transcribes.
+  assert.throws(
+    () =>
+      reapply({
+        model: nextestModel,
+        control: nextestControl,
+        mirror,
+        spawn: nextestRuns({
+          clean: "Summary [   1.000s] 5 tests run: 5 passed, 2 skipped",
+          listing: nextestListing(5, 2),
+          refusal: "Summary [   1.000s] 5 tests run: 4 passed, 1 failed, 2 skipped",
+        }).spawn,
+      }),
+    /no longer the one its command produces/u,
+    "a refusal of a different shape than the control transcribes was accepted",
+  );
+
+  // libtest: the selection is listed with `--list`, and an exact selection
+  // states the intended cases in the command itself, so a named case that no
+  // longer exists is refused even though the run over the rest is green and
+  // the listing agrees with it.
+  const libtestModel = {
+    register: {
+      adapter: [
+        {
+          id: "cargo-test",
+          runner: "cargo",
+          argv_prefix: ["test", "--locked"],
+          summary_grammar: "libtest",
+        },
+      ],
+      proof: [
+        {
+          id: "P-synthetic-libtest",
+          adapter: "cargo-test",
+          argv_tail: ["-p", "synthetic", "--tests", "--", "--exact", "a::one", "b::two"],
+          terminal_summary:
+            "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out | test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out",
+          control: "CTL-synthetic-libtest",
+        },
+      ],
+      control: [
+        {
+          id: "CTL-synthetic-libtest",
+          kind: "command",
+          argv_delta: ["--planted"],
+          observed:
+            "test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out",
+        },
+      ],
+    },
+  };
+  const libtestControl = libtestModel.register.control[0];
+  const libtestListing = (names) =>
+    `${names.map((name) => `${name}: test`).join("\n")}\n\n${names.length} tests, 0 benchmarks\n\n0 tests, 0 benchmarks\n`;
+  const libtestClean = (passed, filtered) =>
+    `test result: ok. ${passed} passed; 0 failed; 0 ignored; 0 measured; ${filtered} filtered out\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out\n`;
+  const libtestRuns =
+    ({ clean, listing, refusal = libtestControl.observed }) =>
+    (argv) => {
+      if (argv.includes("--list")) return { status: 0, stdout: listing, stderr: "" };
+      if (argv.includes("--planted")) return { status: 101, stdout: refusal, stderr: "" };
+      return { status: 0, stdout: clean, stderr: "" };
+    };
+  // The suite around the two named cases grew (one more filtered out than the
+  // transcript states): accepted.
+  reapply({
+    model: libtestModel,
+    control: libtestControl,
+    mirror,
+    spawn: libtestRuns({
+      clean: libtestClean(2, 25),
+      listing: libtestListing(["a::one", "b::two"]),
+    }),
+  });
+  // One of the two named cases no longer exists: green over one case, listing
+  // agrees, intended selection still refused.
+  assert.throws(
+    () =>
+      reapply({
+        model: libtestModel,
+        control: libtestControl,
+        mirror,
+        spawn: libtestRuns({ clean: libtestClean(1, 25), listing: libtestListing(["a::one"]) }),
+      }),
+    /names 2 cases with --exact, but the clean run executed 1/u,
+    "a run over fewer cases than the command names with --exact was accepted",
   );
 
   // The bytes the plant actually writes. `String.prototype.replace` reads `$&`,
