@@ -18,7 +18,7 @@ import {
   validateSchemaObject,
 } from "./lib.mjs";
 
-function smallAuthority(implemented = []) {
+function smallAuthority(implemented = [], cancelled = []) {
   const node = (id, predecessors = []) => ({
     id,
     name: id,
@@ -27,7 +27,7 @@ function smallAuthority(implemented = []) {
   });
   return {
     nodes: [node("ORC0"), node("GH0", ["ORC0"]), node("GH1", ["GH0"])],
-    ledger: { implemented },
+    ledger: { implemented, cancelled },
   };
 }
 
@@ -92,6 +92,7 @@ test("product reporting distinguishes implemented foundations from pending accep
   };
   const [product] = productReport(authority, deriveState(authority));
   assert.equal(product.implemented, 1);
+  assert.equal(product.cancelled, 0);
   assert.deepEqual(product.acceptance_gates, [
     { id: "FINAL", status: "READY", missing_ancestors: [] },
   ]);
@@ -155,6 +156,40 @@ test("frontier is derived only from implemented ancestors", () => {
   assert.equal(afterOrc0.states.get("ORC0").status, "COMPLETE");
   assert.equal(afterOrc0.states.get("GH0").status, "READY");
   assert.equal(afterOrc0.states.get("GH1").status, "BLOCKED");
+});
+
+test("a cancelled node is settled without evidence: never READY, descendants proceed, no packet", () => {
+  const cancelled = deriveState(smallAuthority([], [{ node_id: "GH0", reason: "superseded" }]));
+  assert.equal(cancelled.states.get("ORC0").status, "READY");
+  assert.equal(cancelled.states.get("GH0").status, "CANCELLED");
+  assert.deepEqual(cancelled.states.get("GH0").cancellation, { reason: "superseded" });
+  // GH1 still waits for ORC0, but not for the retired GH0.
+  assert.equal(cancelled.states.get("GH1").status, "BLOCKED");
+  assert.deepEqual(cancelled.states.get("GH1").missing_ancestors, ["ORC0"]);
+  assert.deepEqual(cancelled.states.get("GH1").cancelled_ancestors, ["GH0"]);
+  const afterOrc0 = deriveState(smallAuthority([{ node_id: "ORC0" }], [{ node_id: "GH0" }]));
+  assert.equal(afterOrc0.states.get("GH1").status, "READY");
+  assert.deepEqual(afterOrc0.states.get("GH1").missing_ancestors, []);
+  // An implemented row wins over a cancelled one for the same node (the validator rejects the pair anyway).
+  const both = deriveState(smallAuthority([{ node_id: "GH0" }], [{ node_id: "GH0" }]));
+  assert.equal(both.states.get("GH0").status, "COMPLETE");
+
+  const authority = loadAuthority();
+  const live = deriveState(authority);
+  for (const row of authority.ledger.cancelled) {
+    assert.equal(live.states.get(row.node_id).status, "CANCELLED", `${row.node_id} is retired in the live ledger`);
+    assert.throws(() => packetFor(authority, live, row.node_id), /cannot create work packet for CANCELLED node/u);
+  }
+  assert.ok(
+    authority.ledger.cancelled.some((row) => row.node_id === "BCSS0"),
+    "the superseded BCSS0 charter is retired in the ledger rather than parked as BLOCKED forever",
+  );
+  const errors = validateAuthority({
+    ...authority,
+    ledger: { ...authority.ledger, cancelled: [...authority.ledger.cancelled, { node_id: "A0" }, { node_id: "ZZ9" }] },
+  });
+  assert.ok(errors.includes("implementation ledger: duplicate node A0"));
+  assert.ok(errors.includes("implementation ledger: unknown node ZZ9"));
 });
 
 test("successor promotion directly follows the final Rev11 gate", () => {

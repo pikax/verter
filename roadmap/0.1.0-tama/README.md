@@ -4,7 +4,7 @@ The [codebase simplification train](decisions/2026-09-08-codebase-simplification
 
 This directory is the live Tama roadmap for Verter 0.1.0. It carries the ratified Revision 11 architecture forward as an execution program rather than documentation. Static work definition lives in `authority/dag/` and `charters/`. Implemented state lives in one intentionally simple file: `authority/state/implemented.toml`.
 
-A node is implemented when its predeclared `[implementation]` line has `status = "implemented"`. Its `commit_message`, `commit_date`, and optional `pull_request` are loose locator hints for a person or agent who later wants to find the work. They are not identity, proof, or validator inputs. Flipping the row back to `status = "pending"` is the deliberate operation that marks a node unimplemented.
+A node is implemented when its predeclared `[implementation]` line has `status = "implemented"`. Its `commit_message`, `commit_date`, and optional `pull_request` are loose locator hints for a person or agent who later wants to find the work. They are not identity, proof, or validator inputs. Flipping the row back to `status = "pending"` is the deliberate operation that marks a node unimplemented. A node whose work will never land under its identity (a superseded charter, work folded into another node) is retired with `status = "cancelled"` and an optional `reason`: it is never READY, its descendants do not wait for it, and flipping it back to pending reopens it.
 
 The same file may contain separate `[[github_issue]]` rows with `node_id`, `gh_issue`, and required `sync_to_github`. Those rows are a local lookup table and mutation policy only; they never mark a node implemented. `true` opts an issue into deterministic managed-label synchronization and explicit one-way content refresh. `false` protects a pre-existing issue manually mapped into the DAG. After GH6, `githubctl sync-issues` creates missing opt-in issues and reconciles the versioned catalogs without rewriting existing issue prose. Before creation or `--refresh-content`, author the selected node's reviewed `catalogs/github-issue-content.toml` entry; missing or invalid content fails before GitHub mutation. Opt-in descriptions follow the human issue standard in `contracts/github-control-plane.md`; they explain the problem, expected outcome, and observable acceptance in standalone prose rather than copying charter sections. GitHub edits never flow back, and protected issues are never read or rewritten.
 
@@ -23,6 +23,7 @@ node roadmap/0.1.0-tama/tools/programctl.mjs frontier
 node roadmap/0.1.0-tama/tools/programctl.mjs explain ID
 node roadmap/0.1.0-tama/tools/programctl.mjs packet ID
 node roadmap/0.1.0-tama/tools/programctl.mjs implemented
+node roadmap/0.1.0-tama/tools/programctl.mjs cancelled
 node roadmap/0.1.0-tama/tools/programctl.mjs products
 node roadmap/0.1.0-tama/tools/programctl.mjs github-issues
 node roadmap/0.1.0-tama/tools/programctl.mjs github-issue NUMBER

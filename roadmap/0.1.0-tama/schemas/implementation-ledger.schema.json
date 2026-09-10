@@ -15,7 +15,8 @@
           "additionalProperties": false,
           "required": ["status"],
           "properties": {
-            "status": { "enum": ["pending", "implemented"] },
+            "status": { "enum": ["pending", "implemented", "cancelled"] },
+            "reason": { "type": "string", "minLength": 1 },
             "commit_message": { "type": "string", "minLength": 1 },
             "commit_date": {
               "type": "string",

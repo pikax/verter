@@ -98,6 +98,16 @@ If the user or maintainer explicitly selects a non-PR landing instead, keep the 
 
 To represent an existing GitHub issue in the DAG, follow `ManualDagAuthoring`: manually author the node, charter, and `[[github_issue]]` row with `sync_to_github = false` in the same reviewed patch. No sync command imports or generates those local authority changes, and the existing issue remains protected from rewrite.
 
+## Retiring a node
+
+A node whose work will never land under its identity is retired, not left pending forever:
+
+```toml
+"BCSS0" = { status = "cancelled", reason = "superseded: the charter is a v2 identity wrapper for history already landed" }
+```
+
+`reason` is optional free text for the reader. A cancelled node is never READY and never emits a work packet; its descendants treat it as settled and wait only for their other ancestors. It is not implemented: `programctl implemented` omits it and product reports count it separately. Flipping the row back to `status = "pending"` reopens the node; an implemented node must be flipped to pending before it can be cancelled.
+
 ## Corrections
 
 The ledger is trusted documentation. If a locator hint is unhelpful, correct it with an ordinary patch. The correction does not reopen, invalidate, or re-prove the node. Flipping the row back to `status = "pending"` is the deliberate operation that marks a node unimplemented and may block descendants.
