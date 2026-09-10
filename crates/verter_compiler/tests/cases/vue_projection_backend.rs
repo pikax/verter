@@ -118,10 +118,11 @@ fn registered_artifact_with_grammar(
     let accepted = grammar_authority
         .accept_registered_source(&source_authority, &snapshot, &config)
         .expect("accepted source");
-    verter_compiler::framework_common::CarrierCompilerRegistry::built_in()
-        .project_registered(&accepted)
-        .expect("registered projection")
-        .into_framework_parse_artifact()
+    verter_compiler::framework_common::registered_carrier_projection::project_registered_accepted(
+        &accepted,
+    )
+    .expect("registered projection")
+    .into_framework_parse_artifact()
 }
 
 fn ide_only_request(filename: &str, want_source_map: bool) -> CompileRequest {
@@ -300,8 +301,7 @@ fn vue_ide_projection_refuses_a_foreign_artifact() {
         let accepted = grammar_authority
             .accept_registered_source(&source_authority, &snapshot, &config)
             .expect("accepted source");
-        verter_compiler::framework_common::CarrierCompilerRegistry::built_in()
-            .project_registered(&accepted)
+        verter_compiler::framework_common::registered_carrier_projection::project_registered_accepted(&accepted)
             .expect("registered projection")
             .into_framework_parse_artifact()
     };

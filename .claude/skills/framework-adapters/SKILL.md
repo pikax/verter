@@ -34,7 +34,7 @@ skill is the module map + contract reference behind it.
 | `typeinfo/framework_surface/{executor,plan,results,graph_export,vue_exec}.rs` | The executor entry, the closed plan/result vocabulary, the first `SemanticTypeGraph` encoder, and the relocated Vue resolution delegates. |
 | `typeinfo/adapters/vue/adapter.rs` | `VueFrameworkAdapter` — plan/normalize only. |
 | `verter_compiler/src/framework_common/carrier_compiler.rs` | The `CarrierCompiler` trait (compiler-domain: `adapter_id`, `parse`, `eval_source`, `compile_ide`, `template_data`) + its neutral I/O vocabulary (`ParseOptions`, `IdeCompileOptions`, `IdeOutput`, `CompileUnsupported`, `TemplateFacts`). NO script-fact method — script facts go through the one `ScriptFactProvider` seam. |
-| `verter_compiler/src/framework_common/registry.rs` | `CarrierCompilerRegistry` (built once; the host's carrier parse dispatch looks the file's adapter compiler up here). |
+| `verter_compiler/src/framework_common/registered_carrier_projection.rs` | `project_registered_accepted` — the SOLE production entry: catalog frontend parse (`built_in_frontend_catalog`/`registered_frontend_for`), then registered geometry. The combined `CarrierCompilerRegistry` is DELETED — no runtime registry lookup remains anywhere in this path. |
 | `verter_compiler/src/framework_common/vue_bridge.rs` | `VueCarrierCompiler` — the reference `CarrierCompiler`, delegating call-for-call to `parse_sfc` + `compile_from_parsed`; ZERO edits to any Vue parser/codegen module. Also owns `open_vue_carrier`, the registered-projector opener installed on the Vue `CarrierLeg` (no capability token — the opener only ever opens a Vue-adapter artifact). |
 | `verter_compiler/src/framework_common/sourcemap_e2e_helpers.rs` | Reusable (test-only) framework IDE sourcemap-correctness assertions every carrier vertical re-runs against its own `compile_ide` output. |
 
@@ -224,8 +224,10 @@ It never resolves types, indexes a file, runs OXC, calls
 
 The compiler-domain mirror of the session registry: where the session
 registry owns the carrier ACCESS token + the semantic legs, the
-compiler-side `CarrierCompilerRegistry` owns the carrier COMPILER per
-adapter. `CarrierCompiler` is one trait every carrier framework
+compiler-side immutable per-capability catalog (`built_in_frontend_catalog`
+and friends, dispatched through `project_registered_accepted`) owns the
+carrier COMPILER selection per adapter — the combined `CarrierCompilerRegistry`
+is deleted. `CarrierCompiler` is one trait every carrier framework
 implements, exposing EXACTLY four compiler-domain ops:
 
 - `parse(source, opts) -> Result<Arc<UnregisteredFrameworkParseArtifact>, SyntaxReject>`
