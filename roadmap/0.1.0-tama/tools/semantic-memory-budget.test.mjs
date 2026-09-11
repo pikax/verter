@@ -26,6 +26,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { CI_WORKFLOW } from "./closure-register.mjs";
 import {
   coverageErrors,
   loadCatalog,
@@ -33,6 +34,7 @@ import {
   overlapGroupErrors,
   PACKAGE_ROOT,
   postMutationErrors,
+  REPO_ROOT,
   RETAINED_STATE_ROOT,
   structFields,
   trancheErrors,
@@ -47,8 +49,43 @@ function freshCatalog() {
   return loadCatalog();
 }
 
-function validate(catalog, packageRoot = PACKAGE_ROOT) {
-  return validateSemanticMemoryBudgetModel(catalog, schema, validateSchemaObject, packageRoot);
+function validate(catalog, packageRoot = PACKAGE_ROOT, options = {}) {
+  return validateSemanticMemoryBudgetModel(
+    catalog,
+    schema,
+    validateSchemaObject,
+    packageRoot,
+    options,
+  );
+}
+
+/** Mirror the package's contract inputs into a temporary root. */
+function mirrorPackage(t, prefix) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const relative of ["catalogs", "schemas", "tools/semantic-memory-workload.mjs"])
+    fs.cpSync(path.join(PACKAGE_ROOT, relative), path.join(root, relative), { recursive: true });
+  return root;
+}
+
+/**
+ * A temporary copy of the CI workflow with `find` replaced, after proving
+ * `find` occurs exactly once before and not at all after.
+ */
+function mutatedWorkflow(t, find, replace) {
+  const source = fs.readFileSync(path.join(REPO_ROOT, CI_WORKFLOW), "utf8");
+  assert.equal(
+    source.split(find).length - 1,
+    1,
+    `pre-state: ${JSON.stringify(find)} must occur exactly once in the workflow`,
+  );
+  const mutated = source.replace(find, replace);
+  assert.equal(mutated.split(find).length - 1, 0, "post-state: the plant did not apply");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mem0-workflow-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "ci.yml");
+  fs.writeFileSync(file, mutated, "utf8");
+  return file;
 }
 
 /** Assert that at least one error mentions `needle`. */
@@ -644,6 +681,52 @@ test("deleting a class that covers no walked field is refused", () => {
   );
 });
 
+test("charging one store field with several sub-region classes is refused", () => {
+  // The walk never enters a charged field, so sub-region classes listed on
+  // one field are a closed inventory nothing checks. The store has to be
+  // delegated so each region is a walked field of its own.
+  const catalog = freshCatalog();
+  const delegation = catalog.struct_field.find(
+    (entry) => entry.struct === "ProjectTypeStore" && entry.field === "semantic_graph",
+  );
+  assert.equal(delegation?.disposition, "delegated", "pre-state: the graph store is walked");
+  catalog.struct_field = catalog.struct_field.filter(
+    (entry) => entry !== delegation && entry.struct !== "SemanticGraphStore",
+  );
+  for (const id of ["semantic_graph_node_arena", "family_candidate_slots"])
+    catalog.allocation_class.find((entry) => entry.id === id).covers_fields = [
+      "ProjectTypeStore.semantic_graph",
+    ];
+  assert.ok(
+    !catalog.struct_field.some((entry) => entry.struct === "SemanticGraphStore"),
+    "post-state: the graph store is still dispositioned",
+  );
+  const errors = validate(catalog);
+  refusedBecause(
+    errors,
+    "struct field ProjectTypeStore.semantic_graph: charged by 2 allocation classes",
+  );
+  refusedBecause(errors, "never reaches SemanticGraphStore");
+});
+
+test("an intern table the semantic graph store retains cannot go unowned", () => {
+  const fields = structFields(
+    "crates/verter_session/src/semantic_query_memo/mod.rs",
+    "SemanticGraphStore",
+  );
+  assert.ok(fields.includes("relation_proof_table"), "pre-state: the table is a production field");
+  const catalog = freshCatalog();
+  const before = catalog.allocation_class.length;
+  catalog.allocation_class = catalog.allocation_class.filter(
+    (row) => row.id !== "relation_proof_intern_table",
+  );
+  assert.equal(catalog.allocation_class.length, before - 1, "post-state: the row was not removed");
+  refusedBecause(
+    validate(catalog),
+    "SemanticGraphStore field relation_proof_table is retained but has no allocation class and no disposition",
+  );
+});
+
 test("deleting the caller-owned copy class is refused", () => {
   const catalog = freshCatalog();
   assert.ok(catalog.allocation_class.some((row) => row.id === "public_result_copy"));
@@ -1039,7 +1122,79 @@ test("an unbound negative-control command is refused", () => {
   assert.ok(row?.bound === true, "pre-state: the negative controls must start bound");
   row.bound = false;
   row.lane = "unbound";
+  delete row.gate_profile;
+  delete row.ci_job;
+  delete row.ci_filter;
   refusedBecause(validate(catalog), "no bound negative-control command is declared");
+});
+
+test("a validate command moved to a local lane is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.command.find((entry) => entry.kind === "validate");
+  assert.equal(row?.lane, "required", "pre-state: the validator runs in a required lane");
+  row.lane = "local";
+  delete row.gate_profile;
+  delete row.ci_job;
+  delete row.ci_filter;
+  assert.equal(row.ci_job, undefined);
+  refusedBecause(validate(catalog), "a validate command must run in a required lane");
+});
+
+test("a required command its gate profile no longer runs is refused", (t) => {
+  const root = mirrorPackage(t, "mem0-profile-");
+  assert.deepEqual(validate(loadCatalog(root), root), [], "pre-state: the mirror validates");
+  const profiles = path.join(root, "catalogs", "gate-profiles.toml");
+  const command = '"node roadmap/0.1.0-tama/tools/validate-semantic-memory-budget.mjs", ';
+  const original = fs.readFileSync(profiles, "utf8");
+  assert.equal(original.split(command).length - 1, 1, "pre-state: the profile runs it once");
+  fs.writeFileSync(profiles, original.replace(command, ""), "utf8");
+  assert.equal(
+    fs.readFileSync(profiles, "utf8").split(command).length - 1,
+    0,
+    "post-state: the plant did not apply",
+  );
+  refusedBecause(validate(loadCatalog(root), root), "gate profile docs-domain does not run");
+});
+
+test("a required command the CI job no longer issues is refused", (t) => {
+  const workflowFile = mutatedWorkflow(
+    t,
+    "node roadmap/0.1.0-tama/tools/validate-semantic-memory-budget.mjs",
+    "true",
+  );
+  refusedBecause(
+    validate(freshCatalog(), PACKAGE_ROOT, { workflowFile }),
+    "command budget_validate: job tama-roadmap does not run",
+  );
+});
+
+test("a required command whose job is not gated on its declared filter is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.command.find((entry) => entry.id === "budget_negative_controls");
+  assert.equal(row.ci_filter, "tama", "pre-state");
+  row.ci_filter = "rust";
+  assert.equal(row.ci_filter, "rust");
+  refusedBecause(validate(catalog), "is not gated on the rust trigger filter it declares");
+});
+
+test("a cited crate the trigger filter stops covering is refused", (t) => {
+  // The scheduler owns a charged allocation class, so a change there has to
+  // re-run the job that re-resolves that owner.
+  const workflowFile = mutatedWorkflow(t, "- 'crates/verter_scheduler/src/**'", "");
+  refusedBecause(
+    validate(freshCatalog(), PACKAGE_ROOT, { workflowFile }),
+    "reads crates/verter_scheduler/src/scheduler.rs, which no tama trigger pattern covers",
+  );
+});
+
+test("an anchor citing a path outside the trigger filter is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.allocation_class.find((entry) => entry.id === "route_db");
+  const uncovered = "crates/verter_bench/Cargo.toml";
+  assert.ok(fs.existsSync(path.join(REPO_ROOT, uncovered)), "pre-state: the path exists");
+  row.producers = [...row.producers, uncovered];
+  assert.ok(row.producers.includes(uncovered));
+  refusedBecause(validate(catalog), `reads ${uncovered}, which no tama trigger pattern covers`);
 });
 
 test("a stale manifest pin is refused", () => {

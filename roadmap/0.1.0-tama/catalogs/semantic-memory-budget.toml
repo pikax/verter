@@ -574,16 +574,22 @@ noise_multiplier_permille = 2000
 # COMPLETENESS IS CHECKED AGAINST THE CODE, NOT AGAINST THIS LIST. The
 # validator reads the production fields of `VerterHost` from the source
 # and follows every field marked `delegated` into the struct it holds —
-# `ProjectTypeStore`, the resolver runtime and its fallthrough state, the
-# framework registry and its registrations, the framework script caches,
-# the audit runtime. EVERY field the walk reaches must be either charged
-# by an allocation class (`covers_fields`, as `Struct.field`) or carry
-# exactly one `[[struct_field]]` disposition with a reason. Deleting a
-# class therefore fails validation rather than silently shrinking the
-# inventory, adding a host-lifetime field turns this contract red until it
-# is accounted for, and relabelling a subsystem so the walk stops reaching
-# it is refused. Fields compiled only for tests are not in the population:
-# they do not exist in a shipped build.
+# `ProjectTypeStore` and its `SemanticGraphStore`, the resolver runtime and
+# its fallthrough state, the framework registry and its registrations, the
+# framework script caches, the audit runtime. EVERY field the walk reaches
+# must be either charged by an allocation class (`covers_fields`, as
+# `Struct.field`) or carry exactly one `[[struct_field]]` disposition with a
+# reason. Deleting a class therefore fails validation rather than silently
+# shrinking the inventory, adding a host-lifetime field turns this contract
+# red until it is accounted for, and relabelling a subsystem so the walk
+# stops reaching it is refused. Fields compiled only for tests are not in
+# the population: they do not exist in a shipped build.
+#
+# A class that charges a field charges ALL of it, so at most one class may
+# cover a field. A store whose regions have different owners or bounds is
+# delegated instead, and each region is charged as a walked field of its
+# own; splitting one field across several classes would make those classes
+# a hand-written list the walk could not check, and is refused.
 #
 # current_bound_kind records what bounds the class TODAY, truthfully:
 #
@@ -725,7 +731,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/semantic_query_memo/arena.rs#NodeArena"
 producers = ["crates/verter_session/src/project_semantic_dispatch"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
-covers_fields = ["ProjectTypeStore.semantic_graph"]
+covers_fields = ["SemanticGraphStore.arena"]
 current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -738,30 +744,30 @@ completion_owner = "E4"
 
 [[allocation_class]]
 id = "semantic_graph_family_memo"
-name = "Family-keyed semantic query memo table"
+name = "Family memo admission ledger"
 ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/bounded_query_retention.rs#DEFAULT_BUDGET_CAP"
 producers = ["crates/verter_session/src/project_semantic_dispatch"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
-covers_fields = ["ProjectTypeStore.semantic_graph"]
+covers_fields = ["SemanticGraphStore.memo_budget"]
 current_bound_kind = "entry_count"
 current_bound_value = 4096
 lifetime_owner = "E4"
 admission_owner = "MEM1"
-shared_reference_rule = "A memo entry is charged once at the table and holds node ids, not node payloads. Evicting an entry drops only the table's charge."
+shared_reference_rule = "The ledger records one insertion-ordered admission per family key and is charged once here. It holds keys, not candidates: FIFO eviction past the cap drops the ledger record and the family's slots in the same lock domain, and the slots' candidates are charged at the family table, never here."
 charge_observability = "proxy_instrumented"
 metric_rows = ["session.semantic_warm_hit", "session.cache_candidate_copy"]
-gap = "Hit and clone counters. The table's own retained bytes are not reported, and its entry cap bounds entries rather than bytes."
+gap = "Hit and clone counters over the table this ledger bounds. The ledger's own retained bytes are not reported, and its cap bounds families rather than bytes."
 completion_owner = "E4"
 
 [[allocation_class]]
 id = "family_candidate_slots"
-name = "Per-family query-identity candidate lists"
+name = "Family memo table and its per-family candidate lists"
 ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/semantic_query_memo/family.rs#candidate_cap"
 producers = ["crates/verter_session/src/semantic_query_memo/family.rs#FamilyKey"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
-covers_fields = ["ProjectTypeStore.semantic_graph"]
+covers_fields = ["SemanticGraphStore.entries"]
 current_bound_kind = "entry_count"
 current_bound_value = 8
 lifetime_owner = "E4"
@@ -779,7 +785,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/semantic_query_memo/hash_cons_memos.rs#HASH_CONS_MEMO_RETENTION_CAP"
 producers = ["crates/verter_session/src/semantic_query_memo/hash_cons_memos.rs"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
-covers_fields = ["ProjectTypeStore.semantic_graph"]
+covers_fields = ["SemanticGraphStore.substitute_memo", "SemanticGraphStore.substitute_memo_fifo", "SemanticGraphStore.evaluate_deferred_memo", "SemanticGraphStore.evaluate_deferred_memo_fifo"]
 current_bound_kind = "entry_count"
 current_bound_value = 100000
 lifetime_owner = "E4"
@@ -797,7 +803,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/semantic_query_memo/member_index.rs#MEMBER_ORDINAL_INDEX_RETENTION_CAP"
 producers = ["crates/verter_session/src/semantic_query_memo/member_index.rs"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
-covers_fields = ["ProjectTypeStore.semantic_graph"]
+covers_fields = ["SemanticGraphStore.member_ordinal_index_memo", "SemanticGraphStore.member_ordinal_index_fifo"]
 current_bound_kind = "entry_count"
 current_bound_value = 16384
 lifetime_owner = "E4"
@@ -815,7 +821,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/semantic_query_memo/derivation.rs#DERIVATION_EDGE_BUCKET_CAP"
 producers = ["crates/verter_session/src/semantic_query_memo/derivation.rs"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
-covers_fields = ["ProjectTypeStore.semantic_graph"]
+covers_fields = ["SemanticGraphStore.derivation"]
 current_bound_kind = "entry_count"
 current_bound_value = 4096
 lifetime_owner = "E4"
@@ -833,7 +839,7 @@ ownership = "cache_owned"
 charge_owner = "crates/verter_session/src/semantic_query_memo/interner.rs#DepSignatureInterner"
 producers = ["crates/verter_session/src/semantic_query_memo/interner.rs#DepSignatureInterner"]
 consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"]
-covers_fields = ["ProjectTypeStore.semantic_graph"]
+covers_fields = ["SemanticGraphStore.dep_signature_interner"]
 current_bound_kind = "weak_reference"
 current_bound_value = 0
 lifetime_owner = "E4"
@@ -842,6 +848,96 @@ shared_reference_rule = "The interner holds Weak references only and is charged 
 charge_observability = "proxy_instrumented"
 metric_rows = ["session.read_set_signature_build"]
 gap = "A construction counter. Neither the bucket overhead charged here nor the payloads charged elsewhere are reported as bytes."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "family_memo_reverse_index"
+name = "Family memo canonical reverse index"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/semantic_query_memo/mod.rs#type CanonicalToEntries"
+producers = ["crates/verter_session/src/semantic_query_memo/reverse_index.rs#register_reverse_index"]
+consumers = ["crates/verter_session/src/semantic_query_memo/mod.rs#invalidate_canonical"]
+covers_fields = ["SemanticGraphStore.canonical_to_entries"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One registration per live candidate per canonical its facts name, charged here with the registered fact list. The list is an Arc shared with the candidate's own signature, so it is a reference, not a second payload charge. A registration is pruned when its candidate is evicted or drained, in the same lock domain as the table."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes it. Registrations follow live candidates, but each candidate registers under every canonical its facts name, and nothing caps that fan-out."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "relation_proof_intern_table"
+name = "Relation proof intern table"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/semantic_query_memo/mod.rs#relation_proof_table: Mutex<"
+producers = ["crates/verter_session/src/semantic_query_memo/relation_memo.rs#intern_relation_proof"]
+consumers = ["crates/verter_session/src/semantic_query.rs#RelationProofId"]
+covers_fields = ["SemanticGraphStore.relation_proof_table"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "Each distinct proof is interned once and charged here, in both the ordered proof list and its dedup map. A relation payload refers to it by an opaque id and is charged nothing for it."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes it. The table is append-only and nothing clears it, invalidate_all included: evicting a relation judgement leaves its proof interned for the store's lifetime."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "relate_key_intern_table"
+name = "Co-discharged relate key intern table"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/semantic_query_memo/mod.rs#relate_key_table: Mutex<"
+producers = ["crates/verter_session/src/semantic_query_memo/relation_memo.rs#intern_relate_key"]
+consumers = ["crates/verter_session/src/semantic_query.rs#RelateKeyId"]
+covers_fields = ["SemanticGraphStore.relate_key_table"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "Each distinct full relate key a cycle proof references is interned once and charged here, in both the ordered key list and its dedup map. A proof refers to it by an opaque id and is charged nothing for it."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes it. The table is append-only and nothing clears it, invalidate_all included."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "unresolved_reach_memo"
+name = "Per-node unresolved-reach bit memo"
+ownership = "cache_owned"
+charge_owner = "crates/verter_session/src/semantic_query_memo/mod.rs#unresolved_reach: Mutex<"
+producers = ["crates/verter_session/src/semantic_query_memo/unresolved_reach.rs#node_reaches_unresolved"]
+consumers = ["crates/verter_session/src/project_semantic_dispatch"]
+covers_fields = ["SemanticGraphStore.unresolved_reach"]
+current_bound_kind = "none"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "One bit per interned node id that has been queried, charged here. The bit refers to a node by id; the node's payload is charged at the arena."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes it. It has the arena's append-only shape: a node's bit is true forever once decided, so entries are never evicted or cleared."
+completion_owner = "E4"
+
+[[allocation_class]]
+id = "semantic_graph_inflight_flights"
+name = "Semantic graph in-flight builds and wait-for graph"
+ownership = "request_active"
+charge_owner = "crates/verter_session/src/semantic_query_memo/inflight.rs#InflightEntry"
+producers = ["crates/verter_session/src/semantic_query_memo/mod.rs#execute_cooperative"]
+consumers = ["crates/verter_session/src/semantic_query_memo/inflight.rs#InflightState"]
+covers_fields = ["SemanticGraphStore.inflight", "SemanticGraphStore.independent_inflight", "SemanticGraphStore.wait_for_graph"]
+current_bound_kind = "lease_refcount"
+current_bound_value = 0
+lifetime_owner = "E4"
+admission_owner = "MEM1"
+shared_reference_rule = "A flight's completed result and its fact carrier are charged once, to the request whose owner built it, while any joiner pins the entry; joiners share it and add nothing. The table entry is retired at publish or abort, and the wait-for graph holds reusable owner slots plus one edge per parked joiner, so no flight outlives the requests using it."
+charge_observability = "uninstrumented"
+metric_rows = []
+gap = "No declared work site observes flight occupancy or the results flights hold; the store's own in-flight counters are not an audit site."
 completion_owner = "E4"
 
 [[allocation_class]]
@@ -1889,6 +1985,43 @@ field = "counters"
 disposition = "non_retaining"
 reason = "A fixed set of Arc<AtomicU64> diagnostic counters. Constant size, no payload, and shared with the DBs that update them in place."
 
+[[struct_field]]
+struct = "ProjectTypeStore"
+field = "semantic_graph"
+disposition = "delegated"
+delegate = "crates/verter_session/src/semantic_query_memo/mod.rs#SemanticGraphStore"
+reason = "The semantic graph store holds regions with different owners and bounds — the node arena, the family memo, its ledger and reverse index, intern tables, hash-cons memos and in-flight builds — so each of its fields is charged or dispositioned in turn."
+
+[[struct_field]]
+struct = "SemanticGraphStore"
+field = "operand_identity"
+disposition = "non_retaining"
+reason = "A u64 process-local store identity. Constant size, no payload."
+
+[[struct_field]]
+struct = "SemanticGraphStore"
+field = "stats"
+disposition = "non_retaining"
+reason = "Atomic telemetry counters plus two sample reservoirs that stop growing at a fixed capacity and overwrite in place. They hold u32 samples, never request or file payload."
+
+[[struct_field]]
+struct = "SemanticGraphStore"
+field = "provenance"
+disposition = "non_retaining"
+reason = "An optional Arc to the host's atomic provenance counters. No payload."
+
+[[struct_field]]
+struct = "SemanticGraphStore"
+field = "force_cold_abort_sweep"
+disposition = "non_retaining"
+reason = "An atomic test trigger that ships in production builds. Constant size, no payload."
+
+[[struct_field]]
+struct = "SemanticGraphStore"
+field = "candidate_admission_seq"
+disposition = "non_retaining"
+reason = "An atomic candidate admission-sequence allocator. Constant size, no payload."
+
 # ─────────────────────────────────────────────────────────────────────────
 # Controlling metric rows.
 #
@@ -2866,9 +2999,20 @@ count = 1
 # ─────────────────────────────────────────────────────────────────────────
 # Executable commands.
 #
-# lane records where the command is REQUIRED to run. The validator and its
-# negative controls are bound in TWO places, deliberately: the docs-domain
-# gate profile this node's charter binds, and the required roadmap CI job.
+# lane records where the command is REQUIRED to run:
+#
+#   required  named by `gate_profile`, `ci_job` and `ci_filter`, and RESOLVED
+#             on every validation run: the profile lists the command, the
+#             job issues the whole command line and is gated on the filter,
+#             and the filter covers every repository path the validation
+#             reads. Deleting a binding, or citing a file the filter does
+#             not cover, fails validation.
+#   local     a documented developer command no lane runs
+#   unbound   owned by a later node and not yet bound
+#
+# The validator and its negative controls are bound in TWO places,
+# deliberately: the docs-domain gate profile this node's charter binds, and
+# the required roadmap CI job.
 # They are separate commands rather than a hook inside the program-DAG
 # validator, because that validator is mirrored and re-executed against a
 # partial copy of the tree by the closure instrument, and this contract
@@ -2884,14 +3028,20 @@ count = 1
 id = "budget_validate"
 kind = "validate"
 command = "node roadmap/0.1.0-tama/tools/validate-semantic-memory-budget.mjs"
-lane = "docs-domain gate profile and the required Tama Roadmap CI job"
+lane = "required"
+gate_profile = "docs-domain"
+ci_job = "tama-roadmap"
+ci_filter = "tama"
 bound = true
 
 [[command]]
 id = "budget_negative_controls"
 kind = "negative_control"
 command = "node --test roadmap/0.1.0-tama/tools/semantic-memory-budget.test.mjs"
-lane = "docs-domain gate profile and the required Tama Roadmap CI job"
+lane = "required"
+gate_profile = "docs-domain"
+ci_job = "tama-roadmap"
+ci_filter = "tama"
 bound = true
 
 [[command]]

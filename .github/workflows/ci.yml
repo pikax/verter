@@ -335,26 +335,31 @@ jobs:
               # the audit site schema is the closed vocabulary its metric
               # rows must come from; and the production field lists of
               # `VerterHost` and of every struct its `delegated` fields reach
-              # (`ProjectTypeStore`, `UnifiedResolverRuntime`,
-              # `FallthroughResolverState`, `FrameworkRegistration`,
-              # `FrameworkScriptCaches` and the rest) are the INDEPENDENT
-              # retained-storage inventory the allocation classes are checked
-              # for completeness against, so adding a host-lifetime field to
-              # any of them turns this job red until the contract accounts
-              # for it. The session, semantic and workspace source trees are
-              # taken whole because the allocation-owner and emitter anchors
-              # are spread across them, and the audit tree is taken whole
-              # rather than just its attribution subtree because the live
-              # memory observations resolve `memory.rs` as well; renaming
-              # one of those owners turns this job red on purpose — the
-              # contract has to be repinned, not left describing a symbol
-              # that no longer exists.
+              # (`ProjectTypeStore`, `SemanticGraphStore`,
+              # `UnifiedResolverRuntime`, `FallthroughResolverState`,
+              # `FrameworkRegistration`, `FrameworkScriptCaches` and the rest)
+              # are the INDEPENDENT retained-storage inventory the allocation
+              # classes are checked for completeness against, so adding a
+              # host-lifetime field to any of them turns this job red until
+              # the contract accounts for it. The session, semantic,
+              # workspace, scheduler and language source trees are taken
+              # whole because the allocation-owner and emitter anchors are
+              # spread across them, and the audit tree is taken whole rather
+              # than just its attribution subtree because the live memory
+              # observations resolve `memory.rs` as well; renaming one of
+              # those owners turns this job red on purpose — the contract has
+              # to be repinned, not left describing a symbol that no longer
+              # exists. That validator refuses any repository path it reads
+              # that no pattern here covers, so this block cannot silently
+              # fall behind what the contract cites.
               - 'performance-gates.toml'
               - 'crates/verter_audit/src/**'
               - 'crates/verter_bench/examples/attribution_baseline.rs'
               - 'crates/verter_session/src/**'
               - 'crates/verter_semantic/src/**'
               - 'crates/verter_workspace/src/**'
+              - 'crates/verter_scheduler/src/**'
+              - 'crates/verter_language/src/**'
               - 'crates/verter_compiler/src/code_transform/code_transform.rs'
               - 'crates/verter_compiler/src/code_transform/source_map.rs'
               - 'crates/verter_napi/src/**'

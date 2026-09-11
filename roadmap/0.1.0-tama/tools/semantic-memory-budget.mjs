@@ -26,6 +26,13 @@
 //     delegate to, so dropping an allocation class, adding a host-lifetime
 //     field, or cutting a subsystem out of the walk fails.
 //
+// It also refuses to let the contract stop being enforced. A command
+// declared to run in a required lane is resolved against the gate profile
+// and the CI job it names, so deleting either binding fails; and every
+// repository path this validator opens has to be covered by that job's
+// trigger filter, so a change to a cited file cannot merge without the
+// enforcing job running.
+//
 // One table is validated for the opposite reason. `[[memory_observation]]`
 // records byte-valued memory the process really does report, which the
 // work-site vocabulary cannot name; without it the contract would assert
@@ -36,6 +43,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  CI_WORKFLOW,
+  laneCommandLine,
+  triggerCovers,
+  triggerPaths,
+  workflowJobs,
+} from "./closure-register.mjs";
 import {
   expandWorkload,
   MANIFEST_COLUMNS,
@@ -48,6 +62,7 @@ export const REPO_ROOT = path.resolve(PACKAGE_ROOT, "..", "..");
 
 export const CATALOG_RELATIVE = "catalogs/semantic-memory-budget.toml";
 export const SCHEMA_NAME = "semantic-memory-budget.schema.json";
+const GATE_PROFILES_RELATIVE = "catalogs/gate-profiles.toml";
 const AUDIT_SITE_SCHEMA = "crates/verter_audit/src/attribution/schema.rs";
 
 /**
@@ -69,6 +84,7 @@ export const RETAINED_STATE_ROOT = Object.freeze({
  */
 export const REQUIRED_RETAINED_STRUCTS = Object.freeze([
   "ProjectTypeStore",
+  "SemanticGraphStore",
   "UnifiedResolverRuntime",
   "FallthroughResolverState",
   "FrameworkRegistration",
@@ -175,12 +191,35 @@ export function sha256(bytes) {
   return crypto.createHash("sha256").update(bytes).digest("hex");
 }
 
+/**
+ * Every repository path the running validation opens, repository-relative
+ * with forward slashes, or `null` outside a validation run. The trigger
+ * coverage check is measured against this set rather than against a list
+ * of the catalog's citing fields, so it cannot drift from what is read.
+ */
+let openedRepoPaths = null;
+
+function recordOpened(relative) {
+  if (openedRepoPaths) openedRepoPaths.add(relative);
+}
+
+/** The repository-relative form of an absolute path, or `null` outside it. */
+function repoRelative(absolute) {
+  const relative = path.relative(REPO_ROOT, absolute);
+  if (!relative || path.isAbsolute(relative) || relative.startsWith("..")) return null;
+  return relative.split(path.sep).join("/");
+}
+
 function readRepoFile(relative) {
-  return fs.readFileSync(path.join(REPO_ROOT, relative));
+  const bytes = fs.readFileSync(path.join(REPO_ROOT, relative));
+  recordOpened(relative);
+  return bytes;
 }
 
 function repoPathExists(relative) {
-  return fs.existsSync(path.join(REPO_ROOT, relative));
+  const exists = fs.existsSync(path.join(REPO_ROOT, relative));
+  if (exists) recordOpened(relative);
+  return exists;
 }
 
 /**
@@ -203,7 +242,7 @@ function anchorErrors(anchor, label) {
     errors.push(`${label}: anchored symbol needs a file, got a directory: ${relative}`);
     return errors;
   }
-  if (!fs.readFileSync(target, "utf8").includes(symbol))
+  if (!readRepoFile(relative).toString("utf8").includes(symbol))
     errors.push(`${label}: symbol ${symbol} no longer occurs in ${relative}`);
   return errors;
 }
@@ -814,6 +853,18 @@ function retainedWalkErrors(catalog, coveredFields) {
       const key = `${struct}.${field}`;
       const row = dispositions.get(key);
       const charging = coveredFields.get(key);
+      // A class that charges a field charges ALL of it. Splitting one field
+      // across sub-region classes turns those classes into a hand-written
+      // closed list of what the struct behind it holds, which the walk can
+      // no longer check: a region nobody named is charged nowhere. Such a
+      // field has to be delegated, so each region is a walked field of its
+      // own and an unnamed one is reported.
+      if (charging && charging.size > 1) {
+        errors.push(
+          `struct field ${key}: charged by ${charging.size} allocation classes (${[...charging].join(", ")}); a field split across classes must be delegated so the walk sees every region it holds`,
+        );
+        continue;
+      }
       if (charging && row) {
         errors.push(
           `struct field ${key}: charged by ${[...charging].join(", ")} AND dispositioned ${row.disposition}; it is one or the other`,
@@ -1530,7 +1581,22 @@ export function postMutationErrors(tranche, rows) {
   return errors;
 }
 
-function commandErrors(catalog) {
+/** The binding fields a `required` lane names, and only a `required` lane. */
+const REQUIRED_LANE_FIELDS = Object.freeze(["gate_profile", "ci_job", "ci_filter"]);
+
+/** Command kinds that ARE the contract's enforcement, so must run in a required lane. */
+const ENFORCING_COMMAND_KINDS = Object.freeze(["validate", "negative_control"]);
+
+/**
+ * The command rows, and the bindings behind every `required` lane.
+ *
+ * A declared binding is resolved, never trusted: the gate profile has to
+ * exist and list the command verbatim, the CI job has to exist, issue the
+ * whole command line and be gated on the declared trigger filter. Then
+ * every repository path this run opened has to be covered by that filter,
+ * or a change to it could merge with the enforcing job skipped.
+ */
+function commandErrors(catalog, packageRoot, workflowFile) {
   const errors = [];
   const rows = catalog.command || [];
   const ids = new Set();
@@ -1541,14 +1607,90 @@ function commandErrors(catalog) {
       errors.push(`command ${row.id}: a bound command cannot declare an unbound lane`);
     if (!row.bound && row.lane !== "unbound")
       errors.push(`command ${row.id}: an unbound command must declare the unbound lane`);
+    for (const field of REQUIRED_LANE_FIELDS) {
+      if (row.lane === "required" && row[field] === undefined)
+        errors.push(`command ${row.id}: a required lane must name its ${field}`);
+      if (row.lane !== "required" && row[field] !== undefined)
+        errors.push(`command ${row.id}: only a required lane names a ${field}`);
+    }
+    if (ENFORCING_COMMAND_KINDS.includes(row.kind) && row.bound && row.lane !== "required")
+      errors.push(
+        `command ${row.id}: a ${row.kind} command must run in a required lane; a ${row.lane} one enforces nothing`,
+      );
   }
-  if (!rows.some((row) => row.kind === "validate" && row.bound))
-    errors.push("commands: no bound validate command is declared");
-  if (!rows.some((row) => row.kind === "negative_control" && row.bound))
-    errors.push("commands: no bound negative-control command is declared");
+  const required = rows.filter((row) => row.bound && row.lane === "required");
+  if (!required.some((row) => row.kind === "validate"))
+    errors.push("commands: no bound validate command is declared in a required lane");
+  if (!required.some((row) => row.kind === "negative_control"))
+    errors.push("commands: no bound negative-control command is declared in a required lane");
   if (!rows.some((row) => row.kind === "build" && row.bound))
     errors.push("commands: no bound build command is declared");
   if (!rows.some((row) => row.kind === "run")) errors.push("commands: no run command is declared");
+  if (required.length === 0) return errors;
+
+  let profiles = null;
+  try {
+    profiles = readToml(path.join(packageRoot, GATE_PROFILES_RELATIVE)).profile || [];
+  } catch (error) {
+    errors.push(`commands: cannot read ${GATE_PROFILES_RELATIVE}: ${error.message}`);
+  }
+  let workflow = null;
+  try {
+    workflow = fs.readFileSync(workflowFile, "utf8");
+    const relative = repoRelative(workflowFile);
+    if (relative) recordOpened(relative);
+  } catch (error) {
+    errors.push(`commands: cannot read the CI workflow: ${error.message}`);
+  }
+  const jobs = workflow === null ? new Map() : workflowJobs(workflow);
+  const filters = new Map();
+
+  for (const row of required) {
+    const where = `command ${row.id}`;
+    if (profiles && row.gate_profile !== undefined) {
+      const profile = profiles.find((entry) => entry.id === row.gate_profile);
+      if (!profile) errors.push(`${where}: gate profile ${row.gate_profile} is not declared`);
+      else if (!(profile.final || []).includes(row.command))
+        errors.push(
+          `${where}: gate profile ${row.gate_profile} does not run ${JSON.stringify(row.command)} in its final list`,
+        );
+    }
+    if (workflow === null || row.ci_job === undefined || row.ci_filter === undefined) continue;
+    const body = jobs.get(row.ci_job);
+    if (body === undefined) {
+      errors.push(`${where}: ${row.ci_job} is not a job of the CI workflow`);
+      continue;
+    }
+    // The whole line, not containment: a declaration that is a prefix of
+    // what the job issues would hide the arguments that decide what runs.
+    const line = laneCommandLine(body, row.command);
+    if (line === null)
+      errors.push(`${where}: job ${row.ci_job} does not run ${JSON.stringify(row.command)}`);
+    else if (line !== row.command)
+      errors.push(
+        `${where}: job ${row.ci_job} issues ${JSON.stringify(line)}, not the declared ${JSON.stringify(row.command)}`,
+      );
+    if (!body.includes(`needs.detect-changes.outputs.${row.ci_filter} == 'true'`))
+      errors.push(
+        `${where}: job ${row.ci_job} is not gated on the ${row.ci_filter} trigger filter it declares`,
+      );
+    if (!filters.has(row.ci_filter))
+      filters.set(row.ci_filter, triggerPaths(workflow, row.ci_filter));
+  }
+
+  // What the declared filter has to cover is what this run actually read.
+  const opened = [...(openedRepoPaths ?? [])].sort();
+  for (const [filter, patterns] of filters) {
+    if (!patterns || patterns.length === 0) {
+      errors.push(`commands: the CI workflow declares no ${filter} trigger filter`);
+      continue;
+    }
+    for (const relative of opened)
+      if (!triggerCovers(patterns, relative))
+        errors.push(
+          `trigger coverage: this validation reads ${relative}, which no ${filter} trigger pattern covers, so a change to it would not run the job that enforces this contract`,
+        );
+  }
   return errors;
 }
 
@@ -1557,28 +1699,42 @@ function commandErrors(catalog) {
  * Exported separately from the file-reading entry point so the negative
  * controls can mutate an in-memory catalog and prove the mutation applied
  * before asserting the refusal.
+ *
+ * `workflowFile` is the CI workflow the required lanes resolve against;
+ * the negative controls point it at a mutated copy.
  */
 export function validateSemanticMemoryBudgetModel(
   catalog,
   schema,
   validateSchemaObject,
   packageRoot = PACKAGE_ROOT,
+  { workflowFile = path.join(REPO_ROOT, CI_WORKFLOW) } = {},
 ) {
-  const errors = [...validateSchemaObject(catalog, schema, "catalogs.semantic-memory-budget")];
-  errors.push(...budgetErrors(catalog));
-  errors.push(...limitDerivationErrors(catalog));
-  errors.push(...memoryObservationErrors(catalog));
-  errors.push(...pressureSignalErrors(catalog));
-  errors.push(...scaleErrors(catalog));
-  errors.push(...baselineErrors(catalog));
-  errors.push(...allocationErrors(catalog));
-  errors.push(...metricErrors(catalog));
-  errors.push(...fixtureErrors(catalog, packageRoot));
-  errors.push(...editDeltaErrors(catalog, packageRoot));
-  errors.push(...configurationDeltaErrors(catalog));
-  errors.push(...workloadErrors(catalog, packageRoot));
-  errors.push(...commandErrors(catalog));
-  return errors;
+  openedRepoPaths = new Set();
+  try {
+    // The package itself is read too: this catalog, its schema and
+    // fixtures, the gate profiles and the tools implementing the checks.
+    const packageRelative = repoRelative(packageRoot);
+    if (packageRelative) recordOpened(packageRelative);
+    const errors = [...validateSchemaObject(catalog, schema, "catalogs.semantic-memory-budget")];
+    errors.push(...budgetErrors(catalog));
+    errors.push(...limitDerivationErrors(catalog));
+    errors.push(...memoryObservationErrors(catalog));
+    errors.push(...pressureSignalErrors(catalog));
+    errors.push(...scaleErrors(catalog));
+    errors.push(...baselineErrors(catalog));
+    errors.push(...allocationErrors(catalog));
+    errors.push(...metricErrors(catalog));
+    errors.push(...fixtureErrors(catalog, packageRoot));
+    errors.push(...editDeltaErrors(catalog, packageRoot));
+    errors.push(...configurationDeltaErrors(catalog));
+    errors.push(...workloadErrors(catalog, packageRoot));
+    // Last, so the trigger coverage it checks sees every path read above.
+    errors.push(...commandErrors(catalog, packageRoot, workflowFile));
+    return errors;
+  } finally {
+    openedRepoPaths = null;
+  }
 }
 
 export function loadCatalog(packageRoot = PACKAGE_ROOT) {

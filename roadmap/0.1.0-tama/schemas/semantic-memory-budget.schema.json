@@ -1023,8 +1023,23 @@
             "minLength": 1
           },
           "lane": {
+            "enum": [
+              "required",
+              "local",
+              "unbound"
+            ]
+          },
+          "gate_profile": {
             "type": "string",
-            "minLength": 1
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "ci_job": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "ci_filter": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$"
           },
           "bound": {
             "type": "boolean"

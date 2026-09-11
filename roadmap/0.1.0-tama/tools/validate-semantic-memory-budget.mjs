@@ -9,6 +9,8 @@
 // final list in `catalogs/gate-profiles.toml`, and the required `Tama
 // Roadmap` CI job. The negative controls
 // (`tools/semantic-memory-budget.test.mjs`) are bound alongside it in both.
+// The catalog declares both bindings, and validation resolves them against
+// those two files, so removing either one fails here.
 //
 // It is deliberately NOT folded into `validate-program-dag.mjs --strict`.
 // The closure instrument re-executes that validator against a partial
