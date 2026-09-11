@@ -1,5 +1,5 @@
 //! Svelte IDE `ProjectionBackend`: parse-artifact projection, catalog identity,
-//! byte/map parity with `compile_ide`, IDE-only refusal, and determinism.
+//! IDE-only refusal, and determinism.
 
 use std::sync::Arc;
 
@@ -9,13 +9,12 @@ use verter_compiler::compile_request::{
     IdeProductRequest, ProductKind, RuntimeProductRequest, SvelteCompileRequest,
 };
 use verter_compiler::framework_common::{
-    CarrierCompiler, CatalogCapability, CatalogRow, CompileUnsupported, FrameworkEpoch,
-    FrameworkParseArtifact, IdeCompileOptions, ImmutableCapabilityCatalog, ProjectionBackend,
-    RuntimeOutputDescriptor,
+    CatalogCapability, CatalogRow, CompileUnsupported, FrameworkEpoch, FrameworkParseArtifact,
+    ImmutableCapabilityCatalog, ProjectionBackend, RuntimeOutputDescriptor,
 };
 use verter_compiler::svelte::{
-    svelte_projection_backend_registration, SvelteCarrierCompiler, SvelteProjectionBackend,
-    SvelteProjectionError, SvelteProjectionInputs, SvelteSfc5,
+    svelte_projection_backend_registration, SvelteProjectionBackend, SvelteProjectionError,
+    SvelteProjectionInputs, SvelteSfc5,
 };
 use verter_language::carrier_grammar::{
     CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
@@ -162,16 +161,9 @@ fn svelte_projection_catalog_row_binds_svelte_adapter_identity() {
 }
 
 #[test]
-fn svelte_ide_projection_matches_compile_ide_on_kitchen_sink() {
+fn svelte_ide_projection_produces_a_jsx_artifact_for_the_kitchen_sink() {
     let artifact = svelte_artifact("file:///kitchen.svelte", KITCHEN_SINK);
-    let opts = IdeCompileOptions {
-        filename: Some("Kitchen.svelte".to_string()),
-        ..Default::default()
-    };
-    let via_compile_ide = SvelteCarrierCompiler
-        .compile_ide(KITCHEN_SINK, &artifact, &opts)
-        .expect("compile_ide kitchen sink");
-    let request = ide_only_request("Kitchen.svelte", !opts.skip_source_map);
+    let request = ide_only_request("Kitchen.svelte", true);
     let via_backend = SvelteProjectionBackend
         .project_ide(
             ide_grant(),
@@ -181,34 +173,14 @@ fn svelte_ide_projection_matches_compile_ide_on_kitchen_sink() {
             &SvelteProjectionInputs,
         )
         .expect("projection backend");
-    assert_eq!(via_backend.ide.code, via_compile_ide.code);
-    assert_eq!(via_backend.ide.source_map, via_compile_ide.source_map);
-    assert_eq!(via_backend.ide.is_jsx, via_compile_ide.is_jsx);
-    assert_eq!(
-        via_backend
-            .ide
-            .output_descriptor
-            .source_map
-            .declared_space_tokens,
-        via_compile_ide
-            .output_descriptor
-            .source_map
-            .declared_space_tokens
-    );
     assert!(via_backend.ide.is_jsx);
     assert!(!via_backend.ide.code.is_empty());
+    assert!(!via_backend.ide.source_map.is_empty());
 }
 
 #[test]
-fn svelte_ide_projection_matches_compile_ide_on_a_typescript_carrier() {
+fn svelte_ide_projection_produces_a_tsx_artifact_for_a_typescript_carrier() {
     let artifact = svelte_artifact("file:///simple.svelte", SIMPLE);
-    let opts = IdeCompileOptions {
-        filename: Some("Simple.svelte".to_string()),
-        ..Default::default()
-    };
-    let via_compile_ide = SvelteCarrierCompiler
-        .compile_ide(SIMPLE, &artifact, &opts)
-        .expect("compile_ide simple");
     let via_backend = SvelteProjectionBackend
         .project_ide(
             ide_grant(),
@@ -218,19 +190,26 @@ fn svelte_ide_projection_matches_compile_ide_on_a_typescript_carrier() {
             &SvelteProjectionInputs,
         )
         .expect("projection backend");
-    assert_eq!(via_backend.ide.code, via_compile_ide.code);
-    assert_eq!(via_backend.ide.source_map, via_compile_ide.source_map);
     assert!(!via_backend.ide.is_jsx);
+    assert!(!via_backend.ide.code.is_empty());
+    assert!(!via_backend.ide.source_map.is_empty());
 }
 
 #[test]
-fn svelte_carrier_compile_ide_still_projects() {
+fn svelte_ide_projection_still_projects_a_js_carrier() {
     let artifact = svelte_artifact("file:///js.svelte", JS_CARRIER);
-    let out = SvelteCarrierCompiler
-        .compile_ide(JS_CARRIER, &artifact, &IdeCompileOptions::default())
-        .expect("production compile_ide route");
-    assert!(out.is_jsx);
+    let out = SvelteProjectionBackend
+        .project_ide(
+            ide_grant(),
+            JS_CARRIER,
+            &artifact,
+            &ide_only_request("Js.svelte", true),
+            &SvelteProjectionInputs,
+        )
+        .expect("production projection route");
+    assert!(out.ide.is_jsx);
     assert!(out
+        .ide
         .code
         .starts_with("/** @jsxImportSource @verter/svelte-jsx */"));
 }
@@ -365,18 +344,23 @@ fn svelte_ide_projection_binds_request_syntax_profile_to_admitted_artifact() {
 }
 
 #[test]
-fn svelte_ide_projection_succeeds_for_foreign_namespace_like_compile_ide() {
+fn svelte_ide_projection_succeeds_for_foreign_namespace() {
+    // The IDE projection carries no namespace axis: a request naming the
+    // Foreign namespace must project identically to a plain request over
+    // the same source.
     let artifact = svelte_artifact("file:///foreign-ns.svelte", SIMPLE);
-    let opts = IdeCompileOptions {
-        filename: Some("ForeignNs.svelte".to_string()),
-        ..Default::default()
-    };
-    let via_compile_ide = SvelteCarrierCompiler
-        .compile_ide(SIMPLE, &artifact, &opts)
-        .expect("compile_ide has no namespace axis");
+    let plain = SvelteProjectionBackend
+        .project_ide(
+            ide_grant(),
+            SIMPLE,
+            &artifact,
+            &ide_only_request("ForeignNs.svelte", true),
+            &SvelteProjectionInputs,
+        )
+        .expect("a plain request has no namespace axis");
     let request = CompileRequest::new(
         vec![CompileProduct::IdeCompanion(IdeProductRequest {
-            want_source_map: !opts.skip_source_map,
+            want_source_map: true,
             ..Default::default()
         })],
         FrameworkCompileRequest::Svelte(SvelteCompileRequest {
@@ -398,10 +382,10 @@ fn svelte_ide_projection_succeeds_for_foreign_namespace_like_compile_ide() {
             &request,
             &SvelteProjectionInputs,
         )
-        .expect("IDE-only Foreign namespace must project like compile_ide");
-    assert_eq!(via_backend.ide.code, via_compile_ide.code);
-    assert_eq!(via_backend.ide.source_map, via_compile_ide.source_map);
-    assert_eq!(via_backend.ide.is_jsx, via_compile_ide.is_jsx);
+        .expect("IDE-only Foreign namespace must still project");
+    assert_eq!(via_backend.ide.code, plain.ide.code);
+    assert_eq!(via_backend.ide.source_map, plain.ide.source_map);
+    assert_eq!(via_backend.ide.is_jsx, plain.ide.is_jsx);
 }
 
 #[test]

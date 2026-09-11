@@ -3,9 +3,10 @@
 //! This module owns the Svelte-specific compiler surface: the byte parser
 //! ([`parser`]) producing a [`parser::ParsedSvelte`], and the
 //! [`carrier::SvelteCarrierCompiler`] that lifts it into the framework-neutral
-//! [`FrameworkParseArtifact`](verter_compiler::framework_common::FrameworkParseArtifact) and
-//! drives the four [`CarrierCompiler`](crate::framework_common::CarrierCompiler)
-//! operations.
+//! [`FrameworkParseArtifact`](verter_compiler::framework_common::FrameworkParseArtifact).
+//! The typed [`svelte_projection_backend::SvelteProjectionBackend`] and
+//! [`svelte_runtime_backend::SvelteRuntimeBackend`] drive IDE projection and
+//! runtime-bundle production over that artifact.
 //!
 //! It performs NO type lowering (the thin-adapters guard). The IDE TSX
 //! projection ([`ide`]) is a pure syntactic transform via `CodeTransform` —

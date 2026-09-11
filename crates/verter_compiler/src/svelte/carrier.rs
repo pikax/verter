@@ -2,8 +2,9 @@
 //!
 //! [`SvelteParseCarrier`] wraps [`ParsedSvelte`]. [`build_svelte_parse_artifact`]
 //! produces the unregistered artifact; the projector owns inventory
-//! geometry. [`SvelteCarrierCompiler`]: `parse` → neutral artifact;
-//! `compile_ide` projects IDE TSX.
+//! geometry. [`SvelteCarrierCompiler`]: `parse` → neutral artifact; the
+//! typed [`super::svelte_projection_backend::SvelteProjectionBackend`] and
+//! [`svelte_carrier_bundle`] drive IDE and runtime-bundle production.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -27,9 +28,9 @@ use crate::compile_request::{
     SvelteCompileRequest,
 };
 use crate::framework_common::carrier_compiler::{
-    CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
-    RuntimeCompileOptions, RuntimeCompileOutput, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
-    RuntimeOutputDescriptor, SourceMapFidelity,
+    CarrierCompileOutcome, CompileUnsupported, IdeOutput, RuntimeCompileOptions,
+    RuntimeCompileOutput, RuntimeDiagnostic, RuntimeDiagnosticSeverity, RuntimeOutputDescriptor,
+    SourceMapFidelity,
 };
 use crate::framework_common::FrameworkParseArtifact;
 
@@ -222,7 +223,11 @@ pub fn build_svelte_parse_artifact(
     ))
 }
 
-/// The Svelte carrier compiler — the second [`CarrierCompiler`].
+/// The Svelte carrier compiler: parses source into the framework-neutral
+/// artifact and exposes the shared identity/downcast surface the typed
+/// Svelte backends ([`super::svelte_projection_backend::SvelteProjectionBackend`],
+/// [`super::svelte_runtime_backend::SvelteRuntimeBackend`], the Svelte
+/// host-integration backend) and frontend row build on.
 ///
 /// Reaches its parsed component back out of the type-erased artifact
 /// through its own inherent downcast — no capability token, since only
@@ -248,6 +253,77 @@ pub fn open_svelte_carrier(artifact: &FrameworkParseArtifact) -> Option<Arc<dyn 
 }
 
 impl SvelteCarrierCompiler {
+    /// The adapter identity this compiler answers to in the immutable
+    /// capability catalog.
+    #[must_use]
+    pub fn adapter_id(&self) -> FrameworkAdapterId {
+        FrameworkAdapterId::svelte()
+    }
+
+    /// The carrier LANGUAGE id this compiler serves.
+    #[must_use]
+    pub fn carrier_language_id(&self) -> LanguageId {
+        LanguageId::new("svelte")
+    }
+
+    /// Parse carrier `source` into the framework-neutral artifact.
+    ///
+    /// Recoverable malformed syntax is NOT a rejection: the parser collects
+    /// diagnostics inline, so ordinary malformed input still returns `Ok`
+    /// with the problem recorded on the artifact's mapped diagnostic
+    /// channel. `Err(SyntaxReject)` is reserved for a request this frontend
+    /// cannot honor at all (an explicitly unsupported parse-option
+    /// combination) and is returned BEFORE any artifact is constructed.
+    pub fn parse(
+        &self,
+        source: &str,
+        opts: &ParseOptions,
+    ) -> Result<Arc<UnregisteredFrameworkParseArtifact>, SyntaxReject> {
+        let language = FileLanguage::svelte();
+        let syntax_profile = syntax_profile_id_for(&language, opts)
+            .expect("the built-in Svelte language has a syntax profile");
+        let parse_key = parse_key_for(
+            source,
+            &language,
+            SVELTE_SYNTAX_COMPATIBILITY_DOMAIN,
+            SVELTE_SYNTAX_COMPATIBILITY_EPOCH,
+            &syntax_profile,
+        )
+        .expect("the built-in Svelte language has a parse identity");
+        let syntax_profile = Arc::new(syntax_profile);
+        let parse_key = Arc::new(parse_key);
+        // Svelte's official `loose` parse mode is not implemented by this
+        // frontend (capability-matrix: `SVELTE-PARSE-LOCAL` is "strict
+        // parser diagnostics/recovery only; ... loose is unsupported
+        // fail-closed"). Reject before parsing — never silently downgrade
+        // to strict parsing.
+        if opts.svelte_loose {
+            return Err(SyntaxReject::UnsupportedProfile {
+                parse_key,
+                syntax_profile,
+                reason: verter_language::UnsupportedSyntaxProfileReason::UnsupportedOption,
+            });
+        }
+        // Every OTHER strict-parse / close-tag defect is a parser-owned
+        // RECOVERY point: the tokenizer is intentionally infallible and
+        // always produces a faithful tree, which is correct for the IDE
+        // projection (it owns its own error recovery) — see
+        // `SvelteStrictParseError`'s doc. Refusing publication here would
+        // make the carrier unusable for exactly the states an editor spends
+        // most of its time in (an unclosed `<script>` mid-typing, a stray
+        // close tag). The CLIENT-runtime "Verter emits a `Main` ⇔ official
+        // ACCEPTS" contract is enforced separately and later, at
+        // `official_reject_gate` (compile time) — never at this parse/publish
+        // seam.
+        let parsed = Arc::new(parse_svelte(source));
+        Ok(build_svelte_parse_artifact(
+            source,
+            parsed,
+            parse_key,
+            syntax_profile,
+        ))
+    }
+
     pub(crate) fn unregistered_carrier_arc(
         &self,
         artifact: &UnregisteredFrameworkParseArtifact,
@@ -339,122 +415,10 @@ fn svelte_ide_only_request(
     .map_err(CompileUnsupported::RequestExecutionRefused)
 }
 
-impl CarrierCompiler for SvelteCarrierCompiler {
-    fn adapter_id(&self) -> FrameworkAdapterId {
-        FrameworkAdapterId::svelte()
-    }
-
-    fn carrier_language_id(&self) -> LanguageId {
-        LanguageId::new("svelte")
-    }
-
-    fn parse(
-        &self,
-        source: &str,
-        opts: &ParseOptions,
-    ) -> Result<Arc<UnregisteredFrameworkParseArtifact>, SyntaxReject> {
-        let language = FileLanguage::svelte();
-        let syntax_profile = syntax_profile_id_for(&language, opts)
-            .expect("the built-in Svelte language has a syntax profile");
-        let parse_key = parse_key_for(
-            source,
-            &language,
-            SVELTE_SYNTAX_COMPATIBILITY_DOMAIN,
-            SVELTE_SYNTAX_COMPATIBILITY_EPOCH,
-            &syntax_profile,
-        )
-        .expect("the built-in Svelte language has a parse identity");
-        let syntax_profile = Arc::new(syntax_profile);
-        let parse_key = Arc::new(parse_key);
-        // Svelte's official `loose` parse mode is not implemented by this
-        // frontend (capability-matrix: `SVELTE-PARSE-LOCAL` is "strict
-        // parser diagnostics/recovery only; ... loose is unsupported
-        // fail-closed"). Reject before parsing — never silently downgrade
-        // to strict parsing.
-        if opts.svelte_loose {
-            return Err(SyntaxReject::UnsupportedProfile {
-                parse_key,
-                syntax_profile,
-                reason: verter_language::UnsupportedSyntaxProfileReason::UnsupportedOption,
-            });
-        }
-        // Every OTHER strict-parse / close-tag defect is a parser-owned
-        // RECOVERY point: the tokenizer is intentionally infallible and
-        // always produces a faithful tree, which is correct for the IDE
-        // projection (it owns its own error recovery) — see
-        // `SvelteStrictParseError`'s doc. Refusing publication here would
-        // make the carrier unusable for exactly the states an editor spends
-        // most of its time in (an unclosed `<script>` mid-typing, a stray
-        // close tag). The CLIENT-runtime "Verter emits a `Main` ⇔ official
-        // ACCEPTS" contract is enforced separately and later, at
-        // `official_reject_gate` (compile time) — never at this parse/publish
-        // seam.
-        let parsed = Arc::new(parse_svelte(source));
-        Ok(build_svelte_parse_artifact(
-            source,
-            parsed,
-            parse_key,
-            syntax_profile,
-        ))
-    }
-
-    fn compile_ide(
-        &self,
-        source: &str,
-        artifact: &FrameworkParseArtifact,
-        opts: &IdeCompileOptions,
-    ) -> Result<IdeOutput, CompileUnsupported> {
-        let request = svelte_ide_only_request(
-            opts.filename.clone(),
-            IdeProductRequest {
-                want_source_map: !opts.skip_source_map,
-                embed_ambient_types: opts.embed_ambient_types,
-                ..Default::default()
-            },
-        )?;
-        // This registry route carries no host-issued admission, so the
-        // projection grant is minted at the route boundary (crate-private
-        // mint); admission-issued flows carve theirs off the consumed
-        // admission instead.
-        let grant = crate::framework_common::capability::ProductExecutionGrant::mint(
-            crate::compile_request::ProductKind::IdeCompanion,
-        );
-        crate::framework_common::registered_carrier_projection::project_ide_from_catalog(
-            grant,
-            artifact,
-            source,
-            &request,
-            &crate::framework_common::registered_carrier_projection::ProjectionCatalogInputs {
-                block_content: opts.block_content.clone(),
-                ..Default::default()
-            },
-        )
-        .map(|companion| companion.ide)
-    }
-
-    fn compile_bundle(
-        &self,
-        source: &str,
-        artifact: &FrameworkParseArtifact,
-        opts: &RuntimeCompileOptions,
-        alloc: &oxc_allocator::Allocator,
-    ) -> Result<CarrierCompileOutcome, CompileUnsupported> {
-        svelte_carrier_bundle(
-            source,
-            artifact,
-            opts,
-            alloc,
-            crate::framework_common::carrier_compiler::registry_route_execution_grants(opts),
-        )
-    }
-}
-
 /// The one Svelte bundle orchestration over an admitted parse: ordered
 /// runtime, IDE-projection, and template-fact capability calls with shared
-/// prerequisites. Shared by the compatibility
-/// [`CarrierCompiler::compile_bundle`] route and the Svelte
-/// host-integration backend so both drive the identical single-population
-/// pass.
+/// prerequisites. Driven by the Svelte host-integration backend so every
+/// production caller shares the identical single-population pass.
 pub(crate) fn svelte_carrier_bundle(
     source: &str,
     artifact: &FrameworkParseArtifact,
@@ -569,8 +533,8 @@ pub(crate) fn svelte_carrier_bundle(
             opts.filename.clone(),
             IdeProductRequest {
                 // Per-leg override for a request-derived caller;
-                // `None` couples the IDE map to the runtime output
-                // axis (the compatibility route's historical behavior).
+                // `None` couples the IDE map demand to the runtime
+                // output axis.
                 want_source_map: opts.ide_source_map.unwrap_or(opts.source_map),
                 embed_ambient_types: opts.embed_ambient_types,
                 ..Default::default()
@@ -626,15 +590,78 @@ pub(crate) fn svelte_carrier_bundle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::framework_common::carrier_compiler::CompileBundleProducedExt;
     use crate::framework_common::sourcemap_e2e_helpers::{
         assert_token_maps_to_source, assert_token_maps_to_source_line, build_lookup_table,
         parse_ide_output,
     };
     use crate::framework_common::{
-        FrameworkSemanticAuthority, RuntimeBlockContentInput, RuntimeBlockContentInputs,
+        FrameworkSemanticAuthority, ProjectionBackend, RuntimeBlockContentInput,
+        RuntimeBlockContentInputs,
+    };
+    use crate::svelte::svelte_projection_backend::{
+        SvelteProjectionBackend, SvelteProjectionInputs,
     };
     use verter_language::ScriptRegionKind;
+
+    /// Test-only direct route onto the shared bundle orchestration, mirroring
+    /// the grant-minting the registry-route grants helper performs — the
+    /// same production path `svelte_host_integration.rs` drives, called
+    /// directly rather than through a host admission.
+    fn compile_bundle_direct(
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        opts: &RuntimeCompileOptions,
+        alloc: &oxc_allocator::Allocator,
+    ) -> Result<CarrierCompileOutcome, CompileUnsupported> {
+        svelte_carrier_bundle(
+            source,
+            artifact,
+            opts,
+            alloc,
+            crate::framework_common::carrier_compiler::registry_route_execution_grants(opts),
+        )
+    }
+
+    /// Test-only convenience for fixtures whose carrier is known to PRODUCE —
+    /// mirrors the crate's `CompileBundleProducedExt`, over the free
+    /// [`compile_bundle_direct`] rather than a `CarrierCompiler` impl.
+    fn compile_bundle_expect_produced(
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        opts: &RuntimeCompileOptions,
+        alloc: &oxc_allocator::Allocator,
+    ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
+        compile_bundle_direct(source, artifact, opts, alloc).map(|outcome| {
+            outcome
+                .into_produced()
+                .expect("this fixture's carrier produces a runtime surface")
+        })
+    }
+
+    /// Test-only direct route onto the typed IDE projection backend, for
+    /// fixtures that only need the projected companion (not a full host
+    /// admission).
+    fn project_ide_via_backend(
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        filename: Option<&str>,
+        want_source_map: bool,
+    ) -> Result<IdeOutput, crate::svelte::svelte_projection_backend::SvelteProjectionError> {
+        let request = svelte_ide_only_request(
+            filename.map(str::to_string),
+            IdeProductRequest {
+                want_source_map,
+                ..Default::default()
+            },
+        )
+        .expect("ide-only request constructs");
+        let grant = crate::framework_common::capability::ProductExecutionGrant::mint(
+            crate::compile_request::ProductKind::IdeCompanion,
+        );
+        SvelteProjectionBackend
+            .project_ide(grant, source, artifact, &request, &SvelteProjectionInputs)
+            .map(|companion| companion.ide)
+    }
 
     fn artifact_for(source: &str) -> Arc<FrameworkParseArtifact> {
         use verter_language::carrier_grammar::{
@@ -827,11 +854,10 @@ mod tests {
         // explicit request must fail closed with a typed refusal rather
         // than being silently ignored — mirrors `CompileRequest::new`'s
         // non-Vue `InlineSsrUnsupported` refusal.
-        let compiler = SvelteCarrierCompiler;
         let source = "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count}</button>\n";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
-        let result = compiler.compile_bundle(
+        let result = compile_bundle_direct(
             source,
             &artifact,
             &RuntimeCompileOptions {
@@ -861,12 +887,8 @@ mod tests {
         let artifact = artifact_for(source).remint_epoch_for_tests("unknown-epoch");
         let alloc = oxc_allocator::Allocator::default();
         let before = crate::standalone::runtime_backend_delegation_count();
-        let result = SvelteCarrierCompiler.compile_bundle(
-            source,
-            &artifact,
-            &RuntimeCompileOptions::default(),
-            &alloc,
-        );
+        let result =
+            compile_bundle_direct(source, &artifact, &RuntimeCompileOptions::default(), &alloc);
         assert!(
             matches!(
                 result,
@@ -889,20 +911,18 @@ mod tests {
         // Svelte runtime backend; the per-thread delegation counter is the
         // witness that no route-private runtime emitter remains. Refusal
         // classification travels through the same delegation.
-        let compiler = SvelteCarrierCompiler;
         let source = "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count}</button>\n";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
 
         let before = crate::standalone::runtime_backend_delegation_count();
-        compiler
-            .compile_bundle_expect_produced(
-                source,
-                &artifact,
-                &RuntimeCompileOptions::default(),
-                &alloc,
-            )
-            .expect("svelte runtime bundle");
+        compile_bundle_expect_produced(
+            source,
+            &artifact,
+            &RuntimeCompileOptions::default(),
+            &alloc,
+        )
+        .expect("svelte runtime bundle");
         assert_eq!(
             crate::standalone::runtime_backend_delegation_count(),
             before + 1,
@@ -914,14 +934,13 @@ mod tests {
             "<script>let c = $state(true);</script>\n{#snippet foo()}<p>{c}</p>{/snippet}\n";
         let refused_artifact = artifact_for(refused_source);
         let before_refused = crate::standalone::runtime_backend_delegation_count();
-        let outcome = compiler
-            .compile_bundle(
-                refused_source,
-                &refused_artifact,
-                &RuntimeCompileOptions::default(),
-                &alloc,
-            )
-            .expect("the outcome is produced-or-refused, never an Err");
+        let outcome = compile_bundle_direct(
+            refused_source,
+            &refused_artifact,
+            &RuntimeCompileOptions::default(),
+            &alloc,
+        )
+        .expect("the outcome is produced-or-refused, never an Err");
         assert!(
             matches!(outcome, CarrierCompileOutcome::RuntimeSurfaceRefused(_)),
             "the snippet component must refuse its runtime surface"
@@ -933,20 +952,19 @@ mod tests {
         );
 
         let before_ide_only = crate::standalone::runtime_backend_delegation_count();
-        compiler
-            .compile_bundle(
-                source,
-                &artifact,
-                &RuntimeCompileOptions {
-                    want_runtime: false,
-                    want_ide: true,
-                    ..Default::default()
-                },
-                &alloc,
-            )
-            .expect("the outcome is produced-or-refused, never an Err")
-            .into_produced()
-            .expect("an IDE-only request produces");
+        compile_bundle_direct(
+            source,
+            &artifact,
+            &RuntimeCompileOptions {
+                want_runtime: false,
+                want_ide: true,
+                ..Default::default()
+            },
+            &alloc,
+        )
+        .expect("the outcome is produced-or-refused, never an Err")
+        .into_produced()
+        .expect("an IDE-only request produces");
         assert_eq!(
             crate::standalone::runtime_backend_delegation_count(),
             before_ide_only,
@@ -959,18 +977,16 @@ mod tests {
         // A SUPPORTED runes component populates `main.body_code` (Svelte client JS)
         // so `has_runtime_surface()` becomes true. DISCRIMINATING: the body is the
         // client module, not empty.
-        let compiler = SvelteCarrierCompiler;
         let source = "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count}</button>\n";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
-        let bundle = compiler
-            .compile_bundle_expect_produced(
-                source,
-                &artifact,
-                &RuntimeCompileOptions::default(),
-                &alloc,
-            )
-            .expect("svelte runtime bundle");
+        let bundle = compile_bundle_expect_produced(
+            source,
+            &artifact,
+            &RuntimeCompileOptions::default(),
+            &alloc,
+        )
+        .expect("svelte runtime bundle");
         assert!(
             bundle.has_runtime_surface(),
             "a runes component must carry a runtime surface"
@@ -1000,18 +1016,16 @@ mod tests {
         // `$.prop` prop-source substrate (legacy base flags 8, accessor-call
         // reads) and the bundle carries a real Main — the former per-surface
         // export refusal is gone.
-        let compiler = SvelteCarrierCompiler;
         let source = "<script>export let label;</script>\n<p>{label}</p>\n";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
-        let bundle = compiler
-            .compile_bundle_expect_produced(
-                source,
-                &artifact,
-                &RuntimeCompileOptions::default(),
-                &alloc,
-            )
-            .expect("the bundle is produced");
+        let bundle = compile_bundle_expect_produced(
+            source,
+            &artifact,
+            &RuntimeCompileOptions::default(),
+            &alloc,
+        )
+        .expect("the bundle is produced");
         assert!(
             bundle.has_runtime_surface(),
             "a legacy export-let prop component compiles to a runtime surface"
@@ -1041,7 +1055,6 @@ mod tests {
 
     #[test]
     fn runtime_main_carries_the_demanded_client_source_map() {
-        let compiler = SvelteCarrierCompiler;
         // Keep the rune genuinely reactive: the runtime's supported-surface
         // classifier intentionally rejects a demoted/static interpolation.
         // The click write makes this a valid Main carrier and therefore a
@@ -1050,18 +1063,17 @@ mod tests {
 <button onclick={() => count += 1}>{count}</button>\n";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
-        let mapped = compiler
-            .compile_bundle_expect_produced(
-                source,
-                &artifact,
-                &RuntimeCompileOptions {
-                    filename: Some("src/Counter.svelte".to_string()),
-                    source_map: true,
-                    ..Default::default()
-                },
-                &alloc,
-            )
-            .expect("mapped Svelte runtime bundle");
+        let mapped = compile_bundle_expect_produced(
+            source,
+            &artifact,
+            &RuntimeCompileOptions {
+                filename: Some("src/Counter.svelte".to_string()),
+                source_map: true,
+                ..Default::default()
+            },
+            &alloc,
+        )
+        .expect("mapped Svelte runtime bundle");
         assert!(
             mapped.main.body_code.is_some(),
             "source-map demand must preserve the successful Main body; diagnostics: {:?}",
@@ -1082,18 +1094,17 @@ mod tests {
         assert_eq!(map.get_sources().collect::<Vec<_>>(), ["Counter.svelte"]);
         assert_eq!(map.get_source_content(0), Some(source));
 
-        let plain = compiler
-            .compile_bundle_expect_produced(
-                source,
-                &artifact,
-                &RuntimeCompileOptions {
-                    filename: Some("src/Counter.svelte".to_string()),
-                    source_map: false,
-                    ..Default::default()
-                },
-                &alloc,
-            )
-            .expect("plain Svelte runtime bundle");
+        let plain = compile_bundle_expect_produced(
+            source,
+            &artifact,
+            &RuntimeCompileOptions {
+                filename: Some("src/Counter.svelte".to_string()),
+                source_map: false,
+                ..Default::default()
+            },
+            &alloc,
+        )
+        .expect("plain Svelte runtime bundle");
         assert!(plain.main.source_map.is_empty(), "no demand, no main map");
         assert_eq!(
             mapped.main.body_code, plain.main.body_code,
@@ -1108,7 +1119,6 @@ mod tests {
         // `RuntimeCompileOptions.source_map` flag is the map demand — it
         // reaches the css RENDER through `compile_client`, and the produced
         // map + the `:global` fact ride the neutral style block.
-        let compiler = SvelteCarrierCompiler;
         let source = "<script>let c = $state(0);</script>\n<style>.r{color:red}\n:global(.x){margin:0}</style>\n<button class=\"r\" onclick={() => c++}>{c}</button>\n";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
@@ -1117,8 +1127,7 @@ mod tests {
             source_map: true,
             ..Default::default()
         };
-        let bundle = compiler
-            .compile_bundle_expect_produced(source, &artifact, &opts, &alloc)
+        let bundle = compile_bundle_expect_produced(source, &artifact, &opts, &alloc)
             .expect("svelte runtime bundle");
         let style = bundle.styles.first().expect("an external style block");
         assert!(
@@ -1143,8 +1152,7 @@ mod tests {
             filename: Some("App.svelte".to_string()),
             ..Default::default()
         };
-        let bundle_off = compiler
-            .compile_bundle_expect_produced(source, &artifact, &opts_off, &alloc)
+        let bundle_off = compile_bundle_expect_produced(source, &artifact, &opts_off, &alloc)
             .expect("svelte runtime bundle");
         assert_eq!(
             bundle_off.styles.first().expect("a style block").source_map,
@@ -1155,8 +1163,7 @@ mod tests {
         // A non-global component reports `has_global == false`.
         let non_global = "<script>let c = $state(0);</script>\n<style>.r{color:red}</style>\n<button class=\"r\" onclick={() => c++}>{c}</button>\n";
         let artifact2 = artifact_for(non_global);
-        let bundle2 = compiler
-            .compile_bundle_expect_produced(non_global, &artifact2, &opts, &alloc)
+        let bundle2 = compile_bundle_expect_produced(non_global, &artifact2, &opts, &alloc)
             .expect("svelte runtime bundle");
         assert!(
             !bundle2.styles.first().expect("a style block").has_global,
@@ -1171,7 +1178,6 @@ mod tests {
         // map: {...} }`. An EXISTING `<style>` block always publishes the external
         // artifact, even when the rendered `css.code` is empty; only the ABSENCE
         // of a style block publishes none (`compiled.css === null`).
-        let compiler = SvelteCarrierCompiler;
         let source = "<style></style><p>hi</p>\n";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
@@ -1180,8 +1186,7 @@ mod tests {
             source_map: true,
             ..Default::default()
         };
-        let bundle = compiler
-            .compile_bundle_expect_produced(source, &artifact, &opts, &alloc)
+        let bundle = compile_bundle_expect_produced(source, &artifact, &opts, &alloc)
             .expect("svelte runtime bundle");
         assert_eq!(
             bundle.styles.len(),
@@ -1206,9 +1211,9 @@ mod tests {
         // NEGATIVE: NO `<style>` block ⇒ NO artifact (official css === null).
         let source_none = "<p>hi</p>\n";
         let artifact_none = artifact_for(source_none);
-        let bundle_none = compiler
-            .compile_bundle_expect_produced(source_none, &artifact_none, &opts, &alloc)
-            .expect("svelte runtime bundle");
+        let bundle_none =
+            compile_bundle_expect_produced(source_none, &artifact_none, &opts, &alloc)
+                .expect("svelte runtime bundle");
         assert!(bundle_none.styles.is_empty(), "no style block, no artifact");
     }
 
@@ -1219,7 +1224,6 @@ mod tests {
         // there is NO bundle to hold a `tsx` beside it — the atomicity is
         // structural, not asserted over a flag. The precise reason travels on
         // the refusal itself, not recovered from diagnostic text.
-        let compiler = SvelteCarrierCompiler;
         // A `{#snippet}` declaration is an unsupported runtime surface — the
         // control-flow blocks (`{#if}`/…) ARE supported, so the refused example uses a
         // construct that genuinely still fails closed.
@@ -1233,8 +1237,7 @@ mod tests {
             want_ide: true,
             ..Default::default()
         };
-        let outcome = compiler
-            .compile_bundle(source, &artifact, &opts, &alloc)
+        let outcome = compile_bundle_direct(source, &artifact, &opts, &alloc)
             .expect("the outcome is produced-or-refused, never an Err");
 
         match outcome {
@@ -1266,7 +1269,6 @@ mod tests {
         // component, asked ONLY for its IDE product, attempts no runtime compile
         // and therefore cannot be refused one — it publishes its `tsx` normally.
         // Without this, "refuse everything" would satisfy the test above.
-        let compiler = SvelteCarrierCompiler;
         let source =
             "<script>let c = $state(true);</script>\n{#snippet foo()}<p>{c}</p>{/snippet}\n";
         let artifact = artifact_for(source);
@@ -1276,8 +1278,7 @@ mod tests {
             want_ide: true,
             ..Default::default()
         };
-        let bundle = compiler
-            .compile_bundle(source, &artifact, &opts, &alloc)
+        let bundle = compile_bundle_direct(source, &artifact, &opts, &alloc)
             .expect("the outcome is produced-or-refused, never an Err")
             .into_produced()
             .expect("an IDE-only request asks for no runtime product, so none can be refused");
@@ -1322,24 +1323,22 @@ mod tests {
         // The negative control: the same IDE-only identity on a WELL-FORMED
         // component reports no official-reject diagnostic, so the assertion above
         // discriminates malformed from clean rather than always finding one.
-        let compiler = SvelteCarrierCompiler;
         let source = "<script>let c = $state(0);</script>\n<div><span>hi</span></div>\n";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
-        let bundle = compiler
-            .compile_bundle(
-                source,
-                &artifact,
-                &RuntimeCompileOptions {
-                    want_runtime: false,
-                    want_ide: true,
-                    ..Default::default()
-                },
-                &alloc,
-            )
-            .expect("the outcome is produced-or-refused, never an Err")
-            .into_produced()
-            .expect("an IDE-only request cannot be refused a runtime surface");
+        let bundle = compile_bundle_direct(
+            source,
+            &artifact,
+            &RuntimeCompileOptions {
+                want_runtime: false,
+                want_ide: true,
+                ..Default::default()
+            },
+            &alloc,
+        )
+        .expect("the outcome is produced-or-refused, never an Err")
+        .into_produced()
+        .expect("an IDE-only request cannot be refused a runtime surface");
         assert!(
             !bundle
                 .diagnostics
@@ -1359,16 +1358,15 @@ mod tests {
     fn a_supported_component_produces_rather_than_refuses() {
         // The success direction: a SUPPORTED runes component takes the PRODUCED
         // arm and emits a Main, so the sum discriminates refusal from success.
-        let compiler = SvelteCarrierCompiler;
         let source =
             "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
-        let bundle = compiler
-            .compile_bundle(source, &artifact, &RuntimeCompileOptions::default(), &alloc)
-            .expect("svelte runtime bundle")
-            .into_produced()
-            .expect("a supported component produces, it does not refuse");
+        let bundle =
+            compile_bundle_direct(source, &artifact, &RuntimeCompileOptions::default(), &alloc)
+                .expect("svelte runtime bundle")
+                .into_produced()
+                .expect("a supported component produces, it does not refuse");
         assert!(
             bundle.has_runtime_surface(),
             "a supported component carries a Main"
@@ -1380,19 +1378,10 @@ mod tests {
         // The sourcemap e2e (Tests #2): a script-region binding and a template
         // expression each map back to the matching ORIGINAL carrier text. The
         // unmapped prelude shifts no mapped position — the tokens still land.
-        let compiler = SvelteCarrierCompiler;
         let source =
             "<script lang=\"ts\">let myUniqueBinding = 0;</script>\n<div>{myUniqueBinding}</div>";
         let artifact = artifact_for(source);
-        let ide = compiler
-            .compile_ide(
-                source,
-                &artifact,
-                &IdeCompileOptions {
-                    filename: Some("Comp.svelte".to_string()),
-                    ..Default::default()
-                },
-            )
+        let ide = project_ide_via_backend(source, &artifact, Some("Comp.svelte"), true)
             .expect("svelte ide projection");
         let (code, sm) = parse_ide_output(&ide);
         let lookup = build_lookup_table(&sm);
@@ -1414,20 +1403,11 @@ mod tests {
         // token-precise). DISCRIMINATING: the params identifier `flyParam` is
         // unique to the directive value, so its mapped token can only come from
         // the original `transition:fly={flyParam}` position.
-        let compiler = SvelteCarrierCompiler;
         let source = "<script lang=\"ts\">import { fly } from \"svelte/transition\";\n\
              const flyParam = { delay: 0 };</script>\n\
              <div transition:fly={flyParam}>x</div>";
         let artifact = artifact_for(source);
-        let ide = compiler
-            .compile_ide(
-                source,
-                &artifact,
-                &IdeCompileOptions {
-                    filename: Some("Comp.svelte".to_string()),
-                    ..Default::default()
-                },
-            )
+        let ide = project_ide_via_backend(source, &artifact, Some("Comp.svelte"), true)
             .expect("svelte ide projection");
         let (code, sm) = parse_ide_output(&ide);
         let lookup = build_lookup_table(&sm);
@@ -1480,11 +1460,9 @@ mod tests {
 
     #[test]
     fn compile_ide_projects_a_tsx_artifact_with_the_pragma_prelude() {
-        let compiler = SvelteCarrierCompiler;
         let source = "<script lang=\"ts\">let a = 1;</script>\n<div>{a}</div>";
         let artifact = artifact_for(source);
-        let out = compiler
-            .compile_ide(source, &artifact, &IdeCompileOptions::default())
+        let out = project_ide_via_backend(source, &artifact, None, true)
             .expect("the Svelte IDE projection produces a TSX artifact");
         // A TypeScript `.svelte` projects `.tsx`.
         assert!(!out.is_jsx);
@@ -1502,7 +1480,6 @@ mod tests {
 
     #[test]
     fn compile_ide_projects_a_no_lang_component_as_valid_jsx_with_jsdoc() {
-        let compiler = SvelteCarrierCompiler;
         let source = r#"<script>
 /** @type {{ label: string }} */
 let { label } = $props();
@@ -1510,8 +1487,7 @@ let count = $state(0);
 </script>
 <button onclick={() => count += 1}>{label}: {count}</button>"#;
         let artifact = artifact_for(source);
-        let out = compiler
-            .compile_ide(source, &artifact, &IdeCompileOptions::default())
+        let out = project_ide_via_backend(source, &artifact, None, true)
             .expect("the Svelte IDE projection produces a JavaScript carrier");
 
         assert!(out.is_jsx, "a no-lang Svelte component must publish .jsx");
@@ -1537,12 +1513,11 @@ let count = $state(0);
 
     #[test]
     fn compile_ide_declines_a_foreign_artifact() {
-        let compiler = SvelteCarrierCompiler;
-        // A Vue-shaped artifact is not a Svelte carrier — the typed answer.
+        // A real foreign carrier's refusal is exercised by the shared
+        // contract tests. Here we assert the Svelte path succeeds on its
+        // own minimal artifact.
         let svelte = artifact_for("<div />");
-        // Re-wrap is unnecessary; a real foreign carrier is exercised by the
-        // shared contract tests. Here we assert the Svelte path succeeds.
-        let out = compiler.compile_ide("<div />", &svelte, &IdeCompileOptions::default());
+        let out = project_ide_via_backend("<div />", &svelte, None, true);
         assert!(out.is_ok());
     }
 
@@ -1568,8 +1543,7 @@ let count = $state(0);
             want_template_data: true,
             ..Default::default()
         };
-        let bundle = SvelteCarrierCompiler
-            .compile_bundle_expect_produced(source, &artifact, &opts, &alloc)
+        let bundle = compile_bundle_expect_produced(source, &artifact, &opts, &alloc)
             .expect("Svelte compile_bundle produces a bundle");
         let catalog =
             crate::framework_common::registered_carrier_projection::template_facts_from_catalog(
@@ -1594,8 +1568,7 @@ let count = $state(0);
         );
 
         let reminted = artifact.remint_epoch_for_tests("unknown-epoch");
-        let refused = SvelteCarrierCompiler
-            .compile_bundle_expect_produced(source, &reminted, &opts, &alloc)
+        let refused = compile_bundle_expect_produced(source, &reminted, &opts, &alloc)
             .expect("runtime/IDE-free compile still produces a bundle");
         assert!(
             refused.template_data.is_none(),
@@ -1637,14 +1610,13 @@ let count = $state(0);
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
         let _ = crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations();
-        let bundle = SvelteCarrierCompiler
-            .compile_bundle_expect_produced(
-                source,
-                &artifact,
-                &template_facts_opts(Some("<Replacement />")),
-                &alloc,
-            )
-            .expect("Svelte compile_bundle produces a bundle");
+        let bundle = compile_bundle_expect_produced(
+            source,
+            &artifact,
+            &template_facts_opts(Some("<Replacement />")),
+            &alloc,
+        )
+        .expect("Svelte compile_bundle produces a bundle");
         assert!(
             bundle.template_data.is_none(),
             "selected bytes that replace the admitted markup must refuse facts, never publish the superseded <Button>"
@@ -1665,14 +1637,13 @@ let count = $state(0);
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
         let _ = crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations();
-        let selected = SvelteCarrierCompiler
-            .compile_bundle_expect_produced(
-                source,
-                &artifact,
-                &template_facts_opts(Some("<Button size=\"sm\" bind:value />")),
-                &alloc,
-            )
-            .expect("Svelte compile_bundle produces a bundle");
+        let selected = compile_bundle_expect_produced(
+            source,
+            &artifact,
+            &template_facts_opts(Some("<Button size=\"sm\" bind:value />")),
+            &alloc,
+        )
+        .expect("Svelte compile_bundle produces a bundle");
         assert!(
             selected.template_data.is_none(),
             "selected template bytes cannot bind without an admitted template-host region"
@@ -1683,9 +1654,9 @@ let count = $state(0);
             "selected content without a template host must not invoke the semantic producer"
         );
 
-        let admitted = SvelteCarrierCompiler
-            .compile_bundle_expect_produced(source, &artifact, &template_facts_opts(None), &alloc)
-            .expect("Svelte compile_bundle produces a bundle");
+        let admitted =
+            compile_bundle_expect_produced(source, &artifact, &template_facts_opts(None), &alloc)
+                .expect("Svelte compile_bundle produces a bundle");
         let facts = admitted
             .template_data
             .as_ref()

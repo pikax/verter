@@ -14,7 +14,7 @@ use crate::assembly::AssembledArtifact;
 use crate::compile_request::{CompileRequest, ProductKind};
 use crate::framework_common::capability::{Present, RuntimeCompilerBackend};
 use crate::framework_common::catalog::{RuntimeCap, TypedCapabilityRegistration};
-use crate::framework_common::{CarrierCompiler, FrameworkParseArtifact};
+use crate::framework_common::FrameworkParseArtifact;
 use crate::standalone::{
     DirectCompileError, DirectCompileOutput, StandaloneCompiler, SvelteExecutionInputs,
 };

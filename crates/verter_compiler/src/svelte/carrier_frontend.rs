@@ -15,7 +15,6 @@ use verter_language::{
 
 use crate::framework_common::capability::{CarrierFrontend, FrameworkEpoch, Present};
 use crate::framework_common::catalog::{FrontendCap, TypedCapabilityRegistration};
-use crate::framework_common::CarrierCompiler;
 
 use super::carrier::SvelteCarrierCompiler;
 
