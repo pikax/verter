@@ -1,23 +1,33 @@
 # TE2 abort before mutation: conditional branch operands are not representable under the TE1 seal
 
-- Status: ratified — RESCOPE (architect ruling, 2026-09-11; see "Ratification")
+- Status: proposed — requires maintainer ratification
 - Date: 2026-09-09
 - Node: TE2 — Conditional selective forcing (train `rev11.type-evaluation`)
 - Concerns: `charters/rev11-type-evaluation/TE2.md` — "Independently
   acceptable outcome", "Source-specific scope" (dead-operand proof),
   "Acceptance IDs" TE2-AC1, and "Abort conditions"
-- Ledger: `authority/state/implemented.toml` row `"TE2"` is
-  transitioned to `status = "implemented"` by the ratification below,
-  against the rescoped charter; the excluded scope is predeclared as the
-  new pending row `"TE2B"`.
+- Ledger: `authority/state/implemented.toml` row `"TE2"` stays
+  `status = "pending"`. The captured TE2 charter, the rev11
+  type-evaluation DAG, and TE4's predecessor list are unchanged. The only
+  production changes on this candidate are the ratification-independent
+  dependency-fact fixes recorded under "Delivered"; the operand cutover is
+  not implemented.
 
-## Ratification
+## Proposed rescope — NOT ratified
 
-**Ruling: RESCOPE.** Decided by the architect selected for this candidate,
-against the charter, the candidate diff over baseline `0c91f864`, the
-author turns, and the source at `61968692` — not against the record's
-description of them. The grounds are properties of committed bytes a reader
-can re-check:
+A rescope ruling was once recorded on this candidate branch together with a
+rewritten TE2 charter, a new `TE2B` node, a TE4 predecessor change, and a
+TE2 ledger transition. Review rejected it: the ruling existed only inside
+the candidate's own commit, with no maintainer commit on the default branch
+and no workflow architect-approval artifact behind it. An implementer
+cannot cure its own unmet acceptance criteria by rewriting the contract it
+is judged against. Those charter, DAG and ledger edits are withdrawn; the
+text below is retained verbatim in substance as a **proposal** for the
+maintainer, and binds nothing until it is ratified by an independent
+authority.
+
+**Proposed ruling: RESCOPE.** The grounds are properties of committed bytes
+a reader can re-check:
 
 - `step_crosses_binder_scope` (`decl_body_memo/locator_deref.rs`)
   returns true for `TypeBodyPathStep::ConditionalTrue` exactly when the
@@ -46,10 +56,11 @@ can re-check:
 - `conditional_branch_selection` consumes only `check` and `extends`
   and routes every relation read through `SemanticQueryKey::Relate`; the
   decided arm of `build_conditional` returns the winner node and records
-  its origin edge with sources `[check, extends]` only. The candidate's two
-  source commits (`93ebdcc7`, `7dd244d1`) remove the last dispatch-boundary
-  residue — rooting a decided or distributed result on a branch the answer
-  never read — with tests whose negative controls were proven to apply.
+  its origin edge with sources `[check, extends]` only. The candidate's
+  three source commits (`93ebdcc7`, `7dd244d1`, `315369d3`) remove the
+  dispatch-boundary residue — rooting a decided, distributed, or absorbed
+  result on a branch the answer never read — with tests whose negative
+  controls were proven to apply.
 - `force_semantic_operand` has no production caller; the authored
   vocabulary was never exercised at a binder-crossing position, which is why
   the gap surfaced here and not at TE1 or TE3.
@@ -79,9 +90,10 @@ the TE4 lower-once contract, not dead-operand work; the substitution descend
 of an open shell and the eager lowering-site branch lowering are real dead
 work and are carried forward as a separately owned node rather than waived.
 
-**What this ruling changes.**
+**What the proposal would change if ratified.** None of the following is
+applied on this candidate.
 
-1. `charters/rev11-type-evaluation/TE2.md` is rewritten to the rescoped
+1. `charters/rev11-type-evaluation/TE2.md` would be rewritten to the rescoped
    contract: selection before branch forcing at the dispatch boundary over
    materialized branch operands; the losing branch dead for forcing,
    dispatch, relation, origin, fact-read, and dependency-fact purposes;
@@ -109,22 +121,19 @@ work and are carried forward as a separately owned node rather than waived.
    and then forces it — the same materialized-handle-plus-substitution
    shape TE2B must seal — and must reuse it rather than mint a second one.
    TE5's edges are unchanged; it inherits TE2B through TE4.
-4. The ledger row `"TE2"` transitions to implemented against the rescoped
-   charter, and `"TE2B"` is predeclared pending. The candidate's source
-   commits are the implementation; no further production change is made by
-   this ruling.
+4. The ledger row `"TE2"` would transition to implemented against the
+   rescoped charter, and `"TE2B"` would be predeclared pending. Only the
+   ratifying authority may make those edits.
 
-**Precedence.** Where `decisions/2026-09-01-demand-selected-semantic-operand-forcing.md`
-describes TE2 as carrying sealed operands in the conditional key, or draws
-the topology without TE2B, this record and the rewritten charters are the
-binding authority; the earlier record remains historical context for the
-train's intent, which is unchanged.
+**Precedence.** Until ratification, the captured TE2 charter and
+`decisions/2026-09-01-demand-selected-semantic-operand-forcing.md` remain
+the binding authority; this proposal does not supersede them.
 
 **Open, not waived.** The TE1 completeness gap (an authored conditional-infer
 binder frame and locator vocabulary for every conditional position) is
-recorded here and in TE2B's forbidden designs. It is not scheduled, because
-no node currently READY or planned needs an isolated authored
-binder-crossing force; the first node that does records the DAG amendment.
+recorded here. Under the proposal it would also be named in TE2B's
+forbidden designs and left unscheduled until a node needs an isolated
+authored binder-crossing force.
 
 ## Disposition
 
@@ -342,7 +351,8 @@ One of the following, as a DAG amendment before TE2 is re-dispatched:
    resume against a corrected reading.
 
 Until one of these is recorded, the TE2 row stays `pending` and no
-production source under `crates/verter_session/src` is changed.
+production source under `crates/verter_session/src` is changed beyond the
+ratification-independent dependency-fact fixes under "Delivered".
 
 ## Independent re-verification
 
@@ -561,6 +571,14 @@ ratification:
   alias over it, on the cold build and again on the warm hit (which
   must not rebuild members). Restoring the unconditional four-node root
   set on the distributed arm fails the all-true and all-false rows.
+- An ABSORBED conditional no longer roots on branches it never read. An
+  `error` check and a distributive `never` check decide without reading
+  either branch, so those rows root on `check` and `extends` only; the
+  `any` row publishes the union of both branches and keeps all four
+  roots. Discriminating proof: the same decided-conditional test builds
+  those rows over file-scoped branch shells and asserts no branch file is
+  rooted for `error`/`never` and both are for `any`; restoring the
+  four-node set on the `error`/`never` rows fails it.
 
 Nothing else in TE2 is landed. The operand cutover, the lazy `lower.rs`
 branches, the conditional family context axis, and TE2-AC1/AC2/AC4 all
