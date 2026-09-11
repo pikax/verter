@@ -1,15 +1,130 @@
 # TE2 abort before mutation: conditional branch operands are not representable under the TE1 seal
 
-- Status: proposed — requires maintainer ratification
+- Status: ratified — RESCOPE (architect ruling, 2026-09-11; see "Ratification")
 - Date: 2026-09-09
 - Node: TE2 — Conditional selective forcing (train `rev11.type-evaluation`)
 - Concerns: `charters/rev11-type-evaluation/TE2.md` — "Independently
   acceptable outcome", "Source-specific scope" (dead-operand proof),
   "Acceptance IDs" TE2-AC1, and "Abort conditions"
-- Ledger: `authority/state/implemented.toml` row `"TE2"` stays
-  `status = "pending"`. The only production change on this candidate is
-  the ratification-independent dead-operand dependency-fact fix recorded
-  under "Delivered"; the operand cutover is not implemented.
+- Ledger: `authority/state/implemented.toml` row `"TE2"` is
+  transitioned to `status = "implemented"` by the ratification below,
+  against the rescoped charter; the excluded scope is predeclared as the
+  new pending row `"TE2B"`.
+
+## Ratification
+
+**Ruling: RESCOPE.** Decided by the architect selected for this candidate,
+against the charter, the candidate diff over baseline `0c91f864`, the
+author turns, and the source at `61968692` — not against the record's
+description of them. The grounds are properties of committed bytes a reader
+can re-check:
+
+- `step_crosses_binder_scope` (`decl_body_memo/locator_deref.rs`)
+  returns true for `TypeBodyPathStep::ConditionalTrue` exactly when the
+  sibling `extends` declares an `infer`, and the crossing route in
+  `locator_shape_binder.rs` lowers `root.expr` — the whole enclosing
+  conditional — before navigating. An authored true-branch force of an
+  infer conditional therefore lowers the false branch. Finding 2 holds.
+- `OperandBinderVisibility` is `Body | Constraint { ordinal } |
+  Default { ordinal }` and `SemanticOperandKind` has exactly the
+  `Node` and `Authored` arms; the true-branch infer binding in
+  `lower.rs` is an environment insert of `Infer`/`InferRef` nodes,
+  not a header-ordinal substitution. There is no frame on TE1 identity to
+  seal it against. The charter's own abort clause — "exact infer scoping
+  cannot be represented by TE1 identity" — is met on this tree.
+- `TypeBodyPathStep` has no array, rest, keyof-operand, template,
+  import-argument, or typeof-argument arm, so closing the authored-position
+  gap changes `verter_type_expr`, outside the node's file set. Finding 3
+  holds.
+- `SemanticQueryKey::Conditional` is constructed at seven production
+  sites, six of which destructure an already-interned shell or re-dispatch
+  an incoming key's branch ids; the shell the charter mandates for open
+  conditionals is interned with both branches lowered, and the
+  `substitute.rs` `Conditional` arm descends all four subtrees before the
+  `evaluate.rs` re-decision. Findings 1 and 1b hold under the strict
+  reading of the counter list.
+- `conditional_branch_selection` consumes only `check` and `extends`
+  and routes every relation read through `SemanticQueryKey::Relate`; the
+  decided arm of `build_conditional` returns the winner node and records
+  its origin edge with sources `[check, extends]` only. The candidate's two
+  source commits (`93ebdcc7`, `7dd244d1`) remove the last dispatch-boundary
+  residue — rooting a decided or distributed result on a branch the answer
+  never read — with tests whose negative controls were proven to apply.
+- `force_semantic_operand` has no production caller; the authored
+  vocabulary was never exercised at a binder-crossing position, which is why
+  the gap surfaced here and not at TE1 or TE3.
+
+**Why not REJECT.** The charter is not implementable as written inside its
+own boundary: its lazy-`lower.rs` clause and its required "nested
+same-name infer binders" fixture both need an isolated authored
+`ConditionalTrue` force, and the source shows that force re-lowers the
+enclosing conditional. Making it representable changes TE1's sealed identity
+and the decl-body locator route, both outside TE2's named files and both a
+TE1 completeness concern. The charter's first-listed abort clause is
+therefore correctly invoked, and a reject would order the implementer to
+substitute a local redesign of TE1 for the ratification CLAUDE.md requires.
+
+**Why not ABORT.** The founding decision's outcome — a decided conditional
+forces only its selected branch and dead operands add no dependency facts —
+is neither wrong nor unreachable; only the authored-operand *mechanism* for
+conditionals is. TE4 and TE5 consume the outcome. Cancelling the node would
+discard a landed, tested correctness fix that the charter itself names
+("dead operands add no semantic dependency facts") and would leave the
+lowering-site gap the founding decision identified without an owner.
+
+**The reading.** TE2-AC1's counter list is read as attributable to the
+decided conditional's own evaluation at the dispatch boundary (the narrow
+reading). Lowering the parameterized body once per declaration content is
+the TE4 lower-once contract, not dead-operand work; the substitution descend
+of an open shell and the eager lowering-site branch lowering are real dead
+work and are carried forward as a separately owned node rather than waived.
+
+**What this ruling changes.**
+
+1. `charters/rev11-type-evaluation/TE2.md` is rewritten to the rescoped
+   contract: selection before branch forcing at the dispatch boundary over
+   materialized branch operands; the losing branch dead for forcing,
+   dispatch, relation, origin, fact-read, and dependency-fact purposes;
+   infer bindings scoped to the selected true branch; open shell with
+   walker residual projection; distributivity in `build_conditional` with
+   selection-observed dependency facts. The header is unchanged, so the
+   DAG topology for TE2 is unchanged.
+2. A new node `TE2B — Conditional branch forcing at the lowering and
+   instantiation sites` (train `rev11.type-evaluation`, predecessors
+   TE2 and TE3, budgets 800/8/2 with 1500/12/3 rescope) owns the excluded
+   scope: lowering-site selection before branch lowering through the one
+   oracle, and instantiation-site deferral of losing-branch substitution
+   through a sealed content-free pairing of a materialized handle with its
+   pending positional substitution frame, with no selection during
+   substitution. It forbids the authored-operand cutover of the conditional
+   family, the conditional-`infer` binder frame, and any
+   `verter_type_expr` vocabulary change: those are a TE1 completeness gap
+   that a future consumer records as its own DAG amendment if it needs an
+   isolated authored binder-crossing force. It also forbids the
+   projection-context axes in `FamilyKey::Conditional`, for the reason
+   recorded below (conditional reduction is context-free; the winner is
+   projected under the consumer's own `ProjectPath` context).
+3. TE4's predecessors become TE2, TE2B, and TE3, because TE4's demanded-key
+   value forcing applies a substitution to a materialized value template
+   and then forces it — the same materialized-handle-plus-substitution
+   shape TE2B must seal — and must reuse it rather than mint a second one.
+   TE5's edges are unchanged; it inherits TE2B through TE4.
+4. The ledger row `"TE2"` transitions to implemented against the rescoped
+   charter, and `"TE2B"` is predeclared pending. The candidate's source
+   commits are the implementation; no further production change is made by
+   this ruling.
+
+**Precedence.** Where `decisions/2026-09-01-demand-selected-semantic-operand-forcing.md`
+describes TE2 as carrying sealed operands in the conditional key, or draws
+the topology without TE2B, this record and the rewritten charters are the
+binding authority; the earlier record remains historical context for the
+train's intent, which is unchanged.
+
+**Open, not waived.** The TE1 completeness gap (an authored conditional-infer
+binder frame and locator vocabulary for every conditional position) is
+recorded here and in TE2B's forbidden designs. It is not scheduled, because
+no node currently READY or planned needs an isolated authored
+binder-crossing force; the first node that does records the DAG amendment.
 
 ## Disposition
 

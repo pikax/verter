@@ -39,97 +39,120 @@ rescope_unrelated_packages=3
 
 Readiness comes only from trusted implementation-ledger rows. A READY node may start; tooling does not validate commit locators, Git identity, receipts, leases, external state, or runtime admission.
 
+## Ratified rescope
+
+This contract is the RESCOPE ratified by the architect ruling recorded in
+`decisions/2026-09-09-te2-conditional-operand-abort.md` (2026-09-11). The
+original contract moved the `SemanticQueryKey::Conditional` operand boundary
+onto TE1 sealed authored operands and required a zero-intern dead-operand
+proof over the losing branch's whole lifetime. Three source-verified
+properties of the landed tree put that outside this node's boundary: forcing
+an authored `ConditionalTrue` operand whose sibling `extends` declares an
+`infer` re-lowers the whole enclosing conditional through the binder-crossing
+locator route; TE1 identity has no conditional-`infer` binder frame; and
+several conditional positions have no locator spelling without a
+`verter_type_expr` vocabulary change. The excluded scope is owned by `TE2B`
+and is not silently absorbed here.
+
+Dead-operand accounting under this contract is attributable to the decided
+conditional's own evaluation at the dispatch boundary. Lowering the
+parameterized declaration body once per declaration content and the
+substitution descend of an open shell are outside this node's claim; they are
+`TE2B`'s subject.
+
 ## Independently acceptable outcome
 
-Make conditional evaluation decide through the existing relation/conditional authority
-before forcing branch operands. `SemanticQueryKey::Conditional` remains the canonical
-conditional dispatch family and `ProjectSemanticDispatch::conditional_branch_selection`
-remains the one branch-selection oracle; TE2 changes its operand boundary from four
-already-materialized branch nodes to TE1's sealed operands plus the force request's one
-complete existing `ProjectionReductionContext` (`mode`, `demand`, `provenance`,
-`merge_role`, `vue_heritage_policy`). The force boundary combines operand identity with
-that unchanged request context exactly once in existing query dispatch/family identity;
-the operands do not own, reconstruct, default, duplicate, or store a second context.
-When selection is true or false, only the winning branch is forced. When infer bindings
-are produced, they exist only in the selected true operand's exact binder/substitution
-frame. When selection is open, the conditional stays suspended and a requested residual
-projection is pushed into both branch operands without forcing unrelated branch roots.
+Conditional evaluation decides through the existing relation/conditional
+authority before any branch operand is forced, over the materialized branch
+operands the `SemanticQueryKey::Conditional` family carries.
+`SemanticQueryKey::Conditional` remains the canonical conditional dispatch
+family and `ProjectSemanticDispatch::conditional_branch_selection` remains the
+one branch-selection oracle; it consumes only `check` and `extends`, and every
+relation read re-enters `SemanticQueryKey::Relate`.
 
-The existing conditional dispatch continues to own distributivity. TE2 does not add a
-second distributivity planner, assignability check, or relation policy. A genuine
-query-root `Expanded` demand preserves the current semantic contract: an open conditional
-materializes both branches because both are the requested full result; a decided
-conditional still forces only the selected branch. This charter accepts one complete
-conditional cutover and contains no independently dispatchable subblocks.
+A decided conditional's value is the winning branch node. The losing branch is
+dead at the dispatch boundary: it receives no forcing attempt, no nested
+dispatch, no relation read, no origin edge, and no semantic fact read, and it
+contributes no semantic dependency fact — neither a read-set fact nor an
+observed self-root — to the result. When infer bindings are produced they are
+substituted only into the selected true branch under exact `InferBinderId`
+identity; no binding reaches the false branch, an outer same-name binder, or a
+sibling conditional. When selection is open, a `SemanticNodeData::Conditional`
+shell is preserved and a residual `ProjectPath` is pushed into both branch
+operands through the shared `ProjectPath` family without whole-surface
+enumeration. A genuine query-root `Expanded` demand keeps the current contract:
+an open conditional materializes both branches because both are the requested
+result; a decided conditional still yields only the winner.
+
+Existing conditional dispatch continues to own distributivity. A distributed
+conditional's dependency facts follow the per-member selections: the parent
+roots directly on the distributive `check`, the resolved union surface it
+distributed over, and `extends`, and inherits branch facts from the per-member
+`SemanticQueryKey::Conditional` reads. When every member selects the same
+branch, the other branch contributes no dependency fact. This charter accepts
+one conditional dependency-fact cutover at the dispatch boundary and contains
+no independently dispatchable subblocks.
 
 ## Concrete surfaces and APIs
 
-- Production surfaces: `crates/verter_session/src/project_semantic_dispatch` and `crates/verter_session/src/semantic_query.rs`.
-- Production files: the six named files `lower.rs`, `build.rs`, `evaluate.rs`, `walk.rs`, `relation.rs`, and `semantic_query_memo/family.rs`, plus at most two additional production files if the closed TE1 request vocabulary requires them; tests are non-production. A ninth production file exceeds the target and requires explicit rescope; the 12-file mandatory ceiling is not advance permission.
-- Named boundaries: `SemanticQueryKey::Conditional`, `SemanticNodeData::Conditional`, `ProjectSemanticDispatch::build_conditional`, `conditional_branch_selection`, `conditional_infer_route`, `SemanticQueryKey::Relate`, `InferenceSession`, `InferBinderId`, `ProjectionReductionContext`, `ProjectPath`, `ConditionalSelect`, `InferBind`, TE1's sealed operand and force capability, `ReadSetSignature`, and `SignatureAdmission`.
-- Mutation boundary: conditional operand representation, conditional family identity, lowering/structural emission, conditional build/evaluation/path-walk integration, and exact tests. No public `TypeInfo`, native-checker, flow-product, relation-policy, truthiness, canonical-algebra, or wire change.
+- Production surfaces: `crates/verter_session/src/project_semantic_dispatch`.
+- Production files: `build.rs`; tests are non-production and live in `project_semantic_dispatch/tests.rs`.
+- Named boundaries: `SemanticQueryKey::Conditional`, `SemanticNodeData::Conditional`, `ProjectSemanticDispatch::build_conditional`, `conditional_branch_selection`, `conditional_infer_route`, `distributive_check_union_members`, `observed_self_roots_from_nodes`, `SemanticQueryKey::Relate`, `InferBinderId`, `ConditionalSelect`, `InferBind`, `ReadSetSignature`, and `SignatureAdmission`.
+- Mutation boundary: the observed self-roots and dependency facts of decided and distributed conditional results, and exact tests. No key or family-identity change, no lowering change, no public `TypeInfo`, native-checker, flow-product, relation-policy, truthiness, canonical-algebra, or wire change.
 
 ## Exact predecessor contracts
 
-- **TE1:** implemented ledger row for “Sealed semantic operands and forcing boundary”; ledger presence alone satisfies the predecessor. TE1 supplies the content-free authored operand identity, store-local materialized handle arm, the request-owned complete five-axis `ProjectionReductionContext`, its exactly-once unchanged combination into query dispatch/family identity, and the sole force capability. TE2 may specialize the closed force-request vocabulary but may not reconstruct/default/duplicate/store a second context or bypass it.
-- **D3C:** implemented ledger row for “Product worklist cutover”; ledger presence alone satisfies this architect-mandated ordering edge because D3C is the ledger-visible completion/ordering fence for the atomic D3R/D3I/D3P/D3C landing. TE2 continues to consume the pre-existing shared `SemanticQueryKey::Relate`, `InferenceSession`, and `InferBinderId` authorities. It consumes no D3R nominal `Identity`/`Comparable` outcome, no D3I `FlowBinding` identity, and no D3P/D3C flow, product, worklist, admission, or budget API, including `FlowProductStore`, `FlowReturn`, and `FlowDischargeReport`.
-- **TA1B:** implemented ledger row for “Canonical composite payload and construction-site closure”; ledger presence alone satisfies the predecessor. Every distributed or suspended conditional composite produced here uses the sealed canonical algebra route; no raw derived union/intersection constructor returns.
+- **TE1:** implemented ledger row for “Sealed semantic operands and forcing boundary”; ledger presence alone satisfies the predecessor. This node does not consume the force capability or mint an operand; it keeps the materialized `SemanticNodeId` operands the conditional family already carries. TE1's authored vocabulary is consumed by `TE2B`, not here.
+- **D3C:** implemented ledger row for “Product worklist cutover”; ledger presence alone satisfies this ordering edge. This node consumes only the pre-existing shared `SemanticQueryKey::Relate`, `InferenceSession`, and `InferBinderId` authorities and no D3R/D3I/D3P/D3C flow, product, worklist, admission, or budget API.
+- **TA1B:** implemented ledger row for “Canonical composite payload and construction-site closure”; ledger presence alone satisfies the predecessor. The distributed per-member union is produced through the sealed canonical algebra route; no raw derived composite constructor returns.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope
 
-- Replace the live eager shape in `lower.rs` where `true_type` and `false_type` are lowered before `SemanticQueryKey::Conditional` dispatch. The query key must carry sealed operands; the force request supplies the one complete existing five-axis `ProjectionReductionContext`, which TE1 combines unchanged with operand identity exactly once in query dispatch/family identity. Neither operand nor a second field reconstructs, defaults, duplicates, or stores that request context; source contents and version hashes remain absent from identity.
-- Force the check and extends operands only as far as the existing selection oracle requires. Every nested relation read re-enters `SemanticQueryKey::Relate`; the O(tag) prefilter remains internal to that authority and never becomes a second answer.
-- **Decided true:** force only the true operand under the committed infer bindings. The false operand is dead. Infer declarations/references keep exact `InferBinderId`; the selected true operand alone receives the extended substitution frame. No binding leaks to the false operand, an outer same-name binder, or a sibling conditional.
-- **Decided false:** force only the false operand in the original environment. The true operand and every infer body beneath it are dead.
-- **Open/deferred:** preserve a `SemanticNodeData::Conditional` shell. For a non-empty `ProjectPath`, propagate only the residual path/demand into each branch operand and preserve the check/extends operands as the suspended decision inputs. Do not whole-expand either branch merely to project a leaf.
-- **Genuine root Expanded:** preserve the current query-mode contract. If selection stays open and the caller requested the full root, both branch operands are demanded because both belong to the result. This is not classified as dead-operand work. Decided root Expanded still touches only the winner.
-- Existing conditional distributivity remains in `build_conditional`; distributive arms call the same conditional family and canonical algebra. TE2 adds no pre-expansion distributor or request-local branch walker.
-- **Dead-operand proof:** for the losing branch of a decided conditional, attributable semantic counters must be exactly zero: forcing attempts, locator dereferences, substitutions, nested dispatches (including relation reads), semantic allocations/interns/origin edges, and semantic fact reads. Dead operands add no semantic dependency facts. Parse and shallow indexing are explicitly excluded.
-- Cancellation is checked before check/extends force, before branch force, and before admission. Any cancellation, budget, recursive/unknown relation, or partial nested force is typed `ReturnOnly` unless the correct semantic result is an intentionally suspended complete carrier under existing rules; no degraded candidate warms.
-- Required fixtures include: false branch containing an unresolved import and allocation-heavy generic; true branch containing the same for false selection; nested same-name infer binders; open conditional `['a']['b']` projection; distributive conditional over a union; repeated fresh/warm/incremental execution; and root `Expanded` preservation.
+- `build_conditional` roots a DECIDED result (relation selection to `True`/`False`, and the binding-producing infer selection, which is always decided true) on `check`, `extends`, and the WINNER only. The deferred shell publishes both branch references in its value and keeps the four-node root set.
+- The distributive early return roots on `check`, the resolved union surface returned by `distributive_check_union_members`, and `extends`; the branch files arrive as member-observed facts through the memo's nested fact rail. A global alias over a file-scoped union still roots the union's file.
+- Staleness in the other direction is impossible: the memo key carries both branch node ids, so an edit that changes the losing branch mints a different id and a different key rather than serving a stale hit. The change removes rejections of values that never read the rejecting file and adds no reuse of a value whose inputs moved.
+- Selection, infer substitution into the true branch, the open shell, the walker's residual-path push into both branches, root `Expanded`, and distributivity keep their existing behavior; existing cancellation and `ReturnOnly` rails apply unchanged.
 
 ## Acceptance IDs and discriminating proof
 
-- **TE2-AC1 — select before branch force:** a decided true/false conditional returns the existing semantic answer while the losing branch satisfies the full zero-work proof. A mutation that restores eager branch lowering must fail. The one `Conditional` family and one relation authority remain structurally evident.
-- **TE2-AC2 — infer, distributivity, and open projection:** prove infer bindings are exact and scoped only to the selected true operand; existing distributive behavior and origin edges are preserved; an open conditional with a residual path projects that path through both branches without whole-surface enumeration; genuine root `Expanded` semantics remain unchanged.
-- **TE2-AC3 — admission and incremental equivalence:** fresh and incremental results, completeness, origin, and bytes match after edits to check, winning branch, and formerly losing branch. Conditional family tests one-axis-distinguish the request's `mode`, `demand`, `provenance`, `merge_role`, and `vue_heritage_policy` without an operand-owned or reconstructed context. A dead operand adds no semantic dependency facts and performs no semantic work, but an ordinary same-owner edit may conservatively reject the candidate through strict self-root validation. After any such rejection, recomputation must match fresh and must still record zero dead-operand semantic work. When selection flips, the new winner is forced and its current facts are observed. Cancelled/budgeted/partial work is `ReturnOnly` and never warm; this node does not weaken or refine strict self-root architecture.
-- **TE2-AC4 — bounded work:** relation selection runs at most once per check-relevant substitution class; a decided conditional forces one branch; an open residual-path request forces only branch work necessary for that path; concurrent identical conditionals join the existing family memo; repeated warm requests do not grow candidates.
-- Every new test must discriminate a plausible eager-forcing, infer-leak, residual-projection, or admission regression. Reuse/table-drive existing conditional and infer fixtures where possible.
+- **TE2-AC1 — select before branch force at the dispatch boundary:** a decided true/false conditional returns the winning branch while the losing branch receives no force, nested dispatch, relation read, origin edge, or fact read, and contributes no self-root. Restoring the four-node root set on a decided result must fail `decided_conditional_roots_only_on_check_extends_and_the_winner`; the decided-false leg mirrors the decided-true leg so the proof cannot pass by dropping one fixed branch. One `Conditional` family and one relation authority remain structurally evident (`closed_conditional_selects_and_emits_edges`, `closed_conditional_does_not_materialise_losing_branch_body`).
+- **TE2-AC2 — infer, distributivity, and open projection:** infer bindings substitute only into the selected true branch through the shared oracle (`bare_infer_extends_selects_true_through_the_shared_oracle` and the existing infer suites); a distributed conditional's dependency facts follow member selections for all-true, all-false, mixed, and open member sets, for a raw union check and a global alias over it (`distributed_conditional_dependencies_follow_member_selections`); an open conditional with a residual path projects that path through both branches through the walker; root `Expanded` semantics are unchanged.
+- **TE2-AC3 — admission and incremental equivalence:** a warm repeat of the distributed parent hits without rebuilding members and yields the same read set; strict self-root validation is neither weakened nor refined; cancelled, budgeted, or partial work stays `ReturnOnly` and never warms.
+- **TE2-AC4 — bounded work:** selection runs once per conditional dispatch and consumes only `check`/`extends`; a decided conditional forces zero branches at the boundary because the winner node id is returned as-is; repeated warm requests do not grow candidates beyond the existing family cap.
+- Every test discriminates a plausible dead-branch-root, infer-leak, or admission regression; existing conditional and infer fixtures are reused.
 - Test homes: co-located `project_semantic_dispatch` tests and `crates/verter_session/tests/cases`.
 
 ## Deletions and forbidden designs
 
-- Delete the eager conditional branch-lowering/materialization route and every conditional-only bypass that forces branch bodies before selection; each deletion names TE1 force plus `build_conditional` as the replacement.
+- The unconditional four-node observed-self-root set on the decided and distributed arms is deleted; the replacement is the selection-observed root set in `build_conditional`.
 - No second relation engine, truthiness classifier, distributivity planner, branch recipe graph, recursive demand walker, or conditional cache.
-- No `SemanticRecipeId`, closures, AST pointers, `TypeExpr` operands, arbitrary env maps, source hashes, spans, or display text in conditional operand/query identity.
-- Never infer through an unselected branch, substitute a losing branch, or read semantic facts from a dead branch. Never treat parse/shallow indexing as proof of semantic forcing.
+- No `SemanticRecipeId`, closures, AST pointers, `TypeExpr` operands, arbitrary env maps, source hashes, spans, or display text in conditional query identity.
+- Never infer through an unselected branch, substitute a losing branch at the boundary, or read semantic facts from a dead branch. Never treat parse/shallow indexing as proof of semantic forcing.
 - Never weaken genuine root `Expanded`, the five query modes, canonical algebra, existing origin taxonomies, or relation/inference-session ownership.
-- No public/wire, native-checker, flow-product, call-resolution, truthiness, display, or component-meta policy expansion.
-- Do not implement TE3–TE5 scope. A second independently acceptable outcome requires a DAG amendment.
+- Do not implement `TE2B`, TE4, or TE5 scope here: no lowering-site or instantiation-site change, no authored branch operand, no projection-context axis in `FamilyKey::Conditional`.
 
 ## Budgets and mandatory rescope
 
 - Target ceiling: 800 production LOC, 8 production files, 2 related crates/packages.
 - Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or if relation/distributivity ownership, public/wire shape, or a general recipe graph must change.
-- Correctness budget: zero losing-branch semantic work, infer leakage, stale publication, wrong branch, wrong-complete result, or warm degraded result.
-- Performance budget: decided conditional branch-forcing count exactly 1; dead-branch counters exactly 0; no additional relation selection per equivalent substitution class; zero warm-candidate growth; no allocation/latency regression for equivalent selected work.
+- Correctness budget: zero losing-branch dispatch-boundary work, infer leakage, stale publication, wrong branch, wrong-complete result, or warm degraded result.
+- Performance budget: zero warm-candidate growth; no allocation/latency regression for equivalent selected work.
 
 ## Abort conditions
 
-- Stop before mutation if any predecessor lacks an implemented ledger row, conditional selection cannot occur without first materializing both branches under the existing relation authority, or exact infer scoping cannot be represented by TE1 identity.
-- Stop if preserving distributivity requires a second planner or if root `Expanded` semantics would change.
-- Abort on any dead-branch semantic activity, infer leakage, stale/warm partial, candidate growth, or unexplained output/performance divergence.
+- Stop before mutation if any predecessor lacks an implemented ledger row or if a decided result could serve a stale hit after a losing-branch edit under the existing key shape.
+- Abort on any dead-branch dispatch-boundary activity, infer leakage, stale/warm partial, candidate growth, or unexplained output/performance divergence.
 
 ## Targeted verification
 
-1. Run discriminating conditional, infer, distributivity, projection, cancellation, and dead-operand counter cases.
+1. Run the discriminating conditional root, infer, distributivity, and walker projection cases.
 2. `cargo nextest run -p verter_session -p verter_semantic`
 3. Run every final command in `targeted-domain` on the stable candidate and bind TE2-AC1–AC4 evidence/rationale in the review report.
 
 ## Review and lower-severity findings
 
-Apply `semantic-3`: 2 fresh distinct harness tasks covering exactly `adversarial` and `conformance`. Reviews must inspect the cumulative conditional cutover, infer scoping, dead-operand counters, root/open behavior, and authority non-duplication. P0/P1 block; unresolved P2 follows the binding policy and otherwise blocks. Any material change invalidates affected verdicts. Final acceptance requires 2/2 clean PASS reports plus `targeted` confirmation.
+Apply `semantic-3`: 2 fresh distinct harness tasks covering exactly `adversarial` and `conformance`. Reviews must inspect the dependency-fact cutover, infer scoping, root/open behavior, and authority non-duplication. P0/P1 block; unresolved P2 follows the binding policy and otherwise blocks. Any material change invalidates affected verdicts. Final acceptance requires 2/2 clean PASS reports plus `targeted` confirmation.
 
 ## Trusted implementation ledger
 
