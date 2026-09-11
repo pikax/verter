@@ -5439,6 +5439,45 @@ fn decided_conditional_roots_only_on_check_extends_and_the_winner() {
         ],
         "a deferred shell publishes both branch refs, so both stay rooted"
     );
+
+    // Lattice-extreme checks decide without the relation authority. An
+    // `error` check and a distributive `never` check read neither branch,
+    // so neither branch file is a dependency of the answer.
+    let error_check = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(Arc::from(
+        "error check",
+    ))));
+    let never_check = primitive(&graph, PrimitiveKind::Never);
+    for (label, check, distributive) in [
+        ("error", error_check, false),
+        ("distributive never", never_check, true),
+    ] {
+        let absorbed =
+            dispatch.build_conditional(check, string_node, true_branch, false_branch, distributive);
+        assert!(
+            matches!(absorbed.result, QueryResult::Value(id) if id != true_branch && id != false_branch),
+            "a {label} check must absorb to neither branch, got {:?}",
+            absorbed.result
+        );
+        assert!(
+            rooted_files(&absorbed).is_empty(),
+            "a {label} check reads no branch, so no branch file may be rooted, got {:?}",
+            rooted_files(&absorbed)
+        );
+    }
+
+    // An `any` check publishes the union of both branches, so both stay
+    // rooted.
+    let any_check = primitive(&graph, PrimitiveKind::Any);
+    let any_union =
+        dispatch.build_conditional(any_check, string_node, true_branch, false_branch, false);
+    assert_eq!(
+        rooted_files(&any_union),
+        vec![
+            "/w/false_branch.ts".to_string(),
+            "/w/true_branch.ts".to_string()
+        ],
+        "an any check unions both branches, so both stay rooted"
+    );
 }
 
 #[test]

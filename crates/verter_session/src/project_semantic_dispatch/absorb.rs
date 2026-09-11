@@ -259,6 +259,9 @@ impl ProjectSemanticDispatch<'_> {
     /// Everything else (distributive `Union` distribution, the `infer`-binding
     /// paths, ordinary relation selection) is handled below the fast-reject in
     /// `build_conditional`.
+    ///
+    /// Rows (1) and (3) read neither branch, so they root only on the
+    /// decision inputs; row (2) publishes both branches and roots on them.
     pub(crate) fn absorb_conditional(
         &self,
         check: SemanticNodeId,
@@ -267,21 +270,21 @@ impl ProjectSemanticDispatch<'_> {
         false_branch: SemanticNodeId,
         distributive: bool,
     ) -> Option<QueryBuildOutput> {
-        let roots = [check, extends, true_branch, false_branch];
+        let decision_roots = [check, extends];
         match self.peek_special(check)? {
             // (1) error dominates any/never and both branches.
-            (SpecialKind::Error, err) => Some(self.absorbed_output(err, roots)),
+            (SpecialKind::Error, err) => Some(self.absorbed_output(err, decision_roots)),
             // (2) `any extends T ? X : Y` ⇒ `X | Y`, unless an infer binding
             //     would be involved (then fall through to the infer path).
             (SpecialKind::Any, _) if !self.extends_is_infer_pattern(extends) => {
                 let union = self
                     .intern_normalized_union_or_intersection(&[true_branch, false_branch], true);
-                Some(self.absorbed_output(union, roots))
+                Some(self.absorbed_output(union, [check, extends, true_branch, false_branch]))
             }
             // (3) distributive naked-`never` ⇒ `never` (empty distribution).
-            (SpecialKind::Never, _) if distributive => {
-                Some(self.absorbed_output(self.primitive_node(PrimitiveKind::Never), roots))
-            }
+            (SpecialKind::Never, _) if distributive => Some(
+                self.absorbed_output(self.primitive_node(PrimitiveKind::Never), decision_roots),
+            ),
             _ => None,
         }
     }
