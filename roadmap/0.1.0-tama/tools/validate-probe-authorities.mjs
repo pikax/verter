@@ -488,11 +488,8 @@ export function validateObservations(ctx, file, doc) {
           requireImplemented: eligible,
         }),
       );
-      if (
-        key === "equivalent_work_basis" &&
-        ctx.authorities.get(basis?.authority)?.framework !== "any"
-      )
-        errors.push(`${at}: ${key} must cite a framework-neutral authority`);
+      if (key === "equivalent_work_basis" && basis?.authority !== EQUIVALENT_WORK_AUTHORITY)
+        errors.push(`${at}: ${key} must cite ${EQUIVALENT_WORK_AUTHORITY}`);
     }
     if (eligible && ctx.comparisonOf.get(framework) !== "structural")
       errors.push(

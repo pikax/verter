@@ -740,6 +740,71 @@ fn not_applicable_is_accepted_only_where_the_manifest_declares_it() {
     );
 }
 
+/// Evaluating through the manifest is what makes that check unskippable. A
+/// cell reads one terminal and never sees the manifest header, so an absent
+/// comparator classifies the structural canary as the non-blocking
+/// `NotApplicable` — a missing comparator read as "cannot be exercised here".
+#[test]
+fn manifest_evaluation_refuses_an_observation_whose_applicability_disagrees() {
+    let manifest = ProbeStateManifest::from_toml_str(MANIFEST).expect("fixture manifest is valid");
+    let comparator_absent = observe(
+        seen(&[C::Pass]),
+        seen(&[C::Pass]),
+        DimensionInput::NotApplicable(NotApplicableReason::ComparatorAbsent),
+        seen(&[C::Pass]),
+    )
+    .expect("a not-applicable structural dimension is representable");
+    let structural = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.dimension == Dimension::Structural)
+        .expect("the fixture manifest has a structural cell");
+
+    let unchecked = structural.evaluate(&comparator_absent);
+    assert_eq!(unchecked, Evaluation::NotApplicable);
+    assert!(!unchecked.blocks(), "the fail-open this API closes");
+
+    assert_eq!(
+        manifest.evaluate_case(&comparator_absent).unwrap_err(),
+        InvalidObservation::ApplicabilityMismatch {
+            dimension: Dimension::Structural,
+            declared: None,
+            observed: Some(NotApplicableReason::ComparatorAbsent),
+        }
+    );
+}
+
+/// A sound observation evaluates every cell of its own case, in manifest
+/// order, exactly as the per-cell API would.
+#[test]
+fn manifest_evaluation_returns_every_cell_of_its_case() {
+    let manifest = ProbeStateManifest::from_toml_str(MANIFEST).expect("fixture manifest is valid");
+    let total = observe(
+        seen(&[C::Pass]),
+        seen(&[C::Pass]),
+        seen(&[C::Pass]),
+        seen(&[C::Pass]),
+    )
+    .expect("a passing case is observable");
+    let evaluated = manifest
+        .evaluate_case(&total)
+        .expect("a sound observation evaluates");
+    assert_eq!(
+        evaluated
+            .iter()
+            .map(|(entry, evaluation)| (entry.dimension, *evaluation))
+            .collect::<Vec<_>>(),
+        vec![
+            (Dimension::Route, Evaluation::GatePass),
+            (Dimension::Compile, Evaluation::ObservedPass),
+            (Dimension::Structural, Evaluation::Xpass),
+            (Dimension::Runtime, Evaluation::Skipped),
+            (Dimension::Map, Evaluation::Skipped),
+            (Dimension::Performance, Evaluation::ObservedPass),
+        ]
+    );
+}
+
 /// Hand-built (or deserialized) terminals must honour propagation: a pass
 /// under a failed feeding dimension is a false green, and a not-run where the
 /// feeding failure is admissible would hide the propagated class.

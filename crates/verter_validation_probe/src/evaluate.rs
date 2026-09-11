@@ -4,8 +4,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::manifest::{ExpectedState, ProbeEntry};
-use crate::outcome::{CaseObservation, ProbeOutcomeClass, Terminal};
+use crate::manifest::{ExpectedState, ProbeEntry, ProbeStateManifest};
+use crate::outcome::{CaseObservation, InvalidObservation, ProbeOutcomeClass, Terminal};
 
 /// The closed result of evaluating one manifest cell against one case
 /// observation.
@@ -125,5 +125,40 @@ impl ProbeEntry {
             }
             _ => Evaluation::UnrelatedRegression,
         }
+    }
+}
+
+impl ProbeStateManifest {
+    /// Evaluate every cell this manifest holds for `observation`'s case, once
+    /// the observation's applicability agrees with what this manifest
+    /// declares. Cells keep manifest order; a case this manifest does not
+    /// carry evaluates to no cells.
+    ///
+    /// [`ProbeEntry::evaluate`] reads one terminal and never sees the
+    /// manifest header, so a driver reporting [`Terminal::NotApplicable`] for
+    /// a dimension this manifest declares applicable is classified as the
+    /// non-blocking [`Evaluation::NotApplicable`]. That is the fail-open
+    /// [`ProbeStateManifest::check_applicability`] exists to refuse, and
+    /// nothing obliged a caller to run it first: a missing producer,
+    /// executor, or validator could be read as "cannot be exercised here".
+    /// Evaluating through the manifest makes the checked path the reachable
+    /// one.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidObservation::ApplicabilityMismatch`] when the observation
+    /// reports a dimension inapplicable where this manifest declares it
+    /// applicable, or applicable where this manifest declares it not.
+    pub fn evaluate_case<'a>(
+        &'a self,
+        observation: &CaseObservation,
+    ) -> Result<Vec<(&'a ProbeEntry, Evaluation)>, InvalidObservation> {
+        self.check_applicability(observation)?;
+        Ok(self
+            .entries
+            .iter()
+            .filter(|entry| entry.probe_id == observation.case_id())
+            .map(|entry| (entry, entry.evaluate(observation)))
+            .collect())
     }
 }

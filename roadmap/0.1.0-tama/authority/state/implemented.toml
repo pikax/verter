@@ -166,7 +166,7 @@ schema = 2
 "CPER3" = { status = "pending" }
 "CPF0" = { status = "pending" }
 "CPF1" = { status = "pending" }
-"CVO0" = { status = "implemented", commit_message = "feat(*): add the validation-probe outcome taxonomy and probe-state manifest contract", commit_date = "2026-09-11T08:30:00+01:00" }
+"CVO0" = { status = "implemented", commit_message = "feat(*): add the validation-probe outcome taxonomy and probe-state manifest contract", commit_date = "2026-09-11T08:30:00+01:00", pull_request = 525 }
 "CVO1" = { status = "pending" }
 "CVO1S" = { status = "pending" }
 "CVO2" = { status = "pending" }

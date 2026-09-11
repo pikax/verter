@@ -54,7 +54,21 @@ const CHARTERS = {
   VUE: "# Vue\n\n- **VUE-AC1 — sole owner:** one owner.\n- **VUE-AC2 — positive contract:** exact identity.\n",
   SVELTE: "# Svelte\n\n- **SVELTE-AC2 — positive contract:** exact identity.\n",
   WORK: "# Work\n\n- **WORK-AC2 — positive contract:** equivalent work.\n",
+  MEM: "# Mem\n\n- **MEM-AC2 — positive contract:** a memory snapshot.\n",
 };
+
+// A second framework-neutral authority over Performance. The live catalog has
+// three (`compiler.equivalent-work-ledger`, `compiler.physical-execution`,
+// `native.memory-audit-snapshot`), so "framework = any" never identified the
+// equivalent-work ledger on its own.
+const MEMORY_AUTHORITY = `
+[[authority]]
+id = "native.memory-audit-snapshot"
+node = "MEM"
+framework = "any"
+dimensions = ["Performance"]
+atoms = { memory-snapshot = { charter_atom = "MEM-AC2", dimensions = ["Performance"], outcomes = ["pass"] } }
+`;
 
 const cell = (dimension, fields) => ({
   probe_id: "vue/fixtures/App.vue",
@@ -207,6 +221,29 @@ function refusedOnce(errors, pattern) {
 
 test("valid manifest, join record, and observations pass", () => {
   assert.deepEqual(run({ joins: [joinRecord()], observations: [observationArtifact()] }), []);
+});
+
+// Framework neutrality was never the contract: an observation's comparison
+// evidence must cite the equivalent-work ledger itself, which is what an
+// adopted join row already required. Accepting any framework = "any"
+// authority admitted a memory snapshot as equivalent-work evidence.
+test("an equivalent-work basis citing another framework-neutral authority is refused", () => {
+  const artifact = observationArtifact();
+  artifact.rows[0].equivalent_work_basis = {
+    authority: "native.memory-audit-snapshot",
+    atom: "memory-snapshot",
+  };
+  refusedOnce(
+    run({ catalog: parseToml(CATALOG + MEMORY_AUTHORITY), observations: [artifact] }),
+    /@cold: equivalent_work_basis must cite compiler\.equivalent-work-ledger/,
+  );
+});
+
+test("an equivalent-work basis citing the ledger itself passes", () => {
+  assert.deepEqual(
+    run({ catalog: parseToml(CATALOG + MEMORY_AUTHORITY), observations: [observationArtifact()] }),
+    [],
+  );
 });
 
 test("the live catalog, charters, ledger, and committed manifests validate", () => {
