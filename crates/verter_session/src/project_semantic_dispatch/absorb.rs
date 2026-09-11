@@ -515,6 +515,9 @@ impl ProjectSemanticDispatch<'_> {
                 SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
                 | SemanticNodeData::Opaque(_)
+                // The nominal terminal carries a scalar declaring identity
+                // and no type args — no infer-bearing child node id.
+                | SemanticNodeData::TypeOfNominal(_)
                 // `DeclRef` carries only a declaration identity (no args); the
                 // raw-fallback / synthetic-binding carriers hold no
                 // infer-bearing child node id.

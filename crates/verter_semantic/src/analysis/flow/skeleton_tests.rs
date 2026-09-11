@@ -52,6 +52,352 @@ fn skeleton_of(source: &str) -> FunctionBodySkeleton {
     parse_and_build(source, first_function, |skeleton| skeleton)
 }
 
+pub(super) fn indexed_skeleton_of(source: &str) -> FunctionBodySkeleton {
+    indexed_structure_of(source).into_parts().0
+}
+
+fn indexed_structure_of(source: &str) -> PreparedFunctionBodySkeleton {
+    use crate::analysis::function_program::build_function_program_index;
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    assert!(parsed.errors.is_empty());
+    let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+    let index =
+        build_function_program_index(&parsed.program, source, &owners, Arc::from("/graph.ts"));
+    let function = parsed
+        .program
+        .body
+        .iter()
+        .find_map(|statement| match statement {
+            Statement::FunctionDeclaration(function) if function.body.is_some() => Some(function),
+            _ => None,
+        })
+        .expect("fixture function");
+    let entry = index
+        .matches_named(function.id.as_ref().unwrap().name.as_str())
+        .next()
+        .unwrap()
+        .entry();
+    build_indexed_function_body_skeleton(
+        &FunctionBodySource::from_function(function).unwrap(),
+        entry,
+    )
+    .unwrap()
+}
+
+#[test]
+fn source_type_queries_retain_separate_exact_lexical_occurrences() {
+    let source = "function f<T>(arg=accept(0 as typeof later)) { let later=1; { let twin=1; accept(0 as typeof twin); } { let twin=2; accept(0 as typeof twin); } accept(0 as typeof T); return accept(0 as typeof outside); }";
+    let prepared = indexed_structure_of(source);
+    let bindings = prepared.bindings();
+    let queries: Vec<_> = prepared
+        .skeleton()
+        .expr_sites
+        .iter()
+        .flat_map(|site| site.source_type_queries.iter())
+        .collect();
+    assert_eq!(queries.len(), 5);
+    let mut twins = Vec::new();
+    for query in queries {
+        assert_eq!(
+            bindings.occurrence(query.span),
+            FlowBindingOccurrence::Missing,
+            "query is not a runtime read"
+        );
+        match bindings.source_type_query_occurrence(query.span) {
+            FlowBindingOccurrence::Resolved(FlowBindingRef::Local(binding)) => twins.push(*binding),
+            FlowBindingOccurrence::Free => assert!(query.binding.is_none()),
+            other => panic!("unexpected query disposition {other:?}"),
+        }
+    }
+    assert_eq!(
+        twins.len(),
+        2,
+        "default sees outer environment; type binder has no value identity"
+    );
+    assert_ne!(
+        twins[0], twins[1],
+        "same-name sibling scopes remain distinct"
+    );
+    assert_eq!(
+        bindings.source_type_query_occurrence(FrameSpan::rebase(0, verter_span::Span::new(0, 1))),
+        FlowBindingOccurrence::Missing
+    );
+}
+
+#[test]
+// @ai-generated - Calls without an enclosing expression site retain source-only query bindings.
+fn enum_initializer_call_retains_source_type_query_on_its_call_site() {
+    let source = "function flow(queried: unknown, other: unknown) { enum Local { Value = accept(other as typeof queried), } return Local.Value; }";
+    let prepared = indexed_structure_of(source);
+    let skeleton = prepared.skeleton();
+    let call_site = skeleton
+        .expr_sites
+        .iter()
+        .find(|site| !site.calls.is_empty())
+        .expect("enum initializer call is indexed");
+    assert_eq!(call_site.calls.len(), 1);
+    assert_eq!(call_site.source_type_queries.len(), 1);
+    let query = &call_site.source_type_queries[0];
+    assert!(matches!(query.binding, Some(FlowBindingRef::Local(_))));
+    assert_eq!(
+        prepared.bindings().source_type_query_occurrence(query.span),
+        FlowBindingOccurrence::Resolved(query.binding.as_ref().unwrap())
+    );
+    assert_eq!(
+        prepared.bindings().occurrence(query.span),
+        FlowBindingOccurrence::Missing,
+        "a source type query is not a runtime read"
+    );
+    assert_eq!(
+        skeleton
+            .expr_sites
+            .iter()
+            .map(|site| site.source_type_queries.len())
+            .sum::<usize>(),
+        1,
+        "the query belongs to the existing call site exactly once"
+    );
+}
+
+#[test]
+fn source_type_query_inventory_and_observer_share_wrapper_precedence() {
+    for (input, count) in [
+        ("other as typeof queried", 1),
+        ("(((other as typeof queried)))", 1),
+        ("<const>((other as typeof queried) satisfies unknown)", 1),
+        ("(other as typeof queried) satisfies unknown", 0),
+        ("(other as typeof queried) as const", 0),
+        ("other as (typeof queried)", 0),
+        ("other as typeof queried.member", 0),
+        ("other as typeof queried<string>", 0),
+        ("other as { value: typeof queried }", 0),
+    ] {
+        let source = format!("function f(other, queried) {{ return accept({input}); }}");
+        let prepared = indexed_structure_of(&source);
+        assert_eq!(
+            prepared
+                .skeleton()
+                .expr_sites
+                .iter()
+                .map(|site| site.source_type_queries.len())
+                .sum::<usize>(),
+            count,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn skeleton_records_whole_declarator_annotation_presence_without_lowering() {
+    let source = "function f() { let marked: Widget; var plain = 1; let {part}: Shape = other; return marked; }";
+    let skeleton = skeleton_of(source);
+    let start = source.find(": Widget").unwrap() as u32;
+    assert_eq!(
+        binding(&skeleton, "marked").annotation_span,
+        Some(FrameSpan::rebase(
+            0,
+            verter_span::Span::new(start, start + 8)
+        ))
+    );
+    assert!(binding(&skeleton, "plain").annotation_span.is_none());
+    assert!(
+        binding(&skeleton, "part").destructured,
+        "pattern captures cannot claim whole-declarator authority"
+    );
+}
+
+#[test]
+fn indexed_skeleton_retains_exact_nested_capture_paths_and_runtime_aliases() {
+    use crate::analysis::function_program::build_function_program_index;
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    let source =
+        "function f(x) { {var x;} let unused = 0; { let x = {a: 1}; return () => () => x.a; } }";
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    assert!(parsed.errors.is_empty());
+    let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+    let index =
+        build_function_program_index(&parsed.program, source, &owners, Arc::from("/capture.ts"));
+    let entry = index.matches_named("f").next().unwrap().entry();
+    let prepared =
+        build_indexed_function_body_skeleton(&first_function(&parsed.program), entry).unwrap();
+    let skeleton = &prepared.skeleton;
+    let xs: Vec<_> = skeleton
+        .bindings_named(skeleton.name_id("x").unwrap())
+        .collect();
+    assert_eq!(xs.len(), 3);
+    let exact = prepared.bindings.identity(xs[0]).unwrap();
+    assert_eq!(prepared.bindings.local(exact), Some(xs[0]));
+    let mut stale_name = exact.clone();
+    stale_name.name = Arc::from("replaced");
+    let mut stale_kind = exact.clone();
+    stale_kind.kind = crate::analysis::function_program::FunctionBindingKind::Let;
+    for stale in [&stale_name, &stale_kind] {
+        assert_eq!(stale, exact, "display metadata is not semantic identity");
+        assert_eq!(
+            prepared.bindings.local(stale),
+            None,
+            "map admission still requires exact indexed metadata"
+        );
+    }
+    assert_ne!(
+        prepared.bindings.identity(xs[0]),
+        prepared.bindings.identity(xs[1])
+    );
+    assert_eq!(
+        skeleton.binding(xs[0]).runtime_binding,
+        skeleton.binding(xs[1]).runtime_binding
+    );
+    assert_ne!(
+        skeleton.binding(xs[0]).runtime_binding,
+        skeleton.binding(xs[2]).runtime_binding
+    );
+    let closure = skeleton
+        .expr_sites
+        .iter()
+        .find(|site| !site.capture_bindings.is_empty())
+        .unwrap();
+    assert_eq!(
+        closure.capture_bindings.as_ref(),
+        &[FlowBindingRef::Local(xs[2])]
+    );
+    assert_eq!(closure.reads.len(), 1);
+    assert_eq!(closure.reads[0].binding, Some(FlowBindingRef::Local(xs[2])));
+    assert_eq!(
+        closure.reads[0].path.as_ref(),
+        &[SkeletonPathSegment::Static(skeleton.name_id("a").unwrap())]
+    );
+    let start = source.rfind("x.a").unwrap() as u32;
+    assert_eq!(
+        closure.reads[0].span,
+        FrameSpan::rebase(0, verter_span::Span::new(start, start + 1))
+    );
+    assert_eq!(
+        skeleton.return_sites.len(),
+        1,
+        "nested frame bodies are never walked"
+    );
+}
+
+#[test]
+fn prepared_graph_does_not_resolve_free_parameter_inputs_as_body_bindings() {
+    use crate::analysis::function_program::build_function_program_index;
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    for source in [
+        "const seed = 'outer'; function f(arg = seed) { const seed = 1; return arg; }",
+        "const seed = 'outer'; function f(arg = seed) { var seed = 1; return arg; }",
+        "const seed = 'outer'; function f(arg = seed()) { const seed = 1; return arg; }",
+        "const seed = 'outer'; function f(arg = seed()) { var seed = 1; return arg; }",
+    ] {
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed =
+            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+        assert!(parsed.errors.is_empty());
+        let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+        let index = build_function_program_index(
+            &parsed.program,
+            source,
+            &owners,
+            Arc::from("/default.ts"),
+        );
+        let entry = index.matches_named("f").next().unwrap().entry();
+        let reference = entry
+            .references
+            .iter()
+            .find(|read| read.name.as_ref() == "seed")
+            .unwrap_or_else(|| panic!("default read is indexed: {:?}", entry.references));
+        assert!(
+            reference.binding == crate::analysis::function_program::FunctionReferenceBinding::Free,
+            "the default sees the outer environment"
+        );
+        let prepared =
+            build_indexed_function_body_skeleton(&first_function(&parsed.program), entry).unwrap();
+        let skeleton = &prepared.skeleton;
+        let seed = skeleton
+            .bindings_named(skeleton.name_id("seed").unwrap())
+            .next()
+            .unwrap();
+        let graph = flow_graph::build_function_flow_graph(&prepared);
+        let plan = peeker::ReturnPathPeeker::new(&graph)
+            .plan(
+                &peeker::SliceDemand::for_return_projection(skeleton, &[]),
+                &peeker::FlowSliceBudget::default(),
+            )
+            .unwrap();
+        assert!(
+            !plan.is_selected(graph.binding_node(seed)),
+            "known-free input must not bind a same-name body declaration"
+        );
+    }
+}
+
+#[test]
+fn indexed_skeleton_retains_write_only_capture_subjects_without_value_reads() {
+    use crate::analysis::function_program::build_function_program_index;
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    for (source, captures_outer) in [
+        ("function f(x) { return () => { x = 1; return 0; }; }", true),
+        (
+            "function f(x) { return () => () => { x = 1; return 0; }; }",
+            true,
+        ),
+        (
+            "function f(x) { return () => { let x = 0; return () => { x = 1; return 0; }; }; }",
+            false,
+        ),
+    ] {
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed =
+            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+        assert!(parsed.errors.is_empty());
+        let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+        let index = build_function_program_index(
+            &parsed.program,
+            source,
+            &owners,
+            Arc::from("/capture.ts"),
+        );
+        let entry = index.matches_named("f").next().unwrap().entry();
+        let prepared =
+            build_indexed_function_body_skeleton(&first_function(&parsed.program), entry).unwrap();
+        let skeleton = &prepared.skeleton;
+        let x = skeleton
+            .bindings_named(skeleton.name_id("x").unwrap())
+            .next()
+            .unwrap();
+        let closure = skeleton
+            .expr_sites
+            .iter()
+            .find(|site| !site.capture_bindings.is_empty());
+        if !captures_outer {
+            assert!(
+                closure.is_none(),
+                "an intervening local owns its descendant write"
+            );
+            continue;
+        }
+        let closure = closure.expect("a write-only capture remains an exact closure subject");
+        assert_eq!(
+            closure.capture_bindings.as_ref(),
+            &[FlowBindingRef::Local(x)]
+        );
+        assert!(
+            closure.reads.is_empty(),
+            "writing a cell is not reading its value"
+        );
+        let graph = flow_graph::build_function_flow_graph(&prepared);
+        let plan = peeker::ReturnPathPeeker::new(&graph)
+            .plan(
+                &peeker::SliceDemand::for_return_projection(skeleton, &[]),
+                &peeker::FlowSliceBudget::default(),
+            )
+            .unwrap();
+        assert!(plan.is_effect_only(graph.binding_node(x)));
+    }
+}
+
 fn binding<'a>(skeleton: &'a FunctionBodySkeleton, name: &str) -> &'a SkeletonBinding {
     let id = skeleton
         .name_id(name)
@@ -467,5 +813,268 @@ function d(a: number, b: string) {
         skeleton_of(body),
         skeleton_of(&padded),
         "the same function body indexes identically wherever it sits"
+    );
+}
+
+#[test]
+fn prepared_occurrences_distinguish_free_shadowed_and_captured_targets() {
+    use crate::analysis::flow::{FlowBindingOccurrence, FlowBindingRef};
+    use crate::analysis::function_program::{
+        build_function_program_index, resolve_function_node, FunctionNode,
+    };
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    let source = "const seed='global'; function root(arg=seed) { const seed=1; let value=0; { let twin=1; consume(twin); } { let twin=2; consume(twin); } return () => { value=2; return value; }; }";
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+    let index = build_function_program_index(
+        &parsed.program,
+        source,
+        &owners,
+        Arc::from("/occurrences.ts"),
+    );
+    let entries: Vec<_> = index.matches_named("root").collect();
+    for matched in entries {
+        let entry = matched.entry();
+        let node = resolve_function_node(&parsed.program, &entry.locator)
+            .unwrap()
+            .node;
+        let body = match node {
+            FunctionNode::Function(function) => {
+                FunctionBodySource::from_function(function).unwrap()
+            }
+            FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
+        };
+        let prepared = build_indexed_function_body_skeleton(&body, entry).unwrap();
+        let bindings = prepared.bindings();
+        let frame_span = |start: u32, len: u32| {
+            FrameSpan::rebase(entry.span.start, verter_span::Span::new(start, start + len))
+        };
+        assert_eq!(
+            bindings.occurrence(frame_span(entry.span.start, 1)),
+            FlowBindingOccurrence::Missing
+        );
+        if entry.lexical_parent.is_none() {
+            let default = source.find("arg=seed").unwrap() as u32 + 4;
+            assert_eq!(
+                bindings.occurrence(frame_span(default, 4)),
+                FlowBindingOccurrence::Free,
+                "a body-local declaration must not capture a parameter-default read"
+            );
+            let mut twins = Vec::new();
+            for (position, _) in source.match_indices("consume(twin)") {
+                let FlowBindingOccurrence::Resolved(FlowBindingRef::Local(binding)) =
+                    bindings.occurrence(frame_span(position as u32 + 8, 4))
+                else {
+                    panic!("exact local occurrence");
+                };
+                twins.push(*binding);
+            }
+            assert_eq!(twins.len(), 2);
+            assert_ne!(
+                twins[0], twins[1],
+                "sibling shadows retain distinct exact references"
+            );
+        } else {
+            let write = source.find("value=2").unwrap() as u32;
+            let FlowBindingOccurrence::Resolved(FlowBindingRef::Captured(identity)) =
+                bindings.occurrence(frame_span(write, 5))
+            else {
+                panic!("write-only LHS is an indexed captured occurrence");
+            };
+            assert_eq!(identity.name.as_ref(), "value");
+            assert_ne!(identity.defining_function, entry.key);
+            let read = source.rfind("return value").unwrap() as u32 + 7;
+            assert_eq!(
+                bindings.occurrence(frame_span(read, 5)),
+                bindings.occurrence(frame_span(write, 5))
+            );
+        }
+    }
+}
+
+#[test]
+fn prepared_class_occurrences_distinguish_outer_free_and_static_local_bindings() {
+    use crate::analysis::function_program::build_function_program_index_with_nodes;
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    let source = "function f(x) { class C { static { touch(); var touch; { let x; x = 1; } x = 2; try {} catch (caught) { caught = 3; } for (let item of []) { item = 4; } } static { touch(); x = 5; } method() { deferred(); } p = deferredInit(); static p = immediate(); } const named = class own { static { own(); } }; return x; }";
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+    let (index, nodes) = build_function_program_index_with_nodes(
+        &parsed.program,
+        source,
+        &owners,
+        Arc::from("/class.ts"),
+    );
+    let entry = index.matches_named("f").next().unwrap().entry();
+    let prepared =
+        build_indexed_function_body_skeleton(&first_function(&parsed.program), entry).unwrap();
+    let occurrence = |needle: &str, name: &str| {
+        let start = source.find(needle).unwrap() as u32;
+        prepared.bindings().occurrence(FrameSpan::rebase(
+            entry.span.start,
+            verter_span::Span::new(start, start + name.len() as u32),
+        ))
+    };
+    for (needle, name) in [
+        ("touch(); var", "touch"),
+        ("x = 1", "x"),
+        ("caught = 3", "caught"),
+        ("item = 4", "item"),
+        ("own();", "own"),
+    ] {
+        assert_eq!(
+            occurrence(needle, name),
+            FlowBindingOccurrence::UnmodeledLocal,
+            "{needle}"
+        );
+    }
+    assert_eq!(
+        occurrence("touch(); x", "touch"),
+        FlowBindingOccurrence::Free
+    );
+    assert!(matches!(
+        occurrence("x = 2", "x"),
+        FlowBindingOccurrence::Resolved(FlowBindingRef::Local(_))
+    ));
+    assert_eq!(occurrence("x = 2", "x"), occurrence("x = 5", "x"));
+    assert_eq!(
+        occurrence("deferred();", "deferred"),
+        FlowBindingOccurrence::Missing
+    );
+    assert_eq!(
+        occurrence("deferredInit();", "deferredInit"),
+        FlowBindingOccurrence::Missing
+    );
+    assert_eq!(
+        occurrence("immediate();", "immediate"),
+        FlowBindingOccurrence::Free
+    );
+    for text in ["touch()", "own()", "immediate()"] {
+        let start = source.find(text).unwrap() as u32;
+        assert!(
+            nodes
+                .call(verter_span::Span::new(start, start + text.len() as u32))
+                .is_some(),
+            "evaluated call has retained address: {text}"
+        );
+    }
+    assert!(entry
+        .bindings
+        .iter()
+        .all(|binding| !["touch", "caught", "item", "own"].contains(&binding.name.as_ref())));
+}
+
+#[test]
+fn runtime_shape_preserves_parameter_var_and_pattern_alias_boundaries() {
+    use crate::analysis::function_program::build_function_program_index;
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    let source = "function f(p,q,r) { var p; var [q] = []; { let q = 0; q; } return r; }";
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    assert!(parsed.errors.is_empty());
+    let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+    let index =
+        build_function_program_index(&parsed.program, source, &owners, Arc::from("/runtime.ts"));
+    let entry = index.matches_named("f").next().unwrap().entry();
+    let prepared =
+        build_indexed_function_body_skeleton(&first_function(&parsed.program), entry).unwrap();
+    for (ordinal, binding) in prepared.skeleton().bindings.iter().enumerate() {
+        let local = SkeletonBindingId::from_index(ordinal as u32);
+        let shape = prepared.bindings().runtime_shape(local);
+        let name = prepared.bindings().identity(local).unwrap().name.as_ref();
+        if name == "p" {
+            assert_eq!(
+                shape,
+                FlowRuntimeBindingShape {
+                    has_var: true,
+                    has_destructured_var: false
+                }
+            );
+        } else if name == "q" && binding.kind != SkeletonBindingKind::Let {
+            assert_eq!(
+                shape,
+                FlowRuntimeBindingShape {
+                    has_var: true,
+                    has_destructured_var: true
+                }
+            );
+        } else {
+            assert_eq!(shape, FlowRuntimeBindingShape::default());
+        }
+    }
+}
+
+#[test]
+fn declaration_span_queries_do_not_scan_unrelated_parameters_or_aliases() {
+    for count in [32, 128, 512] {
+        let parameters = (0..count)
+            .map(|index| format!("p{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let declarations = "var shared = 0;".repeat(count);
+        let source = format!("function f({parameters}) {{ {declarations} return 0; }}");
+        let prepared = indexed_structure_of(&source);
+        let skeleton = prepared.skeleton();
+        let bindings = prepared.bindings();
+        assert_eq!(skeleton.bindings.len(), count * 2);
+        binding::take_declaration_span_comparisons();
+        for (ordinal, declaration) in skeleton.bindings.iter().enumerate() {
+            assert_eq!(
+                bindings.declaration_at_span(declaration.span),
+                Some(SkeletonBindingId::from_index(ordinal as u32))
+            );
+        }
+        let missing = FrameSpan::rebase(
+            0,
+            verter_span::Span::new(source.len() as u32, source.len() as u32 + 1),
+        );
+        assert_eq!(bindings.declaration_at_span(missing), None);
+        let comparisons = binding::take_declaration_span_comparisons();
+        eprintln!(
+            "{count} parameters + {count} aliases: {comparisons} declaration span comparisons"
+        );
+        assert!(comparisons <= 8 * (count * 2 + 1), "{count} parameters and {count} aliases used {comparisons} declaration span comparisons");
+    }
+}
+
+#[test]
+fn declaration_span_index_preserves_authored_alias_and_shadow_identities() {
+    let source = "function f(shared, {part: renamed}, ...rest) { var shared = 0; let local = 1; { let local = 2; } type Label = string; return 0; }";
+    let prepared = indexed_structure_of(source);
+    let skeleton = prepared.skeleton();
+    let bindings = prepared.bindings();
+    for (ordinal, declaration) in skeleton.bindings.iter().enumerate() {
+        assert_eq!(
+            bindings.declaration_at_span(declaration.span),
+            Some(SkeletonBindingId::from_index(ordinal as u32))
+        );
+    }
+    let shared = skeleton
+        .bindings_named(skeleton.name_id("shared").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(shared.len(), 2);
+    assert_ne!(shared[0], shared[1]);
+    assert_eq!(
+        bindings.canonical_local(shared[0]),
+        bindings.canonical_local(shared[1])
+    );
+    let locals = skeleton
+        .bindings_named(skeleton.name_id("local").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(locals.len(), 2);
+    assert_ne!(
+        bindings.canonical_local(locals[0]),
+        bindings.canonical_local(locals[1])
+    );
+    let type_binding = skeleton
+        .bindings_named(skeleton.name_id("Label").unwrap())
+        .next()
+        .unwrap();
+    assert!(
+        bindings.identity(type_binding).is_none(),
+        "declaration addressability never invents a value identity for a type-only binder"
     );
 }

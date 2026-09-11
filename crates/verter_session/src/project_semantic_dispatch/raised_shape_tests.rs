@@ -2509,6 +2509,25 @@ fn publication_score_corpus(
                 crate::semantic_query::LiteralValue::String("idle".to_string()),
             )),
         ),
+        (
+            "typeof_nominal",
+            graph.intern_node(SemanticNodeData::new_nominal_typeof(
+                crate::semantic_query::ValueRootKey {
+                    scope: crate::semantic_query::ScopeId::file(
+                        Arc::from("/w/m.ts"),
+                        verter_type_expr::TopLevelOwnerId::module(0),
+                    ),
+                    name: Arc::from("TOKEN"),
+                },
+                Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+                verter_type_expr::facts::ValueDeclIdentityPart {
+                    canonical_id: Arc::from("/w/m.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::module(0),
+                    symbol: Arc::from("TOKEN"),
+                    member_path: Arc::from(Vec::<String>::new().into_boxed_slice()),
+                },
+            )),
+        ),
         ("alias", graph.intern_node(SemanticNodeData::Alias(foo))),
         (
             "union",
@@ -2762,6 +2781,7 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
             SemanticNodeData::IndexedAccess { .. } => "indexed_access",
             SemanticNodeData::Mapped { .. } => "mapped",
             SemanticNodeData::TypeOf(_) => "typeof",
+            SemanticNodeData::TypeOfNominal(_) => "typeof_nominal",
             SemanticNodeData::TypeParam { .. } => "type_param",
             SemanticNodeData::Infer { .. } => "infer",
             SemanticNodeData::InferRef { .. } => "infer-ref",
@@ -2799,6 +2819,7 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
         "indexed_access",
         "mapped",
         "typeof",
+        "typeof_nominal",
         "type_param",
         "infer",
         "opaque",

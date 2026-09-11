@@ -41,7 +41,7 @@ use super::catalog::{CatalogCapability, HostCap, TypedCapabilityRegistration};
 use super::registered_carrier_projection::{
     registered_projection_for, registered_semantic_for, TemplateFactsProduct,
 };
-use super::{CarrierCompiler, FrameworkParseArtifact, Present};
+use super::{FrameworkParseArtifact, Present};
 
 /// Svelte host-integration backend for the native host epoch.
 ///
@@ -1612,19 +1612,20 @@ mod tests {
         let artifact = svelte_artifact(COMPONENT);
         let alloc = oxc_allocator::Allocator::new();
         let before = host_backend_execution_count();
-        let outcome = SvelteCarrierCompiler
-            .compile_bundle(
-                COMPONENT,
-                &artifact,
-                &RuntimeCompileOptions::default(),
-                &alloc,
-            )
-            .expect("the compatibility route still compiles");
+        let opts = RuntimeCompileOptions::default();
+        let outcome = svelte_carrier_bundle(
+            COMPONENT,
+            &artifact,
+            &opts,
+            &alloc,
+            crate::framework_common::carrier_compiler::registry_route_execution_grants(&opts),
+        )
+        .expect("the shared bundle orchestration still compiles directly");
         assert!(matches!(outcome, CarrierCompileOutcome::Produced(_)));
         assert_eq!(
             host_backend_execution_count(),
             before,
-            "the generic production route must not execute the host backend"
+            "reaching the shared orchestration directly must not execute the host backend"
         );
 
         let admission = SvelteHostIntegrationBackend::new()

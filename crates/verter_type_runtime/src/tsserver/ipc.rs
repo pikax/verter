@@ -16,7 +16,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
-use crate::codec::{line_column_to_offset_utf16, offset_to_line_column_utf16};
+use crate::codec::{
+    line_column_to_offset_utf16, offset_to_line_column_utf16, LineColumn, SourceIndex,
+};
+use crate::contents_snapshot::{convert_per_target, with_target_index};
 use crate::protocol::*;
 use crate::traits::{ProviderFuture, TypeProvider};
 
@@ -1354,9 +1357,14 @@ fn handle_message(
 ///
 /// tsserver diagnostics use `{start: {line, offset}, end: {line, offset}}` format
 /// where line and offset are 1-based.
+///
+/// `index` is a UTF-16 index over the file's content, built ONCE per response
+/// batch by the caller and shared across every diagnostic and every diagnostic
+/// pass in it — a per-endpoint rebuild would rescan the same document twice per
+/// diagnostic. Without it, positions fall back to packed 0-based values.
 pub fn parse_tsserver_diagnostic(
     d: &serde_json::Value,
-    content: Option<&str>,
+    index: Option<&SourceIndex<'_>>,
     file_path: Option<&str>,
 ) -> Option<TypeDiagnostic> {
     let text = d.get("text")?.as_str()?.to_string();
@@ -1398,10 +1406,10 @@ pub fn parse_tsserver_diagnostic(
     }
 
     // Convert 1-based line/offset to byte offsets
-    let (so, eo) = if let Some(c) = content {
+    let (so, eo) = if let Some(idx) = index {
         (
-            tsserver_pos_to_byte_offset(c, start_line, start_offset),
-            tsserver_pos_to_byte_offset(c, end_line, end_offset),
+            tsserver_pos_to_byte_offset_indexed(idx, start_line, start_offset),
+            tsserver_pos_to_byte_offset_indexed(idx, end_line, end_offset),
         )
     } else {
         // Fallback: use 0-based packed positions
@@ -1426,7 +1434,7 @@ pub fn parse_tsserver_diagnostic(
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|ri| parse_tsserver_related_info(ri, content, primary_file.as_deref()))
+                .filter_map(|ri| parse_tsserver_related_info(ri, index, primary_file.as_deref()))
                 .collect()
         })
         .unwrap_or_default();
@@ -1458,7 +1466,7 @@ pub fn parse_tsserver_diagnostic(
 /// the content — fail-closed: a dropped secondary link beats a bogus one.
 fn parse_tsserver_related_info(
     ri: &serde_json::Value,
-    primary_content: Option<&str>,
+    primary_index: Option<&SourceIndex<'_>>,
     primary_file: Option<&str>,
 ) -> Option<DiagnosticRelatedInfo> {
     let message = ri.get("message")?.as_str()?.to_string();
@@ -1483,15 +1491,15 @@ fn parse_tsserver_related_info(
     // real offset — DROP it rather than store a packed position the merge would
     // mis-read as a byte offset. Both paths are already canonicalized.
     let same_file = primary_file == Some(file.as_str());
-    let content = primary_content.filter(|_| same_file)?;
+    let idx = primary_index.filter(|_| same_file)?;
     // Even a same-file related span can be MALFORMED (a 1-based line/offset past
     // EOF). The fail-open `tsserver_pos_to_byte_offset` would CLAMP that to
     // `content.len()` and forge a bogus "see declaration" link at EOF, so the
     // related-info path uses the CHECKED converter and DROPS the entry (returns
     // `None`) when the position is out of range — never clamps. The primary-span
     // path keeps its own clamp/recovery behavior (out of scope here).
-    let start_byte = tsserver_pos_to_byte_offset_checked(content, start_line, start_offset)?;
-    let end_byte = tsserver_pos_to_byte_offset_checked(content, end_line, end_offset)?;
+    let start_byte = tsserver_pos_to_byte_offset_checked(idx, start_line, start_offset)?;
+    let end_byte = tsserver_pos_to_byte_offset_checked(idx, end_line, end_offset)?;
 
     Some(DiagnosticRelatedInfo {
         path: file,
@@ -1689,13 +1697,13 @@ async fn recover_companion_managed_root(
 /// the same diagnostic shape, so a single parser serves them all.
 fn parse_tsserver_diagnostics_body(
     body: &serde_json::Value,
-    content: Option<&str>,
+    index: Option<&SourceIndex<'_>>,
     file_path: Option<&str>,
 ) -> Vec<TypeDiagnostic> {
     body.as_array()
         .map(|arr| {
             arr.iter()
-                .filter_map(|d| parse_tsserver_diagnostic(d, content, file_path))
+                .filter_map(|d| parse_tsserver_diagnostic(d, index, file_path))
                 .collect()
         })
         .unwrap_or_default()
@@ -1730,18 +1738,30 @@ pub fn tsserver_pos_to_byte_offset(content: &str, line: u32, offset: u32) -> u32
     line_column_to_offset_utf16(content, line.saturating_sub(1), offset.saturating_sub(1))
 }
 
+/// [`tsserver_pos_to_byte_offset`] against an already-built index.
+///
+/// Same fail-open clamp and same 1-based → 0-based convention; the caller
+/// supplies the shared per-batch index instead of paying a fresh source scan for
+/// every endpoint.
+fn tsserver_pos_to_byte_offset_indexed(idx: &SourceIndex<'_>, line: u32, offset: u32) -> u32 {
+    idx.clamped_position_to_offset(LineColumn {
+        line: line.saturating_sub(1),
+        character: offset.saturating_sub(1),
+    })
+}
+
 /// Parse a tsserver wire position object (`{"line": L, "offset": C}`, 1-based)
-/// into a byte offset against `content`, failing CLOSED on a malformed or
+/// into a byte offset through `index`, failing CLOSED on a malformed or
 /// out-of-range position (the quickinfo hover range is display metadata — a
 /// clamped wrong offset would highlight the wrong span, so it is dropped).
 pub fn quickinfo_wire_pos_to_byte_offset(
-    content: &str,
+    index: &SourceIndex<'_>,
     pos: Option<&serde_json::Value>,
 ) -> Option<u32> {
     let pos = pos?;
     let line = u32::try_from(pos.get("line")?.as_u64()?).ok()?;
     let offset = u32::try_from(pos.get("offset")?.as_u64()?).ok()?;
-    tsserver_pos_to_byte_offset_checked(content, line, offset)
+    tsserver_pos_to_byte_offset_checked(index, line, offset)
 }
 
 /// Convert tsserver's 1-based (line, offset) to a byte offset, returning `None` when the position
@@ -1750,59 +1770,45 @@ pub fn quickinfo_wire_pos_to_byte_offset(
 /// The shared codec ([`line_column_to_offset_utf16`]) fails OPEN: a past-EOF line or a column past
 /// the line's end is silently clamped to a valid-looking offset (`content.len()` / the line end).
 /// That is acceptable for a navigation sentinel, but for an EDIT a clamped wrong offset corrupts
-/// the file — so the edit path validates the position is real and DROPS it otherwise. The check is
-/// EDIT-PATH-LOCAL: it does not change the shared codec.
+/// the file — so the edit path validates the position is real and DROPS it otherwise. The two
+/// conventions coexist deliberately: the clamping converter stays the navigation-sentinel default.
 ///
-/// Validates against the content's own UTF-16 [`LineIndex`]: the 1-based line must exist, and the
-/// 0-based UTF-16 column must not exceed that line's UTF-16 length (a column AT the line end is in
-/// range; past it is not).
-fn tsserver_pos_to_byte_offset_checked(content: &str, line: u32, offset: u32) -> Option<u32> {
+/// The 1-based → 0-based conversion is the tsserver-specific half and stays here (line or offset 0
+/// is malformed); the range validation itself is the shared strict converter
+/// ([`SourceIndex::checked_position_to_offset`]), which rejects a past-EOF line, a column past the
+/// line's end, and a column landing inside a surrogate pair.
+fn tsserver_pos_to_byte_offset_checked(
+    idx: &SourceIndex<'_>,
+    line: u32,
+    offset: u32,
+) -> Option<u32> {
     let line0 = line.checked_sub(1)?; // 1-based → 0-based; line 0 is malformed
     let col0 = offset.checked_sub(1)?; // 1-based → 0-based; offset 0 is malformed
-    let idx = crate::codec::LineIndex::new(content, crate::codec::PositionEncoding::Utf16);
-    if line0 as usize >= idx.line_count() {
-        return None; // past-EOF line
-    }
-    // The line's UTF-16 width: bytes from this line's start to the next line's start (or EOF),
-    // measured in the same UTF-16 space tsserver columns use. A column past it would clamp.
-    let line_start = idx.line_start(line0 as usize)?;
-    let line_end = idx.line_end(line0 as usize)?; // before the newline / EOF
-    let line_text = content.get(line_start as usize..line_end as usize)?;
-    let line_utf16_len: u32 = line_text.encode_utf16().count() as u32;
-    if col0 > line_utf16_len {
-        return None; // column past the line end
-    }
-    let target = crate::codec::LineColumn {
+    idx.checked_position_to_offset(LineColumn {
         line: line0,
         character: col0,
-    };
-    let offset = idx.position_to_offset(target)?;
-    // A column landing between the two halves of an astral (surrogate-pair) character is not a
-    // UTF-16 scalar boundary; the codec rounds it to an adjacent character, yielding an offset that
-    // does NOT map back to the requested column. Require the round-trip to be exact so an EDIT is
-    // only accepted at a real boundary; drop it otherwise.
-    if idx.offset_to_position(offset)? != target {
-        return None;
-    }
-    Some(offset)
+    })
 }
 
 /// Parse one tsserver-family `provideInlayHints` entry into the provider
 /// contract's byte-offset representation.
 ///
 /// Both the managed-tsserver and extension-hosted decoders consume this shared
-/// owner. A missing content snapshot or malformed/out-of-range UTF-16 position
-/// drops the hint; packed line/column sentinels are forbidden because carrier
-/// sourcemap merging interprets [`InlayHint::position`] as a byte offset.
+/// owner. A missing index or malformed/out-of-range UTF-16 position drops the
+/// hint; packed line/column sentinels are forbidden because carrier sourcemap
+/// merging interprets [`InlayHint::position`] as a byte offset.
+///
+/// `index` is the caller's UTF-16 index over this file's content, built once for
+/// the hint batch — a per-hint rebuild would rescan the document for every hint.
 pub fn parse_tsserver_inlay_hint(
     hint: &serde_json::Value,
-    content: Option<&str>,
+    index: Option<&SourceIndex<'_>>,
 ) -> Option<InlayHint> {
     let text = hint.get("text")?.as_str()?.to_string();
     let pos = hint.get("position")?;
     let line = u32::try_from(pos.get("line")?.as_u64()?).ok()?;
     let offset = u32::try_from(pos.get("offset")?.as_u64()?).ok()?;
-    let position = tsserver_pos_to_byte_offset_checked(content?, line, offset)?;
+    let position = tsserver_pos_to_byte_offset_checked(index?, line, offset)?;
 
     let kind = match hint.get("kind").and_then(|value| value.as_str()) {
         Some("Type") => Some(InlayHintKind::Type),
@@ -3654,16 +3660,19 @@ impl TypeProvider for TsserverTypeProvider {
                             let (range_start, range_end) = {
                                 let cache = contents_cache.lock().await;
                                 match cache.get(&file) {
-                                    Some(content) => (
-                                        quickinfo_wire_pos_to_byte_offset(
-                                            content,
-                                            body.get("start"),
-                                        ),
-                                        quickinfo_wire_pos_to_byte_offset(
-                                            content,
-                                            body.get("end"),
-                                        ),
-                                    ),
+                                    Some(content) => {
+                                        let index = SourceIndex::new_utf16(content);
+                                        (
+                                            quickinfo_wire_pos_to_byte_offset(
+                                                &index,
+                                                body.get("start"),
+                                            ),
+                                            quickinfo_wire_pos_to_byte_offset(
+                                                &index,
+                                                body.get("end"),
+                                            ),
+                                        )
+                                    }
                                     None => (None, None),
                                 }
                             };
@@ -3997,9 +4006,14 @@ impl TypeProvider for TsserverTypeProvider {
 
             match semantic_result {
                 Ok(semantic_body) => {
+                    // One index for all three diagnostic passes: semantic,
+                    // syntactic and suggestion all resolve against the same
+                    // content snapshot, so the document is scanned once for the
+                    // whole pull rather than twice per diagnostic per pass.
+                    let index = content.as_deref().map(SourceIndex::new_utf16);
                     let semantic = parse_tsserver_diagnostics_body(
                         &semantic_body,
-                        content.as_deref(),
+                        index.as_ref(),
                         Some(file.as_str()),
                     );
 
@@ -4008,7 +4022,7 @@ impl TypeProvider for TsserverTypeProvider {
                         .map(|body| {
                             parse_tsserver_diagnostics_body(
                                 &body,
-                                content.as_deref(),
+                                index.as_ref(),
                                 Some(file.as_str()),
                             )
                         })
@@ -4019,7 +4033,7 @@ impl TypeProvider for TsserverTypeProvider {
                         .map(|body| {
                             parse_tsserver_diagnostics_body(
                                 &body,
-                                content.as_deref(),
+                                index.as_ref(),
                                 Some(file.as_str()),
                             )
                         })
@@ -4113,11 +4127,7 @@ impl TypeProvider for TsserverTypeProvider {
                 let cache = contents_cache.lock().await;
                 result
                     .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
-                            .collect()
-                    })
+                    .map(|arr| parse_tsserver_locations(arr, &cache))
                     .unwrap_or_default()
             };
             for location in &mut locs {
@@ -4171,11 +4181,7 @@ impl TypeProvider for TsserverTypeProvider {
                 let cache = contents_cache.lock().await;
                 result
                     .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
-                            .collect()
-                    })
+                    .map(|arr| parse_tsserver_locations(arr, &cache))
                     .unwrap_or_default()
             };
             for location in &mut locs {
@@ -4226,11 +4232,7 @@ impl TypeProvider for TsserverTypeProvider {
                 result
                     .get("refs")
                     .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
-                            .collect()
-                    })
+                    .map(|arr| parse_tsserver_locations(arr, &cache))
                     .unwrap_or_default()
             };
             for location in &mut locs {
@@ -4309,16 +4311,11 @@ impl TypeProvider for TsserverTypeProvider {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or_default(),
                                 );
-                                group
+                                let spans = group
                                     .get("locs")
                                     .and_then(|v| v.as_array())
-                                    .into_iter()
-                                    .flat_map(move |spans| {
-                                        let fp = file_path.clone();
-                                        spans.iter().filter_map(move |span| {
-                                            parse_tsserver_rename_span(span, &fp, cache)
-                                        })
-                                    })
+                                    .map_or(&[][..], Vec::as_slice);
+                                parse_tsserver_rename_spans(spans, &file_path, cache)
                             })
                             .collect()
                     })
@@ -4829,15 +4826,15 @@ impl TypeProvider for TsserverTypeProvider {
                 )
                 .await;
 
+            // One index for the whole hint batch.
+            let index = content_snapshot.as_deref().map(SourceIndex::new_utf16);
             match result {
                 Ok(body) => {
                     let hints = body
                         .as_array()
                         .map(|arr| {
                             arr.iter()
-                                .filter_map(|hint| {
-                                    parse_tsserver_inlay_hint(hint, content_snapshot.as_deref())
-                                })
+                                .filter_map(|hint| parse_tsserver_inlay_hint(hint, index.as_ref()))
                                 .collect()
                         })
                         .unwrap_or_default();
@@ -5481,20 +5478,52 @@ fn tsserver_completion_documentation(detail: &serde_json::Value) -> Option<Strin
     Some(combined)
 }
 
-/// Parse a tsserver location (used in definition/references responses).
+/// A response target's content: `contents_cache` first, then a disk read on a miss (a
+/// cross-file target the session never opened).
+fn cached_or_disk<'a>(
+    target: &str,
+    contents_cache: &'a HashMap<String, Arc<str>>,
+) -> Option<std::borrow::Cow<'a, str>> {
+    match contents_cache.get(target) {
+        Some(content) => Some(std::borrow::Cow::Borrowed(content.as_ref())),
+        None => std::fs::read_to_string(target)
+            .ok()
+            .map(std::borrow::Cow::Owned),
+    }
+}
+
+/// Parse a tsserver location batch (definition / references responses).
 ///
 /// tsserver locations have: `{ file, start: {line, offset}, end: {line, offset} }`
 /// where line and offset are 1-based, and offset counts UTF-16 code units.
 ///
-/// When content is available in `contents_cache`, positions are converted to proper
-/// byte offsets. Otherwise, falls back to packed 0-based `(line << 16) | col` format.
-pub fn parse_tsserver_location(
-    loc: &serde_json::Value,
+/// Each location converts against ITS OWN file's content — `contents_cache` first, then a disk
+/// read on a miss — and each distinct file resolves and indexes once for the whole batch. With
+/// content, positions become proper byte offsets; otherwise they fall back to packed 0-based
+/// `(line << 16) | col` format. Results keep the response order.
+pub fn parse_tsserver_locations(
+    locs: &[serde_json::Value],
     contents_cache: &HashMap<String, Arc<str>>,
+) -> Vec<TypeLocation> {
+    convert_per_target(
+        locs,
+        |loc| {
+            Some(verter_span::path::canonicalize_path(
+                loc.get("file").and_then(|v| v.as_str()).unwrap_or_default(),
+            ))
+        },
+        |file| cached_or_disk(file, contents_cache),
+        parse_tsserver_location,
+    )
+}
+
+/// One tsserver location in `file`, converted through that file's batch index (`None` when the
+/// file has no content: the packed fallback).
+fn parse_tsserver_location(
+    loc: &serde_json::Value,
+    file: &str,
+    index: Option<&SourceIndex<'_>>,
 ) -> Option<TypeLocation> {
-    let file = verter_span::path::canonicalize_path(
-        loc.get("file").and_then(|v| v.as_str()).unwrap_or_default(),
-    );
     let start = loc.get("start")?;
     let end = loc.get("end")?;
     let sl = start.get("line")?.as_u64()? as u32;
@@ -5502,18 +5531,10 @@ pub fn parse_tsserver_location(
     let el = end.get("line")?.as_u64()? as u32;
     let eo = end.get("offset")?.as_u64()? as u32;
 
-    let disk_content;
-    let content = if let Some(content) = contents_cache.get(&file) {
-        Some(content.as_ref())
-    } else {
-        disk_content = std::fs::read_to_string(&file).ok();
-        disk_content.as_deref()
-    };
-
-    let (s, e) = if let Some(content) = content {
+    let (s, e) = if let Some(idx) = index {
         (
-            tsserver_pos_to_byte_offset(content, sl, so),
-            tsserver_pos_to_byte_offset(content, el, eo),
+            tsserver_pos_to_byte_offset_indexed(idx, sl, so),
+            tsserver_pos_to_byte_offset_indexed(idx, el, eo),
         )
     } else {
         // Fallback: store packed 0-based positions
@@ -5524,32 +5545,57 @@ pub fn parse_tsserver_location(
     };
 
     Some(TypeLocation {
-        path: file,
+        path: file.to_string(),
         start: s,
         end: e,
     })
 }
 
-/// Parse a tsserver rename span into a RenameLocation.
+/// Parse the spans a tsserver rename response groups under ONE `file` into RenameLocations.
 ///
-/// A tsserver rename response groups spans by file, so each span's REAL byte offset is into the
-/// GROUP's `file` — which may be a cross-file rename target the queried session never opened
-/// (e.g. an imported component's carrier or a `.ts` declaration). Resolve each span against THAT
-/// file's own content: the in-memory `contents_cache` first, then a per-target disk read on a
-/// cache miss — the SAME content-resolution [`parse_tsserver_location`] gives references /
-/// definition, and the tsgo rename path gives via `parse_range_to_offsets_strict_with_disk_fallback`.
+/// Each span's REAL byte offset is into the GROUP's `file` — which may be a cross-file rename
+/// target the queried session never opened (e.g. an imported component's carrier or a `.ts`
+/// declaration). Resolve the group against THAT file's own content, once for all of its spans:
+/// the in-memory `contents_cache` first, then a per-target disk read on a cache miss — the SAME
+/// content resolution [`parse_tsserver_locations`] gives references / definition and the tsgo
+/// rename path gives its workspace edits.
 ///
-/// The disk fallback recovers a cross-file target absent from the cache, so its rename edit lands
-/// at the real range instead of being dropped. FAIL CLOSED otherwise: when NEITHER cache nor disk
-/// has the content the span is DROPPED (returns `None`) — a rename location is a WRITE edit, so a
-/// packed `(line << 16) | col` sentinel applied at a bogus byte offset would CORRUPT the file. An
-/// out-of-range position (the shared codec would clamp it to EOF) and an inverted `start > end`
-/// span also drop. The caller collects via `filter_map`, so one dropped span never aborts the
+/// The disk fallback recovers a cross-file target absent from the cache, so its rename edits land
+/// at the real range instead of being dropped. FAIL CLOSED otherwise: a rename location is a WRITE
+/// edit — same corruption class as a code edit — so when NEITHER cache nor disk has the content
+/// every span of the group is DROPPED, never packed into a `(line << 16) | col` sentinel the merge
+/// layer would apply at a bogus byte offset. The checked converter additionally drops an
+/// out-of-range position (the shared codec would clamp it to a valid-looking EOF offset), and an
+/// inverted `start > end` span drops too; a dropped span skips only that one location, never the
 /// whole rename.
-pub fn parse_tsserver_rename_span(
-    span: &serde_json::Value,
+pub fn parse_tsserver_rename_spans(
+    spans: &[serde_json::Value],
     file: &str,
     contents_cache: &HashMap<String, Arc<str>>,
+) -> Vec<RenameLocation> {
+    if spans.is_empty() {
+        return Vec::new();
+    }
+    with_target_index(
+        file,
+        |file| cached_or_disk(file, contents_cache),
+        |index| {
+            let Some(index) = index else {
+                return Vec::new();
+            };
+            spans
+                .iter()
+                .filter_map(|span| parse_tsserver_rename_span(span, file, index))
+                .collect()
+        },
+    )
+}
+
+/// One tsserver rename span in `file`, converted through the group's index.
+fn parse_tsserver_rename_span(
+    span: &serde_json::Value,
+    file: &str,
+    index: &SourceIndex<'_>,
 ) -> Option<RenameLocation> {
     let start = span.get("start")?;
     let end = span.get("end")?;
@@ -5558,24 +5604,8 @@ pub fn parse_tsserver_rename_span(
     let el = u32::try_from(end.get("line")?.as_u64()?).ok()?;
     let eo = u32::try_from(end.get("offset")?.as_u64()?).ok()?;
 
-    let disk_content;
-    let content = if let Some(content) = contents_cache.get(file) {
-        Some(content.as_ref())
-    } else {
-        disk_content = std::fs::read_to_string(file).ok();
-        disk_content.as_deref()
-    };
-
-    // FAIL CLOSED: a rename location is a WRITE edit — same corruption class as a code edit. When the
-    // target content is unavailable (cache miss AND disk read fails) DROP the span — never pack a
-    // `(line << 16) | col` sentinel the merge layer would apply at a bogus byte offset and corrupt
-    // the file. The checked converter additionally drops an out-of-range position (the shared codec
-    // would clamp it to a valid-looking EOF offset), and an inverted `start > end` span drops too.
-    // The caller collects via `filter_map`, so a dropped span skips that one location, not the
-    // whole rename.
-    let c = content?;
-    let s = tsserver_pos_to_byte_offset_checked(c, sl, so)?;
-    let e = tsserver_pos_to_byte_offset_checked(c, el, eo)?;
+    let s = tsserver_pos_to_byte_offset_checked(index, sl, so)?;
+    let e = tsserver_pos_to_byte_offset_checked(index, el, eo)?;
     if s > e {
         return None;
     }
@@ -5630,13 +5660,9 @@ fn parse_tsserver_file_code_edits(
                 .and_then(|v| v.as_str())
                 .unwrap_or_default(),
         );
-        let disk_content;
-        let content = if let Some(content) = contents_cache.get(&file) {
-            Some(content.as_ref())
-        } else {
-            disk_content = std::fs::read_to_string(&file).ok();
-            disk_content.as_deref()
-        };
+        // One index per target file, shared by every edit landing in it.
+        let content = cached_or_disk(&file, contents_cache);
+        let index = content.as_deref().map(SourceIndex::new_utf16);
         if let Some(text_changes) = change.get("textChanges").and_then(|v| v.as_array()) {
             for tc in text_changes {
                 let start = tc.get("start")?;
@@ -5657,15 +5683,15 @@ fn parse_tsserver_file_code_edits(
 
                 // FAIL CLOSED: no content for this target → DROP the edit (never a packed sentinel
                 // that would write at a bogus byte offset).
-                let Some(c) = content else {
+                let Some(idx) = index.as_ref() else {
                     continue;
                 };
                 // FAIL CLOSED on an OUT-OF-RANGE position: the shared codec clamps a past-EOF
                 // line/col to a valid-looking offset, which for an EDIT would corrupt the file. The
                 // checked converter drops it instead. A malformed `start > end` also drops.
                 let (Some(s), Some(e)) = (
-                    tsserver_pos_to_byte_offset_checked(c, sl, so),
-                    tsserver_pos_to_byte_offset_checked(c, el, eo),
+                    tsserver_pos_to_byte_offset_checked(idx, sl, so),
+                    tsserver_pos_to_byte_offset_checked(idx, el, eo),
                 ) else {
                     continue;
                 };

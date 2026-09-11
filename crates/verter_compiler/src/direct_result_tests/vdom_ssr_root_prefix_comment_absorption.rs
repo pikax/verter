@@ -57,9 +57,10 @@ use crate::compile_request::{
     CompileProduct, CompileRequest, FrameworkCompileRequest, RuntimeProductRequest,
     VueBackendRequest, VueCompileRequest, VueOptionAttempt,
 };
+use crate::framework_common::registered_carrier_projection::project_registered_accepted;
 use crate::framework_common::{
-    CarrierCompilerRegistry, FrameworkHostIntegrationBackend, FrameworkParseArtifact,
-    VueHostExecutionInputs, VueHostIntegrationBackend, VueHostRuntimeRenderDemand,
+    FrameworkHostIntegrationBackend, FrameworkParseArtifact, VueHostExecutionInputs,
+    VueHostIntegrationBackend, VueHostRuntimeRenderDemand,
 };
 use oxc_allocator::Allocator;
 use oxc_sourcemap::OwnedSourceMap;
@@ -356,8 +357,7 @@ fn artifact_for(source: &str) -> Arc<FrameworkParseArtifact> {
         .accept_registered_source(&source_authority, &snapshot, &config)
         .unwrap();
     Arc::new(
-        CarrierCompilerRegistry::built_in()
-            .project_registered(&accepted)
+        project_registered_accepted(&accepted)
             .expect("fixture source parses")
             .into_framework_parse_artifact(),
     )

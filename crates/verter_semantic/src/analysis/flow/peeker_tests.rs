@@ -8,35 +8,164 @@ use std::sync::Arc;
 
 use super::*;
 use crate::analysis::flow::flow_graph::{
-    build_function_flow_graph, FlowEdgeKind, FlowNodeId, FlowNodeKind, FunctionFlowGraph,
+    build_function_flow_graph_for_test as build_function_flow_graph, FlowEdgeKind, FlowNodeId,
+    FlowNodeKind, FunctionFlowGraph,
 };
 use crate::analysis::flow::flow_ir::ReturnSlicePlan;
 use crate::analysis::flow::{
-    build_function_body_skeleton, FunctionBodySkeleton, FunctionBodySource, SkeletonPathSegment,
-    SkeletonReturnSiteId, SkeletonWriteCertainty,
+    FunctionBodySkeleton, SkeletonPathSegment, SkeletonReturnSiteId, SkeletonWriteCertainty,
 };
 
 fn skeleton_of(source: &str) -> FunctionBodySkeleton {
-    let allocator = oxc_allocator::Allocator::default();
-    let source_type = oxc_span::SourceType::ts();
-    let ret = oxc_parser::Parser::new(&allocator, source, source_type).parse();
-    assert!(
-        ret.errors.is_empty(),
-        "fixture must parse: {:?}",
-        ret.errors
-    );
-    for statement in &ret.program.body {
-        if let oxc_ast::ast::Statement::FunctionDeclaration(function) = statement {
-            if let Some(body_source) = FunctionBodySource::from_function(function) {
-                return build_function_body_skeleton(&body_source);
-            }
-        }
-    }
-    panic!("fixture must contain a bodied function declaration");
+    crate::analysis::flow::skeleton_tests::indexed_skeleton_of(source)
 }
 
 fn names(path: &[&str]) -> Vec<Arc<str>> {
     path.iter().map(|name| Arc::from(*name)).collect()
+}
+
+#[test]
+fn planner_composes_member_reads_with_the_demanded_suffix() {
+    for expression in ["x.a", "(0, x.a)", "x.a || x.a", "true ? x.a : x.a"] {
+        let source = format!(
+            "function f() {{ let x = {{a: {{b: 'wanted'}}, b: 'sibling'}}; return {expression}; }}"
+        );
+        let skeleton = skeleton_of(&source);
+        let graph = build_function_flow_graph(&skeleton);
+        let plan = plan_return(&skeleton, &graph, &["b"]);
+        for (literal, selected) in [("'wanted'", true), ("'sibling'", false)] {
+            let start = source.find(literal).unwrap() as u32;
+            let span = crate::analysis::flow::FrameSpan::rebase(
+                0,
+                verter_span::Span::new(start, start + literal.len() as u32),
+            );
+            let site = skeleton
+                .expr_sites
+                .iter()
+                .position(|site| site.span == span)
+                .unwrap();
+            assert_eq!(
+                plan.is_value(graph.expr_site_node(SkeletonExprSiteId::from_index(site as u32))),
+                selected,
+                "{literal}"
+            );
+        }
+    }
+}
+
+#[test]
+fn planner_consumed_inputs_do_not_grow_result_projection_cycles() {
+    for source in [
+        "function f(u) { let v=u; if(typeof v==='string') v=v.trim(); return {label:typeof v==='string'?v:'z'}; }",
+        "function f(v) { v = v.length + 1; return {label:v}; }",
+        "function f(v) { v = !v.flag; return {label:v}; }",
+    ] {
+        let skeleton = skeleton_of(source);
+        let graph = build_function_flow_graph(&skeleton);
+        let budget = FlowSliceBudget { max_value_states: 128, ..FlowSliceBudget::default() };
+        let plan = ReturnPathPeeker::new(&graph)
+            .plan(&SliceDemand::for_return_projection(&skeleton, &names(&["label"])), &budget)
+            .unwrap_or_else(|error| panic!("consumed inputs must not inherit result projections: {source}: {error:?}"));
+        assert!(plan.is_value(binding_node(&skeleton, &graph, "v")));
+    }
+}
+
+#[test]
+fn planner_consumed_member_input_keeps_its_path_without_the_result_suffix() {
+    let source =
+        "function f() { const x={a:{nested:'input'}, b:'unrelated'}; return consume(x.a); }";
+    let skeleton = skeleton_of(source);
+    let graph = build_function_flow_graph(&skeleton);
+    let plan = plan_return(&skeleton, &graph, &["result"]);
+    for (literal, selected) in [("'input'", true), ("'unrelated'", false)] {
+        let start = source.find(literal).unwrap() as u32;
+        let span = crate::analysis::flow::FrameSpan::rebase(
+            0,
+            verter_span::Span::new(start, start + literal.len() as u32),
+        );
+        let site = skeleton
+            .expr_sites
+            .iter()
+            .position(|site| site.span == span)
+            .unwrap();
+        assert_eq!(
+            plan.is_value(graph.expr_site_node(SkeletonExprSiteId::from_index(site as u32))),
+            selected,
+            "{literal}"
+        );
+    }
+}
+
+#[test]
+fn planner_source_type_query_selects_whole_current_subject_without_result_suffix() {
+    let source = "function f() { let queried={a:'first',b:'second'}; const unused='unused'; queried={a:'next',b:'last'}; return accept(0 as typeof queried); }";
+    let skeleton = skeleton_of(source);
+    let graph = build_function_flow_graph(&skeleton);
+    let plan = plan_return(&skeleton, &graph, &["result"]);
+    let subject = binding_node(&skeleton, &graph, "queried");
+    assert!(plan.is_value(subject));
+    assert!(!plan.is_value(binding_node(&skeleton, &graph, "unused")));
+    for literal in ["'first'", "'second'", "'next'", "'last'"] {
+        let start = source.find(literal).unwrap() as u32;
+        let span = crate::analysis::flow::FrameSpan::rebase(
+            0,
+            verter_span::Span::new(start, start + literal.len() as u32),
+        );
+        let site = skeleton
+            .expr_sites
+            .iter()
+            .position(|site| site.span == span)
+            .unwrap();
+        assert!(
+            plan.is_value(graph.expr_site_node(SkeletonExprSiteId::from_index(site as u32))),
+            "query consumes the current whole subject independent of result path: {literal}"
+        );
+    }
+    let (site_id, site) = skeleton
+        .expr_sites
+        .iter()
+        .enumerate()
+        .find(|(_, site)| !site.source_type_queries.is_empty())
+        .unwrap();
+    assert!(site
+        .reads
+        .iter()
+        .all(|read| read.binding.as_ref() != site.source_type_queries[0].binding.as_ref()));
+    assert!(site.capture_bindings.is_empty());
+    assert!(graph
+        .out_edges(graph.expr_site_node(SkeletonExprSiteId::from_index(site_id as u32)))
+        .iter()
+        .any(|edge| edge.to == subject && matches!(edge.kind, FlowEdgeKind::SourceTypeQuery)));
+}
+
+#[test]
+fn planner_bounds_a_self_growing_member_projection_cycle() {
+    let skeleton = skeleton_of("function f(x) { x = x.a; return x; }");
+    let graph = build_function_flow_graph(&skeleton);
+    let budget = FlowSliceBudget {
+        max_value_states: 64,
+        ..FlowSliceBudget::default()
+    };
+    let refused = ReturnPathPeeker::new(&graph)
+        .plan(&SliceDemand::for_return_projection(&skeleton, &[]), &budget)
+        .expect_err("a growing projection cycle must refuse instead of hanging or widening");
+    assert_eq!(refused.axis, FlowSliceBudgetAxis::ValueStates);
+    assert_eq!(refused.limit, 64);
+    assert_eq!(refused.observed, 65);
+}
+
+#[test]
+fn planner_keeps_mutable_member_definitions_across_conditional_and_later_writes() {
+    for source in [
+        "function f(flag) { let x = {}; x.a = 'first'; if(flag) x.a = 'second'; return x.a; }",
+        "function f() { let x = {}; x.a = 'first'; let before = x.a; x.a = 'second'; return before; }",
+    ] {
+        let skeleton = skeleton_of(source);
+        let graph = build_function_flow_graph(&skeleton);
+        let plan = plan_return(&skeleton, &graph, &[]);
+        let first = skeleton.writes.iter().find(|write| !write.path.is_empty()).unwrap();
+        assert!(plan.is_value(graph.expr_site_node(first.value.unwrap())), "runtime assignments have no graph-level overwrite proof: {source}");
+    }
 }
 
 fn plan_return(
@@ -295,15 +424,15 @@ fn planner_multi_origin_unions_conditional_returns() {
     let arm_region = skeleton.return_sites[0].region;
     assert!(plan.is_effect_only(graph.region_node(arm_region)));
 
-    // The condition expression is not a value provider of `b`.
+    // Executing either selected return depends on the condition's value.
     let consequent_parent = skeleton.region(arm_region).parent.expect("consequent");
     let condition = skeleton
         .region(consequent_parent)
         .control_input
         .expect("condition input");
     assert!(
-        !plan.is_value(graph.expr_site_node(condition)),
-        "no narrowing-predicate edges exist yet — the condition is not value-selected"
+        plan.is_value(graph.expr_site_node(condition)),
+        "the region's control-input edge keeps the governing value selected"
     );
 }
 
@@ -353,6 +482,7 @@ fn planner_budget_exceeded_is_typed_refusal() {
     let tiny = FlowSliceBudget {
         max_return_sites: 256,
         max_selected_nodes: 1,
+        ..FlowSliceBudget::default()
     };
     let refused = ReturnPathPeeker::new(&graph)
         .plan(&demand, &tiny)
@@ -365,6 +495,7 @@ fn planner_budget_exceeded_is_typed_refusal() {
     let no_returns = FlowSliceBudget {
         max_return_sites: 0,
         max_selected_nodes: 4096,
+        ..FlowSliceBudget::default()
     };
     let refused = ReturnPathPeeker::new(&graph)
         .plan(&demand, &no_returns)
@@ -387,7 +518,7 @@ function d(a: number, flag: boolean) {
     let first = plan_return(&skeleton, &graph, &["out"]);
     let second = plan_return(&skeleton, &graph, &["out"]);
     assert_eq!(first, second);
-    assert!(!first.value_nodes.is_empty());
+    assert!(!first.value_nodes().is_empty());
 }
 
 /// The planner's input type is the structural proof it plans over the
@@ -414,30 +545,34 @@ fn planner_holds_only_the_graph_and_emits_disjoint_sorted_sets() {
     // fixture selects `b`, whose value reads `x`, and records the `x = "s"`
     // write as an effect.
     assert!(
-        !plan.value_nodes.is_empty(),
+        !plan.value_nodes().is_empty(),
         "the demanded member's value providers must be selected"
     );
     assert!(
-        !plan.effect_only_nodes.is_empty(),
+        !plan.effect_only_nodes().is_empty(),
         "the parameter write must be selected as an effect-only node"
     );
 
-    for window in plan.value_nodes.windows(2) {
+    for window in plan.value_nodes().windows(2) {
         assert!(window[0].index() < window[1].index(), "sorted, no dups");
     }
-    for window in plan.effect_only_nodes.windows(2) {
+    for window in plan.effect_only_nodes().windows(2) {
         assert!(window[0].index() < window[1].index(), "sorted, no dups");
     }
-    for node in plan.effect_only_nodes.iter() {
+    for node in plan.effect_only_nodes().iter() {
         assert!(!plan.is_value(*node), "role sets are disjoint");
     }
-    for node in plan.value_nodes.iter() {
+    for node in plan.value_nodes().iter() {
         assert!(plan.is_value(*node), "role sets are disjoint");
     }
     // Every selected node addresses a real graph node — `node_kind` is
     // total over the graph's own ids, so a selected id outside it is the
     // failure this catches.
-    for node in plan.value_nodes.iter().chain(plan.effect_only_nodes.iter()) {
+    for node in plan
+        .value_nodes()
+        .iter()
+        .chain(plan.effect_only_nodes().iter())
+    {
         assert!(
             node.index() < graph.node_count(),
             "a selected node must address a real graph node"
@@ -445,7 +580,7 @@ fn planner_holds_only_the_graph_and_emits_disjoint_sorted_sets() {
     }
     // A control REGION carries no value: it can be selected for its
     // EFFECTS, never as a value provider.
-    for node in plan.value_nodes.iter() {
+    for node in plan.value_nodes().iter() {
         let kind: FlowNodeKind = graph.node_kind(*node);
         assert!(
             matches!(

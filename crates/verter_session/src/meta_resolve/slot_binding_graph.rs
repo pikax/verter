@@ -434,6 +434,7 @@ fn accumulate_lowered_node_carrier_deps(
             // carrier head is not resolved here (args-only).
             SemanticNodeData::BareRef(_)
             | SemanticNodeData::TypeOf(_)
+            | SemanticNodeData::TypeOfNominal(_)
             | SemanticNodeData::ImportType(_) => {
                 for arg in data.carrier_type_args().iter() {
                     stack.push(*arg);
@@ -678,6 +679,7 @@ fn node_contains_free_type_param(
         // the shared accessor (args-only; the carrier head is not resolved).
         SemanticNodeData::BareRef(_)
         | SemanticNodeData::TypeOf(_)
+        | SemanticNodeData::TypeOfNominal(_)
         | SemanticNodeData::ImportType(_) => data
             .carrier_type_args()
             .iter()

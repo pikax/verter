@@ -1,6 +1,6 @@
 //! Svelte runtime `RuntimeCompilerBackend`: parse-artifact emit, catalog
 //! identity, byte/map/diagnostic parity with the parsed core, runtime-only
-//! refusal, option preservation, and production `compile_bundle` isolation.
+//! refusal, option preservation, and production host-products isolation.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -16,8 +16,8 @@ use verter_compiler::compile_request::{
     RuntimeProductRequest, SvelteCompileRequest, SvelteOptionAttempt, VueCompileRequest,
 };
 use verter_compiler::framework_common::{
-    CarrierCompiler, CatalogCapability, CatalogRow, FrameworkEpoch, FrameworkParseArtifact,
-    ImmutableCapabilityCatalog, RuntimeCompileOptions, RuntimeCompilerBackend,
+    CatalogCapability, CatalogRow, FrameworkEpoch, FrameworkParseArtifact,
+    ImmutableCapabilityCatalog, RuntimeCompilerBackend,
 };
 use verter_compiler::standalone::{
     DirectCompileError, DirectCompileOutput, DirectExecutionInputs, StandaloneCompiler,
@@ -26,8 +26,8 @@ use verter_compiler::standalone::{
 use verter_compiler::style_planner::{prepare_supplied_style, PreparedStyleIr};
 use verter_compiler::svelte::runtime::{ClientCompileError, UnsupportedSvelteRuntimeSurface};
 use verter_compiler::svelte::{
-    svelte_runtime_backend_registration, SvelteCarrierCompiler, SvelteRuntimeBackend,
-    SvelteRuntimeError, SvelteRuntimeInputs, SvelteSfc5,
+    svelte_runtime_backend_registration, SvelteRuntimeBackend, SvelteRuntimeError,
+    SvelteRuntimeInputs, SvelteSfc5,
 };
 use verter_language::carrier_grammar::{
     CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
@@ -100,10 +100,11 @@ fn registered_artifact(canonical: &str, source: &str, svelte: bool) -> Framework
     let accepted = grammar_authority
         .accept_registered_source(&source_authority, &snapshot, &config)
         .expect("accepted source");
-    verter_compiler::framework_common::CarrierCompilerRegistry::built_in()
-        .project_registered(&accepted)
-        .expect("registered projection")
-        .into_framework_parse_artifact()
+    verter_compiler::framework_common::registered_carrier_projection::project_registered_accepted(
+        &accepted,
+    )
+    .expect("registered projection")
+    .into_framework_parse_artifact()
 }
 
 fn svelte_artifact(canonical: &str, source: &str) -> FrameworkParseArtifact {
@@ -637,35 +638,45 @@ fn svelte_runtime_backend_refuses_an_analysis_product_request() {
 }
 
 #[test]
-fn compile_bundle_still_emits_runtime_when_an_ide_product_is_also_requested() {
+fn compile_host_products_still_emits_runtime_when_an_ide_product_is_also_requested() {
+    use verter_compiler::framework_common::{
+        FrameworkHostIntegrationBackend as _, SvelteHostExecutionInputs,
+        SvelteHostIntegrationBackend, SvelteHostMultiProductDemand,
+    };
     let artifact = svelte_artifact("file:///bundle.svelte", SIMPLE);
-    let mixed = SvelteCarrierCompiler
-        .compile_bundle(
-            SIMPLE,
+    let backend = SvelteHostIntegrationBackend::registered();
+    let admission = backend
+        .admit_host_products(
             &artifact,
-            &RuntimeCompileOptions {
+            SvelteHostMultiProductDemand {
+                products: vec![
+                    client_product(true),
+                    CompileProduct::IdeCompanion(IdeProductRequest {
+                        want_source_map: true,
+                        ..Default::default()
+                    }),
+                ],
                 filename: Some("Bundle.svelte".to_string()),
-                want_runtime: true,
-                want_ide: true,
-                source_map: true,
                 ..Default::default()
             },
+        )
+        .expect("mixed runtime+IDE demand admits");
+    let mixed = backend
+        .compile_host_products(
+            admission,
+            &artifact,
+            &SvelteHostExecutionInputs::default(),
             &oxc_allocator::Allocator::new(),
         )
-        .expect("production compile_bundle still serves runtime");
-    match mixed {
-        verter_compiler::framework_common::CarrierCompileOutcome::Produced(bundle) => {
-            assert!(
-                bundle.has_runtime_surface(),
-                "production compile_bundle must still emit a runtime product"
-            );
-            assert!(
-                bundle.tsx.is_some(),
-                "production compile_bundle must still emit the IDE product on the combined path"
-            );
-        }
-        other => panic!("expected produced runtime+IDE bundle, got {other:?}"),
-    }
+        .expect("production compile_host_products still serves runtime");
+    assert!(
+        mixed.runtime_client_bundle().is_some(),
+        "production compile_host_products must still emit a runtime product"
+    );
+    assert!(
+        mixed.ide_companion().is_some(),
+        "production compile_host_products must still emit the IDE product on the combined path"
+    );
 
     let request = CompileRequest::new(
         vec![

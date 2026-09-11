@@ -1,8 +1,8 @@
-error[E0616]: field `basis` of struct `FlowDemandPlan` is private
+error[E0616]: field `execution` of struct `FlowDemandPlan` is private
  --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs
   |
-  |     plan.basis = todo!();
-  |          ^^^^^ private field
+  |     plan.execution = todo!();
+  |          ^^^^^^^^^ private field
 
 error[E0616]: field `work_order` of struct `FlowDemandPlan` is private
  --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs
@@ -10,16 +10,28 @@ error[E0616]: field `work_order` of struct `FlowDemandPlan` is private
   |     plan.work_order = todo!();
   |          ^^^^^^^^^^ private field
 
-error[E0616]: field `subject` of struct `FlowDemandPlan` is private
+error[E0616]: field `basis` of struct `FlowExecutionSelection` is private
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs
+  |
+  |     selection.basis = todo!();
+  |               ^^^^^ private field
+
+error[E0616]: field `structural_selection` of struct `FlowExecutionSelection` is private
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs
+  |
+  |     selection.structural_selection = todo!();
+  |               ^^^^^^^^^^^^^^^^^^^^ private field
+
+error[E0616]: field `resources` of struct `FlowExecutionSelection` is private
   --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs
    |
-   |     let _ = &plan.subject;
-   |                   ^^^^^^^ private field
+   |     let _ = &selection.resources;
+   |                        ^^^^^^^^^ private field
    |
-help: a method `subject` also exists, call it with parentheses
+help: a method `resources` also exists, call it with parentheses
    |
-24 |     let _ = &plan.subject();
-   |                          ++
+29 |     let _ = &selection.resources();
+   |                                 ++
 
 error[E0599]: no method named `obligation_specs_mut` found for mutable reference `&mut FlowDemandPlan` in the current scope
   --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs
@@ -29,8 +41,8 @@ error[E0599]: no method named `obligation_specs_mut` found for mutable reference
    |
 help: there is a method `obligation_specs` with a similar name
    |
-30 -     let _: &mut [_] = plan.obligation_specs_mut();
-30 +     let _: &mut [_] = plan.obligation_specs();
+35 -     let _: &mut [_] = plan.obligation_specs_mut();
+35 +     let _: &mut [_] = plan.obligation_specs();
    |
 
 error[E0599]: no method named `work_order_mut` found for mutable reference `&mut FlowDemandPlan` in the current scope
@@ -41,8 +53,8 @@ error[E0599]: no method named `work_order_mut` found for mutable reference `&mut
    |
 help: there is a method `work_order` with a similar name
    |
-31 -     let _: &mut [_] = plan.work_order_mut();
-31 +     let _: &mut [_] = plan.work_order();
+36 -     let _: &mut [_] = plan.work_order_mut();
+36 +     let _: &mut [_] = plan.work_order();
    |
 
 error[E0624]: associated function `new` is private
@@ -81,7 +93,7 @@ error[E0616]: field `expected_suboperations` of struct `FlowObligationSpec` is p
    |
 help: a method `expected_suboperations` also exists, call it with parentheses
    |
-44 |     let _ = &spec.expected_suboperations();
+49 |     let _ = &spec.expected_suboperations();
    |                                         ++
 
 error[E0277]: the trait bound `SealedFlowCompletion: Clone` is not satisfied

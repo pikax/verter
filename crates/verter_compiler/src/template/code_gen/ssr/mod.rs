@@ -45,19 +45,9 @@ use super::vdom::element::resolve_expr;
 use super::vdom::props::{camelize, format_event_handler_key_into, needs_quoted_key};
 use super::{TemplateCodeGen, TemplateCodeGenOptions};
 
-/// Source-order placeholders spliced into the root `attrs_obj` while the
-/// class/style merge value is still unknown, then replaced post-build.
-/// NUL-delimited so they are UNFORGEABLE from template content: resolved
-/// user expressions are verbatim source text, and a raw NUL byte cannot
-/// survive SFC parsing into an attribute expression — an ASCII sentinel
-/// (`__STYLE_PLACEHOLDER__`) could be forged by a user string literal and
-/// silently corrupted by the post-build replace.
-const CLASS_PLACEHOLDER: &str = "\u{0}VERTER_CLASS\u{0}";
-const STYLE_PLACEHOLDER: &str = "\u{0}VERTER_STYLE\u{0}";
-/// [`STYLE_PLACEHOLDER`] preceded by the `, ` separator (drop-arm cleanup).
-const STYLE_PLACEHOLDER_AFTER_COMMA: &str = ", \u{0}VERTER_STYLE\u{0}";
-/// [`STYLE_PLACEHOLDER`] followed by the `, ` separator (drop-arm cleanup).
-const STYLE_PLACEHOLDER_BEFORE_COMMA: &str = "\u{0}VERTER_STYLE\u{0}, ";
+mod props_object;
+
+use props_object::{PropsObject, PropsSlot};
 
 /// What each element pushed onto `elem_ctx` means for `leave_element`.
 #[derive(Debug, Clone, PartialEq)]
@@ -2381,7 +2371,7 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         // even for nested elements (don't use inline per-attr helpers).
         let has_custom_directives = el.prop_flag.has(PropFlags::HasCustomDirective);
 
-        let mut attrs_obj = String::new();
+        let mut attrs_obj = PropsObject::new();
         let mut has_dynamic_attrs = false;
         let mut has_v_show = false;
         let mut v_show_expr = String::new();
@@ -2419,23 +2409,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         let mut static_class_prop_idx: Option<usize> = None;
         let mut dynamic_class_resolved: Option<String> = None;
         let mut dynamic_class_prop_idx: Option<usize> = None;
-        // The "class" KEY's own byte offset inside `attrs_obj` (NOT yet the
-        // final returned string — the caller shifts it through the
-        // remaining wrapping below), plus the attribute's own authored
-        // source position. Populated ONLY for the plain-static, no-merge
-        // shape `build_attrs_string`'s own doc comment names; `None`
-        // otherwise.
-        let mut class_key_anchor_in_attrs_obj: Option<(u32, u32)> = None;
-        // `attrs_obj`'s own byte offset of `CLASS_PLACEHOLDER`'s first
-        // character, captured AT THE POINT the static-class code path below
-        // writes it — never recovered later by scanning the assembled
-        // buffer. `Some` only when the static-only (no `:class`) path is
-        // the one that wrote the placeholder; the dynamic-class insertion
-        // sites push their own placeholder independently and don't feed
-        // this — see the `(None, Some(static_cls))` merge arm below, the
-        // only reader, which is reachable ONLY when no dynamic class
-        // resolved (so the dynamic sites' pushes never apply here).
-        let mut static_class_placeholder_offset: Option<u32> = None;
+        // Source-order position held for the merged `class` entry while its
+        // value is still unknown. Exactly one is reserved per element — the
+        // first `class`/`:class` occurrence wins the position — so a later
+        // occurrence cannot open a second one and duplicate the key.
+        let mut class_slot: Option<PropsSlot> = None;
 
         // Style merge tracking: static style, `:style`, and v-show display
         // always merge into ONE `_ssrRenderStyle(...)` attribute per element
@@ -2445,19 +2423,21 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         let mut dynamic_style_prop_idx: Option<usize> = None;
         let mut static_style_value: Option<String> = None;
         let mut static_style_prop_idx: Option<usize> = None;
+        // Source-order position held for the merged `style` entry, reserved
+        // once for the same reason as `class_slot`.
+        let mut style_slot: Option<PropsSlot> = None;
 
         // Prepare ref entry for root elements (ref needs source-order insertion)
         let ref_entry: Option<(u32, String)> = if is_root {
             el.v_ref.as_ref().and_then(|v_ref| {
                 let (vs, ve) = (v_ref.value_start?, v_ref.value_end?);
                 let ref_val = &source[vs as usize..ve as usize];
-                let entry = if v_ref.is_directive {
-                    let resolved = self.resolve_expr(ref_val, vs, None);
-                    format!("ref: {}", resolved)
+                let value = if v_ref.is_directive {
+                    self.resolve_expr(ref_val, vs, None)
                 } else {
-                    format!("ref: \"{}\"", escape_js_string(ref_val))
+                    format!("\"{}\"", escape_js_string(ref_val))
                 };
-                Some((v_ref.start, entry))
+                Some((v_ref.start, value))
             })
         } else {
             None
@@ -2466,12 +2446,9 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
 
         for (i, prop) in el.props.iter().enumerate() {
             // Emit ref at the correct source position among other props
-            if let Some((ref_pos, ref entry_str)) = &ref_entry {
+            if let Some((ref_pos, ref ref_value)) = &ref_entry {
                 if !ref_emitted && *ref_pos < prop.start {
-                    if !attrs_obj.is_empty() {
-                        attrs_obj.push_str(", ");
-                    }
-                    attrs_obj.push_str(entry_str);
+                    attrs_obj.push("ref", ref_value.clone());
                     has_dynamic_attrs = true;
                     ref_emitted = true;
                 }
@@ -2579,12 +2556,7 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                                 let resolved_name = self.resolve_expr(raw_arg, as_ + 1, oxc_arg);
                                 // Build computed key: [resolvedExpr || ""]
                                 let computed_key = format!("[{} || \"\"]", resolved_name);
-                                if !attrs_obj.is_empty() {
-                                    attrs_obj.push_str(", ");
-                                }
-                                attrs_obj.push_str(&computed_key);
-                                attrs_obj.push_str(": ");
-                                attrs_obj.push_str(&resolved);
+                                attrs_obj.push(computed_key, resolved);
                                 has_dynamic_attrs = true;
                                 continue;
                             }
@@ -2635,13 +2607,8 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                                 dynamic_class_resolved = Some(resolved);
                                 dynamic_class_prop_idx = Some(i);
                                 has_dynamic_attrs = true;
-                                // Insert placeholder for source-order preservation
-                                if !attrs_obj.contains(CLASS_PLACEHOLDER) {
-                                    if !attrs_obj.is_empty() {
-                                        attrs_obj.push_str(", ");
-                                    }
-                                    attrs_obj.push_str(CLASS_PLACEHOLDER);
-                                }
+                                // Hold this source-order position for the merged value
+                                class_slot.get_or_insert_with(|| attrs_obj.reserve());
                             } else if attr_name == "style" {
                                 // Defer to static+dynamic style merge (array form,
                                 // source order). Emitting a second `style:` key would
@@ -2649,20 +2616,9 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                                 dynamic_style_resolved = Some(resolved);
                                 dynamic_style_prop_idx = Some(i);
                                 has_dynamic_attrs = true;
-                                if !attrs_obj.contains(STYLE_PLACEHOLDER) {
-                                    if !attrs_obj.is_empty() {
-                                        attrs_obj.push_str(", ");
-                                    }
-                                    attrs_obj.push_str(STYLE_PLACEHOLDER);
-                                }
+                                style_slot.get_or_insert_with(|| attrs_obj.reserve());
                             } else {
-                                if !attrs_obj.is_empty() {
-                                    attrs_obj.push_str(", ");
-                                }
-                                let js_attr = html_attr_to_js_key(attr_name);
-                                attrs_obj.push_str(&js_attr);
-                                attrs_obj.push_str(": ");
-                                attrs_obj.push_str(&resolved);
+                                attrs_obj.push(html_attr_to_js_key(attr_name), resolved);
                                 has_dynamic_attrs = true;
                             }
                         } else {
@@ -2720,20 +2676,9 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                                 dynamic_class_resolved = Some(resolved);
                                 dynamic_class_prop_idx = Some(i);
                                 has_dynamic_attrs = true;
-                                if !attrs_obj.contains(CLASS_PLACEHOLDER) {
-                                    if !attrs_obj.is_empty() {
-                                        attrs_obj.push_str(", ");
-                                    }
-                                    attrs_obj.push_str(CLASS_PLACEHOLDER);
-                                }
+                                class_slot.get_or_insert_with(|| attrs_obj.reserve());
                             } else {
-                                if !attrs_obj.is_empty() {
-                                    attrs_obj.push_str(", ");
-                                }
-                                let js_attr = html_attr_to_js_key(attr_name);
-                                attrs_obj.push_str(&js_attr);
-                                attrs_obj.push_str(": ");
-                                attrs_obj.push_str(&resolved);
+                                attrs_obj.push(html_attr_to_js_key(attr_name), resolved);
                                 has_dynamic_attrs = true;
                             }
                         }
@@ -2764,16 +2709,9 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                     static_class_value = Some(value.trim_end().to_string());
                     static_class_prop_idx = Some(i);
                     if is_root || has_v_bind_spread || has_custom_directives {
-                        // Insert a placeholder in attrs_obj at source order position.
-                        // The class merge section below will replace it with the
-                        // final merged value, preserving source order. Record ITS
-                        // OWN offset now, at the write, rather than recovering it
-                        // later by scanning the assembled buffer.
-                        if !attrs_obj.is_empty() {
-                            attrs_obj.push_str(", ");
-                        }
-                        static_class_placeholder_offset = Some(attrs_obj.len() as u32);
-                        attrs_obj.push_str(CLASS_PLACEHOLDER);
+                        // Hold this source-order position; the class merge section
+                        // below fills it with the final merged value.
+                        class_slot.get_or_insert_with(|| attrs_obj.reserve());
                         continue;
                     }
                     // For inline path: let it continue to attrs_obj (harmless, attrs_obj
@@ -2784,43 +2722,26 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                 if attr_name == "style" && (is_root || has_v_bind_spread || has_custom_directives) {
                     static_style_value = Some(css_to_js_object(value));
                     static_style_prop_idx = Some(i);
-                    if !attrs_obj.contains(STYLE_PLACEHOLDER) {
-                        if !attrs_obj.is_empty() {
-                            attrs_obj.push_str(", ");
-                        }
-                        attrs_obj.push_str(STYLE_PLACEHOLDER);
-                    }
+                    style_slot.get_or_insert_with(|| attrs_obj.reserve());
                     continue;
                 }
 
-                if !attrs_obj.is_empty() {
-                    attrs_obj.push_str(", ");
-                }
                 let js_attr = html_attr_to_js_key(attr_name);
-                attrs_obj.push_str(&js_attr);
                 if attr_name == "style" {
                     // Vue SSR converts static style strings to JS objects in mergeProps
-                    attrs_obj.push_str(": ");
-                    attrs_obj.push_str(&css_to_js_object(value));
+                    attrs_obj.push(js_attr, css_to_js_object(value));
                 } else {
-                    attrs_obj.push_str(": \"");
-                    attrs_obj.push_str(&escape_js_string(value));
-                    attrs_obj.push('"');
+                    attrs_obj.push(js_attr, format!("\"{}\"", escape_js_string(value)));
                 }
             } else {
                 // Boolean attribute (e.g., `disabled`)
-                if !attrs_obj.is_empty() {
-                    attrs_obj.push_str(", ");
-                }
-                let js_attr = html_attr_to_js_key(attr_name);
-                attrs_obj.push_str(&js_attr);
-                attrs_obj.push_str(": \"\"");
+                attrs_obj.push(html_attr_to_js_key(attr_name), "\"\"");
             }
         }
 
-        // Merge static + dynamic class into a single expression.
-        // For the root path, a __CLASS_PLACEHOLDER__ was inserted in source-order
-        // position. Replace it with the final class value to preserve ordering.
+        // Merge static + dynamic class into a single expression. On the root
+        // path the merged value goes into the position reserved at the first
+        // `class`/`:class` occurrence, so source order is preserved.
         match (&dynamic_class_resolved, &static_class_value) {
             (Some(dyn_expr), Some(static_cls)) => {
                 if !is_root && !has_v_bind_spread && !has_custom_directives {
@@ -2839,19 +2760,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                     has_dynamic_attrs = true;
                 } else {
                     // Root/attrs_obj path: class: ["static", dynamic] (Vue order: static first)
-                    let class_entry = format!(
-                        "class: [\"{}\", {}]",
-                        escape_js_string(static_cls),
-                        dyn_expr,
+                    attrs_obj.fill_or_push(
+                        class_slot,
+                        "class",
+                        format!("[\"{}\", {}]", escape_js_string(static_cls), dyn_expr),
                     );
-                    if attrs_obj.contains(CLASS_PLACEHOLDER) {
-                        attrs_obj = attrs_obj.replace(CLASS_PLACEHOLDER, &class_entry);
-                    } else {
-                        if !attrs_obj.is_empty() {
-                            attrs_obj.push_str(", ");
-                        }
-                        attrs_obj.push_str(&class_entry);
-                    }
                     has_dynamic_attrs = true;
                 }
             }
@@ -2867,57 +2780,25 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                     has_dynamic_attrs = true;
                 } else {
                     // Root/attrs_obj path: dynamic class only
-                    let class_entry = format!("class: {}", dyn_expr);
-                    if attrs_obj.contains(CLASS_PLACEHOLDER) {
-                        attrs_obj = attrs_obj.replace(CLASS_PLACEHOLDER, &class_entry);
-                    } else {
-                        if !attrs_obj.is_empty() {
-                            attrs_obj.push_str(", ");
-                        }
-                        attrs_obj.push_str(&class_entry);
-                    }
+                    attrs_obj.fill_or_push(class_slot, "class", dyn_expr.clone());
                     has_dynamic_attrs = true;
                 }
             }
             (None, Some(static_cls)) => {
                 if is_root || has_v_bind_spread || has_custom_directives {
-                    // Root/mergeProps path: put static class into attrs_obj.
-                    // `class_entry` always starts with the literal "class"
-                    // key at its own offset 0 — capture that position
-                    // (translated into `attrs_obj`'s own coordinate space)
-                    // as the authored anchor before splicing.
-                    //
-                    // The placeholder's position is READ from
-                    // `static_class_placeholder_offset` — recorded when it
-                    // was WRITTEN above, never recovered by re-scanning
-                    // `attrs_obj` here. `dynamic_class_resolved` is `None`
-                    // in this arm, so if a placeholder is present at all it
-                    // was written by that one static-only site (the two
-                    // dynamic-class insertion sites always set
-                    // `dynamic_class_resolved = Some(..)` before writing
-                    // theirs), making the recorded offset authoritative.
-                    let class_entry = format!("class: \"{}\"", escape_js_string(static_cls));
-                    let class_key_offset =
-                        if let Some(placeholder_pos) = static_class_placeholder_offset {
-                            let start = placeholder_pos as usize;
-                            let end = start + CLASS_PLACEHOLDER.len();
-                            verter_debug_assert_eq!(
-                                &attrs_obj[start..end],
-                                CLASS_PLACEHOLDER,
-                                "recorded placeholder offset must still point at CLASS_PLACEHOLDER"
-                            );
-                            attrs_obj.replace_range(start..end, &class_entry);
-                            Some(placeholder_pos)
-                        } else {
-                            let offset = attrs_obj.len() + if attrs_obj.is_empty() { 0 } else { 2 };
-                            if !attrs_obj.is_empty() {
-                                attrs_obj.push_str(", ");
-                            }
-                            attrs_obj.push_str(&class_entry);
-                            Some(offset as u32)
-                        };
-                    if let (Some(offset), Some(idx)) = (class_key_offset, static_class_prop_idx) {
-                        class_key_anchor_in_attrs_obj = Some((offset, el.props[idx].start));
+                    // Root/mergeProps path: put static class into attrs_obj and
+                    // mark its key as the anchor. The rendered offset of that
+                    // key is reported by `attrs_obj.render()` from the entry's
+                    // own position, so no assembled text is searched for it.
+                    let value = format!("\"{}\"", escape_js_string(static_cls));
+                    match static_class_prop_idx {
+                        Some(idx) => attrs_obj.fill_or_push_anchored(
+                            class_slot,
+                            "class",
+                            value,
+                            el.props[idx].start,
+                        ),
+                        None => attrs_obj.fill_or_push(class_slot, "class", value),
                     }
                 }
                 // Inline path: static class will be rendered as literal HTML
@@ -2937,52 +2818,24 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                 // attribute parts in source order).
                 let static_first = static_style_prop_idx.unwrap_or(usize::MAX)
                     <= dynamic_style_prop_idx.unwrap_or(usize::MAX);
-                let style_entry = if static_first {
-                    format!("style: [{}, {}]", stat_obj, dyn_expr)
+                let style_value = if static_first {
+                    format!("[{}, {}]", stat_obj, dyn_expr)
                 } else {
-                    format!("style: [{}, {}]", dyn_expr, stat_obj)
+                    format!("[{}, {}]", dyn_expr, stat_obj)
                 };
-                if attrs_obj.contains(STYLE_PLACEHOLDER) {
-                    attrs_obj = attrs_obj.replace(STYLE_PLACEHOLDER, &style_entry);
-                } else {
-                    if !attrs_obj.is_empty() {
-                        attrs_obj.push_str(", ");
-                    }
-                    attrs_obj.push_str(&style_entry);
-                }
+                attrs_obj.fill_or_push(style_slot, "style", style_value);
                 has_dynamic_attrs = true;
             }
             (Some(dyn_expr), None) if is_root || has_v_bind_spread || has_custom_directives => {
-                let style_entry = format!("style: {}", dyn_expr);
-                if attrs_obj.contains(STYLE_PLACEHOLDER) {
-                    attrs_obj = attrs_obj.replace(STYLE_PLACEHOLDER, &style_entry);
-                } else {
-                    if !attrs_obj.is_empty() {
-                        attrs_obj.push_str(", ");
-                    }
-                    attrs_obj.push_str(&style_entry);
-                }
+                attrs_obj.fill_or_push(style_slot, "style", dyn_expr.clone());
                 has_dynamic_attrs = true;
             }
             (None, Some(stat_obj)) if is_root || has_v_bind_spread || has_custom_directives => {
-                let style_entry = format!("style: {}", stat_obj);
-                if attrs_obj.contains(STYLE_PLACEHOLDER) {
-                    attrs_obj = attrs_obj.replace(STYLE_PLACEHOLDER, &style_entry);
-                } else {
-                    if !attrs_obj.is_empty() {
-                        attrs_obj.push_str(", ");
-                    }
-                    attrs_obj.push_str(&style_entry);
-                }
+                attrs_obj.fill_or_push(style_slot, "style", stat_obj.clone());
             }
             _ => {
-                // Drop any unresolved placeholder rather than emit invalid JS.
-                if attrs_obj.contains(STYLE_PLACEHOLDER) {
-                    attrs_obj = attrs_obj
-                        .replace(STYLE_PLACEHOLDER_AFTER_COMMA, "")
-                        .replace(STYLE_PLACEHOLDER_BEFORE_COMMA, "")
-                        .replace(STYLE_PLACEHOLDER, "");
-                }
+                // No style value to emit. A reserved slot that is never filled
+                // renders nothing, so nothing has to be cleaned up here.
             }
         }
 
@@ -3000,10 +2853,7 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                         // :value on textarea: for root path, add value to attrs_obj.
                         // For non-root, content interpolation handles it.
                         if is_root || has_v_bind_spread || has_custom_directives {
-                            if !attrs_obj.is_empty() {
-                                attrs_obj.push_str(", ");
-                            }
-                            attrs_obj.push_str(&format!("{}: {}", prop_name, model_expr));
+                            attrs_obj.push(prop_name, model_expr.clone());
                             has_dynamic_attrs = true;
                         }
                     }
@@ -3071,34 +2921,28 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                         match input_type {
                             Some("checkbox") => {
                                 out.add_ssr_import(SsrHelper::LooseContain);
-                                if !attrs_obj.is_empty() {
-                                    attrs_obj.push_str(", ");
-                                }
-                                attrs_obj.push_str(&format!(
-                                    "checked: (Array.isArray({expr}) \
-                                     ? _ssrLooseContain({expr}, null) \
-                                     : {expr})",
-                                    expr = model_expr
-                                ));
+                                attrs_obj.push(
+                                    "checked",
+                                    format!(
+                                        "(Array.isArray({expr}) \
+                                         ? _ssrLooseContain({expr}, null) \
+                                         : {expr})",
+                                        expr = model_expr
+                                    ),
+                                );
                                 has_dynamic_attrs = true;
                             }
                             Some("radio") => {
                                 let radio_value = self.get_option_value(el, oxc, source);
                                 out.add_ssr_import(SsrHelper::LooseEqual);
-                                if !attrs_obj.is_empty() {
-                                    attrs_obj.push_str(", ");
-                                }
-                                attrs_obj.push_str(&format!(
-                                    "checked: _ssrLooseEqual({}, {})",
-                                    model_expr, radio_value
-                                ));
+                                attrs_obj.push(
+                                    "checked",
+                                    format!("_ssrLooseEqual({}, {})", model_expr, radio_value),
+                                );
                                 has_dynamic_attrs = true;
                             }
                             _ => {
-                                if !attrs_obj.is_empty() {
-                                    attrs_obj.push_str(", ");
-                                }
-                                attrs_obj.push_str(&format!("{}: {}", prop_name, model_expr));
+                                attrs_obj.push(prop_name, model_expr.clone());
                                 has_dynamic_attrs = true;
                             }
                         }
@@ -3106,10 +2950,7 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                 }
                 _ => {
                     // Component v-model or other elements
-                    if !attrs_obj.is_empty() {
-                        attrs_obj.push_str(", ");
-                    }
-                    attrs_obj.push_str(&format!("{}: {}", prop_name, model_expr));
+                    attrs_obj.push(prop_name, model_expr.clone());
                     has_dynamic_attrs = true;
                 }
             }
@@ -3261,12 +3102,9 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
 
         // Add ref to attrs for root _mergeProps path if not yet emitted during prop loop
         // (ref appears after all other props in source order)
-        if let Some((_, ref entry_str)) = &ref_entry {
+        if let Some((_, ref ref_value)) = &ref_entry {
             if !ref_emitted {
-                if !attrs_obj.is_empty() {
-                    attrs_obj.push_str(", ");
-                }
-                attrs_obj.push_str(entry_str);
+                attrs_obj.push("ref", ref_value.clone());
                 has_dynamic_attrs = true;
             }
         }
@@ -3284,8 +3122,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
             parts.push(v_bind_spread_expr);
         }
 
-        if !attrs_obj.is_empty() {
-            parts.push(format!("{{ {} }}", attrs_obj));
+        // The one emission of the attrs object; the anchor is the "class" key's
+        // offset inside the rendered body, reported by the same pass.
+        let (attrs_obj_body, class_key_anchor_in_attrs_obj) = attrs_obj.render();
+        if !attrs_obj_body.is_empty() {
+            parts.push(format!("{{ {} }}", attrs_obj_body));
         }
 
         if is_root
@@ -5146,26 +4987,28 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             }
             let comp_merge_class = comp_static_class.is_some() && comp_dynamic_class.is_some();
 
-            let mut props_parts: Vec<String> = Vec::new();
-            let mut props_part_positions: Vec<u32> = Vec::new();
+            let mut props_parts = PropsObject::new();
             let mut comp_directive_calls: Vec<String> = Vec::new();
             let mut comp_v_bind_spread: Option<String> = None;
             // Track props collected before the v-bind spread for position-aware merging.
             // Vue splits props into groups around v-bind spreads:
             //   <Comp :a="1" v-bind="obj" :b="2" /> → _mergeProps({a: 1}, obj, {b: 2})
-            let mut props_before_spread: Option<Vec<String>> = None;
+            let mut props_before_spread: Option<PropsObject> = None;
             for (i, prop) in el.props.iter().enumerate() {
                 // Handle class merge: skip individual class entries, emit merged on first
                 if comp_merge_class
                     && (Some(i) == comp_static_class_idx || Some(i) == comp_dynamic_class_idx)
                 {
                     if Some(i) == comp_static_class_idx {
-                        props_parts.push(format!(
-                            "class: [\"{}\", {}]",
-                            escape_js_string(comp_static_class.as_ref().unwrap()),
-                            comp_dynamic_class.as_ref().unwrap()
-                        ));
-                        props_part_positions.push(prop.start);
+                        props_parts.push_at(
+                            "class",
+                            format!(
+                                "[\"{}\", {}]",
+                                escape_js_string(comp_static_class.as_ref().unwrap()),
+                                comp_dynamic_class.as_ref().unwrap()
+                            ),
+                            prop.start,
+                        );
                     }
                     continue;
                 }
@@ -5211,11 +5054,9 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                             let mut js_key = String::with_capacity(event_name.len() + 2);
                             format_event_handler_key_into(&mut js_key, event_name);
                             if needs_quoted_key(&js_key) {
-                                props_parts.push(format!("\"{}\": {}", js_key, value));
-                            } else {
-                                props_parts.push(format!("{}: {}", js_key, value));
+                                js_key = format!("\"{}\"", js_key);
                             }
-                            props_part_positions.push(prop.start);
+                            props_parts.push_at(js_key, value, prop.start);
                         }
                         continue;
                     }
@@ -5242,8 +5083,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                             } else {
                                 model_prop.clone()
                             };
-                            props_parts.push(format!("{}: {}", model_key, resolved));
-                            props_part_positions.push(prop.start);
+                            props_parts.push_at(model_key, resolved.clone(), prop.start);
 
                             // Emit update handler: "onUpdate:modelValue": $event => ((<expr>) = $event)
                             // Vue camelCases kebab-case model names in the handler key
@@ -5252,11 +5092,11 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                             } else {
                                 model_prop.clone()
                             };
-                            props_parts.push(format!(
-                                "\"onUpdate:{}\": $event => (({}) = $event)",
-                                update_name, resolved
-                            ));
-                            props_part_positions.push(prop.start);
+                            props_parts.push_at(
+                                format!("\"onUpdate:{}\"", update_name),
+                                format!("$event => (({}) = $event)", resolved),
+                                prop.start,
+                            );
 
                             // Emit modifiers if any: modelModifiers: { trim: true, ... }
                             if !prop.modifiers.is_empty() {
@@ -5273,8 +5113,11 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                                         format!("{}: true", name)
                                     })
                                     .collect();
-                                props_parts.push(format!("{}: {{ {} }}", mod_key, mods.join(", ")));
-                                props_part_positions.push(prop.start);
+                                props_parts.push_at(
+                                    mod_key,
+                                    format!("{{ {} }}", mods.join(", ")),
+                                    prop.start,
+                                );
                             }
                         }
                         continue;
@@ -5298,12 +5141,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                                     let camelized = camelize(attr);
                                     self.resolver.resolve_simple_expr(&camelized)
                                 };
-                            props_parts.push(format!(
-                                "{}: {}",
-                                html_attr_to_js_key(attr),
-                                resolved
-                            ));
-                            props_part_positions.push(prop.start);
+                            props_parts.push_at(html_attr_to_js_key(attr), resolved, prop.start);
                         }
                         continue;
                     }
@@ -5317,8 +5155,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                             comp_v_bind_spread = Some(resolved);
                             // Snapshot props collected so far as "before spread" group.
                             // Props added after this point go into the "after spread" group.
-                            props_before_spread = Some(std::mem::take(&mut props_parts));
-                            props_part_positions.clear();
+                            props_before_spread = Some(props_parts.take());
                         }
                         continue;
                     }
@@ -5341,19 +5178,17 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     let value = &source[vs as usize..ve as usize];
                     if prop_name == "style" {
                         // Vue SSR converts static style to JS object for component props
-                        props_parts.push(format!("style: {}", css_to_js_object(value)));
+                        props_parts.push_at("style", css_to_js_object(value), prop.start);
                     } else {
-                        props_parts.push(format!(
-                            "{}: \"{}\"",
+                        props_parts.push_at(
                             html_attr_to_js_key(prop_name),
-                            escape_js_string(value)
-                        ));
+                            format!("\"{}\"", escape_js_string(value)),
+                            prop.start,
+                        );
                     }
-                    props_part_positions.push(prop.start);
                 } else {
                     // Boolean attribute with no value: <Comp rounded /> → rounded: ""
-                    props_parts.push(format!("{}: \"\"", html_attr_to_js_key(prop_name)));
-                    props_part_positions.push(prop.start);
+                    props_parts.push_at(html_attr_to_js_key(prop_name), "\"\"", prop.start);
                 }
             }
 
@@ -5362,25 +5197,23 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             if let Some(ref v_ref) = el.v_ref {
                 if let (Some(vs), Some(ve)) = (v_ref.value_start, v_ref.value_end) {
                     let ref_val = &source[vs as usize..ve as usize];
-                    let ref_str = if v_ref.is_directive {
-                        let resolved = self.resolve_expr(ref_val, vs, None);
-                        format!("ref: {}", resolved)
+                    let ref_value = if v_ref.is_directive {
+                        self.resolve_expr(ref_val, vs, None)
                     } else {
-                        format!("ref: \"{}\"", escape_js_string(ref_val))
+                        format!("\"{}\"", escape_js_string(ref_val))
                     };
-                    let insert_idx = props_part_positions.partition_point(|&pos| pos < v_ref.start);
-                    props_parts.insert(insert_idx, ref_str);
+                    props_parts.insert_by_source_order("ref", ref_value, v_ref.start);
                 }
             }
 
-            // Merge duplicate event handler keys into arrays.
-            // When v-model and an explicit @update:model-value handler coexist,
-            // Vue merges them into an array: "onUpdate:modelValue": [handler1, handler2].
-            merge_duplicate_event_handlers(&mut props_parts);
+            // Merge duplicate keys into arrays. When v-model and an explicit
+            // @update:model-value handler coexist, Vue passes both handlers as
+            // "onUpdate:modelValue": [handler1, handler2].
+            props_parts.merge_duplicate_keys();
 
             // Also merge in the before-spread group if applicable
             if let Some(ref mut before) = props_before_spread {
-                merge_duplicate_event_handlers(before);
+                before.merge_duplicate_keys();
             }
 
             // Build the props expression, handling combinations of:
@@ -5400,7 +5233,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                 let mut merge_args: Vec<String> = Vec::new();
                 if let Some(ref before) = props_before_spread {
                     if !before.is_empty() {
-                        merge_args.push(format!("{{ {} }}", before.join(", ")));
+                        merge_args.push(format!("{{ {} }}", before.render_body()));
                     }
                 }
                 if let Some(spread) = &comp_v_bind_spread {
@@ -5408,7 +5241,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                 }
                 // Props after the spread (or all props if no spread was present)
                 if !props_parts.is_empty() {
-                    merge_args.push(format!("{{ {} }}", props_parts.join(", ")));
+                    merge_args.push(format!("{{ {} }}", props_parts.render_body()));
                 }
                 if is_root {
                     merge_args.push("_attrs".to_string());
@@ -5430,12 +5263,12 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     "_attrs".to_string()
                 } else {
                     out.add_vdom_import(VdomHelper::MergeProps);
-                    format!("_mergeProps({{ {} }}, _attrs)", props_parts.join(", "))
+                    format!("_mergeProps({{ {} }}, _attrs)", props_parts.render_body())
                 }
             } else if props_parts.is_empty() {
                 "null".to_string()
             } else {
-                format!("{{ {} }}", props_parts.join(", "))
+                format!("{{ {} }}", props_parts.render_body())
             };
 
             // CSS v-bind custom properties reach ROOT-LEVEL components as a
@@ -6995,93 +6828,6 @@ fn is_numeric_literal(s: &str) -> bool {
     }
     // Must have at least one digit (not just "." or "-.")
     s.bytes().any(|b| b.is_ascii_digit())
-}
-
-/// Merge duplicate event handler keys in `props_parts` into arrays.
-///
-/// When v-model and an explicit `@update:model-value` handler coexist on the same component,
-/// both emit a `"onUpdate:modelValue": <handler>` entry. Vue merges them into a single entry
-/// with an array value: `"onUpdate:modelValue": [handler1, handler2]`.
-///
-/// Each entry in `props_parts` is a string like `"onUpdate:modelValue": $event => ...`
-/// or `key: value`. This function finds entries with the same key, removes the duplicates,
-/// and replaces the first occurrence with the merged array form.
-fn merge_duplicate_event_handlers(parts: &mut Vec<String>) {
-    if parts.len() < 2 {
-        return;
-    }
-
-    // Extract key from a "key: value" or `"key": value` entry.
-    // Returns (key_with_quotes, value) where key_with_quotes includes any surrounding quotes.
-    fn extract_key_value(entry: &str) -> Option<(&str, &str)> {
-        // Handle quoted keys: "onUpdate:modelValue": value
-        if let Some(stripped) = entry.strip_prefix('"') {
-            if let Some(close_quote) = stripped.find('"') {
-                let key_end = close_quote + 2; // past the closing quote
-                let rest = &entry[key_end..];
-                // Skip ": "
-                let value_start = rest.find(": ").map(|i| i + 2)?;
-                let value = &rest[value_start..];
-                return Some((&entry[..key_end], value));
-            }
-        }
-        // Handle unquoted keys: key: value
-        let colon_pos = entry.find(": ")?;
-        Some((&entry[..colon_pos], &entry[colon_pos + 2..]))
-    }
-
-    // Find duplicate keys: collect (key, indices) pairs.
-    // Use owned Strings to avoid borrowing from parts.
-    let mut seen: Vec<(String, Vec<usize>)> = Vec::new();
-    for (i, part) in parts.iter().enumerate() {
-        if let Some((key, _)) = extract_key_value(part) {
-            let key_owned = key.to_string();
-            if let Some(entry) = seen.iter_mut().find(|(k, _)| *k == key_owned) {
-                entry.1.push(i);
-            } else {
-                seen.push((key_owned, vec![i]));
-            }
-        }
-    }
-
-    // Collect all merge operations first, then apply all at once.
-    // We must not modify `parts` during the collection phase because removing
-    // entries for one key group would shift indices for subsequent groups.
-    let mut merges: Vec<(usize, String)> = Vec::new(); // (first_index, merged_entry)
-    let mut removals: Vec<usize> = Vec::new(); // indices to remove
-
-    for (_key, indices) in &seen {
-        if indices.len() < 2 {
-            continue;
-        }
-        // Collect all values from original (unmodified) parts
-        let values: Vec<String> = indices
-            .iter()
-            .filter_map(|&i| extract_key_value(&parts[i]).map(|(_, v)| v.to_string()))
-            .collect();
-
-        // Build merged entry: "key": [value1, value2]
-        let key_str = extract_key_value(&parts[indices[0]])
-            .map(|(k, _)| k.to_string())
-            .unwrap_or_default();
-        let merged = format!("{}: [{}]", key_str, values.join(", "));
-
-        merges.push((indices[0], merged));
-        // Mark all but first for removal
-        removals.extend_from_slice(&indices[1..]);
-    }
-
-    // Apply merges (replacements) first — indices are still valid
-    for (idx, merged) in &merges {
-        parts[*idx] = merged.clone();
-    }
-
-    // Sort removals in descending order, then remove from the end
-    removals.sort_unstable();
-    removals.dedup();
-    for &i in removals.iter().rev() {
-        parts.remove(i);
-    }
 }
 
 #[cfg(test)]

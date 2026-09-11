@@ -372,13 +372,7 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.tama == 'true'
     runs-on: ubuntu-latest
-    # The closure instrument suite no longer only asserts over the register: it
-    # mirrors the roadmap tree and re-applies every negative control it owns,
-    # which spawns the validator and the two node-run tools it drives as real
-    # child processes. The five-minute budget this job carried was sized for a
-    # suite that only parsed files. The instrument suite resolves this number
-    # against its own nested deadlines, so it is a declared budget rather than
-    # a guess.
+    # Focused validator tests run here; repository mutation replay is manual.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -389,66 +383,13 @@ jobs:
           node --test roadmap/0.1.0-tama/tools/ledger.test.mjs
           node roadmap/0.1.0-tama/tools/closure-register.mjs --check
           node --test roadmap/0.1.0-tama/tools/closure-register.test.mjs
+          node --test roadmap/0.1.0-tama/tools/closure-replay.test.mjs
           node roadmap/0.1.0-tama/tools/validate-semantic-memory-budget.mjs
           node --test roadmap/0.1.0-tama/tools/semantic-memory-budget.test.mjs
       - name: CI aggregate completeness
         run: |
           node scripts/check-ci-aggregate.mjs
           node --test scripts/check-ci-aggregate.test.mjs
-
-  # The negative-control lane. The roadmap job above re-applies the controls
-  # whose records run under `node`; the rest mutate an artifact too and are
-  # re-applied here, where the Rust toolchain their records need exists and
-  # where spawning the roadmap suite does not re-enter it. The partition
-  # between the two lanes is resolved by the roadmap job, which also requires
-  # THIS job to exist and to issue that command, so deleting it turns the
-  # roadmap job red rather than silently retiring half the controls.
-  tama-controls:
-    name: Tama Closure Controls
-    needs: detect-changes
-    if: needs.detect-changes.outputs.tama == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: tama-controls
-      # A re-applied record's command can be a `cargo nextest` run, and nextest
-      # is a subcommand installed beside the toolchain rather than with it.
-      # The same install the rust-test lane carries, so this lane fails on the
-      # control rather than on a missing subcommand the clean run would read
-      # as a refused mirror.
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-      # The charter's targeted-verification record runs its three packages
-      # UNFILTERED, so the clean half of its re-application includes the
-      # tsgo-backed Svelte projection typecheck gate — tests that hard-fail
-      # under CI without the rc typescript launcher, which ships only through
-      # the workspace's node_modules. The same install the core and provider
-      # lanes carry; the gate paths-maps the in-repo `@verter/svelte-jsx`
-      # shims, so no package build is needed beyond it.
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      # A compile-contract record's runner builds its fixture project through
-      # trybuild, which invokes cargo with `--offline`: every dependency in the
-      # lock has to be in the registry cache before the lane spawns anything, or
-      # that inner build fails on a download it is not allowed to make. The
-      # refresh command those records name establishes this by fetching first;
-      # this lane re-applies the record's own narrower command, so it establishes
-      # the same prerequisite here. Resolved rather than commented — the
-      # instrument suite requires this job to carry it while a cargo-bound
-      # control is delegated to the lane.
-      - name: Fetch the locked workspace
-        run: cargo fetch --locked
-      - name: Re-apply the delegated negative controls
-        run: |
-          node --test roadmap/0.1.0-tama/tools/closure-controls.test.mjs
 
   # ---------------------------------------------------------------------------
   # `dtolnay/rust-toolchain@1.97.1` (not `@stable`) in every job below, and in
@@ -519,6 +460,21 @@ jobs:
   #   artifacts included — while compiling clean in debug. `release.yml` builds
   #   release, but that runs on a tag, which is far too late.
   #
+  # - THE SHIPPED CONFIGURATION, EXECUTED. The release check above RUNS NOTHING,
+  #   so it cannot observe the runtime half of the same class: a state-changing
+  #   operation written inside a `debug_assert!` argument compiles fine and then
+  #   silently never executes in a shipped build. The two steps below are this
+  #   workflow's owned equivalent of the canonical gate's shipped-cfg lane
+  #   (`runShippedCfgLane` in `scripts/gate.mjs`, which `release.yml` runs via
+  #   `node scripts/gate.mjs --exhaustive`): the same compile-only
+  #   `no-debug-assertions` check across the whole workspace, then the same
+  #   package-scoped `verter_shipped_cfg_contract` nextest run under that
+  #   profile — the only tests in this repo that EXECUTE with
+  #   `debug_assertions`/`overflow-checks` off. `--no-fail-fast` mirrors the
+  #   gate's exhaustive policy so one red test does not hide the rest. The
+  #   crate's two profile-sanity canaries fail loudly if the alternate profile
+  #   did not take effect, so a run that silently used `dev` cannot read green.
+  #
   # - wasm32-unknown-unknown. `rust-clippy` above is host-only and cannot see
   #   target-gated code at all. The existing `editor-lapce` / `editor-zed` jobs
   #   do run wasm clippy, but against `wasm32-wasip1`/`wasip2` and the SEPARATE
@@ -544,7 +500,11 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Raised from 60 when the two shipped-configuration steps landed: they add a
+    # whole-workspace compile-only check plus a package-scoped build+run under a
+    # profile whose unit hashes are disjoint from every other job's, so neither
+    # shares a cached artifact with the release check above.
+    timeout-minutes: 95
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -554,8 +514,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: rust-build-configs
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
       - name: Check the release configuration
         run: cargo check --workspace --release
+      - name: Check the shipped configuration (debug-assertions off)
+        run: cargo check --workspace --all-targets --profile no-debug-assertions
+      - name: Run the shipped-configuration contract (debug-assertions off)
+        run: |
+          cargo nextest run --no-fail-fast -p verter_shipped_cfg_contract \
+            --cargo-profile no-debug-assertions
       - name: Clippy (wasm32-unknown-unknown)
         run: cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings
       - name: Clippy (transport-equivalence feature)
@@ -2093,7 +2061,6 @@ jobs:
     needs:
       - detect-changes
       - tama-roadmap
-      - tama-controls
       - rust-fmt
       - proto-fmt
       - rust-clippy

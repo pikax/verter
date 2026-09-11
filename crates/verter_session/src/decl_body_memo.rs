@@ -82,6 +82,18 @@ pub(crate) use locator_deref::{DerefedBodyShape, LocatorBodyDerefError};
 /// them for the session-owned lazy-lowering machinery and its consumers.
 pub use verter_semantic::resolver_core::{LoweredTypeDecl, LoweredValueDecl, ValueBodyHashFact};
 
+/// Transient call lowering and the exact source origins used to evaluate its
+/// argument/receiver types. Value reads and authored type queries retain
+/// distinct roles from the same AST borrow as `call`; the memo retains neither
+/// this IR nor another body index.
+pub(crate) struct IndexedFlowCallExpression {
+    pub(crate) call: verter_type_expr::IndexedValueCall,
+    pub(crate) argument_roots:
+        Box<[verter_semantic::analysis::type_eval_build::IndexedValueReadRoot]>,
+    pub(crate) receiver_root:
+        Option<verter_semantic::analysis::type_eval_build::IndexedValueReadRoot>,
+}
+
 /// The committed value of one per-symbol demand cell.
 ///
 /// The cell carries the [`LeaseMiss`](Self::LeaseMiss) outcome ITSELF (never a
@@ -276,6 +288,8 @@ struct LoweredStatementBatch {
 
 /// See module docs.
 pub struct DeclBodyMemo {
+    #[cfg(test)]
+    pub(crate) capture_lookup_work: Arc<std::sync::atomic::AtomicUsize>,
     key: SnapshotKey,
     eval_source: Arc<str>,
     framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
@@ -362,6 +376,8 @@ impl DeclBodyMemo {
             let _ = lease_cell.set(lease);
         }
         Self {
+            #[cfg(test)]
+            capture_lookup_work: Arc::default(),
             key,
             eval_source,
             framework_parse,
@@ -396,6 +412,8 @@ impl DeclBodyMemo {
         header_index: Arc<DeclHeaderIndex>,
     ) -> Self {
         let memo = Self {
+            #[cfg(test)]
+            capture_lookup_work: Arc::default(),
             key,
             eval_source: Arc::from(""),
             framework_parse: None,
@@ -1079,13 +1097,13 @@ impl DeclBodyMemo {
         self.ensure_lease();
         let owner_table = Arc::clone(&self.owner_table);
         let canonical = Arc::clone(&self.key.canonical);
+        let parse_env_hash = self.key.parse_env_hash;
         let Some(index) = service.run_leased(&self.key, move |program| {
             program.map(|p| {
-                verter_semantic::analysis::function_program::build_function_program_index(
-                    p.borrow_dependent(),
-                    p.source_str(),
+                p.function_program_index(
                     owner_table.as_ref(),
                     Arc::clone(&canonical),
+                    &parse_env_hash,
                 )
             })
         }) else {
@@ -1106,11 +1124,7 @@ impl DeclBodyMemo {
             );
             return Arc::new(Default::default());
         };
-        let folded =
-            fold_flow_body_env_identity(&index, &self.key.parse_env_hash, self.source_type);
-        self.function_program_index
-            .get_or_init(|| Arc::new(folded))
-            .clone()
+        self.function_program_index.get_or_init(|| index).clone()
     }
 
     /// The OWNED slice content of one demanded flow evaluation: the
@@ -1121,31 +1135,96 @@ impl DeclBodyMemo {
     /// family memo's warm hit already prevents same-demand recomputation.
     /// Returns `None` on a locator miss (a typed miss, never a panic) or
     /// on a seeded memo / broken lease pin.
+    #[cfg(test)]
+    pub(crate) fn flow_bound_graph_for_tests(
+        &self,
+        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+    ) -> crate::cache_runtime::flow_slice_node::BoundFlowGraph {
+        let file_language =
+            verter_language::FileLanguage::script(verter_language::ScriptSourceType::Ts);
+        let (_, parse_key) =
+            verter_language::default_parse_identity_for(&self.eval_source, &file_language)
+                .expect("fixture parse identity");
+        let key = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
+            canonical_id: Arc::clone(&self.key.canonical),
+            function: entry.key.clone(),
+            flow_body_stable_hash: entry.flow_body_stable_hash,
+            flow_body_exact_hash: entry.flow_body_exact_hash.expect("fixture exact body"),
+            parse_env_hash: self.key.parse_env_hash,
+            parse_key,
+            file_language,
+            build_toolchain_fingerprint:
+                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+        };
+        let prepared = self
+            .function_flow_structure(entry)
+            .expect("fixture binding authority")
+            .expect("fixture retained structure");
+        crate::cache_runtime::flow_slice_node::FunctionFlowGraphStore::new()
+            .mint_bound_flow_graph(key, prepared)
+    }
+
     pub(crate) fn flow_slice_content(
         &self,
         entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
         selection: crate::flow_slice_content::FlowSliceSelection,
-        skeleton: Arc<verter_semantic::analysis::flow::FunctionBodySkeleton>,
+        bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
     ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
+        self.flow_slice_content_with_context(entry, Some(selection), bound, None)
+    }
+
+    pub(crate) fn flow_slice_content_with_context(
+        &self,
+        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+        selection: Option<crate::flow_slice_content::FlowSliceSelection>,
+        bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+        context: Option<Arc<crate::flow_slice_content::NestedFlowContext>>,
+    ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
+        if bound.key().function != entry.key
+            || bound.key().flow_body_exact_hash != entry.flow_body_exact_hash?
+            || context
+                .as_ref()
+                .is_some_and(|context| !context.matches_snapshot(&self.key))
+        {
+            return None;
+        }
+        let skeleton = Arc::clone(&bound.bundle().skeleton);
+        let bindings = Arc::clone(&bound.bundle().bindings);
         let service = self.service.as_ref()?;
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.
         self.ensure_lease();
         let entry = entry.clone();
+        let index = self.function_program_index();
         // A carrier's script block (`.vue` / `.svelte`) compiles to a
         // module by construction; a plain script file proves module scope
         // only through its own top-level syntax.
         let carrier_module = self.framework_parse.is_some();
+        let snapshot = self.key.clone();
+        #[cfg(test)]
+        let work = Arc::clone(&self.capture_lookup_work);
         let Some(node) = service.run_leased(&self.key, move |program| {
+            #[cfg(test)]
+            let _probe = crate::flow_slice_content::capture_lookup_probe::enter(work);
             program.and_then(|p| {
-                crate::flow_slice_content::build_flow_slice_content(
-                    p.borrow_dependent(),
-                    p.source_str(),
-                    &entry,
-                    &selection,
-                    &skeleton,
-                    carrier_module,
-                )
+                p.with_indexed_function(&entry, |resolved, entry| {
+                    crate::flow_slice_content::build_flow_slice_content(
+                        crate::flow_slice_content::FlowSliceSource {
+                            program: p.borrow_dependent(),
+                            resolved,
+                        },
+                        p.source_str(),
+                        &index,
+                        entry,
+                        selection.as_ref(),
+                        &skeleton,
+                        Arc::clone(&bindings),
+                        carrier_module,
+                        &snapshot,
+                        context.as_deref(),
+                    )
+                })
+                .flatten()
             })
         }) else {
             // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
@@ -1158,6 +1237,52 @@ impl DeclBodyMemo {
             return None;
         };
         node.map(Arc::new)
+    }
+
+    /// Lower selected missing annotations in one retained-source lease. Slots
+    /// preserve authored absence separately from a source/locator mismatch.
+    pub(crate) fn flow_capture_authorities(
+        &self,
+        locators: &[crate::flow_slice_content::SliceCaptureAuthorityLocator],
+    ) -> Option<Vec<Option<Option<crate::flow_slice_content::SliceCaptureAuthority>>>> {
+        let service = self.service.as_ref()?;
+        let index = self.function_program_index();
+        let snapshot = self.key.clone();
+        let locators = locators.to_vec();
+        #[cfg(test)]
+        let work = Arc::clone(&self.capture_lookup_work);
+        self.ensure_lease();
+        service.run_leased(&self.key, move |program| {
+            #[cfg(test)]
+            let _probe = crate::flow_slice_content::capture_lookup_probe::enter(work);
+            let program = program?;
+            Some(
+                locators
+                    .iter()
+                    .map(|locator| {
+                        if !locator.matches_snapshot(&snapshot) {
+                            return None;
+                        }
+                        let entry = index.get(&locator.declaration.defining_function)?;
+                        crate::flow_slice_content::build_flow_capture_authority(
+                            program.borrow_dependent(),
+                            program.source_str(),
+                            entry.entry(),
+                            locator,
+                        )
+                    })
+                    .collect(),
+            )
+        })?
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flow_capture_authority(
+        &self,
+        locator: &crate::flow_slice_content::SliceCaptureAuthorityLocator,
+    ) -> Option<Option<crate::flow_slice_content::SliceCaptureAuthority>> {
+        self.flow_capture_authorities(std::slice::from_ref(locator))?
+            .pop()?
     }
 
     /// The OWN type-parameter clause of one indexed function, lowered
@@ -1177,14 +1302,16 @@ impl DeclBodyMemo {
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.
         self.ensure_lease();
+        let _index = self.function_program_index();
         let entry = entry.clone();
         let Some(clause) = service.run_leased(&self.key, move |program| {
             program.and_then(|p| {
-                crate::flow_slice_content::build_function_type_param_clause(
-                    p.borrow_dependent(),
-                    p.source_str(),
-                    &entry,
-                )
+                p.with_indexed_function(&entry, |resolved, _entry| {
+                    crate::flow_slice_content::build_function_type_param_clause(
+                        resolved,
+                        p.source_str(),
+                    )
+                })
             })
         }) else {
             // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
@@ -1214,25 +1341,49 @@ impl DeclBodyMemo {
         &self,
         entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
     ) -> Option<verter_semantic::analysis::flow::FunctionBodySkeleton> {
-        let service = self.service.as_ref()?;
+        self.function_flow_structure(entry)
+            .ok()
+            .flatten()
+            .map(|prepared| prepared.into_parts().0)
+    }
+
+    /// Build the current frame with the index's retained closure-access facts,
+    /// returning its exact binding map with the structure for shared publication.
+    pub fn function_flow_structure(
+        &self,
+        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+    ) -> Result<
+        Option<verter_semantic::analysis::flow::PreparedFunctionBodySkeleton>,
+        verter_semantic::analysis::flow::FlowBindingMapError,
+    > {
+        let Some(service) = self.service.as_ref() else {
+            return Ok(None);
+        };
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.
         self.ensure_lease();
+        let _index = self.function_program_index();
         let entry = entry.clone();
         let Some(skeleton) = service.run_leased(&self.key, move |program| {
             program.and_then(|p| {
                 use verter_semantic::analysis::flow::{
-                    build_function_body_skeleton, FunctionBodySource,
+                    build_indexed_function_body_skeleton, FunctionBodySource,
                 };
-                use verter_semantic::analysis::function_program::{
-                    resolve_function_node, FunctionNode,
-                };
-                let resolved = resolve_function_node(p.borrow_dependent(), &entry.locator)?;
-                let source = match &resolved.node {
-                    FunctionNode::Function(func) => FunctionBodySource::from_function(func)?,
-                    FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
-                };
-                Some(build_function_body_skeleton(&source))
+                use verter_semantic::analysis::function_program::FunctionNode;
+                p.with_indexed_function(&entry, |resolved, entry| {
+                    let source = match &resolved.node {
+                        FunctionNode::Function(func) => {
+                            if func.r#type == oxc_ast::ast::FunctionType::FunctionExpression {
+                                FunctionBodySource::from_function_expression(func)?
+                            } else {
+                                FunctionBodySource::from_function(func)?
+                            }
+                        }
+                        FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
+                    };
+                    Some(build_indexed_function_body_skeleton(&source, entry))
+                })
+                .flatten()
             })
         }) else {
             // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
@@ -1242,9 +1393,9 @@ impl DeclBodyMemo {
                 "decl-body lease pin broken: function_body_skeleton's lease-only run missed \
                  the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
             );
-            return None;
+            return Ok(None);
         };
-        skeleton
+        skeleton.transpose()
     }
 
     /// Transient typed IR for one indexed declaration expression. The retained
@@ -1273,26 +1424,61 @@ impl DeclBodyMemo {
     /// is found through the program index (a flow-selected call is inside
     /// a served function by construction); no body `TypeExpr` is
     /// memo-owned.
-    pub fn indexed_call_expression_at(
+    pub(crate) fn indexed_call_expression_at(
         &self,
         span: verter_span::Span,
-    ) -> Option<Arc<verter_type_expr::IndexedValueCall>> {
+    ) -> Option<Arc<IndexedFlowCallExpression>> {
         let service = self.service.as_ref()?;
         self.ensure_lease();
-        let index = self.function_program_index();
+        let _index = self.function_program_index();
         let node = service.run_leased(&self.key, move |program| {
             program.and_then(|parsed| {
-                let call = verter_semantic::analysis::function_program::call_expression_at(
-                    parsed.borrow_dependent(),
-                    &index,
-                    span,
-                )?;
-                Some(
-                    verter_semantic::analysis::type_eval_build::lower_indexed_call_expression(
-                        call,
-                        parsed.source_str(),
-                    ),
-                )
+                parsed
+                    .with_indexed_call(span, |call| {
+                        use verter_semantic::analysis::type_eval_build::{
+                            lower_indexed_call_expression_with_read_roots, IndexedCallReadSite,
+                            IndexedValueReadRoot,
+                        };
+                        // Keep absence of an observer result distinct from an
+                        // explicit NonBinding disposition. No missing address may
+                        // fall back to the file's same-spelled value.
+                        let mut roots: Vec<Option<IndexedValueReadRoot>> =
+                            (0..call.arguments.len()).map(|_| None).collect();
+                        let mut receiver_root = None;
+                        let mut invalid_observation = false;
+                        let call = lower_indexed_call_expression_with_read_roots(
+                            call,
+                            parsed.source_str(),
+                            &mut |site, root| match site {
+                                IndexedCallReadSite::Argument(ordinal) => {
+                                    match roots.get_mut(ordinal) {
+                                        Some(slot) => {
+                                            invalid_observation |= slot.replace(root).is_some()
+                                        }
+                                        None => invalid_observation = true,
+                                    }
+                                }
+                                IndexedCallReadSite::Receiver => {
+                                    invalid_observation |= receiver_root.replace(root).is_some();
+                                }
+                            },
+                        );
+                        if invalid_observation {
+                            return None;
+                        }
+                        let argument_roots = roots.into_iter().collect::<Option<Box<[_]>>>()?;
+                        let receiver_root = match (call.receiver.is_some(), receiver_root) {
+                            (true, Some(root)) => Some(root),
+                            (false, None) => None,
+                            _ => return None,
+                        };
+                        Some(IndexedFlowCallExpression {
+                            call,
+                            argument_roots,
+                            receiver_root,
+                        })
+                    })
+                    .flatten()
             })
         })??;
         Some(Arc::new(node))
@@ -3004,6 +3190,7 @@ pub(crate) fn lowered_value_decl_for_synthesised_default(
         ValueDeclKind::Class,
         verter_type_expr::facts::ValueTypeAnnotationFact {
             is_unique_symbol: false,
+            unique_symbol_members: Arc::from([]),
             typeof_alias_target: None,
             classification: ValueAnnotationClass::Direct,
             annotation: Some(instance),
@@ -3082,7 +3269,7 @@ fn collect_augmentation_statement_dependencies(
 /// walk's `flow_body_stable_hash` covers body content only; this boundary
 /// mix is what makes a parse-env move or a parser/language flip miss
 /// exactly the affected artifact slots without re-walking the body.
-fn fold_flow_body_env_identity(
+pub(crate) fn fold_flow_body_env_identity(
     index: &verter_semantic::analysis::function_program::FunctionProgramIndex,
     parse_env_hash: &crate::types::Hash16,
     source_type: oxc_span::SourceType,

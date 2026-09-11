@@ -408,3 +408,620 @@ fn an_unmodeled_array_element_collapses_the_array_and_is_owed() {
     );
     assert_eq!(outcome.candidates, 0);
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// The frame's PRODUCT state: the evidence a discharge rests on, the
+// determinism of the state the merges produce, and the budget boundary a
+// merge runs under.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Frames whose semantic state the product domains actually carry: a
+/// binding whose slot facts a discharge must rest on, a branch whose
+/// merge exercises the frame join, and a mutual component whose members
+/// publish together.
+const PRODUCT_CANONICAL: &str = "/ws/flow-products.ts";
+
+const PRODUCT_FIXTURE: &str = r#"
+export function boundControl(c: boolean) {
+  const k = 1;
+  if (c) {
+    return k;
+  }
+  return 2;
+}
+
+export function branchJoin(c: boolean) {
+  let v: string | number = "s";
+  if (c) {
+    v = 1;
+  }
+  return v;
+}
+
+export function switchJoin(c: number) {
+  let v: string | number = "s";
+  switch (c) {
+    case 1:
+      v = 1;
+      break;
+    default:
+      break;
+  }
+  return v;
+}
+
+export function tryJoin(c: boolean) {
+  let v: string | number = "s";
+  try {
+    v = 1;
+  } catch (e) {
+    v = "t";
+  }
+  return v;
+}
+
+export function scBoundA(c: boolean) {
+  const k = 1;
+  if (c) return k;
+  return scBoundB(c);
+}
+
+export function scBoundB(c: boolean) {
+  const m = 2;
+  if (c) return m;
+  return scBoundA(c);
+}
+"#;
+
+/// Two frames with the SAME body and different signature ARITY.
+///
+/// The body returns out of a `try`, so the `finally` boundary merges the
+/// pending return edge into the entering state through the frame join —
+/// and completing a return-edge snapshot's parameter layer files one
+/// product per SIGNATURE parameter, read or unread. The wide frame
+/// therefore reaches that merge holding far more subjects than the demand
+/// plan's selection names, while the narrow one does not. Generated
+/// rather than written out because the arity is the whole variable: the
+/// two bodies must be identical for the comparison to mean anything.
+const WIDE_SIGNATURE_ARITY: usize = 256;
+
+fn signature_arity_fixtures() -> String {
+    let mut source = String::new();
+    // bounded-loop: the two declared fixture arities.
+    for (name, arity) in [
+        ("narrowSignatureJoin", 2),
+        ("wideSignatureJoin", WIDE_SIGNATURE_ARITY),
+    ] {
+        let mut params = String::from("c: boolean");
+        // bounded-loop: the fixture's own declared arity.
+        for ordinal in 1..arity {
+            params.push_str(&format!(", p{ordinal}: string"));
+        }
+        source.push_str(&format!(
+            "\nexport function {name}({params}) {{\n  const k = 1;\n  try {{\n    if (c) {{\n      return k;\n    }}\n  }} finally {{\n    c;\n  }}\n  return 2;\n}}\n"
+        ));
+    }
+    source
+}
+
+fn make_product_host() -> Arc<VerterHost> {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(PRODUCT_CANONICAL.to_string()),
+        input_id: PRODUCT_CANONICAL.to_string(),
+        source: Arc::from(format!("{PRODUCT_FIXTURE}{}", signature_arity_fixtures())),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(PRODUCT_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    host
+}
+
+fn product_key(dispatch: &ProjectSemanticDispatch<'_>, name: &str) -> FlowReturnKey {
+    FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(PRODUCT_CANONICAL),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(PRODUCT_CANONICAL),
+        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
+    }
+}
+
+/// Owned test observations contain no execution capability and cannot affect
+/// admission. Semantic IDs are projected only after the demand has returned.
+#[derive(Debug)]
+pub(crate) struct ProductObservation {
+    products: Vec<(super::flow_solve::FlowDomain, usize, ObservedProduct)>,
+    executed: Vec<(super::flow_solve::FlowDomain, usize, bool)>,
+    iterations: Option<u32>,
+    report: super::dispatch_txn::flow_obligation_state::FlowDischargeReport,
+}
+
+#[derive(Debug)]
+enum ObservedProduct {
+    Definitions(Vec<usize>),
+    Reaching(super::flow_products::ReachingTypeProduct),
+    Declared(Option<crate::semantic_query::SemanticNodeId>),
+    Narrowing(super::flow_products::NarrowingProduct),
+    Assignment(super::flow_products::DefiniteAssignmentProduct),
+}
+
+impl ProductObservation {
+    pub(super) fn capture(
+        products: &super::flow_return_products::FlowFrameProducts,
+        evidence: Option<&super::flow_products::FlowProductEvidence>,
+        report: super::dispatch_txn::flow_obligation_state::FlowDischargeReport,
+    ) -> Self {
+        use super::flow_products::FlowProductValue;
+        use super::flow_solve::FlowDomain;
+        Self {
+            products: products
+                .state
+                .ordered_entries()
+                .map(|(key, value)| {
+                    let value = match value {
+                        FlowProductValue::ReachingValue(value) => ObservedProduct::Definitions(
+                            value
+                                .definitions()
+                                .iter()
+                                .map(|node| node.index())
+                                .collect(),
+                        ),
+                        FlowProductValue::ReachingType(value) => {
+                            ObservedProduct::Reaching(value.clone())
+                        }
+                        FlowProductValue::DeclaredType(value) => {
+                            ObservedProduct::Declared(value.declared())
+                        }
+                        FlowProductValue::Narrowing(value) => {
+                            ObservedProduct::Narrowing(value.clone())
+                        }
+                        FlowProductValue::DefiniteAssignment(value) => {
+                            ObservedProduct::Assignment(*value)
+                        }
+                    };
+                    (key.domain(), key.node().index(), value)
+                })
+                .collect(),
+            executed: products
+                .execution
+                .borrow()
+                .execution
+                .selected_sites()
+                .flat_map(|site| {
+                    [
+                        FlowDomain::ReachingValue,
+                        FlowDomain::ReachingType,
+                        FlowDomain::Narrowing,
+                        FlowDomain::DeclaredType,
+                        FlowDomain::DefiniteAssignment,
+                    ]
+                    .map(|domain| {
+                        let key = site.key(domain).unwrap();
+                        (
+                            domain,
+                            key.node().index(),
+                            evidence.is_some_and(|evidence| evidence.executed(&key)),
+                        )
+                    })
+                })
+                .collect(),
+            iterations: evidence.map(|evidence| evidence.iterations()),
+            report,
+        }
+    }
+
+    fn canonical(self, host: &VerterHost) -> CanonicalProductObservation {
+        use super::flow_products::WideningMembership;
+        fn structural_type(ty: &verter_type_expr::TypeExpr) -> String {
+            use verter_type_expr::TypeExpr;
+            match ty {
+                TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
+                    let mut arms: Vec<_> = arms.iter().map(structural_type).collect();
+                    arms.sort();
+                    format!(
+                        "{}:{arms:?}",
+                        if matches!(ty, TypeExpr::Union(_)) {
+                            "union"
+                        } else {
+                            "intersection"
+                        }
+                    )
+                }
+                other => format!("{other:?}"),
+            }
+        }
+        let node = |id| {
+            structural_type(&host.project_node_to_type_expr_for_test(id).expect(
+                "fixture product types must project; a missing type is not equivalent evidence",
+            ))
+        };
+        let set = |ids: &[crate::semantic_query::SemanticNodeId]| {
+            let mut values: Vec<_> = ids.iter().copied().map(node).collect();
+            values.sort();
+            values
+        };
+        let products = self
+            .products
+            .into_iter()
+            .map(|(domain, site, value)| {
+                let value = match value {
+                    ObservedProduct::Definitions(value) => format!("{value:?}"),
+                    ObservedProduct::Reaching(value) => {
+                        let widening = match value.widening() {
+                            None => "none".to_string(),
+                            Some(WideningMembership::All) => "all".to_string(),
+                            Some(WideningMembership::Partial(members)) => {
+                                format!("{:?}", set(members))
+                            }
+                        };
+                        format!(
+                            "{:?}/{:?}/{widening}",
+                            set(value.contributors()),
+                            value.united().map(node)
+                        )
+                    }
+                    ObservedProduct::Declared(value) => format!("{:?}", value.map(node)),
+                    ObservedProduct::Narrowing(value) => {
+                        let mut facts: Vec<_> = value
+                            .facts()
+                            .iter()
+                            .map(|fact| {
+                                format!(
+                                    "{:?}/{:?}/{}",
+                                    fact.binding,
+                                    fact.path,
+                                    node(fact.narrowed_to)
+                                )
+                            })
+                            .collect();
+                        facts.sort();
+                        format!("{facts:?}")
+                    }
+                    ObservedProduct::Assignment(value) => format!("{value:?}"),
+                };
+                (domain, site, value)
+            })
+            .collect();
+        CanonicalProductObservation {
+            products,
+            executed: self.executed,
+            iterations: self.iterations,
+            report: self.report,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CanonicalProductObservation {
+    products: Vec<(super::flow_solve::FlowDomain, usize, String)>,
+    executed: Vec<(super::flow_solve::FlowDomain, usize, bool)>,
+    iterations: Option<u32>,
+    report: super::dispatch_txn::flow_obligation_state::FlowDischargeReport,
+}
+
+/// One evaluated demand: the structural type it served (arena-free, so
+/// two hosts are comparable), the slot candidate count, and how many cold
+/// computations the run performed.
+struct ProductRun {
+    served: Option<verter_type_expr::TypeExpr>,
+    candidates: usize,
+    cold_computes: u32,
+    observations: Vec<CanonicalProductObservation>,
+}
+
+/// Serve `name` `demands` times, EACH through a fresh store view — the
+/// warm read of a published candidate runs against a view where the cold
+/// build's artifacts are visible — under ONE request context, so the
+/// cold-compute counter measures the whole run.
+fn run_product(host: &Arc<VerterHost>, name: &str, demands: u32) -> ProductRun {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    let ctx = RequestContext::new(1, Arc::from(PRODUCT_CANONICAL), false, None);
+    let _guard = RequestContextGuard::install(ctx);
+    let mut served = None;
+    // bounded-loop: the caller-supplied demand count.
+    for _ in 0..demands {
+        served = with_dispatch(host, |dispatch| {
+            let key = product_key(dispatch, name);
+            match dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key))) {
+                QueryResult::Value(SemanticQueryOutput {
+                    value: SemanticQueryValue::FlowReturn(result),
+                    ..
+                }) => host.project_node_to_type_expr_for_test(result.return_type()),
+                _ => None,
+            }
+        });
+    }
+    let cold_computes = crate::request_context::current_request_context()
+        .expect("the run installs a RequestContext")
+        .flow_return_cold_computes
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let candidates = with_dispatch(host, |dispatch| {
+        let key = product_key(dispatch, name);
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)))
+    });
+    let observations =
+        std::mem::take(&mut *host.flow_fault_injection.product_executions.lock().unwrap());
+    ProductRun {
+        served,
+        candidates,
+        cold_computes,
+        observations: observations
+            .into_iter()
+            .map(|observation| observation.canonical(host))
+            .collect(),
+    }
+}
+
+/// A demand's completeness rests on the frame's PRODUCT evidence: a
+/// planned binding obligation discharges only when the evaluation
+/// actually produced that binding's definite-assignment product.
+///
+/// Both legs run the SAME otherwise-clean evaluation. The control admits
+/// warm — one candidate, one cold compute across two demands. With one
+/// required binding-domain product dropped from an otherwise untouched
+/// witness (the walk ledger, the call evidence and the convergence log
+/// all stay clean), the binding obligation stays unclaimed, no
+/// `CompleteFlowResult` mints, and BOTH demands recompute cold with zero
+/// candidates — at the root and at SCC publication alike, since both
+/// finalize through the one discharge report.
+///
+/// The fault is refuse-only: it can withhold evidence, never mint it. A
+/// green control beside a red injected leg therefore proves the seal
+/// discriminates missing product evidence rather than riding the
+/// report's say-so.
+#[test]
+fn flow_discharge_requires_product_evidence() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    // Root leg: the control warms.
+    let host = make_product_host();
+    let control = run_product(&host, "boundControl", 2);
+    assert!(
+        control.served.is_some(),
+        "the control produces a usable value"
+    );
+    assert_eq!(
+        control.candidates, 1,
+        "a clean bound frame warm-admits exactly one candidate"
+    );
+    assert_eq!(
+        control.cold_computes, 1,
+        "the second demand of a clean bound frame is a warm hit"
+    );
+
+    // Root leg: the same evaluation without one binding-domain product.
+    let injected_host = make_product_host();
+    let injected = {
+        let _drop_product = inject::Guard::arm(
+            &injected_host
+                .flow_fault_injection
+                .drop_binding_domain_product,
+        );
+        run_product(&injected_host, "boundControl", 2)
+    };
+    assert_eq!(
+        injected.served, control.served,
+        "the evaluated value is unchanged — only the discharge evidence is"
+    );
+    assert_eq!(
+        injected.candidates, 0,
+        "a binding obligation with no product evidence never mints a proof: \
+         zero candidates"
+    );
+    assert_eq!(
+        injected.cold_computes, 2,
+        "an unproven demand never warms, so the second demand recomputes cold"
+    );
+
+    // SCC leg: a component member's missing product keeps the WHOLE batch
+    // out of the publish set.
+    let scc_control = make_product_host();
+    let scc_control_run = run_product(&scc_control, "scBoundA", 1);
+    assert!(
+        scc_control_run.served.is_some(),
+        "the component control produces a usable value"
+    );
+    let scc_injected = make_product_host();
+    let _drop_product = inject::Guard::arm(
+        &scc_injected
+            .flow_fault_injection
+            .drop_binding_domain_product,
+    );
+    with_dispatch(&scc_injected, |dispatch| {
+        let root = product_key(dispatch, "scBoundA");
+        let peer = product_key(dispatch, "scBoundB");
+        let _ = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(root.clone())));
+        for (name, key) in [("scBoundA", root), ("scBoundB", peer)] {
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0,
+                "{name}: a member without product evidence never enters the SCC \
+                 publish batch"
+            );
+        }
+    });
+}
+
+/// Equivalent demand and actual predecessor orders preserve every observed
+/// product, exact execution evidence, discharge claim, served type and warm hit.
+/// The second host reverses request order and feeds each multiway join its
+/// actual snapshots in reverse. Semantic types are compared structurally after
+/// evaluation; graph-local subjects refer to the same fixture content.
+#[test]
+fn flow_product_execution_is_permutation_deterministic() {
+    use super::flow_return::flow_admission_fault_injection::Guard;
+    let forward = make_product_host();
+    let _forward_observation = Guard::arm(&forward.flow_fault_injection.observe_product_execution);
+    let forward_first = run_product(&forward, "switchJoin", 2);
+    let forward_second = run_product(&forward, "boundControl", 2);
+
+    let reverse = make_product_host();
+    let _reverse_observation = Guard::arm(&reverse.flow_fault_injection.observe_product_execution);
+    let _reverse_predecessors =
+        Guard::arm(&reverse.flow_fault_injection.reverse_product_predecessors);
+    let reverse_second = run_product(&reverse, "boundControl", 2);
+    let reverse_first = run_product(&reverse, "switchJoin", 2);
+
+    // The merging frame's answer is the JOIN of both dispatch edges, not
+    // one edge's: the assertion the order-independence above is about.
+    for (order, run) in [("forward", &forward_first), ("reverse", &reverse_first)] {
+        let Some(verter_type_expr::TypeExpr::Union(arms)) = run.served.as_ref() else {
+            panic!(
+                "{order}: the merging frame serves the union of both dispatch \
+                 edges, got {:?}",
+                run.served
+            );
+        };
+        assert_eq!(
+            arms.len(),
+            2,
+            "{order}: both incoming edges contribute to the merged reaching type"
+        );
+    }
+
+    for (name, a, b) in [
+        ("switchJoin", &forward_first, &reverse_first),
+        ("boundControl", &forward_second, &reverse_second),
+    ] {
+        assert_eq!(
+            a.observations.len(),
+            1,
+            "{name}: observe the cold frame exactly once"
+        );
+        let observed = &a.observations[0];
+        assert!(
+            !observed.products.is_empty(),
+            "{name}: compare real materialized products"
+        );
+        assert!(observed.executed.iter().any(|entry| entry.2));
+        assert!(observed.executed.iter().any(|entry| !entry.2));
+        assert!(
+            !observed.report.entries().is_empty(),
+            "{name}: compare real discharge claims"
+        );
+        assert_eq!(
+            observed.iterations,
+            Some(0),
+            "acyclic joins consume no fixed-point rounds"
+        );
+        assert_eq!(
+            a.observations, b.observations,
+            "{name}: canonical products and exact discharge evidence are invariant"
+        );
+        assert_eq!(
+            (a.candidates, a.cold_computes),
+            (1, 1),
+            "{name}: the second demand actually warms"
+        );
+        assert_eq!(
+            a.served, b.served,
+            "{name}: an equivalent request order serves the same value"
+        );
+        assert_eq!(
+            a.candidates, b.candidates,
+            "{name}: an equivalent request order admits the same candidate"
+        );
+        assert_eq!(
+            a.cold_computes, b.cold_computes,
+            "{name}: an equivalent request order performs the same cold work"
+        );
+    }
+}
+
+/// Acyclic continuation joins require no fixed-point iterations. The
+/// materialized-product limit is independent: exhausting it refuses the
+/// entire transaction and retains no candidate.
+#[test]
+fn flow_product_budget_boundary_is_exact_and_never_warm() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    for function in ["switchJoin", "branchJoin"] {
+        let host = make_product_host();
+        let control = run_product(&host, function, 2);
+        assert!(
+            control.served.is_some(),
+            "the control frame merges within its plan's convergence policy"
+        );
+        assert_eq!(
+            control.candidates, 1,
+            "a converged frame warm-admits exactly one candidate"
+        );
+        assert_eq!(
+            control.cold_computes, 1,
+            "the second demand of a converged frame is a warm hit"
+        );
+
+        let acyclic_host = make_product_host();
+        let _zero_iterations = inject::Guard::arm(
+            &acyclic_host
+                .flow_fault_injection
+                .zero_product_iteration_budget,
+        );
+        let acyclic = run_product(&acyclic_host, function, 2);
+        assert_eq!(acyclic.served, control.served);
+        assert_eq!(
+            acyclic.candidates, 1,
+            "acyclic joins perform no fixed-point iteration"
+        );
+        assert_eq!(acyclic.cold_computes, 1);
+
+        let exhausted_host = make_product_host();
+        let _zero_budget =
+            inject::Guard::arm(&exhausted_host.flow_fault_injection.zero_product_capacity);
+        let exhausted = run_product(&exhausted_host, function, 2);
+        assert_eq!(
+            exhausted.candidates, 0,
+            "an exhausted product budget retains no candidate"
+        );
+        assert_eq!(
+            exhausted.cold_computes, 2,
+            "a budget-exhausted demand recomputes cold rather than serving a \
+         retained partial"
+        );
+    }
+}
+
+/// Unread signature parameters do not create product subjects. Both frames
+/// have the same selected body and must serve the same value and warm within
+/// the same demand-derived product policy despite their different arities.
+#[test]
+fn a_wide_signature_frame_converges_within_its_own_product_budget() {
+    let narrow_host = make_product_host();
+    let narrow = run_product(&narrow_host, "narrowSignatureJoin", 2);
+    let wide_host = make_product_host();
+    let wide = run_product(&wide_host, "wideSignatureJoin", 2);
+
+    assert!(
+        narrow.served.is_some(),
+        "the narrow control frame converges and serves a value"
+    );
+    assert_eq!(
+        wide.served, narrow.served,
+        "the unread parameters do not change the value the frame serves"
+    );
+    assert_eq!(
+        narrow.candidates, 1,
+        "the narrow control warm-admits exactly one candidate"
+    );
+    assert_eq!(
+        wide.candidates, narrow.candidates,
+        "unselected signature parameters do not exhaust the product budget"
+    );
+    assert_eq!(
+        wide.cold_computes, narrow.cold_computes,
+        "the second demand of either frame is a warm hit"
+    );
+}

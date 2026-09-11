@@ -31,8 +31,7 @@ export interface HostAnalysisProductOptions {
 
 /**
  * Dev-server tooling flavour for Main-assembly decoration. Wire spellings
- * are all-lowercase, matching the legacy `FfiCompileProfile.hmr_strategy`
- * vocabulary (`"none"` / `"vite"` / `"webpack"`).
+ * are all-lowercase (`"none"` / `"vite"` / `"webpack"`).
  */
 export type HostHmrStrategy = "none" | "vite" | "webpack";
 
@@ -47,15 +46,13 @@ export interface HostCompileIdentity {
   forceJs: boolean;
   /**
    * The `ssrContext.modules` manifest key form — root-relative under
-   * Vite; absent falls back to the canonical id. Exactly the legacy
-   * `FfiCompileProfile.ssr_module_id` semantics.
+   * Vite; absent falls back to the canonical id.
    */
   ssrModuleId?: string | null;
   /**
    * Dev-server tooling flavour gating the natively composed `__file`
    * and hot-accept trailer; absent = no decoration. The Svelte Main
-   * assembly has no decoration consumer, matching the legacy profile
-   * where the field is inert for Svelte.
+   * assembly has no decoration consumer — the field is inert for Svelte.
    */
   hmrStrategy?: HostHmrStrategy | null;
 }

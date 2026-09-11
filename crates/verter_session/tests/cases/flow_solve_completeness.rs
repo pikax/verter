@@ -21,7 +21,6 @@ use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{InputBasisId, ResultContractId};
 use verter_language::{FileLanguage, ScriptSourceType};
 use verter_semantic::analysis::flow::flow_graph::FlowEdgeClass;
-use verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan;
 use verter_semantic::analysis::flow::peeker::{
     FlowSliceBudget, FlowSliceBudgetAxis, FlowSliceBudgetExceeded,
 };
@@ -1237,6 +1236,39 @@ fn flow_result_contract_is_exact_identity() {
             "the result-contract identity must change when the {name} semantics change"
         );
     }
+
+    // The DOMAIN VOCABULARY the identity ranks over is identity schema in
+    // its own right: adding, removing, or renumbering a `FlowDomain`
+    // variant changes what every contract's encoded domain rank means,
+    // even when no individual contract row was edited. The versioned
+    // domain tag is what carries that, and it rides in the minted bytes —
+    // so a registry change that forgot to bump it, or a bump that was
+    // later reverted, is visible here. The column cases above cannot see
+    // it: they derive both compared identities from the same descriptor,
+    // so the tag cancels out.
+    let bytes = base_id.canonical_bytes();
+    let carries = |tag: &str| {
+        bytes
+            .windows(tag.len())
+            .any(|window| window == tag.as_bytes())
+    };
+    assert!(
+        carries("verter.session.flow.result_contract.v5"),
+        "the minted contract identity carries the domain tag of the registry revision \
+         it ranks over"
+    );
+    for superseded in [
+        "result_contract.v1",
+        "result_contract.v2",
+        "result_contract.v3",
+        "result_contract.v4",
+    ] {
+        assert!(
+            !carries(superseded),
+            "a superseded domain tag ({superseded}) must not survive in a minted identity: \
+             it would reuse a previous registry revision's identity space"
+        );
+    }
 }
 
 /// The central report applicator: a complete report discharges every
@@ -1520,6 +1552,109 @@ fn obligation_budget_trips_at_first_excess() {
         11 + 9 + 20,
         "the counted base (11 coverage + 9 domains + 20 additional) trips before any concrete obligation is constructed"
     );
+}
+
+/// Exhausting proof obligations must not revoke the already validated
+/// structural work needed to produce an unproven cold value.
+#[test]
+fn execution_selection_survives_obligation_budget_refusal() {
+    let fixture = flow_graph_fixture_for_tests(FIXTURE_SOURCE, 7);
+    let mut request = base_request();
+    request.resources.max_obligations = 0;
+    let retained = fixture.retained_plan(&request).expect("structural plan");
+    let execution = fixture
+        .prepare_execution_with_retained(&request, &retained)
+        .expect("proof capacity does not limit structural execution");
+    assert_eq!(execution.structural_selection(), retained.selection());
+    assert_eq!(execution.basis().input_basis, request.input_basis);
+    assert!(matches!(
+        fixture.build_plan_from_execution(Arc::clone(&execution), Arc::from([])),
+        Err(FlowDemandPlanError::ObligationBudget { limit: 0, .. })
+    ));
+    assert!(!execution.structural_selection().value_nodes().is_empty());
+
+    request.resources.slice_budget.max_selected_nodes = 0;
+    assert!(matches!(
+        fixture.prepare_execution_with_retained(&request, &retained),
+        Err(FlowDemandPlanError::SliceBudget(_))
+    ));
+}
+
+/// Member-value navigation has its own finalizer. Its exact supported demand
+/// may execute structurally without entering the whole-return proof contract.
+#[test]
+fn member_navigation_executes_without_expanding_the_proof_contract() {
+    use verter_session::semantic_query::demand::Demand;
+    let fixture = flow_graph_fixture_for_tests(FIXTURE_SOURCE, 7);
+    let member = PathSegment::Member(PropertyKey::String(Arc::from("value")));
+    let mut projected = base_request();
+    let SemanticQueryKey::FlowReturn(key) = &mut projected.query else {
+        unreachable!()
+    };
+    key.demand.point.projection.path = ProjectionPath::from_segments([member.clone()]);
+    let retained = fixture
+        .retained_plan(&projected)
+        .expect("retained member selection");
+    for segment in [
+        member,
+        PathSegment::Index(verter_session::semantic_query::IndexKey::String(Arc::from(
+            "value",
+        ))),
+    ] {
+        let mut request = base_request();
+        let SemanticQueryKey::FlowReturn(key) = &mut request.query else {
+            unreachable!()
+        };
+        key.demand.point = Demand::navigate(ProjectionPath::from_segments([segment]));
+        let execution = fixture
+            .prepare_execution_with_retained(&request, &retained)
+            .expect("the existing string-member navigation may execute");
+        assert_eq!(
+            execution.subject().projection_path.as_ref(),
+            &[Arc::<str>::from("value")]
+        );
+        assert!(matches!(
+            fixture.build_plan_from_execution(execution, Arc::from([])),
+            Err(FlowDemandPlanError::UnrepresentableDemand)
+        ));
+        let SemanticQueryKey::FlowReturn(key) = &mut request.query else {
+            unreachable!()
+        };
+        key.demand.point.projection.call_signatures = true;
+        assert!(matches!(
+            fixture.prepare_execution_with_retained(&request, &retained),
+            Err(FlowDemandPlanError::UnrepresentableDemand)
+        ));
+    }
+}
+
+/// Equal descriptive bases do not authorize attaching a separately prepared
+/// execution's product evidence to an installed proof plan.
+#[test]
+fn demand_plan_retains_its_exact_execution_capability() {
+    let fixture = flow_graph_fixture_for_tests(FIXTURE_SOURCE, 7);
+    let request = base_request();
+    let retained = fixture.retained_plan(&request).expect("structural plan");
+    let execution = fixture
+        .prepare_execution_with_retained(&request, &retained)
+        .expect("validated execution");
+    let other = fixture
+        .prepare_execution_with_retained(&request, &retained)
+        .expect("independently validated execution");
+    let plan = fixture
+        .build_plan_from_execution(Arc::clone(&execution), Arc::from([]))
+        .expect("proof plan");
+    assert!(Arc::ptr_eq(plan.execution_selection(), &execution));
+    assert!(plan.matches_execution(&execution));
+    assert_eq!(execution.basis(), other.basis());
+    assert!(!plan.matches_execution(&other));
+
+    let foreign =
+        flow_graph_fixture_for_tests("function solve_me(x) { return { different: x }; }", 7);
+    assert!(matches!(
+        foreign.build_plan_from_execution(execution, Arc::from([])),
+        Err(FlowDemandPlanError::BasisKeyMismatch)
+    ));
 }
 
 /// The no-flow allocation contract, at BOTH levels: a default runtime
@@ -2245,20 +2380,16 @@ function no_capture(x) {
 "#;
 
 /// A closure capturing a destructured parameter: the element has no
-/// whole-slot inventory entry, but its identity is REAL — the skeleton
-/// names the element, its kind, and its frame, and its slot is the
-/// skeleton's binding ordinal offset past the inventory's slot range —
-/// so the capture plans as a concrete dischargeable subject.
+/// whole-slot value carrier, but the indexed element has its own exact
+/// declaration identity, so the capture plans as a concrete subject.
 const DESTRUCTURED_CAPTURE_FIXTURE_SOURCE: &str = r#"
 function destructured_capture({a}) {
   return () => a;
 }
 "#;
 
-/// A closure capturing a binding whose KIND is outside the cross-frame
-/// identity vocabulary (a class declaration): the binding is real but no
-/// cross-frame identity can name it — the family's accepted typed gap,
-/// never silence.
+/// A captured class has an exact indexed identity, independently of whether
+/// its value can be evaluated or the pending obligation can be discharged.
 const CLASS_CAPTURE_FIXTURE_SOURCE: &str = r#"
 function class_capture() {
   class C {}
@@ -2396,28 +2527,34 @@ fn a_no_capture_closure_proves_the_family_empty() {
     );
 }
 
-/// A captured binding whose kind is outside the cross-frame identity
-/// vocabulary (a class declaration) installs the family's accepted typed
-/// gap — anchored on the resolved lexical binding — never silence.
+/// A captured class has an exact lexical identity. Planning that subject
+/// creates a pending evidence obligation; naming it does not establish
+/// that class-value evaluation is supported or authorize warm admission.
 #[test]
-fn unnameable_captured_binding_installs_the_family_typed_gap() {
+fn captured_class_identity_installs_a_pending_evidence_obligation() {
     let fixture = flow_graph_fixture_for_tests(CLASS_CAPTURE_FIXTURE_SOURCE, 25);
     let plan = fixture
         .build_plan(request_named("class_capture"))
         .expect("the class-capture fixture plans");
-    let gaps: Vec<&FlowObligationSpec> = plan
+    let captures: Vec<&FlowObligationSpec> = plan
         .obligation_specs()
         .iter()
-        .filter(|spec| matches!(spec.basis(), FlowObligationBasis::Capture { .. }))
+        .filter(|spec| matches!(spec.basis(), FlowObligationBasis::CapturedBinding { .. }))
         .collect();
-    assert_eq!(gaps.len(), 1, "exactly the class-capture gap");
-    let FlowObligationBasis::Capture { identity, .. } = gaps[0].basis() else {
+    assert_eq!(captures.len(), 1, "exactly the class capture");
+    let FlowObligationBasis::CapturedBinding { identity, .. } = captures[0].basis() else {
         unreachable!()
     };
-    assert!(
-        identity.is_none(),
-        "a class binding has no cross-frame identity"
+    assert_eq!(identity.name.as_ref(), "C");
+    assert_eq!(
+        identity.kind,
+        verter_semantic::analysis::function_program::FunctionBindingKind::Class
     );
+    assert_eq!(
+        identity.defining_function.declaration.name.as_ref(),
+        "class_capture"
+    );
+    assert_eq!(identity.binding_slot, 0);
 
     let mut runtime = ObligationRuntime::default();
     let handle = runtime.install_flow_demand(&plan);
@@ -2425,13 +2562,107 @@ fn unnameable_captured_binding_installs_the_family_typed_gap() {
         .flow_obligations(handle)
         .expect("the demand is installed")
         .iter()
-        .find(|record| record.spec.id() == gaps[0].id())
+        .find(|record| record.spec.id() == captures[0].id())
         .expect("installed");
     assert_eq!(
         record.state,
-        ObligationState::Gap(FlowGap::ClosureCapture),
-        "the unnameable captured binding installs the family's accepted typed gap"
+        ObligationState::Pending,
+        "exact identity still requires actual capture evidence"
     );
+}
+
+#[test]
+fn captured_hubs_and_shadowed_closures_keep_exact_binding_subjects() {
+    use verter_semantic::analysis::flow::flow_graph::FlowNodeKind;
+    use verter_semantic::analysis::flow::FlowBindingRef;
+    use verter_session::for_tests::flow_graph_fixture_for_tests_nested;
+
+    let fixture = flow_graph_fixture_for_tests_nested(
+        "function root(x) { function middle() { const first = () => x; { let x = 1; return [first, () => x]; } } return middle; }",
+        42,
+        "middle",
+    );
+    let function = fixture.program_key();
+    let mut request = request_named(&function.declaration.name);
+    let SemanticQueryKey::FlowReturn(query) = &mut request.query else {
+        unreachable!()
+    };
+    query.function.declaration_slot.owner = function.declaration.owner;
+    query.function.function_part = function.part.clone();
+    query.function.overload_ordinal = function.overload_ordinal;
+    let plan = fixture.build_plan(request).expect("nested demand plans");
+    let inputs = fixture.product_inputs();
+    let graph = inputs.graph();
+    let hubs: Vec<_> = plan
+        .structural_selection()
+        .value_nodes()
+        .iter()
+        .filter_map(|node| match graph.node_kind(*node) {
+            FlowNodeKind::CapturedBinding(id) => Some((*node, graph.captured_binding(id))),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        hubs.len(),
+        1,
+        "the outer variable has one selected graph hub"
+    );
+    let (hub, outer_identity) = hubs[0];
+    let hub_obligations: Vec<_> = plan.obligation_specs().iter().filter(|spec| {
+        matches!(spec.basis(), FlowObligationBasis::Binding { node, slot } if *node == hub && &slot.identity == outer_identity)
+    }).collect();
+    assert_eq!(
+        hub_obligations.len(),
+        1,
+        "every selected captured hub gets its exact BindingSlot obligation"
+    );
+    let FlowObligationBasis::Binding { slot, .. } = hub_obligations[0].basis() else {
+        unreachable!()
+    };
+    assert_eq!(
+        &slot.binding,
+        &FlowBindingRef::Captured(outer_identity.clone())
+    );
+
+    let captures: Vec<_> = plan
+        .obligation_specs()
+        .iter()
+        .filter_map(|spec| match spec.basis() {
+            FlowObligationBasis::CapturedBinding { identity, .. } => Some(identity),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        captures.len(),
+        2,
+        "both closure sites retain their exact capture"
+    );
+    assert!(captures
+        .iter()
+        .all(|identity| identity.name.as_ref() == "x"));
+    assert_eq!(
+        captures
+            .iter()
+            .filter(|identity| **identity == outer_identity)
+            .count(),
+        1
+    );
+    let local = captures
+        .iter()
+        .find(|identity| **identity != outer_identity)
+        .unwrap();
+    assert_eq!(
+        &local.defining_function, function,
+        "the nearer x belongs to the selected frame"
+    );
+    assert_ne!(local.defining_function, outer_identity.defining_function);
+
+    let mut runtime = ObligationRuntime::default();
+    let handle = runtime.install_flow_demand(&plan);
+    assert!(runtime.flow_obligations(handle).unwrap().iter().filter(|record| {
+        matches!(record.spec.basis(), FlowObligationBasis::Binding { node, .. } if *node == hub)
+            || matches!(record.spec.basis(), FlowObligationBasis::CapturedBinding { .. })
+    }).all(|record| record.state == ObligationState::Pending), "named subjects still require executed product and capture evidence");
 }
 
 // ── Demand-handle runtime scoping ───────────────────────────────────────
@@ -2626,11 +2857,6 @@ fn demand_planner_rejects_an_out_of_range_selection_node() {
     let rich_retained = richer
         .retained_plan(&base_request())
         .expect("the richer demand plans");
-    let out_of_range = *rich_retained
-        .selection()
-        .value_nodes
-        .last()
-        .expect("the richer selection is non-empty");
 
     let own = fixture
         .retained_plan(&request_named("smaller"))
@@ -2638,15 +2864,7 @@ fn demand_planner_rejects_an_out_of_range_selection_node() {
     // The forged pair carries the OWN selection's minted identity, so only
     // the out-of-range node distinguishes it: the refusal is the bounds
     // check, not the identity check.
-    let forged = PlannedFlowSlice::new(
-        own.hash(),
-        ReturnSlicePlan {
-            origins: Arc::clone(&own.selection().origins),
-            demand_path: Arc::clone(&own.selection().demand_path),
-            value_nodes: Arc::from(vec![out_of_range].into_boxed_slice()),
-            effect_only_nodes: Arc::from([]),
-        },
-    );
+    let forged = PlannedFlowSlice::for_test(own.hash(), rich_retained.selection().clone());
     assert!(
         matches!(
             fixture.build_plan_with_retained(request_named("smaller"), &forged),
@@ -2662,7 +2880,7 @@ fn demand_planner_rejects_an_out_of_range_selection_node() {
 /// provenance axis matches) is a typed budget error, never a plan
 /// mislabeled as satisfying the stricter policy. The gate compares the
 /// selection's OBSERVABLE counts against the request's budget — exactly
-/// the two axes the demand planner enforces — never the budget values
+/// the axes the demand planner enforces — never the budget values
 /// themselves, so a stricter-but-satisfied request still plans.
 #[test]
 fn demand_planner_rejects_a_selection_over_the_requests_slice_budget() {
@@ -2672,7 +2890,8 @@ fn demand_planner_rejects_a_selection_over_the_requests_slice_budget() {
     let loose = fixture
         .retained_plan(&request_named("rich"))
         .expect("the rich demand plans under the default budget");
-    let selected = loose.selection().value_nodes.len() + loose.selection().effect_only_nodes.len();
+    let selected =
+        loose.selection().value_nodes().len() + loose.selection().effect_only_nodes().len();
     assert!(selected > 0, "the rich selection is non-empty");
 
     // Matched control: the selection served against the budget it was
@@ -2721,17 +2940,79 @@ fn demand_planner_rejects_a_selection_over_the_requests_slice_budget() {
         "a selection over the request's selected-node budget is a typed planning error"
     );
 
+    let mut strict_values = request_named("rich");
+    let value_states = loose.selection().value_states();
+    assert!(value_states > 0);
+    strict_values.resources.slice_budget.max_value_states = value_states - 1;
+    assert_eq!(
+        fixture
+            .build_plan_with_retained(strict_values, &loose)
+            .unwrap_err(),
+        FlowDemandPlanError::SliceBudget(FlowSliceBudgetExceeded {
+            axis: FlowSliceBudgetAxis::ValueStates,
+            limit: value_states - 1,
+            observed: value_states,
+        }),
+        "retained projection states must satisfy the current request budget"
+    );
+
     // A stricter-but-satisfied budget still plans: the check compares the
     // selection's counts, never the budget VALUES.
     let mut tighter = request_named("rich");
     tighter.resources.slice_budget = FlowSliceBudget {
         max_return_sites: 2,
         max_selected_nodes: u32::try_from(selected).expect("in range"),
+        max_value_states: value_states,
     };
     assert!(
         fixture.build_plan_with_retained(tighter, &loose).is_ok(),
         "a stricter budget the selection still satisfies plans"
     );
+}
+
+#[test]
+fn retained_projection_selection_respects_value_state_budget() {
+    let fixture = flow_graph_fixture_for_tests(
+        "function projected(source) { return source.a.b.c.d.e.f; }",
+        41,
+    );
+    let request = request_named("projected");
+    let retained = fixture.retained_plan(&request).expect("projection plans");
+    let observed = retained.selection().value_states();
+    let selected =
+        retained.selection().value_nodes().len() + retained.selection().effect_only_nodes().len();
+    assert!(
+        observed as usize > selected,
+        "projection tails consume value states independently of selected nodes"
+    );
+
+    let mut strict = request.clone();
+    strict.resources.slice_budget.max_value_states = observed - 1;
+    let expected = FlowDemandPlanError::SliceBudget(FlowSliceBudgetExceeded {
+        axis: FlowSliceBudgetAxis::ValueStates,
+        limit: observed - 1,
+        observed,
+    });
+    assert_eq!(
+        fixture
+            .prepare_execution_with_retained(&strict, &retained)
+            .unwrap_err(),
+        expected,
+        "retained work cannot bypass the incoming execution budget"
+    );
+    assert_eq!(
+        fixture
+            .build_plan_with_retained(strict, &retained)
+            .unwrap_err(),
+        expected,
+        "proof preparation obeys the same sealed execution budget"
+    );
+    let mut exact = request;
+    exact.resources.slice_budget.max_value_states = observed;
+    assert!(fixture
+        .prepare_execution_with_retained(&exact, &retained)
+        .is_ok());
+    assert!(fixture.build_plan_with_retained(exact, &retained).is_ok());
 }
 
 // ── Discharge-report basis binding ──────────────────────────────────────
@@ -2814,4 +3095,85 @@ fn discharge_report_is_bound_to_the_installed_demands_basis() {
             .is_some(),
         "the matched report completes"
     );
+}
+
+#[test]
+fn effect_only_capture_retains_effect_obligations_without_value_products() {
+    use verter_semantic::analysis::flow::flow_graph::{FlowEdgeClass, FlowNodeKind};
+    use verter_session::for_tests::FlowCaptureDemand;
+    let fixture = verter_session::for_tests::flow_graph_fixture_for_tests_nested(
+        "function root(x) { function middle() { return () => { x = 1; return 0; }; } return middle; }",
+        63,
+        "middle",
+    );
+    let function = fixture.program_key();
+    let mut request = request_named(&function.declaration.name);
+    let SemanticQueryKey::FlowReturn(query) = &mut request.query else {
+        unreachable!()
+    };
+    query.function.declaration_slot.owner = function.declaration.owner;
+    query.function.function_part = function.part.clone();
+    query.function.overload_ordinal = function.overload_ordinal;
+    let plan = fixture.build_plan(request).unwrap();
+    let inputs = fixture.product_inputs();
+    let hub = inputs
+        .graph()
+        .nodes()
+        .find(|node| {
+            matches!(
+                inputs.graph().node_kind(*node),
+                FlowNodeKind::CapturedBinding(_)
+            )
+        })
+        .unwrap();
+    assert!(plan.structural_selection().is_effect_only(hub));
+    assert!(plan.obligation_specs().iter().any(|spec| matches!(spec.basis(), FlowObligationBasis::Edge { to, class: FlowEdgeClass::EvalEffect, .. } if *to == hub)), "the exact effect dependency remains a proof obligation");
+    assert_eq!(plan.obligation_specs().iter().filter(|spec| matches!(spec.basis(), FlowObligationBasis::CapturedBinding { identity, demand: FlowCaptureDemand::Effect, .. } if identity.name.as_ref() == "x")).count(), 1, "the exact capture subject retains its effect-only proof requirement");
+    assert!(
+        !plan.obligation_specs().iter().any(
+            |spec| matches!(spec.basis(), FlowObligationBasis::Binding { node, .. } if *node == hub)
+        ),
+        "an effect-only capture cannot require fabricated reaching values or assignment products"
+    );
+}
+
+#[test]
+fn capture_value_requirements_are_local_to_each_closure_site() {
+    use verter_session::for_tests::FlowCaptureDemand;
+    let fixture = verter_session::for_tests::flow_graph_fixture_for_tests_nested(
+        "function root(x) { function middle() { const writer = () => { x = 1; return 0; }; const reader = () => x; return { writer, reader }; } return middle; }",
+        64,
+        "middle",
+    );
+    let function = fixture.program_key();
+    let mut request = request_named(&function.declaration.name);
+    let SemanticQueryKey::FlowReturn(query) = &mut request.query else {
+        unreachable!()
+    };
+    query.function.declaration_slot.owner = function.declaration.owner;
+    query.function.function_part = function.part.clone();
+    query.function.overload_ordinal = function.overload_ordinal;
+    let plan = fixture.build_plan(request).unwrap();
+    let captures: Vec<_> = plan
+        .obligation_specs()
+        .iter()
+        .filter_map(|spec| match spec.basis() {
+            FlowObligationBasis::CapturedBinding {
+                site,
+                identity,
+                demand,
+                ..
+            } if identity.name.as_ref() == "x" => Some((*site, identity, *demand)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(captures.len(), 2);
+    assert_eq!(
+        captures[0].1, captures[1].1,
+        "both closures capture the same exact binding"
+    );
+    assert_ne!(captures[0].0, captures[1].0);
+    assert_eq!(captures[0].2, FlowCaptureDemand::Effect);
+    assert_eq!(captures[1].2, FlowCaptureDemand::Value);
+    assert!(plan.obligation_specs().iter().any(|spec| matches!(spec.basis(), FlowObligationBasis::Binding { slot, .. } if &slot.identity == captures[0].1)), "the reader still requires value products for their shared hub");
 }

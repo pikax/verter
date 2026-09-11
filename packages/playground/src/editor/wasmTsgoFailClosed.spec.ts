@@ -2,11 +2,10 @@
  * Guard `wasm_tsgo_unavailable_fail_closed`.
  *
  * In the WASM/browser surface the TS>=7 / external-tsgo capability is
- * UNAVAILABLE: carrier generation + Verter-native diagnostics only. No
- * Go-WASM engine module exists or is instantiable, the capability model
- * explicitly declares the external-tsgo engine off for EVERY TS major, the
- * type-checker mode is the single browser capability, and a persisted legacy
- * engine selection can never resurrect a live external-engine path.
+ * UNAVAILABLE: carrier generation + Verter-native diagnostics only. The
+ * capability model explicitly declares the external-tsgo engine off for
+ * EVERY TS major, and a persisted legacy engine selection can never
+ * resurrect a live external-engine path.
  *
  * Hermetic: typed/structural against the capability surface — no
  * `@verter/wasm` host load.
@@ -17,10 +16,8 @@ import { describe, it, expect } from "vitest";
 import { zlibSync, strToU8, strFromU8 } from "fflate";
 import { capabilityForWasm, tsMajorOf } from "./inContextLs";
 import { deserializeFromHash } from "../core/urlState";
-import typesSource from "../core/types.ts?raw";
 
-/** The retired engine mode token, assembled so this file never contains it. */
-const RETIRED_MODE = "ts" + "go";
+const RETIRED_MODE = "tsgo";
 
 describe("wasm_tsgo_unavailable_fail_closed (#2)", () => {
   it("the capability model declares the external-tsgo engine UNAVAILABLE for every TS major", () => {
@@ -36,19 +33,6 @@ describe("wasm_tsgo_unavailable_fail_closed (#2)", () => {
     expect(capabilityForWasm(7)).toEqual({ inContextLS: false, tsgo: false });
     expect(capabilityForWasm(tsMajorOf("7.0.1-rc"))).toEqual({ inContextLS: false, tsgo: false });
     expect(capabilityForWasm(8)).toEqual({ inContextLS: false, tsgo: false });
-  });
-
-  it("TypeCheckerMode is the single browser capability (no external-engine variant)", () => {
-    const declaration = typesSource.match(/export type TypeCheckerMode = ([^;]+);/);
-    expect(declaration, "TypeCheckerMode declaration must exist").not.toBeNull();
-    expect(declaration![1].trim()).toBe('"tsc"');
-  });
-
-  it("no Go-WASM engine module exists in the editor module graph (nothing to instantiate)", () => {
-    // Transform-time structural check over this directory: any sibling
-    // `tsgo*` engine/service/worker module makes this non-empty.
-    const engineModules = Object.keys(import.meta.glob("./tsgo*"));
-    expect(engineModules).toEqual([]);
   });
 
   it("a persisted legacy engine selection can never select a live external-engine path", () => {

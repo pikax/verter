@@ -1,0 +1,11 @@
+error[E0616]: field `value_states` of struct `ReturnSlicePlan` is private
+ --> tests/compile-fail/return_slice_plan_is_immutable.rs:5:10
+  |
+5 |     plan.value_states = 0;
+  |          ^^^^^^^^^^^^ private field
+
+error[E0616]: field `value_nodes` of struct `ReturnSlicePlan` is private
+ --> tests/compile-fail/return_slice_plan_is_immutable.rs:6:10
+  |
+6 |     plan.value_nodes = Arc::from([]);
+  |          ^^^^^^^^^^^ private field

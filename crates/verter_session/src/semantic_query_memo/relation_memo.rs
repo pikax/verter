@@ -344,6 +344,24 @@ impl SemanticGraphStore {
             .sum()
     }
 
+    /// Test-support count of admitted relation candidates on one relation
+    /// axis. This observes the actual family key; it does not issue queries.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn relation_memo_count_of_kind(
+        &self,
+        relation: crate::semantic_query::RelationKind,
+    ) -> usize {
+        let entries = self.entries_lock_diagnosed();
+        entries
+            .iter()
+            .filter(|(family, _)| {
+                matches!(family, FamilyKey::Relate { key } if key.relation == relation)
+            })
+            .map(|(_, slots)| slots.slot_candidate_count_for_test(ModeSlot::Single))
+            .sum()
+    }
+
     /// Test-support seed seam for relation fixtures (mirrors the retired
     /// `insert_relation` shape): publishes a DECIDED payload with the
     /// legacy no-view eviction policy (LRU front). This seeds a ROOT, so

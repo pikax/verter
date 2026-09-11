@@ -107,7 +107,7 @@ pub fn compute_flow_slice_hash(
     buf.extend_from_slice(HASH_SALT);
     buf.push(HASH_SEP);
 
-    for origin in plan.origins.iter() {
+    for origin in plan.origins().iter() {
         match origin {
             SliceOrigin::Return(id) => {
                 buf.push(b'O');
@@ -122,7 +122,7 @@ pub fn compute_flow_slice_hash(
         }
     }
 
-    for segment in plan.demand_path.iter() {
+    for segment in plan.demand_path().iter() {
         match segment {
             DemandSegment::Named(name) => {
                 buf.push(b'D');
@@ -135,11 +135,11 @@ pub fn compute_flow_slice_hash(
         }
     }
 
-    for node in plan.value_nodes.iter() {
+    for node in plan.value_nodes().iter() {
         buf.push(b'V');
         fold_u32(&mut buf, node.index() as u32);
     }
-    for node in plan.effect_only_nodes.iter() {
+    for node in plan.effect_only_nodes().iter() {
         buf.push(b'E');
         fold_u32(&mut buf, node.index() as u32);
     }
@@ -158,8 +158,16 @@ pub fn compute_flow_slice_hash(
                 fold_u32(&mut buf, edge.ordinal);
                 match &edge.kind {
                     FlowEdgeKind::ValueDef => buf.push(1),
-                    FlowEdgeKind::PathWrite { path, certainty } => {
+                    FlowEdgeKind::PathWrite {
+                        path,
+                        certainty,
+                        source,
+                    } => {
                         buf.push(2);
+                        buf.push(match source {
+                            super::flow_graph::PathWriteSource::ObjectLiteralEntry => 1,
+                            super::flow_graph::PathWriteSource::Assignment => 2,
+                        });
                         buf.push(match certainty {
                             SkeletonWriteCertainty::Definite => 1,
                             SkeletonWriteCertainty::Optional => 2,
@@ -176,12 +184,25 @@ pub fn compute_flow_slice_hash(
                     }
                     FlowEdgeKind::EvalEffect => buf.push(3),
                     FlowEdgeKind::ControlRegion => buf.push(4),
+                    FlowEdgeKind::ControlInput => buf.push(7),
+                    FlowEdgeKind::SourceTypeQuery => buf.push(8),
+                    FlowEdgeKind::ReadProjection { path, kind } => {
+                        buf.push(5);
+                        buf.push(match kind {
+                            super::FlowReadKind::Result => 0,
+                            super::FlowReadKind::Input => 1,
+                        });
+                        fold_u32(&mut buf, path.len() as u32);
+                        for name in path.iter() {
+                            fold_text(&mut buf, skeleton.name(*name));
+                        }
+                    }
                 }
             }
         }
     };
-    fold_edges(&plan.value_nodes);
-    fold_edges(&plan.effect_only_nodes);
+    fold_edges(plan.value_nodes());
+    fold_edges(plan.effect_only_nodes());
 
     FlowSliceHash(hash_16(&buf))
 }

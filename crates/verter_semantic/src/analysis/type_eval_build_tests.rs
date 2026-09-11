@@ -2808,6 +2808,265 @@ fn indexed_call_ir_preserves_nested_calls_and_rebases_program_points() {
     ));
 }
 
+fn indexed_call_with_observed_roots(
+    source: &str,
+) -> (
+    IndexedValueCall,
+    Vec<(
+        super::type_eval_build::IndexedCallReadSite,
+        super::type_eval_build::IndexedValueReadRoot,
+    )>,
+) {
+    use super::type_eval_build::{
+        lower_indexed_call_expression, lower_indexed_call_expression_with_read_roots,
+    };
+    let allocator = oxc_allocator::Allocator::default();
+    let expression = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+        .parse_expression()
+        .expect("fixture expression");
+    let oxc_ast::ast::Expression::CallExpression(call) = expression else {
+        panic!("fixture must be a direct call");
+    };
+    let ordinary = lower_indexed_call_expression(&call, source);
+    let mut roots = Vec::new();
+    let observed =
+        lower_indexed_call_expression_with_read_roots(&call, source, &mut |site, root| {
+            roots.push((site, root))
+        });
+    assert_eq!(
+        observed, ordinary,
+        "observing roots must preserve all IR: {source}"
+    );
+    (observed, roots)
+}
+
+#[test]
+fn indexed_call_read_roots_follow_the_actual_value_inference_branch() {
+    use super::type_eval_build::{IndexedCallReadSite, IndexedValueReadRoot};
+    for source in [
+        "accept(x)",
+        "accept(((x)))",
+        "accept(x!)",
+        "accept(x satisfies unknown)",
+        "accept(x as const)",
+        "accept(<const>x)",
+        "accept(<const>((x as const) satisfies unknown))",
+        // Keep the existing indexed unwrap policy: satisfies around an
+        // assertion reaches the identifier, unlike a direct assertion.
+        "accept((x as string) satisfies unknown)",
+    ] {
+        let (call, roots) = indexed_call_with_observed_roots(source);
+        let start = source.find('x').unwrap() as u32;
+        assert_eq!(
+            roots,
+            vec![(
+                IndexedCallReadSite::Argument(0),
+                IndexedValueReadRoot::Identifier(verter_span::Span::new(start, start + 1))
+            )],
+            "{source}"
+        );
+        assert!(
+            matches!(&call.args[0].expression, IndexedValueExpression::Value(TypeExpr::TypeOf(value)) if value.path == ["x"]),
+            "{source}"
+        );
+    }
+
+    for (source, primitive) in [
+        ("accept(x as string)", PrimitiveName::String),
+        ("accept(<string>x)", PrimitiveName::String),
+        ("accept(undefined)", PrimitiveName::Undefined),
+    ] {
+        let (call, roots) = indexed_call_with_observed_roots(source);
+        assert_eq!(
+            roots,
+            vec![(
+                IndexedCallReadSite::Argument(0),
+                IndexedValueReadRoot::NonBinding
+            )],
+            "{source}"
+        );
+        assert_eq!(
+            call.args[0].expression,
+            IndexedValueExpression::Value(TypeExpr::Primitive(primitive)),
+            "{source}"
+        );
+    }
+
+    for source in [
+        "accept(x.value)",
+        "accept({ value: x })",
+        "accept(x ? x : x)",
+        "accept(other(x))",
+        "accept(x + 1)",
+    ] {
+        let (_, roots) = indexed_call_with_observed_roots(source);
+        assert_eq!(
+            roots,
+            vec![(
+                IndexedCallReadSite::Argument(0),
+                IndexedValueReadRoot::NonBinding
+            )],
+            "nested/composite roots must not escape: {source}"
+        );
+    }
+    let (conditional, _) = indexed_call_with_observed_roots("accept(x ? x : x)");
+    assert!(matches!(
+        &conditional.args[0].expression,
+        IndexedValueExpression::Value(TypeExpr::Union(arms))
+            if arms.len() == 2 && arms.iter().all(|arm| matches!(arm, TypeExpr::TypeOf(value) if value.path == ["x"]))
+    ), "conditional inference retains both existing arms without manufacturing an identifier origin");
+}
+
+#[test]
+fn indexed_call_source_type_query_is_distinct_from_the_operand() {
+    use super::type_eval_build::{IndexedCallReadSite, IndexedValueReadRoot};
+    for source in [
+        "accept(other as typeof queried)",
+        "accept(((other as typeof queried)))",
+        "accept(<typeof queried>other)",
+        "accept(<const>(other as typeof queried))",
+        "accept(<const>((other as typeof queried) satisfies unknown))",
+        "accept(...(other as typeof queried))",
+    ] {
+        let (call, roots) = indexed_call_with_observed_roots(source);
+        let start = source.find("queried").unwrap() as u32;
+        assert_eq!(
+            roots,
+            vec![(
+                IndexedCallReadSite::Argument(0),
+                IndexedValueReadRoot::SourceTypeQuery(verter_span::Span::new(start, start + 7))
+            )],
+            "{source}"
+        );
+        assert!(
+            matches!(&call.args[0].expression, IndexedValueExpression::Value(TypeExpr::TypeOf(query)) if query.path == ["queried"] && query.type_args.is_empty()),
+            "{source}"
+        );
+    }
+    for source in [
+        "accept((other as typeof queried) satisfies unknown)",
+        "accept((other as typeof queried) as const)",
+    ] {
+        let (_, roots) = indexed_call_with_observed_roots(source);
+        let start = source.find("other").unwrap() as u32;
+        assert_eq!(
+            roots,
+            vec![(
+                IndexedCallReadSite::Argument(0),
+                IndexedValueReadRoot::Identifier(verter_span::Span::new(start, start + 5))
+            )],
+            "existing indexed unwrap precedence: {source}"
+        );
+    }
+    for source in [
+        "accept(other as string)",
+        "accept(other as (typeof queried))",
+        "accept(other as typeof queried.member)",
+        "accept(other as typeof queried<string>)",
+        "accept(other as { value: typeof queried })",
+        "accept(other as typeof queried | number)",
+    ] {
+        let (_, roots) = indexed_call_with_observed_roots(source);
+        assert_eq!(
+            roots,
+            vec![(
+                IndexedCallReadSite::Argument(0),
+                IndexedValueReadRoot::NonBinding
+            )],
+            "whole-query boundary: {source}"
+        );
+    }
+    let source = "(other as typeof queried).method()";
+    let (_, roots) = indexed_call_with_observed_roots(source);
+    let start = source.find("queried").unwrap() as u32;
+    assert_eq!(
+        roots,
+        vec![(
+            IndexedCallReadSite::Receiver,
+            IndexedValueReadRoot::SourceTypeQuery(verter_span::Span::new(start, start + 7))
+        )]
+    );
+}
+
+#[test]
+fn indexed_call_read_roots_preserve_each_occurrence_and_spread_ordinal() {
+    use super::type_eval_build::{IndexedCallReadSite, IndexedValueReadRoot};
+    let source = "accept(x, (x satisfies unknown), undefined, ...x)";
+    let (call, roots) = indexed_call_with_observed_roots(source);
+    let spans: Vec<_> = source
+        .match_indices('x')
+        .map(|(start, _)| verter_span::Span::new(start as u32, start as u32 + 1))
+        .collect();
+    assert_eq!(
+        roots,
+        vec![
+            (
+                IndexedCallReadSite::Argument(0),
+                IndexedValueReadRoot::Identifier(spans[0])
+            ),
+            (
+                IndexedCallReadSite::Argument(1),
+                IndexedValueReadRoot::Identifier(spans[1])
+            ),
+            (
+                IndexedCallReadSite::Argument(2),
+                IndexedValueReadRoot::NonBinding
+            ),
+            (
+                IndexedCallReadSite::Argument(3),
+                IndexedValueReadRoot::Identifier(spans[2])
+            ),
+        ]
+    );
+    assert!(call.args[3].spread);
+}
+
+#[test]
+fn indexed_call_read_roots_observe_the_actual_member_receiver_once() {
+    use super::type_eval_build::{IndexedCallReadSite, IndexedValueReadRoot};
+    for source in [
+        "(x satisfies unknown).method(other(x))",
+        "(<const>x)[key](other(x))",
+    ] {
+        let (call, roots) = indexed_call_with_observed_roots(source);
+        let start = source.find('x').unwrap() as u32;
+        assert!(call.receiver.is_some());
+        assert_eq!(
+            roots,
+            vec![
+                (
+                    IndexedCallReadSite::Receiver,
+                    IndexedValueReadRoot::Identifier(verter_span::Span::new(start, start + 1))
+                ),
+                (
+                    IndexedCallReadSite::Argument(0),
+                    IndexedValueReadRoot::NonBinding
+                ),
+            ],
+            "{source}"
+        );
+    }
+    for source in [
+        "(x as string).method()",
+        "x.value.method()",
+        "undefined.method()",
+    ] {
+        let (call, roots) = indexed_call_with_observed_roots(source);
+        assert!(call.receiver.is_some());
+        assert_eq!(
+            roots,
+            vec![(
+                IndexedCallReadSite::Receiver,
+                IndexedValueReadRoot::NonBinding
+            )],
+            "{source}"
+        );
+    }
+    let (call, roots) = indexed_call_with_observed_roots("accept()");
+    assert!(call.receiver.is_none());
+    assert!(roots.is_empty());
+}
+
 /// Value-expression inference never FABRICATES a call's answer: a bare
 /// call and a call nested inside a compound produce only the honest
 /// `ReturnType<typeof …>` carrier (re-resolved later through the shared

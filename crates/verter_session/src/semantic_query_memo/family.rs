@@ -247,6 +247,15 @@ pub(super) enum FamilyKey {
     /// embedded projection demand strips into the [`ModeSlot`].
     TypeOf {
         value_root: crate::semantic_query::ValueRootSlotIdentity,
+        /// Remaining member path of the authored `typeof` (`typeof Tokens.A`
+        /// is `value_root = Tokens`, `path = ["A"]`) — a member query must
+        /// never warm-hit the declaration-root family. The `Arc` payload is
+        /// BOXED to keep `FamilyKey` under its size rail: a fat `Arc<[..]>`
+        /// is 16B by value, and the typeof family must not inflate the hot
+        /// `FamilyKey → FamilySlots` keyspace for every other family. The
+        /// box delegates `Hash`/`Eq`/`Clone` to the `Arc`, so the family
+        /// IDENTITY is unchanged.
+        path: Box<Arc<[Arc<str>]>>,
         resolve_env_hash: crate::semantic_query::HashValue,
         /// Surface-provenance dimension. `build_typeof` lowers the value's
         /// annotation / shape under the full projection-reduction context,
@@ -1669,10 +1678,12 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         ),
         SemanticQueryKey::TypeOf {
             value_root,
+            path,
             context,
         } => (
             FamilyKey::TypeOf {
                 value_root: value_root.clone(),
+                path: Box::new(Arc::clone(path)),
                 resolve_env_hash: context.resolve_env_hash,
                 provenance: context.projection_reduction.provenance,
                 merge_role: context.projection_reduction.merge_role,

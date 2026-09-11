@@ -1064,7 +1064,7 @@ pub fn audit_key_for_node(
             IndexKey::Computed(n) => format!("IndexedAccess({}[<type:{}>])", object.0, n.0),
         },
         SemanticNodeData::Mapped { source, .. } => format!("Mapped(source={})", source.0),
-        SemanticNodeData::TypeOf(_) => {
+        SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_) => {
             let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
             format!(
                 "TypeOf({}::{},path[{}])",

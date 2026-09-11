@@ -4,15 +4,18 @@
 //! non-admission, warm-hit identity, content-version keying, and the
 //! empty-fact-rail pin (no slice identity in `ReadSetSignature.facts`).
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use verter_semantic::analysis::flow::flow_ir::{FlowExprShape, FlowObjectEntry, FlowObjectKey};
 use verter_semantic::analysis::flow::peeker::{FlowSliceBudget, FlowSliceBudgetAxis};
 use verter_semantic::analysis::flow::{
-    build_function_body_skeleton, FunctionBodySkeleton, FunctionBodySource,
+    build_indexed_function_body_skeleton, FunctionBodySkeleton, FunctionBodySource,
 };
-use verter_semantic::analysis::function_program::{FunctionDeclarationRef, FunctionProgramKey};
+use verter_semantic::analysis::function_program::{
+    build_function_program_index, FunctionDeclarationRef, FunctionProgramKey,
+};
+use verter_semantic::analysis::top_level_owners::TopLevelOwnerTable;
 use verter_semantic::facts::SymbolSpace;
 use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::TopLevelOwnerId;
@@ -24,7 +27,7 @@ use crate::semantic_query::SemanticQueryApi as _;
 use crate::types::HostConfig;
 use crate::VerterHost;
 
-fn skeleton_of(source: &str) -> FunctionBodySkeleton {
+fn prepared_of(source: &str) -> PreparedFunctionBodySkeleton {
     let allocator = oxc_allocator::Allocator::default();
     let source_type = oxc_span::SourceType::ts();
     let ret = oxc_parser::Parser::new(&allocator, source, source_type).parse();
@@ -33,14 +36,26 @@ fn skeleton_of(source: &str) -> FunctionBodySkeleton {
         "fixture must parse: {:?}",
         ret.errors
     );
+    let owners = TopLevelOwnerTable::ordinary_file(ret.program.body.len());
+    let index =
+        build_function_program_index(&ret.program, source, &owners, Arc::from("/fixture.ts"));
     for statement in &ret.program.body {
         if let oxc_ast::ast::Statement::FunctionDeclaration(function) = statement {
             if let Some(body_source) = FunctionBodySource::from_function(function) {
-                return build_function_body_skeleton(&body_source);
+                let entry = index
+                    .matches_named(function.id.as_ref().unwrap().name.as_str())
+                    .next()
+                    .unwrap()
+                    .entry();
+                return build_indexed_function_body_skeleton(&body_source, entry).unwrap();
             }
         }
     }
     panic!("fixture must contain a bodied function declaration");
+}
+
+fn skeleton_of(source: &str) -> FunctionBodySkeleton {
+    prepared_of(source).into_parts().0
 }
 
 /// A skeleton source over pinned `(key, source-text)` fixtures, counting
@@ -49,6 +64,7 @@ fn skeleton_of(source: &str) -> FunctionBodySkeleton {
 struct FixtureSkeletonSource {
     fixtures: Vec<(FlowSliceFunctionKey, &'static str)>,
     builds: AtomicUsize,
+    invalid_bindings: AtomicBool,
 }
 
 impl FixtureSkeletonSource {
@@ -56,6 +72,7 @@ impl FixtureSkeletonSource {
         Self {
             fixtures,
             builds: AtomicUsize::new(0),
+            invalid_bindings: AtomicBool::new(false),
         }
     }
 
@@ -65,18 +82,57 @@ impl FixtureSkeletonSource {
 }
 
 impl FlowBodySkeletonSource for FixtureSkeletonSource {
-    fn build_skeleton(
+    fn build_bundle(
         &self,
         key: &FlowSliceFunctionKey,
         _resolver: &dyn ResolverContext,
-    ) -> Option<FunctionBodySkeleton> {
-        let source = self
+    ) -> Result<Option<FlowGraphBundle>, FlowBindingMapError> {
+        let Some(source) = self
             .fixtures
             .iter()
             .find(|(fixture_key, _)| fixture_key == key)
-            .map(|(_, source)| *source)?;
+            .map(|(_, source)| *source)
+        else {
+            return Ok(None);
+        };
         self.builds.fetch_add(1, Ordering::SeqCst);
-        Some(skeleton_of(source))
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed =
+            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+        assert!(parsed.errors.is_empty(), "fixture must parse");
+        let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+        let index = build_function_program_index(
+            &parsed.program,
+            source,
+            &owners,
+            Arc::clone(&key.canonical_id),
+        );
+        let mut entry = index
+            .get(&key.function)
+            .expect("fixture function is indexed")
+            .entry()
+            .clone();
+        if self.invalid_bindings.load(Ordering::SeqCst) {
+            entry.bindings = entry.bindings[..entry.bindings.len() - 1].into();
+        }
+        let function = parsed
+            .program
+            .body
+            .iter()
+            .find_map(|statement| match statement {
+                oxc_ast::ast::Statement::FunctionDeclaration(function)
+                    if function.body.is_some() =>
+                {
+                    Some(function)
+                }
+                _ => None,
+            })
+            .expect("fixture function");
+        let prepared = build_indexed_function_body_skeleton(
+            &FunctionBodySource::from_function(function).unwrap(),
+            &entry,
+        )?;
+        Ok(Some(build_prepared_bundle(prepared)))
     }
 }
 
@@ -159,6 +215,64 @@ fn parse_key_and_language_are_function_key_axes() {
     );
 }
 
+#[test]
+fn enclosing_binding_changes_split_unchanged_child_body_bundles() {
+    fn child_key(
+        source: &str,
+    ) -> (
+        FlowSliceFunctionKey,
+        verter_semantic::analysis::function_program::FlowBindingIdentity,
+    ) {
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed =
+            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+        assert!(parsed.errors.is_empty());
+        let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+        let index = build_function_program_index(
+            &parsed.program,
+            source,
+            &owners,
+            Arc::from("/capture.ts"),
+        );
+        let root = index.matches_named("root").next().unwrap().entry();
+        let child = index
+            .nested_at(
+                &root.key,
+                verter_span::Span::new(
+                    source.find("() =>").unwrap() as u32,
+                    source.rfind("; }").unwrap() as u32,
+                ),
+            )
+            .unwrap()
+            .entry();
+        let key = FlowSliceFunctionKey {
+            function: child.key.clone(),
+            flow_body_stable_hash: child.flow_body_stable_hash,
+            flow_body_exact_hash: child.flow_body_exact_hash.unwrap(),
+            ..function_key("/capture.ts", "root", 0, source)
+        };
+        (key, child.captures.0[0].clone())
+    }
+    let (before, old_capture) = child_key("function root() { let x = 0; return () => x; }");
+    let (after, new_capture) =
+        child_key("function root() { let unused = 1; let x = 0; return () => x; }");
+    assert_eq!(before.function, after.function);
+    assert_eq!(before.flow_body_stable_hash, after.flow_body_stable_hash);
+    assert_eq!(before.flow_body_exact_hash, after.flow_body_exact_hash);
+    assert_ne!(
+        old_capture, new_capture,
+        "the ancestor declaration slot changed"
+    );
+    assert_ne!(
+        before.parse_key, after.parse_key,
+        "the served lexical source context is pinned"
+    );
+    assert_ne!(
+        before, after,
+        "an unchanged child body cannot reuse stale captured identities"
+    );
+}
+
 /// The production skeleton source verifies the exact parse identity and
 /// the runtime language row in addition to the body hashes: a key whose
 /// parse key or language row does not match the serving artifact is a
@@ -168,8 +282,7 @@ fn skeleton_source_verifies_parse_key_and_language() {
     use crate::types::UpsertRequest;
     let host = VerterHost::new_standalone(HostConfig::default());
     let canonical = "/ws/source-identity.ts";
-    let source =
-        "export function myType() { const a = new Mytype(); const b = 1; return { a, b }; }\n";
+    let source = "export function myType(p: number) { var p; const { a, b } = input; { let a = 1; } return { a, b, p }; }\n";
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some(canonical.to_string()),
         input_id: canonical.to_string(),
@@ -223,6 +336,30 @@ fn skeleton_source_verifies_parse_key_and_language() {
         stores.skeleton_for(&key, ctx).is_some(),
         "the key whose source axes match the served artifact is served"
     );
+    let first = stores.bound_graph_for(&key).expect("built graph is bound");
+    let bindings = &first.bundle().bindings;
+    assert_eq!(bindings.function(), &entry.key);
+    assert_eq!(bindings.value_count(), entry.bindings.len());
+    for (slot, record) in entry.bindings.iter().enumerate() {
+        let local = bindings
+            .declaration_at_span(verter_semantic::analysis::flow::FrameSpan::rebase(
+                entry.span.start,
+                record.span,
+            ))
+            .expect("every indexed declaration has its exact skeleton binding");
+        let identity = bindings
+            .identity(local)
+            .expect("value declaration identity");
+        assert_eq!(identity.binding_slot as usize, slot);
+        assert_eq!(identity.name, record.name);
+        assert_eq!(identity.kind, record.kind);
+    }
+    let repeated = stores.bound_graph_for(&key).expect("warm graph is bound");
+    assert!(
+        Arc::ptr_eq(bindings, &repeated.bundle().bindings),
+        "all demands share the map built from the pinned retained index"
+    );
+    assert_eq!(stores.graphs().build_count(), 1);
 
     // Only the parse key changes: a real parse identity of other content.
     let foreign_parse_key = FlowSliceFunctionKey {
@@ -255,8 +392,8 @@ fn skeleton_source_verifies_parse_key_and_language() {
 
 #[test]
 fn flow_slice_identity_uses_only_the_shared_build_fingerprint() {
-    let baseline = function_key("/same.ts", "same", 7, MYTYPE_FIXTURE);
-    let repeated = function_key("/same.ts", "same", 7, MYTYPE_FIXTURE);
+    let baseline = function_key("/same.ts", "myType", 7, MYTYPE_FIXTURE);
+    let repeated = function_key("/same.ts", "myType", 7, MYTYPE_FIXTURE);
     let changed = FlowSliceFunctionKey {
         build_toolchain_fingerprint: crate::build_toolchain_fingerprint::fingerprint_for_test(0x9a),
         ..baseline.clone()
@@ -347,7 +484,7 @@ fn peek_reports_none_before_build_and_the_memoized_skeleton_after() {
         FlowSliceBudget::default(),
     );
 
-    // Discriminates: a `peek` that fell through to `source.build_skeleton`
+    // Discriminates: a `peek` that fell through to `source.build_bundle`
     // on a miss would silently become `get_or_build` under a different
     // name, defeating the whole point of a non-blocking observation
     // backing primitive.
@@ -360,6 +497,7 @@ fn peek_reports_none_before_build_and_the_memoized_skeleton_after() {
     let built = rig
         .graphs
         .get_or_build(&key, rig.source.as_ref(), &rig.host as &dyn ResolverContext)
+        .expect("valid fixture correspondence")
         .expect("fixture key must build");
     assert_eq!(rig.source.build_calls(), 1);
 
@@ -370,6 +508,37 @@ fn peek_reports_none_before_build_and_the_memoized_skeleton_after() {
     );
     // A second peek does not build again.
     assert_eq!(rig.source.build_calls(), 1);
+}
+
+#[test]
+fn invalid_binding_correspondence_never_publishes_or_caches_absence() {
+    let key = function_key("/invalid-bindings.ts", "myType", 1, MYTYPE_FIXTURE);
+    let rig = rig(
+        vec![(key.clone(), MYTYPE_FIXTURE)],
+        FlowSliceBudget::default(),
+    );
+    rig.source.invalid_bindings.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        rig.graphs
+            .get_or_build(&key, rig.source.as_ref(), &rig.host),
+        Err(FlowBindingMapError::MissingDeclaration)
+    ));
+    let demand = hash_key(key.clone(), &["b"]);
+    for _ in 0..2 {
+        assert!(lookup(rig.hash_node.as_ref(), demand.clone(), &rig.host).is_none());
+        assert!(rig.graphs.peek(&key).is_none());
+        assert!(rig.hash_node.published_entry(&demand).is_none());
+    }
+    assert_eq!(rig.graphs.build_count(), 0);
+    assert_eq!(rig.source.build_calls(), 3, "invalid builds remain cold");
+    assert_eq!(rig.lowered_node.entry_count(), 0);
+
+    rig.source.invalid_bindings.store(false, Ordering::SeqCst);
+    assert!(lookup(rig.hash_node.as_ref(), demand, &rig.host).is_some());
+    let recovered = rig.graphs.bound_graph(&key).expect("valid retry publishes");
+    assert_eq!(recovered.bundle().bindings.value_count(), 2);
+    assert_eq!(rig.graphs.build_count(), 1);
+    assert_eq!(rig.source.build_calls(), 4);
 }
 
 /// `FlowSliceStores::peek_skeleton_for` — the store-level wrapper's
@@ -547,9 +716,21 @@ pub(crate) fn two_demands_one_function_flow_graph_build() {
     let ctx: &dyn ResolverContext = &rig.host;
 
     let key_a = hash_key(function.clone(), &["a"]);
-    let key_b = hash_key(function, &["b"]);
+    let key_b = hash_key(function.clone(), &["b"]);
     let planned_a = planned(lookup(rig.hash_node.as_ref(), key_a.clone(), ctx).expect("a"));
+    let first = rig
+        .graphs
+        .bound_graph(&function)
+        .expect("first demand builds");
     let planned_b = planned(lookup(rig.hash_node.as_ref(), key_b.clone(), ctx).expect("b"));
+    let second = rig
+        .graphs
+        .bound_graph(&function)
+        .expect("second demand reuses");
+    assert!(Arc::ptr_eq(
+        &first.bundle().bindings,
+        &second.bundle().bindings
+    ));
     assert_ne!(
         planned_a, planned_b,
         "distinct demands select distinct slices"
@@ -600,6 +781,7 @@ fn budget_exceeded_admits_nothing_at_any_layer() {
     let tiny = FlowSliceBudget {
         max_return_sites: 256,
         max_selected_nodes: 1,
+        ..FlowSliceBudget::default()
     };
     let rig = rig(vec![(function.clone(), MYTYPE_FIXTURE)], tiny);
     let ctx: &dyn ResolverContext = &rig.host;
@@ -924,7 +1106,8 @@ pub(crate) fn flow_slice_is_graph_reachability_not_procedural_walk() {
     let skeleton = skeleton_of(
         "function f(u: number) { const b = 1; const dead = mystery(u); return { a: dead, b } }",
     );
-    let graph = verter_semantic::analysis::flow::flow_graph::build_function_flow_graph(&skeleton);
+    let graph =
+        verter_semantic::analysis::flow::flow_graph::build_function_flow_graph_for_test(&skeleton);
 
     // Resolve every asserted node id BEFORE the skeleton is dropped.
     let object_site = skeleton.return_sites[0].argument.expect("return argument");
@@ -1011,7 +1194,8 @@ pub(crate) fn flow_graph_effect_edges_stay_live_past_value_writes() {
 
     let skeleton =
         skeleton_of(r#"function f(x: string) { return { a: (x = "s"), b: x.toUpperCase() } }"#);
-    let graph = verter_semantic::analysis::flow::flow_graph::build_function_flow_graph(&skeleton);
+    let graph =
+        verter_semantic::analysis::flow::flow_graph::build_function_flow_graph_for_test(&skeleton);
     let demand = SliceDemand::for_return_projection(&skeleton, &[Arc::<str>::from("b")]);
     let plan = ReturnPathPeeker::new(&graph)
         .plan(&demand, &FlowSliceBudget::default())
@@ -1062,7 +1246,7 @@ pub(crate) fn flow_graph_effect_edges_stay_live_past_value_writes() {
 /// route lookup, or imported-fact observation. Rails:
 ///
 /// - STRUCTURAL: `build_function_body_skeleton(&FunctionBodySource)` and
-///   `build_function_flow_graph(&FunctionBodySkeleton)` take no resolver,
+///   `build_function_flow_graph(&PreparedFunctionBodySkeleton)` take no resolver,
 ///   no store view, and no dispatch handle — resolution is unreachable
 ///   from the build path at compile time; and both artifacts are
 ///   `NoTypeExpr` (asserted below), so no lowered type can be STORED.
@@ -1094,7 +1278,9 @@ pub(crate) fn flow_graph_build_is_shallow_interned_no_lowering_lazy_regions() {
         || {
             let skeleton = skeleton_of(source);
             let graph =
-                verter_semantic::analysis::flow::flow_graph::build_function_flow_graph(&skeleton);
+                verter_semantic::analysis::flow::flow_graph::build_function_flow_graph_for_test(
+                    &skeleton,
+                );
             assert!(graph.node_count() > 0, "the build produced a real graph");
         },
     );

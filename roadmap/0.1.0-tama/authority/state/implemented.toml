@@ -6,32 +6,20 @@ schema = 2
 # commit_message, commit_date, and optionally pull_request) is the complete
 # implementation fact. Evidence fields are loose human locators; tooling never
 # resolves or validates them against Git, content, ancestry, or GitHub.
+# status = "cancelled" (with an optional reason) retires a node whose work
+# will never land under this identity: it is never READY, and descendants
+# treat it as settled; flipping it back to "pending" reopens it.
 # Serialization is canonical: nodes sorted by id, one line per node, so
 # independent transitions merge mechanically. [[github_issue]] rows map
 # node_id to gh_issue; sync_to_github is one-way-refresh policy only and never
 # affects readiness. [[github_train_issue]] rows map train parents.
 
 [implementation]
-"SIMP1" = { status = "pending" }
-"SIMP2" = { status = "pending" }
-"SIMP3" = { status = "pending" }
-"SIMP4" = { status = "pending" }
-"SIMP5" = { status = "pending" }
-"SIMP6" = { status = "pending" }
-"SIMP7" = { status = "pending" }
-"SIMP8" = { status = "pending" }
-"SIMP9" = { status = "pending" }
-"SIMP10" = { status = "pending" }
-"SIMP11" = { status = "pending" }
-"SIMP12" = { status = "pending" }
-"SIMP13" = { status = "pending" }
-"SIMP14" = { status = "pending" }
-"SIMP15" = { status = "pending" }
 
 "A0" = { status = "implemented", commit_message = "chore(*): add the architecture-lock program documents, state validator, and gate wiring", commit_date = "2026-08-10T01:40:28+01:00" }
 "A1" = { status = "implemented", commit_message = "docs(*): reference command-truth evidence in the capability matrix", commit_date = "2026-08-10T08:17:25+01:00" }
 "A2" = { status = "implemented", commit_message = "test(session): strengthen the U6 flow-return corpus with recursive expectations, a fully modelled two-call boundary, checker-syntax semantic cross-validation, and per-clause comparator controls", commit_date = "2026-08-10T17:18:39+01:00" }
-"A2C" = { status = "pending" }
+"A2C" = { status = "cancelled", reason = "superseded: retired completion predecessor, deferred to D6" }
 "A3" = { status = "implemented", commit_message = "fix(session): retract unsupported flow-return results from warm admission", commit_date = "2026-08-11T15:42:17+01:00" }
 "A4" = { status = "implemented", commit_message = "feat(audit): install measurement-only work-attribution substrate and capture baseline", commit_date = "2026-08-12T00:12:56+01:00" }
 "A5" = { status = "implemented", commit_message = "docs(arch): accept the current-owner inventories and the implementation lock record into the program ledger", commit_date = "2026-08-12T08:32:50+01:00" }
@@ -47,7 +35,7 @@ schema = 2
 "B5" = { status = "implemented", commit_message = "feat(core): expose the accepted framework algorithms through one direct core", commit_date = "2026-08-22T16:48:49+01:00" }
 "B6" = { status = "implemented", commit_message = "perf(core): group batch items by map probe instead of a linear scan", commit_date = "2026-08-24T18:43:38+01:00" }
 "BA0" = { status = "implemented", commit_message = "fix(core): make a compile request atomic over the products it asks for", commit_date = "2026-08-17T23:47:24+01:00" }
-"BCSS0" = { status = "pending" }
+"BCSS0" = { status = "cancelled", reason = "superseded: the charter is a v2 identity wrapper for history already landed under the Rev11 compiler foundation" }
 "BF1" = { status = "implemented", commit_message = "chore(arch): freeze the oracle-manifest enumeration performance cells", commit_date = "2026-08-12T17:05:21+01:00" }
 "BF2" = { status = "implemented", commit_message = "fix(meta): correct three official-invocation option-propagation defects and rebuild the mapping axis on authored-source truthfulness", commit_date = "2026-08-14T19:02:10+01:00" }
 "BF3" = { status = "implemented", commit_message = "docs(arch): record the maintainer act closing the two held-open review items", commit_date = "2026-08-17T12:53:47+01:00" }
@@ -127,7 +115,7 @@ schema = 2
 "CCA1O4D" = { status = "implemented", commit_message = "refactor(napi): delete the legacy compile-profile surface", commit_date = "2026-09-06T10:20:00+01:00" }
 "CCA1O5" = { status = "implemented", commit_message = "feat(play): migrate playground compile onto the typed WASM host request", commit_date = "2026-09-04T02:15:00+01:00", pull_request = 484 }
 "CCA1O5D" = { status = "implemented", commit_message = "refactor(wasm): delete the legacy compile-profile routes", commit_date = "2026-09-05T11:10:48+01:00", pull_request = 504 }
-"CCA1T1" = { status = "pending" }
+"CCA1T1" = { status = "implemented", commit_message = "refactor(core): delete the dynamic compiler registry", commit_date = "2026-09-10T14:56:00+01:00" }
 "CCA1T2" = { status = "pending" }
 "CCA1T2S" = { status = "pending" }
 "CCA1T2V" = { status = "pending" }
@@ -189,17 +177,17 @@ schema = 2
 "D2B" = { status = "implemented", commit_message = "feat(session): route flow-return admission through the sole completeness proof", commit_date = "2026-08-30T17:32:00+01:00" }
 "D2C" = { status = "implemented", commit_message = "feat(session): explain flow-return partiality in the audit payload", commit_date = "2026-09-02T09:00:00+01:00" }
 "D2D" = { status = "implemented", commit_message = "feat(session): make every surface producer return a typed resolution outcome", commit_date = "2026-09-01T19:15:00+01:00" }
-"D3C" = { status = "pending" }
+"D3C" = { status = "implemented", commit_message = "feat(session): flow product worklist cutover", commit_date = "2026-09-05T20:00:00+01:00" }
 "D3I" = { status = "implemented", commit_message = "feat(flowslice): complete stable binding identity", commit_date = "2026-09-05T11:21:01Z", pull_request = 503 }
-"D3P" = { status = "pending" }
-"D3R" = { status = "pending" }
+"D3P" = { status = "implemented", commit_message = "feat(session): flow product lattice substrate", commit_date = "2026-09-05T12:00:00+01:00" }
+"D3R" = { status = "implemented", commit_message = "feat(session): nominal relation authority for unique-symbol identity and comparability", commit_date = "2026-09-04T02:30:00+01:00" }
 "D4" = { status = "pending" }
 "D5" = { status = "pending" }
 "D6" = { status = "pending" }
 "D7" = { status = "pending" }
 "D8" = { status = "pending" }
 "DEM0" = { status = "pending" }
-"E1" = { status = "pending" }
+"E1" = { status = "implemented", commit_message = "feat(typeinfo): resolve-symbol graph operation with bounded SemanticTypeGraph export", commit_date = "2026-09-05T01:30:00+01:00" }
 "E2" = { status = "pending" }
 "E3" = { status = "pending" }
 "E4" = { status = "pending" }
@@ -384,7 +372,22 @@ schema = 2
 "SCP5" = { status = "pending" }
 "SCP6" = { status = "pending" }
 "SCP7" = { status = "pending" }
-"SG0" = { status = "pending" }
+"SG0" = { status = "implemented", commit_message = "ci(ci): execute the shipped configuration in the canonical gate and CI", commit_date = "2026-09-08T00:00:00+01:00" }
+"SIMP1" = { status = "pending" }
+"SIMP10" = { status = "implemented", commit_message = "refactor(core): assemble SSR properties from keys and values", commit_date = "2026-09-09T12:00:00+01:00" }
+"SIMP11" = { status = "pending" }
+"SIMP12" = { status = "pending" }
+"SIMP13" = { status = "pending" }
+"SIMP14" = { status = "pending" }
+"SIMP15" = { status = "pending" }
+"SIMP2" = { status = "pending" }
+"SIMP3" = { status = "pending" }
+"SIMP4" = { status = "pending" }
+"SIMP5" = { status = "pending" }
+"SIMP6" = { status = "pending" }
+"SIMP7" = { status = "implemented", commit_message = "perf(lsp): reuse one source index per provider response batch", commit_date = "2026-09-10T12:00:00+01:00" }
+"SIMP8" = { status = "pending" }
+"SIMP9" = { status = "pending" }
 "SKL0" = { status = "pending" }
 "SKL1" = { status = "pending" }
 "SKL2" = { status = "pending" }
@@ -407,7 +410,7 @@ schema = 2
 "TCM0" = { status = "pending" }
 "TCM0R" = { status = "implemented", commit_message = "fix(*): deduplicate the canonical set field and ratify the TypeScript dual-plane contract", commit_date = "2026-09-04T18:00:00+01:00", pull_request = 477 }
 "TCM1" = { status = "implemented", commit_message = "feat(core): dual-surface mapping product inside CodeTransform", commit_date = "2026-09-05T00:00:00+01:00" }
-"TCM2" = { status = "pending" }
+"TCM2" = { status = "implemented", commit_message = "feat(mapping-geometry): content-mapper projection plane", commit_date = "2026-09-09T12:00:00+01:00" }
 "TCM3" = { status = "pending" }
 "TCM4" = { status = "pending" }
 "TE1" = { status = "implemented", commit_message = "feat: sealed semantic operands and forcing boundary", commit_date = "2026-09-04T01:30:00+01:00", pull_request = 474 }

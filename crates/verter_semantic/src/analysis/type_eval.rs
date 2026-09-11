@@ -75,6 +75,10 @@ pub struct TypeDeclInfo {
     /// [`DeclHeaderIndex`](crate::analysis::decl_headers::DeclHeaderIndex)
     /// mirror) read THIS inventory; they never walk a body.
     pub direct_member_headers: Arc<[MemberHeaderFact]>,
+    /// Statically-named members of this type whose authored annotations are
+    /// exactly `unique symbol`. Copied onto a value whose annotation names
+    /// this type so `typeof C.K` keeps the member's own identity.
+    pub unique_symbol_members: Arc<[String]>,
 }
 
 /// An ordered group of same-name type declaration contributors, in

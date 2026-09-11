@@ -8,8 +8,8 @@
 //!   truth for generated-code edits) and NEVER post-hoc string-munges the
 //!   built output. Seeded with a negative self-test.
 //! - `carrier_descriptors_have_compilers` — every carrier-bearing session
-//!   descriptor has a registered `CarrierCompiler` in the compiler-side
-//!   registry (Vue-through-the-bridge satisfies it). RED if the registry
+//!   descriptor has a registered frontend in the compiler-side immutable
+//!   catalog (Vue-through-the-bridge satisfies it). RED if the catalog
 //!   lands without the Vue bridge registration.
 //! - `non_vue_api_projector_has_no_dispatch_or_oxc` — the Svelte declaration
 //!   renderer consumes cached AST facts and the shared framework-surface
@@ -178,16 +178,16 @@ fn carrier_descriptors_have_compilers() {
     // The compiler-completeness leg split out of B5's
     // `framework_registry_complete`: EVERY carrier-bearing session
     // descriptor (a descriptor whose `carrier_language` is `Some`) MUST
-    // have a registered `CarrierCompiler` in the compiler-side registry.
+    // have a registered frontend in the immutable compiler-side catalog —
+    // the SAME catalog `project_registered_accepted` dispatches through in
+    // production. There is no combined registry to consult any more.
     //
     // GENERALIZED: iterate every built-in descriptor and filter the
     // carrier-bearing rows, rather than hardcoding Vue. A new carrier vertical's
     // descriptor is covered automatically; if Svelte's carrier registers without
     // a compiler, this is RED.
-    use verter_compiler::framework_common::CarrierCompilerRegistry;
+    use verter_compiler::framework_common::registered_carrier_projection::registered_frontend_for;
     use verter_session::framework::descriptor::built_in_descriptors;
-
-    let registry = CarrierCompilerRegistry::built_in();
 
     let carrier_bearing: Vec<_> = built_in_descriptors()
         .into_iter()
@@ -200,31 +200,19 @@ fn carrier_descriptors_have_compilers() {
     );
 
     for descriptor in &carrier_bearing {
-        assert!(
-            registry.contains(&descriptor.id),
-            "the carrier-bearing descriptor `{}` MUST have a registered CarrierCompiler — \
-             a carrier registered without a compiler",
-            descriptor.id
-        );
-        // The registered compiler answers to the descriptor's adapter id, AND it
-        // serves the descriptor's carrier language (the full carrier-row gate).
+        // The catalog frontend row answers to the EXACT (adapter id, carrier
+        // language) pair — a same-adapter non-carrier row never matches.
         let carrier_language = descriptor
             .carrier_language
             .as_ref()
             .expect("filtered to carrier-bearing");
-        let compiler = registry
-            .compiler_for_carrier_language(&descriptor.id, carrier_language)
-            .unwrap_or_else(|| {
-                panic!(
-                    "carrier-bearing descriptor `{}` ({}) has no compiler for its carrier language",
-                    descriptor.id, carrier_language
-                )
-            });
-        assert_eq!(
-            compiler.adapter_id(),
-            descriptor.id,
-            "the registered compiler's adapter id must match the descriptor's"
-        );
+        registered_frontend_for(&descriptor.id, carrier_language).unwrap_or_else(|| {
+            panic!(
+                "carrier-bearing descriptor `{}` ({}) has no registered catalog frontend — \
+                 a carrier registered without a compiler",
+                descriptor.id, carrier_language
+            )
+        });
     }
 }
 

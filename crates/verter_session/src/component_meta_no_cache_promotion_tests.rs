@@ -374,6 +374,7 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
             Default::default(),
             Default::default(),
         ),
+        path: Arc::from([]),
         context: TypeOfContext::new(context, Default::default()),
     };
     let result = dispatch.execute_read(typeof_key);

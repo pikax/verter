@@ -1,45 +1,8 @@
 /**
- * The control lane.
- *
- * The instrument suite re-applies the negative controls whose bound record runs
- * under `node`. This lane re-applies the rest — the records that run under
- * `cargo`, the one whose command IS the instrument suite, and the command-shaped
- * controls beside them, whose mutation is an argument rather than a file edit.
- * Both halves use the same plant/run/restore routine, and the instrument suite
- * resolves the partition between them, so a control cannot be owned by neither
- * lane and this one cannot quietly cover a subset of what it claims.
- *
- * Two reasons the split is here rather than one suite:
- *
- *   - The roadmap job runs on a checkout with no Rust toolchain and a budget
- *     sized for node tools. Folding cargo re-application into it would either
- *     fail for a missing runner or turn into the skip this register refuses
- *     everywhere else. A separate job installs the toolchain and pays the build
- *     once, under a budget of its own that this lane's deadlines nest inside.
- *   - The control whose command is the instrument suite cannot be driven BY the
- *     instrument suite: that re-enters it. Driven from here it terminates by
- *     construction — the suite this lane spawns drives no control whose command
- *     is itself.
- *
- * The mirror is the whole repository minus its build and dependency output,
- * because a cargo record resolves a workspace rather than a file list. Every
- * installed `node_modules` tree — the repository root and each workspace
- * package's own tree — is linked in rather than copied: a re-applied cargo
- * record can run tests that resolve the workspace's JavaScript toolchain
- * (including nested package `node_modules` canonicalization), and linking keeps
- * the mirror a mutation copy without multiplying gigabytes of installed
- * output. A mutation belongs in a copy, never in the tree under review, where
- * an interrupted run would leave it behind as a real edit.
- *
- * One delegated record transcribes counters shaped by the platform they were
- * taken on: its three-package selection contains a `#[cfg(target_os)]`-gated
- * set, so selected, executed, and skipped all move together when the host
- * compiles a different set. The clean run is therefore not held to that
- * transcript. It is held to the tree's own inventory of the selection, listed
- * by the same runner on the same host, so a lane run on any platform judges
- * the run it made against the cases that host compiles, and an unexpected
- * skip is one the inventory does not mark ignored rather than one that moves
- * a number transcribed on another OS.
+ * On-demand repository mutation replay. This entry is run explicitly from the
+ * Closure Control Replay workflow, never as a routine merge requirement.
+ * It drives all recorded controls in a disposable repository mirror. Focused
+ * tests for the driver live in closure-replay.test.mjs and run in normal CI.
  */
 
 import assert from "node:assert/strict";
@@ -51,12 +14,10 @@ import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  CONTROL_LANE,
   CONTROL_LANE_COMMAND_DEADLINE_MS,
   CONTROL_LANE_DEADLINE_MS,
   CONTROL_LANE_ENTRY,
   MIRROR_OUTPUT_BASENAMES,
-  controlsFor,
   freshenMirrorTimestamps,
   installedModuleRelatives,
   linkInstalledModuleTrees,
@@ -166,6 +127,44 @@ function mirrorRepository() {
   return root;
 }
 
+test("a fresh mirror is younger than any artifact the replay's target directory holds", () => {
+  // `fs.cpSync` preserves timestamps on Windows, so a mirror copied from the
+  // checkout carries mtimes older than the artifact a previous run built from
+  // a planted source, and cargo reuses that artifact for the clean run. The
+  // copy is therefore re-stamped, files only, without following the linked
+  // dependency trees or descending into output basenames.
+  const src = fs.mkdtempSync(path.join(os.tmpdir(), "ctl-stamp-src-"));
+  const dest = fs.mkdtempSync(path.join(os.tmpdir(), "ctl-stamp-dest-"));
+  try {
+    const old = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    fs.mkdirSync(path.join(src, "crates", "x", "src"), { recursive: true });
+    fs.writeFileSync(path.join(src, "crates", "x", "src", "lib.rs"), "pub fn x() {}\n");
+    fs.utimesSync(path.join(src, "crates", "x", "src", "lib.rs"), old, old);
+    fs.mkdirSync(path.join(src, "node_modules", "dep"), { recursive: true });
+    fs.writeFileSync(path.join(src, "node_modules", "dep", "index.js"), "");
+    fs.utimesSync(path.join(src, "node_modules", "dep", "index.js"), old, old);
+    fs.cpSync(src, dest, { recursive: true, filter: (s) => !EXCLUDED.has(path.basename(s)) });
+    linkInstalledModuleTrees(src, dest);
+
+    const copied = path.join(dest, "crates", "x", "src", "lib.rs");
+    const linked = path.join(dest, "node_modules", "dep", "index.js");
+    const before = Date.now();
+    freshenMirrorTimestamps(dest);
+    assert.ok(
+      fs.statSync(copied).mtimeMs >= before - 2000,
+      `a copied source still carries its checkout mtime: ${fs.statSync(copied).mtime.toISOString()}`,
+    );
+    assert.equal(
+      fs.statSync(linked).mtimeMs,
+      fs.statSync(path.join(src, "node_modules", "dep", "index.js")).mtimeMs,
+      "a linked dependency tree was re-stamped through the link",
+    );
+  } finally {
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.rmSync(src, { recursive: true, force: true });
+  }
+});
+
 test("the control-lane mirror links nested package node_modules", () => {
   // The copy filter drops every basename `node_modules`. Linking only the
   // repository root leaves `packages/<pkg>/node_modules` absent, and any cargo
@@ -208,44 +207,6 @@ test("the control-lane mirror links nested package node_modules", () => {
   } finally {
     fs.rmSync(src, { recursive: true, force: true });
     fs.rmSync(dest, { recursive: true, force: true });
-  }
-});
-
-test("a fresh mirror is younger than any artifact the lane's target directory holds", () => {
-  // `fs.cpSync` preserves timestamps on Windows, so a mirror copied from the
-  // checkout carries mtimes older than the artifact a previous run built from
-  // a planted source, and cargo reuses that artifact for the clean run. The
-  // copy is therefore re-stamped, files only, without following the linked
-  // dependency trees or descending into output basenames.
-  const src = fs.mkdtempSync(path.join(os.tmpdir(), "ctl-stamp-src-"));
-  const dest = fs.mkdtempSync(path.join(os.tmpdir(), "ctl-stamp-dest-"));
-  try {
-    const old = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    fs.mkdirSync(path.join(src, "crates", "x", "src"), { recursive: true });
-    fs.writeFileSync(path.join(src, "crates", "x", "src", "lib.rs"), "pub fn x() {}\n");
-    fs.utimesSync(path.join(src, "crates", "x", "src", "lib.rs"), old, old);
-    fs.mkdirSync(path.join(src, "node_modules", "dep"), { recursive: true });
-    fs.writeFileSync(path.join(src, "node_modules", "dep", "index.js"), "");
-    fs.utimesSync(path.join(src, "node_modules", "dep", "index.js"), old, old);
-    fs.cpSync(src, dest, { recursive: true, filter: (s) => !EXCLUDED.has(path.basename(s)) });
-    linkInstalledModuleTrees(src, dest);
-
-    const copied = path.join(dest, "crates", "x", "src", "lib.rs");
-    const linked = path.join(dest, "node_modules", "dep", "index.js");
-    const before = Date.now();
-    freshenMirrorTimestamps(dest);
-    assert.ok(
-      fs.statSync(copied).mtimeMs >= before - 2000,
-      `a copied source still carries its checkout mtime: ${fs.statSync(copied).mtime.toISOString()}`,
-    );
-    assert.equal(
-      fs.statSync(linked).mtimeMs,
-      fs.statSync(path.join(src, "node_modules", "dep", "index.js")).mtimeMs,
-      "a linked dependency tree was re-stamped through the link",
-    );
-  } finally {
-    fs.rmSync(dest, { recursive: true, force: true });
-    fs.rmSync(src, { recursive: true, force: true });
   }
 });
 
@@ -332,14 +293,13 @@ test("delegated commands discard cached trybuild fixture results", () => {
 });
 
 test(
-  "every control the instrument suite delegates is re-applied and refused",
+  "every recorded control is re-applied and refused on demand",
   { timeout: CONTROL_LANE_DEADLINE_MS },
   (t) => {
     const laneStarted = Date.now();
     const { model } = analyze(PACKAGE_ROOT);
-    const instrumentEntry = "roadmap/0.1.0-tama/tools/closure-register.test.mjs";
-    const owned = controlsFor(model, CONTROL_LANE, instrumentEntry);
-    assert.ok(owned.length >= 1, "the live register delegates no control to this lane");
+    const owned = model.register.control;
+    assert.ok(owned.length >= 1, "the live register declares no controls to replay");
 
     const runners = new Set(
       owned.map(
@@ -436,7 +396,7 @@ test(
     assert.equal(
       reApplied,
       owned.length,
-      `every delegated control must be re-applied; ran ${reApplied} of ${owned.length}`,
+      `every recorded control must be re-applied; ran ${reApplied} of ${owned.length}`,
     );
 
     // The lane mirrors the repository from scratch on every run and its cargo
@@ -447,12 +407,12 @@ test(
     // discovering it as a runner kill months later.
     const elapsed = Date.now() - laneStarted;
     t.diagnostic(
-      `re-applied ${reApplied} delegated controls in ${elapsed}ms, ${Math.round((elapsed / CONTROL_LANE_DEADLINE_MS) * 100)}% of this lane's ${CONTROL_LANE_DEADLINE_MS}ms deadline`,
+      `re-applied ${reApplied} recorded controls in ${elapsed}ms, ${Math.round((elapsed / CONTROL_LANE_DEADLINE_MS) * 100)}% of this lane's ${CONTROL_LANE_DEADLINE_MS}ms deadline`,
     );
   },
 );
 
-test("this lane is the file the instrument suite delegates to", () => {
+test("the replay entry matches the declared command", () => {
   // `fileURLToPath`, never `URL.pathname`: a pathname is percent-encoded, so a
   // checkout under a directory containing a space, `#`, `%` or `?` yields
   // `.../Jane%20Doe/...` and this comparison fails on a developer machine while

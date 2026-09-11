@@ -27,8 +27,9 @@ use oxc_allocator::Allocator;
 use verter_compiler::framework_common::carrier_compiler::{
     CarrierCompiler, RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
 };
+use verter_compiler::framework_common::registered_carrier_projection::project_registered_accepted;
 use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-use verter_compiler::framework_common::{CarrierCompilerRegistry, FrameworkParseArtifact};
+use verter_compiler::framework_common::FrameworkParseArtifact;
 use verter_compiler::style_planner::{
     run_vue_style_cascade, transform_vue_v_bind, AuthoredStyleInput, StyleRewriteOutcome,
 };
@@ -491,8 +492,7 @@ fn registered_artifact(canonical: &str, source: &str) -> FrameworkParseArtifact 
     let accepted = grammar_authority
         .accept_registered_source(&source_authority, &snapshot, &config)
         .expect("accepted source");
-    CarrierCompilerRegistry::built_in()
-        .project_registered(&accepted)
+    project_registered_accepted(&accepted)
         .expect("registered projection")
         .into_framework_parse_artifact()
 }

@@ -379,7 +379,7 @@ pnpm vitest --run                            # All tests (non-watch)
 pnpm vitest --run path/to/test.spec.ts       # Specific file
 
 # Rust — CANONICAL agent gate
-node scripts/gate.mjs                         # Canonical provider-free core Rust gate: one workspace archive/list, then the serialized wasm JS-boundary lane (the workspace's `#[wasm_bindgen_test]` cases on `wasm32-unknown-unknown` through `wasm-bindgen-test-runner`) and one filtered nextest run; BOTH receipts are required for the verdict. Real providers, Svelte conformance, compile contracts, and proto regeneration freshness have dedicated CI lanes. The shipped-cfg lane is currently SKIPPED and disclosed on every run.
+node scripts/gate.mjs                         # Canonical provider-free core Rust gate: one workspace archive/list, then the serialized wasm JS-boundary lane (the workspace's `#[wasm_bindgen_test]` cases on `wasm32-unknown-unknown` through `wasm-bindgen-test-runner`) and one filtered nextest run; BOTH receipts are required for the verdict. It also runs the shipped-cfg lane (`cargo check --workspace --all-targets --profile no-debug-assertions` then `cargo nextest run -p verter_shipped_cfg_contract --cargo-profile no-debug-assertions`); its receipt is required for the verdict too. Real providers, Svelte conformance, compile contracts, and proto regeneration freshness have dedicated CI lanes.
 node scripts/gate.mjs --exhaustive            # CI/complete core diagnostics: same core universe, with `--no-fail-fast`.
 node scripts/compile-contracts.mjs             # Standalone trybuild compile contracts; no Rust test targets.
 pnpm proto:check                               # Pinned buf + oxfmt regeneration freshness.
@@ -395,14 +395,13 @@ cargo test --package verter_compiler test_name   # Specific Rust test
 # a runtime `HostConfig.metrics_enabled` toggle, not a Cargo feature) and the skip no longer reproduces —
 # confirmed by diffing the built executable sets of `cargo test --workspace --tests --no-run -v` against
 # `cargo test -p verter_session --tests --no-run -v` (same verter_session executables in both). Still run
-# `node scripts/gate.mjs` as the sole Rust gate regardless (Surface 1; the shipped-cfg guard is currently
-# skipped and disclosed). Bare `--workspace --tests` and plain `cargo nextest run --workspace` are not
-# that gate.
+# `node scripts/gate.mjs` as the sole Rust gate regardless (Surface 1 plus the shipped-cfg guard). Bare
+# `--workspace --tests` and plain `cargo nextest run --workspace` are not that gate.
 cargo test --package verter_compiler 2>&1 | tail -60  # Full suite with truncated output
 ```
 
 The bare gate is the local fail-fast policy: nextest stops scheduling after its first failure. A PASS means
-provider-free core Surface 1 passed; the shipped-cfg guard is currently skipped and is disclosed on every run. Use `--exhaustive`
+provider-free core Surface 1 AND the shipped-cfg guard both passed. Use `--exhaustive`
 when the red run itself must collect every Surface 1 failure; CI and release always pass it explicitly.
 
 **Oversize-source advisory:** `scripts/gate.mjs` scans production Rust sources and warns for each
@@ -434,7 +433,7 @@ node scripts/compile-contracts.mjs
 pnpm proto:check
 cargo test --no-fail-fast -p verter_svelte_conformance --features conformance-tests --lib --bin verter_svelte_conformance --test main -- --test-threads=4
 cargo clippy --workspace --all-targets -- -D warnings
-cargo check --workspace --release   # Compiles the REAL release profile (opt-level 3 + fat LTO), which the gate does not: surface 1 is debug, and the shipped-cfg lane (cheap `no-debug-assertions` profile) is currently skipped. `debug_assert!` gates on `cfg!` — a RUNTIME constant — so its body still name-resolves in release: a `#[cfg(debug_assertions)]` helper called inside one is an E0425 in every release build (napi and wasm artifacts included) while compiling clean in debug. This is a CHECK — it RUNS NO TESTS, so it CANNOT observe the runtime half of the same class (a state mutation written inside a `debug_assert!` argument, which compiles fine and silently never executes in a shipped build). That half is covered only by `verter_shipped_cfg_contract` under `no-debug-assertions`, which the gate currently skips. Do not read a green `cargo check --workspace --release` as coverage of `debug_assert!` behaviour.
+cargo check --workspace --release   # Compiles the REAL release profile (opt-level 3 + fat LTO), which the gate does not: surface 1 is debug and the shipped-cfg lane uses the cheap `no-debug-assertions` profile. `debug_assert!` gates on `cfg!` — a RUNTIME constant — so its body still name-resolves in release: a `#[cfg(debug_assertions)]` helper called inside one is an E0425 in every release build (napi and wasm artifacts included) while compiling clean in debug. This is a CHECK — it RUNS NO TESTS, so it CANNOT observe the runtime half of the same class (a state mutation written inside a `debug_assert!` argument, which compiles fine and silently never executes in a shipped build). That half is covered by `verter_shipped_cfg_contract` under `no-debug-assertions`, which the gate runs as its shipped-cfg lane. Do not read a green `cargo check --workspace --release` as coverage of `debug_assert!` behaviour.
 cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings   # Host clippy cannot see target-gated code. The wasm32 artifact is what the playground and `@verter/wasm` consumers run. The `wasm32-wasip1`/`wasip2` clippy jobs cover the SEPARATE lapce/zed manifests, not this one.
 cargo fmt --all --check
 pnpm install --frozen-lockfile   # Verify the lockfile and pinned JavaScript tooling CI consumes.
@@ -448,7 +447,7 @@ evidence about the one CI uses.
 
 For TypeScript changes, also run `pnpm test`. Do not skip workspace-wide testing even for "small" changes.
 
-**Agent test policy:** `node scripts/gate.mjs` is the default local provider-free Rust gate; `--exhaustive` changes failure collection only. The wasm JS-boundary lane is REQUIRED on every real invocation, bare and exhaustive, and is never path-filtered: a missing `wasm32-unknown-unknown` target, a missing or version-skewed `wasm-bindgen-test-runner`, an empty case inventory, an absent terminal harness result, or an executed-vs-declared case count that does not reconcile each FAIL the gate loudly (`WASM-LANE PREREQUISITE MISSING` for the prerequisites). Provide them with `rustup target add wasm32-unknown-unknown` and `cargo install wasm-bindgen-cli --version <the `wasm-bindgen` version in `crates/verter_wasm/Cargo.toml`> --locked`. The shipped-cfg lane remains temporarily skipped and disclosed. Real providers run only in the dedicated serial libtest CI jobs, Svelte conformance runs with its `conformance-tests` feature in its own job, compile-fail fixtures run via `node scripts/compile-contracts.mjs`, and proto regeneration freshness runs via `pnpm proto:check`. Do not run bare `cargo test --workspace` (no `--tests`) by default: it pulls in doctests and examples. Run doctests only when rustdoc examples changed or the user explicitly asks.
+**Agent test policy:** `node scripts/gate.mjs` is the default local provider-free Rust gate; `--exhaustive` changes failure collection only. The wasm JS-boundary lane is REQUIRED on every real invocation, bare and exhaustive, and is never path-filtered: a missing `wasm32-unknown-unknown` target, a missing or version-skewed `wasm-bindgen-test-runner`, an empty case inventory, an absent terminal harness result, or an executed-vs-declared case count that does not reconcile each FAIL the gate loudly (`WASM-LANE PREREQUISITE MISSING` for the prerequisites). Provide them with `rustup target add wasm32-unknown-unknown` and `cargo install wasm-bindgen-cli --version <the `wasm-bindgen` version in `crates/verter_wasm/Cargo.toml`> --locked`. The shipped-cfg lane is likewise REQUIRED on every real invocation and has no skip disposition: a missing, cancelled, zero-selection, or count-mismatched shipped receipt is incomplete required coverage and FAILS the gate. Real providers run only in the dedicated serial libtest CI jobs, Svelte conformance runs with its `conformance-tests` feature in its own job, compile-fail fixtures run via `node scripts/compile-contracts.mjs`, and proto regeneration freshness runs via `pnpm proto:check`. Do not run bare `cargo test --workspace` (no `--tests`) by default: it pulls in doctests and examples. Run doctests only when rustdoc examples changed or the user explicitly asks.
 
 ### Documentation Updates
 
@@ -498,7 +497,7 @@ Planned guard: `gate_contract_integrity` — one registered suite exercising the
 
 ### Testing-Hermeticity (MANDATORY)
 
-Unit tests must only depend on locally-vendored fixtures. They must compile and run without any third-party repository (e.g., `nuxt-ui`, `element-plus`) checked out alongside this repository. Tests that need external corpora must be feature-gated (e.g., `#[cfg(feature = "external-corpus")]`) and excluded from the default canonical run (`node scripts/gate.mjs`: one workspace archive/list, then archive-backed Surface 1; the shipped-cfg lane is currently skipped).
+Unit tests must only depend on locally-vendored fixtures. They must compile and run without any third-party repository (e.g., `nuxt-ui`, `element-plus`) checked out alongside this repository. Tests that need external corpora must be feature-gated (e.g., `#[cfg(feature = "external-corpus")]`) and excluded from the default canonical run (`node scripts/gate.mjs`: one workspace archive/list, then archive-backed Surface 1 plus the shipped-cfg lane).
 
 A test that references `.integration-tests/repos/<third-party>/...` from a non-gated test file is a violation. The architecture guard `external_corpus_paths_not_present_outside_gated_tests` enforces this.
 

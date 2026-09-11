@@ -12,7 +12,6 @@ use crate::compile::RawTemplateData;
 use crate::framework_common::capability::{FrameworkSemanticAuthority, Present};
 use crate::framework_common::catalog::{SemanticCap, TypedCapabilityRegistration};
 use crate::framework_common::registered_carrier_projection::TemplateFactsProduct;
-use crate::framework_common::CarrierCompiler;
 use crate::framework_common::FrameworkParseArtifact;
 use crate::svelte::carrier::SvelteParseCarrier;
 

@@ -1192,7 +1192,13 @@ impl VerterHost {
                         ) {
                         (TscSpliceText::new(import_form), None)
                     } else {
-                        match render_tsc_testing_node(ctx, member.value, counters) {
+                        match render_tsc_testing_node(
+                            ctx,
+                            dispatch,
+                            owner_canonical,
+                            member.value,
+                            counters,
+                        ) {
                             Ok(rendered) => rendered,
                             Err(failure) => return failure.tsc(),
                         }
@@ -1257,6 +1263,7 @@ impl VerterHost {
                 let events = match tsc_emit_rows(
                     ctx,
                     dispatch,
+                    owner_canonical,
                     &surface,
                     mac,
                     payload_index,
@@ -1299,10 +1306,11 @@ impl VerterHost {
                 }))
             }
             AnalyzedMacroKind::DefineModel => {
-                let value_type = match render_tsc_node(ctx, payload, counters) {
-                    Ok(text) => text,
-                    Err(failure) => return failure.tsc(),
-                };
+                let value_type =
+                    match render_tsc_node(ctx, dispatch, owner_canonical, payload, counters) {
+                        Ok(text) => text,
+                        Err(failure) => return failure.tsc(),
+                    };
                 let name = mac.model_name.as_deref().unwrap_or("modelValue").to_owned();
                 let optional = mac
                     .prop_fields
@@ -1382,6 +1390,20 @@ impl VerterHost {
                             if reduced.result_is_partial() {
                                 crate::request_context::mark_request_result_partial();
                             }
+                            // The render funnel widens an owner-local
+                            // NOMINAL carrier — unnameable by the generated
+                            // surface — to `symbol` at every position of
+                            // the subtree. This site needs the widened node
+                            // itself as well, because the reference set it
+                            // collects must describe the text that was
+                            // spliced: recording `K` for a position that
+                            // rendered `symbol` demands a setup binding the
+                            // declaration surface cannot satisfy, which
+                            // fails the whole macro rather than one member.
+                            let render_node = dispatch.widen_owner_local_nominal_typeofs(
+                                reduced.node_id(),
+                                owner_canonical,
+                            );
                             // `render_tsc_node` itself fails closed (typed
                             // `Err`) on a NESTED resolver degradation baked
                             // into the rendered text — see its doc comment.
@@ -1389,11 +1411,17 @@ impl VerterHost {
                             // masquerading as `Ok` text, so it needs no
                             // second, textual screen of its own; a genuinely
                             // resolved member is the only `Ok` outcome.
-                            match render_tsc_node(ctx, reduced.node_id(), counters) {
+                            match render_tsc_node(
+                                ctx,
+                                dispatch,
+                                owner_canonical,
+                                render_node,
+                                counters,
+                            ) {
                                 Ok(text) => {
                                     crate::resolver_core::component_meta_registry::collect_node_ref_names(
                                         ctx,
-                                        reduced.node_id(),
+                                        render_node,
                                         &mut ref_names,
                                     );
                                     TscExposeMemberType::Resolved(text)

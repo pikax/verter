@@ -52,6 +52,8 @@ try {
       }))
       .sort((left, right) => left.node_id.localeCompare(right.node_id));
     console.log(JSON.stringify(rows, null, 2));
+  } else if (command === "cancelled") {
+    console.log(JSON.stringify(authority.ledger.cancelled, null, 2));
   } else if (command === "github-issues") {
     console.log(JSON.stringify(listGitHubIssues(authority.ledger), null, 2));
   } else if (command === "github-issue") {
@@ -61,7 +63,7 @@ try {
     console.log(JSON.stringify(githubIssueByNumber(authority.ledger, issue), null, 2));
   } else {
     throw new Error(
-      `unknown command ${command}; supported commands: frontier, explain, packet, products, implemented, github-issues, github-issue`,
+      `unknown command ${command}; supported commands: frontier, explain, packet, products, implemented, cancelled, github-issues, github-issue`,
     );
   }
 } catch (error) {

@@ -100,6 +100,24 @@ Spans computed as `content_offset + local_offset` during CSS scanning, where `co
 **Standard LSP positions** (`line:character`): handled by `LineIndex` in `documents/line_index.rs`.
 **Custom protocol data** (analysis spans): converted at LSP boundary before serialization.
 
+**Two index shapes, one conversion implementation.** `verter_type_runtime::codec` exposes an owning
+`LineIndex` (copies the source; for an index stored beyond the buffer's life, e.g. the per-document
+index in `documents/mod.rs`) and a borrowing `SourceIndex<'a>` (owns only the line-start table). Both
+delegate to the same private conversion core, so they cannot disagree about an encoding, a bound
+check, or a clamp. A caller converting more than one position against one immutable source — a
+diagnostic pull, a semantic-token stream, an inlay-hint or highlight batch, a rename/code-fix
+batch, a span's two endpoints — builds ONE `SourceIndex` and converts every endpoint through it;
+the per-call convenience functions rescan the source each time. A response whose endpoints span
+several target files (definition/references locations, rename and code-action edits) resolves each
+distinct target's content (snapshot, then disk) and indexes it once, through
+`contents_snapshot::{with_target_index, convert_per_target}`; results keep the response order.
+
+Each index offers both conventions explicitly: `clamped_position_to_offset` fails OPEN (out-of-range
+clamps to EOF — the navigation-sentinel default) and `checked_position_to_offset` fails CLOSED
+(rejects a past-EOF line, a column past the line's end, and a column inside a surrogate pair).
+Edit-applying and secondary-link paths must use the checked converter; a clamped wrong offset
+corrupts a file or forges a bogus "see declaration" link at EOF.
+
 ## Encoding Conversion Reference
 
 | Boundary | Pattern | Reference Implementation |
@@ -108,7 +126,10 @@ Spans computed as `content_offset + local_offset` during CSS scanning, where `co
 | Rust internal → LSP client | Negotiated encoding conversion | `crates/verter_lsp/src/documents/mod.rs` |
 | LSP Position → byte offset | `LineIndex::position_to_offset()` | `crates/verter_lsp/src/documents/line_index.rs` |
 | Byte offset → LSP Position | `LineIndex::offset_to_position()` | `crates/verter_lsp/src/documents/line_index.rs` |
-| TSGO response → byte offset | `position_to_offset()` | `crates/verter_lsp/src/tsgo/ipc.rs` (ASCII TSX only) |
+| Provider response batch → byte offsets | One `SourceIndex` per source snapshot, reused for every endpoint | `crates/verter_type_runtime/src/codec.rs` |
+| Multi-file provider response → byte offsets | One content resolution + index per distinct target | `crates/verter_type_runtime/src/contents_snapshot.rs` |
+| TSGO response range → byte offsets | `parse_range_to_offsets()` (navigation, clamped) / `parse_range_to_offsets_strict()` (edits, checked) over the batch index | `crates/verter_type_runtime/src/tsgo/ipc.rs` |
+| tsserver response → byte offset | `tsserver_pos_to_byte_offset_indexed()` (clamped) / `tsserver_pos_to_byte_offset_checked()` (edits) over the batch index; 1-based wire positions | `crates/verter_type_runtime/src/tsserver/ipc.rs` |
 
 ## VS Code Extension
 

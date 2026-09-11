@@ -301,34 +301,6 @@ pub(crate) fn try_resolve_src_block(
     }
 }
 
-/// The single counted carrier-parse chokepoint for `verter_session`.
-///
-/// EVERY framework carrier parse the host materializes — Vue, Svelte,
-/// and every later vertical — is counted in the publication store. It
-/// bumps the framework-neutral `MetaProvenance::carrier_parses` rail
-/// exactly once per elected catalog-frontend parse, and the Vue
-/// compatibility rail `sfc_parses` when (and only when) the dispatched
-/// carrier is Vue. Counting lives in the HOST, not the carrier: the
-/// frontend is the parser/producer only — it owns no provenance, lease,
-/// or lifecycle state.
-/// The process-wide compiler-side carrier-compiler registry.
-///
-/// Test-only: no production session route dispatches through the
-/// combined registry any more — the host compile lanes execute through
-/// the request-scoped bound framework host-integration backends, and
-/// host source-stage carrier parse is owned by the publication store
-/// ([`carrier_snapshot_from_artifact`] only builds a snapshot from an
-/// already-published artifact). The registry is stateless, so one
-/// process-wide instance serves every test caller.
-#[cfg(test)]
-pub(crate) fn carrier_compiler_registry(
-) -> &'static verter_compiler::framework_common::CarrierCompilerRegistry {
-    use std::sync::OnceLock;
-    static REGISTRY: OnceLock<verter_compiler::framework_common::CarrierCompilerRegistry> =
-        OnceLock::new();
-    REGISTRY.get_or_init(verter_compiler::framework_common::CarrierCompilerRegistry::built_in)
-}
-
 /// Produce a carrier file's `ParseSnapshot` + framework-neutral artifact from
 /// an already-published registered parse.
 ///

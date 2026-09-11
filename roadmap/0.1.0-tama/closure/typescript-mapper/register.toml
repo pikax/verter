@@ -592,6 +592,20 @@ evidence_anchor = "crates/verter_compiler/src/code_transform/mapping_product.rs"
 shipped_obligation = "met"
 
 [[atom]]
+id = "A-projection-refuses-not-approximates"
+claim = "CLM-EVIDENCE"
+statement = "The projection plane answers a position question with a correspondence or a typed refusal and never an approximation: a range overrunning a surface, a range reaching bytes with no preimage, a strict sub-range of text whose correspondence is region to region, and preimages separated by a carrier gap are each refused rather than clamped, narrowed, guessed, or spanned."
+evidence_anchor = "crates/verter_session/src/content_mapper.rs"
+shipped_obligation = "met"
+
+[[atom]]
+id = "A-projection-complete-and-lineage-addressed"
+claim = "CLM-EVIDENCE"
+statement = "A carrier position answers with every projection derived from it in ascending projected order, and the projection is addressed by the carrier unit lineage while the map construction over it carries the content: an edit moves the construction identity and leaves the carrier unit unchanged."
+evidence_anchor = "crates/verter_session/src/content_mapper.rs"
+shipped_obligation = "met"
+
+[[atom]]
 id = "A-implementation-baseline"
 claim = "CLM-EVIDENCE"
 statement = "A pre-change implementation baseline exists for the comparisons the successors need."
@@ -812,12 +826,12 @@ adapter = "node-tool"
 argv_tail = ["roadmap/0.1.0-tama/tools/closure-register.mjs", "--check"]
 fixtures = ["roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM0.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM1.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM2.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM3.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM4.md"]
 covers = ["A-plane-boundary", "A-no-oracle-callback", "A-mapper-total", "A-projection-classes-closed", "A-binding-is-a-witness", "A-no-unbound-semantic-result", "A-publication-requires-live-basis", "A-degraded-never-warms", "A-slot-keyed-by-query-identity", "A-incremental-equals-fresh", "A-single-owner-per-capability", "A-no-dual-running-window", "A-deletion-rows-concrete", "A-survivor-rows-received", "A-residue-owner-non-circular", "A-receiving-criterion-direct", "A-resolution-gate-named", "A-downstream-owner-restated"]
-selected = 571
-executed = 571
-passed = 571
+selected = 595
+executed = 595
+passed = 595
 failed = 0
 skipped = 0
-terminal_summary = "closure-register: PASS instrument=typescript-mapper-closure claims=7 atoms=54 proofs=10 controls=10 findings=36 residues=3 obligations=571 state=READY_FOR_REVIEW"
+terminal_summary = "closure-register: PASS instrument=typescript-mapper-closure claims=7 atoms=56 proofs=11 controls=11 findings=36 residues=3 obligations=595 state=READY_FOR_REVIEW"
 count_key = "obligations"
 control = "CTL-contract-section"
 
@@ -827,14 +841,14 @@ adapter = "cargo-nextest"
 argv_tail = ["-p", "verter_type_runtime", "-p", "verter_session", "-p", "verter_protocol"]
 fixtures = ["crates/verter_type_runtime/tests/main.rs", "crates/verter_session/tests/cases/mod.rs", "crates/verter_protocol/tests/cases/typeinfo_proto_roundtrip.rs"]
 covers = ["A-targeted-domain-green"]
-selected = 9510
-executed = 8963
-passed = 8963
+selected = 9542
+executed = 8995
+passed = 8995
 failed = 0
 skipped = 547
 expected_skips = 547
 skip_basis = "the command applies no filter expression, so nextest counts a test as skipped only for being marked #[ignore]: the 547 are the three packages' opt-in real-provider, corpus, and soak cases, and the clean half of the control lane's re-application holds the live executed and skipped counts to the runner's own listing of this selection on the host that runs it, never to this transcript. The selection is shaped by the platform — unix-gated and windows-gated cases compile on different hosts — so the five counts here are the linux selection's on the day they were taken, and a lane run on a host that compiles a different cfg set is judged against what that host lists rather than against these numbers"
-terminal_summary = "Summary [  73.559s] 8963 tests run: 8963 passed, 547 skipped"
+terminal_summary = "Summary [ 330.600s] 8995 tests run: 8995 passed (6 slow), 547 skipped"
 control = "CTL-targeted-selector"
 
 [[proof]]
@@ -850,6 +864,20 @@ failed = 0
 skipped = 0
 terminal_summary = "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 6350 filtered out"
 control = "CTL-mapping-product-elision"
+
+[[proof]]
+id = "P-content-mapper"
+adapter = "cargo-test"
+argv_tail = ["-p", "verter_session", "--test", "main", "--", "content_mapper_projection"]
+fixtures = ["crates/verter_session/src/content_mapper.rs", "crates/verter_session/tests/cases/content_mapper_projection.rs"]
+covers = ["A-projection-refuses-not-approximates", "A-projection-complete-and-lineage-addressed"]
+selected = 9
+executed = 9
+passed = 9
+failed = 0
+skipped = 0
+terminal_summary = "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 2293 filtered out"
+control = "CTL-content-mapper-clamp"
 
 # ---------------------------------------------------------------------------
 # Canonical negative controls.
@@ -942,10 +970,10 @@ id = "CTL-ledger-row"
 kind = "source"
 mutation = "Set one implementation-ledger row to a status outside the declared pending/implemented pair."
 subject = "roadmap/0.1.0-tama/authority/state/implemented.toml"
-reverted = "\"TCM1\" = { status = \"implemented\", commit_message = \"feat(core): dual-surface mapping product inside CodeTransform\", commit_date = \"2026-09-05T00:00:00+01:00\" }\n\"TCM2\" = { status = \"pending\" }"
-applied = "\"TCM1\" = { status = \"landed\", commit_message = \"feat(core): dual-surface mapping product inside CodeTransform\", commit_date = \"2026-09-05T00:00:00+01:00\" }\n\"TCM2\" = { status = \"pending\" }"
+reverted = "\"TCM2\" = { status = \"implemented\", commit_message = \"feat(mapping-geometry): content-mapper projection plane\", commit_date = \"2026-09-09T12:00:00+01:00\" }\n\"TCM3\" = { status = \"pending\" }"
+applied = "\"TCM2\" = { status = \"landed\", commit_message = \"feat(mapping-geometry): content-mapper projection plane\", commit_date = \"2026-09-09T12:00:00+01:00\" }\n\"TCM3\" = { status = \"pending\" }"
 uniqueness = "unique-new-occurrence"
-observed = "node exit 1\ntests 30 | pass 22 | fail 8 | cancelled 0 | skipped 0 | todo 0\neight cases reported `implementation ledger: TCM1: status must be pending or implemented` beside the schema error `authority.implementation-ledger.implementation.TCM1.status: expected one of pending, implemented`"
+observed = "node exit 1\ntests 30 | pass 22 | fail 8 | cancelled 0 | skipped 0 | todo 0\neight cases reported `implementation ledger: TCM2: status must be pending or implemented` beside the schema error `authority.implementation-ledger.implementation.TCM2.status: expected one of pending, implemented`"
 
 [[control]]
 id = "CTL-register-status"
@@ -973,7 +1001,7 @@ kind = "command"
 mutation = "Re-run the recorded command with an added filter expression that matches no test in the three packages."
 argv_delta = ["-E", "test(zzz_selector_matches_nothing)"]
 uniqueness = "unique-new-occurrence"
-observed = "nextest exit 4, error: no tests to run; Summary [ 0.018s] 0 tests run: 0 passed, 9510 skipped — a record transcribed from that run is refused twice over, for zero selected work and for 9510 skips against 547 declared"
+observed = "nextest exit 4, error: no tests to run; Summary [ 0.018s] 0 tests run: 0 passed, 9542 skipped — a record transcribed from that run is refused twice over, for zero selected work and for 9542 skips against 547 declared"
 
 [[control]]
 id = "CTL-mapping-product-elision"
@@ -984,6 +1012,16 @@ reverted = "        let class = class.unwrap_or(CarrierClass::Elided);\n        
 applied = "        let class = class.unwrap_or(CarrierClass::Elided);\n        if false && class == CarrierClass::Elided {"
 uniqueness = "unique-new-occurrence"
 observed = "cargo exit 101; test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 6350 filtered out — code_transform::mapping_product_tests::wholly_synthetic_replacement_text_elides_the_source_it_stands_in_for panicked on `an elided carrier byte has NO projection: answering with a neighbour is the mis-mapping this class refuses`"
+
+[[control]]
+id = "CTL-content-mapper-clamp"
+kind = "source"
+mutation = "Clamp a projected range to the end of the surface instead of refusing it, so a range the caller never named is answered with a well-formed correspondence."
+subject = "crates/verter_session/src/content_mapper.rs"
+reverted = "        if projected.end > self.product.projected_len() {\n            return CarrierAnswer::Refused(Refusal::OutOfRange);\n        }"
+applied = "        let projected = MappingSpan {\n            start: projected.start.min(self.product.projected_len()),\n            end: projected.end.min(self.product.projected_len()),\n        };"
+uniqueness = "unique-new-occurrence"
+observed = "cargo exit 101; test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 2293 filtered out — cases::content_mapper_projection::a_projected_offset_past_the_surface_is_refused_rather_than_clamped_to_its_end panicked on `a range overrunning the projected surface is refused, not truncated to the part of itself that happens to map`, left Span(MappingSpan { start: 28, end: 31 }), right Refused(OutOfRange)"
 
 # ---------------------------------------------------------------------------
 # Findings. Every entry is routed to exactly one claim or one residue; the
@@ -1452,3 +1490,38 @@ subject = "Vue SFC auto-import restoration"
 disposition = "Accepting an auto-import completion in a Vue SFC drops the import statement: TypeScript anchors the insertion at generated offset 0 inside the synthesized preamble, the published map has no correspondence, and remapAllFileTextChanges refuses the FileTextChanges atomically. Restoration is a mapped zero-length anchor at script-content start so the insertion lands in a mapped region, not a source-structure heuristic. The geometry that anchor needs now exists; routing it into the projection plane is the activation the contract keeps separate from this block."
 receiving_criterion = "TCM2-AC2"
 receiving_criterion_role = "positive contract"
+
+[[row]]
+kind = "deletion"
+subject = "Unselected projection topologies"
+disposition = "Deleted rather than retained as options. The selected topology is RETAINED owned geometry, addressed by the carrier unit lineage and answered by searching the compact partition the mapping product already publishes. The two alternatives are structurally absent rather than merely unused: re-deriving the correspondence from a live CodeTransform per question is not expressible, because the plane carries no lifetime parameter and no constructor that borrows a transform, so geometry can neither depend on an arena that has been dropped nor pay a whole chunk walk per position; a dense per-projected-byte table is absent because it buys nothing over the partition search while costing memory linear in every generated surface. The selection rule is the pair of constraints the ratified contract places on this plane at once, answerable with no engine running and bounded in what it keeps, and only the retained compact form satisfies both."
+receiving_criterion = "TCM2-AC1"
+receiving_criterion_role = "sole-owner outcome"
+
+[[row]]
+kind = "survivor"
+subject = "Content-mapper projection plane"
+disposition = "Delivered and dormant: one carrier surface's projection, addressed by the carrier unit lineage, carrying the retained mapping product plus the map-construction and companion-map identities composed over it. Its position semantics are total and fail closed, a correspondence or a typed refusal and never an approximation. A range overrunning the surface is refused rather than truncated to the part of itself that happens to map; a range reaching synthesized bytes is refused whole rather than narrowed; a strict sub-range of region-to-region rewritten text is refused rather than sliced byte to byte; relocated preimages separated by a carrier gap are refused rather than answered with their hull; an elided carrier position answers with no projection rather than a neighbour; an inverted range is refused rather than normalised. A declared zero-width insertion resolves to its authored anchor while the synthesized bytes around it still refuse, which is the geometry the Vue SFC auto-import restoration needs. Nothing routes through it, which is the landing-dormant rule the contract records rather than a second answering route."
+receiving_criterion = "TCM2-AC2"
+receiving_criterion_role = "positive contract"
+
+[[row]]
+kind = "survivor"
+subject = "Projection-path implementation baseline record"
+disposition = "Recorded for this path under the locked method and still carried for the successors. The pre-change comparison reference is the geometry the mapping product already publishes, read through its own partition, anchor, and carrier-to-projected accessors; the workload is one transform per disposition the wire semantics branch on, being identity source, region-to-region rewrite, synthesized intro, wholly synthetic replacement with its elided carrier extent, backwards relocation, a mapped carrier point, and a declared preamble anchor; the package identity is verter_session; the method composes the plane over that product and compares every answer against the product region by region; the comparison rule is that the plane never widens, narrows, or invents a correspondence the product does not already carry, and refuses wherever the product carries none. No absolute machine threshold and no Git identity enters it. A-implementation-baseline stays transferred, because TCM3 and TCM4 receive the same residue for paths this block does not touch."
+receiving_criterion = "TCM2-AC2"
+receiving_criterion_role = "positive contract"
+
+[[row]]
+kind = "survivor"
+subject = "Projection-plane incremental-equivalence not-applicable scope"
+disposition = "Not applicable, recorded against untouched authority: the plane is a pure function of one carrier unit, one content identity, and one mapping product. It holds no cache slot, publishes nothing, warms nothing, and is reached by no production route, so no incremental, cancellation, stale-publication, or partial-result authority is owned or altered here and there is no warm path whose equality with a cold one could differ. Its map-construction identity is composed so that a later cache owner keys on content and geometry while the carrier unit survives the edit, which is a property of the identity rather than a slot this block introduces."
+receiving_criterion = "TCM2-AC3"
+receiving_criterion_role = "incremental equivalence"
+
+[[row]]
+kind = "survivor"
+subject = "Projection-plane bounded-work not-applicable scope"
+disposition = "Not applicable, recorded per the charter's performance budget: no hot path calls the plane. The work it does add is bounded by construction, being one canonical encoding per projection and a partition-point search rather than a scan or a per-question re-derivation for every position query. No counters and no retention soak are created."
+receiving_criterion = "TCM2-AC4"
+receiving_criterion_role = "bounded work"

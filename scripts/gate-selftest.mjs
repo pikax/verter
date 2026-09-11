@@ -285,9 +285,6 @@ import {
   decideShippedCfgGuardExpectedCountMatch,
   // local fail-fast / explicit exhaustive policy and coverage-complete receipt verdict (GB17).
   reduceGateLaneReceipts,
-  SHIPPED_CFG_LANE_ENABLED,
-  SHIPPED_CFG_SKIP_SUMMARY,
-  SHIPPED_CFG_SKIP_VERDICT_NOTE,
   // reused by the gate-failure-triage parsing scenarios (GB14) so a nextest recap fixture is read through
   // the SAME extractor the live gate/triage share — no second nextest-output parser.
   extractNextestTerminalFailures,
@@ -310,6 +307,17 @@ const SELFTEST_DIR = dirname(fileURLToPath(import.meta.url));
 // The PRODUCTION gate CLI — exercised by the U-P0 "no bypass mode" scenario and by GB15, which invokes
 // the real Vapor/TypeScript harness paths with Cargo/tool stand-ins. Other scenarios use stand-ins as applicable.
 const GATE = join(SELFTEST_DIR, "gate.mjs");
+// The CLOSED module set a byte-copy of the production CLI needs to LOAD from a synthetic repo root. Every
+// scenario that copies the CLI elsewhere copies exactly this set, so a missing entry cannot make one
+// scenario fail while another silently keeps working. An omission does not degrade gracefully: Node
+// refuses the import and the copied CLI dies with ERR_MODULE_NOT_FOUND at exit 1, which reads as "the CLI
+// accepted bad argv" in every argv-strictness assertion that expects the usage exit (127). Keep it in
+// dependency order and extend it whenever gate.mjs gains a first-party sibling import.
+const GATE_CLI_MODULE_FILES = Object.freeze([
+  "gate.mjs",
+  "gate-internals.mjs",
+  "provider-ci-internals.mjs",
+]);
 // The SELF-TEST-ONLY subprocess runner (mutex + containment + timeout/stall + teardown + seam, against
 // sleep/echo stand-ins). It imports the same gate primitives; production never runs it.
 const RUNNER = join(SELFTEST_DIR, "gate-selftest-runner.mjs");
@@ -1560,11 +1568,18 @@ async function main() {
   process.stderr.write("\n(GB17) LOCAL FAIL-FAST / EXPLICIT EXHAUSTIVE GATE POLICY\n");
   {
     let ok = true;
+    // Stand-in for the live `buildProviderLaneFilterExpr("core")` selection. GB17.1/GB17.2 assert that the
+    // argv builder passes whatever filter it is handed through UNCHANGED, and that the bare and exhaustive
+    // argv differ by exactly one `--no-fail-fast`. Neither claim depends on the filter string having a
+    // particular value, and binding this to the live selection would make an unrelated lane-partition edit
+    // fail here for the wrong reason. Owning the selection's own correctness is the provider-CI lane's job
+    // (`node scripts/provider-ci.mjs verify`), not this argv contract's.
+    const SYNTHETIC_SURFACE_1_FILTER = "not(package(verter_svelte_conformance))";
     const surfaceBase = {
       archiveFile: "C:/synthetic/dev.tar.zst",
       extractDir: "C:/synthetic/extract",
       repoRealpath: "C:/synthetic/repo",
-      filterExpr: buildTrybuildExclusionFilterExpr(),
+      filterExpr: SYNTHETIC_SURFACE_1_FILTER,
       testThreads: 7,
     };
     const localSurface = buildSurface1RunArgs(surfaceBase);
@@ -1580,7 +1595,7 @@ async function main() {
       "--workspace-remap",
       surfaceBase.repoRealpath,
       "-E",
-      buildTrybuildExclusionFilterExpr(),
+      SYNTHETIC_SURFACE_1_FILTER,
       "--test-threads",
       "7",
     ];
@@ -1724,51 +1739,60 @@ async function main() {
         ok = false;
       }
     }
-    const skippedPass = reduceGateLaneReceipts({
-      surface: completeSurface,
-      shipped: null,
-      wasm: completeWasm,
-      shippedCfgLaneEnabled: false,
-    });
-    if (skippedPass.verdict !== "PASS" || skippedPass.coverageComplete !== true) {
-      fail(
-        `(GB17.5) Surface-1-only skip must PASS from a complete Surface receipt without a shipped lane, ` +
-          `got ${JSON.stringify(skippedPass)}`,
-      );
-      ok = false;
+    // The shipped-cfg lane has no skip disposition: there is no argument, receipt shape, or option
+    // through which a run that never executed it can reach PASS. The reducer takes no enable flag, so
+    // the only way to express "the lane did not run" is a missing/incomplete shipped receipt — which
+    // must always be incomplete required coverage. Discriminates the exact regression this node
+    // repaired: a verdict that reads green while nothing executed with debug_assertions off.
+    const laneAbsenceRows = [
+      ["no shipped receipt at all", null],
+      ["a check that never succeeded", { ...completeShipped, check: { status: "skipped" } }],
+      [
+        "a contract that never ran",
+        { ...completeShipped, contract: { status: "skipped", parseable: false, complete: false } },
+      ],
+      [
+        "a contract whose run never closed",
+        { ...completeShipped, contract: { status: "ok", parseable: true, complete: false } },
+      ],
+      [
+        "a contract whose selected count does not reconcile with the tree scan",
+        { ...completeShipped, parity: { complete: true, matches: false } },
+      ],
+      [
+        "a lane that never reached its parity decision",
+        { ...completeShipped, parity: { complete: false, matches: false } },
+      ],
+    ];
+    for (const [label, shipped] of laneAbsenceRows) {
+      const decision = reduceGateLaneReceipts({
+        surface: completeSurface,
+        shipped,
+        wasm: completeWasm,
+      });
+      if (
+        decision.verdict !== "FAIL" ||
+        decision.coverageComplete !== false ||
+        !decision.failures.some((row) => row.surface === "gate/incomplete")
+      ) {
+        fail(
+          `(GB17.5) shipped-cfg lane absence (${label}) must FAIL as incomplete required coverage, ` +
+            `got ${JSON.stringify(decision)}`,
+        );
+        ok = false;
+      }
     }
-    const skippedIncomplete = reduceGateLaneReceipts({
-      surface: { ...completeSurface, coverage: { parseable: false, complete: false } },
-      shipped: null,
-      wasm: completeWasm,
-      shippedCfgLaneEnabled: false,
-    });
-    if (
-      skippedIncomplete.verdict !== "FAIL" ||
-      skippedIncomplete.coverageComplete !== false ||
-      !skippedIncomplete.failures.some((row) => row.surface === "gate/incomplete")
-    ) {
-      fail(
-        `(GB17.5) Surface-1-only skip must still FAIL on an incomplete Surface receipt, ` +
-          `got ${JSON.stringify(skippedIncomplete)}`,
-      );
-      ok = false;
-    }
-
-    const wasmlessSkippedRun = reduceGateLaneReceipts({
+    // Positive control for the rows above: with every lane complete the SAME reducer reaches PASS, so a
+    // FAIL row above is attributable to the missing lane and not to an unrelatedly broken fixture.
+    const allLanesGreen = reduceGateLaneReceipts({
       surface: completeSurface,
-      shipped: null,
-      wasm: null,
-      shippedCfgLaneEnabled: false,
+      shipped: completeShipped,
+      wasm: completeWasm,
     });
-    if (
-      wasmlessSkippedRun.verdict !== "FAIL" ||
-      wasmlessSkippedRun.coverageComplete !== false ||
-      !wasmlessSkippedRun.failures.some((row) => row.surface === "gate/incomplete")
-    ) {
+    if (allLanesGreen.verdict !== "PASS" || allLanesGreen.coverageComplete !== true) {
       fail(
-        "(GB17.5) the shipped-cfg skip path must NOT become a hole through which a run with no wasm " +
-          `JS-boundary receipt reaches PASS, got ${JSON.stringify(wasmlessSkippedRun)}`,
+        `(GB17.5) the positive control must PASS with all three lanes complete, got ` +
+          `${JSON.stringify(allLanesGreen)}`,
       );
       ok = false;
     }
@@ -1798,7 +1822,7 @@ async function main() {
     } else {
       const parseScripts = join(parseRoot, "scripts");
       mkdirSync(parseScripts, { recursive: true });
-      for (const name of ["gate.mjs", "gate-internals.mjs"]) {
+      for (const name of GATE_CLI_MODULE_FILES) {
         writeFileSync(join(parseScripts, name), readFileSync(join(SELFTEST_DIR, name)));
       }
       const accepted = runGateCapture(
@@ -1890,14 +1914,11 @@ async function main() {
       !commandPlanCall.includes("filterExpr: SURFACE_1_FILTER") ||
       !(continuationAt >= 0 && continuationAt < shippedAt) ||
       finalizerAt < shippedAt ||
-      passVerdictCount !== 2 ||
+      passVerdictCount !== 1 ||
       firstPassVerdictAt <= finalizerAt ||
       !shippedFnBody.includes("guard.summary.initialCount") ||
       !shippedFnBody.includes("guard.summary.unrun === 0") ||
-      !shippedFnBody.includes('runStep("shipped-cfg"') ||
-      !runGateBody.includes("SHIPPED_CFG_LANE_ENABLED") ||
-      !runGateBody.includes("SHIPPED_CFG_SKIP_SUMMARY") ||
-      !runGateBody.includes("SHIPPED_CFG_SKIP_VERDICT_NOTE")
+      !shippedFnBody.includes('runStep("shipped-cfg"')
     ) {
       fail(
         `(GB17.7) production runGate must wire the tested argv/transition/completion/finalizer helpers: ` +
@@ -1988,12 +2009,11 @@ async function main() {
   // (GB20) LANE RESOURCE SPLIT VALUE WIRING — BEHAVIORAL. GB19 proves the STRUCTURE (one layout, one
   // supervisor, two envs) is wired; this proves the actual per-lane cargo VALUES reach the real
   // production CLI rather than, say, a comment or a dead occurrence. It drives the REAL production CLI
-  // end-to-end against a controlled `cargo` stand-in on PATH. Production currently skips the shipped-cfg
-  // lane (`SHIPPED_CFG_LANE_ENABLED=false`): Surface 1 must receive the full `--build-jobs 8` /
-  // `--test-threads 8` ceiling, shipped-cfg cargo must never be invoked, and the skip must be disclosed
-  // in the captured output. Flipping the constant back to true MUST restore the previous 6/6 vs 2/2
-  // split assertions (surface=6, shipped=2 via `SHIPPED_CFG_LANE_SHARE=0.25`) and require all three
-  // cargo invocations.
+  // end-to-end against a controlled `cargo` stand-in on PATH. All THREE cargo invocations are required:
+  // Surface 1, the shipped-cfg compile check, and the shipped-cfg contract run. Surface takes 6/6 and
+  // shipped-cfg 2/2 out of the `--build-jobs 8 --test-threads 8` ceiling (via
+  // `SHIPPED_CFG_LANE_SHARE=0.25`) — never the un-split 8/8 applied twice. A run in which the shipped-cfg
+  // cargo was never invoked at all is a FAILURE here, so the lane cannot silently stop executing.
   // --------------------------------------------------------------------------------------------------
   process.stderr.write("\n(GB20) LANE RESOURCE SPLIT VALUE WIRING\n");
   posix_gb20: {
@@ -2199,76 +2219,42 @@ fi
         `shipped-contract build-jobs=${shippedContractBuildJobs} test-threads=${shippedContractTestThreads}`,
     );
 
-    if (SHIPPED_CFG_LANE_ENABLED) {
-      const allInvoked = surfaceRaw !== "" && shippedCheckRaw !== "" && shippedContractRaw !== "";
-      const EXPECT_SURFACE = "6";
-      const EXPECT_SHIPPED = "2";
-      if (!allInvoked) {
-        fail(
-          "(GB20) LANE RESOURCE SPLIT VALUE WIRING: the real per-lane cargo invocation(s) were never " +
-            `observed (surface-invoked=${surfaceRaw !== ""} shipped-check-invoked=${shippedCheckRaw !== ""} ` +
-            `shipped-contract-invoked=${shippedContractRaw !== ""}) — the gate did not reach the lanes under ` +
-            `test (rc=${r.code}). Tail of captured output:\n${r.out.slice(-4000)}`,
-        );
-      } else if (
-        surfaceBuildJobs !== EXPECT_SURFACE ||
-        surfaceTestThreads !== EXPECT_SURFACE ||
-        shippedCheckBuildJobs !== EXPECT_SHIPPED ||
-        shippedContractBuildJobs !== EXPECT_SHIPPED ||
-        shippedContractTestThreads !== EXPECT_SHIPPED
-      ) {
-        fail(
-          "(GB20) production must thread deriveGateLaneResourceSplit's actual per-lane VALUES into the " +
-            "REAL cargo env (CARGO_BUILD_JOBS) and command line (--test-threads) each lane's own cargo " +
-            "process actually receives — not opts.buildJobs/opts.testThreads (the pre-fix un-split ceiling, " +
-            `applied twice): expected surface=${EXPECT_SURFACE}/${EXPECT_SURFACE}, ` +
-            `shipped=${EXPECT_SHIPPED}/${EXPECT_SHIPPED}; observed surface build-jobs=${surfaceBuildJobs} ` +
-            `test-threads=${surfaceTestThreads}, shipped-check build-jobs=${shippedCheckBuildJobs}, ` +
-            `shipped-contract build-jobs=${shippedContractBuildJobs} test-threads=${shippedContractTestThreads}`,
-        );
-      } else {
-        pass(
-          "(GB20) LANE RESOURCE SPLIT VALUE WIRING: driving the REAL gate.mjs CLI against a controlled " +
-            "cargo stand-in (--build-jobs 8 --test-threads 8, a concurrent, non-degenerate split) proves the " +
-            "ACTUAL per-lane cargo invocations receive deriveGateLaneResourceSplit's split values — surface " +
-            "CARGO_BUILD_JOBS=6/--test-threads 6, shipped-cfg CARGO_BUILD_JOBS=2/--test-threads 2 — never the " +
-            "un-split 8/8 ceiling applied twice; a behavioral proof over the real command/env each lane's " +
-            "cargo process is actually handed, discriminating regardless of gate.mjs's source text",
-        );
-      }
+    const allInvoked = surfaceRaw !== "" && shippedCheckRaw !== "" && shippedContractRaw !== "";
+    const EXPECT_SURFACE = "6";
+    const EXPECT_SHIPPED = "2";
+    if (!allInvoked) {
+      fail(
+        "(GB20) LANE RESOURCE SPLIT VALUE WIRING: the real per-lane cargo invocation(s) were never " +
+          `observed (surface-invoked=${surfaceRaw !== ""} shipped-check-invoked=${shippedCheckRaw !== ""} ` +
+          `shipped-contract-invoked=${shippedContractRaw !== ""}) — the gate did not reach the lanes under ` +
+          `test (rc=${r.code}). Tail of captured output:\n${r.out.slice(-4000)}`,
+      );
+    } else if (
+      surfaceBuildJobs !== EXPECT_SURFACE ||
+      surfaceTestThreads !== EXPECT_SURFACE ||
+      shippedCheckBuildJobs !== EXPECT_SHIPPED ||
+      shippedContractBuildJobs !== EXPECT_SHIPPED ||
+      shippedContractTestThreads !== EXPECT_SHIPPED
+    ) {
+      fail(
+        "(GB20) production must thread deriveGateLaneResourceSplit's actual per-lane VALUES into the " +
+          "REAL cargo env (CARGO_BUILD_JOBS) and command line (--test-threads) each lane's own cargo " +
+          "process actually receives — not opts.buildJobs/opts.testThreads (the pre-fix un-split ceiling, " +
+          `applied twice): expected surface=${EXPECT_SURFACE}/${EXPECT_SURFACE}, ` +
+          `shipped=${EXPECT_SHIPPED}/${EXPECT_SHIPPED}; observed surface build-jobs=${surfaceBuildJobs} ` +
+          `test-threads=${surfaceTestThreads}, shipped-check build-jobs=${shippedCheckBuildJobs}, ` +
+          `shipped-contract build-jobs=${shippedContractBuildJobs} test-threads=${shippedContractTestThreads}`,
+      );
     } else {
-      const EXPECT_SURFACE = "8";
-      const skipDisclosed =
-        r.out.includes(SHIPPED_CFG_SKIP_SUMMARY) && r.out.includes(SHIPPED_CFG_SKIP_VERDICT_NOTE);
-      if (surfaceRaw === "") {
-        fail(
-          "(GB20) Surface 1 cargo was never invoked while the shipped-cfg lane is skipped " +
-            `(rc=${r.code}). Tail of captured output:\n${r.out.slice(-4000)}`,
-        );
-      } else if (shippedCheckRaw !== "" || shippedContractRaw !== "") {
-        fail(
-          "(GB20) shipped-cfg cargo must not run while SHIPPED_CFG_LANE_ENABLED is false: " +
-            `shipped-check-invoked=${shippedCheckRaw !== ""} shipped-contract-invoked=${shippedContractRaw !== ""}`,
-        );
-      } else if (surfaceBuildJobs !== EXPECT_SURFACE || surfaceTestThreads !== EXPECT_SURFACE) {
-        fail(
-          "(GB20) while the shipped-cfg lane is skipped, Surface 1 must receive the full " +
-            `--build-jobs/--test-threads ceiling (expected ${EXPECT_SURFACE}/${EXPECT_SURFACE}), not a ` +
-            `split leftover: observed build-jobs=${surfaceBuildJobs} test-threads=${surfaceTestThreads}`,
-        );
-      } else if (!skipDisclosed) {
-        fail(
-          "(GB20) a skipped shipped-cfg lane must disclose the skip in the captured output " +
-            `(missing ${JSON.stringify(SHIPPED_CFG_SKIP_SUMMARY)} and/or ` +
-            `${JSON.stringify(SHIPPED_CFG_SKIP_VERDICT_NOTE)})\n${r.out.slice(-4000)}`,
-        );
-      } else {
-        pass(
-          "(GB20) shipped-cfg lane skip is behavioral: driving the REAL gate.mjs CLI against a " +
-            "controlled cargo stand-in (--build-jobs 8 --test-threads 8) invokes Surface 1 at the full " +
-            "8/8 ceiling, never launches shipped-cfg cargo, and discloses the skip in the verdict/summary",
-        );
-      }
+      pass(
+        "(GB20) LANE RESOURCE SPLIT VALUE WIRING: driving the REAL gate.mjs CLI against a controlled " +
+          "cargo stand-in (--build-jobs 8 --test-threads 8, a concurrent, non-degenerate split) proves both " +
+          "post-list lanes are actually invoked and that the ACTUAL per-lane cargo invocations receive " +
+          "deriveGateLaneResourceSplit's split values — surface CARGO_BUILD_JOBS=6/--test-threads 6, " +
+          "shipped-cfg CARGO_BUILD_JOBS=2/--test-threads 2 — never the un-split 8/8 ceiling applied twice; " +
+          "a behavioral proof over the real command/env each lane's cargo process is actually handed, " +
+          "discriminating regardless of gate.mjs's source text",
+      );
     }
   }
 
@@ -8134,7 +8120,7 @@ fi
       const synthScripts = join(synthRoot, "scripts");
       mkdirSync(synthScripts, { recursive: true });
       // A BYTE-COPY of the production CLI and its internals — the real code path, rooted elsewhere.
-      for (const name of ["gate.mjs", "gate-internals.mjs"]) {
+      for (const name of GATE_CLI_MODULE_FILES) {
         writeFileSync(join(synthScripts, name), readFileSync(join(SELFTEST_DIR, name)));
       }
       const synthGate = join(synthScripts, "gate.mjs");
@@ -8828,39 +8814,15 @@ fi
         "lsp-server-unit",
         "cfg(windows)",
       ) === 0 &&
-      exactOverrideCount(
-        "default",
-        "test(/^cases::g_compile::compile_fail::/)",
-        null,
-        null,
-        '{ period = "120s", terminate-after = 3 }',
-      ) === 1 &&
-      exactOverrideCount(
-        "ci",
-        "test(/^cases::g_compile::compile_fail::/)",
-        null,
-        null,
-        '{ period = "120s", terminate-after = 3 }',
-      ) === 1 &&
-      exactOverrideCount(
-        "default",
-        "test(/^cases::resolver_observation_compile_fail::/)",
-        null,
-        null,
-        '{ period = "120s", terminate-after = 3 }',
-      ) === 1 &&
-      exactOverrideCount(
-        "ci",
-        "test(/^cases::resolver_observation_compile_fail::/)",
-        null,
-        null,
-        '{ period = "120s", terminate-after = 3 }',
-      ) === 1;
+      // Compile-fail contracts run from the standalone `scripts/compile-contracts.mjs` executable, not
+      // the nextest inventory, so no nextest override may widen the hang budget for them.
+      overrideRows.every((row) => row.slowTimeout !== '{ period = "120s", terminate-after = 3 }') &&
+      overrideRows.every((row) => !/compile_fail/.test(row.filter || ""));
     if (!configOk) {
       fail(
         `(GB18.7) full CI capacity forbids both Windows-only serialized nextest groups and their ` +
-          `default/ci assignments while preserving the all-platform shared-provider timeout and every ` +
-          `platform-neutral trybuild timeout override; parsed rows=` +
+          `default/ci assignments while preserving the all-platform shared-provider timeout, and no ` +
+          `nextest override may widen the hang budget for compile-fail contracts; parsed rows=` +
           JSON.stringify(overrideRows),
       );
       ok = false;
@@ -8915,7 +8877,7 @@ fi
         : "";
     if (
       supervisorFactoryCount !== 1 ||
-      productionRunStepCount !== 9 ||
+      productionRunStepCount !== 8 ||
       gateSource.includes("await runContainedStep({") ||
       !gateSource.includes('ctx.supervisor.runStep("surface-1", {') ||
       !gateSource.includes('ctx.supervisor.runStep("shipped-cfg", {') ||
@@ -8925,7 +8887,7 @@ fi
         teardownSource.indexOf("mutex.release()")
     ) {
       fail(
-        `(GB18.10) production must construct exactly one supervisor, route all nine currently ` +
+        `(GB18.10) production must construct exactly one supervisor, route all eight currently ` +
           `sequential contained commands through it (including the wasm JS-boundary, Surface 1 and ` +
           `shipped lanes), and await its ` +
           `close before mutex release; factory=${supervisorFactoryCount} runStep=${productionRunStepCount}`,
@@ -8937,7 +8899,8 @@ fi
       pass(
         "(GB18) measured build resources are CPU/memory-tiered while the independent 12-thread cap " +
           "remains CPU-clamped and both stay explicitly overrideable; both " +
-          "Windows-only serialized nextest groups/selectors are forbidden while safety timeouts remain pinned; every Windows proc-macro suite (including a " +
+          "Windows-only serialized nextest groups/selectors are forbidden while the shared-provider safety timeout remains pinned and " +
+          "no compile-fail override widens the hang budget; every Windows proc-macro suite (including a " +
           "novel future id) remains warmable with its listed host libdir prepended to one canonical PATH; " +
           "malformed metadata and every non-zero/no-status/signal outcome fail closed; a real cargo-free " +
           "child receives the environment; production wires it into the unfiltered suite loop; the `gate-lane` " +
@@ -9573,7 +9536,8 @@ fi
       ok = false;
     }
     const passParsed = parseGateVerdict(
-      `[gate] VERDICT: PASS (surface 1 green; ${SHIPPED_CFG_SKIP_VERDICT_NOTE})\n`,
+      "[gate] VERDICT: PASS (surface 1 + the shipped-cfg guard both green; " +
+        "wasm JS-boundary lane executed 4/4 discovered case(s) on wasm32-unknown-unknown)\n",
     );
     if (passParsed.kind !== "pass") {
       fail(`(GB14.1) PASS verdict must parse kind=pass, got ${JSON.stringify(passParsed)}`);
