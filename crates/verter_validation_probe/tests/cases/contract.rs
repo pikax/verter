@@ -636,6 +636,29 @@ fn an_unexpected_pass_on_a_failure_expectation_is_an_xpass_not_a_gate() {
 }
 
 #[test]
+fn a_still_failing_known_fail_is_its_own_expected_match() {
+    let diagnosed = observe(
+        seen(&[C::Pass]),
+        seen(&[C::VerterDiagnostic]),
+        DimensionInput::Unreached,
+        DimensionInput::Unreached,
+    )
+    .expect("a compile diagnostic is observable");
+    let rows = [
+        (ExpectedState::KnownFail, Evaluation::KnownFailExpected),
+        (ExpectedState::Canary, Evaluation::CanaryExpected),
+    ];
+    for (state, expected) in rows {
+        let evaluation = entry(Dimension::Compile, state, C::VerterDiagnostic).evaluate(&diagnosed);
+        assert_eq!(
+            evaluation, expected,
+            "{state:?} observing its expected class"
+        );
+        assert!(!evaluation.blocks(), "an expected failure never blocks");
+    }
+}
+
+#[test]
 fn lower_failures_propagate_and_independent_higher_failures_win() {
     let observation = observe(
         seen(&[C::Pass]),
