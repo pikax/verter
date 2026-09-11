@@ -11,7 +11,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -94,12 +93,12 @@ pub struct ApplicabilityFlags {
     pub map: Applicability,
 }
 
-/// A full 40-hex lowercase commit SHA.
+/// A full commit id: forty lowercase hexadecimal digits.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Sha40(String);
 
-/// A 64-hex lowercase SHA-256 digest.
+/// A SHA-256 digest: sixty-four lowercase hexadecimal digits.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Sha256(String);
@@ -119,7 +118,7 @@ impl TryFrom<String> for Sha40 {
             Ok(Sha40(value))
         } else {
             Err(format!(
-                "`{value}` is not a full 40-hex lowercase commit SHA"
+                "`{value}` is not a full commit id of forty lowercase hexadecimal digits"
             ))
         }
     }
@@ -146,7 +145,7 @@ impl TryFrom<String> for Sha256 {
             Ok(Sha256(value))
         } else {
             Err(format!(
-                "`{value}` is not a 64-hex lowercase SHA-256 digest"
+                "`{value}` is not a SHA-256 digest of sixty-four lowercase hexadecimal digits"
             ))
         }
     }
@@ -311,8 +310,8 @@ pub struct ProbeStateManifest {
 pub enum ManifestViolation {
     /// The manifest file name differs from its framework.
     FileNameMismatch {
-        /// The file stem found.
-        file_stem: String,
+        /// The file name found.
+        file_name: String,
     },
     /// No case is inventoried.
     EmptyInventory,
@@ -435,10 +434,10 @@ pub enum ManifestViolation {
 impl fmt::Display for ManifestViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ManifestViolation::FileNameMismatch { file_stem } => {
+            ManifestViolation::FileNameMismatch { file_name } => {
                 write!(
                     f,
-                    "manifest file `{file_stem}.toml` does not match its framework"
+                    "manifest file `{file_name}` does not match its framework"
                 )
             }
             ManifestViolation::EmptyInventory => f.write_str("the inventory lists no case"),
@@ -532,8 +531,6 @@ impl fmt::Display for ManifestViolation {
 /// Why a manifest could not be loaded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ManifestError {
-    /// The file could not be read.
-    Io(String),
     /// The text is not a manifest (malformed TOML, unknown field, or a value
     /// outside a closed vocabulary such as an outcome alias).
     Parse(String),
@@ -544,7 +541,6 @@ pub enum ManifestError {
 impl fmt::Display for ManifestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ManifestError::Io(message) => write!(f, "manifest unreadable: {message}"),
             ManifestError::Parse(message) => write!(f, "manifest malformed: {message}"),
             ManifestError::Invalid(violations) => {
                 f.write_str("manifest invalid:")?;
@@ -620,23 +616,18 @@ impl ProbeStateManifest {
         Ok(manifest)
     }
 
-    /// Read, parse, and validate `manifest/<framework>.toml`, including that
-    /// the file stem names the manifest's framework.
-    pub fn load(path: &Path) -> Result<Self, ManifestError> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|error| ManifestError::Io(format!("{}: {error}", path.display())))?;
+    /// Parse and validate the text of the manifest file `file_name`
+    /// (`<framework>.toml`), including that the file name names the
+    /// manifest's framework. The caller reads the file.
+    pub fn from_manifest_file(file_name: &str, text: &str) -> Result<Self, ManifestError> {
         let manifest: ProbeStateManifest =
-            toml::from_str(&text).map_err(|error| ManifestError::Parse(error.to_string()))?;
+            toml::from_str(text).map_err(|error| ManifestError::Parse(error.to_string()))?;
         let mut violations = manifest.validate().err().unwrap_or_default();
-        let file_stem = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or_default();
-        if file_stem != manifest.framework.as_str() {
+        if file_name != format!("{}.toml", manifest.framework.as_str()) {
             violations.insert(
                 0,
                 ManifestViolation::FileNameMismatch {
-                    file_stem: file_stem.to_string(),
+                    file_name: file_name.to_string(),
                 },
             );
         }

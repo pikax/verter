@@ -187,6 +187,19 @@ fn contract_manifest_validates() {
 }
 
 #[test]
+fn a_manifest_filed_under_another_framework_is_rejected() {
+    assert!(ProbeStateManifest::from_manifest_file("vue.toml", MANIFEST).is_ok());
+    assert_eq!(
+        ProbeStateManifest::from_manifest_file("svelte.toml", MANIFEST),
+        Err(ManifestError::Invalid(vec![
+            ManifestViolation::FileNameMismatch {
+                file_name: "svelte.toml".to_string()
+            }
+        ]))
+    );
+}
+
+#[test]
 fn generic_failure_alias_is_not_an_outcome_class() {
     let text = planted(
         r#"expected_class = "semantic_mismatch""#,
