@@ -29,14 +29,14 @@ use verter_session::for_tests::{
     finalize_flow_solve, flow_family_route, flow_graph_fixture_for_tests,
     flow_graph_fixture_for_tests_with_language, flow_operation_contract, flow_result_contract_id,
     flow_return_result_contract_id, flow_return_result_for_tests, CompleteFlowResult,
-    FlowDemandHandle, FlowDemandPlan, FlowDemandPlanError, FlowDemandRequest, FlowDischargeEntry,
-    FlowDischargeReport, FlowDomain, FlowDomainClosure, FlowFactFamily, FlowFailure,
-    FlowFailureClass, FlowFinalizerKind, FlowGraphFixtureForTests, FlowObligationBasis,
-    FlowObligationId, FlowObligationOrigin, FlowObligationSpec, FlowOperationContract,
-    FlowOperationRole, FlowOperationStatus, FlowPartialReason, FlowRequirement,
-    FlowRequirementKind, FlowResourcePolicy, FlowResultContractDescriptor, FlowSealError,
-    FlowSolveOutcome, FlowSuboperationEvidence, FlowTransitionError, ObligationRuntime,
-    ObligationState, PlannedFlowSlice, SealedFlowCompletion, SemanticGraphStore,
+    FlowCaptureDemand, FlowDemandHandle, FlowDemandPlan, FlowDemandPlanError, FlowDemandRequest,
+    FlowDischargeEntry, FlowDischargeReport, FlowDomain, FlowDomainClosure, FlowFactFamily,
+    FlowFailure, FlowFailureClass, FlowFinalizerKind, FlowGraphFixtureForTests,
+    FlowObligationBasis, FlowObligationId, FlowObligationOrigin, FlowObligationSpec,
+    FlowOperationContract, FlowOperationRole, FlowOperationStatus, FlowPartialReason,
+    FlowRequirement, FlowRequirementKind, FlowResourcePolicy, FlowResultContractDescriptor,
+    FlowSealError, FlowSolveOutcome, FlowSuboperationEvidence, FlowTransitionError,
+    ObligationRuntime, ObligationState, PlannedFlowSlice, SealedFlowCompletion, SemanticGraphStore,
 };
 use verter_session::semantic_query::demand::{ProjectionPath, SurfaceFacet, SurfaceFacetSet};
 use verter_session::semantic_query::{
@@ -3421,6 +3421,62 @@ fn call_argument_callbacks_sharing_one_site_own_separate_capture_obligations() {
         (captures[0].2.as_str(), captures[1].2.as_str()),
         ("x", "y"),
         "each callback owes exactly the cell it retains, in authored order"
+    );
+}
+
+const SHARED_SITE_READER_WRITER_SOURCE: &str = r#"
+function reader_and_writer(a) {
+  return sink(() => a, () => { a = 1; });
+}
+"#;
+
+/// A capture demand is the CALLBACK's, so the read set that decides it is
+/// the callback's too. One expression site merges every callable's reads
+/// with its own, so `sink(() => a, () => { a = 1 })` reads `a` at the
+/// site while only the FIRST callback consumes its value. Answered from
+/// the merged footprint the write-only callback also demands `Value`,
+/// which discharges through `binding_product_evidence` rather than the
+/// structural execution an effect-only retainer proves — a value product
+/// the callback never produces, leaving its obligation pending.
+#[test]
+fn a_sibling_reader_never_turns_a_write_only_capture_into_a_value_demand() {
+    let fixture = flow_graph_fixture_for_tests(SHARED_SITE_READER_WRITER_SOURCE, 89);
+    let plan = fixture
+        .build_plan(request_named("reader_and_writer"))
+        .expect("the shared-site reader/writer fixture plans");
+    let mut captures: Vec<_> = plan
+        .obligation_specs()
+        .iter()
+        .filter_map(|spec| match spec.basis() {
+            FlowObligationBasis::CapturedBinding {
+                site,
+                closure,
+                identity,
+                demand,
+                ..
+            } => Some((*site, *closure, identity.name.to_string(), *demand)),
+            _ => None,
+        })
+        .collect();
+    captures.sort_by_key(|(site, closure, _, _)| (site.index(), closure.index()));
+    assert_eq!(
+        captures.len(),
+        2,
+        "both callbacks retain `a`, one obligation each: {captures:?}"
+    );
+    assert_eq!(
+        captures[0].0, captures[1].0,
+        "both callbacks are argument positions of ONE call site"
+    );
+    assert_eq!(
+        (captures[0].2.as_str(), captures[1].2.as_str()),
+        ("a", "a"),
+        "the two callbacks retain the same cell"
+    );
+    assert_eq!(
+        (captures[0].3, captures[1].3),
+        (FlowCaptureDemand::Value, FlowCaptureDemand::Effect),
+        "the reader consumes the value; the write-only sibling retains only its cell"
     );
 }
 

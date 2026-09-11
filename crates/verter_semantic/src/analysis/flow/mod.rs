@@ -556,6 +556,19 @@ pub struct SkeletonClosure {
     /// callables), deduplicated in the indexed source order. Genuinely
     /// free / global reads bind to no declaration and never appear here.
     pub captures: Arc<[FlowBindingRef]>,
+    /// The subset of `captures` this callable actually READS — its own
+    /// free reads, deduplicated in the indexed source order. The
+    /// remaining captures are retained for their cell alone (a
+    /// write-only capture), and demand exactly the callable's execution,
+    /// never a value product.
+    ///
+    /// Recorded per callable because the site-level
+    /// [`SkeletonExprSite::reads`] merges every callable at the site with
+    /// the site's own reads: at `f(() => a, () => { a = 1 })` the merged
+    /// footprint says `a` is read HERE and cannot say by WHICH callable,
+    /// so a site-level answer makes the write-only callback look like a
+    /// value consumer.
+    pub read_captures: Arc<[FlowBindingRef]>,
 }
 
 /// One tracked expression site: span, region membership, containment
@@ -1079,6 +1092,14 @@ fn prepare_function_body_skeleton(
                     *capture = bindings.resolve_identity(identity)?;
                 }
             }
+            // The callable's own read subjects resolve through the SAME
+            // map, so a cell named one way in `captures` is named the
+            // same way here and the two lists stay comparable.
+            for capture in Arc::make_mut(&mut closure.read_captures) {
+                if let FlowBindingRef::Captured(identity) = capture {
+                    *capture = bindings.resolve_identity(identity)?;
+                }
+            }
         }
         for read in Arc::make_mut(&mut site.reads) {
             read.binding = match &read.binding {
@@ -1478,6 +1499,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             span: closure_span,
             correlation: SkeletonClosureCorrelation::Uncorrelated,
             captures: Arc::from([]),
+            read_captures: Arc::from([]),
         });
     }
 
@@ -1538,6 +1560,18 @@ impl<'entry> SkeletonBuilder<'entry> {
                 self.sites[site.index()].captures.push(name);
             }
         }
+        // This callable's OWN read subjects, kept apart from the site
+        // footprint below: the site's `reads` merge every callable here,
+        // so only this per-callable list can say that a sibling — and not
+        // this callable — is the one consuming the cell's value.
+        let mut own_reads: Vec<FlowBindingRef> = Vec::new();
+        let mut own_read_seen = FxHashSet::default();
+        for read in captures.reads.iter() {
+            let binding = FlowBindingRef::Captured(read.binding.clone());
+            if own_read_seen.insert(binding.clone()) {
+                own_reads.push(binding);
+            }
+        }
         self.sites[site.index()].closures.push(SkeletonClosure {
             span: closure_span,
             correlation: if captures.exhaustive {
@@ -1546,6 +1580,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                 SkeletonClosureCorrelation::Partial
             },
             captures: Arc::from(own.into_boxed_slice()),
+            read_captures: Arc::from(own_reads.into_boxed_slice()),
         });
         for read in captures.reads.iter() {
             let name = self.intern(&read.binding.name);

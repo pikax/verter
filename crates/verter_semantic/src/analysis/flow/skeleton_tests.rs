@@ -1134,6 +1134,47 @@ fn each_callable_sharing_one_site_retains_its_own_capture_partition() {
     }
 }
 
+/// A site's read footprint MERGES every callable evaluated there with the
+/// site's own reads, so it can say that a cell is read HERE and never by
+/// WHICH callable. `sink(() => a, () => { a = 1; })` retains `a` twice
+/// and reads it once: without the per-callable read partition the
+/// write-only callback is indistinguishable from the reader, and a
+/// consumer would demand a value it never consumes.
+#[test]
+fn each_callable_keeps_its_own_read_partition_of_the_merged_site_footprint() {
+    let prepared =
+        indexed_structure_of("function root(a) { sink(() => a, () => { a = 1; }); return 1; }");
+    let skeleton = prepared.skeleton();
+    let a = single_binding_named(skeleton, "a");
+    let site = skeleton
+        .expr_sites
+        .iter()
+        .find(|site| site.closures.len() > 1)
+        .expect("both callables share one expression site");
+    assert!(
+        site.reads
+            .iter()
+            .any(|read| read.binding == Some(FlowBindingRef::Local(a))),
+        "the merged footprint records the read with no callable attribution"
+    );
+    let partition: Vec<_> = site
+        .closures
+        .iter()
+        .map(|closure| (closure.captures.as_ref(), closure.read_captures.as_ref()))
+        .collect();
+    assert_eq!(
+        partition,
+        vec![
+            (
+                &[FlowBindingRef::Local(a)][..],
+                &[FlowBindingRef::Local(a)][..]
+            ),
+            (&[FlowBindingRef::Local(a)][..], &[][..]),
+        ],
+        "both callables retain `a`; only the authored first one reads it"
+    );
+}
+
 /// The three outcomes a consumer must be able to tell apart at one call
 /// site: a callback that provably captures nothing, a callback whose only
 /// free read binds no declaration at all (a global — never a capture),

@@ -1292,8 +1292,6 @@ pub(crate) fn build_flow_demand_plan_from_execution(
                     let FlowNodeKind::ExprSite(site) = graph.node_kind(*node) else { continue };
                     let site_record = bundle.skeleton.expr_site(site);
                     if site_record.closures.is_empty() { continue; }
-                    let value_captures: FxHashSet<_> = site_record.reads.iter()
-                        .filter_map(|read| read.binding.as_ref()).collect();
                     for (ordinal, record) in site_record.closures.iter().enumerate() {
                         let closure = SkeletonClosureId::from_index(u32::try_from(ordinal).unwrap_or(u32::MAX));
                         // An authored callable the indexed program does not
@@ -1330,6 +1328,17 @@ pub(crate) fn build_flow_demand_plan_from_execution(
                             expanded.push(id);
                             continue;
                         }
+                        // The demand is THIS callable's, so the read set
+                        // that decides it is THIS callable's too. The site
+                        // footprint merges every callable evaluated here
+                        // with the site's own reads, so in
+                        // `f(() => a, () => { a = 1 })` the sibling reader
+                        // would otherwise make the write-only callback
+                        // demand a value product it never consumes: `Value`
+                        // is discharged by `binding_product_evidence`, not
+                        // by the structural execution an effect-only
+                        // capture proves.
+                        let value_captures: FxHashSet<_> = record.read_captures.iter().collect();
                         for capture in record.captures.iter() {
                             let demand = if value_captures.contains(capture) { FlowCaptureDemand::Value } else { FlowCaptureDemand::Effect };
                             let (basis, dischargeable) = match capture {
