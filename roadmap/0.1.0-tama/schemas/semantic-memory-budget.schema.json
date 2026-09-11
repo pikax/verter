@@ -774,8 +774,7 @@
           "minimum": 2
         },
         "config_pair_size": {
-          "type": "integer",
-          "minimum": 2
+          "const": 2
         },
         "disposition_rule": {
           "type": "string",
@@ -878,7 +877,7 @@
           },
           "setting": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_]*(.[A-Za-z][A-Za-z0-9_]*)*$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*$"
           },
           "baseline_value": {
             "type": "string",
@@ -1080,7 +1079,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^(normal|pressure).[a-z][a-z0-9_]*$"
+            "pattern": "^(normal|pressure)\\.[a-z][a-z0-9_]*$"
           },
           "mode": {
             "enum": [
@@ -1343,7 +1342,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^memory.[a-z][a-z0-9_]*$"
+            "pattern": "^memory\\.[a-z][a-z0-9_]*$"
           },
           "observes": {
             "type": "string",

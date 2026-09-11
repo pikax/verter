@@ -1488,6 +1488,77 @@ test("a stale manifest pin is refused", () => {
   refusedBecause(validate(catalog), "manifest digest recomputes to");
 });
 
+test("a configuration group that is not a pair is refused", () => {
+  const catalog = freshCatalog();
+  assert.equal(catalog.workload.config_pair_size, 2, "pre-state: a configuration group is a pair");
+  catalog.workload.config_pair_size = 4;
+  assert.equal(catalog.workload.config_pair_size, 4, "post-state: the group size did not change");
+  // Four configuration actions divide evenly by four, so the whole-number
+  // check alone admits the value while the expander still emits one apply
+  // and three reverts of the same delta. Both halves refuse it: the schema
+  // pins the value, and the expander's own shape check rejects it without
+  // the schema's help.
+  const errors = validate(catalog);
+  refusedBecause(errors, "config_pair_size: expected constant 2");
+  refusedBecause(errors, "config_pair_size must be 2, got 4");
+});
+
+test("a step naming an inherited object property is refused", () => {
+  const catalog = freshCatalog();
+  const step = catalog.workload_step.find(
+    (row) => row.cycle === "a" && row.kind === "request_warm",
+  );
+  assert.ok(step, "pre-state: cycle a declares a warm request step");
+  assert.ok(
+    !catalog.workload_kind.some((row) => row.kind === "constructor"),
+    "pre-state: constructor is not a declared kind",
+  );
+  // The hazard this control pins. The projected kinds map is a plain
+  // object, so `constructor` resolves through `Object.prototype` even though
+  // no row declares it, and the schema's kind pattern admits the name — a
+  // truthiness lookup would accept the step and expand it into an action
+  // whose class and disposition are undefined.
+  const projected = workloadSpec(catalog).kinds;
+  assert.ok(projected.constructor, "pre-state: the inherited lookup does resolve");
+  assert.equal(Object.hasOwn(projected, "constructor"), false);
+
+  step.kind = "constructor";
+  assert.equal(step.kind, "constructor", "post-state: the step kind did not change");
+  refusedBecause(validate(catalog), "step names unknown kind constructor");
+});
+
+// ── identifier separators ────────────────────────────────────────────────
+
+test("a dotted identifier whose separator is not a dot is refused", () => {
+  // An unescaped `.` in a JSON-schema pattern is the any-character
+  // metacharacter, so each value below satisfies the UNESCAPED form of its
+  // own pattern while separating its parts with something that is not a
+  // dot. Each assertion names the escaped pattern, so this control fails if
+  // any of the three separators stops being a literal dot.
+  const catalog = freshCatalog();
+  const derivation = catalog.limit_derivation[0];
+  const observation = catalog.memory_observation[0];
+  const delta = catalog.workload_configuration_delta[0];
+  assert.ok(derivation.id.includes("."), "pre-state: the derivation id is dotted");
+  assert.ok(observation.id.includes("."), "pre-state: the observation id is dotted");
+  assert.ok(delta.setting.includes("."), "pre-state: the setting path is dotted");
+
+  derivation.id = derivation.id.replace(".", "X");
+  observation.id = observation.id.replace(".", "X");
+  delta.setting = delta.setting.replace(".", " ");
+  assert.ok(!derivation.id.includes("."), "post-state: the derivation separator did not change");
+  assert.ok(!observation.id.includes("."), "post-state: the observation separator did not change");
+  assert.ok(!delta.setting.includes("."), "post-state: the setting separator did not change");
+
+  const errors = validate(catalog);
+  refusedBecause(errors, String.raw`string does not match ^(normal|pressure)\.[a-z][a-z0-9_]*$`);
+  refusedBecause(errors, String.raw`string does not match ^memory\.[a-z][a-z0-9_]*$`);
+  refusedBecause(
+    errors,
+    String.raw`string does not match ^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)*$`,
+  );
+});
+
 // ── per-tranche control restoration ──────────────────────────────────────
 
 test("a tranche that does not restore its control live set is refused", () => {
@@ -1503,8 +1574,11 @@ test("a tranche that does not restore its control live set is refused", () => {
   revert.count = 7;
   cold.count += 1;
   assert.equal(revert.count, 7, "post-state: the revert count did not change");
-  const errors = validate(catalog);
-  assert.ok(errors.length > 0, `an unreverted edit must not validate clean:\n${errors.join("\n")}`);
+  // Naming the refusal, not merely counting errors: the extra cold request
+  // this mutation adds to keep the tranche whole also exhausts the carrier
+  // pool, so a regressed pairing check would still leave an error behind and
+  // an `errors.length > 0` assertion would stay green over it.
+  refusedBecause(validate(catalog), "cycle a does not revert exactly the edits it applies");
 });
 
 /**
@@ -1847,10 +1921,7 @@ test("an edited fixture on disk is refused", (t) => {
   // temporary root, change one byte of one frozen fixture, and confirm the
   // pin catches it. The in-memory controls above cannot prove the fixture
   // digests are read from disk at all; this one can.
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mem0-budget-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  for (const relative of ["catalogs", "schemas", "tools/semantic-memory-workload.mjs"])
-    fs.cpSync(path.join(PACKAGE_ROOT, relative), path.join(root, relative), { recursive: true });
+  const root = mirrorPackage(t, "mem0-budget-");
 
   assert.deepEqual(
     validate(loadCatalog(root), root),
@@ -1873,10 +1944,7 @@ test("an edited fixture on disk is refused", (t) => {
 });
 
 test("a mutated expander on disk is refused", (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mem0-expander-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  for (const relative of ["catalogs", "schemas", "tools/semantic-memory-workload.mjs"])
-    fs.cpSync(path.join(PACKAGE_ROOT, relative), path.join(root, relative), { recursive: true });
+  const root = mirrorPackage(t, "mem0-expander-");
 
   const expander = path.join(root, "tools/semantic-memory-workload.mjs");
   const original = fs.readFileSync(expander, "utf8");

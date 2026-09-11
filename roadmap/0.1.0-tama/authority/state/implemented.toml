@@ -299,7 +299,7 @@ schema = 2
 "LSO9" = { status = "pending" }
 "MDXP" = { status = "pending" }
 "MDXR0" = { status = "pending" }
-"MEM0" = { status = "implemented", commit_message = "feat(*): ratify the aggregate semantic memory budget, allocation ownership inventory, and fixed churn workload", commit_date = "2026-09-08T12:00:00+01:00" }
+"MEM0" = { status = "implemented", commit_message = "feat(*): ratify the aggregate semantic memory budget, allocation ownership inventory, and fixed churn workload", commit_date = "2026-09-08T12:00:00+01:00", pull_request = 524 }
 "MEM1" = { status = "pending" }
 "NCF-AT-CYCLE" = { status = "pending" }
 "NCF-AT-QUERY" = { status = "pending" }

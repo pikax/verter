@@ -429,6 +429,14 @@ function validateSpecShape(spec) {
   if (!spec.fixtures.some((f) => f.role === "carrier" && f.health === "malformed"))
     errors.push("fixtures declare no malformed carrier");
 
+  // The expander pairs configuration actions by ordinal parity: an even
+  // ordinal applies a delta and the next odd ordinal reverts that SAME delta
+  // on that SAME project. A group of any other size would emit one apply and
+  // several reverts of one delta, leaving the tranche configured in a way the
+  // pairing itself cannot express, so two is the only size that is a pair.
+  if (spec.config_pair_size !== 2)
+    errors.push(`config_pair_size must be 2, got ${spec.config_pair_size}`);
+
   for (const cycle of CYCLES) {
     const steps = spec.steps.filter((step) => step.cycle === cycle);
     if (steps.length === 0) {
@@ -466,7 +474,12 @@ function validateSpecShape(spec) {
       );
   }
   for (const step of spec.steps)
-    if (!spec.kinds[step.kind]) errors.push(`step names unknown kind ${step.kind}`);
+    // An own-property test, not a truthiness test: the projected kinds map is
+    // a plain object, so a step naming an inherited key — `constructor` is
+    // both a live `Object.prototype` member and a legal kind under the
+    // schema pattern — would resolve to a function, pass this check, and be
+    // expanded into an action whose class and disposition are `undefined`.
+    if (!Object.hasOwn(spec.kinds, step.kind)) errors.push(`step names unknown kind ${step.kind}`);
   for (const [kind, descriptor] of Object.entries(spec.kinds))
     if (!DISPOSITIONS.has(descriptor.cache_disposition))
       errors.push(
