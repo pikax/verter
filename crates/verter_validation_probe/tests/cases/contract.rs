@@ -620,6 +620,22 @@ fn a_pass_canary_reports_observed_pass_then_canary_regression() {
 }
 
 #[test]
+fn an_unexpected_pass_on_a_failure_expectation_is_an_xpass_not_a_gate() {
+    let passing = observe(
+        seen(&[C::Pass]),
+        seen(&[C::Pass]),
+        seen(&[C::Pass]),
+        seen(&[C::Pass]),
+    )
+    .expect("a passing case is observable");
+    for state in [ExpectedState::KnownFail, ExpectedState::Canary] {
+        let evaluation = entry(Dimension::Compile, state, C::VerterDiagnostic).evaluate(&passing);
+        assert_eq!(evaluation, Evaluation::Xpass, "{state:?} observing pass");
+        assert!(!evaluation.blocks(), "an xpass never blocks");
+    }
+}
+
+#[test]
 fn lower_failures_propagate_and_independent_higher_failures_win() {
     let observation = observe(
         seen(&[C::Pass]),
