@@ -64,6 +64,7 @@ import {
   NODE_TEST_INVENTORY_PRELOAD,
   controlCommand,
   controlsFor,
+  inventoryCommand,
   laneFor,
   linkInstalledModuleTrees,
   reapply,
@@ -2344,12 +2345,99 @@ selfAssertion("the re-application routine plants and refuses what the register s
     /emitted no node-test listing/u,
     "a node-test clean run with no inventory was trusted",
   );
-  // A tool that prints one verdict line exposes no inventory at all, so a
-  // record declaring skips under it cannot tell a declared skip from an
-  // unexpected one, and is refused rather than trusted.
-  const toolControl = owned.find(
-    (row) => controlCommand(model, row).adapter.summary_grammar === "tool-line",
+  // A single-verdict tool whose count is a selection the tree declares is
+  // held to the script that re-derives that selection. A clean run of the DAG
+  // validator reporting fewer nodes than the authority's modules declare
+  // stopped reading part of the DAG — green, over a smaller selection than
+  // the tree intends — and is refused.
+  const toolLine = (row) => controlCommand(model, row).adapter.summary_grammar === "tool-line";
+  const inventoried = owned.find((row) => {
+    if (!toolLine(row)) return false;
+    const { adapter, argv } = controlCommand(model, row);
+    return inventoryCommand(adapter, argv) !== null;
+  });
+  assert.ok(
+    inventoried,
+    "no control this lane drives runs a single-verdict tool with an inventory",
   );
+  const inventoriedCommand = controlCommand(model, inventoried);
+  const [inventoryScript] = inventoryCommand(inventoriedCommand.adapter, inventoriedCommand.argv);
+  const countKey = inventoriedCommand.proof.count_key;
+  const counted = parseTerminalSummary(
+    "tool-line",
+    inventoriedCommand.proof.terminal_summary,
+    countKey,
+  ).selected;
+  const toolRuns = (cleanStdout, listing) => {
+    let runs = 0;
+    return (argv) => {
+      if (argv[0] === inventoryScript) return { status: 0, stdout: listing, stderr: "" };
+      runs += 1;
+      return runs === 1
+        ? { status: 0, stdout: cleanStdout, stderr: "" }
+        : { status: 1, stdout: inventoried.observed, stderr: "" };
+    };
+  };
+  const cleanLine = (count) =>
+    inventoriedCommand.proof.terminal_summary.replace(
+      new RegExp(String.raw`\b${countKey}=\d+\b`, "u"),
+      `${countKey}=${count}`,
+    );
+  assert.notEqual(cleanLine(counted - 1), inventoriedCommand.proof.terminal_summary);
+  const toolInventory = (key, count) => `tool-line inventory: ${key}=${count}\n`;
+  // Positive leg: the run and the inventory agree, including on a tree whose
+  // DAG has grown since the transcript was written.
+  reapply({
+    model,
+    control: inventoried,
+    mirror,
+    spawn: toolRuns(cleanLine(counted + 1), toolInventory(countKey, counted + 1)),
+  });
+  assert.throws(
+    () =>
+      reapply({
+        model,
+        control: inventoried,
+        mirror,
+        spawn: toolRuns(cleanLine(counted - 1), toolInventory(countKey, counted)),
+      }),
+    new RegExp(
+      `selected ${counted - 1} cases, but the runner's own listing of that selection on this tree holds ${counted}`,
+      "u",
+    ),
+    "a single-verdict run over fewer items than the tree declares was accepted",
+  );
+  assert.throws(
+    () =>
+      reapply({
+        model,
+        control: inventoried,
+        mirror,
+        spawn: toolRuns(cleanLine(counted), toolInventory("edges", counted)),
+      }),
+    new RegExp(`counts ${countKey}, but the inventory of .* counts edges`, "u"),
+    "an inventory of a different field was compared against the record's count",
+  );
+  assert.throws(
+    () =>
+      reapply({
+        model,
+        control: inventoried,
+        mirror,
+        spawn: toolRuns(cleanLine(counted), ""),
+      }),
+    /emitted no tool-line listing/u,
+    "a single-verdict run whose inventory printed nothing was trusted",
+  );
+
+  // A tool that prints one verdict line and has no such inventory exposes no
+  // inventory at all, so a record declaring skips under it cannot tell a
+  // declared skip from an unexpected one, and is refused rather than trusted.
+  const toolControl = owned.find((row) => {
+    if (!toolLine(row)) return false;
+    const { adapter, argv } = controlCommand(model, row);
+    return inventoryCommand(adapter, argv) === null;
+  });
   assert.ok(toolControl, "no control this lane drives runs a single-verdict tool");
   const toolProof = model.register.proof.find((row) => row.control === toolControl.id);
   const toolDeclaring = {

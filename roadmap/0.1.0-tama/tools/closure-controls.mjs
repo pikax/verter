@@ -224,6 +224,20 @@ export const INSTRUMENT_LANE_COMMAND_DEADLINE_MS = 2 * 60_000;
  */
 export const NODE_TEST_INVENTORY_PRELOAD = "./roadmap/0.1.0-tama/tools/node-test-inventory.mjs";
 
+/**
+ * The single-verdict tools whose counted field is a selection the tree
+ * declares independently of the tool, keyed by the tool a record runs, with
+ * the key that count is printed under and the script that re-derives it.
+ * A tool absent here has no inventory, and its clean run is judged on its own
+ * line alone.
+ */
+export const TOOL_LINE_INVENTORIES = Object.freeze({
+  "roadmap/0.1.0-tama/tools/validate-program-dag.mjs": Object.freeze({
+    countKey: "nodes",
+    script: "./roadmap/0.1.0-tama/tools/dag-node-inventory.mjs",
+  }),
+});
+
 /** The two lanes that between them re-apply every control in the register. */
 export const INSTRUMENT_LANE = "instrument";
 export const CONTROL_LANE = "control-lane";
@@ -280,13 +294,19 @@ export const controlsFor = (model, lane, instrumentEntry) =>
  * included; the ignored subset is listed on request with `--ignored`.
  * node:test has no listing mode, so its inventory is the suite's own module
  * code run under {@link NODE_TEST_INVENTORY_PRELOAD}, which counts every case
- * the suite declares and runs none of them.
+ * the suite declares and runs none of them. A tool printing one verdict line
+ * lists nothing either; where its count is a selection the tree declares,
+ * {@link TOOL_LINE_INVENTORIES} names the script that re-derives it.
  *
- * A runner with no inventory at all — a tool printing one verdict line —
- * leaves the clean run judged on its own summary alone: zero failures,
- * nonzero work, and no skip the record does not declare.
+ * A runner with no inventory at all — a single-verdict tool absent from that
+ * table — leaves the clean run judged on its own summary alone: zero
+ * failures, nonzero work, and no skip the record does not declare.
  */
 export function inventoryCommand(adapter, argv, { ignoredOnly = false } = {}) {
+  if (adapter.summary_grammar === "tool-line") {
+    const inventory = TOOL_LINE_INVENTORIES[argv[0]];
+    return inventory ? [inventory.script] : null;
+  }
   if (adapter.summary_grammar === "node-test") {
     // The run is `--test <suite>`; the inventory is that same suite file
     // evaluated with `node:test` replaced by the counting registrar. Node
@@ -374,6 +394,15 @@ export function parseInventory(grammar, output) {
     ];
     if (rows.length !== 1) return null;
     return { selected: Number(rows[0][1]), skipped: Number(rows[0][2]) };
+  }
+  if (grammar === "tool-line") {
+    // The inventory script's one line, naming the key its count is under so
+    // it is compared only against the field the record counts.
+    const rows = [
+      ...output.replaceAll("\r\n", "\n").matchAll(/^tool-line inventory: ([a-z_]+)=(\d+)$/gmu),
+    ];
+    if (rows.length !== 1) return null;
+    return { countKey: rows[0][1], selected: Number(rows[0][2]) };
   }
   return null;
 }
@@ -463,6 +492,12 @@ function assertCleanRunEvidence({ control, proof, adapter, argv, observedNow, in
     );
     return;
   }
+  if (inventory.countKey !== undefined)
+    assert.equal(
+      inventory.countKey,
+      proof.count_key,
+      `${control.id}: record ${proof.id} counts ${proof.count_key}, but the inventory of ${command} counts ${inventory.countKey}, so the two cannot be compared`,
+    );
   assert.equal(
     observedNow.selected,
     inventory.selected,
