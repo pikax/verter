@@ -63,6 +63,13 @@ export const REPO_ROOT = path.resolve(PACKAGE_ROOT, "..", "..");
 export const CATALOG_RELATIVE = "catalogs/semantic-memory-budget.toml";
 export const SCHEMA_NAME = "semantic-memory-budget.schema.json";
 const GATE_PROFILES_RELATIVE = "catalogs/gate-profiles.toml";
+/** This module and the modules it imports its checks from. */
+const VALIDATOR_MODULES = Object.freeze([
+  import.meta.url,
+  new URL("./closure-register.mjs", import.meta.url),
+  new URL("./semantic-memory-workload.mjs", import.meta.url),
+  new URL("./toml.mjs", import.meta.url),
+]);
 const AUDIT_SITE_SCHEMA = "crates/verter_audit/src/attribution/schema.rs";
 
 /**
@@ -208,6 +215,16 @@ function repoRelative(absolute) {
   const relative = path.relative(REPO_ROOT, absolute);
   if (!relative || path.isAbsolute(relative) || relative.startsWith("..")) return null;
   return relative.split(path.sep).join("/");
+}
+
+/**
+ * Record an absolute path the run read. Paths outside the repository — a
+ * negative control's mirrored package or mutated workflow copy — are not
+ * trigger inputs and are skipped.
+ */
+function recordOpenedAt(absolute) {
+  const relative = repoRelative(absolute);
+  if (relative) recordOpened(relative);
 }
 
 function readRepoFile(relative) {
@@ -1008,9 +1025,11 @@ function metricErrors(catalog) {
         String.raw`(?:attribute\w*!\(\s*${site.variant}\b|WorkSite::${site.variant}\b)`,
         "u",
       );
-      const emitters = rustSourcesUnder(row.emitter_anchor).filter((file) =>
-        raised.test(fs.readFileSync(file, "utf8")),
-      );
+      const emitters = rustSourcesUnder(row.emitter_anchor).filter((file) => {
+        const text = fs.readFileSync(file, "utf8");
+        recordOpenedAt(file);
+        return raised.test(text);
+      });
       if (emitters.length === 0)
         errors.push(`metric row ${row.id}: ${row.emitter_anchor} no longer raises ${site.variant}`);
     }
@@ -1040,6 +1059,7 @@ function fixtureErrors(catalog, packageRoot) {
       continue;
     }
     const actual = sha256(fs.readFileSync(absolute));
+    recordOpenedAt(absolute);
     if (actual !== fixture.sha256)
       errors.push(
         `workload fixture ${fixture.path}: digest recomputes to ${actual}, not the pinned ${fixture.sha256}`,
@@ -1070,7 +1090,9 @@ function fixtureErrors(catalog, packageRoot) {
   else if (oversize.role !== "oversize_carrier")
     errors.push("workload materialization: oversize_template is not the oversize_carrier fixture");
   else {
-    const text = fs.readFileSync(fixturePath(catalog, packageRoot, oversize.path), "utf8");
+    const oversizeAbsolute = fixturePath(catalog, packageRoot, oversize.path);
+    const text = fs.readFileSync(oversizeAbsolute, "utf8");
+    recordOpenedAt(oversizeAbsolute);
     for (const [key, label] of [
       ["oversize_marker_begin", "begin marker"],
       ["oversize_marker_end", "end marker"],
@@ -1111,6 +1133,7 @@ function editDeltaErrors(catalog, packageRoot) {
     const absolute = fixturePath(catalog, packageRoot, delta.template);
     if (!fs.existsSync(absolute)) continue;
     const text = fs.readFileSync(absolute, "utf8");
+    recordOpenedAt(absolute);
     const occurrences = text.split(delta.find).length - 1;
     if (occurrences === 0)
       errors.push(
@@ -1212,6 +1235,7 @@ function workloadErrors(catalog, packageRoot) {
     return errors;
   }
   const expanderDigest = sha256(fs.readFileSync(expanderAbsolute));
+  recordOpenedAt(expanderAbsolute);
   if (expanderDigest !== workload.expander_sha256)
     errors.push(
       `workload: expander digest recomputes to ${expanderDigest}, not the pinned ${workload.expander_sha256}`,
@@ -1630,15 +1654,16 @@ function commandErrors(catalog, packageRoot, workflowFile) {
 
   let profiles = null;
   try {
-    profiles = readToml(path.join(packageRoot, GATE_PROFILES_RELATIVE)).profile || [];
+    const profilesFile = path.join(packageRoot, GATE_PROFILES_RELATIVE);
+    profiles = readToml(profilesFile).profile || [];
+    recordOpenedAt(profilesFile);
   } catch (error) {
     errors.push(`commands: cannot read ${GATE_PROFILES_RELATIVE}: ${error.message}`);
   }
   let workflow = null;
   try {
     workflow = fs.readFileSync(workflowFile, "utf8");
-    const relative = repoRelative(workflowFile);
-    if (relative) recordOpened(relative);
+    recordOpenedAt(workflowFile);
   } catch (error) {
     errors.push(`commands: cannot read the CI workflow: ${error.message}`);
   }
@@ -1647,6 +1672,9 @@ function commandErrors(catalog, packageRoot, workflowFile) {
 
   for (const row of required) {
     const where = `command ${row.id}`;
+    // The scripts a required lane executes are inputs to that lane too.
+    for (const token of row.command.split(/\s+/u))
+      if (token.endsWith(".mjs") && fs.existsSync(path.join(REPO_ROOT, token))) recordOpened(token);
     if (profiles && row.gate_profile !== undefined) {
       const profile = profiles.find((entry) => entry.id === row.gate_profile);
       if (!profile) errors.push(`${where}: gate profile ${row.gate_profile} is not declared`);
@@ -1712,10 +1740,13 @@ export function validateSemanticMemoryBudgetModel(
 ) {
   openedRepoPaths = new Set();
   try {
-    // The package itself is read too: this catalog, its schema and
-    // fixtures, the gate profiles and the tools implementing the checks.
-    const packageRelative = repoRelative(packageRoot);
-    if (packageRelative) recordOpened(packageRelative);
+    // The contract's own sources are inputs too: the catalog and schema the
+    // caller parsed from this package, and the modules implementing these
+    // checks. Fixtures, the expander and the gate profiles are recorded
+    // where they are read.
+    recordOpenedAt(path.join(packageRoot, CATALOG_RELATIVE));
+    recordOpenedAt(path.join(packageRoot, "schemas", SCHEMA_NAME));
+    for (const module of VALIDATOR_MODULES) recordOpenedAt(fileURLToPath(module));
     const errors = [...validateSchemaObject(catalog, schema, "catalogs.semantic-memory-budget")];
     errors.push(...budgetErrors(catalog));
     errors.push(...limitDerivationErrors(catalog));

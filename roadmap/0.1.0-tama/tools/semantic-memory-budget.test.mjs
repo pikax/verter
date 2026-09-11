@@ -1187,6 +1187,38 @@ test("a cited crate the trigger filter stops covering is refused", (t) => {
   );
 });
 
+test("the contract's own sources the trigger filter stops covering are refused", (t) => {
+  // Narrowing the package pattern must not leave the catalog, schema, gate
+  // profiles and fixtures with no pattern while the validator keeps passing.
+  const toolsOnly = mutatedWorkflow(
+    t,
+    "- 'roadmap/0.1.0-tama/**'",
+    "- 'roadmap/0.1.0-tama/tools/**'",
+  );
+  const narrowed = validate(freshCatalog(), PACKAGE_ROOT, { workflowFile: toolsOnly });
+  for (const relative of [
+    "catalogs/semantic-memory-budget.toml",
+    "schemas/semantic-memory-budget.schema.json",
+    "catalogs/gate-profiles.toml",
+    "catalogs/semantic-memory-workload/sources/",
+  ])
+    refusedBecause(narrowed, `reads roadmap/0.1.0-tama/${relative}`);
+  // And the other way: the modules implementing the checks are inputs too.
+  const catalogsOnly = mutatedWorkflow(
+    t,
+    "- 'roadmap/0.1.0-tama/**'",
+    "- 'roadmap/0.1.0-tama/catalogs/**'",
+  );
+  const withoutTools = validate(freshCatalog(), PACKAGE_ROOT, { workflowFile: catalogsOnly });
+  for (const relative of [
+    "tools/semantic-memory-budget.mjs",
+    "tools/semantic-memory-workload.mjs",
+    "tools/validate-semantic-memory-budget.mjs",
+    "tools/semantic-memory-budget.test.mjs",
+  ])
+    refusedBecause(withoutTools, `reads roadmap/0.1.0-tama/${relative},`);
+});
+
 test("an anchor citing a path outside the trigger filter is refused", () => {
   const catalog = freshCatalog();
   const row = catalog.allocation_class.find((entry) => entry.id === "route_db");
