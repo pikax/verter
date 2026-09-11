@@ -102,6 +102,10 @@ const LAYER_7_HARNESSES: &[&str] = &[
     // closure. It exists so the boundary's own behaviour can be observed
     // rather than asserted from a Rust model of it.
     "verter_napi_request_fixture",
+    // The validation-probe contract (outcome taxonomy, probe-state manifest,
+    // expectation evaluator): test and CI tooling that no production crate
+    // may depend on.
+    "verter_validation_probe",
 ];
 
 /// Build/test tooling, not a production layer. Checked by

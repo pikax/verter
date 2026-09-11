@@ -1,0 +1,67 @@
+# Validation-probe authority catalog.
+#
+# The sole mapping from a durable probe citation id (the `Authority` enum of
+# `crates/verter_validation_probe`) to the roadmap node that owns it, the
+# framework and outcome dimensions it covers, the exact structural comparator
+# it supplies (if any), and the atoms that authorize probe cells.
+#
+# Executable artifacts (probe-state manifests, join records, observation
+# artifacts) cite `{ authority, atom }` with `atom` a durable lower-kebab id
+# only; `charter_atom` is the roadmap-side mapping of that id to the owning
+# charter's acceptance atom — an acceptance id, or "<section heading>/<bullet
+# ordinal>" for charters without acceptance ids — and never appears outside
+# this catalog.
+#
+# `atoms` is the authority's atom list keyed by durable id (the shared roadmap
+# TOML reader has no nested array tables). An atom's `dimensions` and
+# `outcomes` are the cells and terminal classes it may authorize: a `gate`
+# cell is admitted only when its owning node is implemented and its exact
+# expected class is listed in the cited atom's `outcomes` for the cell's
+# dimension. `framework = "any"` covers every framework.
+#
+# Validated by `tools/validate-probe-authorities.mjs`.
+
+schema = 1
+
+[[authority]]
+id = "compiler.public-request-route"
+node = "CCA1O2J"
+framework = "any"
+dimensions = ["Route"]
+atoms = { route-callable = { charter_atom = "Acceptance and evidence/1", dimensions = ["Route"], outcomes = ["pass"] }, typed-refusal = { charter_atom = "Acceptance and evidence/6", dimensions = ["Route"], outcomes = ["request_refused"] } }
+
+[[authority]]
+id = "vue.runtime-client-product"
+node = "VCP7"
+framework = "vue"
+dimensions = ["Compile", "Structural", "Runtime", "Map"]
+comparator = { crate = "verter_vue_conformance", path = "src/compare.rs", function = "compare_modules", atom = "product-identity" }
+atoms = { product-shape = { charter_atom = "VCP7-AC2", dimensions = ["Compile"], outcomes = ["pass"] }, product-diagnostic = { charter_atom = "VCP7-AC2", dimensions = ["Compile"], outcomes = ["verter_diagnostic", "unsupported"] }, product-identity = { charter_atom = "VCP7-AC2", dimensions = ["Structural"], outcomes = ["pass"] }, runtime-behavior = { charter_atom = "VCP7-AC2", dimensions = ["Runtime"], outcomes = ["pass"] }, source-map = { charter_atom = "VCP7-AC2", dimensions = ["Map"], outcomes = ["pass"] } }
+
+[[authority]]
+id = "svelte.runtime-client-product"
+node = "SCP7"
+framework = "svelte"
+dimensions = ["Compile", "Structural", "Runtime", "Map"]
+atoms = { product-shape = { charter_atom = "SCP7-AC2", dimensions = ["Compile"], outcomes = ["pass"] }, product-diagnostic = { charter_atom = "SCP7-AC2", dimensions = ["Compile"], outcomes = ["verter_diagnostic", "unsupported"] }, product-identity = { charter_atom = "SCP7-AC2", dimensions = ["Structural"], outcomes = ["pass"] }, runtime-behavior = { charter_atom = "SCP7-AC2", dimensions = ["Runtime"], outcomes = ["pass"] }, source-map = { charter_atom = "SCP7-AC2", dimensions = ["Map"], outcomes = ["pass"] } }
+
+[[authority]]
+id = "compiler.equivalent-work-ledger"
+node = "CPER0"
+framework = "any"
+dimensions = ["Performance"]
+atoms = { equivalent-work-ledger = { charter_atom = "CPER0-AC2", dimensions = ["Performance"], outcomes = ["pass"] } }
+
+[[authority]]
+id = "compiler.physical-execution"
+node = "CPER2"
+framework = "any"
+dimensions = ["Performance"]
+atoms = { physical-execution = { charter_atom = "CPER2-AC2", dimensions = ["Performance"], outcomes = ["pass"] } }
+
+[[authority]]
+id = "native.memory-audit-snapshot"
+node = "CPER0M"
+framework = "any"
+dimensions = ["Performance"]
+atoms = { memory-snapshot = { charter_atom = "Acceptance and evidence/1", dimensions = ["Performance"], outcomes = ["pass"] } }
