@@ -349,9 +349,10 @@ jobs:
               # observations resolve `memory.rs` as well; renaming one of
               # those owners turns this job red on purpose — the contract has
               # to be repinned, not left describing a symbol that no longer
-              # exists. That validator refuses any repository path it reads
-              # that no pattern here covers, so this block cannot silently
-              # fall behind what the contract cites.
+              # exists. That validator refuses any repository path it reads,
+              # and any first-party module it or its lane scripts import, that
+              # no pattern here covers, so this block cannot silently fall
+              # behind what the contract cites or runs.
               - 'performance-gates.toml'
               - 'crates/verter_audit/src/**'
               - 'crates/verter_bench/examples/attribution_baseline.rs'

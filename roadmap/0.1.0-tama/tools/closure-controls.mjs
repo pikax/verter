@@ -216,6 +216,14 @@ export const CONTROL_LANE_COMMAND_DEADLINE_MS = 20 * 60_000;
 export const INSTRUMENT_LANE_DEADLINE_MS = 10 * 60_000;
 export const INSTRUMENT_LANE_COMMAND_DEADLINE_MS = 2 * 60_000;
 
+/**
+ * The preload that turns a node:test suite file into its own inventory,
+ * spelled relative to the repository root every lane runs its commands from.
+ * It is spawned, never imported: importing it would replace `node:test` in
+ * the importing process too.
+ */
+export const NODE_TEST_INVENTORY_PRELOAD = "./roadmap/0.1.0-tama/tools/node-test-inventory.mjs";
+
 /** The two lanes that between them re-apply every control in the register. */
 export const INSTRUMENT_LANE = "instrument";
 export const CONTROL_LANE = "control-lane";
@@ -270,11 +278,28 @@ export const controlsFor = (model, lane, instrumentEntry) =>
  * which is exactly the split the run summary reports as executed and skipped.
  * libtest's `--list` prints every case the same filter admits, ignored ones
  * included; the ignored subset is listed on request with `--ignored`.
+ * node:test has no listing mode, so its inventory is the suite's own module
+ * code run under {@link NODE_TEST_INVENTORY_PRELOAD}, which counts every case
+ * the suite declares and runs none of them.
  *
- * A runner with no listing mode leaves the clean run judged on its own summary
- * alone: zero failures, nonzero work, and no skip the record does not declare.
+ * A runner with no inventory at all — a tool printing one verdict line —
+ * leaves the clean run judged on its own summary alone: zero failures,
+ * nonzero work, and no skip the record does not declare.
  */
 export function inventoryCommand(adapter, argv, { ignoredOnly = false } = {}) {
+  if (adapter.summary_grammar === "node-test") {
+    // The run is `--test <suite>`; the inventory is that same suite file
+    // evaluated with `node:test` replaced by the counting registrar. Node
+    // evaluates one main module, so a record selecting several files, or
+    // narrowing a file by flag, has no inventory this can derive and is
+    // refused rather than held to a count of something else.
+    const [flag, ...files] = argv;
+    assert.ok(
+      flag === "--test" && files.length === 1 && !files[0].startsWith("-"),
+      `a node-test record must run exactly one whole suite file to be inventoried, got ${JSON.stringify(argv)}`,
+    );
+    return ["--import", NODE_TEST_INVENTORY_PRELOAD, files[0]];
+  }
   if (adapter.summary_grammar === "nextest") {
     // The run command is `nextest run …`; the listing is `nextest list …` over
     // the same selection, and the format flag is a `list` option that has to
@@ -337,6 +362,18 @@ export function parseInventory(grammar, output) {
     const selected = totals.reduce((sum, row) => sum + Number(row[1]), 0);
     if (listed !== selected) return null;
     return { selected };
+  }
+  if (grammar === "node-test") {
+    // The preload's single exit line. Anything else the suite's module code
+    // prints around it is not the inventory, and two such lines mean two
+    // processes' counts were interleaved into one listing.
+    const rows = [
+      ...output
+        .replaceAll("\r\n", "\n")
+        .matchAll(/^node-test inventory: declared (\d+) skipped (\d+)$/gmu),
+    ];
+    if (rows.length !== 1) return null;
+    return { selected: Number(rows[0][1]), skipped: Number(rows[0][2]) };
   }
   return null;
 }

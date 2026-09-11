@@ -45,6 +45,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   CI_WORKFLOW,
+  importedModules,
   laneCommandLine,
   triggerCovers,
   triggerPaths,
@@ -63,13 +64,6 @@ export const REPO_ROOT = path.resolve(PACKAGE_ROOT, "..", "..");
 export const CATALOG_RELATIVE = "catalogs/semantic-memory-budget.toml";
 export const SCHEMA_NAME = "semantic-memory-budget.schema.json";
 const GATE_PROFILES_RELATIVE = "catalogs/gate-profiles.toml";
-/** This module and the modules it imports its checks from. */
-const VALIDATOR_MODULES = Object.freeze([
-  import.meta.url,
-  new URL("./closure-register.mjs", import.meta.url),
-  new URL("./semantic-memory-workload.mjs", import.meta.url),
-  new URL("./toml.mjs", import.meta.url),
-]);
 const AUDIT_SITE_SCHEMA = "crates/verter_audit/src/attribution/schema.rs";
 
 /**
@@ -227,6 +221,21 @@ function recordOpenedAt(absolute) {
   if (relative) recordOpened(relative);
 }
 
+/**
+ * Record a module the run executes together with every first-party module it
+ * transitively imports. An import is execution: the schema check a lane
+ * script hands in, and the helpers the checks import, decide this verdict as
+ * much as the module that calls them, so recording only the modules named
+ * directly would leave the rest free to change with the job skipped.
+ */
+function recordModuleClosure(absolute) {
+  const relative = repoRelative(absolute);
+  if (!relative) return;
+  recordOpened(relative);
+  for (const imported of importedModules(REPO_ROOT, relative))
+    if (fs.existsSync(path.join(REPO_ROOT, imported))) recordOpened(imported);
+}
+
 function readRepoFile(relative) {
   const bytes = fs.readFileSync(path.join(REPO_ROOT, relative));
   recordOpened(relative);
@@ -370,6 +379,14 @@ function budgetErrors(catalog) {
       );
     if (mode.per_entry_admission_max_bytes > mode.cache_owned_retained_max_bytes)
       errors.push(`budget.${name}: per-entry admission cap exceeds the whole retained ceiling`);
+    // A complete result is built inside one request's active budget, so an
+    // entry cap at or above that budget can never bind: nothing both exceeds
+    // the cap and fits the request, and the complete-but-uncached return the
+    // pinned-result policy defines is empty.
+    if (mode.per_entry_admission_max_bytes >= mode.per_request_active_max_bytes)
+      errors.push(
+        `budget.${name}: the per-entry admission cap must be below the per-request active cap, or no complete result can be too large to admit while still fitting the active budget, and the oversized-entry boundary is unreachable`,
+      );
     const active = mode.per_request_active_max_bytes * mode.max_simultaneously_admitted_requests;
     if (active !== mode.request_active_max_bytes)
       errors.push(
@@ -394,12 +411,8 @@ function budgetErrors(catalog) {
       );
     if (pressure.allocator_slack_bytes !== normal.allocator_slack_bytes)
       errors.push("budget.pressure: pressure may not change allocator slack");
-    // The oversized-entry boundary is only reachable when an entry can be
-    // too large to admit while still fitting one request's active budget.
-    if (pressure.per_entry_admission_max_bytes > pressure.per_request_active_max_bytes)
-      errors.push(
-        "budget.pressure: the per-entry admission cap must not exceed the per-request active cap, or a complete result can never be too large to admit while still fitting the active budget, and the oversized-entry boundary is unreachable",
-      );
+    if (pressure.per_entry_admission_max_bytes > normal.per_entry_admission_max_bytes)
+      errors.push("budget.pressure: the pressure entry cap may not exceed the normal entry cap");
   }
   return errors;
 }
@@ -575,6 +588,52 @@ function pressureSignalErrors(catalog) {
     errors.push(
       "measurement: no pressure boundary signal has a complete emitter, so the pressure obligation rests entirely on partial evidence and no run could discharge it",
     );
+  return errors;
+}
+
+/**
+ * The control-live-set floor is one whole byte-bounded pool the workload
+ * exercises, so the floor has to name that pool and equal its bound, and
+ * every other byte-bounded class has to be declared unexercised. A new
+ * byte-bounded class, or a floor that drifts from its pool, is refused
+ * rather than silently changing what the floor means.
+ */
+function slackFloorErrors(catalog) {
+  const errors = [];
+  const measurement = catalog.measurement || {};
+  const byteBounded = new Map(
+    (catalog.allocation_class || [])
+      .filter((row) => row.current_bound_kind === "retained_bytes")
+      .map((row) => [row.id, row]),
+  );
+  const slackClass = measurement.control_live_set_slack_class;
+  const pool = byteBounded.get(slackClass);
+  if (!pool)
+    errors.push(
+      `measurement: control_live_set_slack_class ${slackClass} is not a byte-bounded allocation class, so the floor names no pool`,
+    );
+  else if (pool.current_bound_value !== measurement.control_live_set_absolute_slack_bytes)
+    errors.push(
+      `measurement: the control-live-set floor is ${measurement.control_live_set_absolute_slack_bytes} bytes, but its pool ${slackClass} is bounded at ${pool.current_bound_value}`,
+    );
+  const unexercised = measurement.control_live_set_unexercised_byte_bounded_classes || [];
+  const seen = new Set();
+  for (const id of unexercised) {
+    if (seen.has(id))
+      errors.push(`measurement: unexercised byte-bounded class ${id} is listed twice`);
+    seen.add(id);
+    if (!byteBounded.has(id))
+      errors.push(
+        `measurement: ${id} is listed as an unexercised byte-bounded class, but it is not a byte-bounded allocation class`,
+      );
+    if (id === slackClass)
+      errors.push(`measurement: ${id} cannot both set the floor and be unexercised`);
+  }
+  for (const id of byteBounded.keys())
+    if (id !== slackClass && !seen.has(id))
+      errors.push(
+        `measurement: byte-bounded allocation class ${id} neither sets the control-live-set floor nor is declared unexercised, so the floor's rationale no longer covers the inventory`,
+      );
   return errors;
 }
 
@@ -832,6 +891,53 @@ function allocationErrors(catalog) {
   // host-lifetime field is unaccounted until the contract covers it, and a
   // subsystem cut out of the walk is refused.
   errors.push(...retainedWalkErrors(catalog, coveredFields));
+  errors.push(...embeddingErrors(catalog));
+  return errors;
+}
+
+/**
+ * Classes stored inside another class's charged payload.
+ *
+ * Everything the host retains hangs off the walk, so a cache-owned class
+ * that charges no walked field can only live inside the values of a field
+ * some other class charges — and that class charges ALL of its field. Unless
+ * the embedding is declared, the same bytes have two charge owners. So every
+ * such class names each host it is carved out of, with the anchor where the
+ * host holds it, and the host's charge excludes exactly those regions.
+ */
+function embeddingErrors(catalog) {
+  const errors = [];
+  const classes = new Map((catalog.allocation_class || []).map((row) => [row.id, row]));
+  const chargesField = (row) => (row.covers_fields || []).length > 0;
+  const embeddedIn = new Map();
+  const pairs = new Set();
+  for (const row of catalog.embedding || []) {
+    const where = `embedding ${row.embedded} in ${row.host}`;
+    const pair = `${row.embedded}|${row.host}`;
+    if (pairs.has(pair)) errors.push(`${where}: declared more than once`);
+    pairs.add(pair);
+    const embedded = classes.get(row.embedded);
+    const host = classes.get(row.host);
+    if (!embedded) errors.push(`${where}: ${row.embedded} is not a declared allocation class`);
+    else if (embedded.ownership !== "cache_owned" || chargesField(embedded))
+      errors.push(
+        `${where}: only a cache-owned class that charges no walked field is embedded; ${row.embedded} is ${embedded.ownership} and charges ${(embedded.covers_fields || []).length} fields`,
+      );
+    if (!host) errors.push(`${where}: ${row.host} is not a declared allocation class`);
+    else if (!chargesField(host))
+      errors.push(
+        `${where}: the host charges no walked field, so there is no charged payload to carve the class out of`,
+      );
+    if (row.embedded === row.host) errors.push(`${where}: a class cannot be embedded in itself`);
+    errors.push(...anchorErrors(row.held_at, `${where} held_at`));
+    if (!embeddedIn.has(row.embedded)) embeddedIn.set(row.embedded, []);
+    embeddedIn.get(row.embedded).push(row.host);
+  }
+  for (const row of classes.values())
+    if (row.ownership === "cache_owned" && !chargesField(row) && !embeddedIn.has(row.id))
+      errors.push(
+        `allocation class ${row.id}: a cache-owned class that charges no walked field lives inside some other class's charged payload, and no [[embedding]] row names that host, so its bytes are charged twice`,
+      );
   return errors;
 }
 
@@ -1263,7 +1369,34 @@ function workloadErrors(catalog, packageRoot) {
     errors.push(`workload: ${actions.length} actions is below the contract minimum of 10000`);
 
   errors.push(...coverageErrors(catalog, actions));
+  errors.push(...ingredientUseErrors(catalog, actions));
   errors.push(...trancheErrors(catalog, actions));
+  return errors;
+}
+
+/**
+ * Every declared workload ingredient is exercised by the manifest.
+ *
+ * A delta or cancellation point the expander never selects is dead weight
+ * that still reads as coverage: the edit lifecycle of the template it was
+ * authored for, or the cancellation boundary it names, silently never runs.
+ */
+export function ingredientUseErrors(catalog, actions) {
+  const errors = [];
+  const used = { edit: new Set(), configuration: new Set(), cancellation: new Set() };
+  for (const action of actions) {
+    if (action.kind === "edit") used.edit.add(action.delta.slice("edit:".length).split("@")[0]);
+    if (action.kind === "config_change") used.configuration.add(action.delta.split(":")[1]);
+    if (action.cancel_at !== "none") used.cancellation.add(action.cancel_at);
+  }
+  for (const [label, rows, seen] of [
+    ["edit delta", catalog.workload_edit_delta || [], used.edit],
+    ["configuration delta", catalog.workload_configuration_delta || [], used.configuration],
+    ["cancellation point", catalog.workload_cancellation_point || [], used.cancellation],
+  ])
+    for (const row of rows)
+      if (!seen.has(row.id))
+        errors.push(`workload: ${label} ${row.id} is declared but the manifest never applies it`);
   return errors;
 }
 
@@ -1272,11 +1405,13 @@ export function coverageErrors(catalog, actions) {
   const covered = new Set(actions.map((action) => action.class));
   const fixtures = new Map((catalog.workload_fixture || []).map((row) => [row.path, row]));
   const identities = new Set();
+  const heldAtClose = outstandingHoldsAtClose(actions);
   for (const action of actions) {
     // Kind-driven coverage first: the boundaries that are properties of
     // the ACTION rather than of a fixture must be observed even for the
-    // actions that name no template.
-    if (action.kind === "close_project" && action.result_class === "closed_with_active_readers")
+    // actions that name no template. A close only covers the active-reader
+    // boundary when a result held on its project really is outstanding.
+    if (action.kind === "close_project" && heldAtClose.get(action.seq) > 0)
       covered.add("project_close_with_active_readers");
     if (action.kind === "request_cancelled" && action.cancel_at === "none")
       errors.push(`workload action ${action.seq}: a cancelled request must name its cancel point`);
@@ -1367,6 +1502,25 @@ export function coverageErrors(catalog, actions) {
 
 function multiset(values) {
   return JSON.stringify([...values].sort());
+}
+
+/**
+ * For every `close_project` action, how many results held on that project
+ * are still unreleased when it runs, in action order within its tranche.
+ * This is the fact a `closed_with_active_readers` close claims, derived
+ * from the holds and releases rather than read off the close's own label.
+ */
+function outstandingHoldsAtClose(actions) {
+  const outstanding = new Map();
+  const atClose = new Map();
+  for (const action of actions) {
+    const key = `${action.tranche}|${action.project}`;
+    const count = outstanding.get(key) ?? 0;
+    if (action.kind === "hold_result") outstanding.set(key, count + 1);
+    else if (action.kind === "release_result") outstanding.set(key, count - 1);
+    else if (action.kind === "close_project") atClose.set(action.seq, count);
+  }
+  return atClose;
 }
 
 /**
@@ -1471,6 +1625,25 @@ export function trancheErrors(catalog, actions) {
     const released = rows.filter((row) => row.kind === "release_result").map((row) => row.query);
     if (multiset(held) !== multiset(released))
       errors.push(at("the results it pins are not exactly the results it releases"));
+    // A close's label states whether readers are still active; the holds and
+    // releases before it decide whether they are.
+    const heldAtClose = outstandingHoldsAtClose(rows);
+    for (const row of rows) {
+      if (row.kind !== "close_project") continue;
+      const outstanding = heldAtClose.get(row.seq);
+      if (row.result_class === "closed_with_active_readers" && outstanding < 1)
+        errors.push(
+          at(
+            `the close at ${row.seq} claims active readers, but no result held on ${row.project} is outstanding when it runs`,
+          ),
+        );
+      if (row.result_class === "closed_quiescent" && outstanding > 0)
+        errors.push(
+          at(
+            `the close at ${row.seq} is labelled quiescent while ${outstanding} results held on ${row.project} are still outstanding`,
+          ),
+        );
+    }
 
     const opened = rows.filter((row) => row.kind === "open_project").map((row) => row.project);
     const closed = rows.filter((row) => row.kind === "close_project").map((row) => row.project);
@@ -1672,9 +1845,11 @@ function commandErrors(catalog, packageRoot, workflowFile) {
 
   for (const row of required) {
     const where = `command ${row.id}`;
-    // The scripts a required lane executes are inputs to that lane too.
+    // The scripts a required lane executes, and everything they import, are
+    // inputs to that lane too.
     for (const token of row.command.split(/\s+/u))
-      if (token.endsWith(".mjs") && fs.existsSync(path.join(REPO_ROOT, token))) recordOpened(token);
+      if (token.endsWith(".mjs") && fs.existsSync(path.join(REPO_ROOT, token)))
+        recordModuleClosure(path.join(REPO_ROOT, token));
     if (profiles && row.gate_profile !== undefined) {
       const profile = profiles.find((entry) => entry.id === row.gate_profile);
       if (!profile) errors.push(`${where}: gate profile ${row.gate_profile} is not declared`);
@@ -1741,17 +1916,19 @@ export function validateSemanticMemoryBudgetModel(
   openedRepoPaths = new Set();
   try {
     // The contract's own sources are inputs too: the catalog and schema the
-    // caller parsed from this package, and the modules implementing these
-    // checks. Fixtures, the expander and the gate profiles are recorded
-    // where they are read.
+    // caller parsed from this package, and this module with everything it
+    // imports. Fixtures, the expander and the gate profiles are recorded
+    // where they are read; the lane scripts and their imports where the lane
+    // is resolved.
     recordOpenedAt(path.join(packageRoot, CATALOG_RELATIVE));
     recordOpenedAt(path.join(packageRoot, "schemas", SCHEMA_NAME));
-    for (const module of VALIDATOR_MODULES) recordOpenedAt(fileURLToPath(module));
+    recordModuleClosure(fileURLToPath(import.meta.url));
     const errors = [...validateSchemaObject(catalog, schema, "catalogs.semantic-memory-budget")];
     errors.push(...budgetErrors(catalog));
     errors.push(...limitDerivationErrors(catalog));
     errors.push(...memoryObservationErrors(catalog));
     errors.push(...pressureSignalErrors(catalog));
+    errors.push(...slackFloorErrors(catalog));
     errors.push(...scaleErrors(catalog));
     errors.push(...baselineErrors(catalog));
     errors.push(...allocationErrors(catalog));

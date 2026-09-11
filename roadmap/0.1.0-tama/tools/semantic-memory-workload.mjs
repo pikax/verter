@@ -211,8 +211,14 @@ export function expandWorkload(spec) {
     );
 
     // Edit targets: every shared-module instance first (so a shared edit
-    // invalidates the carriers importing it), then carrier instances.
-    const editTargets = [...pool.modules, ...cold].slice(0, countOf(steps, "edit"));
+    // invalidates the carriers importing it), then carrier instances taken
+    // one template at a time, so every healthy carrier shape — Svelte as
+    // well as Vue — goes through edit, post-mutation request and revert.
+    const editCount = countOf(steps, "edit");
+    const editTargets = [
+      ...pool.modules,
+      ...carrierEditTargets(cold, editCount - pool.modules.length),
+    ].slice(0, editCount);
     const held = [];
 
     for (const step of steps) {
@@ -342,6 +348,34 @@ export function expandWorkload(spec) {
   }
 
   return actions;
+}
+
+/**
+ * `count` distinct cold carrier instances to edit, rotating over the
+ * templates the cold pool holds in pool order. The k-th pick takes the
+ * template at `slot = k % templates`, and within it the instance at
+ * `(slot + round) % instances`: distinct across rounds while a template has
+ * an instance per round, and — because the pool alternates projects within a
+ * template — alternating projects across templates rather than editing one
+ * project's instances only.
+ */
+function carrierEditTargets(cold, count) {
+  const byTemplate = new Map();
+  for (const entry of cold) {
+    if (!byTemplate.has(entry.template)) byTemplate.set(entry.template, []);
+    byTemplate.get(entry.template).push(entry);
+  }
+  const templates = [...byTemplate.values()];
+  const targets = [];
+  for (let pick = 0; pick < count; pick += 1) {
+    const slot = pick % templates.length;
+    const round = Math.floor(pick / templates.length);
+    const entries = templates[slot];
+    if (round >= entries.length)
+      throw new Error(`the cold pool holds too few ${entries[0].template} instances to edit`);
+    targets.push(entries[(slot + round) % entries.length]);
+  }
+  return targets;
 }
 
 function isModuleInstance(pool, target) {

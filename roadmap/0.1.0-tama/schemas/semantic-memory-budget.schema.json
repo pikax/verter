@@ -26,6 +26,7 @@
     "command",
     "limit_derivation",
     "struct_field",
+    "embedding",
     "workload_materialization",
     "workload_edit_delta",
     "memory_observation"
@@ -393,6 +394,8 @@
         "control_live_set_tolerance_permille",
         "control_live_set_absolute_slack_bytes",
         "control_live_set_slack_rationale",
+        "control_live_set_slack_class",
+        "control_live_set_unexercised_byte_bounded_classes",
         "envelope_rule",
         "growth_rule",
         "statistics_source",
@@ -442,6 +445,17 @@
         "control_live_set_slack_rationale": {
           "type": "string",
           "minLength": 40
+        },
+        "control_live_set_slack_class": {
+          "type": "string",
+          "minLength": 1
+        },
+        "control_live_set_unexercised_byte_bounded_classes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         },
         "envelope_rule": {
           "type": "string",
@@ -1152,6 +1166,38 @@
           "attributed_by": {
             "type": "string",
             "minLength": 1
+          }
+        }
+      }
+    },
+    "embedding": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "embedded",
+          "host",
+          "held_at",
+          "reason"
+        ],
+        "properties": {
+          "embedded": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "host": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "held_at": {
+            "type": "string",
+            "pattern": "^[^#]+#.+$"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 20
           }
         }
       }

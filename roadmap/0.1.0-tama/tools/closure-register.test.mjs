@@ -61,6 +61,7 @@ import {
   INSTRUMENT_LANE,
   INSTRUMENT_LANE_COMMAND_DEADLINE_MS,
   INSTRUMENT_LANE_DEADLINE_MS,
+  NODE_TEST_INVENTORY_PRELOAD,
   controlCommand,
   controlsFor,
   laneFor,
@@ -2208,9 +2209,18 @@ selfAssertion("the re-application routine plants and refuses what the register s
   );
   const block = (tests, pass, fail, skipped) =>
     `tests ${tests} | pass ${pass} | fail ${fail} | cancelled 0 | skipped ${skipped} | todo 0`;
-  const stubbedRuns = (cleanStdout, refusalStdout = subject.observed) => {
+  // The runs, stubbed in the order the routine spawns them: the clean run,
+  // then the suite's registration inventory, then the mutated run. The
+  // inventory defaults to exactly what the clean run executed, so a leg about
+  // something else is not failed by it.
+  const stubbedRuns = (cleanStdout, refusalStdout = subject.observed, listing) => {
+    const clean = parseTerminalSummary("node-test", cleanStdout);
+    const inventory =
+      listing ?? `node-test inventory: declared ${clean.selected} skipped ${clean.skipped}\n`;
     let runs = 0;
-    return () => {
+    return (argv) => {
+      if (argv.includes(NODE_TEST_INVENTORY_PRELOAD))
+        return { status: 0, stdout: inventory, stderr: "" };
       runs += 1;
       return runs === 1
         ? { status: 0, stdout: cleanStdout, stderr: "" }
@@ -2266,9 +2276,33 @@ selfAssertion("the re-application routine plants and refuses what the register s
     /declares that its selection carries none/u,
     "a clean run skipping an undeclared case was accepted as clean",
   );
-  // A record that declares skips under a runner with no listing of its own
-  // selection cannot tell a declared skip from an unexpected one, and is
-  // refused rather than trusted.
+  // node:test has no listing mode, so the suite's own registrations are its
+  // inventory. A clean run that executed fewer cases than the suite declares
+  // stopped reaching some of them — green, over a smaller selection than the
+  // tree intends — and is refused; the suite's module code declaring fewer is
+  // a change to the suite, and the two agree.
+  const declared = (count, skipped = 0) =>
+    `node-test inventory: declared ${count} skipped ${skipped}\n`;
+  assert.throws(
+    () =>
+      reapply({
+        model,
+        control: subject,
+        mirror,
+        spawn: stubbedRuns(
+          block(transcribed.selected - 1, transcribed.passed - 1, 0, 0),
+          subject.observed,
+          declared(transcribed.selected),
+        ),
+      }),
+    new RegExp(
+      `selected ${transcribed.selected - 1} cases, but the runner's own listing of that selection on this tree holds ${transcribed.selected}`,
+      "u",
+    ),
+    "a clean run over fewer cases than the suite declares was accepted",
+  );
+  // A skip the suite's registrations do not declare is an unexpected one,
+  // even when the record declares a skip count that happens to match it.
   const declaringModel = {
     ...model,
     register: {
@@ -2284,7 +2318,56 @@ selfAssertion("the re-application routine plants and refuses what the register s
         model: declaringModel,
         control: subject,
         mirror,
-        spawn: stubbedRuns(block(transcribed.selected + 1, transcribed.passed, 0, 1)),
+        spawn: stubbedRuns(
+          block(transcribed.selected + 1, transcribed.passed, 0, 1),
+          subject.observed,
+          declared(transcribed.selected + 1, 0),
+        ),
+      }),
+    /the difference is an unexpected skip/u,
+    "a skip the suite does not declare was accepted",
+  );
+  // A suite whose registration inventory cannot be produced — its module code
+  // throws once `node:test` is the registrar — is refused, not trusted.
+  assert.throws(
+    () =>
+      reapply({
+        model,
+        control: subject,
+        mirror,
+        spawn: stubbedRuns(
+          block(transcribed.selected, transcribed.passed, 0, 0),
+          subject.observed,
+          "",
+        ),
+      }),
+    /emitted no node-test listing/u,
+    "a node-test clean run with no inventory was trusted",
+  );
+  // A tool that prints one verdict line exposes no inventory at all, so a
+  // record declaring skips under it cannot tell a declared skip from an
+  // unexpected one, and is refused rather than trusted.
+  const toolControl = owned.find(
+    (row) => controlCommand(model, row).adapter.summary_grammar === "tool-line",
+  );
+  assert.ok(toolControl, "no control this lane drives runs a single-verdict tool");
+  const toolProof = model.register.proof.find((row) => row.control === toolControl.id);
+  const toolDeclaring = {
+    ...model,
+    register: {
+      ...model.register,
+      proof: model.register.proof.map((row) =>
+        row.id === toolProof.id ? { ...row, expected_skips: 1, skip_basis: "planted" } : row,
+      ),
+    },
+  };
+  assert.throws(
+    () =>
+      reapply({
+        model: toolDeclaring,
+        control: toolControl,
+        mirror,
+        spawn: () => ({ status: 0, stdout: toolProof.terminal_summary, stderr: "" }),
       }),
     /exposes no inventory/u,
     "a declared skip under a runner with no inventory was trusted",
@@ -2510,6 +2593,13 @@ selfAssertion("the re-application routine plants and refuses what the register s
   // compared. The stub returns the record's own transcript for the clean run
   // and the control's own observed refusal for the mutated one, so every other
   // gate in the routine still has to pass on the way through.
+  // The stubbed legs below answer the suite's registration inventory with the
+  // record's own transcribed selection, so only the runs each leg is about
+  // reach its own stub.
+  const withInventory = (spawn) => (argv, adapter) =>
+    argv.includes(NODE_TEST_INVENTORY_PRELOAD)
+      ? { status: 0, stdout: declared(transcribed.selected, transcribed.skipped), stderr: "" }
+      : spawn(argv, adapter);
   const dollarApplied = `${subject.applied}\n# $& $\` $' $1 $$ \${{ github.sha }}`;
   const dollars = { ...subject, applied: dollarApplied };
   const boundGrammar = controlCommand(model, subject).adapter.summary_grammar;
@@ -2522,7 +2612,7 @@ selfAssertion("the re-application routine plants and refuses what the register s
     mirrored = fs.readFileSync(path.join(mirror, dollars.subject), "utf8");
     return { status: 1, stdout: dollars.observed, stderr: "" };
   };
-  reapply({ model, control: dollars, mirror, spawn: stub });
+  reapply({ model, control: dollars, mirror, spawn: withInventory(stub) });
   assert.equal(staged, 2, "the routine did not run the command clean and then mutated");
   assert.ok(
     mirrored.includes(dollarApplied),
@@ -2571,7 +2661,7 @@ selfAssertion("the re-application routine plants and refuses what the register s
       crlfPlanted = fs.readFileSync(crlfSubject, "utf8");
       return { status: 1, stdout: subject.observed, stderr: "" };
     };
-    reapply({ model, control: subject, mirror, spawn: crlfSpawn });
+    reapply({ model, control: subject, mirror, spawn: withInventory(crlfSpawn) });
     assert.ok(
       crlfPlanted?.includes(subject.applied),
       "the plant did not land against a CRLF subject, so a refusal after it would prove nothing",
@@ -2612,7 +2702,7 @@ selfAssertion("the re-application routine plants and refuses what the register s
   };
   const commandProbe = path.join(mirror, subject.subject);
   const commandBefore = fs.readFileSync(commandProbe, "utf8");
-  reapply({ model, control: commandSubject, mirror, spawn: commandSpawn });
+  reapply({ model, control: commandSubject, mirror, spawn: withInventory(commandSpawn) });
   assert.equal(
     commandCalls.length,
     2,
@@ -2634,7 +2724,7 @@ selfAssertion("the re-application routine plants and refuses what the register s
         model,
         control: { ...commandSubject, argv_delta: ["--test"] },
         mirror,
-        spawn: commandSpawn,
+        spawn: withInventory(commandSpawn),
       }),
     /already part of the command/u,
     "a delta naming an argument the command already carries was applied as if it were new",

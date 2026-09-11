@@ -182,7 +182,7 @@ cache_owned_retained_max_bytes = 1073741824
 request_active_max_bytes = 268435456
 external_pinned_backpressure_threshold_bytes = 536870912
 allocator_slack_bytes = 268435456
-per_entry_admission_max_bytes = 33554432
+per_entry_admission_max_bytes = 2097152
 max_simultaneously_admitted_requests = 64
 per_request_active_max_bytes = 4194304
 
@@ -213,7 +213,7 @@ cache_owned_retained_max_bytes = 67108864
 request_active_max_bytes = 67108864
 external_pinned_backpressure_threshold_bytes = 536870912
 allocator_slack_bytes = 268435456
-per_entry_admission_max_bytes = 4194304
+per_entry_admission_max_bytes = 1048576
 max_simultaneously_admitted_requests = 16
 per_request_active_max_bytes = 4194304
 
@@ -400,9 +400,9 @@ completion_owner = "E4"
 id = "normal.per_entry_admission_max_bytes"
 mode = "normal"
 limit = "per_entry_admission_max_bytes"
-value = 33554432
+value = 2097152
 derivation = "provisional"
-evidence = "One thirty-second of the retained ceiling, so no single entry can occupy a large fraction of the retained set. No per-entry byte size is measured today."
+evidence = "Half the per-request active cap. A complete result is built inside one request's active budget, so an entry cap at or above that budget could never bind; half of it leaves a band (2 MiB to 4 MiB) in which a complete result is too large to retain yet still fits the request that produced it, which is the complete-but-uncached return the pinned-result policy defines. It is also one five-hundred-and-twelfth of the retained ceiling, so no single entry occupies a meaningful share of the retained set. No per-entry byte size is measured today."
 blocking_metric_row = "session.store_retained_bytes"
 completion_owner = "MEM1"
 
@@ -480,9 +480,9 @@ completion_owner = "E4"
 id = "pressure.per_entry_admission_max_bytes"
 mode = "pressure"
 limit = "per_entry_admission_max_bytes"
-value = 4194304
+value = 1048576
 derivation = "provisional"
-evidence = "Set equal to the per-request active cap, so the oversized-entry boundary is reachable: an entry that fits one request's active budget but not the pressure entry cap is exactly the complete-but-uncached case the resource contract requires."
+evidence = "A quarter of the per-request active cap and half the normal entry cap. The cap has to sit strictly below the per-request active cap for the oversized-entry boundary to be reachable at all: only an entry above this cap that still fits one request's active budget is the complete-but-uncached case the resource contract requires, and pressure widens that band to 1 MiB through 4 MiB so the pressure run meets it."
 blocking_metric_row = "session.store_retained_bytes"
 completion_owner = "MEM1"
 
@@ -549,13 +549,15 @@ owned_bytes_scope = "exact summed charge over the allocation_class rows, partiti
 owned_bytes_excludes_allocator_overhead = true
 control_live_set_tolerance_permille = 20
 control_live_set_absolute_slack_bytes = 4194304
-control_live_set_slack_rationale = "4 MiB is the whole ratified budget of the single largest byte-bounded allocation class in the system today (the identity intern pool). A control-state difference smaller than one entire byte-bounded pool is not attributable, so it is the floor below which relative tolerance is not applied."
+control_live_set_slack_rationale = "4 MiB is the whole ratified budget of the identity intern pool, named as control_live_set_slack_class: the smaller of the two byte-bounded allocation classes and the only one the churn workload exercises. Every tranche materializes fresh instance paths, so the pool keeps interning new identities and evicting old ones regardless of control state; two samples at equivalent control states can differ by up to one full pool with nothing retained unexplained. A difference below that is not attributable, so it is the floor below which relative tolerance is not applied. The larger byte-bounded class, the supplied block content store (64 MiB), is listed in control_live_set_unexercised_byte_bounded_classes rather than setting the floor: it is filled only through the explicit block-override entry point, which no workload action issues, so it stays empty across the run and contributes no control-state difference. Every byte-bounded class is one or the other, so a new one cannot change what the floor means without this being re-derived."
+control_live_set_slack_class = "identity_intern_pool"
+control_live_set_unexercised_byte_bounded_classes = ["supplied_block_content_store"]
 envelope_rule = "The first 2,000 actions establish the steady-state retained-byte envelope. Every later control sample must satisfy that envelope AND the absolute budget. The envelope is fixed once observed at the start of a run and is never raised after seeing the candidate's later samples."
 growth_rule = "Unexplained positive growth at equivalent control states fails the run even when the final sample happens to be small. A single small end sample is not evidence of a bounded run."
 pressure_boundary_obligation = "A pressure run MUST observe, and record, at least one admission refusal, at least one eviction, and at least one complete-but-uncached return. A pressure run that observes none of these has not reached the boundary the pressure budget was configured to reach and FAILS; it is never recorded as a clean pass. This obligation exists because the pressure ceilings are provisional: it is the runner, not this document, that establishes the crossing."
 pressure_boundary_signals = ["session.family_candidate_evict", "session.cache_admit_return_only", "memory.host_cache_bytes", "memory.process_rss_peak"]
 pressure_boundary_signal_rule = "The obligation above is discharged against these declared signals and no others, so it is a check a runner can actually perform on this tree rather than a promise deferred to instrumentation that does not exist. At least one must be a complete emitter, or the obligation would rest entirely on partial evidence: session.family_candidate_evict is that one, and eviction is therefore the boundary condition a pressure run can always establish. The remaining three are read for corroboration and each is read within its own stated limits — the return-only counter over-counts its role, the host-cache figure sees one store's source text, and the peak-RSS sampler reports zero unless timing capture is on, so a run that reads a zero from it must assert the flag rather than record the zero as a low peak."
-oversize_boundary_obligation = "The runner MUST measure the entry produced from the oversize input and FAIL when it does not exceed budget.pressure.per_entry_admission_max_bytes. The declared repetition factor is a starting point, not an asserted size; a factor that does not reach the cap is repaired by re-ratifying the factor, never by lowering the cap or dropping the boundary."
+oversize_boundary_obligation = "The runner MUST measure the entry produced from the oversize input and FAIL when it does not exceed budget.pressure.per_entry_admission_max_bytes, or when it exceeds budget.pressure.per_request_active_max_bytes — an entry above the active budget returns resource-limited, never complete-but-uncached, so it does not reach this boundary. The declared repetition factor is a starting point, not an asserted size; a factor that does not reach the cap is repaired by re-ratifying the factor, never by lowering the cap or dropping the boundary."
 statistics_source = "performance-gates.toml [statistics]"
 confidence_percent = 95
 bootstrap_resamples = 10000
@@ -590,6 +592,15 @@ noise_multiplier_permille = 2000
 # delegated instead, and each region is charged as a walked field of its
 # own; splitting one field across several classes would make those classes
 # a hand-written list the walk could not check, and is refused.
+#
+# The one carve-out is a class stored INSIDE the values of a charged field:
+# a cache-owned class that charges no walked field can only be retained in
+# some other class's payload, since everything the host retains hangs off
+# the walk. Such a class must name every host it is carved out of in an
+# `[[embedding]]` row below, with the anchor where the host holds it, and
+# the host's charge excludes exactly those regions. A cache-owned class
+# with no field and no embedding row is refused: its bytes would otherwise
+# be charged twice, once in full by the host and once by itself.
 #
 # current_bound_kind records what bounds the class TODAY, truthfully:
 #
@@ -646,7 +657,7 @@ current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
 admission_owner = "MEM1"
-shared_reference_rule = "The memo owns its lowered records. A dispatch consumer borrows through the hot read accessor and is charged nothing."
+shared_reference_rule = "The memo owns its lowered records. It lives inside the IndexedReady artifact FileArtifactStore retains (ShallowFileState holds it by Arc), so it is carved out of file_artifact_store by an [[embedding]] row and that class's charge excludes it. A dispatch consumer borrows through the hot read accessor, and a prepared bundle or cached store view that shares the state by Arc holds a reference; neither is charged."
 charge_observability = "proxy_instrumented"
 metric_rows = ["session.decl_body_lower"]
 gap = "A lowering-call counter, not a retained-byte gauge over the memo's records."
@@ -664,7 +675,7 @@ current_bound_kind = "logical_retirement"
 current_bound_value = 0
 lifetime_owner = "E4"
 admission_owner = "MEM1"
-shared_reference_rule = "Retirement is logical: a version a live root still addresses survives the cap and is freed only once no root can see it. Retirement transfers the charge to the retired set; it never resets it and never double-counts a version that is both live and retired."
+shared_reference_rule = "Retirement is logical: a version a live root still addresses survives the cap and is freed only once no root can see it. Retirement transfers the charge to the retired set; it never resets it and never double-counts a version that is both live and retired. The declaration body memo each artifact carries is carved out of this charge and charged to declaration_body_memo."
 charge_observability = "proxy_instrumented"
 metric_rows = ["session.indexed_ready_build"]
 gap = "The cited work site is a construction counter. This class is the ONE with a live byte observation: memory.host_cache_bytes sums each row's canonical id plus its raw and eval source text. That is retained SOURCE TEXT, not the IndexedReady index payload it is stored beside, and it counts no retired version — so the class is observed in part and charged in full by neither."
@@ -970,7 +981,7 @@ current_bound_kind = "none"
 current_bound_value = 0
 lifetime_owner = "E4"
 admission_owner = "MEM1"
-shared_reference_rule = "A signature is charged once, at the cached value it validates. A signature shared by a backfilled clone is charged at the clone as a shared reference, never as a second payload."
+shared_reference_rule = "A ReadSetSignature a cached value holds is charged here, once, and carved out of the class that stores the value; every such host is an [[embedding]] row, and its charge excludes the signature. The fact set inside is an Arc, so a backfilled clone sharing it holds a reference and is charged nothing. A bare fact-version set a store keeps without the ReadSetSignature wrapper (the validated fact-cache candidates, the app-config proof entries) is that store's own payload and stays in its class. A carrier on an in-flight build is charged to that flight until it is published, and one the workspace holds is the workspace's."
 charge_observability = "proxy_instrumented"
 metric_rows = ["session.fact_observe", "session.read_set_signature_build"]
 gap = "Observation and construction item counts, not signature bytes."
@@ -1690,6 +1701,119 @@ gap = "No declared work site observes lane occupancy or the values lanes hold."
 completion_owner = "E4"
 
 # ─────────────────────────────────────────────────────────────────────────
+# Embedded classes.
+#
+# One row per (embedded class, host class): the embedded class is stored
+# inside the values of a field the host charges, and is carved out of that
+# host's charge. `held_at` is the anchor where the host's payload holds it,
+# re-resolved on every run. A cache-owned class that charges no walked field
+# must appear here at least once; a host must charge a field; and only such
+# a field-less cache-owned class may be embedded.
+# ─────────────────────────────────────────────────────────────────────────
+
+[[embedding]]
+embedded = "declaration_body_memo"
+host = "file_artifact_store"
+held_at = "crates/verter_session/src/resolver_core/shallow_file_state.rs#decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>"
+reason = "Each IndexedReady artifact the store retains carries its ShallowFileState, which holds the file's declaration body memo."
+
+[[embedding]]
+embedded = "fact_read_set_signature"
+host = "family_candidate_slots"
+held_at = "crates/verter_session/src/semantic_query_memo/family.rs#read_set_signature: ReadSetSignature"
+reason = "Every family memo candidate carries the signature it is revalidated against."
+
+[[embedding]]
+embedded = "fact_read_set_signature"
+host = "owner_import_surface_db"
+held_at = "crates/verter_session/src/owner_import_surface.rs#pub read_set_signature: crate::fact_signature_helpers::ReadSetSignature"
+reason = "Each owner import surface records the signature it was validated under."
+
+[[embedding]]
+embedded = "fact_read_set_signature"
+host = "materialize_structure_candidates"
+held_at = "crates/verter_session/src/component_meta_caches.rs#pub read_set_signature: crate::fact_signature_helpers::ReadSetSignature"
+reason = "Each materialized-structure entry carries its signature, held in the store's candidate slots."
+
+[[embedding]]
+embedded = "fact_read_set_signature"
+host = "imported_registry_db"
+held_at = "crates/verter_session/src/cache_runtime/admission.rs#pub signature: ReadSetSignature"
+reason = "The store's reverse-indexed candidate slots hold cache-runtime candidates, each carrying its signature."
+
+[[embedding]]
+embedded = "fact_read_set_signature"
+host = "shape_cache_entries"
+held_at = "crates/verter_session/src/cache_runtime/admission.rs#pub signature: ReadSetSignature"
+reason = "Each shape cache entry is a cache-runtime entry carrying its signature."
+
+[[embedding]]
+embedded = "fact_read_set_signature"
+host = "declaration_lookup_db"
+held_at = "crates/verter_session/src/cache_runtime/admission.rs#pub signature: ReadSetSignature"
+reason = "Each declaration lookup entry is a cache-runtime entry carrying its signature."
+
+[[embedding]]
+embedded = "fact_read_set_signature"
+host = "resolvability_db"
+held_at = "crates/verter_session/src/cache_runtime/admission.rs#pub signature: ReadSetSignature"
+reason = "Each resolvability entry is a cache-runtime entry carrying its signature."
+
+[[embedding]]
+embedded = "fact_read_set_signature"
+host = "owner_collection_db"
+held_at = "crates/verter_session/src/cache_runtime/admission.rs#pub signature: ReadSetSignature"
+reason = "Each owner collection entry is a cache-runtime entry carrying its signature."
+
+[[embedding]]
+embedded = "fact_read_set_signature"
+host = "compile_output_content_entries"
+held_at = "crates/verter_session/src/cache_runtime/admission.rs#pub signature: ReadSetSignature"
+reason = "Each pure compile-output entry is a cache-runtime entry carrying its signature."
+
+[[embedding]]
+embedded = "fact_read_set_signature"
+host = "flow_slice_artifacts"
+held_at = "crates/verter_session/src/cache_runtime/admission.rs#pub signature: ReadSetSignature"
+reason = "The flow-slice hash and lowered-body nodes store cache-runtime entries, each carrying its signature."
+
+[[embedding]]
+embedded = "fact_read_set_signature"
+host = "compile_cache_db"
+held_at = "crates/verter_session/src/types.rs#pub(crate) fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature"
+reason = "Each compile slot in a file's profile state carries the signature it was admitted under."
+
+[[embedding]]
+embedded = "fact_read_set_signature"
+host = "derived_raw_cache_db"
+held_at = "crates/verter_session/src/types.rs#pub(crate) template_class_signature: crate::fact_signature_helpers::ReadSetSignature"
+reason = "A file's retained raw template analysis carries its template-class signature."
+
+[[embedding]]
+embedded = "fact_read_set_signature"
+host = "component_meta_result_candidates"
+held_at = "crates/verter_session/src/component_meta_result_db.rs#pub read_set_signature: crate::fact_signature_helpers::ReadSetSignature"
+reason = "Each component-meta result candidate carries the signature a warm hit revalidates."
+
+[[embedding]]
+embedded = "fact_read_set_signature"
+host = "binder_identity_facts_store"
+held_at = "crates/verter_session/src/binder_identity_facts.rs#pub read_set_signature: ReadSetSignature"
+reason = "Each binder identity facts entry carries its signature."
+
+[[embedding]]
+embedded = "fact_read_set_signature"
+host = "framework_script_fact_store"
+held_at = "crates/verter_session/src/framework/script_facts.rs#pub read_set_signature: ReadSetSignature"
+reason = "Each stored resolved script fact carries the signature it was published under."
+
+[[embedding]]
+embedded = "fact_read_set_signature"
+host = "framework_surface_dto_store"
+held_at = "crates/verter_session/src/framework/surface_store.rs#pub read_set_signature: ReadSetSignature"
+reason = "Each stored framework surface DTO carries the signature it was published under."
+
+# ─────────────────────────────────────────────────────────────────────────
 # Retained-state walk dispositions.
 #
 # Every production field the walk reaches that no allocation class above
@@ -2347,8 +2471,8 @@ tranche_actions = 100
 total_actions = 10000
 projects_per_tranche = 2
 expander = "tools/semantic-memory-workload.mjs"
-expander_sha256 = "655fd2f9862f98a2a8a1ee82f947ce4f9b5602c3c7da9d446f48b8bda0a07d3c"
-manifest_sha256 = "99031f239b8b9e43507f36277ad817aa73faabf10005e5b5368e2e467c1edc59"
+expander_sha256 = "b8d9d23eb2508110ddfab242dff2130fbced1f52f058339948471662f76ed5fb"
+manifest_sha256 = "27eb108e169613aede6291be6537460f9bafc89c17b13f78e634ce53f08c3992"
 manifest_columns = ["seq", "tranche", "cycle", "kind", "class", "project", "template", "instance", "query", "delta", "cancel_at", "overlap_group", "result_class", "cache_disposition"]
 min_distinct_query_identities = 3000
 fixture_root = "catalogs/semantic-memory-workload/sources"

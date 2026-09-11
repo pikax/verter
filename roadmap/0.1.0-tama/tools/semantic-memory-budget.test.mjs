@@ -29,6 +29,7 @@ import test from "node:test";
 import { CI_WORKFLOW } from "./closure-register.mjs";
 import {
   coverageErrors,
+  ingredientUseErrors,
   loadCatalog,
   loadSchema,
   overlapGroupErrors,
@@ -39,6 +40,7 @@ import {
   structFields,
   trancheErrors,
   validateSemanticMemoryBudgetModel,
+  workloadSpec,
 } from "./semantic-memory-budget.mjs";
 import { expandWorkload, serializeManifest } from "./semantic-memory-workload.mjs";
 import { validateSchemaObject } from "./lib.mjs";
@@ -147,13 +149,80 @@ test("a pressure ceiling at or above the normal ceiling is refused", () => {
   refusedBecause(validate(catalog), "must be below the normal ceiling");
 });
 
-test("a pressure entry cap above the per-request cap makes the oversized boundary unreachable", () => {
+// A complete result is built inside one request's active budget, so an entry
+// cap that is not strictly below that budget leaves no result both too large
+// to admit and small enough to finish: the equality edge is as unreachable as
+// a cap above it, in either mode.
+for (const [mode, edge] of [
+  ["pressure", "equal to"],
+  ["pressure", "above"],
+  ["normal", "equal to"],
+  ["normal", "above"],
+])
+  test(`a ${mode} entry cap ${edge} the per-request cap makes the oversized boundary unreachable`, () => {
+    const catalog = freshCatalog();
+    const budget = catalog.budget[mode];
+    const perRequest = budget.per_request_active_max_bytes;
+    assert.ok(
+      budget.per_entry_admission_max_bytes < perRequest,
+      "pre-state: the committed entry cap sits below the per-request cap",
+    );
+    budget.per_entry_admission_max_bytes = edge === "equal to" ? perRequest : perRequest * 2;
+    // Keep every other budget identity intact, so the refusal is this one.
+    if (mode === "normal")
+      catalog.budget.pressure.per_entry_admission_max_bytes = budget.per_entry_admission_max_bytes;
+    for (const row of catalog.limit_derivation)
+      if (row.limit === "per_entry_admission_max_bytes")
+        row.value = catalog.budget[row.mode].per_entry_admission_max_bytes;
+    assert.equal(
+      budget.per_entry_admission_max_bytes >= perRequest,
+      true,
+      "post-state: the mutation did not apply",
+    );
+    const errors = validate(catalog);
+    refusedBecause(errors, `budget.${mode}: the per-entry admission cap must be below`);
+  });
+
+// ── control-live-set floor ───────────────────────────────────────────────
+
+test("a control-live-set floor naming the larger byte-bounded class is refused", () => {
   const catalog = freshCatalog();
-  const before = catalog.budget.pressure.per_entry_admission_max_bytes;
-  assert.equal(before, catalog.budget.pressure.per_request_active_max_bytes);
-  catalog.budget.pressure.per_entry_admission_max_bytes = before * 2;
-  assert.notEqual(catalog.budget.pressure.per_entry_admission_max_bytes, before);
-  refusedBecause(validate(catalog), "the oversized-entry boundary is unreachable");
+  const measurement = catalog.measurement;
+  assert.equal(measurement.control_live_set_slack_class, "identity_intern_pool");
+  assert.deepEqual(measurement.control_live_set_unexercised_byte_bounded_classes, [
+    "supplied_block_content_store",
+  ]);
+  // Swap which pool sets the floor without moving the floor itself.
+  measurement.control_live_set_slack_class = "supplied_block_content_store";
+  measurement.control_live_set_unexercised_byte_bounded_classes = ["identity_intern_pool"];
+  assert.equal(measurement.control_live_set_slack_class, "supplied_block_content_store");
+  refusedBecause(
+    validate(catalog),
+    "the control-live-set floor is 4194304 bytes, but its pool supplied_block_content_store is bounded at 67108864",
+  );
+});
+
+test("a byte-bounded class the floor's rationale does not account for is refused", () => {
+  const catalog = freshCatalog();
+  const measurement = catalog.measurement;
+  const before = measurement.control_live_set_unexercised_byte_bounded_classes.length;
+  assert.equal(before, 1, "pre-state: one byte-bounded class is declared unexercised");
+  measurement.control_live_set_unexercised_byte_bounded_classes = [];
+  assert.equal(measurement.control_live_set_unexercised_byte_bounded_classes.length, 0);
+  refusedBecause(
+    validate(catalog),
+    "byte-bounded allocation class supplied_block_content_store neither sets the control-live-set floor nor is declared unexercised",
+  );
+});
+
+test("a control-live-set floor that drifts from its pool's bound is refused", () => {
+  const catalog = freshCatalog();
+  const before = catalog.measurement.control_live_set_absolute_slack_bytes;
+  const pool = catalog.allocation_class.find((row) => row.id === "identity_intern_pool");
+  assert.equal(before, pool.current_bound_value, "pre-state: the floor is one whole pool");
+  catalog.measurement.control_live_set_absolute_slack_bytes = before * 2;
+  assert.notEqual(catalog.measurement.control_live_set_absolute_slack_bytes, before);
+  refusedBecause(validate(catalog), "but its pool identity_intern_pool is bounded at");
 });
 
 // ── limit provenance ─────────────────────────────────────────────────────
@@ -727,6 +796,60 @@ test("an intern table the semantic graph store retains cannot go unowned", () =>
   );
 });
 
+// ── embedded classes ─────────────────────────────────────────────────────
+
+test("a class stored inside a charged payload with no declared host is charged twice and refused", () => {
+  const catalog = freshCatalog();
+  const memo = catalog.allocation_class.find((row) => row.id === "declaration_body_memo");
+  assert.deepEqual(memo.covers_fields, [], "pre-state: the memo charges no walked field");
+  const before = catalog.embedding.length;
+  catalog.embedding = catalog.embedding.filter((row) => row.embedded !== "declaration_body_memo");
+  assert.equal(
+    catalog.embedding.length,
+    before - 1,
+    "post-state: the embedding row was not removed",
+  );
+  refusedBecause(
+    validate(catalog),
+    "allocation class declaration_body_memo: a cache-owned class that charges no walked field lives inside some other class's charged payload, and no [[embedding]] row names that host",
+  );
+});
+
+test("an embedding whose host charges no field carves nothing out and is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.embedding.find((entry) => entry.embedded === "declaration_body_memo");
+  assert.equal(row.host, "file_artifact_store");
+  row.host = "public_result_copy";
+  assert.equal(row.host, "public_result_copy", "post-state: the mutation did not apply");
+  refusedBecause(
+    validate(catalog),
+    "embedding declaration_body_memo in public_result_copy: the host charges no walked field",
+  );
+});
+
+test("embedding a class that already charges a field is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.embedding.find((entry) => entry.embedded === "declaration_body_memo");
+  row.embedded = "retained_parse_snapshot";
+  assert.equal(row.embedded, "retained_parse_snapshot", "post-state: the mutation did not apply");
+  refusedBecause(
+    validate(catalog),
+    "only a cache-owned class that charges no walked field is embedded; retained_parse_snapshot is cache_owned and charges 1 fields",
+  );
+});
+
+test("an embedding whose held_at anchor no longer resolves is refused", () => {
+  const catalog = freshCatalog();
+  const row = catalog.embedding.find((entry) => entry.embedded === "declaration_body_memo");
+  const before = row.held_at;
+  row.held_at = before.replace("decl_bodies:", "decl_bodies_moved:");
+  assert.notEqual(row.held_at, before, "post-state: the mutation did not apply");
+  refusedBecause(
+    validate(catalog),
+    "symbol decl_bodies_moved: Arc<crate::decl_body_memo::DeclBodyMemo> no longer occurs",
+  );
+});
+
 test("deleting the caller-owned copy class is refused", () => {
   const catalog = freshCatalog();
   assert.ok(catalog.allocation_class.some((row) => row.id === "public_result_copy"));
@@ -1096,6 +1219,101 @@ test("requesting a shared module instead of a carrier is refused", () => {
   );
 });
 
+/** The committed manifest's actions, expanded from the catalog. */
+function committedActions(catalog) {
+  return expandWorkload(workloadSpec(catalog));
+}
+
+test("every healthy carrier, Svelte included, goes through the edit lifecycle", () => {
+  const catalog = freshCatalog();
+  const actions = committedActions(catalog);
+  assert.deepEqual(ingredientUseErrors(catalog, actions), []);
+  const edited = new Set(actions.filter((row) => row.kind === "edit").map((row) => row.template));
+  const requestedAfter = new Set(
+    actions.filter((row) => row.kind === "request_after_edit").map((row) => row.template),
+  );
+  for (const fixture of catalog.workload_fixture)
+    if (fixture.role === "carrier" && fixture.health === "healthy") {
+      assert.ok(edited.has(fixture.path), `${fixture.path} is never edited`);
+      assert.ok(
+        requestedAfter.has(fixture.path),
+        `${fixture.path} is never requested after an edit`,
+      );
+    }
+});
+
+test("a declared edit delta the manifest never applies is refused", () => {
+  const catalog = freshCatalog();
+  const actions = committedActions(catalog);
+  const isSvelteEdit = (row) => row.kind === "edit" && row.template.startsWith("svelte/");
+  assert.ok(actions.some(isSvelteEdit), "pre-state: the committed manifest edits a Svelte carrier");
+  // The shape a Vue-only edit selection produces: no Svelte carrier is ever
+  // an edit target, so the Svelte deltas are declared and never applied.
+  const vueOnly = actions.filter((row) => !isSvelteEdit(row));
+  assert.ok(!vueOnly.some(isSvelteEdit), "post-state: the Svelte edits were not removed");
+  refusedBecause(
+    ingredientUseErrors(catalog, vueOnly),
+    "edit delta panel_props_widen is declared but the manifest never applies it",
+  );
+});
+
+/** Move every `kind` row of each `cycle` tranche to just before its first `before` row. */
+function hoistBefore(actions, cycle, kind, before) {
+  const out = [];
+  for (const tranche of new Set(actions.map((row) => row.tranche))) {
+    const rows = actions.filter((row) => row.tranche === tranche);
+    if (rows[0].cycle !== cycle) {
+      out.push(...rows);
+      continue;
+    }
+    const moved = rows.filter((row) => row.kind === kind);
+    const rest = rows.filter((row) => row.kind !== kind);
+    const at = rest.findIndex((row) => row.kind === before);
+    out.push(...rest.slice(0, at), ...moved, ...rest.slice(at));
+  }
+  return out;
+}
+
+test("a close claiming active readers after every hold was released is refused", () => {
+  const catalog = freshCatalog();
+  const actions = committedActions(catalog);
+  const tranche = actions.find((row) => row.cycle === "b").tranche;
+  const rows = actions.filter((row) => row.tranche === tranche);
+  assert.deepEqual(trancheErrors(catalog, rows), [], "pre-state: the cycle-b tranche is clean");
+  assert.ok(
+    rows
+      .filter((row) => row.kind === "close_project")
+      .every((row) => row.result_class === "closed_with_active_readers"),
+    "pre-state: cycle-b closes claim active readers",
+  );
+  const released = hoistBefore(rows, "b", "release_result", "close_project");
+  const firstOf = (kind) => released.findIndex((row) => row.kind === kind);
+  assert.ok(
+    firstOf("release_result") < firstOf("close_project"),
+    "post-state: the releases do not precede the closes",
+  );
+  refusedBecause(trancheErrors(catalog, released), "claims active readers, but no result held on");
+
+  // Across the whole manifest the boundary is then observed nowhere, so the
+  // label alone no longer counts as covering it.
+  refusedBecause(
+    coverageErrors(catalog, hoistBefore(actions, "b", "release_result", "close_project")),
+    "required lifecycle class project_close_with_active_readers is not covered",
+  );
+});
+
+test("a close labelled quiescent while results are still held is refused", () => {
+  const catalog = freshCatalog();
+  const actions = committedActions(catalog);
+  const tranche = actions.find((row) => row.cycle === "a").tranche;
+  const rows = actions.filter((row) => row.tranche === tranche);
+  assert.deepEqual(trancheErrors(catalog, rows), [], "pre-state: the cycle-a tranche is clean");
+  const closedEarly = hoistBefore(rows, "a", "close_project", "release_result");
+  const firstOf = (kind) => closedEarly.findIndex((row) => row.kind === kind);
+  assert.ok(firstOf("close_project") < firstOf("release_result"), "post-state: no close moved");
+  refusedBecause(trancheErrors(catalog, closedEarly), "is labelled quiescent while");
+});
+
 test("an oversized request against an ordinary carrier is refused", () => {
   const catalog = freshCatalog();
   const rows = [
@@ -1217,6 +1435,39 @@ test("the contract's own sources the trigger filter stops covering are refused",
     "tools/semantic-memory-budget.test.mjs",
   ])
     refusedBecause(withoutTools, `reads roadmap/0.1.0-tama/${relative},`);
+});
+
+test("a module the validation only imports is still held to the trigger filter", (t) => {
+  // The file-granularity narrowing the filter already uses for other
+  // scripts: enumerate the modules the validation names directly and drop
+  // the package pattern. The schema check the entry script hands in, and
+  // the helpers the named modules import, are executed on every run too.
+  const named = [
+    "semantic-memory-budget.mjs",
+    "semantic-memory-workload.mjs",
+    "closure-register.mjs",
+    "toml.mjs",
+    "validate-semantic-memory-budget.mjs",
+    "semantic-memory-budget.test.mjs",
+  ];
+  const indent = "\n              ";
+  const enumerated = mutatedWorkflow(
+    t,
+    "- 'roadmap/0.1.0-tama/**'",
+    [
+      "- 'roadmap/0.1.0-tama/catalogs/**'",
+      "- 'roadmap/0.1.0-tama/schemas/**'",
+      ...named.map((file) => `- 'roadmap/0.1.0-tama/tools/${file}'`),
+    ].join(indent),
+  );
+  const errors = validate(freshCatalog(), PACKAGE_ROOT, { workflowFile: enumerated });
+  for (const file of ["lib.mjs", "ledger.mjs", "closure-register.pins.mjs"])
+    refusedBecause(errors, `reads roadmap/0.1.0-tama/tools/${file},`);
+  for (const file of named)
+    assert.ok(
+      !errors.some((error) => error.includes(`reads roadmap/0.1.0-tama/tools/${file},`)),
+      `${file} is enumerated, so it must not be reported uncovered`,
+    );
 });
 
 test("an anchor citing a path outside the trigger filter is refused", () => {
