@@ -402,12 +402,9 @@ fn conditional_any_check_unions_both_branches() {
     let same = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let folded = absorbed_node(
         dispatch
-            .absorb_conditional(
-                any,
-                extends,
-                false,
-                |take_true| if take_true { same } else { same },
-            )
+            // Both branch slots resolve to the SAME node — that is the point of
+            // this row, so the closure ignores which branch it is asked for.
+            .absorb_conditional(any, extends, false, |_take_true| same)
             .expect("any-check absorbs"),
     );
     assert_eq!(
