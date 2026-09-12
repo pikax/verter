@@ -9,7 +9,7 @@ use verter_language::registered_source_authority::{
 };
 use verter_language::{CarrierAttribute, CarrierBlock, MarkupNodeKind};
 
-use super::registry::CarrierCompilerRegistry;
+use super::registered_carrier_projection::project_registered_accepted;
 use super::FrameworkParseArtifact;
 
 fn accepted(
@@ -52,15 +52,14 @@ fn accepted(
 }
 
 /// Project `accepted` through the real production entry
-/// (`CarrierCompilerRegistry::project_registered`) into a registered
+/// (`project_registered_accepted`) into a registered
 /// `FrameworkParseArtifact`. Every fixture in this suite passes a source
 /// whose resolved language always matches ITS own registered projector, so
-/// the registry's internal adapter-id dispatch always lands on the right
+/// the catalog's internal adapter-id dispatch always lands on the right
 /// compiler — there is no need to fetch or name a compiler separately.
 fn project(accepted: &AcceptedRegisteredCarrierSource) -> Arc<FrameworkParseArtifact> {
     Arc::new(
-        CarrierCompilerRegistry::built_in()
-            .project_registered(accepted)
+        project_registered_accepted(accepted)
             .expect("registered source parses")
             .into_framework_parse_artifact(),
     )
@@ -143,7 +142,7 @@ fn registered_rehome_accepts_the_same_parse_under_a_new_source_authority() {
 
 /// Build the closed dispatch value the module-internal projector expects for
 /// `accepted`'s own resolved language — mirrors exactly what
-/// `CarrierCompilerRegistry::project_registered` resolves internally.
+/// `project_registered_accepted` resolves internally.
 fn known_compiler(
     accepted: &AcceptedRegisteredCarrierSource,
 ) -> super::registered_carrier_projection::KnownRegisteredCompiler {
@@ -1181,10 +1180,11 @@ fn fixture_registry_rejects_without_panic_when_known_projector_is_absent() {
         "<template>ok</template>",
     );
     let parses_before = super::registered_carrier_projection::registered_frontend_parse_count();
-    let err = match CarrierCompilerRegistry::from_compilers([]).project_registered(&accepted) {
-        Err(err) => err,
-        Ok(_) => panic!("fixture registry has no known projector"),
-    };
+    let err =
+        match super::registered_carrier_projection::project_registered_carrier(None, &accepted) {
+            Err(err) => err,
+            Ok(_) => panic!("an absent known projector must reject, not project"),
+        };
     assert_eq!(
         super::registered_carrier_projection::registered_frontend_parse_count(),
         parses_before,

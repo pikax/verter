@@ -15,7 +15,7 @@ use crate::framework_common::carrier_compiler::{
     CompileUnsupported, IdeOutput, RuntimeOutputDescriptor,
 };
 use crate::framework_common::catalog::{ProjectionCap, TypedCapabilityRegistration};
-use crate::framework_common::{CarrierCompiler, FrameworkParseArtifact};
+use crate::framework_common::FrameworkParseArtifact;
 use crate::standalone::{DirectCompileError, StandaloneCompiler};
 use crate::svelte::ide::SvelteIdeUnsupportedDiagnostic;
 

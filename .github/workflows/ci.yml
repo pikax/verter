@@ -325,6 +325,47 @@ jobs:
               # record's own owner against that list, and dropping an entry
               # changes which records that lane still refreshes.
               - 'scripts/compile-contracts.mjs'
+              # Inputs to the semantic-memory-budget validator, for the same
+              # reason as the closure-register inputs above: it opens these
+              # bytes directly. The locked gate file supplies the ratified
+              # baseline it re-cites, including the recorded measurements and
+              # the cell's own metric limits; the benchmark harness IS the
+              # measured corpus and is re-hashed to decide whether that
+              # recorded measurement is still equivalent work on this tree;
+              # the audit site schema is the closed vocabulary its metric
+              # rows must come from; and the production field lists of
+              # `VerterHost` and of every struct its `delegated` fields reach
+              # (`ProjectTypeStore`, `SemanticGraphStore`,
+              # `UnifiedResolverRuntime`, `FallthroughResolverState`,
+              # `FrameworkRegistration`, `FrameworkScriptCaches` and the rest)
+              # are the INDEPENDENT retained-storage inventory the allocation
+              # classes are checked for completeness against, so adding a
+              # host-lifetime field to any of them turns this job red until
+              # the contract accounts for it. The session, semantic,
+              # workspace, scheduler and language source trees are taken
+              # whole because the allocation-owner and emitter anchors are
+              # spread across them, and the audit tree is taken whole rather
+              # than just its attribution subtree because the live memory
+              # observations resolve `memory.rs` as well; renaming one of
+              # those owners turns this job red on purpose — the contract has
+              # to be repinned, not left describing a symbol that no longer
+              # exists. That validator refuses any repository path it reads,
+              # and any first-party module it or its lane scripts import, that
+              # no pattern here covers, so this block cannot silently fall
+              # behind what the contract cites or runs.
+              - 'performance-gates.toml'
+              - 'crates/verter_audit/src/**'
+              - 'crates/verter_bench/examples/attribution_baseline.rs'
+              - 'crates/verter_session/src/**'
+              - 'crates/verter_semantic/src/**'
+              - 'crates/verter_workspace/src/**'
+              - 'crates/verter_scheduler/src/**'
+              - 'crates/verter_language/src/**'
+              - 'crates/verter_compiler/src/code_transform/code_transform.rs'
+              - 'crates/verter_compiler/src/code_transform/source_map.rs'
+              - 'crates/verter_napi/src/**'
+              - 'crates/verter_wasm/src/**'
+              - 'crates/verter_lsp/src/**'
 
   tama-roadmap:
     name: Tama Roadmap
@@ -343,6 +384,8 @@ jobs:
           node roadmap/0.1.0-tama/tools/closure-register.mjs --check
           node --test roadmap/0.1.0-tama/tools/closure-register.test.mjs
           node --test roadmap/0.1.0-tama/tools/closure-replay.test.mjs
+          node roadmap/0.1.0-tama/tools/validate-semantic-memory-budget.mjs
+          node --test roadmap/0.1.0-tama/tools/semantic-memory-budget.test.mjs
       - name: CI aggregate completeness
         run: |
           node scripts/check-ci-aggregate.mjs
@@ -417,6 +460,21 @@ jobs:
   #   artifacts included — while compiling clean in debug. `release.yml` builds
   #   release, but that runs on a tag, which is far too late.
   #
+  # - THE SHIPPED CONFIGURATION, EXECUTED. The release check above RUNS NOTHING,
+  #   so it cannot observe the runtime half of the same class: a state-changing
+  #   operation written inside a `debug_assert!` argument compiles fine and then
+  #   silently never executes in a shipped build. The two steps below are this
+  #   workflow's owned equivalent of the canonical gate's shipped-cfg lane
+  #   (`runShippedCfgLane` in `scripts/gate.mjs`, which `release.yml` runs via
+  #   `node scripts/gate.mjs --exhaustive`): the same compile-only
+  #   `no-debug-assertions` check across the whole workspace, then the same
+  #   package-scoped `verter_shipped_cfg_contract` nextest run under that
+  #   profile — the only tests in this repo that EXECUTE with
+  #   `debug_assertions`/`overflow-checks` off. `--no-fail-fast` mirrors the
+  #   gate's exhaustive policy so one red test does not hide the rest. The
+  #   crate's two profile-sanity canaries fail loudly if the alternate profile
+  #   did not take effect, so a run that silently used `dev` cannot read green.
+  #
   # - wasm32-unknown-unknown. `rust-clippy` above is host-only and cannot see
   #   target-gated code at all. The existing `editor-lapce` / `editor-zed` jobs
   #   do run wasm clippy, but against `wasm32-wasip1`/`wasip2` and the SEPARATE
@@ -442,7 +500,11 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Raised from 60 when the two shipped-configuration steps landed: they add a
+    # whole-workspace compile-only check plus a package-scoped build+run under a
+    # profile whose unit hashes are disjoint from every other job's, so neither
+    # shares a cached artifact with the release check above.
+    timeout-minutes: 95
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -452,8 +514,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: rust-build-configs
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
       - name: Check the release configuration
         run: cargo check --workspace --release
+      - name: Check the shipped configuration (debug-assertions off)
+        run: cargo check --workspace --all-targets --profile no-debug-assertions
+      - name: Run the shipped-configuration contract (debug-assertions off)
+        run: |
+          cargo nextest run --no-fail-fast -p verter_shipped_cfg_contract \
+            --cargo-profile no-debug-assertions
       - name: Clippy (wasm32-unknown-unknown)
         run: cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings
       - name: Clippy (transport-equivalence feature)

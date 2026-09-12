@@ -132,8 +132,7 @@ fn registered_vue_parse_boundary_is_repeatable_and_source_bound() {
     let unregistered = compiler
         .parse(source, &ParseOptions::vue_standard())
         .unwrap();
-    let registered = verter_compiler::framework_common::CarrierCompilerRegistry::built_in()
-        .project_registered(&accepted)
+    let registered = verter_compiler::framework_common::registered_carrier_projection::project_registered_accepted(&accepted)
         .unwrap()
         .into_framework_parse_artifact();
 

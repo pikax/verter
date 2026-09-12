@@ -8401,64 +8401,72 @@ const chartConfig = { desktop: 1, mobile: 2 }
     );
 }
 
-// ─── merge_duplicate_event_handlers regression ──────────────────────────────
+// ─── duplicate props-object key merging ─────────────────────────────────────
 
 #[test]
-fn test_merge_duplicate_event_handlers_multiple_keys() {
-    // Regression: when multiple duplicate key groups exist, removing entries
-    // for the first group shifts indices for subsequent groups, causing
-    // index-out-of-bounds panic.
-    use super::merge_duplicate_event_handlers;
+fn duplicate_key_merge_handles_multiple_interleaved_groups() {
+    // Two duplicate key groups, the second one's members sitting after the
+    // first one's: collapsing the first group must not disturb the second.
+    use super::props_object::PropsObject;
 
-    let mut parts = vec![
-        r#""onUpdate:a": $event => (a = $event)"#.to_string(),
-        r#"b: val_b"#.to_string(),
-        r#""onUpdate:a": $event => (a2 = $event)"#.to_string(),
-        r#"c: val_c"#.to_string(),
-        r#""onUpdate:d": $event => (d = $event)"#.to_string(),
-        r#"e: val_e"#.to_string(),
-        r#"f: val_f"#.to_string(),
-        r#"g: val_g"#.to_string(),
-        r#"h: val_h"#.to_string(),
-        r#""onUpdate:d": $event => (d2 = $event)"#.to_string(),
-    ];
+    let mut props = PropsObject::new();
+    props.push("\"onUpdate:a\"", "$event => (a = $event)");
+    props.push("b", "val_b");
+    props.push("\"onUpdate:a\"", "$event => (a2 = $event)");
+    props.push("c", "val_c");
+    props.push("\"onUpdate:d\"", "$event => (d = $event)");
+    props.push("e", "val_e");
+    props.push("f", "val_f");
+    props.push("\"onUpdate:d\"", "$event => (d2 = $event)");
 
-    // Should not panic
-    merge_duplicate_event_handlers(&mut parts);
+    props.merge_duplicate_keys();
 
-    // Positive: merged entries should have array values
-    let result = parts.join(", ");
-    assert!(
-        result.contains("["),
-        "should have merged array form, got: {}",
-        result
-    );
-
-    // Negative: no duplicate keys remain
-    let key_count_a = parts
-        .iter()
-        .filter(|p| p.starts_with("\"onUpdate:a\""))
-        .count();
+    // Both groups collapse in place, each keeping its first occurrence's
+    // position and both values in authoring order.
     assert_eq!(
-        key_count_a, 1,
-        "should have exactly one onUpdate:a entry after merge, got {}",
-        key_count_a
-    );
-    let key_count_d = parts
-        .iter()
-        .filter(|p| p.starts_with("\"onUpdate:d\""))
-        .count();
-    assert_eq!(
-        key_count_d, 1,
-        "should have exactly one onUpdate:d entry after merge, got {}",
-        key_count_d
+        props.render_body(),
+        concat!(
+            r#""onUpdate:a": [$event => (a = $event), $event => (a2 = $event)], "#,
+            "b: val_b, c: val_c, ",
+            r#""onUpdate:d": [$event => (d = $event), $event => (d2 = $event)], "#,
+            "e: val_e, f: val_f"
+        )
     );
 }
 
 #[test]
+fn duplicate_key_merge_distinguishes_quoted_from_bare_keys() {
+    // `"foo"` and `foo` are emitted as authored; merging them would rewrite a
+    // key the author spelled two different ways into one entry.
+    use super::props_object::PropsObject;
+
+    let mut props = PropsObject::new();
+    props.push("\"foo\"", "1");
+    props.push("foo", "2");
+    props.merge_duplicate_keys();
+
+    assert_eq!(props.render_body(), r#""foo": 1, foo: 2"#);
+}
+
+#[test]
+fn reserved_slot_never_filled_renders_nothing() {
+    // `class`/`style` reserve a position before their merged value is known;
+    // an abandoned reservation must not leave a stray separator behind.
+    use super::props_object::PropsObject;
+
+    let mut props = PropsObject::new();
+    props.push("a", "1");
+    let _abandoned = props.reserve();
+    props.push("b", "2");
+
+    assert_eq!(props.render_body(), "a: 1, b: 2");
+}
+
+#[test]
 fn test_ssr_component_with_many_v_models_no_panic() {
-    // Regression: DatePicker.vue with multiple same-named event handlers
-    // caused index-out-of-bounds in merge_duplicate_event_handlers.
+    // Regression: a component carrying many v-model/@update pairs plus two
+    // handlers for the same event exercises several duplicate-key groups at
+    // once; collapsing one group must not disturb the others.
     let code = gen_ssr_template(
         r#"<template>
   <MyComp
@@ -8951,27 +8959,143 @@ const color = ref('green')
     );
 }
 
-/// User content that spells the OLD ASCII sentinel must never be corrupted
-/// by the post-build placeholder replace — the live sentinels are
-/// NUL-delimited and unforgeable from template content.
+/// A string literal in a bound attribute is opaque to property assembly: it is
+/// carried through to emission verbatim, whatever it spells, while the class
+/// and style parts around it still merge.
 #[test]
-fn ssr_user_literal_matching_old_placeholder_text_survives() {
+fn ssr_string_literal_prop_value_survives_class_and_style_merge() {
     let code = gen_ssr_template(
         r#"<script setup>
 const cls = 'x'
 </script>
-<template><div :class="cls" :data-note="'__STYLE_PLACEHOLDER__'" style="color:red" :style="{ color: 'blue' }">t</div></template>"#,
+<template><div :class="cls" :data-note="'plain text'" style="color:red" :style="{ color: 'blue' }">t</div></template>"#,
     );
     assert!(
-        code.contains("__STYLE_PLACEHOLDER__"),
+        code.contains("'plain text'"),
         "the user's literal must survive verbatim, got:\n{code}"
     );
     assert!(
-        code.contains("_ssrRenderStyle") || code.contains("style:"),
-        "the real style merge must still emit, got:\n{code}"
+        code.contains(r#"class: $setup.cls"#),
+        "the dynamic class must still emit, got:\n{code}"
     );
     assert!(
-        !code.contains('\u{0}'),
-        "no sentinel byte may leak into output, got:\n{code}"
+        code.contains(r#"style: [{"color":"red"}, { color: 'blue' }]"#),
+        "static and dynamic style must merge in source order, got:\n{code}"
     );
+}
+
+#[test]
+fn root_dynamic_class_before_static_class_emits_one_class_key() {
+    // `:class` ahead of `class` reserves the merged entry's position first;
+    // the later static `class` must reuse that position rather than open a
+    // second one. Two `class` keys in one object literal is invalid Vue props
+    // output — the second silently wins at runtime.
+    let code = gen_ssr_template(
+        r#"<template><div :class="a" class="b" id="x"></div></template>
+<script setup>const a = 1</script>"#,
+    );
+    assert_eq!(
+        code.matches("class: ").count(),
+        1,
+        "exactly one class entry expected, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains(r#"{ class: ["b", $setup.a], id: "x" }"#),
+        "merged class keeps the first class-ish prop's position, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn spread_element_dynamic_class_before_static_class_emits_one_class_key() {
+    // Same reservation rule when a `v-bind` spread precedes both class props,
+    // so the attrs object is no longer the first `_mergeProps` argument.
+    let code = gen_ssr_template(
+        r#"<template><div v-bind="o" :class="a" class="b"></div></template>
+<script setup>const a = 1; const o = {}</script>"#,
+    );
+    assert_eq!(
+        code.matches("class: ").count(),
+        1,
+        "exactly one class entry expected, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains(r#"_mergeProps($setup.o, { class: ["b", $setup.a] }, _attrs)"#),
+        "spread stays first and the merged class is the only attrs entry, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn root_static_class_key_maps_back_to_the_authored_class_attribute() {
+    // The attrs object's `class` key is one of the few generated keys carrying
+    // a source anchor: an IDE landing on `class` in the emitted `_mergeProps`
+    // object must resolve to the authored `class=` attribute name. The offset
+    // is derived from the entry's own position inside the rendered object, so
+    // an off-by-N here silently mis-maps rather than failing to compile.
+    let source = r#"<template><div id="x" class="b"></div></template>"#;
+    let alloc = Allocator::new();
+    let result = compile(
+        source,
+        &CodegenOptions {
+            filename: Some("App.vue".to_string()),
+            ..Default::default()
+        },
+        &VerterCompileOptions {
+            force_js: true,
+            ssr: true,
+            source_map: true,
+            ..Default::default()
+        },
+        &VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let tpl = result.template.as_ref().expect("template block");
+
+    let key_offset = tpl
+        .code
+        .find("class: ")
+        .expect("the attrs object carries a class key");
+    let (gen_line, gen_col) = ssr_map_byte_offset_to_line_col(&tpl.code, key_offset);
+
+    let authored = source.find("class=").expect("authored class attribute");
+    let expected = ssr_map_byte_offset_to_line_col(source, authored);
+
+    let map = oxc_sourcemap::OwnedSourceMap::from_json_string(&tpl.source_map)
+        .expect("valid source-map JSON");
+    let lookup = map.generate_lookup_table();
+    let token = map
+        .lookup_token(&lookup, gen_line, gen_col)
+        .expect("a token at or before the class key");
+    assert_eq!(
+        (token.get_dst_line(), token.get_dst_col()),
+        (gen_line, gen_col),
+        "the class key must own its own mapping, not inherit an earlier token's, got:\n{}",
+        tpl.code
+    );
+    assert_eq!(
+        (token.get_src_line(), token.get_src_col()),
+        expected,
+        "the class key must map to the authored class attribute name, got:\n{}",
+        tpl.code
+    );
+}
+
+/// 0-based (line, UTF-16 column) for a byte offset — the column unit the
+/// source-map spec uses.
+fn ssr_map_byte_offset_to_line_col(text: &str, byte_offset: usize) -> (u32, u32) {
+    let before = &text[..byte_offset];
+    let line = before.matches('\n').count() as u32;
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    (
+        line,
+        text[line_start..byte_offset].encode_utf16().count() as u32,
+    )
 }

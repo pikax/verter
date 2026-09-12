@@ -32,8 +32,7 @@
 //! `assert_ne!` / `panic!`) and is NOT downgraded to a debug-only form
 //! (`debug_assert!` / `debug_assert_eq!` / `debug_assert_ne!`). The guard
 //! is consistent with this block's other static guards
-//! (`no_legacy_compile_many_upsert_fanout`,
-//! `scheduler_has_only_atomic_batch_api`): it scans only production source,
+//! (`no_legacy_compile_many_upsert_fanout`): it scans only production source,
 //! extracts the SPECIFIC enforcing region (not a whole-file `assert!`
 //! grep, which would pass trivially), and ships a companion fixture
 //! proving the analysis would FLAG a `debug_assert!` downgrade — so the

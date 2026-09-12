@@ -92,7 +92,7 @@ fn tsserver_checked_drops_mid_surrogate_column() {
     let content = "let x = '😀';";
     // 0-based col 10 == 1-based offset 11 lands on the trailing surrogate half of the emoji.
     assert_eq!(
-        tsserver_pos_to_byte_offset_checked(content, 1, 11),
+        tsserver_pos_to_byte_offset_checked(&SourceIndex::new_utf16(content), 1, 11),
         None,
         "a UTF-16 column inside an astral character is not a scalar boundary and must be dropped"
     );
@@ -102,7 +102,7 @@ fn tsserver_checked_drops_mid_surrogate_column() {
 fn tsserver_checked_accepts_position_after_astral() {
     let content = "let x = '😀';";
     // 0-based col 11 == 1-based offset 12 is the closing quote, immediately AFTER the emoji.
-    let off = tsserver_pos_to_byte_offset_checked(content, 1, 12)
+    let off = tsserver_pos_to_byte_offset_checked(&SourceIndex::new_utf16(content), 1, 12)
         .expect("the position immediately after an astral character is a valid scalar boundary");
     // `let x = '` is 9 bytes, `😀` is 4 UTF-8 bytes → byte offset 13 is the closing quote.
     assert_eq!(off, 13);
@@ -113,7 +113,7 @@ fn tsserver_checked_accepts_position_after_astral() {
 fn tsserver_checked_accepts_eol_insertion_on_astral_line() {
     let content = "let x = '😀';";
     // EOL insertion: 0-based col == line UTF-16 length (13) == 1-based offset 14.
-    let off = tsserver_pos_to_byte_offset_checked(content, 1, 14)
+    let off = tsserver_pos_to_byte_offset_checked(&SourceIndex::new_utf16(content), 1, 14)
         .expect("an end-of-line insertion position is a valid scalar boundary");
     assert_eq!(off as usize, content.len());
 }
@@ -129,7 +129,8 @@ fn test_parse_tsserver_diagnostic() {
         "category": "error"
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), None).unwrap();
+    let parsed =
+        parse_tsserver_diagnostic(&diag, Some(&SourceIndex::new_utf16(content)), None).unwrap();
     assert_eq!(
         parsed.message,
         "Type 'number' is not assignable to type 'string'."
@@ -148,6 +149,56 @@ fn test_parse_tsserver_diagnostic() {
     );
 }
 
+/// A diagnostic pull resolves every diagnostic in every pass against ONE index
+/// built for the response batch. Sharing that index must be indistinguishable in
+/// the parsed result from indexing the source afresh for each diagnostic — the
+/// non-ASCII line is what would expose a stale or mis-encoded shared table.
+#[test]
+fn one_batch_index_parses_diagnostics_identically_to_per_diagnostic_indexing() {
+    let content = "const a😀b = 1;\nconst é: string = 42;\nconst z = 3;";
+    let batch = [
+        serde_json::json!({
+            "start": { "line": 1, "offset": 7 },
+            "end": { "line": 1, "offset": 11 },
+            "text": "first",
+            "code": 2322,
+            "category": "error"
+        }),
+        serde_json::json!({
+            "start": { "line": 2, "offset": 7 },
+            "end": { "line": 2, "offset": 13 },
+            "text": "second",
+            "code": 2322,
+            "category": "error"
+        }),
+        serde_json::json!({
+            "start": { "line": 3, "offset": 7 },
+            "end": { "line": 3, "offset": 8 },
+            "text": "third",
+            "code": 6133,
+            "category": "suggestion"
+        }),
+    ];
+
+    let shared = SourceIndex::new_utf16(content);
+    for diag in &batch {
+        let via_shared = parse_tsserver_diagnostic(diag, Some(&shared), None).unwrap();
+        let via_fresh =
+            parse_tsserver_diagnostic(diag, Some(&SourceIndex::new_utf16(content)), None).unwrap();
+        assert_eq!(
+            (via_shared.start, via_shared.end),
+            (via_fresh.start, via_fresh.end),
+            "shared-index offsets diverged for {}",
+            via_shared.message
+        );
+        // The offsets must be real byte offsets into the content, not packed
+        // line/column sentinels.
+        assert!(via_shared.start <= via_shared.end);
+        assert!(content.is_char_boundary(via_shared.start as usize));
+        assert!(content.is_char_boundary(via_shared.end as usize));
+    }
+}
+
 #[test]
 fn parse_tsserver_diagnostic_reads_reports_unnecessary_tag() {
     // tsserver flags unused-symbol suggestions (e.g. TS6133) with the
@@ -163,7 +214,8 @@ fn parse_tsserver_diagnostic_reads_reports_unnecessary_tag() {
         "reportsUnnecessary": true
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), None).unwrap();
+    let parsed =
+        parse_tsserver_diagnostic(&diag, Some(&SourceIndex::new_utf16(content)), None).unwrap();
     assert_eq!(parsed.code, Some("6133".to_string()));
     assert_eq!(
         parsed.tags,
@@ -187,7 +239,8 @@ fn parse_tsserver_diagnostic_reads_reports_deprecated_tag() {
         "reportsDeprecated": true
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), None).unwrap();
+    let parsed =
+        parse_tsserver_diagnostic(&diag, Some(&SourceIndex::new_utf16(content)), None).unwrap();
     assert_eq!(
         parsed.tags,
         vec![TypeDiagnosticTag::Deprecated],
@@ -209,7 +262,8 @@ fn parse_tsserver_diagnostic_without_tag_flags_stays_untagged() {
         "category": "suggestion"
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), None).unwrap();
+    let parsed =
+        parse_tsserver_diagnostic(&diag, Some(&SourceIndex::new_utf16(content)), None).unwrap();
     assert!(
         parsed.tags.is_empty(),
         "no boolean flags ⇒ no tags, got: {:?}",
@@ -245,7 +299,12 @@ fn parse_tsserver_diagnostic_reads_same_file_related_information() {
         ]
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/dup.ts")).unwrap();
+    let parsed = parse_tsserver_diagnostic(
+        &diag,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/dup.ts"),
+    )
+    .unwrap();
     assert_eq!(
         parsed.related_information.len(),
         1,
@@ -276,7 +335,12 @@ fn parse_tsserver_diagnostic_without_related_information_is_empty() {
         "category": "error"
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/x.ts")).unwrap();
+    let parsed = parse_tsserver_diagnostic(
+        &diag,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/x.ts"),
+    )
+    .unwrap();
     assert!(
         parsed.related_information.is_empty(),
         "absent relatedInformation ⇒ empty list, got: {:?}",
@@ -317,7 +381,12 @@ fn parse_tsserver_diagnostic_drops_cross_file_related_without_content() {
         ]
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/a.ts")).unwrap();
+    let parsed = parse_tsserver_diagnostic(
+        &diag,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/a.ts"),
+    )
+    .unwrap();
     assert!(
         parsed.related_information.is_empty(),
         "a cross-file related span with no content for the related file must be \
@@ -362,7 +431,12 @@ fn parse_tsserver_related_never_stores_packed_position_anti_bogus_link() {
         ]
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/a.ts")).unwrap();
+    let parsed = parse_tsserver_diagnostic(
+        &diag,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/a.ts"),
+    )
+    .unwrap();
     // The exact packed value the pre-fix code would have stored for line 100 col 5.
     let packed = ((100u32 - 1) << 16) | ((5u32 - 1) & 0xFFFF);
     assert_eq!(
@@ -422,7 +496,12 @@ fn parse_tsserver_related_drops_same_file_out_of_range_offset() {
         ]
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/dup.ts")).unwrap();
+    let parsed = parse_tsserver_diagnostic(
+        &diag,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/dup.ts"),
+    )
+    .unwrap();
     // The primary diagnostic survives with its real in-range offsets.
     assert_eq!(parsed.start, 6, "primary start is a real in-range offset");
     assert_eq!(parsed.end, 9, "primary end is a real in-range offset");
@@ -487,7 +566,12 @@ fn parse_tsserver_related_drops_same_file_wrap_to_valid_coordinate() {
         ]
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/dup.ts")).unwrap();
+    let parsed = parse_tsserver_diagnostic(
+        &diag,
+        Some(&SourceIndex::new_utf16(content)),
+        Some("/proj/dup.ts"),
+    )
+    .unwrap();
     // The primary diagnostic survives with its real in-range offsets.
     assert_eq!(parsed.start, 6, "primary start is a real in-range offset");
     assert_eq!(parsed.end, 9, "primary end is a real in-range offset");
@@ -718,31 +802,31 @@ fn test_format_quickinfo_hover_with_docs() {
 
 #[test]
 fn quickinfo_wire_pos_maps_to_byte_offset() {
-    let content = "const x = 1;\nconst y = 2;\n";
+    let index = SourceIndex::new_utf16("const x = 1;\nconst y = 2;\n");
     // tsserver positions are 1-based: line 2, offset 7 → byte 13 + 6.
     let pos = serde_json::json!({ "line": 2, "offset": 7 });
     assert_eq!(
-        quickinfo_wire_pos_to_byte_offset(content, Some(&pos)),
+        quickinfo_wire_pos_to_byte_offset(&index, Some(&pos)),
         Some(19)
     );
 }
 
 #[test]
 fn quickinfo_wire_pos_fails_closed_on_out_of_range_or_malformed() {
-    let content = "const x = 1;\n";
+    let index = SourceIndex::new_utf16("const x = 1;\n");
     let past_eof = serde_json::json!({ "line": 9, "offset": 1 });
     assert_eq!(
-        quickinfo_wire_pos_to_byte_offset(content, Some(&past_eof)),
+        quickinfo_wire_pos_to_byte_offset(&index, Some(&past_eof)),
         None,
         "a past-EOF wire position must be dropped, not clamped"
     );
     let malformed = serde_json::json!({ "line": 0, "offset": 0 });
     assert_eq!(
-        quickinfo_wire_pos_to_byte_offset(content, Some(&malformed)),
+        quickinfo_wire_pos_to_byte_offset(&index, Some(&malformed)),
         None,
         "a 0-based (malformed) tsserver position must be dropped"
     );
-    assert_eq!(quickinfo_wire_pos_to_byte_offset(content, None), None);
+    assert_eq!(quickinfo_wire_pos_to_byte_offset(&index, None), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -807,6 +891,23 @@ fn kind_labeled_signature_is_idempotent_and_fails_closed() {
     );
 }
 
+/// One tsserver location through the batch parser.
+fn parse_one_tsserver_location(
+    loc: &serde_json::Value,
+    cache: &HashMap<String, Arc<str>>,
+) -> Option<TypeLocation> {
+    parse_tsserver_locations(std::slice::from_ref(loc), cache).pop()
+}
+
+/// One tsserver rename span through the per-file parser.
+fn parse_one_tsserver_rename_span(
+    span: &serde_json::Value,
+    file: &str,
+    cache: &HashMap<String, Arc<str>>,
+) -> Option<RenameLocation> {
+    parse_tsserver_rename_spans(std::slice::from_ref(span), file, cache).pop()
+}
+
 #[test]
 fn test_parse_tsserver_location_with_content() {
     let content = "const x = 1;\nconst y = 2;\nconst z = 3;";
@@ -819,7 +920,7 @@ fn test_parse_tsserver_location_with_content() {
         "end": { "line": 2, "offset": 8 },
     });
 
-    let parsed = parse_tsserver_location(&loc, &cache).unwrap();
+    let parsed = parse_one_tsserver_location(&loc, &cache).unwrap();
     assert_eq!(parsed.path, "d:/test/file.ts");
     // "y" is at byte 19 (line 2, col 7 in 1-based = byte 13 + 6 = 19)
     assert_eq!(parsed.start, 19, "start should be byte offset, not packed");
@@ -841,7 +942,7 @@ fn test_parse_tsserver_location_without_content() {
         "end": { "line": 2, "offset": 8 },
     });
 
-    let parsed = parse_tsserver_location(&loc, &cache).unwrap();
+    let parsed = parse_one_tsserver_location(&loc, &cache).unwrap();
     // Without content, should use packed fallback (0-based)
     let expected_start = ((2 - 1) << 16) | ((7 - 1) & 0xFFFF);
     assert_eq!(
@@ -866,7 +967,7 @@ fn test_parse_tsserver_location_line_10_not_packed() {
         "end": { "line": 10, "offset": 5 },
     });
 
-    let parsed = parse_tsserver_location(&loc, &cache).unwrap();
+    let parsed = parse_one_tsserver_location(&loc, &cache).unwrap();
     // With content, byte offset for line 10 should be reasonable (< 200 bytes)
     assert!(
         parsed.start < (10 << 16),
@@ -892,7 +993,7 @@ fn test_parse_tsserver_location_without_cache_reads_disk_content() {
         "end": { "line": 2, "offset": 8 },
     });
 
-    let parsed = parse_tsserver_location(&loc, &cache).unwrap();
+    let parsed = parse_one_tsserver_location(&loc, &cache).unwrap();
     assert_eq!(parsed.start, 27);
     assert_eq!(parsed.end, 32);
 
@@ -909,7 +1010,7 @@ fn test_parse_tsserver_rename_span_with_content() {
         "end": { "line": 2, "offset": 8 },
     });
 
-    let parsed = parse_tsserver_rename_span(&span, "d:/test/file.ts", &cache).unwrap();
+    let parsed = parse_one_tsserver_rename_span(&span, "d:/test/file.ts", &cache).unwrap();
     assert_eq!(parsed.start, 19, "start should be byte offset");
     assert_eq!(parsed.end, 20, "end should be byte offset");
     assert!(parsed.start < 100, "must not be packed");
@@ -917,8 +1018,8 @@ fn test_parse_tsserver_rename_span_with_content() {
 
 /// A cross-file rename span whose GROUP file is absent from the in-memory contents cache must
 /// resolve its byte offsets against THAT file's own on-disk content (the per-target disk
-/// fallback) — the SAME content-resolution `parse_tsserver_location` gives references and the
-/// tsgo rename path gives via `parse_range_to_offsets_strict_with_disk_fallback`.
+/// fallback) — the SAME content resolution `parse_tsserver_locations` gives references and the
+/// tsgo rename path gives its workspace edits.
 ///
 /// Fails if a cache-miss span packs a 0-based `(line << 16) | col` sentinel the merge layer cannot
 /// map to a real range, silently dropping the cross-file edit (incomplete rename). The renamed
@@ -942,7 +1043,7 @@ fn test_parse_tsserver_rename_span_without_cache_reads_disk_content() {
         "end": { "line": 3, "offset": 21 },
     });
 
-    let parsed = parse_tsserver_rename_span(&span, &file_key, &cache).unwrap();
+    let parsed = parse_one_tsserver_rename_span(&span, &file_key, &cache).unwrap();
     let want_start = content.find("renamed").unwrap() as u32;
     let want_end = want_start + "renamed".len() as u32;
     assert_eq!(
@@ -984,7 +1085,7 @@ fn parse_tsserver_rename_span_drops_span_when_content_unavailable() {
     });
     let cache: HashMap<String, Arc<str>> = HashMap::new();
 
-    let parsed = parse_tsserver_rename_span(&span, &missing, &cache);
+    let parsed = parse_one_tsserver_rename_span(&span, &missing, &cache);
     assert!(
         parsed.is_none(),
         "a rename span whose content is unavailable must be DROPPED (fail-closed), never packed: \
@@ -1005,7 +1106,7 @@ fn parse_tsserver_rename_span_drops_out_of_range_position() {
         "end": { "line": 999, "offset": 4 },
     });
 
-    let parsed = parse_tsserver_rename_span(&span, "d:/proj/r.ts", &cache);
+    let parsed = parse_one_tsserver_rename_span(&span, "d:/proj/r.ts", &cache);
     assert!(
         parsed.is_none(),
         "an out-of-range rename span must be DROPPED, never clamped to EOF: {parsed:?}"
@@ -1031,7 +1132,7 @@ fn parse_tsserver_rename_span_drops_on_position_overflow() {
         "end": { "line": 1, "offset": 2 },
     });
 
-    let parsed = parse_tsserver_rename_span(&span, "d:/proj/r.ts", &cache);
+    let parsed = parse_one_tsserver_rename_span(&span, "d:/proj/r.ts", &cache);
     assert!(
         parsed.is_none(),
         "a u64>u32::MAX rename span must be DROPPED, never truncated into an in-range offset: \
@@ -1043,7 +1144,7 @@ fn parse_tsserver_rename_span_drops_on_position_overflow() {
         "start": { "line": 1, "offset": 1 },
         "end": { "line": 1, "offset": 2 },
     });
-    let ok = parse_tsserver_rename_span(&span_ok, "d:/proj/r.ts", &cache)
+    let ok = parse_one_tsserver_rename_span(&span_ok, "d:/proj/r.ts", &cache)
         .expect("an in-range rename span must still resolve");
     assert_eq!(
         (ok.start, ok.end),
@@ -1066,7 +1167,7 @@ fn test_parse_tsserver_location_non_ascii() {
         "end": { "line": 2, "offset": 6 },
     });
 
-    let parsed = parse_tsserver_location(&loc, &cache).unwrap();
+    let parsed = parse_one_tsserver_location(&loc, &cache).unwrap();
     // "café\n" = 6 bytes (c=1, a=1, f=1, é=2, \n=1)
     // "world" starts at byte 6
     assert_eq!(parsed.start, 6, "start of 'world' should be byte 6");
@@ -5252,7 +5353,8 @@ fn inlay_hint_decoder_returns_byte_offsets_and_fails_closed_without_content() {
         "whitespaceBefore": true,
     });
 
-    let parsed = parse_tsserver_inlay_hint(&hint, Some(content)).expect("valid hint");
+    let parsed = parse_tsserver_inlay_hint(&hint, Some(&SourceIndex::new_utf16(content)))
+        .expect("valid hint");
     assert_eq!(
         parsed.position, 15,
         "line/offset is UTF-16 while the provider contract requires bytes"
@@ -5270,5 +5372,7 @@ fn inlay_hint_decoder_returns_byte_offsets_and_fails_closed_without_content() {
         "position": { "line": 200, "offset": 1 },
         "kind": "Type",
     });
-    assert!(parse_tsserver_inlay_hint(&out_of_range, Some(content)).is_none());
+    assert!(
+        parse_tsserver_inlay_hint(&out_of_range, Some(&SourceIndex::new_utf16(content))).is_none()
+    );
 }

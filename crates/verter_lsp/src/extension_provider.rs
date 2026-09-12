@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, OnceCell};
 
+use verter_type_runtime::codec::SourceIndex;
+
 use crate::server::TsQueryParams;
 use crate::tsserver::ipc::{
     assemble_signature_label, build_completion_entry_details_request, build_entry_names_entry,
@@ -20,8 +22,8 @@ use crate::tsserver::ipc::{
     completion_entry_details_to_resolve_result, concat_display_parts, dedup_error_codes,
     enrich_completion_with_entry_details, format_quickinfo_hover, merge_diagnostic_sets,
     parse_tsserver_code_action, parse_tsserver_combined_code_fix, parse_tsserver_completion,
-    parse_tsserver_diagnostic, parse_tsserver_inlay_hint, parse_tsserver_location,
-    parse_tsserver_rename_span, quickinfo_wire_pos_to_byte_offset,
+    parse_tsserver_diagnostic, parse_tsserver_inlay_hint, parse_tsserver_locations,
+    parse_tsserver_rename_spans, quickinfo_wire_pos_to_byte_offset,
     stamp_tsserver_completion_offset,
 };
 use crate::type_provider::protocol::*;
@@ -437,10 +439,13 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                     let (range_start, range_end) = {
                         let cache = contents_cache.lock().await;
                         match cache.get(&file) {
-                            Some(content) => (
-                                quickinfo_wire_pos_to_byte_offset(content, body.get("start")),
-                                quickinfo_wire_pos_to_byte_offset(content, body.get("end")),
-                            ),
+                            Some(content) => {
+                                let index = SourceIndex::new_utf16(content);
+                                (
+                                    quickinfo_wire_pos_to_byte_offset(&index, body.get("start")),
+                                    quickinfo_wire_pos_to_byte_offset(&index, body.get("end")),
+                                )
+                            }
                             None => (None, None),
                         }
                     };
@@ -483,16 +488,16 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
             // failures degrade that category to empty rather than failing the
             // whole pull. The union/dedup is the shared `merge_diagnostic_sets`
             // owner (one merge point, not a per-provider fork).
+            // One index for all three passes: they resolve against the same
+            // content snapshot, so the document is scanned once for the whole
+            // pull rather than twice per diagnostic per pass.
+            let index = content.as_deref().map(SourceIndex::new_utf16);
             let parse_body = |body: serde_json::Value| -> Vec<TypeDiagnostic> {
                 body.as_array()
                     .map(|arr| {
                         arr.iter()
                             .filter_map(|d| {
-                                parse_tsserver_diagnostic(
-                                    d,
-                                    content.as_deref(),
-                                    Some(file.as_str()),
-                                )
+                                parse_tsserver_diagnostic(d, index.as_ref(), Some(file.as_str()))
                             })
                             .collect()
                     })
@@ -561,7 +566,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await?;
 
-            // Snapshot then release before parsing: `parse_tsserver_location` can fall back to a
+            // Snapshot then release before parsing: `parse_tsserver_locations` can fall back to a
             // blocking disk read on a cache miss for a cross-file target. The snapshot is a cheap
             // pointer-map clone (`Arc<str>` values).
             let cache_snapshot = {
@@ -570,11 +575,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
             };
             let locs = result
                 .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|loc| parse_tsserver_location(loc, &cache_snapshot))
-                        .collect()
-                })
+                .map(|arr| parse_tsserver_locations(arr, &cache_snapshot))
                 .unwrap_or_default();
 
             Ok(locs)
@@ -608,7 +609,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await?;
 
-            // Snapshot then release before parsing: `parse_tsserver_location` can fall back to a
+            // Snapshot then release before parsing: `parse_tsserver_locations` can fall back to a
             // blocking disk read on a cache miss for a cross-file target. The snapshot is a cheap
             // pointer-map clone (`Arc<str>` values).
             let cache_snapshot = {
@@ -617,11 +618,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
             };
             let locs = result
                 .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|loc| parse_tsserver_location(loc, &cache_snapshot))
-                        .collect()
-                })
+                .map(|arr| parse_tsserver_locations(arr, &cache_snapshot))
                 .unwrap_or_default();
 
             Ok(locs)
@@ -651,7 +648,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await?;
 
-            // Snapshot then release before parsing: `parse_tsserver_location` can fall back to a
+            // Snapshot then release before parsing: `parse_tsserver_locations` can fall back to a
             // blocking disk read on a cache miss for a cross-file target. The snapshot is a cheap
             // pointer-map clone (`Arc<str>` values).
             let cache_snapshot = {
@@ -661,11 +658,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
             let locs = result
                 .get("refs")
                 .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|loc| parse_tsserver_location(loc, &cache_snapshot))
-                        .collect()
-                })
+                .map(|arr| parse_tsserver_locations(arr, &cache_snapshot))
                 .unwrap_or_default();
 
             Ok(locs)
@@ -702,7 +695,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 .await?;
 
             // Snapshot ONLY this response's target files and release the lock BEFORE parsing: a
-            // rename span resolves its target through `parse_tsserver_rename_span`, which can fall
+            // rename group resolves its target through `parse_tsserver_rename_spans`, which can fall
             // back to a blocking disk read on a cache miss. Holding the async mutex across that read
             // would block every other task contending for the cache. Scanning the response bounds
             // the snapshot to the files it touches.
@@ -732,16 +725,11 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or_default(),
                                 );
-                                group
+                                let spans = group
                                     .get("locs")
                                     .and_then(|v| v.as_array())
-                                    .into_iter()
-                                    .flat_map(move |spans| {
-                                        let fp = file_path.clone();
-                                        spans.iter().filter_map(move |span| {
-                                            parse_tsserver_rename_span(span, &fp, cache)
-                                        })
-                                    })
+                                    .map_or(&[][..], Vec::as_slice);
+                                parse_tsserver_rename_spans(spans, &file_path, cache)
                             })
                             .collect()
                     })
@@ -1200,15 +1188,15 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await;
 
+            // One index for the whole hint batch.
+            let index = content_snapshot.as_deref().map(SourceIndex::new_utf16);
             match result {
                 Ok(body) => {
                     let hints = body
                         .as_array()
                         .map(|arr| {
                             arr.iter()
-                                .filter_map(|hint| {
-                                    parse_tsserver_inlay_hint(hint, content_snapshot.as_deref())
-                                })
+                                .filter_map(|hint| parse_tsserver_inlay_hint(hint, index.as_ref()))
                                 .collect()
                         })
                         .unwrap_or_default();

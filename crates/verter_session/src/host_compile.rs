@@ -362,7 +362,7 @@ pub fn compile_profile_for_bundler() -> CompileProfile {
 /// [`CompileBatchRenderProfile`]. Fail-closed: no preset fallback.
 /// `component_id` is per-input (`None` here).
 ///
-/// Absent-field semantics match FFI (`ffi_profile_to_host`). Hash-
+/// Absent-field semantics match the FFI host conversion path. Hash-
 /// load-bearing: the profile must hash identically to the
 /// `CompileProfile` projected from the same JS framework-discriminated
 /// `HostCompileRequest` identity, runtime-product options, and framework-arm

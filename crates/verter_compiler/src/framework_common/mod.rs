@@ -11,11 +11,12 @@
 //!
 //! On top of the carrier wrappers it owns the compiler-side carrier
 //! framework substrate: the [`CarrierCompiler`] trait (parse / IDE /
-//! runtime) and the [`CarrierCompilerRegistry`] the host's carrier
-//! dispatch looks up. Vue is the reference implementation
-//! ([`vue_bridge::VueCarrierCompiler`]), delegating call-for-call to the
-//! existing Vue pipeline with ZERO edits to any Vue parser/codegen
-//! module.
+//! runtime) and the immutable per-capability catalogs
+//! (`registered_carrier_projection::built_in_frontend_catalog` and
+//! friends) production selectors dispatch through. Vue is the reference
+//! implementation ([`vue_bridge::VueCarrierCompiler`]), delegating
+//! call-for-call to the existing Vue pipeline with ZERO edits to any Vue
+//! parser/codegen module.
 
 pub mod capability;
 pub mod carrier_compiler;
@@ -25,7 +26,6 @@ pub mod generated_identifier;
 #[doc(hidden)]
 pub mod registered_carrier_projection;
 mod registered_geometry_state;
-pub mod registry;
 pub mod svelte_host_integration;
 pub(crate) mod typescript_directives;
 pub mod vue_bridge;
@@ -65,7 +65,6 @@ pub use generated_identifier::{is_generated_identifier, GENERATED_IDENTIFIER_PRE
 #[doc(hidden)]
 pub use registered_carrier_projection::FrameworkParseArtifact;
 pub use registered_carrier_projection::RegisteredCarrierPayload;
-pub use registry::CarrierCompilerRegistry;
 pub use svelte_host_integration::{
     svelte_host_integration_registration, SvelteAdmittedDemand, SvelteCompileAdmission,
     SvelteHostAdmissionRefusal, SvelteHostCompileRefusal, SvelteHostCompiledProducts,

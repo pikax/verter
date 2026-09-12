@@ -13,11 +13,71 @@
 //! The scanners walk the typed response JSON (no string heuristics) and
 //! canonicalize each path exactly as the corresponding parser does for its
 //! content lookup, so a scanned key matches the parser's lookup key byte-for-byte.
+//!
+//! [`with_target_index`] and [`convert_per_target`] are that per-target content
+//! resolution: each distinct target a response touches is resolved once through
+//! the provider's resolver (snapshot, then disk) and indexed once, however many
+//! endpoints land in it.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::codec::SourceIndex;
 use crate::uri::file_uri_to_path;
+
+/// Resolve one response target's content through the provider's `resolve` (its
+/// contents snapshot, then its disk fallback) and hand `convert` ONE UTF-16 index
+/// over it, shared by every endpoint the response places in that target.
+/// `convert` sees `None` when the target has no content. The content and its
+/// index live only for this call.
+pub fn with_target_index<'c, R>(
+    target: &str,
+    resolve: impl FnOnce(&str) -> Option<Cow<'c, str>>,
+    convert: impl FnOnce(Option<&SourceIndex<'_>>) -> R,
+) -> R {
+    let content = resolve(target);
+    let index = content.as_deref().map(SourceIndex::new_utf16);
+    convert(index.as_ref())
+}
+
+/// Convert a flat response batch whose elements each name their own target file
+/// (definition / references locations), resolving and indexing each DISTINCT
+/// target once through [`with_target_index`].
+///
+/// An element whose `target_of` is `None` is skipped. Only one target's content
+/// is held at a time, and the results keep the batch's element order.
+pub fn convert_per_target<'c, T, R>(
+    items: &[T],
+    target_of: impl Fn(&T) -> Option<String>,
+    resolve: impl Fn(&str) -> Option<Cow<'c, str>>,
+    convert: impl Fn(&T, &str, Option<&SourceIndex<'_>>) -> Option<R>,
+) -> Vec<R> {
+    let mut group_of: HashMap<String, usize> = HashMap::new();
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for (position, item) in items.iter().enumerate() {
+        let Some(target) = target_of(item) else {
+            continue;
+        };
+        match group_of.get(&target) {
+            Some(&group) => groups[group].1.push(position),
+            None => {
+                group_of.insert(target.clone(), groups.len());
+                groups.push((target, vec![position]));
+            }
+        }
+    }
+
+    let mut converted: Vec<Option<R>> = std::iter::repeat_with(|| None).take(items.len()).collect();
+    for (target, members) in &groups {
+        with_target_index(target, &resolve, |index| {
+            for &position in members {
+                converted[position] = convert(&items[position], target, index);
+            }
+        });
+    }
+    converted.into_iter().flatten().collect()
+}
 
 /// Clone only the `paths` entries out of the locked contents cache into a small
 /// snapshot. The values are `Arc<str>`, so each clone is a pointer bump; the map
@@ -108,7 +168,7 @@ pub fn tsserver_rename_target_paths(response: &serde_json::Value) -> HashSet<Str
 /// Canonical target paths referenced by an LSP `WorkspaceEdit` value (the
 /// `changes: { [uri]: … }` map keys plus each `documentChanges[].textDocument.uri`).
 /// Each URI is converted to a canonical filesystem path exactly as
-/// `parse_rename_edit` / `parse_text_edit_to_code_edit` key their content lookup.
+/// `parse_rename_edits` / `parse_text_edits_to_code_edits` key their content lookup.
 ///
 /// Used for the LSP-shape responses (tsgo rename's top-level workspace edit and
 /// the workspace edit nested under a tsgo code action's `edit`).
@@ -159,6 +219,57 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), Arc::from(*v)))
             .collect()
+    }
+
+    /// A batch converts through one content resolution per DISTINCT target: interleaved
+    /// elements of the same target share it, a target-less element is skipped, a target with
+    /// no content converts with no index, and results keep the batch's element order.
+    #[test]
+    fn convert_per_target_resolves_each_distinct_target_once_in_batch_order() {
+        let items = [
+            (Some("a"), 0usize),
+            (Some("b"), 1),
+            (None, 0),
+            (Some("a"), 2),
+            (Some("missing"), 0),
+            (Some("b"), 0),
+        ];
+
+        let lookups = std::cell::RefCell::new(Vec::new());
+        let converted = convert_per_target(
+            &items,
+            |(target, _)| target.map(str::to_string),
+            |target| {
+                lookups.borrow_mut().push(target.to_string());
+                match target {
+                    "a" => Some(Cow::Borrowed("x\ny\nz")),
+                    "b" => Some(Cow::Borrowed("bb\ncc")),
+                    _ => None,
+                }
+            },
+            |&(_, line), target, index| {
+                Some((
+                    target.to_string(),
+                    index.and_then(|index| index.line_start(line)),
+                ))
+            },
+        );
+
+        assert_eq!(
+            converted,
+            vec![
+                ("a".to_string(), Some(0)),
+                ("b".to_string(), Some(3)),
+                ("a".to_string(), Some(4)),
+                ("missing".to_string(), None),
+                ("b".to_string(), Some(0)),
+            ]
+        );
+        assert_eq!(
+            *lookups.borrow(),
+            vec!["a".to_string(), "b".to_string(), "missing".to_string()],
+            "each distinct target resolves once, in first-seen order"
+        );
     }
 
     #[test]

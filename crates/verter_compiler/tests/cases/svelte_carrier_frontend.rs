@@ -5,8 +5,7 @@
 use std::sync::Arc;
 
 use verter_compiler::framework_common::{
-    CarrierCompiler, CarrierFrontend, CatalogCapability, CatalogRow, FrameworkEpoch,
-    ImmutableCapabilityCatalog,
+    CarrierFrontend, CatalogCapability, CatalogRow, FrameworkEpoch, ImmutableCapabilityCatalog,
 };
 use verter_compiler::svelte::{
     svelte_carrier_frontend_registration, SvelteCarrierCompiler, SvelteCarrierFrontend, SvelteSfc5,

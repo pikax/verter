@@ -1,6 +1,7 @@
 //! Route-boundary evidence that Vue/Svelte IDE projection is selected from
-//! the built-in catalog (adapter × epoch × Projection) and that combined
-//! compile_ide / compile_bundle IDE products delegate to that backend.
+//! the built-in catalog (adapter × epoch × Projection) and that Vue's
+//! combined compile_ide / compile_bundle IDE products delegate to that
+//! backend.
 
 use std::sync::Arc;
 
@@ -20,9 +21,7 @@ use verter_compiler::framework_common::{
     FrameworkParseArtifact, IdeCompileOptions, ProjectionBackend, RuntimeCompileOptions,
     RuntimeDiagnostic, VueProjectionBackend, VueProjectionInputs,
 };
-use verter_compiler::svelte::{
-    SvelteCarrierCompiler, SvelteProjectionBackend, SvelteProjectionInputs,
-};
+use verter_compiler::svelte::{SvelteProjectionBackend, SvelteProjectionInputs};
 use verter_language::carrier_grammar::{
     CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
     FrameworkAdapterSemanticVersion,
@@ -81,10 +80,11 @@ fn registered_artifact(canonical: &str, source: &str, svelte: bool) -> Framework
     let accepted = grammar_authority
         .accept_registered_source(&source_authority, &snapshot, &config)
         .expect("accepted source");
-    verter_compiler::framework_common::CarrierCompilerRegistry::built_in()
-        .project_registered(&accepted)
-        .expect("registered projection")
-        .into_framework_parse_artifact()
+    verter_compiler::framework_common::registered_carrier_projection::project_registered_accepted(
+        &accepted,
+    )
+    .expect("registered projection")
+    .into_framework_parse_artifact()
 }
 
 fn vue_ide_request(filename: &str) -> CompileRequest {
@@ -339,37 +339,6 @@ fn vue_compile_ide_delegates_to_the_catalog_backend_once() {
 }
 
 #[test]
-fn svelte_compile_ide_delegates_to_the_catalog_backend_once() {
-    let artifact = registered_artifact("file:///ide.svelte", SVELTE_SIMPLE, true);
-    let opts = IdeCompileOptions {
-        filename: Some("Ide.svelte".to_string()),
-        ..Default::default()
-    };
-    let request = svelte_ide_request("Ide.svelte");
-    let via_backend = SvelteProjectionBackend
-        .project_ide(
-            ide_grant(),
-            SVELTE_SIMPLE,
-            &artifact,
-            &request,
-            &SvelteProjectionInputs,
-        )
-        .expect("svelte backend");
-    let _ = take_projection_producer_invocations();
-    let via_compile_ide = SvelteCarrierCompiler
-        .compile_ide(SVELTE_SIMPLE, &artifact, &opts)
-        .expect("compile_ide");
-    assert_eq!(
-        take_projection_producer_invocations(),
-        1,
-        "compile_ide must project through the catalog once"
-    );
-    assert_eq!(via_compile_ide.code, via_backend.ide.code);
-    assert_eq!(via_compile_ide.source_map, via_backend.ide.source_map);
-    assert_eq!(via_compile_ide.is_jsx, via_backend.ide.is_jsx);
-}
-
-#[test]
 fn vue_compile_bundle_ide_product_delegates_to_the_catalog_backend_once() {
     let artifact = registered_artifact("file:///bundle.vue", VUE_SIMPLE, false);
     let request = vue_ide_request("Bundle.vue");
@@ -393,43 +362,6 @@ fn vue_compile_bundle_ide_product_delegates_to_the_catalog_backend_once() {
         &artifact,
         &RuntimeCompileOptions {
             filename: Some("Bundle.vue".to_string()),
-            source_map: true,
-            want_runtime: false,
-            want_ide: true,
-            ..Default::default()
-        },
-    );
-    assert_eq!(
-        take_projection_producer_invocations(),
-        1,
-        "the combined adapter must project its IDE product through the catalog once"
-    );
-    let tsx = bundle.tsx.expect("IDE product present");
-    assert_eq!(tsx.code, via_backend.ide.code);
-    assert_eq!(tsx.source_map, via_backend.ide.source_map);
-    assert_eq!(tsx.is_jsx, via_backend.ide.is_jsx);
-}
-
-#[test]
-fn svelte_compile_bundle_ide_product_delegates_to_the_catalog_backend_once() {
-    let artifact = registered_artifact("file:///bundle.svelte", SVELTE_SIMPLE, true);
-    let request = svelte_ide_request("Bundle.svelte");
-    let via_backend = SvelteProjectionBackend
-        .project_ide(
-            ide_grant(),
-            SVELTE_SIMPLE,
-            &artifact,
-            &request,
-            &SvelteProjectionInputs,
-        )
-        .expect("svelte backend");
-    let _ = take_projection_producer_invocations();
-    let bundle = produced_bundle(
-        &SvelteCarrierCompiler,
-        SVELTE_SIMPLE,
-        &artifact,
-        &RuntimeCompileOptions {
-            filename: Some("Bundle.svelte".to_string()),
             source_map: true,
             want_runtime: false,
             want_ide: true,

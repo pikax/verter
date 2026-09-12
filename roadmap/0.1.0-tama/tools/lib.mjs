@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parseToml, readToml } from "./toml.mjs";
-import { implementedRows, ledgerErrors, COMMIT_DATE_PATTERN, NODE_ID_PATTERN } from "./ledger.mjs";
+import { cancelledRows, implementedRows, ledgerErrors, COMMIT_DATE_PATTERN, NODE_ID_PATTERN } from "./ledger.mjs";
 
 export { parseToml, readToml };
 
@@ -123,6 +123,12 @@ function schemaTypeMatches(value, type) {
 
 function schemaErrors(value, schema, location) {
   const errors = [];
+  if (Array.isArray(schema.oneOf)) {
+    // Mutually exclusive shapes (the ledger's per-status rows): exactly one branch may accept the value.
+    const matched = schema.oneOf.filter((branch) => schemaErrors(value, branch, location).length === 0).length;
+    if (matched !== 1)
+      errors.push(`${location}: must match exactly one of ${schema.oneOf.length} alternatives (matched ${matched})`);
+  }
   if (schema.const !== undefined && JSON.stringify(value) !== JSON.stringify(schema.const))
     errors.push(`${location}: expected constant ${JSON.stringify(schema.const)}`);
   if (Array.isArray(schema.enum) && !schema.enum.includes(value))
@@ -280,6 +286,7 @@ export function loadAuthority(packageRoot = PACKAGE_ROOT) {
     schema: 2,
     implementation: raw.implementation,
     implemented: implementedRows(raw),
+    cancelled: cancelledRows(raw),
     github_issue: raw.github_issue || [],
     github_train_issue: raw.github_train_issue || [],
   };
@@ -638,12 +645,15 @@ export function productReport(authority, state) {
   const products = [...new Set(authority.nodes.map((node) => node.product))].sort();
   return products.map((product) => {
     const nodes = authority.nodes.filter((node) => node.product === product);
-    const pending = nodes.filter((node) => state.states.get(node.id).status !== "COMPLETE");
+    const statusOf = (node) => state.states.get(node.id).status;
+    // Cancelled nodes are settled, not pending: nothing is owed for them.
+    const pending = nodes.filter((node) => !["COMPLETE", "CANCELLED"].includes(statusOf(node)));
     return {
       product,
       total: nodes.length,
-      implemented: nodes.length - pending.length,
-      ready: pending.filter((node) => state.states.get(node.id).status === "READY").length,
+      implemented: nodes.filter((node) => statusOf(node) === "COMPLETE").length,
+      cancelled: nodes.filter((node) => statusOf(node) === "CANCELLED").length,
+      ready: pending.filter((node) => statusOf(node) === "READY").length,
       acceptance_gates: nodes
         .filter(
           (node) =>
@@ -816,6 +826,26 @@ export function validateAuthority(authority, options = {}) {
     if (!NODE_ID_PATTERN.test(row.node_id))
       errors.push(`implementation ledger: invalid node id ${row.node_id}`);
   }
+  const cancelled = new Set();
+  // Programmatic mutations may hand in anything; a malformed container is a
+  // validation error, not an exception (absent or null still means "none").
+  if (authority.ledger.cancelled != null && !Array.isArray(authority.ledger.cancelled))
+    errors.push("implementation ledger: cancelled rows must be an array");
+  for (const [index, row] of (Array.isArray(authority.ledger.cancelled) ? authority.ledger.cancelled : []).entries()) {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      errors.push(`implementation ledger: cancelled row ${index} must be an object`);
+      continue;
+    }
+    if (!knownNodes.has(row.node_id))
+      errors.push(`implementation ledger: unknown node ${row.node_id}`);
+    if (implemented.has(row.node_id) || cancelled.has(row.node_id))
+      errors.push(`implementation ledger: duplicate node ${row.node_id}`);
+    cancelled.add(row.node_id);
+    if (row.reason !== undefined && (typeof row.reason !== "string" || row.reason.length === 0))
+      errors.push(`implementation ledger: ${row.node_id} reason must be a non-empty string`);
+    if (!NODE_ID_PATTERN.test(row.node_id))
+      errors.push(`implementation ledger: invalid node id ${row.node_id}`);
+  }
   const mappedNodes = new Set();
   const mappedIssues = new Set();
   // Identity is {node_id, gh_issue} unique both ways; sync_to_github is not a key.
@@ -879,6 +909,11 @@ export function deriveState(authority, options = {}) {
       },
     ]),
   );
+  // A cancelled node is settled without evidence: it is never offered as
+  // work and its descendants do not wait for it (the reason lives in the row).
+  const cancelled = new Map(
+    (options.cancelled || authority.ledger.cancelled || []).map((row) => [row.node_id, { reason: row.reason ?? null }]),
+  );
   const states = new Map();
   const byId = new Map(authority.nodes.map((node) => [node.id, node]));
   const ancestorCache = new Map();
@@ -896,20 +931,26 @@ export function deriveState(authority, options = {}) {
   for (const node of order) {
     const commit = commits.get(node.id) || null;
     const complete = Boolean(commit);
-    const missingAncestors = [...ancestorsOf(node.id)].filter((id) => !commits.has(id)).sort();
+    const ancestors = [...ancestorsOf(node.id)];
+    const missingAncestors = ancestors.filter((id) => !commits.has(id) && !cancelled.has(id)).sort();
+    const cancelledAncestors = ancestors.filter((id) => !commits.has(id) && cancelled.has(id)).sort();
     let status;
     if (complete) status = "COMPLETE";
+    else if (cancelled.has(node.id)) status = "CANCELLED";
     else if (node.dispatchable && missingAncestors.length === 0) status = "READY";
     else status = "BLOCKED";
     states.set(node.id, {
       status,
       commit,
+      cancellation: status === "CANCELLED" ? cancelled.get(node.id) : null,
       missing_ancestors: missingAncestors,
+      cancelled_ancestors: cancelledAncestors,
     });
   }
   return {
     states,
     commits,
+    cancelled,
     errors: [],
   };
 }
@@ -930,7 +971,9 @@ export function explainNode(authority, state, id) {
           locator: row.commit.locator,
         }
       : null,
+    cancellation: row.cancellation ?? null,
     missing_ancestors: row.missing_ancestors,
+    cancelled_ancestors: row.cancelled_ancestors ?? [],
     external_requirements: node.external_requirements,
     charter: node.charter,
   };
@@ -940,6 +983,10 @@ export function packetFor(authority, state, id) {
   const node = authority.nodes.find((candidate) => candidate.id === id);
   if (!node) throw new Error(`unknown node ${id}`);
   const row = state.states.get(id);
+  if (row.status === "CANCELLED")
+    throw new Error(
+      `cannot create work packet for CANCELLED node ${id}; ${row.cancellation?.reason || "the ledger retired it"}`,
+    );
   if (row.status === "BLOCKED") {
     const reason = row.missing_ancestors.length
       ? `missing ancestors: ${row.missing_ancestors.join(", ")}`
@@ -950,7 +997,7 @@ export function packetFor(authority, state, id) {
     confinedFile(authority.packageRoot, node.charter, `${id} charter`),
     "utf8",
   );
-  return `# Tama work packet: ${id}\n\nStatus: ${row.status}\nName: ${node.name}\nTrain: ${node.train}\nPredecessors: ${node.predecessors.join(", ") || "none"}\nMissing ancestors: ${row.missing_ancestors.join(", ") || "none"}\nExternal requirements (agent-checked): ${node.external_requirements.join(", ") || "none"}\n\n## Completion ledger\n\nBefore squashing or starting review, transition this node's predeclared line in \`authority/${authority.metadata.implemented_ledger}\` as part of the implementation patch. The node already has exactly one line under \`[implementation]\`; change only that line:\n\n    "${id}" = { status = "implemented", commit_message = "<planned squash commit message or useful search phrase>", commit_date = "<approximate squash date with timezone>" }\n\nAdd \`, pull_request = 1234\` inside the braces when the PR number is already known. Never append a second entry, never touch another node's line, and never edit \`[[github_issue]]\` rows for completion.\n\nThen squash once using the planned message and review that candidate. No after-commit ledger update or amend is required. The transitioned status is authoritative by presence. The commit fields are loose locator hints only. Tooling does not resolve or validate them, require an exact message/date match, compare content, inspect ancestry, or contact GitHub. If a message search returns several commits, use the date to choose the closest result; use the PR number when available.\n\n## Active sizing and train review policy\n\nProduction LOC and file budgets are planning references, not hard acceptance lines. Investigate material drift in either direction; if one expected production file becomes ten, require a scope-coherence explanation rather than mechanically rejecting or splitting the candidate.\n\nAfter every 3 to 6 implemented blocks in this train, the train manager spawns a fresh Codex Architect conformance review over the cumulative implementation before a seventh unchecked block proceeds. On the train's final intended block, also spawn a fresh train review covering every implemented block, the final candidate, and all current amendments. These train reviews are additional to the node's own review profile and create no new ledger or readiness state.\n\n## Charter\n\n${charter}`;
+  return `# Tama work packet: ${id}\n\nStatus: ${row.status}\nName: ${node.name}\nTrain: ${node.train}\nPredecessors: ${node.predecessors.join(", ") || "none"}\nMissing ancestors: ${row.missing_ancestors.join(", ") || "none"}\n${row.cancelled_ancestors?.length ? `Cancelled ancestors (settled without evidence): ${row.cancelled_ancestors.join(", ")}\n` : ""}External requirements (agent-checked): ${node.external_requirements.join(", ") || "none"}\n\n## Completion ledger\n\nBefore squashing or starting review, transition this node's predeclared line in \`authority/${authority.metadata.implemented_ledger}\` as part of the implementation patch. The node already has exactly one line under \`[implementation]\`; change only that line:\n\n    "${id}" = { status = "implemented", commit_message = "<planned squash commit message or useful search phrase>", commit_date = "<approximate squash date with timezone>" }\n\nAdd \`, pull_request = 1234\` inside the braces when the PR number is already known. Never append a second entry, never touch another node's line, and never edit \`[[github_issue]]\` rows for completion.\n\nThen squash once using the planned message and review that candidate. No after-commit ledger update or amend is required. The transitioned status is authoritative by presence. The commit fields are loose locator hints only. Tooling does not resolve or validate them, require an exact message/date match, compare content, inspect ancestry, or contact GitHub. If a message search returns several commits, use the date to choose the closest result; use the PR number when available.\n\n## Active sizing and train review policy\n\nProduction LOC and file budgets are planning references, not hard acceptance lines. Investigate material drift in either direction; if one expected production file becomes ten, require a scope-coherence explanation rather than mechanically rejecting or splitting the candidate.\n\nAfter every 3 to 6 implemented blocks in this train, the train manager spawns a fresh Codex Architect conformance review over the cumulative implementation before a seventh unchecked block proceeds. On the train's final intended block, also spawn a fresh train review covering every implemented block, the final candidate, and all current amendments. These train reviews are additional to the node's own review profile and create no new ledger or readiness state.\n\n## Charter\n\n${charter}`;
 }
 
 export function exactRegularFileInventory(root, label = "inventory") {

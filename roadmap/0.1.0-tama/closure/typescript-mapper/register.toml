@@ -37,8 +37,11 @@ decision = "decisions/2026-09-02-typescript-mapper-rescope.md"
 #
 # `reexecution` says who re-derives the record, and the two arms are both
 # resolved rather than trusted. An `instrument` record is re-run by the control
-# suite against the live register and compared against its transcription; a node
-# runner may not declare anything else. An `external` record names the lane that
+# suite against the live register, and the live run is judged as fresh evidence
+# — clean exit, a summary of the declared grammar, zero failures, nonzero work,
+# no undeclared skip, the transcribed verdict fields — never by comparing its
+# counts against the transcribed ones; a node runner may not declare anything
+# else. An `external` record names the lane that
 # re-runs its work — `refresh_job`, `refresh_command`, `refresh_filter` — and
 # the validator resolves that the job exists, issues that command, and is gated
 # on that filter, then measures the record's cited artifacts against the
@@ -535,7 +538,7 @@ shipped_obligation = "authority-only"
 [[atom]]
 id = "A-node-evidence-re-executed"
 claim = "CLM-EVIDENCE"
-statement = "Every proof record whose adapter declares instrument re-execution is re-run by the control suite against the live register, and the record is refused unless the counters derived from the live run's own terminal summary equal the ones derived from what the record transcribes. Exactly one such record is exempt and named as such: the control suite's own record, which cannot re-enter itself without diverging. It is bound instead by the suite's declared-case comparison, which requires the register's transcribed selected, executed, and passed counts to equal the number of cases the suite registers — so adding or removing a case there invalidates the transcription just as a drifted count would. A node runner may not opt out of re-execution. A record whose adapter declares EXTERNAL re-execution is re-derived too whenever it binds a negative control, because the lane that re-applies that control runs the record's own command against a clean mirror before planting anything: that clean run's terminal summary is compared against the record's transcription by the same derivation, so the only records whose counters are transcribed rather than re-derived are the ones that bind no control at all."
+statement = "Every proof record whose adapter declares instrument re-execution is re-run by the control suite against the live register, and the live run is judged as fresh evidence about the tree it ran on: it exits clean, emits a terminal summary of the grammar its adapter declares, reports zero failures and nonzero executed work, skips nothing the record does not declare, and carries the verdict fields a tool line transcribes — its PASS word and every field whose value is not a count. The live counts are NOT compared against the record's transcribed counts: those are the record's claim about a run somebody once did, held to its own transcript by the validator, and a lane that refused whenever a selected suite gained a case or a DAG gained a node would be red until someone rewrote the number, which proves nothing about the tree. Exactly one such record is exempt from re-execution and named as such: the control suite's own record, which cannot re-enter itself without diverging. It is bound instead by the suite's declared-case comparison, which requires the register's transcribed selected, executed, and passed counts to equal the number of cases the suite registers. A node runner may not opt out of re-execution. A record whose adapter declares EXTERNAL re-execution is re-run too whenever it binds a negative control, because the lane that re-applies that control runs the record's own command against a clean mirror before planting anything, under the same evidence rule — and where that runner can list its own selection, the clean run is held to the tree's inventory of it: the cases it executed and the cases it skipped are the ones the listing marks matching and ignored on the host that ran it, and a libtest command that names its cases with --exact must have executed exactly that many. The only records whose commands are transcribed rather than re-run are the ones that bind no control at all."
 evidence_anchor = "roadmap/0.1.0-tama/closure/typescript-mapper/register.toml"
 shipped_obligation = "authority-only"
 
@@ -586,6 +589,20 @@ id = "A-mapping-product-complete"
 claim = "CLM-EVIDENCE"
 statement = "A carrier region answers with every projected region derived from it, in deterministic ascending order, and preserves the provenance the pre-change range geometry published."
 evidence_anchor = "crates/verter_compiler/src/code_transform/mapping_product.rs"
+shipped_obligation = "met"
+
+[[atom]]
+id = "A-projection-refuses-not-approximates"
+claim = "CLM-EVIDENCE"
+statement = "The projection plane answers a position question with a correspondence or a typed refusal and never an approximation: a range overrunning a surface, a range reaching bytes with no preimage, a strict sub-range of text whose correspondence is region to region, and preimages separated by a carrier gap are each refused rather than clamped, narrowed, guessed, or spanned."
+evidence_anchor = "crates/verter_session/src/content_mapper.rs"
+shipped_obligation = "met"
+
+[[atom]]
+id = "A-projection-complete-and-lineage-addressed"
+claim = "CLM-EVIDENCE"
+statement = "A carrier position answers with every projection derived from it in ascending projected order, and the projection is addressed by the carrier unit lineage while the map construction over it carries the content: an edit moves the construction identity and leaves the carrier unit unchanged."
+evidence_anchor = "crates/verter_session/src/content_mapper.rs"
 shipped_obligation = "met"
 
 [[atom]]
@@ -677,7 +694,7 @@ shipped_obligation = "authority-only"
 [[atom]]
 id = "A-control-mutation-locatable"
 claim = "CLM-INSTRUMENT"
-statement = "A negative control names the artifact it mutated and both halves of the edit, and `unique-new-occurrence` is VERIFIED rather than asserted: the replaced text must occur in the subject exactly once, and the introduced text must be absent. A mutation that could never have applied fails, and so does one still sitting in the tree under review. A command-shaped control instead names the arguments it added, none of which may already be part of the recorded command. A control whose observed outcome parses as a transcript this validator would admit records no refusal and is refused. Every control is RE-APPLIED rather than believed, command-shaped ones included: the mutation goes into a mirror of the tree — or, for a command control, onto the argument vector — the record's own command runs against it, and the refusal must be the runner's own, in its adapter's grammar, carrying the counts the control transcribes — with a clean run of the same mirror beforehand, so a refusal is attributable to the mutation rather than to a tree that was already red. Re-application is not sampled. It is split across two lanes on a TOOLCHAIN boundary — the instrument suite drives the controls whose records run under `node`, and a second lane drives the rest, the records that run under `cargo` and the one whose command is the instrument suite itself, which cannot be driven by the suite it would re-enter. The partition over the register's whole control universe is resolved rather than declared: every control lands in exactly one lane, no control is exempt from re-application for mutating no artifact — a command-shaped control is re-applied by the lane its record's runner decides, so the counters its record transcribes and the refusal its delta produces are re-derived live rather than trusted — and the delegated lane is resolved against the workflow — one job issuing its complete command line, installing the runner and the cargo subcommands its controls need, gated on a filter covering that lane's own sources and every subject it mutates. A delegated lane no job runs is a transcript with extra steps."
+statement = "A negative control names the artifact it mutated and both halves of the edit, and `unique-new-occurrence` is VERIFIED rather than asserted: the replaced text must occur in the subject exactly once, and the introduced text must be absent. A mutation that could never have applied fails, and so does one still sitting in the tree under review. A command-shaped control instead names the arguments it added, none of which may already be part of the recorded command. A control whose observed outcome parses as a transcript this validator would admit records no refusal and is refused. Every control is RE-APPLIED rather than believed, command-shaped ones included: the mutation goes into a mirror of the tree — or, for a command control, onto the argument vector — the record's own command runs against it, and the refusal must be the runner's own, in its adapter's grammar, carrying the mutation's own signature the control transcribes — how many cases it broke, whether it emptied the selection, which errors it printed — while the suite-size counters beside it, which move whenever the selected suite gains a case or a cfg-gated case compiles on a different host, are not compared; with a clean run of the same mirror beforehand, judged as fresh evidence about that mirror, so a refusal is attributable to the mutation rather than to a tree that was already red. Re-application is not sampled. It is split across two lanes on a TOOLCHAIN boundary — the instrument suite drives the controls whose records run under `node`, and a second lane drives the rest, the records that run under `cargo` and the one whose command is the instrument suite itself, which cannot be driven by the suite it would re-enter. The partition over the register's whole control universe is resolved rather than declared: every control lands in exactly one lane, no control is exempt from re-application for mutating no artifact — a command-shaped control is re-applied by the lane its record's runner decides, so whether its record's command still runs clean and the refusal its delta produces are re-derived live rather than trusted — and the delegated lane is resolved against the workflow — one job issuing its complete command line, installing the runner and the cargo subcommands its controls need, gated on a filter covering that lane's own sources and every subject it mutates. A delegated lane no job runs is a transcript with extra steps."
 evidence_anchor = "roadmap/0.1.0-tama/tools/closure-register.mjs"
 shipped_obligation = "authority-only"
 
@@ -809,12 +826,12 @@ adapter = "node-tool"
 argv_tail = ["roadmap/0.1.0-tama/tools/closure-register.mjs", "--check"]
 fixtures = ["roadmap/0.1.0-tama/contracts/typescript-mapper-dual-plane.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM0.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM1.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM2.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM3.md", "roadmap/0.1.0-tama/charters/rev11-typescript-mapper/TCM4.md"]
 covers = ["A-plane-boundary", "A-no-oracle-callback", "A-mapper-total", "A-projection-classes-closed", "A-binding-is-a-witness", "A-no-unbound-semantic-result", "A-publication-requires-live-basis", "A-degraded-never-warms", "A-slot-keyed-by-query-identity", "A-incremental-equals-fresh", "A-single-owner-per-capability", "A-no-dual-running-window", "A-deletion-rows-concrete", "A-survivor-rows-received", "A-residue-owner-non-circular", "A-receiving-criterion-direct", "A-resolution-gate-named", "A-downstream-owner-restated"]
-selected = 571
-executed = 571
-passed = 571
+selected = 595
+executed = 595
+passed = 595
 failed = 0
 skipped = 0
-terminal_summary = "closure-register: PASS instrument=typescript-mapper-closure claims=7 atoms=54 proofs=10 controls=10 findings=36 residues=3 obligations=571 state=READY_FOR_REVIEW"
+terminal_summary = "closure-register: PASS instrument=typescript-mapper-closure claims=7 atoms=56 proofs=11 controls=11 findings=36 residues=3 obligations=595 state=READY_FOR_REVIEW"
 count_key = "obligations"
 control = "CTL-contract-section"
 
@@ -830,7 +847,7 @@ passed = 8995
 failed = 0
 skipped = 547
 expected_skips = 547
-skip_basis = "the command applies no filter expression, so nextest counts a test as skipped only for being marked #[ignore]: the 547 are the three packages' opt-in real-provider, corpus, and soak cases, and the clean half of the control lane's re-application re-derives executed and skipped live against this transcript. The selection is shaped by the lane's CI platform — unix-gated and windows-gated cases compile on different hosts, so the five counts are the linux selection's, and a lane run on a platform that compiles a different cfg set fails the clean-run comparison by exactly those cases rather than being tolerated"
+skip_basis = "the command applies no filter expression, so nextest counts a test as skipped only for being marked #[ignore]: the 547 are the three packages' opt-in real-provider, corpus, and soak cases, and the clean half of the control lane's re-application holds the live executed and skipped counts to the runner's own listing of this selection on the host that runs it, never to this transcript. The selection is shaped by the platform — unix-gated and windows-gated cases compile on different hosts — so the five counts here are the linux selection's on the day they were taken, and a lane run on a host that compiles a different cfg set is judged against what that host lists rather than against these numbers"
 terminal_summary = "Summary [ 330.600s] 8995 tests run: 8995 passed (6 slow), 547 skipped"
 control = "CTL-targeted-selector"
 
@@ -847,6 +864,20 @@ failed = 0
 skipped = 0
 terminal_summary = "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 6350 filtered out"
 control = "CTL-mapping-product-elision"
+
+[[proof]]
+id = "P-content-mapper"
+adapter = "cargo-test"
+argv_tail = ["-p", "verter_session", "--test", "main", "--", "content_mapper_projection"]
+fixtures = ["crates/verter_session/src/content_mapper.rs", "crates/verter_session/tests/cases/content_mapper_projection.rs"]
+covers = ["A-projection-refuses-not-approximates", "A-projection-complete-and-lineage-addressed"]
+selected = 9
+executed = 9
+passed = 9
+failed = 0
+skipped = 0
+terminal_summary = "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 2293 filtered out"
+control = "CTL-content-mapper-clamp"
 
 # ---------------------------------------------------------------------------
 # Canonical negative controls.
@@ -939,10 +970,10 @@ id = "CTL-ledger-row"
 kind = "source"
 mutation = "Set one implementation-ledger row to a status outside the declared pending/implemented pair."
 subject = "roadmap/0.1.0-tama/authority/state/implemented.toml"
-reverted = "\"TCM1\" = { status = \"implemented\", commit_message = \"feat(core): dual-surface mapping product inside CodeTransform\", commit_date = \"2026-09-05T00:00:00+01:00\" }\n\"TCM2\" = { status = \"pending\" }"
-applied = "\"TCM1\" = { status = \"landed\", commit_message = \"feat(core): dual-surface mapping product inside CodeTransform\", commit_date = \"2026-09-05T00:00:00+01:00\" }\n\"TCM2\" = { status = \"pending\" }"
+reverted = "\"TCM2\" = { status = \"implemented\", commit_message = \"feat(mapping-geometry): content-mapper projection plane\", commit_date = \"2026-09-09T12:00:00+01:00\" }\n\"TCM3\" = { status = \"pending\" }"
+applied = "\"TCM2\" = { status = \"landed\", commit_message = \"feat(mapping-geometry): content-mapper projection plane\", commit_date = \"2026-09-09T12:00:00+01:00\" }\n\"TCM3\" = { status = \"pending\" }"
 uniqueness = "unique-new-occurrence"
-observed = "node exit 1\ntests 30 | pass 22 | fail 8 | cancelled 0 | skipped 0 | todo 0\neight cases reported `implementation ledger: TCM1: status must be pending or implemented` beside the schema error `authority.implementation-ledger.implementation.TCM1.status: expected one of pending, implemented`"
+observed = "node exit 1\ntests 30 | pass 22 | fail 8 | cancelled 0 | skipped 0 | todo 0\neight cases reported `implementation ledger: TCM2: status must be pending or implemented` beside the schema error `authority.implementation-ledger.implementation.TCM2.status: expected one of pending, implemented`"
 
 [[control]]
 id = "CTL-register-status"
@@ -981,6 +1012,16 @@ reverted = "        let class = class.unwrap_or(CarrierClass::Elided);\n        
 applied = "        let class = class.unwrap_or(CarrierClass::Elided);\n        if false && class == CarrierClass::Elided {"
 uniqueness = "unique-new-occurrence"
 observed = "cargo exit 101; test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 6350 filtered out — code_transform::mapping_product_tests::wholly_synthetic_replacement_text_elides_the_source_it_stands_in_for panicked on `an elided carrier byte has NO projection: answering with a neighbour is the mis-mapping this class refuses`"
+
+[[control]]
+id = "CTL-content-mapper-clamp"
+kind = "source"
+mutation = "Clamp a projected range to the end of the surface instead of refusing it, so a range the caller never named is answered with a well-formed correspondence."
+subject = "crates/verter_session/src/content_mapper.rs"
+reverted = "        if projected.end > self.product.projected_len() {\n            return CarrierAnswer::Refused(Refusal::OutOfRange);\n        }"
+applied = "        let projected = MappingSpan {\n            start: projected.start.min(self.product.projected_len()),\n            end: projected.end.min(self.product.projected_len()),\n        };"
+uniqueness = "unique-new-occurrence"
+observed = "cargo exit 101; test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 2293 filtered out — cases::content_mapper_projection::a_projected_offset_past_the_surface_is_refused_rather_than_clamped_to_its_end panicked on `a range overrunning the projected surface is refused, not truncated to the part of itself that happens to map`, left Span(MappingSpan { start: 28, end: 31 }), right Refused(OutOfRange)"
 
 # ---------------------------------------------------------------------------
 # Findings. Every entry is routed to exactly one claim or one residue; the
@@ -1449,3 +1490,38 @@ subject = "Vue SFC auto-import restoration"
 disposition = "Accepting an auto-import completion in a Vue SFC drops the import statement: TypeScript anchors the insertion at generated offset 0 inside the synthesized preamble, the published map has no correspondence, and remapAllFileTextChanges refuses the FileTextChanges atomically. Restoration is a mapped zero-length anchor at script-content start so the insertion lands in a mapped region, not a source-structure heuristic. The geometry that anchor needs now exists; routing it into the projection plane is the activation the contract keeps separate from this block."
 receiving_criterion = "TCM2-AC2"
 receiving_criterion_role = "positive contract"
+
+[[row]]
+kind = "deletion"
+subject = "Unselected projection topologies"
+disposition = "Deleted rather than retained as options. The selected topology is RETAINED owned geometry, addressed by the carrier unit lineage and answered by searching the compact partition the mapping product already publishes. The two alternatives are structurally absent rather than merely unused: re-deriving the correspondence from a live CodeTransform per question is not expressible, because the plane carries no lifetime parameter and no constructor that borrows a transform, so geometry can neither depend on an arena that has been dropped nor pay a whole chunk walk per position; a dense per-projected-byte table is absent because it buys nothing over the partition search while costing memory linear in every generated surface. The selection rule is the pair of constraints the ratified contract places on this plane at once, answerable with no engine running and bounded in what it keeps, and only the retained compact form satisfies both."
+receiving_criterion = "TCM2-AC1"
+receiving_criterion_role = "sole-owner outcome"
+
+[[row]]
+kind = "survivor"
+subject = "Content-mapper projection plane"
+disposition = "Delivered and dormant: one carrier surface's projection, addressed by the carrier unit lineage, carrying the retained mapping product plus the map-construction and companion-map identities composed over it. Its position semantics are total and fail closed, a correspondence or a typed refusal and never an approximation. A range overrunning the surface is refused rather than truncated to the part of itself that happens to map; a range reaching synthesized bytes is refused whole rather than narrowed; a strict sub-range of region-to-region rewritten text is refused rather than sliced byte to byte; relocated preimages separated by a carrier gap are refused rather than answered with their hull; an elided carrier position answers with no projection rather than a neighbour; an inverted range is refused rather than normalised. A declared zero-width insertion resolves to its authored anchor while the synthesized bytes around it still refuse, which is the geometry the Vue SFC auto-import restoration needs. Nothing routes through it, which is the landing-dormant rule the contract records rather than a second answering route."
+receiving_criterion = "TCM2-AC2"
+receiving_criterion_role = "positive contract"
+
+[[row]]
+kind = "survivor"
+subject = "Projection-path implementation baseline record"
+disposition = "Recorded for this path under the locked method and still carried for the successors. The pre-change comparison reference is the geometry the mapping product already publishes, read through its own partition, anchor, and carrier-to-projected accessors; the workload is one transform per disposition the wire semantics branch on, being identity source, region-to-region rewrite, synthesized intro, wholly synthetic replacement with its elided carrier extent, backwards relocation, a mapped carrier point, and a declared preamble anchor; the package identity is verter_session; the method composes the plane over that product and compares every answer against the product region by region; the comparison rule is that the plane never widens, narrows, or invents a correspondence the product does not already carry, and refuses wherever the product carries none. No absolute machine threshold and no Git identity enters it. A-implementation-baseline stays transferred, because TCM3 and TCM4 receive the same residue for paths this block does not touch."
+receiving_criterion = "TCM2-AC2"
+receiving_criterion_role = "positive contract"
+
+[[row]]
+kind = "survivor"
+subject = "Projection-plane incremental-equivalence not-applicable scope"
+disposition = "Not applicable, recorded against untouched authority: the plane is a pure function of one carrier unit, one content identity, and one mapping product. It holds no cache slot, publishes nothing, warms nothing, and is reached by no production route, so no incremental, cancellation, stale-publication, or partial-result authority is owned or altered here and there is no warm path whose equality with a cold one could differ. Its map-construction identity is composed so that a later cache owner keys on content and geometry while the carrier unit survives the edit, which is a property of the identity rather than a slot this block introduces."
+receiving_criterion = "TCM2-AC3"
+receiving_criterion_role = "incremental equivalence"
+
+[[row]]
+kind = "survivor"
+subject = "Projection-plane bounded-work not-applicable scope"
+disposition = "Not applicable, recorded per the charter's performance budget: no hot path calls the plane. The work it does add is bounded by construction, being one canonical encoding per projection and a partition-point search rather than a scan or a per-question re-derivation for every position query. No counters and no retention soak are created."
+receiving_criterion = "TCM2-AC4"
+receiving_criterion_role = "bounded work"
