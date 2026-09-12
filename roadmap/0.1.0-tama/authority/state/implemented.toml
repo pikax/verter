@@ -381,7 +381,7 @@ schema = 2
 "SIMP14" = { status = "pending" }
 "SIMP15" = { status = "pending" }
 "SIMP2" = { status = "pending" }
-"SIMP3" = { status = "implemented", commit_message = "test(*): retire the documentation-heading guard registry", commit_date = "2026-09-12T10:00:00+01:00" }
+"SIMP3" = { status = "implemented", commit_message = "test(*): retire the documentation-heading guard registry", commit_date = "2026-09-12T10:52:03+01:00" }
 "SIMP4" = { status = "pending" }
 "SIMP5" = { status = "pending" }
 "SIMP6" = { status = "pending" }

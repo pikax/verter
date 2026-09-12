@@ -118,6 +118,17 @@ display never establish public-contract meaning. See
 
 ## Component-Meta Heuristic Prevention (CRITICAL)
 
+Guards: the typed-IR-only resolver cluster in
+`crates/verter_session/tests/cases/architecture_guards.rs` —
+`no_macro_string_heuristics_in_resolver_core`,
+`no_text_based_macro_surface_projection_helpers`, `no_format_then_reparse`,
+`no_pick_or_omit_string_prefix_check`, `no_role_inference_from_name_suffix` —
+plus `retired_symbols_absent_from_production_source`
+(`crates/verter_session/tests/cases/g_misc0/no_legacy_walker.rs`), which fails
+if the retired checker-display-text re-parse bridge
+(`parse_checker_text_to_type_expr` / `checker_text_adapter`) reappears in
+production source.
+
 ### Prop callable roles
 
 `PropCallableRole` is producer-owned semantic authority carried from

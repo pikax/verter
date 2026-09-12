@@ -291,6 +291,8 @@ The Rust compiler has **two separate template codegen paths**. Modifying one doe
 
 The **LSP uses the IDE path** via `host.ensure_compiled()` with `CompileTarget::IDE`. TSGO type-checks this output. Changes to VDOM codegen do NOT affect LSP hover/completions. IDE codegen auto-detects the script language: TS SFCs produce `.tsx` (TypeScript + JSX); JS SFCs (no `lang` or `lang="js"`) produce `.jsx` (JavaScript + JSDoc annotations).
 
+Guards: the `compile_audit_sourcemap` suite (`crates/verter_session/tests/cases/g_compile/compile_audit_sourcemap.rs`) plus the compile-output snapshots. An IDE-side regression caused by a VDOM change (or the reverse) surfaces as a snapshot diff or a sourcemap byte-offset mismatch.
+
 ## Compiled-Output Conformance (CRITICAL)
 
 Official-framework compiler conformance is behavioral plus structural/helper-topology parity, not raw-byte identity. For Vue VDOM/Vapor, Svelte `svelte/internal/*`, SSR/client, and future runtime backends, compare emitted output by observable behavior plus parsed/token-normalized structure: imports, helper families, helper call sequence where order is semantic, memoization/reactivity/effect topology, DOM/hydration template topology, class/style/attribute normalization, prop/property routing, event delegation, and diagnostic/reject ordering.

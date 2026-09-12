@@ -368,6 +368,8 @@ Best-architecture target:
 - Projection planning is explicit. Callers request identity/navigation/shallow/expanded behavior and package-boundary/depth policy up front; resolvers do not infer these from ad hoc shape checks.
 - If the current IR cannot represent a TypeScript construct, extend the IR/schema or return a structured unsupported result with diagnostics. Do not recover meaning by reparsing display text.
 
+Guards: `no_macro_string_heuristics_in_resolver_core`, `no_format_then_reparse`, `no_node_modules_substring_outside_workspace_api` (`crates/verter_session/tests/cases/architecture_guards.rs`) mechanically forbid the text-derived-meaning and path-substring patterns the rule text names. The identity/validation-completeness half of the rule is held by the cache-architecture guards (`/type-cache-architecture`), not by these three.
+
 ## Typed Degradation And Completeness Contract (CRITICAL)
 
 Semantic degraded states are part of the type system contract. They must be typed, propagated, and observable.
@@ -376,6 +378,8 @@ Semantic degraded states are part of the type system contract. They must be type
 - `Unknown` is allowed only for a genuine unknown type value with provenance explaining why the producer could not represent it. If the producer knows this is `Unsupported`, `BudgetExceeded`, `Recursive`, `Miss`, or `Unstable`, use that state instead.
 - Public query envelopes must preserve completeness. `Complete` means the required inputs were available, current, and no budget/unsupported/unstable branch affected the answer. A query may return `Complete(None)` only when absence itself was proven under the current facts; missing analysis, stale cache data, unavailable providers, unsupported operators, and budget exits must surface as `Unavailable`, `Partial`, or a typed degraded result.
 - Degraded results may be displayed and returned to callers, but must not be promoted into warm shared caches as complete answers.
+
+Guards: `macro_impacting_constructs_fail_lowering_not_silent_skip` (`crates/verter_session/tests/cases/architecture_guards.rs` + `crates/verter_session/src/owned_artifacts/eval_program_tests.rs`) pins fail-loud lowering over silent skip; `audit_publishes_member_edge_with_published_field_provenance_at_macro_boundaries` (`crates/verter_session/src/component_meta_audit/mod_tests.rs`) pins published-field provenance at the macro boundaries. Typed degraded-state propagation beyond those two boundaries is not yet guarded end to end.
 
 ## Cache Population Target Contract
 
