@@ -1,14 +1,46 @@
 // @ai-generated - Covers replay discrimination, inventory changes, and source restoration.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 import test from "node:test";
 
-import { reapply } from "./closure-controls.mjs";
+import {
+  NODE_TEST_INVENTORY_PRELOAD,
+  controlCommand,
+  inventoryCommand,
+  parseInventory,
+  reapply,
+} from "./closure-controls.mjs";
+import { analyze, parseTerminalSummary } from "./closure-register.mjs";
+import { PACKAGE_ROOT } from "./lib.mjs";
+
+const REPO_ROOT = path.resolve(PACKAGE_ROOT, "..", "..");
 
 const summary = (passed, failed = 0, skipped = 0) =>
   `tests ${passed + failed + skipped}\npass ${passed}\nfail ${failed}\ncancelled 0\nskipped ${skipped}\ntodo 0\n`;
+
+// Answers the suite's registration inventory with exactly what the clean run
+// before it reported, unless a case supplies its own listing, so a case about
+// something else is not decided by the listing.
+function withListing(spawn, listing) {
+  let last = "";
+  return (argv, adapter) => {
+    if (argv.includes(NODE_TEST_INVENTORY_PRELOAD)) {
+      if (listing !== undefined) return { status: 0, stdout: listing };
+      const clean = parseTerminalSummary("node-test", last);
+      return {
+        status: 0,
+        stdout: `node-test inventory: declared ${clean.selected} skipped ${clean.skipped}\n`,
+      };
+    }
+    const result = spawn(argv, adapter);
+    last = `${result?.stdout ?? ""}`;
+    return result;
+  };
+}
 
 function fixture(body) {
   const mirror = fs.mkdtempSync(path.join(os.tmpdir(), "closure-replay-unit-"));
@@ -45,6 +77,24 @@ function fixture(body) {
   }
 }
 
+const nextestListing = (matching, ignored) =>
+  JSON.stringify({
+    "rust-suites": {
+      synthetic: {
+        testcases: Object.fromEntries([
+          ...Array.from({ length: matching }, (_, i) => [
+            `runs_${i}`,
+            { ignored: false, "filter-match": { status: "matches" } },
+          ]),
+          ...Array.from({ length: ignored }, (_, i) => [
+            `ignored_${i}`,
+            { ignored: true, "filter-match": { status: "mismatch", reason: "ignored" } },
+          ]),
+        ]),
+      },
+    },
+  });
+
 test("replay accepts a changed passing inventory and restores the planted source", () => {
   for (const total of [8, 2])
     fixture(({ mirror, control, model, subject }) => {
@@ -57,7 +107,7 @@ test("replay accepts a changed passing inventory and restores the planted source
           stdout: summary(total - (planted ? 1 : 0), planted ? 1 : 0, 4),
         };
       };
-      reapply({ model, control, mirror, spawn });
+      reapply({ model, control, mirror, spawn: withListing(spawn) });
       assert.equal(calls, 2);
       assert.equal(fs.readFileSync(subject, "utf8"), control.reverted);
     });
@@ -79,11 +129,45 @@ test("replay rejects empty, incomplete, and failing clean runs before planting",
           model,
           control,
           mirror,
-          spawn: () => {
+          spawn: withListing(() => {
             calls += 1;
             return clean;
-          },
+          }),
         }),
+      );
+      assert.equal(calls, 1);
+      assert.equal(fs.readFileSync(subject, "utf8"), control.reverted);
+    });
+});
+
+test("replay holds the clean run to the suite's own inventory before planting", () => {
+  for (const [clean, listing, refusal] of [
+    // Green over fewer cases than the suite declares: the run stopped reaching
+    // some of its registrations.
+    [
+      summary(3),
+      "node-test inventory: declared 4 skipped 0\n",
+      /listing of that selection on this tree holds 4/u,
+    ],
+    // A skip the suite's registrations do not declare.
+    [summary(3, 0, 1), "node-test inventory: declared 4 skipped 0\n", /unexpected skip/u],
+    // A suite whose registrations cannot be counted is refused, not trusted.
+    [summary(3), "", /emitted no node-test listing/u],
+  ])
+    fixture(({ mirror, control, model, subject }) => {
+      let calls = 0;
+      assert.throws(
+        () =>
+          reapply({
+            model,
+            control,
+            mirror,
+            spawn: withListing(() => {
+              calls += 1;
+              return { status: 0, stdout: clean };
+            }, listing),
+          }),
+        refusal,
       );
       assert.equal(calls, 1);
       assert.equal(fs.readFileSync(subject, "utf8"), control.reverted);
@@ -104,7 +188,7 @@ test("replay rejects a surviving mutation or a different refusal and restores th
           model,
           control,
           mirror,
-          spawn: () => (++calls === 1 ? { status: 0, stdout: summary(3) } : mutated),
+          spawn: withListing(() => (++calls === 1 ? { status: 0, stdout: summary(3) } : mutated)),
         }),
       );
       assert.equal(calls, 2);
@@ -124,11 +208,11 @@ test("replay preserves replacement bytes and restores CRLF source after a spawn 
           model,
           control: { ...control, applied },
           mirror,
-          spawn: () => {
+          spawn: withListing(() => {
             if (++calls === 1) return { status: 0, stdout: summary(3) };
             assert.equal(fs.readFileSync(subject, "utf8"), applied);
             throw new Error("spawn failed");
-          },
+          }),
         }),
       /spawn failed/u,
     );
@@ -166,12 +250,12 @@ test("a command mutation appends only new arguments and writes no source", () =>
       model,
       control: command,
       mirror,
-      spawn: (argv) => {
+      spawn: withListing((argv) => {
         calls.push(argv);
         return calls.length === 1
           ? { status: 0, stdout: summary(3) }
           : { status: 1, stdout: summary(2, 1) };
-      },
+      }),
     });
     assert.deepEqual(calls[1], [...calls[0], "--empty-selection"]);
     assert.equal(fs.readFileSync(subject, "utf8"), control.reverted);
@@ -207,12 +291,224 @@ test("an empty nextest selector is detected independently of passing and skipped
       model,
       control: command,
       mirror,
-      spawn: () =>
-        ++calls === 1
+      spawn: (argv) => {
+        if (argv[1] === "list") return { status: 0, stdout: nextestListing(9002, 547) };
+        return ++calls === 1
           ? { status: 0, stdout: "Summary [ 1s] 9002 tests run: 9002 passed, 547 skipped" }
-          : { status: 4, stdout: "Summary [ 1s] 0 tests run: 0 passed, 9549 skipped" },
+          : { status: 4, stdout: "Summary [ 1s] 0 tests run: 0 passed, 9549 skipped" };
+      },
     });
     assert.equal(calls, 2);
     assert.equal(result.cleanSummary.executed, 9002);
   });
+});
+
+test("a nextest clean run is held to the runner's own listing of its selection", () => {
+  fixture(({ mirror, control, model }) => {
+    const adapter = model.register.adapter[0];
+    adapter.runner = "cargo";
+    adapter.argv_prefix = ["nextest", "run", "--locked"];
+    adapter.summary_grammar = "nextest";
+    model.register.proof[0].argv_tail = ["-p", "synthetic"];
+    const command = {
+      ...control,
+      kind: "command",
+      argv_delta: ["-E", "test(zzz)"],
+      observed: "Summary [ 0s] 0 tests run: 0 passed, 7 skipped",
+    };
+    const runs = (clean, listing) => {
+      const spawned = [];
+      const spawn = (argv) => {
+        spawned.push(argv.join(" "));
+        if (argv[1] === "list") return { status: 0, stdout: listing };
+        if (argv.includes("-E")) return { status: 4, stdout: command.observed };
+        return { status: 0, stdout: clean };
+      };
+      return { spawn, spawned };
+    };
+    const agreeing = runs("Summary [ 1s] 6 tests run: 6 passed, 2 skipped", nextestListing(6, 2));
+    reapply({ model, control: command, mirror, spawn: agreeing.spawn });
+    assert.deepEqual(agreeing.spawned, [
+      "nextest run --locked -p synthetic",
+      "nextest list --message-format json --locked -p synthetic",
+      "nextest run --locked -p synthetic -E test(zzz)",
+    ]);
+    assert.throws(
+      () =>
+        reapply({
+          model,
+          control: command,
+          mirror,
+          spawn: runs("Summary [ 1s] 5 tests run: 5 passed, 2 skipped", nextestListing(6, 2)).spawn,
+        }),
+      /listing of that selection on this tree holds 8/u,
+    );
+    assert.throws(
+      () =>
+        reapply({
+          model,
+          control: command,
+          mirror,
+          spawn: runs("Summary [ 1s] 4 tests run: 4 passed, 3 skipped", nextestListing(5, 2)).spawn,
+        }),
+      /unexpected skip/u,
+    );
+  });
+});
+
+test("a libtest command naming its cases with --exact must execute every named case", () => {
+  fixture(({ mirror, control, model }) => {
+    const adapter = model.register.adapter[0];
+    adapter.runner = "cargo";
+    adapter.argv_prefix = ["test", "--locked"];
+    adapter.summary_grammar = "libtest";
+    model.register.proof[0].argv_tail = ["-p", "synthetic", "--", "--exact", "a::one", "b::two"];
+    const command = {
+      ...control,
+      kind: "command",
+      argv_delta: ["--planted"],
+      observed: "test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out",
+    };
+    const listing = (names) =>
+      `${names.map((name) => `${name}: test`).join("\n")}\n\n${names.length} tests, 0 benchmarks\n`;
+    const clean = (passed) =>
+      `test result: ok. ${passed} passed; 0 failed; 0 ignored; 0 measured; 25 filtered out\n`;
+    const runs = (cleanStdout, listed) => (argv) => {
+      if (argv.includes("--list")) return { status: 0, stdout: listed };
+      if (argv.includes("--planted")) return { status: 101, stdout: command.observed };
+      return { status: 0, stdout: cleanStdout };
+    };
+    reapply({
+      model,
+      control: command,
+      mirror,
+      spawn: runs(clean(2), listing(["a::one", "b::two"])),
+    });
+    // One named case no longer exists: the run is green and the listing agrees
+    // with it, but the command's own selection is short.
+    assert.throws(
+      () =>
+        reapply({ model, control: command, mirror, spawn: runs(clean(1), listing(["a::one"])) }),
+      /names 2 cases with --exact, but the clean run executed 1/u,
+    );
+  });
+});
+
+test("a single-verdict tool is held to the script that re-derives its counted selection", () => {
+  fixture(({ mirror, control }) => {
+    const model = {
+      register: {
+        adapter: [{ id: "tool", runner: "node", argv_prefix: [], summary_grammar: "tool-line" }],
+        proof: [
+          {
+            id: "dag-proof",
+            control: control.id,
+            adapter: "tool",
+            argv_tail: ["roadmap/0.1.0-tama/tools/validate-program-dag.mjs", "--strict"],
+            count_key: "nodes",
+          },
+        ],
+      },
+    };
+    const command = {
+      ...control,
+      kind: "command",
+      argv_delta: ["--planted"],
+      observed: "ERROR: planted edge\n",
+    };
+    const [script] = inventoryCommand(model.register.adapter[0], model.register.proof[0].argv_tail);
+    const runs = (nodes, listing) => (argv) => {
+      if (argv[0] === script) return { status: 0, stdout: listing };
+      if (argv.includes("--planted")) return { status: 1, stdout: command.observed };
+      return { status: 0, stdout: `validate-program-dag: PASS nodes=${nodes} edges=9\n` };
+    };
+    reapply({
+      model,
+      control: command,
+      mirror,
+      spawn: runs(427, "tool-line inventory: nodes=427\n"),
+    });
+    assert.throws(
+      () =>
+        reapply({
+          model,
+          control: command,
+          mirror,
+          spawn: runs(425, "tool-line inventory: nodes=426\n"),
+        }),
+      /listing of that selection on this tree holds 426/u,
+    );
+    assert.throws(
+      () =>
+        reapply({
+          model,
+          control: command,
+          mirror,
+          spawn: runs(426, "tool-line inventory: edges=426\n"),
+        }),
+      /counts nodes, but the inventory of .* counts edges/u,
+    );
+  });
+});
+
+test("the inventory helpers count what the real runners select on this tree", () => {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const run = (argv, cwd = REPO_ROOT) =>
+    spawnSync(process.execPath, argv, { cwd, env, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+
+  const dag = "roadmap/0.1.0-tama/tools/validate-program-dag.mjs";
+  const validated = run([dag, "--strict"]);
+  assert.equal(validated.status, 0, validated.stderr);
+  const listed = run(inventoryCommand({ summary_grammar: "tool-line" }, [dag, "--strict"]));
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.equal(
+    parseInventory("tool-line", listed.stdout).selected,
+    parseTerminalSummary("tool-line", validated.stdout, "nodes").selected,
+  );
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "closure-replay-inventory-"));
+  try {
+    const suite = path.join(dir, "suite.test.mjs");
+    fs.writeFileSync(
+      suite,
+      [
+        'import test, { describe } from "node:test";',
+        'test("a", () => {});',
+        'test.skip("b", () => {});',
+        'describe("group", () => {',
+        '  test("c", () => {});',
+        '  test("d", { skip: true }, () => {});',
+        "});",
+        "",
+      ].join("\n"),
+    );
+    const inventory = run(inventoryCommand({ summary_grammar: "node-test" }, ["--test", suite]));
+    assert.equal(inventory.status, 0, inventory.stderr);
+    const real = run(["--test", suite], dir);
+    assert.equal(real.status, 0, real.stderr);
+    const counted = parseTerminalSummary("node-test", real.stdout);
+    assert.deepEqual(parseInventory("node-test", inventory.stdout), {
+      selected: counted.selected,
+      skipped: counted.skipped,
+    });
+    assert.deepEqual(parseInventory("node-test", inventory.stdout), { selected: 4, skipped: 2 });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("every recorded node suite and the DAG validator record replay against an inventory", () => {
+  const { model } = analyze(PACKAGE_ROOT);
+  const inventoried = { "node-test": 0, "tool-line": 0 };
+  for (const control of model.register.control) {
+    const { adapter, argv } = controlCommand(model, control);
+    if (adapter.summary_grammar === "node-test") {
+      assert.ok(inventoryCommand(adapter, argv), `${control.id}: a node suite with no inventory`);
+      inventoried["node-test"] += 1;
+    } else if (adapter.summary_grammar === "tool-line" && inventoryCommand(adapter, argv))
+      inventoried["tool-line"] += 1;
+  }
+  assert.ok(inventoried["node-test"] >= 1, "no recorded control replays a node suite");
+  assert.ok(inventoried["tool-line"] >= 1, "no recorded control replays an inventoried tool");
 });

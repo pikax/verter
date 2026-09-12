@@ -3,7 +3,10 @@
  * and the normal test lanes; it does not replay historical evidence records.
  * A replay requires a nonempty, complete clean run, an applicable mutation,
  * and the expected refusal. Passing totals are observations of the current
- * inventory, never values that must match an old transcript.
+ * inventory, never values that must match an old transcript. Where the runner
+ * can list the selection its command makes, the clean run is held to that
+ * listing on the host that runs it, so a green run over fewer cases than the
+ * tree currently selects is refused rather than accepted as nonempty work.
  */
 
 import assert from "node:assert/strict";
@@ -99,10 +102,264 @@ export function linkInstalledModuleTrees(repoRoot, destRoot) {
   }
 }
 
+/**
+ * Give every file of a freshly copied mirror a modification time of NOW.
+ *
+ * The replay's cargo target directory persists across runs, and cargo decides
+ * freshness by comparing each source file's mtime against the artifact it last
+ * built from it. A mutated run builds an artifact from the planted source, the
+ * plant is restored, and the next run recreates the mirror from a copy — a
+ * copy that, on Windows, keeps the checkout's older timestamps (`fs.cpSync`
+ * goes through `CopyFile`, which preserves them). To cargo the artifact built
+ * from the MUTATED source is then newer than every source it depends on, so it
+ * is reused, and the clean run fails on the previous run's mutation: a refusal
+ * no edit in this run produced, on a tree that is not red. A mirror younger
+ * than anything the target directory holds makes those fingerprints decide
+ * from the bytes actually on disk, on every platform. Linked dependency trees
+ * are left alone: nothing is built from them and they are not this mirror's
+ * copy.
+ */
+export function freshenMirrorTimestamps(root) {
+  const now = new Date();
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) continue;
+      const child = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!MIRROR_OUTPUT_BASENAMES.has(entry.name)) walk(child);
+        continue;
+      }
+      fs.utimesSync(child, now, now);
+    }
+  };
+  walk(root);
+}
+
 /** Entry point for the manually dispatched diagnostic workflow. */
 export const CONTROL_LANE_ENTRY = "roadmap/0.1.0-tama/tools/closure-controls.test.mjs";
 export const CONTROL_LANE_DEADLINE_MS = 40 * 60_000;
 export const CONTROL_LANE_COMMAND_DEADLINE_MS = 20 * 60_000;
+
+/**
+ * The preload that turns a node:test suite file into its own inventory,
+ * spelled relative to the repository root every replay runs its commands from.
+ * It is spawned, never imported: importing it would replace `node:test` in
+ * the importing process too.
+ */
+export const NODE_TEST_INVENTORY_PRELOAD = "./roadmap/0.1.0-tama/tools/node-test-inventory.mjs";
+
+/**
+ * The single-verdict tools whose counted field is a selection the tree
+ * declares independently of the tool, keyed by the tool a record runs, with
+ * the key that count is printed under and the script that re-derives it.
+ * A tool absent here has no inventory, and its clean run is judged on its own
+ * line alone.
+ */
+export const TOOL_LINE_INVENTORIES = Object.freeze({
+  "roadmap/0.1.0-tama/tools/validate-program-dag.mjs": Object.freeze({
+    countKey: "nodes",
+    script: "./roadmap/0.1.0-tama/tools/dag-node-inventory.mjs",
+  }),
+});
+
+/**
+ * The command that LISTS the selection a run command would execute, or `null`
+ * for a runner that has none.
+ *
+ * The listing is produced by the same runner over the same selection arguments
+ * as the clean run, so the run is held to what the tree selects today rather
+ * than to a transcribed total. `cargo nextest list` reports, per case, whether
+ * the run's filter matches it — exactly the split the run summary reports as
+ * executed and skipped. libtest's `--list` prints every case the filter admits,
+ * ignored ones included; the ignored subset is listed on request with
+ * `--ignored`. node:test has no listing mode, so its inventory is the suite's
+ * own module code run under {@link NODE_TEST_INVENTORY_PRELOAD}, which counts
+ * every case the suite declares and runs none of them. A single-verdict tool
+ * lists nothing either; where its count is a selection the tree declares,
+ * {@link TOOL_LINE_INVENTORIES} names the script that re-derives it.
+ */
+export function inventoryCommand(adapter, argv, { ignoredOnly = false } = {}) {
+  if (adapter.summary_grammar === "tool-line") {
+    const inventory = TOOL_LINE_INVENTORIES[argv[0]];
+    return inventory ? [inventory.script] : null;
+  }
+  if (adapter.summary_grammar === "node-test") {
+    // The run is `--test <suite>`; the inventory is that same suite file
+    // evaluated with `node:test` replaced by the counting registrar. Node
+    // evaluates one main module, so a record selecting several files, or
+    // narrowing a file by flag, has no inventory this can derive and is
+    // refused rather than held to a count of something else.
+    const [flag, ...files] = argv;
+    assert.ok(
+      flag === "--test" && files.length === 1 && !files[0].startsWith("-"),
+      `a node-test record must run exactly one whole suite file to be inventoried, got ${JSON.stringify(argv)}`,
+    );
+    return ["--import", NODE_TEST_INVENTORY_PRELOAD, files[0]];
+  }
+  if (adapter.summary_grammar === "nextest") {
+    // The listing flag is a `list` option, so it precedes any `--` the tail
+    // carries.
+    assert.deepEqual(
+      argv.slice(0, 2),
+      ["nextest", "run"],
+      `a nextest record's command must start with \`nextest run\`, got ${JSON.stringify(argv)}`,
+    );
+    return ["nextest", "list", "--message-format", "json", ...argv.slice(2)];
+  }
+  if (adapter.summary_grammar === "libtest") {
+    // libtest flags follow the `--` separator. A tail that already carries one
+    // (`-- --exact …`) takes `--list` after its own filters, so the listing is
+    // exactly the run's selection.
+    const listed = argv.includes("--") ? [...argv, "--list"] : [...argv, "--", "--list"];
+    return ignoredOnly ? [...listed, "--ignored"] : listed;
+  }
+  return null;
+}
+
+/**
+ * The selection a runner's own listing reports, or `null` when the output is
+ * not a listing of the declared shape.
+ */
+export function parseInventory(grammar, output) {
+  if (grammar === "nextest") {
+    let listing;
+    try {
+      listing = JSON.parse(output);
+    } catch {
+      return null;
+    }
+    const suites = listing?.["rust-suites"];
+    if (!suites || typeof suites !== "object") return null;
+    let executed = 0;
+    let skipped = 0;
+    for (const suite of Object.values(suites))
+      for (const testcase of Object.values(suite?.testcases ?? {}))
+        if (testcase?.["filter-match"]?.status === "matches") executed += 1;
+        else skipped += 1;
+    return { selected: executed + skipped, executed, skipped };
+  }
+  if (grammar === "libtest") {
+    const text = output.replaceAll("\r\n", "\n");
+    // Every binary the command selects prints its cases and then its own
+    // `N tests, M benchmarks` line; a listing with no such line is not a
+    // listing, and one whose per-binary totals disagree with the cases it
+    // printed is a truncated one.
+    const totals = [...text.matchAll(/^(\d+) tests?, (\d+) benchmarks?$/gmu)];
+    if (!totals.length) return null;
+    const listed = [...text.matchAll(/^\S.*: test$/gmu)].length;
+    const selected = totals.reduce((sum, row) => sum + Number(row[1]), 0);
+    if (listed !== selected) return null;
+    return { selected };
+  }
+  if (grammar === "node-test") {
+    // The preload's single exit line. Two such lines mean two processes'
+    // counts were interleaved into one listing.
+    const rows = [
+      ...output
+        .replaceAll("\r\n", "\n")
+        .matchAll(/^node-test inventory: declared (\d+) skipped (\d+)$/gmu),
+    ];
+    if (rows.length !== 1) return null;
+    return { selected: Number(rows[0][1]), skipped: Number(rows[0][2]) };
+  }
+  if (grammar === "tool-line") {
+    // The inventory script's one line, naming the key its count is under so it
+    // is compared only against the field the record counts.
+    const rows = [
+      ...output.replaceAll("\r\n", "\n").matchAll(/^tool-line inventory: ([a-z_]+)=(\d+)$/gmu),
+    ];
+    if (rows.length !== 1) return null;
+    return { countKey: rows[0][1], selected: Number(rows[0][2]) };
+  }
+  return null;
+}
+
+/**
+ * The case names a libtest command selects by exact name, or `null` when it
+ * selects by filter. An exact selection states the intended work in the command
+ * itself, so a named case that no longer exists leaves a green run over fewer
+ * cases than the record intends.
+ */
+export function exactSelection(argv) {
+  const separator = argv.indexOf("--");
+  if (separator === -1) return null;
+  const tail = argv.slice(separator + 1);
+  if (!tail.includes("--exact")) return null;
+  return tail.filter((token) => !token.startsWith("-"));
+}
+
+// The clean run's selection, held to the tree's own inventory of it. Totals are
+// compared against the listing produced now, never against a transcript.
+function assertCleanRunSelection({ control, proof, adapter, argv, observedNow, inventory }) {
+  const command = argv.join(" ");
+  const grammar = adapter.summary_grammar;
+  const exact = grammar === "libtest" ? exactSelection(argv) : null;
+  if (exact)
+    assert.equal(
+      observedNow.executed,
+      exact.length,
+      `${control.id}: ${command} names ${exact.length} cases with --exact, but the clean run executed ${observedNow.executed}, so a case the record intends to run no longer exists on this tree`,
+    );
+  if (inventory === null) return;
+  if (inventory.countKey !== undefined)
+    assert.equal(
+      inventory.countKey,
+      proof.count_key,
+      `${control.id}: record ${proof.id} counts ${proof.count_key}, but the inventory of ${command} counts ${inventory.countKey}, so the two cannot be compared`,
+    );
+  assert.equal(
+    observedNow.selected,
+    inventory.selected,
+    `${control.id}: the clean run of ${command} selected ${observedNow.selected} cases, but the runner's own listing of that selection on this tree holds ${inventory.selected}`,
+  );
+  if (inventory.skipped !== undefined)
+    assert.equal(
+      observedNow.skipped,
+      inventory.skipped,
+      `${control.id}: the clean run of ${command} skipped ${observedNow.skipped} cases, but this tree marks ${inventory.skipped} of that selection ignored, so the difference is an unexpected skip`,
+    );
+}
+
+// Runs the runner's own listing of the clean run's selection, or returns null
+// for a runner that has none. A listing is read from STDOUT alone: cargo prints
+// build progress on stderr, and a JSON listing with `Compiling` lines appended
+// is not JSON. The whole output still goes into a failure message.
+function listSelection({ control, adapter, argv, observedNow, spawn }) {
+  const listing = inventoryCommand(adapter, argv);
+  if (!listing) return null;
+  const listed = spawn(listing, adapter);
+  const listedOutput = `${listed.stdout ?? ""}${listed.stderr ?? ""}`;
+  assert.equal(
+    listed.status,
+    0,
+    `${control.id}: the runner refused to list the selection of ${argv.join(" ")}, so the clean run cannot be held to the tree's own inventory\n${listedOutput}`,
+  );
+  let inventory = parseInventory(adapter.summary_grammar, listed.stdout ?? "");
+  assert.ok(
+    inventory,
+    `${control.id}: ${listing.join(" ")} emitted no ${adapter.summary_grammar} listing:\n${listedOutput}`,
+  );
+  // libtest lists ignored cases beside the runnable ones without marking them,
+  // so a clean run that reports ignored cases gets that subset listed on its
+  // own.
+  if (adapter.summary_grammar === "libtest" && observedNow.skipped > 0) {
+    const ignoredListing = inventoryCommand(adapter, argv, { ignoredOnly: true });
+    const ignored = spawn(ignoredListing, adapter);
+    const ignoredOutput = `${ignored.stdout ?? ""}${ignored.stderr ?? ""}`;
+    assert.equal(
+      ignored.status,
+      0,
+      `${control.id}: the runner refused to list the ignored subset of ${argv.join(" ")}\n${ignoredOutput}`,
+    );
+    const ignoredInventory = parseInventory(adapter.summary_grammar, ignored.stdout ?? "");
+    assert.ok(
+      ignoredInventory,
+      `${control.id}: ${ignoredListing.join(" ")} emitted no ${adapter.summary_grammar} listing:\n${ignoredOutput}`,
+    );
+    inventory = { ...inventory, skipped: ignoredInventory.selected };
+  }
+  return inventory;
+}
 
 /**
  * The command a control's bound record runs, with the adapter's prefix applied.
@@ -194,6 +451,8 @@ export function reapply({ model, control, mirror, spawn }) {
       observedNow.selected === observedNow.executed + observedNow.skipped,
     `${control.id}: the clean run must execute nonempty work and pass completely:\n${cleanOutput}`,
   );
+  const inventory = listSelection({ control, adapter, argv, observedNow, spawn });
+  assertCleanRunSelection({ control, proof, adapter, argv, observedNow, inventory });
 
   let mutated;
   if (control.kind === "source") {
