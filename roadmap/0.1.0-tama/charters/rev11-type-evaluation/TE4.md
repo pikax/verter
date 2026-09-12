@@ -7,7 +7,7 @@ product=rev11
 kind=implementation
 semantic_role=delivery
 class=foundational-authority
-predecessors=TE2,TE3
+predecessors=TE2,TE2B,TE3
 owner=rev11.type-evaluation:the sole demand-selected semantic operand forcing authority inside the existing SemanticQuery graph
 conflict_domains=semantic_authority
 resource_class=rust-mixed
@@ -66,7 +66,8 @@ independently dispatchable subblocks.
 
 ## Exact predecessor contracts
 
-- **TE2:** implemented ledger row for “Conditional selective forcing”; ledger presence alone satisfies the predecessor. It supplies select-before-force conditional semantics, exact infer scoping, open conditional suspension/residual projection, distributivity ownership, and dead-branch proof used by conditional mapper values.
+- **TE2:** implemented ledger row for “Conditional selective forcing”; ledger presence alone satisfies the predecessor. Under its ratified rescope it supplies selection before branch forcing at the dispatch boundary over materialized branch operands, exact infer scoping into the selected true branch, open conditional suspension with walker residual projection, distributivity ownership, and the dispatch-boundary dead-branch proof (zero force, dispatch, relation read, origin edge, fact read, and dependency fact on the loser) used by conditional mapper values.
+- **TE2B:** implemented ledger row for “Conditional branch forcing at the lowering and instantiation sites”; ledger presence alone satisfies the predecessor. It supplies lowering-site selection before branch lowering and the instantiation-site pending-substitution deferral, so a conditional mapper value forced under a demanded key substitutes and forces only its winning branch; TE4 reuses that sealed materialized-handle-plus-substitution pairing for demanded-key value forcing rather than introducing a second one.
 - **TE3:** implemented ledger row for “Projection and key-domain selective forcing”; ledger presence alone satisfies the predecessor. It supplies canonical residual-path propagation, key-domain-before-base forcing, single-key non-enumeration, and content-free projection identity.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
