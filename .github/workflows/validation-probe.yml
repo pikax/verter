@@ -1,0 +1,105 @@
+name: Validation Probe
+
+# The external workload probe lane.
+#
+# Drives Verter against one PINNED third-party corpus through the normal public
+# compile request route, classifies every case with the probe outcome taxonomy,
+# and publishes one compact machine-readable summary.
+#
+# The corpus is a WORKLOAD, never an oracle. A mismatch against the reference
+# compiler is evidence for the owning semantic node; it is never a verdict on
+# Verter and never a reason to change compiler behaviour from this lane.
+#
+# Exactly ONE probe job runs the whole slice. There is no per-fixture job and no
+# per-fixture test: which cases run, what they are expected to do, and who owns
+# that expectation are manifest data, and the runner is table-driven over it.
+#
+# The lane's disposition is a real exit, computed after publication: the summary
+# is uploaded and rendered FIRST, then `validation-probe-summary --dispose`
+# exits non-zero if any gate cell did not evaluate to a gate pass — so a run
+# that goes red still leaves behind the evidence for why.
+
+on:
+  push:
+    branches: main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: validation-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The pinned corpus. Recorded here AND in `manifest/vue.toml`; the lane
+  # checks the manifest inventory against the checkout in both directions, so
+  # the two cannot drift apart silently.
+  VUE_BENCHMARKS_REPO: pikax/vue-benchmarks
+  VUE_BENCHMARKS_REVISION: 5ac27ef2df618855c5855adcd9487488e0b18f25
+
+jobs:
+  probe:
+    name: Workload probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: validation-probe
+      - uses: taiki-e/install-action@nextest
+
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The runner never links the addon: the public routes are addon methods
+      # bound for JavaScript, so the driver loads them through @verter/native.
+      - name: Build the native addon
+        run: pnpm --filter @verter/native build
+
+      # Checked out at its EXACT commit. A moving ref would make every
+      # classification in the summary unattributable.
+      - name: Check out the pinned Vue corpus
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.VUE_BENCHMARKS_REPO }}
+          ref: ${{ env.VUE_BENCHMARKS_REVISION }}
+          path: .integration-tests/repos/vue-benchmarks
+          persist-credentials: false
+
+      # The pull-request lane drives the manifest's bounded smoke slice; main
+      # and manual runs drive the complete ratified inventory.
+      - name: Run the workload probe
+        env:
+          VALIDATION_PROBE_LANE: ${{ github.event_name == 'pull_request' && 'smoke' || 'main' }}
+        run: cargo nextest run -p verter_validation_probe --features external-corpus
+
+      - name: Upload the summary artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-probe-summary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/validation-probe/summary.json
+          if-no-files-found: error
+
+      - name: Render the job summary
+        if: always()
+        run: |
+          cargo run -p verter_validation_probe --bin validation-probe-summary -- \
+            --markdown >> "$GITHUB_STEP_SUMMARY"
+
+      # AFTER publication, and last: the artifact and the rendered table exist
+      # for the run this step turns red.
+      - name: Lane disposition
+        if: always()
+        run: cargo run -p verter_validation_probe --bin validation-probe-summary -- --dispose
