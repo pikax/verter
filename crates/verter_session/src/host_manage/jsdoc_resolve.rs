@@ -695,8 +695,12 @@ fn node_has_direct_macro_reference(
                 extends,
                 true_branch_ref,
                 false_branch_ref,
+                pending,
                 ..
             } => {
+                if let Some(frame) = pending {
+                    worklist.extend(frame.argument_nodes());
+                }
                 worklist.push(*check);
                 worklist.push(*extends);
                 worklist.push(*true_branch_ref);

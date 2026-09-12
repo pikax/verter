@@ -1987,16 +1987,28 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     true_branch_ref,
                     false_branch_ref,
                     distributive,
+                    pending,
                 } => {
                     // Open conditional — distribute the remaining path
                     // into both branches via SemanticQueryApi::execute
                     // (re-entry through dispatch → memo dedup). No
                     // direct recursion into `walk_internal`; the
                     // dispatch re-entry inherits per-path memoisation.
+                    // Pending frames are discharged because both open
+                    // branches are demanded output.
                     let check = *check;
                     let extends = *extends;
-                    let true_branch = *true_branch_ref;
-                    let false_branch = *false_branch_ref;
+                    let pending = pending.clone();
+                    let true_branch = self.dispatch.apply_conditional_branch_pending(
+                        *true_branch_ref,
+                        pending.as_deref(),
+                        true,
+                    );
+                    let false_branch = self.dispatch.apply_conditional_branch_pending(
+                        *false_branch_ref,
+                        pending.as_deref(),
+                        false,
+                    );
                     let distributive = *distributive;
                     let rest_path: Arc<[PathSegment]> =
                         Arc::from(path[index..].to_vec().into_boxed_slice());
@@ -2034,6 +2046,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         true_branch_ref: true_id,
                         false_branch_ref: false_id,
                         distributive,
+                        pending: None,
                     });
                     self.graph().record_origin_edge(
                         wrapper,
@@ -3765,8 +3778,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             // not open conditionals.
             SemanticNodeData::Conditional {
                 check,
+                extends,
+                distributive,
                 true_branch_ref,
                 false_branch_ref,
+                pending,
                 ..
             } if matches!(self.mode(), ProjectionMode::Expanded)
                 && matches!(
@@ -3778,13 +3794,36 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     )
                 ) =>
             {
-                let true_branch = *true_branch_ref;
-                let false_branch = *false_branch_ref;
+                let true_branch = self.dispatch.apply_conditional_branch_pending(
+                    *true_branch_ref,
+                    pending.as_deref(),
+                    true,
+                );
+                let false_branch = self.dispatch.apply_conditional_branch_pending(
+                    *false_branch_ref,
+                    pending.as_deref(),
+                    false,
+                );
+                let parent = if pending.is_some() {
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::Conditional {
+                            check: *check,
+                            extends: *extends,
+                            true_branch_ref: true_branch,
+                            false_branch_ref: false_branch,
+                            distributive: *distributive,
+                            pending: None,
+                        },
+                    )
+                } else {
+                    node
+                };
                 drop(data);
                 let arms: Arc<[SemanticNodeId]> =
                     Arc::from(vec![true_branch, false_branch].into_boxed_slice());
                 work.push(ExpandFrame::CombineUnion {
-                    parent: node,
+                    parent,
                     originals: Arc::clone(&arms),
                 });
                 for arm in arms.iter().rev() {
@@ -4761,6 +4800,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 check,
                 true_branch_ref,
                 false_branch_ref,
+                pending,
                 ..
             } => {
                 // Open conditional: check is unbound (TypeParam / Infer).
@@ -4774,6 +4814,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // pre-§3.1.3 expand_terminal_step but stays inside the
                 // shallow synthesis worklist instead of recursing.
                 let check_id = *check;
+                let pending = pending.clone();
                 let true_branch = *true_branch_ref;
                 let false_branch = *false_branch_ref;
                 drop(data);
@@ -4813,7 +4854,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         union_node: cur,
                     });
                     let arms: Arc<[SemanticNodeId]> =
-                        Arc::from(vec![true_branch, false_branch].into_boxed_slice());
+                        Arc::from(vec![
+                            self.dispatch.apply_conditional_branch_pending(true_branch, pending.as_deref(), true),
+                            self.dispatch.apply_conditional_branch_pending(false_branch, pending.as_deref(), false),
+                        ].into_boxed_slice());
                     work.push(Frame::VisitArmAt {
                         arms,
                         arm_index: 0,
@@ -4850,7 +4894,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         union_node: cur,
                     });
                     let arms: Arc<[SemanticNodeId]> =
-                        Arc::from(vec![true_branch, false_branch].into_boxed_slice());
+                        Arc::from(vec![
+                            self.dispatch.apply_conditional_branch_pending(true_branch, pending.as_deref(), true),
+                            self.dispatch.apply_conditional_branch_pending(false_branch, pending.as_deref(), false),
+                        ].into_boxed_slice());
                     work.push(Frame::VisitArmAt {
                         arms,
                         arm_index: 0,

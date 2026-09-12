@@ -631,13 +631,13 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "mapped_type_queries_differing_only_by_merge_role_do_not_warm_hit, keyof_and_mapped_type_context_axes_do_not_alias_family_identity, vue_heritage_policy_is_family_identity_for_every_projection_reduction_family",
             admission: AdmissionSpec::Singleflight,
         },
-        // Conditional { check, extends, true, false, distributive } —
+        // Conditional { check, extends, true, false, distributive, pending } —
         // structural conditional decision over already-resolved nodes; no
-        // demand payload.
+        // demand payload. `pending` is the sealed handle+substitution pairing.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::Conditional,
             lifecycle: KeyLifecycle::Live,
-            context_shape: "(check,extends,true_branch,false_branch,distributive)",
+            context_shape: "(check,extends,true_branch,false_branch,distributive,pending)",
             value_domain: SemanticQueryValueTag::TypeNode,
             env_dims: EnvDimSpec::Static(env_structural()),
             allowed_demand: AxisMask::empty(),

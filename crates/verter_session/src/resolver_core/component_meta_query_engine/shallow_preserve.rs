@@ -989,9 +989,16 @@ fn node_references_type_param_names(
             extends,
             true_branch_ref,
             false_branch_ref,
+            pending,
             ..
         } => {
-            recur(*check) || recur(*extends) || recur(*true_branch_ref) || recur(*false_branch_ref)
+            pending
+                .as_ref()
+                .is_some_and(|frame| frame.argument_nodes().any(&recur))
+                || recur(*check)
+                || recur(*extends)
+                || recur(*true_branch_ref)
+                || recur(*false_branch_ref)
         }
         SemanticNodeData::Mapped { .. } => {
             // A mapped type's binder shadows same-named outer parameters

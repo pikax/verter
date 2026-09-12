@@ -314,8 +314,20 @@ pub(crate) fn resolve_payload_surface_with_scope(
             Some(SemanticNodeData::Conditional {
                 true_branch_ref,
                 false_branch_ref,
+                pending,
                 ..
-            }) => (*true_branch_ref, *false_branch_ref),
+            }) => (
+                dispatch.apply_conditional_branch_pending(
+                    *true_branch_ref,
+                    pending.as_deref(),
+                    true,
+                ),
+                dispatch.apply_conditional_branch_pending(
+                    *false_branch_ref,
+                    pending.as_deref(),
+                    false,
+                ),
+            ),
             _ => {
                 // Unreachable per the resolution above, but fall through
                 // safely.

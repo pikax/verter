@@ -40,8 +40,9 @@ use std::sync::Arc;
 use super::ProjectSemanticDispatch;
 use crate::request_context::RecursiveSubstituteIdentity;
 use crate::semantic_query::{
-    FunctionParam, IndexKey, IndexSignature, MapperKey, QueryError, SemanticNodeData,
-    SemanticNodeId, SurfaceMember, SurfaceView, TypeParamDecl,
+    ConditionalPendingSubstitution, FunctionParam, IndexKey, IndexSignature, MapperKey,
+    PendingSubstitutionFrame, QueryError, SemanticNodeData, SemanticNodeId, SurfaceMember,
+    SurfaceView, TypeParamDecl,
 };
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -101,6 +102,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .substitute_memo_publish(node, parameter_node, arg, result);
         }
         result
+    }
+
+    /// Apply a stored positional substitution frame to a demanded winner
+    /// (or to an open branch that a consumer has already selected). Empty
+    /// frames are identity.
+    pub(super) fn apply_pending_substitution_frame(
+        &self,
+        node: SemanticNodeId,
+        frame: &PendingSubstitutionFrame,
+    ) -> SemanticNodeId {
+        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+        evidence.inspected_file_roots = self
+            .observed_self_roots_from_nodes(frame.pairs().iter().map(|&(_, argument)| argument));
+        self.deposit_canonical_evidence(evidence);
+        let mut result = node;
+        for &(param, arg) in frame.pairs() {
+            if self.ctx.is_cancelled() {
+                return self.opaque(QueryError::Miss);
+            }
+            result = self.substitute_semantic_type_param(result, param, arg);
+        }
+        result
+    }
+
+    pub(crate) fn apply_conditional_branch_pending(
+        &self,
+        node: SemanticNodeId,
+        pending: Option<&ConditionalPendingSubstitution>,
+        true_branch: bool,
+    ) -> SemanticNodeId {
+        let Some(pending) = pending else {
+            return node;
+        };
+        let frame = if true_branch {
+            pending.true_branch()
+        } else {
+            pending.false_branch()
+        };
+        self.apply_pending_substitution_frame(node, frame)
     }
 
     /// Change-tracking internal helper for
@@ -702,11 +742,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 true_branch_ref,
                 false_branch_ref,
                 distributive,
+                pending,
             } => {
-                // "conditional descents"
-                // counter — every visit of the Conditional arm
-                // descends into its four sub-trees, regardless of
-                // whether the rebuild ultimately fires.
+                // Substitution rewrites check/extends only. Branch
+                // substitution is deferred onto the sealed pending frame
+                // so an undemanded loser is never traversed. Selection
+                // does not run here.
                 if let Some(observer) = verter_audit::current_observer() {
                     observer.record_event(verter_audit::AuditEvent::SubstituteConditionalDescend);
                 }
@@ -734,19 +775,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else {
                     self.substitute_with_change_tracking(*extends, parameter_node, arg)
                 };
-                let (sub_true, tc) = if shadowed_by_inner_infer {
-                    (*true_branch_ref, false)
+                let mut next_pending = pending
+                    .as_ref()
+                    .map(|frame| frame.as_ref().clone())
+                    .unwrap_or_else(ConditionalPendingSubstitution::empty);
+                if shadowed_by_inner_infer {
+                    next_pending = next_pending.append_false(parameter_node, arg);
                 } else {
-                    self.substitute_with_change_tracking(*true_branch_ref, parameter_node, arg)
+                    next_pending = next_pending.append_both(parameter_node, arg);
+                }
+                let next_pending = if next_pending.is_empty() {
+                    None
+                } else {
+                    Some(Arc::new(next_pending))
                 };
-                let (sub_false, fc) =
-                    self.substitute_with_change_tracking(*false_branch_ref, parameter_node, arg);
-                if !(cc || ec || tc || fc) {
+                if !cc && !ec && next_pending == *pending {
                     return (node, false);
                 }
-                // "Conditional rebuilt"
-                // counter. Distinct from `SubstituteConditionalDescend`
-                // (every visit) — fires only on the rebuild branch.
                 if let Some(observer) = verter_audit::current_observer() {
                     observer.record_event(verter_audit::AuditEvent::SubstituteConditionalRebuild);
                 }
@@ -756,9 +801,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         SemanticNodeData::Conditional {
                             check: sub_check,
                             extends: sub_extends,
-                            true_branch_ref: sub_true,
-                            false_branch_ref: sub_false,
+                            true_branch_ref: *true_branch_ref,
+                            false_branch_ref: *false_branch_ref,
                             distributive: *distributive,
+                            pending: next_pending,
                         },
                     ),
                     true,
@@ -1319,8 +1365,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     extends,
                     true_branch_ref,
                     false_branch_ref,
+                    pending,
                     ..
                 } => {
+                    if let Some(pending) = pending {
+                        stack.extend(pending.argument_nodes());
+                    }
                     stack.push(*check);
                     stack.push(*extends);
                     stack.push(*true_branch_ref);

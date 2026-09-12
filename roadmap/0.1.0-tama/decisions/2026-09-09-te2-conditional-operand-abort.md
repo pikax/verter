@@ -1,18 +1,32 @@
 # TE2 abort before mutation: conditional branch operands are not representable under the TE1 seal
 
-- Status: ratified — RESCOPE (architect ruling, 2026-09-11)
-- Date: 2026-09-09 (abort recorded); 2026-09-11 (ratified)
+- Status: ratified — RESCOPE (architect ruling, 2026-09-11); the node-split
+  half of that ruling was itself SUPERSEDED on 2026-09-12 — see "Superseded:
+  the successor-node split" immediately below
+- Date: 2026-09-09 (abort recorded); 2026-09-11 (ratified); 2026-09-12
+  (successor-node split superseded)
 - Node: TE2 — Conditional selective forcing (train `rev11.type-evaluation`)
 - Concerns: `charters/rev11-type-evaluation/TE2.md` — "Independently
   acceptable outcome", "Source-specific scope" (dead-operand proof),
   "Acceptance IDs" TE2-AC1, and "Abort conditions"
-- Ledger: `authority/state/implemented.toml` row `"TE2"` transitions to
-  `status = "implemented"` against the rescoped charter; `"TE2B"` is
-  predeclared `pending`. `authority/dag/rev11-type-evaluation.toml` gains
-  the `TE2B` node (predecessors TE2, TE3) and TE4's predecessors become
-  TE2, TE2B, TE3. The production changes on this candidate are the
-  dependency-fact fixes recorded under "Delivered"; the lowering-site and
-  instantiation-site cutover is `TE2B`'s.
+- Ledger: `authority/state/implemented.toml` row `"TE2"` is
+  `status = "implemented"` against the charter now in the tree, which carries
+  the lowering-site and instantiation-site deferral itself.
+
+## Superseded: the successor-node split
+
+Everything below that routes the lowering-site and instantiation-site cutover
+to a successor node `TE2B` — the ratification's "carried to the new node
+`TE2B`" wording, the `TE2B` charter, its DAG node, its predeclared ledger row,
+and the TE4 predecessor rewrite that named it — was withdrawn on 2026-09-12.
+No `TE2B` node, charter, DAG entry, or ledger row exists; TE4's predecessors
+are TE2 and TE3 as before. Read every `TE2B` mention below as naming work that
+is now owned by TE2 itself and delivered on this candidate.
+
+The rest of this record stands as written: the abort grounds, the
+representability findings, and the reasoning that closed the five-axis family
+identity question are unchanged, and the charter in the tree is the binding
+contract.
 
 ## Ratification — RESCOPE (architect ruling, 2026-09-11)
 
@@ -616,9 +630,21 @@ ratification:
   rooted for `error`/`never` and both are for `any`; restoring the
   four-node set on the `error`/`never` rows fails it.
 
-Nothing else in TE2 is landed. The operand cutover, the lazy `lower.rs`
-branches, the conditional family context axis, and TE2-AC1/AC2/AC4 all
-remain blocked on one of the three ratifications above.
+At the time this section was written, nothing else was landed: the operand
+cutover, the lazy `lower.rs` branches, and the conditional family context axis
+were all still open, as were the CAPTURED PRE-RESCOPE requirements — the
+lifetime zero-intern/zero-substitution dead-operand proof, the sealed authored
+infer-true operand frame, and the five-axis conditional family identity.
+
+That sentence is no longer the current status, and it never referred to the
+acceptance criteria that now hold those identifiers. The charter in the tree
+defines TE2-AC1/AC2/AC4 as the lowering-site and instantiation-site deferral
+criteria, and those are delivered: branch lowering is demand-driven behind the
+selection oracle, post-decision losing-branch substitution is gone, and the
+ledger records TE2 implemented against that contract. The pre-rescope operand
+cutover on TE1's authored identity and the five-axis family identity remain
+NOT implemented — deliberately, per the ratified limitations recorded above and
+the charter's own forbidden designs — and are not what TE2-AC1/AC2/AC4 ask for.
 
 ## Why this surfaced at TE2 and not earlier
 

@@ -800,6 +800,7 @@ fn build_key_of_over_conditional_distributes_into_branches() {
         true_branch_ref: true_branch,
         false_branch_ref: false_branch,
         distributive: false,
+        pending: None,
     });
 
     let result = dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::KeyOf {
@@ -4597,6 +4598,7 @@ fn contravariant_infer_candidates_intersect_not_union() {
         true_branch: infer_u,
         false_branch: never_node,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4733,6 +4735,7 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
         true_branch: generic_fn,
         false_branch: never_node,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4800,6 +4803,7 @@ fn mutable_array_infer_element_binds_covariantly() {
         true_branch: infer_u,
         false_branch: never_node,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4861,6 +4865,7 @@ fn nested_same_name_infer_binder_is_not_captured_by_outer_substitution() {
         true_branch_ref: infer_u,
         false_branch_ref: never_node,
         distributive: false,
+        pending: None,
     });
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Conditional {
@@ -4869,6 +4874,7 @@ fn nested_same_name_infer_binder_is_not_captured_by_outer_substitution() {
         true_branch: inner,
         false_branch: never_node,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4900,6 +4906,7 @@ fn nested_same_name_infer_binder_is_not_captured_by_outer_substitution() {
         true_branch_ref: infer_u,
         false_branch_ref: never_node,
         distributive: false,
+        pending: None,
     });
     let result = match dispatch.execute_type_node(SemanticQueryKey::Conditional {
         check: string_node,
@@ -4907,6 +4914,7 @@ fn nested_same_name_infer_binder_is_not_captured_by_outer_substitution() {
         true_branch: inner_v,
         false_branch: never_node,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -5054,6 +5062,7 @@ fn expanded_distribution_treats_infer_ref_check_as_open() {
         true_branch_ref: a,
         false_branch_ref: b,
         distributive: false,
+        pending: None,
     });
     let outer = graph.intern_node(SemanticNodeData::Conditional {
         check: t_param,
@@ -5061,6 +5070,7 @@ fn expanded_distribution_treats_infer_ref_check_as_open() {
         true_branch_ref: inner,
         false_branch_ref: c,
         distributive: false,
+        pending: None,
     });
 
     let projected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
@@ -5161,6 +5171,7 @@ fn mapped_extends_infer_declaration_shadows_outer_binder() {
         true_branch_ref: infer_u,
         false_branch_ref: never_node,
         distributive: false,
+        pending: None,
     });
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Conditional {
@@ -5169,6 +5180,7 @@ fn mapped_extends_infer_declaration_shadows_outer_binder() {
         true_branch: inner,
         false_branch: never_node,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -5252,6 +5264,7 @@ fn mapped_own_key_param_shadows_same_named_outer_infer_binder() {
         true_branch: mapped,
         false_branch: never_node,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -5357,6 +5370,7 @@ fn constructor_type_substitutes_bound_infer_inside_signature() {
         true_branch: ctor,
         false_branch: never_node,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -5436,6 +5450,7 @@ fn constructor_type_relates_and_binds_infer_return() {
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -5624,6 +5639,7 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
         true_branch_ref: p_ref,
         false_branch_ref: never_node,
         distributive: false,
+        pending: None,
     });
 
     // Outer: `string extends infer P ? <inner> : never`.
@@ -5633,6 +5649,7 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
         true_branch: inner,
         false_branch: never_node,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),

@@ -8188,6 +8188,7 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
         true_branch_ref: closed_branch,
         false_branch_ref: open_branch,
         distributive: false,
+        pending: None,
     });
 
     let mut diag_sink = Vec::new();

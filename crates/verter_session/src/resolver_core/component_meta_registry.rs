@@ -1937,8 +1937,21 @@ fn collect_registry_member_surface_refs_node(
             extends,
             true_branch_ref,
             false_branch_ref,
+            pending,
             ..
         } => {
+            if let Some(frame) = pending {
+                for argument in frame.argument_nodes() {
+                    recurse(
+                        ctx,
+                        argument,
+                        queued_names,
+                        output,
+                        member_ref_policy,
+                        visited,
+                    );
+                }
+            }
             recurse(
                 ctx,
                 *check,
@@ -2185,8 +2198,12 @@ fn walk_reference_carriers(
                 extends,
                 true_branch_ref,
                 false_branch_ref,
+                pending,
                 ..
             } => {
+                if let Some(frame) = pending {
+                    worklist.extend(frame.argument_nodes());
+                }
                 worklist.push(*check);
                 worklist.push(*extends);
                 worklist.push(*true_branch_ref);

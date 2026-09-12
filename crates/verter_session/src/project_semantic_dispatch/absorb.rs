@@ -266,9 +266,8 @@ impl ProjectSemanticDispatch<'_> {
         &self,
         check: SemanticNodeId,
         extends: SemanticNodeId,
-        true_branch: SemanticNodeId,
-        false_branch: SemanticNodeId,
         distributive: bool,
+        mut force_branch: impl FnMut(bool) -> SemanticNodeId,
     ) -> Option<QueryBuildOutput> {
         let decision_roots = [check, extends];
         match self.peek_special(check)? {
@@ -277,6 +276,8 @@ impl ProjectSemanticDispatch<'_> {
             // (2) `any extends T ? X : Y` ⇒ `X | Y`, unless an infer binding
             //     would be involved (then fall through to the infer path).
             (SpecialKind::Any, _) if !self.extends_is_infer_pattern(extends) => {
+                let true_branch = force_branch(true);
+                let false_branch = force_branch(false);
                 let union = self
                     .intern_normalized_union_or_intersection(&[true_branch, false_branch], true);
                 Some(self.absorbed_output(union, [check, extends, true_branch, false_branch]))
@@ -475,8 +476,12 @@ impl ProjectSemanticDispatch<'_> {
                     extends,
                     true_branch_ref,
                     false_branch_ref,
+                    pending,
                     ..
                 } => {
+                    if let Some(pending) = pending {
+                        stack.extend(pending.argument_nodes());
+                    }
                     stack.push(*check);
                     stack.push(*extends);
                     stack.push(*true_branch_ref);

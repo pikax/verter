@@ -3372,8 +3372,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     extends,
                     true_branch_ref,
                     false_branch_ref,
+                    pending,
                     ..
                 } => {
+                    if let Some(pending) = pending {
+                        stack.extend(pending.argument_nodes());
+                    }
                     stack.extend([*check, *extends, *true_branch_ref, *false_branch_ref]);
                 }
                 SemanticNodeData::InstantiationRef { args, .. } => {
@@ -3996,14 +4000,41 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     extends,
                     true_branch_ref,
                     false_branch_ref,
+                    pending,
                     ..
                 } => {
                     let conditional_shadows =
                         self.extends_pattern_declares_infer(*extends, base_infer);
+                    let (selection, _) = self.conditional_branch_selection(*check, *extends);
+                    if selection != super::ConditionalBranchSelection::Deferred {
+                        if let Some(Some(selected)) = self.reduce_relation_conditional(node) {
+                            stack.push((
+                                selected,
+                                shadowed
+                                    || (conditional_shadows
+                                        && selection == super::ConditionalBranchSelection::True),
+                            ));
+                        }
+                        continue;
+                    }
                     stack.push((*check, shadowed));
-                    stack.push((*false_branch_ref, shadowed));
                     stack.push((*extends, shadowed || conditional_shadows));
-                    stack.push((*true_branch_ref, shadowed || conditional_shadows));
+                    stack.push((
+                        self.apply_conditional_branch_pending(
+                            *true_branch_ref,
+                            pending.as_deref(),
+                            true,
+                        ),
+                        shadowed || conditional_shadows,
+                    ));
+                    stack.push((
+                        self.apply_conditional_branch_pending(
+                            *false_branch_ref,
+                            pending.as_deref(),
+                            false,
+                        ),
+                        shadowed,
+                    ));
                 }
                 SemanticNodeData::Signature {
                     params,
@@ -5547,6 +5578,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             true_branch_ref,
             false_branch_ref,
             distributive,
+            pending,
         } = data.as_ref()
         else {
             return None;
@@ -5557,6 +5589,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             true_branch: *true_branch_ref,
             false_branch: *false_branch_ref,
             distributive: *distributive,
+            pending: pending.clone(),
         };
         drop(data);
         Some(match self.execute_type_node(key) {

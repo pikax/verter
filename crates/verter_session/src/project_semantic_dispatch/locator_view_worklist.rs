@@ -85,6 +85,11 @@ enum ProjectionFrame {
         data: Arc<SemanticNodeData>,
         extends_context: ProjectionReductionContext,
     },
+    ConditionalSelectedFinish {
+        node: SemanticNodeId,
+        selected: SemanticNodeId,
+        context: ProjectionReductionContext,
+    },
     ConditionalAfterTrue {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
@@ -572,12 +577,72 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     extends_context,
                 } => {
                     let SemanticNodeData::Conditional {
-                        true_branch_ref, ..
+                        check,
+                        extends,
+                        true_branch_ref,
+                        false_branch_ref,
+                        distributive,
+                        pending,
                     } = data.as_ref()
                     else {
                         unreachable!("conditional staging frame must carry a conditional")
                     };
-                    let true_branch = *true_branch_ref;
+                    let decision_shell = SemanticNodeData::Conditional {
+                        check: projected(memo, *check, context),
+                        extends: projected(memo, *extends, extends_context),
+                        true_branch_ref: *true_branch_ref,
+                        false_branch_ref: *false_branch_ref,
+                        distributive: *distributive,
+                        pending: pending.clone(),
+                    };
+                    work_credit.settle();
+                    let selected = match self.execute_type_node(SemanticQueryKey::Conditional {
+                        check: projected(memo, *check, context),
+                        extends: projected(memo, *extends, extends_context),
+                        true_branch: *true_branch_ref,
+                        false_branch: *false_branch_ref,
+                        distributive: *distributive,
+                        pending: pending.clone(),
+                    }) {
+                        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+                        _ => self.opaque(QueryError::Miss),
+                    };
+                    if let Err(reasons) = work_credit.refresh() {
+                        trip = Some(reasons);
+                        break;
+                    }
+                    if self.graph().node_data(selected).as_deref() != Some(&decision_shell) {
+                        frames.push(ProjectionFrame::ConditionalSelectedFinish {
+                            node,
+                            selected,
+                            context,
+                        });
+                        frames.push(ProjectionFrame::Enter {
+                            node: selected,
+                            context,
+                        });
+                        continue;
+                    }
+                    // Both branches of a suspended conditional are demanded by
+                    // this view. Discharge before projecting either subtree.
+                    let true_branch = self.apply_conditional_branch_pending(
+                        *true_branch_ref,
+                        pending.as_deref(),
+                        true,
+                    );
+                    let false_branch = self.apply_conditional_branch_pending(
+                        *false_branch_ref,
+                        pending.as_deref(),
+                        false,
+                    );
+                    let data = Arc::new(SemanticNodeData::Conditional {
+                        check: *check,
+                        extends: *extends,
+                        true_branch_ref: true_branch,
+                        false_branch_ref: false_branch,
+                        distributive: *distributive,
+                        pending: None,
+                    });
                     frames.push(ProjectionFrame::ConditionalAfterTrue {
                         node,
                         context,
@@ -588,6 +653,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         node: true_branch,
                         context,
                     });
+                }
+                ProjectionFrame::ConditionalSelectedFinish {
+                    node,
+                    selected,
+                    context,
+                } => {
+                    self.memoize_projected(memo, node, context, projected(memo, selected, context));
                 }
                 ProjectionFrame::ConditionalAfterTrue {
                     node,
@@ -625,6 +697,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         true_branch_ref,
                         false_branch_ref,
                         distributive,
+                        pending,
                     } = data.as_ref()
                     else {
                         unreachable!("conditional finish frame must carry a conditional")
@@ -636,6 +709,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         true_branch: projected(memo, *true_branch_ref, context),
                         false_branch: projected(memo, *false_branch_ref, context),
                         distributive: *distributive,
+                        pending: pending.clone(),
                     }) {
                         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
                         _ => self.opaque(QueryError::Miss),
