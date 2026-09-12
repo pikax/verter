@@ -3915,6 +3915,7 @@ dependencies = [
  "sha2",
  "toml",
  "verter_language",
+ "verter_test_support",
  "verter_vue_conformance",
 ]
 

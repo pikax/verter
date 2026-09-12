@@ -37,3 +37,10 @@ toml = "1.1"
 # it which paths are carrier cases instead of matching extensions by hand.
 verter_language = { path = "../verter_language" }
 verter_vue_conformance = { path = "../verter_vue_conformance" }
+
+[dev-dependencies]
+# The shared resolution for a sibling `[[bin]]` target's path. A test that
+# spelled `env!("CARGO_BIN_EXE_…")` itself would bake in the BUILD machine's
+# `target/` path and break the moment the test binary runs from an extracted
+# archive, which is how the shared Rust test archive is executed.
+verter_test_support = { path = "../verter_test_support" }

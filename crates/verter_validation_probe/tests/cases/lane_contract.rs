@@ -1833,13 +1833,22 @@ fn the_summary_binary_disposes_as_a_process() {
         .remove("gated_regressions");
     let incomplete = parsed.to_string();
 
+    // The binary this run owns, not the one the BUILD machine left behind:
+    // `CARGO_BIN_EXE_*` is expanded at compile time, so under the shared Rust
+    // test archive — built by one job and extracted by another — it names a
+    // `target/` directory the running job never built. The shared resolver
+    // takes nextest's runtime `NEXTEST_BIN_EXE_*` instead, and under nextest
+    // refuses to fall back to a stale build tree rather than dispose over a
+    // binary that is not the one under test.
+    let binary = verter_test_support::cargo_test_binary_path!("validation-probe-summary");
+
     for (label, document, expected) in [
         ("a clean summary", clean, Some(0)),
         ("a gate regression", regressed, Some(1)),
         ("a summary missing a counter", incomplete, Some(2)),
     ] {
         let path = temp_file(&format!("dispose-{}", label.replace(' ', "-")), &document);
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_validation-probe-summary"))
+        let output = std::process::Command::new(&binary)
             .args(["--dispose", "--summary"])
             .arg(&path)
             .output()
