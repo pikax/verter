@@ -1,7 +1,6 @@
 //! Carrier-compiler trait and framework-neutral I/O.
 //!
-//! One trait per carrier: parse, IDE codegen, runtime bundle.
-//! Vue is the reference (`vue_bridge::VueCarrierCompiler`). Eval-source
+//! Parse, IDE codegen, runtime bundle. Eval-source
 //! and template facts belong to
 //! [`super::capability::FrameworkSemanticAuthority`]. Script facts go
 //! through the host `ScriptFactProvider` seam — not this trait.
