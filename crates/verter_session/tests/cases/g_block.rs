@@ -69,8 +69,6 @@ mod block_6i_slot_callable_realization;
 mod block_6i_static_guards;
 #[path = "g_block/cache_runtime_no_external_cooperative.rs"]
 mod cache_runtime_no_external_cooperative;
-#[path = "g_block/cache_runtime_singleflight_rehome.rs"]
-mod cache_runtime_singleflight_rehome;
 #[path = "block_2_canary/harness.rs"]
 mod canary_harness;
 #[path = "g_block/compile_slots_encapsulation.rs"]

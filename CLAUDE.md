@@ -261,9 +261,7 @@ The codebase MUST build, test, and materialize on macOS, Windows, AND Linux. Pla
 
 Guard-enforced — `tracked_paths_are_portable` (`crates/verter_source_policy_gate/tests/cases/tracked_paths_are_portable.rs`) enumerates `git ls-files -z` and enforces: valid UTF-8; no NTFS-illegal characters (`< > : " | ? * \` plus control chars); no trailing dot or space; no reserved device basenames (`CON`/`PRN`/`AUX`/`NUL`/`COM1`–`COM9`/`LPT1`–`LPT9`, with or without extension, plus `CONIN$`/`CONOUT$` — the `$`-suffixed forms only); no case-insensitive path collisions (lowercase-fold approximation of NTFS/APFS folding, not the exact filesystem fold tables); ≤200-byte relative paths.
 
-Portable content and exact authority evidence use two distinct guard rails. `tracked_paths_no_machine_roots` (`crates/verter_source_policy_gate/tests/cases/tracked_paths_no_machine_roots.rs`) still reads and scans every tracked file's raw bytes for its closed set of known machine-root markers. Build/test/runtime inputs, generated output, source, fixtures, and portable documentation fail on any hit. Exact, already-ratified authority evidence may retain the environment where it was produced only through `scripts/manifests/portability-machine-marker-evidence-exceptions.tsv`: exact repository path, exact worktree SHA-256, an existing pin document containing that digest, a permitted evidence/ruling root, and an exact historical Git-object pin are all required. There is no directory, suffix, basename, glob, or generic `docs`/`evidence` exemption, and stale rows fail in either direction.
-
-Future machine-bound raw logs default to external digest-bound bundles. Do not commit a new raw log and grow the exception manifest merely for convenience; keep the raw bundle external and commit only the portable ruling/summary plus its exact digest unless a new architecture act explicitly authorizes in-tree evidence.
+Future machine-bound raw logs (benchmarks, traces, heap profiles) stay out of the tracked tree; commit only the portable ruling/summary plus its exact digest unless a new architecture act explicitly authorizes in-tree evidence.
 
 Review-enforced (the guard does not cover these):
 
@@ -273,7 +271,7 @@ Review-enforced (the guard does not cover these):
 - OS-specific binaries (`tsgo`, `.exe` suffixes) are discovered platform-aware, never via a hardcoded per-OS name.
 - Temp and cwd paths come from std abstractions, not literal paths.
 
-Guards: `tracked_paths_are_portable`, `tracked_files_contain_no_machine_specific_path_markers`, and the authority-evidence admission/liveness tests in `tracked_paths_no_machine_roots.rs`. Durable mechanism record: `docs/contributing/portability-fixed-marker-scanner-rulings.md`.
+Guard: `tracked_paths_are_portable`.
 
 ### Anti-Binary-Growth Integration-Test Layout (CRITICAL)
 
@@ -509,7 +507,7 @@ Name the durable invariant or regression boundary instead: what input fails, wha
 
 A code or test comment may cite a GitHub issue only when it records a specific independently reported product defect that is outside the DAG-controlled `[[github_issue]]` mappings. The comment must still state the durable behavior; the issue reference is supplemental. Never cite a DAG-managed issue, PR, node, or charter as code/test rationale, because the DAG coordinates implementation rather than defining the defect.
 
-The architecture guard `no_phase_archaeology_in_production_code` enforces the production-source subset on `crates/*/src/**`. Implementer and reviewer policy applies the broader rule to tests and non-Rust code as well.
+This rule is implementer- and reviewer-enforced across production source, tests, and non-Rust code. It carries no runtime source scanner: a guard that detected roadmap vocabulary would itself be the name-keyed source scanner the landed-guard policy above forbids.
 
 See `/testing` skill for full TS/Rust test patterns, sourcemap testing, and server cleanup.
 

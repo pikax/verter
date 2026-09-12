@@ -12,8 +12,7 @@ cargo test -p verter_session --test architecture_guards \
 ## What it does
 
 Extends the existing `syn`-AST scanner used by `architecture_guards.rs` (`render_type`,
-`no_off_store_host_caches_inner`, `no_phase_archaeology_in_production_code`,
-`god_module_size_budget`) to also dump per-file:
+`no_off_store_host_caches_inner`, `god_module_size_budget`) to also dump per-file:
 
 - **SCC table** — strongly-connected components of the intra-file function call graph.
   One row per SCC: `{ file, scc_id, members: Vec<fn_name>, size, recursive: bool }`.
