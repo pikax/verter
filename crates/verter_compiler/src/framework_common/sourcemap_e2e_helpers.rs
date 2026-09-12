@@ -5,9 +5,10 @@
 //! `(generated_code, source_map_json)` pair plus the original carrier
 //! source, so EVERY carrier vertical (Vue today; Svelte / React / Astro
 //! later) re-runs the SAME e2e correctness assertions against its own
-//! [`CarrierCompiler::compile_ide`](super::CarrierCompiler::compile_ide)
-//! output. A token that maps to mismatched source text is the bug class
-//! these helpers catch.
+//! typed `compile_ide` output (e.g.
+//! [`VueCarrierCompiler::compile_ide`](super::vue_bridge::VueCarrierCompiler::compile_ide)).
+//! A token that maps to mismatched source text is the bug class these
+//! helpers catch.
 //!
 //! Test-only: gated behind `#[cfg(test)]` so the helpers never ship in a
 //! release artifact, but `pub` so a later vertical's `#[cfg(test)]`
@@ -231,7 +232,7 @@ pub fn assert_token_maps_to_source_line(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::framework_common::carrier_compiler::{CarrierCompiler, IdeCompileOptions};
+    use crate::framework_common::carrier_compiler::IdeCompileOptions;
     use crate::framework_common::vue_bridge::VueCarrierCompiler;
 
     #[test]

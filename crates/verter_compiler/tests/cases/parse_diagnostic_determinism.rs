@@ -3,7 +3,6 @@ use verter_compiler::diagnostics::{
     sort_diagnostics, Diagnostic, SyntaxPluginContext, SyntaxPluginOptions,
 };
 use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-use verter_compiler::framework_common::CarrierCompiler;
 use verter_compiler::parser::Syntax;
 use verter_compiler::svelte::SvelteCarrierCompiler;
 use verter_language::{sort_language_diagnostics, LanguageDiagnostic, ParseOptions};

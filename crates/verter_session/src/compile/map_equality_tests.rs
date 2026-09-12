@@ -2256,7 +2256,7 @@ struct CompileAxes {
 fn compile_fixture(fixture: &str, axes: CompileAxes) -> RealCompile {
     use oxc_allocator::Allocator;
     use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-    use verter_compiler::framework_common::{CarrierCompiler, RuntimeCompileOptions};
+    use verter_compiler::framework_common::RuntimeCompileOptions;
 
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/framework-conformance-harness/fixtures/vue")
@@ -2602,7 +2602,7 @@ fn genuine_compiler_output_agrees_across_implementations() {
 fn filename_none_is_not_a_real_host_shape_and_the_carrier_defect_it_exposes_is_tracked() {
     use oxc_allocator::Allocator;
     use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-    use verter_compiler::framework_common::{CarrierCompiler, RuntimeCompileOptions};
+    use verter_compiler::framework_common::RuntimeCompileOptions;
 
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/framework-conformance-harness/fixtures/vue")

@@ -15,7 +15,6 @@ use verter_language::{
 use super::capability::{CarrierFrontend, FrameworkEpoch, Present};
 use super::catalog::{FrontendCap, TypedCapabilityRegistration};
 use super::vue_bridge::VueCarrierCompiler;
-use super::CarrierCompiler;
 
 /// Vue carrier frontend: parse, typed reject, adapter identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

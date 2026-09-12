@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use oxc_allocator::Allocator;
 use verter_compiler::framework_common::carrier_compiler::{
-    CarrierCompiler, RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
+    RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
 };
 use verter_compiler::framework_common::registered_carrier_projection::project_registered_accepted;
 use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;

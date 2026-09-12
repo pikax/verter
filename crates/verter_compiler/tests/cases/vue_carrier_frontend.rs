@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
 use verter_compiler::framework_common::{
-    vue_carrier_frontend_registration, CarrierCompiler, CarrierFrontend, CatalogCapability,
-    CatalogRow, FrameworkEpoch, ImmutableCapabilityCatalog, VueCarrierFrontend, VueSfcV3,
+    vue_carrier_frontend_registration, CarrierFrontend, CatalogCapability, CatalogRow,
+    FrameworkEpoch, ImmutableCapabilityCatalog, VueCarrierFrontend, VueSfcV3,
 };
 use verter_language::{
     parse_key_for, syntax_profile_id_for, FileLanguage, FrameworkAdapterId, LanguageId,

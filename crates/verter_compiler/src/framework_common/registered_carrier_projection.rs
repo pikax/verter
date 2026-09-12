@@ -19,8 +19,7 @@ use super::capability::{
     CarrierFrontend, FrameworkEpochId, FrameworkSemanticAuthority, ProjectionBackend,
 };
 use super::carrier_compiler::{
-    CarrierCompiler, CompileUnsupported, RuntimeBlockContentInputs, RuntimeDiagnostic,
-    RuntimeDiagnosticSeverity,
+    CompileUnsupported, RuntimeBlockContentInputs, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
 };
 use super::catalog::{CatalogCapability, CatalogRow, ImmutableCapabilityCatalog};
 use super::vue_bridge::VueCarrierCompiler;

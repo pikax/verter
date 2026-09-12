@@ -947,7 +947,7 @@ fn concurrent_ensure_ide_compiled_and_get_virtual_file_main_share_one_published_
     // observation:
     //
     // 1. ONE parsed carrier artifact. `carrier_parses` is the framework-neutral
-    //    parse-once rail (one increment per `CarrierCompiler::parse`); a
+    //    parse-once rail (one increment per Vue carrier parse); a
     //    regression where each request RE-PARSED the carrier independently
     //    would bump it to >= 2. The carrier is parsed once at `upsert`, and
     //    BOTH the Ide and the Main demand reuse that one cached artifact (no
