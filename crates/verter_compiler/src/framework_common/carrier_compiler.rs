@@ -1,7 +1,6 @@
 //! Carrier-compiler trait and framework-neutral I/O.
 //!
-//! One trait per carrier: parse, IDE codegen, runtime bundle.
-//! Vue is the reference (`vue_bridge::VueCarrierCompiler`). Eval-source
+//! Parse, IDE codegen, runtime bundle. Eval-source
 //! and template facts belong to
 //! [`super::capability::FrameworkSemanticAuthority`]. Script facts go
 //! through the host `ScriptFactProvider` seam — not this trait.
@@ -825,41 +824,6 @@ impl RuntimeCompileOutput {
         self.diagnostics
             .iter()
             .any(|d| d.severity == RuntimeDiagnosticSeverity::Error)
-    }
-}
-
-/// Test-only convenience over [`CarrierCompiler::compile_bundle`] for fixtures
-/// whose carrier is known to PRODUCE.
-///
-/// Deliberately test-only: production code matches the outcome exhaustively, so
-/// a refusal can never be unwrapped into "some bundle" there. A test that is
-/// ABOUT the refusal calls `compile_bundle` directly and matches the arm.
-#[cfg(test)]
-pub(crate) trait CompileBundleProducedExt {
-    fn compile_bundle_expect_produced(
-        &self,
-        source: &str,
-        artifact: &FrameworkParseArtifact,
-        opts: &RuntimeCompileOptions,
-        alloc: &oxc_allocator::Allocator,
-    ) -> Result<RuntimeCompileOutput, CompileUnsupported>;
-}
-
-#[cfg(test)]
-impl<T: CarrierCompiler + ?Sized> CompileBundleProducedExt for T {
-    fn compile_bundle_expect_produced(
-        &self,
-        source: &str,
-        artifact: &FrameworkParseArtifact,
-        opts: &RuntimeCompileOptions,
-        alloc: &oxc_allocator::Allocator,
-    ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
-        self.compile_bundle(source, artifact, opts, alloc)
-            .map(|outcome| {
-                outcome
-                    .into_produced()
-                    .expect("this fixture's carrier produces a runtime surface")
-            })
     }
 }
 

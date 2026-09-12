@@ -10,11 +10,11 @@ use verter_compiler::compile_request::{
 };
 use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
 use verter_compiler::framework_common::{
-    vue_projection_backend_registration, CarrierCompiler, CatalogCapability, CatalogRow,
-    CompileUnsupported, FrameworkEpoch, FrameworkParseArtifact, IdeCompileOptions,
-    ImmutableCapabilityCatalog, ProjectionBackend, RuntimeBlockContentInput,
-    RuntimeBlockContentInputs, RuntimeCompileOptions, RuntimeOutputDescriptor,
-    VueProjectionBackend, VueProjectionError, VueProjectionInputs, VueSfcV3,
+    vue_projection_backend_registration, CatalogCapability, CatalogRow, CompileUnsupported,
+    FrameworkEpoch, FrameworkParseArtifact, IdeCompileOptions, ImmutableCapabilityCatalog,
+    ProjectionBackend, RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
+    RuntimeOutputDescriptor, VueProjectionBackend, VueProjectionError, VueProjectionInputs,
+    VueSfcV3,
 };
 use verter_compiler::standalone::StandaloneCompiler;
 use verter_language::carrier_grammar::{

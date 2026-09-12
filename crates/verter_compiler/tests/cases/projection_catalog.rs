@@ -17,9 +17,9 @@ use verter_compiler::framework_common::registered_carrier_projection::{
 };
 use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
 use verter_compiler::framework_common::{
-    CarrierCompileOutcome, CarrierCompiler, CatalogCapability, CompileUnsupported,
-    FrameworkParseArtifact, IdeCompileOptions, ProjectionBackend, RuntimeCompileOptions,
-    RuntimeDiagnostic, VueProjectionBackend, VueProjectionInputs,
+    CarrierCompileOutcome, CatalogCapability, CompileUnsupported, FrameworkParseArtifact,
+    IdeCompileOptions, ProjectionBackend, RuntimeCompileOptions, RuntimeDiagnostic,
+    VueProjectionBackend, VueProjectionInputs,
 };
 use verter_compiler::svelte::{SvelteProjectionBackend, SvelteProjectionInputs};
 use verter_language::carrier_grammar::{
@@ -120,7 +120,7 @@ fn svelte_ide_request(filename: &str) -> CompileRequest {
 }
 
 fn produced_bundle(
-    compiler: &impl CarrierCompiler,
+    compiler: &VueCarrierCompiler,
     source: &str,
     artifact: &FrameworkParseArtifact,
     opts: &RuntimeCompileOptions,
