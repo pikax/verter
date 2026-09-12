@@ -387,7 +387,7 @@ schema = 2
 "SIMP6" = { status = "implemented", commit_message = "test(lsp): prove provider attach, admission and close ordering through real protocol traffic", commit_date = "2026-09-12T16:00:00+01:00" }
 "SIMP7" = { status = "implemented", commit_message = "perf(lsp): reuse one source index per provider response batch", commit_date = "2026-09-10T12:00:00+01:00" }
 "SIMP8" = { status = "pending" }
-"SIMP9" = { status = "pending" }
+"SIMP9" = { status = "implemented", commit_message = "refactor(lsp): close stale provider surfaces through one lifecycle operation", commit_date = "2026-09-12T22:20:00+01:00" }
 "SKL0" = { status = "pending" }
 "SKL1" = { status = "pending" }
 "SKL2" = { status = "pending" }

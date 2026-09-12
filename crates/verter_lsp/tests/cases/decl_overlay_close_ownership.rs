@@ -9,8 +9,9 @@
 //! strand an open carrier root's bare import on TS2307) and a closed root can never
 //! resurrect an overlay no live root reaches.
 //!
-//! The generic stale-path closers (`background_drain::close_stale_provider_paths`,
-//! `sync_coordinator::close_stale_paths`, `workspace_scanner::close_stale_paths`)
+//! The generic stale-path close operation
+//! (`provider_sync::close_stale_provider_path` and its slice form
+//! `provider_sync::close_stale_provider_paths`)
 //! and the provider-state close dispatch must NEVER issue a raw `close_dts` for a
 //! `Decl`-classified path. The type split (`NonDeclProviderPathKind`) already makes
 //! that a compile-time impossibility at the generic closers; THIS guard is the

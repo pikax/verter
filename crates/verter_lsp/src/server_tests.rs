@@ -30019,7 +30019,7 @@ async fn generic_stale_closer_never_closes_declaration_overlay() {
 
     // Exactly the call shape the removal paths use: the generic closer over the
     // NON-DECL active set.
-    super::close_stale_provider_paths(
+    crate::provider_sync::close_stale_provider_paths(
         &sync,
         &provider_surfaces,
         &state.active_non_decl_paths(),

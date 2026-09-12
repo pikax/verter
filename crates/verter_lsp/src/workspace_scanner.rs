@@ -32,8 +32,8 @@ use verter_session::FileLanguage;
 
 use crate::documents::DocumentRegistry;
 use crate::provider_sync::{
-    commit_sync_transition, genuinely_stale_after_sync, non_decl_close_targets,
-    prepare_sync_transition, revert_unsynced_kinds, NonDeclProviderPathKind, ProviderPathKind,
+    close_stale_provider_paths, commit_sync_transition, genuinely_stale_after_sync,
+    non_decl_close_targets, prepare_sync_transition, revert_unsynced_kinds, ProviderPathKind,
     ProviderSyncState,
 };
 use crate::type_provider::project_sync::ProjectSync;
@@ -837,10 +837,11 @@ async fn sync_non_carrier_file_to_provider(
         crate::provider_sync::non_carrier_sync_state_for_source(&snapshot.resolver, canonical_id);
     if let Some(next) = next_state {
         let transition = prepare_sync_transition(sync_states, canonical_id, next);
-        close_stale_paths(
+        close_stale_provider_paths(
             sync,
             provider_surfaces,
             &non_decl_close_targets(&transition.stale_paths),
+            "workspace_scanner(non_carrier)",
         )
         .await;
         let mut committed = transition.next;
@@ -1223,10 +1224,11 @@ pub(crate) async fn sync_file_to_provider(
                         requeue.insert(canonical_id.to_string());
                     }
                 } else {
-                    close_stale_paths(
+                    close_stale_provider_paths(
                         sync,
                         provider_surfaces,
                         &non_decl_close_targets(&genuinely_stale),
+                        "workspace_scanner(carrier)",
                     )
                     .await;
                 }
@@ -1254,49 +1256,15 @@ pub(crate) async fn sync_file_to_provider(
                     // The declaration overlay (`Decl`), if any, is released by
                     // `DeclOverlayOwner` via the `did_close` lifecycle, never here.
                     if let Some(sync) = sync {
-                        close_stale_paths(sync, provider_surfaces, &state.active_non_decl_paths())
-                            .await;
+                        close_stale_provider_paths(
+                            sync,
+                            provider_surfaces,
+                            &state.active_non_decl_paths(),
+                            "workspace_scanner(owner_loss)",
+                        )
+                        .await;
                     }
                 }
-            }
-        }
-    }
-}
-
-async fn close_stale_paths(
-    sync: &ProjectSync,
-    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
-    stale_paths: &[(NonDeclProviderPathKind, String)],
-) {
-    for (kind, path) in stale_paths {
-        // EVERY closing store-backed surface (IDE / API / Shadow) is no longer
-        // the active synced virtual surface — retire its active generation under
-        // a fresh close EPOCH (in-flight captures stay valid; the `Closing`
-        // state keeps the path failing closed until the provider close is
-        // CONFIRMED). Retiring only the API role would leave a closed IDE /
-        // Shadow surface `Current` — capturable by an interactive query against
-        // a CLOSED provider buffer. Capture the epoch-stamped token so the
-        // finalize is scoped to THIS close.
-        let close_token = provider_surfaces.forget(path);
-        // A declaration overlay (`Decl`) is unrepresentable here — its lifecycle is
-        // owned by `DeclOverlayOwner`, never this generic close.
-        let result = match kind {
-            NonDeclProviderPathKind::Ide => sync.close_tsx(path).await,
-            NonDeclProviderPathKind::Api => sync.close_dts(path).await,
-            NonDeclProviderPathKind::Shadow => sync.close_file(path).await,
-        };
-        match result {
-            // Only a CONFIRMED close finalizes, and only via THIS close's token —
-            // a reopen (or newer close) during the await makes the epoch mismatch
-            // and the finalize a no-op (the fresh snapshot survives). An error
-            // drops the token, leaving the `Closing` state (fail closed).
-            Ok(()) => {
-                provider_surfaces.finalize_close(close_token);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "workspace_scanner: failed to close stale provider path {path}: {error}"
-                );
             }
         }
     }
