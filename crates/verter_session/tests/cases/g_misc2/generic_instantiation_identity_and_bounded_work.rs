@@ -24,7 +24,8 @@
 //!
 //! 4. **Repeated warm demands do not grow the memo.** Re-issuing an
 //!    already-cached instantiation must add no entries and take no
-//!    misses.
+//!    misses, and one generic body lowers once no matter how many
+//!    distinct argument environments instantiate it.
 //!
 //! 5. **Mapper classification is structural.** Choosing `Identity`
 //!    versus `Computed` reads the mapper's carrier shape and binder
@@ -461,4 +462,59 @@ fn mapper_kind_classification_materialises_no_value_body() {
              classifier is not allowed to make"
         );
     }
+}
+
+/// DISCRIMINATOR (body lowered once per declaration content): three
+/// distinct argument environments of one generic must lower that
+/// generic's declaration body EXACTLY once.
+///
+/// The declaration body is a property of the declaration's content, not
+/// of any argument environment: `Pair<string>`, `Pair<number>` and
+/// `Pair<boolean>` all instantiate the same lowered body under different
+/// substitutions. Re-lowering per environment is the failure this
+/// catches — it turns a per-declaration cost into a per-demand one and
+/// scales with call sites rather than with content.
+///
+/// `decl_bodies_lowered` is the lazy body service's own counter, so the
+/// assertion reads the exact quantity the invariant names. The three
+/// environments must genuinely differ (each is a distinct instantiation
+/// identity — pinned by
+/// `distinct_argument_environments_instantiate_once_each_and_repeats_join_the_memo`),
+/// otherwise a count of one would only mean the demands collapsed.
+#[test]
+fn one_generic_body_lowers_once_across_distinct_argument_environments() {
+    let host = new_host();
+    host.provenance().reset();
+
+    let mut surfaces = Vec::new();
+    for argument in [
+        PrimitiveName::String,
+        PrimitiveName::Number,
+        PrimitiveName::Boolean,
+    ] {
+        surfaces.push(instantiate(
+            &host,
+            "Pair",
+            vec![TypeExpr::primitive(argument)],
+        ));
+    }
+
+    // The three demands must be genuinely distinct, else "lowered once"
+    // is a statement about one demand rather than three.
+    let distinct: std::collections::BTreeSet<_> = surfaces.iter().copied().collect();
+    assert_eq!(
+        distinct.len(),
+        3,
+        "fixture invariant: the three argument environments must produce three distinct \
+         instantiations; got {surfaces:?}"
+    );
+
+    let lowered = host.provenance().snapshot().decl_bodies_lowered;
+    assert_eq!(
+        lowered, 1,
+        "three distinct argument environments of one generic must lower its declaration body \
+         exactly once — the body belongs to the declaration's content, and each environment \
+         only re-substitutes it. Observed {lowered} lowerings, i.e. the body was re-lowered per \
+         argument environment."
+    );
 }
