@@ -10,7 +10,8 @@
 #![cfg(feature = "external-corpus")]
 
 use verter_validation_probe::lane;
-use verter_validation_probe::runner::PhaseDeadlines;
+use verter_validation_probe::outcome::{Dimension, ProbeOutcomeClass};
+use verter_validation_probe::runner::{self, DriverCommand, PhaseDeadlines, PlannedCase};
 use verter_validation_probe::summary::Lane;
 
 /// Which lane this run drives. The workflow's smoke job leaves it unset; the
@@ -81,5 +82,72 @@ fn workload_lane_runs_the_pinned_slice_and_publishes_its_summary() {
         "the lane reported {} gate regression(s); see {}",
         summary.totals.gated_regressions,
         path.display(),
+    );
+}
+
+/// A CONSTRUCTED, supported single-file component reaches a `runtimeClient`
+/// product through the real addon.
+///
+/// The corpus cases already exercise the route, but their outcomes depend on
+/// what the upstream project happens to contain. This one does not: the source
+/// is written here and is unambiguously supported, so the only ways it can
+/// fail are the ones worth knowing about — the driver never reaching the
+/// compiler at all (a `binding` or `host` failure, a spawn failure, an addon
+/// that will not load). Without it, a lane whose driver silently stopped
+/// calling the addon could still look like a lane of known failures.
+#[test]
+fn a_constructed_supported_component_reaches_a_runtime_client_product() {
+    let manifest = lane::load_manifest(verter_validation_probe::Framework::Vue)
+        .expect("the manifest is valid");
+    // Any inventoried case id will do as the carrier identity; what is
+    // compiled is the source written here, which the driver never re-reads
+    // from the corpus.
+    let case_id = manifest
+        .smoke
+        .first()
+        .expect("the smoke slice is non-empty")
+        .clone();
+    let relative_path = case_id
+        .strip_prefix("vue/")
+        .expect("a vue case id")
+        .to_string();
+
+    let planned = PlannedCase {
+        case_id: case_id.clone(),
+        relative_path,
+        source: concat!(
+            "<template>\n  <p :class=\"tone\">{{ label }}</p>\n</template>\n\n",
+            "<script setup>\nconst label = 'probe'\nconst tone = 'plain'\n</script>\n",
+        )
+        .to_string(),
+    };
+
+    let driver = DriverCommand::committed(&verter_validation_probe::corpus::workspace_root());
+    let results = runner::run_cases(
+        &manifest,
+        &driver,
+        std::slice::from_ref(&planned),
+        PhaseDeadlines::default(),
+    )
+    .unwrap_or_else(|error| panic!("the driver could not be run: {error}"));
+
+    let observation = results
+        .into_iter()
+        .next()
+        .expect("one planned case yields one result")
+        .observation
+        .unwrap_or_else(|error| panic!("the observation is representable: {error}"));
+
+    assert_eq!(
+        observation.terminal(Dimension::Route).class(),
+        Some(ProbeOutcomeClass::Pass),
+        "the public route did not answer a supported component: {:?}",
+        observation.terminal(Dimension::Route),
+    );
+    assert_eq!(
+        observation.terminal(Dimension::Compile).class(),
+        Some(ProbeOutcomeClass::Pass),
+        "a supported component did not reach a valid runtimeClient product: {:?}",
+        observation.terminal(Dimension::Compile),
     );
 }
