@@ -25,16 +25,30 @@
 //!    back to whole-surface `MappedType` resolution forces every
 //!    surviving key's value to answer a one-key question.
 //!
-//! Both legs also assert the ANSWER, not just the counter: narrowing
-//! must return the same semantic surface/value that whole-surface
-//! evaluation produces, and a remap-dropped key must be absent from the
-//! published surface. A counter-only assertion would pass for an
-//! implementation that skipped the work by skipping the semantics.
+//! 3. **Enumerating an OPEN key domain to answer a single-key demand.**
+//!    A mapper over an unbound source has no enumerable key set, so a
+//!    demanded produced name has no decidable preimage. The demand must
+//!    preserve the deferred `Mapped` carrier and force nothing.
+//!
+//! 4. **Widening the cache-validity rail with a dead key's
+//!    dependencies.** A remap-dropped key's value declaration is not a
+//!    semantic dependency of the mapped answer, so its facts must not
+//!    enter the traced read set — while the demanded key's value facts
+//!    and both keys' import-route facts must.
+//!
+//! Every leg also asserts the ANSWER, not just the counter or the read
+//! set: narrowing must return the same semantic surface/value that
+//! whole-surface evaluation produces, and a remap-dropped key must be
+//! absent from the published surface. A counter-only assertion would
+//! pass for an implementation that skipped the work by skipping the
+//! semantics.
 
 #![allow(clippy::too_many_lines)]
 
 use std::sync::Arc;
 
+use verter_semantic::facts::FactKey;
+use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef};
 use verter_session::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, PropertyKey, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
@@ -367,5 +381,255 @@ fn dead_key_edit_preserves_surface_and_forces_no_dead_key_work_on_recompute() {
         "recomputation after a dead-key edit must still force at most the two SURVIVING keys' \
          value operands; observed {forced}. More than two means dead-key work leaked back into \
          the recompute path."
+    );
+}
+
+/// `WIDE_REMAP_TS`'s mapped type re-authored over an UNBOUND source: the
+/// iteration domain is `keyof T` for a type parameter with no argument,
+/// so the key domain is OPEN.
+///
+/// Lowered with zero type arguments the alias yields the deferred
+/// `Mapped` carrier itself (not a `DeclRef`), which is what puts a
+/// single-key demand on the walker's mapped arm with a remapping mapper
+/// — the exact entrance the closed-domain narrowing uses.
+const OPEN_REMAP_TS: &str = r#"
+export type Boxed<V> = { boxed: V };
+
+export type Kept<K> = K extends 'b' ? 'kept_b' : K extends 'e' ? 'kept_e' : never;
+
+export type OpenRemapped<T> = {
+  [K in keyof T as Kept<K>]: Boxed<T[K]>
+};
+"#;
+
+/// DISCRIMINATOR (open key domain at a single-key demand): a
+/// `ProjectPath` for one produced name through a remapping mapper whose
+/// key domain is OPEN must preserve the deferred `Mapped` carrier and
+/// force NOTHING.
+///
+/// An open domain has no enumerable key set, so no preimage of the
+/// demanded produced name exists. The demand must therefore carrier-stop
+/// (L1), not guess. Two regressions this catches:
+///
+/// 1. Enumerating an open domain to answer the narrower demand — any
+///    key admitted from a non-finite domain is fabricated, and forcing
+///    its value is work for a member that may not exist. The per-K
+///    counter must not move at all.
+/// 2. Collapsing the un-narrowable demand to a resolved node (an
+///    `Opaque` miss or a synthesised member) instead of returning the
+///    carrier. The carrier is ADDRESSABLE: a later consumer that binds
+///    `T` re-dispatches it. A miss is terminal and wrong.
+#[test]
+fn open_key_domain_single_key_demand_preserves_the_mapped_carrier() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert(&host, OPEN_REMAP_TS);
+
+    let base = carrier(&host, "OpenRemapped", ProjectionMode::Expanded);
+    let graph = host.project_type_store().semantic_graph();
+    assert!(
+        matches!(
+            graph.node_data(base).as_deref(),
+            Some(SemanticNodeData::Mapped { .. })
+        ),
+        "fixture invariant: an unbound-source mapped alias must lower to the deferred `Mapped` \
+         carrier, otherwise the demand never reaches the mapped arm and the test is vacuous. \
+         Got {:?}",
+        graph.node_data(base).as_deref()
+    );
+
+    let before = per_k_materializations(&host);
+    let projected = project(
+        &host,
+        base,
+        vec![PathSegment::Member(PropertyKey::string_literal("kept_b"))],
+        ProjectionMode::Expanded,
+    );
+    let forced = per_k_materializations(&host) - before;
+
+    assert!(
+        matches!(
+            host.project_type_store()
+                .semantic_graph()
+                .node_data(projected)
+                .as_deref(),
+            Some(SemanticNodeData::Mapped { .. })
+        ),
+        "a single-key demand through a remapping mapper over an OPEN key domain must preserve \
+         the deferred `Mapped` carrier — the domain has no enumerable key set, so the produced \
+         name has no decidable preimage and the demand carrier-stops. Got {:?}",
+        host.project_type_store()
+            .semantic_graph()
+            .node_data(projected)
+            .as_deref()
+    );
+    assert_eq!(
+        forced, 0,
+        "an OPEN key domain must never be enumerated to answer a narrower demand: observed \
+         {forced} per-K value materialisations. Any non-zero count means keys were admitted \
+         from a non-finite domain and their values forced."
+    );
+}
+
+const KEPT_VALUE_TS: &str = "export type KeptValue = { inner: number };\n";
+const DEAD_VALUE_TS: &str = "export type DeadValue = { inner: string };\n";
+
+/// Owner file whose mapped VALUE projects into the member type
+/// (`WideSource[K]['inner']`), so forcing a key's value necessarily
+/// enters that key's value declaration — and therefore that file — while
+/// leaving a key's value unforced necessarily does not.
+const CROSS_FILE_REMAP_OWNER_TS: &str = r#"
+import type { KeptValue } from './kept';
+import type { DeadValue } from './dead';
+
+export interface WideSource { b: KeptValue; c: DeadValue; }
+
+export type Kept<K> = K extends 'b' ? 'kept_b' : never;
+
+export type Remapped = { [K in keyof WideSource as Kept<K>]: WideSource[K]['inner'] };
+"#;
+
+fn upsert_at(host: &Arc<VerterHost>, path: &str, source: &str) {
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(path.to_string()),
+        input_id: path.to_string(),
+        source: Arc::from(source),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static(path)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+}
+
+/// Every fact in `signature` attributed to `canonical`.
+fn facts_for(signature: &[FactVersionRef], canonical: &str) -> Vec<FactVersionRef> {
+    signature
+        .iter()
+        .filter(|fact| fact.canonical_id() == Some(canonical))
+        .cloned()
+        .collect()
+}
+
+/// `true` for the facts EVERY file reached through an import route
+/// contributes regardless of whether its declarations were ever read:
+/// the route target's whole-hash and its syntactic route interface.
+/// These are the *import* facts a demanded resolution legitimately
+/// traces; anything beyond them means the resolver entered the file to
+/// read a declaration.
+fn is_import_route_floor_fact(fact: &FactVersionRef) -> bool {
+    match fact {
+        FactVersionRef::FileWholeHash { .. } => true,
+        FactVersionRef::Parse(parse) => {
+            matches!(parse.key, FactKey::SyntacticRouteInterface)
+        }
+        _ => false,
+    }
+}
+
+/// DISCRIMINATOR (fact-signature membership): the read set of a mapped
+/// evaluation contains the demanded key's value-declaration facts and
+/// does NOT contain the remap-dropped key's.
+///
+/// `Remapped` maps `WideSource[K]['inner']`, so producing a key's value
+/// requires resolving that key's declared type through its import and
+/// reading its `inner` member — an observation attributed to the file
+/// that declares it. `b`'s value lives in `/w/kept.ts` and survives the
+/// remap; `c`'s lives in `/w/dead.ts` and the remap drops it.
+///
+/// Both files are reached by the owner's IMPORT ROUTES, so both
+/// legitimately contribute the route floor (whole-hash + syntactic route
+/// interface) — that leg pins the positive half: demanded import facts
+/// DO enter the signature. The discriminating half is what lies beyond
+/// the floor: `/w/kept.ts` must contribute more (the resolver entered it
+/// to read `KeptValue`), `/w/dead.ts` must contribute nothing more.
+///
+/// Forcing the value operand before the remap decision resolves
+/// `DeadValue['inner']` too, and the dead file's declaration facts land
+/// in the read set — widening the cache-validity rail with a dependency
+/// the answer does not have.
+#[test]
+fn demanded_key_value_facts_are_traced_and_dead_key_value_facts_are_not() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_at(&host, "/w/kept.ts", KEPT_VALUE_TS);
+    upsert_at(&host, "/w/dead.ts", DEAD_VALUE_TS);
+    upsert_at(&host, "/w/owner.ts", CROSS_FILE_REMAP_OWNER_TS);
+
+    let (surface, finalised) = for_tests::install_fact_tracer_for_tests(&host, || {
+        let expr = TypeExpr::Ref {
+            name: Arc::from("Remapped"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let base = for_tests::dispatch_lower_type_expr_in_scope_with_context_for_tests(
+            &host,
+            "/w/owner.ts",
+            &expr,
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        )
+        .expect("lowering `Remapped` must succeed");
+        project(&host, base, Vec::new(), ProjectionMode::Expanded)
+    });
+
+    // Correctness rail: the surface is the renamed survivor only.
+    assert_eq!(
+        member_names(&host, surface),
+        vec!["kept_b".to_string()],
+        "the remap keeps only `b`, renamed to `kept_b`"
+    );
+
+    let FactReadSetFinalise::Ok(signature) = finalised else {
+        panic!("the traced read set must finalise cacheable; got {finalised:?}");
+    };
+
+    // A domain aggregate stands in for an unbounded set of precise
+    // facts, so "the dead file contributes nothing beyond the floor"
+    // would be an under-approximation rather than a claim. Assert the
+    // signature is precise before reading absence from it.
+    assert!(
+        signature
+            .iter()
+            .all(|fact| !matches!(fact, FactVersionRef::DomainGeneration(_))),
+        "fixture invariant: the read set must stay precise (no collapsed domain aggregate), \
+         otherwise an absent per-file fact proves nothing. Got {signature:?}"
+    );
+
+    let kept_facts = facts_for(&signature, "/w/kept.ts");
+    let dead_facts = facts_for(&signature, "/w/dead.ts");
+
+    // Positive half — both files are reached by an import route, so both
+    // contribute the route floor. This is the "demanded import facts
+    // enter the signature" leg; it also proves the dead file WAS
+    // reachable, so its absence beyond the floor is a decision and not
+    // an accident of the fixture.
+    assert!(
+        dead_facts
+            .iter()
+            .any(|f| matches!(f, FactVersionRef::FileWholeHash { .. })),
+        "fixture invariant: the dropped key's value file must still be import-resolved (its \
+         route facts belong in the signature), otherwise the absence assertion below is \
+         vacuous. Got {dead_facts:?}"
+    );
+
+    // Discriminating half.
+    let kept_beyond_floor: Vec<_> = kept_facts
+        .iter()
+        .filter(|fact| !is_import_route_floor_fact(fact))
+        .collect();
+    let dead_beyond_floor: Vec<_> = dead_facts
+        .iter()
+        .filter(|fact| !is_import_route_floor_fact(fact))
+        .collect();
+
+    assert!(
+        !kept_beyond_floor.is_empty(),
+        "the DEMANDED key's value declaration was read, so its file must contribute facts \
+         beyond the import-route floor — those are the body facts the cached answer actually \
+         depends on. Got only {kept_facts:?}"
+    );
+    assert!(
+        dead_beyond_floor.is_empty(),
+        "a remap-DROPPED key's value declaration is not a semantic dependency of the mapped \
+         answer, so its file must contribute nothing beyond the import-route floor. Observed \
+         {dead_beyond_floor:?}. Forcing the value operand before the remap decision resolves \
+         `DeadValue['inner']` and lands its declaration facts in the read set, widening the \
+         cache-validity rail with a dependency the answer does not have."
     );
 }
