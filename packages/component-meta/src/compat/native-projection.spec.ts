@@ -17,6 +17,15 @@ import {
   projectDeclaredOnlyNativeResult,
 } from "./native-projection.js";
 import { encodeTestComponentMetaPayload } from "../type-graph.test-utils.js";
+import {
+  nativeComponentMetaToComponentMeta,
+  nativeTypeRegistryToMap,
+} from "../native-component-meta.js";
+import { mapComponentMeta } from "./checker.js";
+import {
+  projectDeclaredOnlyFromNativePayload as barrelProjectFromPayload,
+  projectDeclaredOnlyNativeResult as barrelProjectResult,
+} from "./index.js";
 
 function fullNativeMeta(): NativeComponentMetaResult {
   return {
@@ -215,5 +224,45 @@ describe("projectDeclaredOnlyFromNativePayload", () => {
       nativeSpy.mockRestore();
       mapSpy.mockRestore();
     }
+  });
+});
+
+describe("compat subpath barrel", () => {
+  it("re-exports both projection helpers", () => {
+    expect(barrelProjectResult).toBe(projectDeclaredOnlyNativeResult);
+    expect(barrelProjectFromPayload).toBe(projectDeclaredOnlyFromNativePayload);
+  });
+
+  it("feeds the existing mappers to produce a Volar-shaped result", () => {
+    const payload = encodeTestComponentMetaPayload({
+      filePath: "/project/src/Button.vue",
+      props: [
+        {
+          name: "label",
+          type: { kind: "primitive", name: "string" },
+          terminalDisplay: "string",
+          required: true,
+          hasDefault: false,
+        },
+      ],
+      slots: [{ name: "default", isScoped: false, bindings: [], isRequired: false }],
+    });
+
+    const decoded = barrelProjectFromPayload(payload);
+    if (!decoded) {
+      throw new Error("declared-only projection returned null for a non-null payload");
+    }
+
+    const volar = mapComponentMeta(
+      nativeComponentMetaToComponentMeta(decoded),
+      undefined,
+      nativeTypeRegistryToMap(decoded),
+    );
+
+    expect(volar.props.map((prop) => prop.name)).toEqual(["label"]);
+    expect(volar.props[0]?.type).toBe("string");
+    expect(volar.slots.map((slot) => slot.name)).toEqual(["default"]);
+    // The `_verter` sidecar carries the underlying ComponentMeta shape.
+    expect(volar._verter?.filePath).toBe("/project/src/Button.vue");
   });
 });
