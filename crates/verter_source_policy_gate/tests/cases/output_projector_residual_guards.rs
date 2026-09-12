@@ -23,17 +23,7 @@
 //! These guards pin the EXACT shape of that trusted surface, each with the
 //! mechanism that MATCHES it:
 //!
-//! 1. `retired_kind_b_bridge_symbol_absent_from_production_source` — the
-//!    interim Kind-B `legacy_semantic_type_expr_bridge` (a former crate-visible
-//!    `pub(crate)` non-sealed raw `SemanticNodeId -> TypeExpr` delegator) is
-//!    RETIRED by the Kind-B graph-native conversion: every Kind-B caller now
-//!    decides on the node-domain `RaisedShapeFacts` / interned `RaisedShapeKey`,
-//!    and the single publication `TypeExpr` is materialised once at a registered
-//!    output sink through the sealed `OutputProjector`. No compiler mechanism
-//!    can assert "this deleted name never returns", so this lean ABSENCE
-//!    tripwire bans the retired spelling from production source.
-//!
-//! 2. The fence-SHAPE guards — each pins one facet of the trusted vault /
+//! 1. The fence-SHAPE guards — each pins one facet of the trusted vault /
 //!    registration surface the compiler cannot express:
 //!    - `sealed_module_is_private_not_pub_super` — pins the structural fact
 //!      that makes the carrier-can't-name-`sealed` seal COMPILER-enforced:
@@ -90,9 +80,6 @@
 //!      the trybuild fixture `output_projector_not_impl_outside_crate.rs`
 //!      (`output_projector_not_impl_outside_crate`).
 //!
-//! The tombstone's full record block lives on the
-//! `retired_kind_b_bridge_symbol_absent_from_production_source` guard below.
-//!
 //! Every `syn` `#[test]` guard here ships a paired self-test proving it
 //! discriminates (fires on a synthetic violation, passes on the known-good
 //! shape) per the Stub-Prevention contract.
@@ -124,29 +111,6 @@ fn read_rel(rel: &str) -> String {
 }
 
 // ===========================================================================
-// Kind-B bridge TOMBSTONE (absence tripwire).
-//
-// The interim Kind-B reverse-raise bridge `legacy_semantic_type_expr_bridge`
-// and the `execute_to_type_expr` / `project_slot_binding_member_with_terminal_id`
-// raise-then-decide entrypoints were RETIRED by the Kind-B graph-native
-// conversion: every Kind-B caller now decides on the node-domain
-// `RaisedShapeFacts` / interned `RaisedShapeKey` (no mid-flight
-// `SemanticNodeId -> TypeExpr` raise), and the single publication `TypeExpr` is
-// materialised ONCE at a registered output sink through the sealed
-// `OutputProjector` capability.
-//
-// The PRIMARY confinement is structural: there is no `pub(crate)` (or wider)
-// raw `SemanticNodeId -> TypeExpr` surface — the module-private
-// `raise_node_to_type_expr` is reached only through the sealed `OutputProjector`
-// seam (`raise_node_to_type_expr_primitive_is_module_private` pins its
-// visibility) and the `#[cfg(test)]` oracle
-// (`materialize_type_expr_is_not_production_visible` pins that). This tombstone
-// is the only ADDED safeguard: a lean ABSENCE tripwire that the retired bridge
-// symbol never returns to production source.
-// ===========================================================================
-
-const RETIRED_BRIDGE_IDENT: &str = "legacy_semantic_type_expr_bridge";
-
 /// Whether `c` continues a Rust identifier.
 fn is_bridge_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
@@ -179,80 +143,6 @@ fn whole_ident_occurrences(src: &str, needle: &str) -> usize {
     count
 }
 
-/// TOMBSTONE: the retired Kind-B bridge symbol `legacy_semantic_type_expr_bridge`
-/// appears NOWHERE in production `verter_session` source — no definition, no
-/// call, no path reference, no re-export.
-///
-/// ```text
-/// scanner_invariant: retired_kind_b_bridge_symbol_absent_from_production_source
-/// scanner_justification: no compiler mechanism can assert "this deleted name never returns to production"; the bridge was a `pub(crate)` raw `SemanticNodeId -> TypeExpr` delegator now removed, and a re-introduction under the SAME name would re-open the mid-flight reverse-raise laundering surface. The PRIMARY confinement is structural (privacy on the module-private `raise_node_to_type_expr` + the sealed `OutputProjector` carriers + the `#[cfg(test)]` oracle gate), pinned by `raise_node_to_type_expr_primitive_is_module_private` and `materialize_type_expr_is_not_production_visible`; this tombstone is only an ABSENCE tripwire for the one retired spelling.
-/// mechanism_ruling: structural-confinement-first, lean-safeguards — the structural confinement (privacy + the sealed `OutputProjector` carriers) is the primary; the interim Kind-B reference-pinning scanners were retired and replaced by this single absence tripwire, NOT broadened into a closed-inventory scanner.
-/// hardening_rounds: 0
-/// hardening_history: this single absence tripwire replaces three retired interim guards — the two bridge-reference pins (`residual_output_materialization_bridge_no_new_kind_b_references`, `kind_b_raise_then_decide_entrypoints_pinned`) and the dormant readiness fence (`node_domain_readiness_primitives_have_zero_production_callers`); no spelling-hardening rounds.
-/// ```
-fn retired_kind_b_bridge_symbol_absent_from_production_source() {
-    let mut offenders: Vec<String> = Vec::new();
-    for (rel, src) in production_src_files() {
-        let n = whole_ident_occurrences(src, RETIRED_BRIDGE_IDENT);
-        if n > 0 {
-            offenders.push(format!("{rel} ({n}x)"));
-        }
-    }
-    assert!(
-        offenders.is_empty(),
-        "TOMBSTONE: the retired Kind-B bridge `{RETIRED_BRIDGE_IDENT}` must NOT exist in production \
-         source (it was removed by the Kind-B graph-native conversion; the node-domain decision API \
-         + the sealed OutputProjector sink replace it). Re-introduction would re-open the mid-flight \
-         reverse-raise laundering surface. Offending files: {offenders:?}"
-    );
-}
-
-/// Self-test: the tombstone's whole-identifier matcher DISCRIMINATES — it
-/// counts the bare symbol, ignores a longer identifier that merely CONTAINS it,
-/// and ignores an unrelated name. (Proves the absence assertion would actually
-/// FIRE on a re-introduction rather than pass vacuously.)
-#[test]
-fn retired_kind_b_bridge_tombstone_self_test_discriminates() {
-    // The bare symbol as a call / path / definition is COUNTED.
-    assert_eq!(
-        whole_ident_occurrences(
-            "self.legacy_semantic_type_expr_bridge(node)",
-            RETIRED_BRIDGE_IDENT
-        ),
-        1,
-        "self-test: a bare bridge call MUST be counted"
-    );
-    assert_eq!(
-        whole_ident_occurrences(
-            "fn legacy_semantic_type_expr_bridge(&self) {}\nx.legacy_semantic_type_expr_bridge();",
-            RETIRED_BRIDGE_IDENT
-        ),
-        2,
-        "self-test: a definition + a call MUST both count"
-    );
-    // A LONGER identifier merely CONTAINING the needle is NOT counted.
-    assert_eq!(
-        whole_ident_occurrences(
-            "x.legacy_semantic_type_expr_bridge_v2()",
-            RETIRED_BRIDGE_IDENT
-        ),
-        0,
-        "self-test: a longer identifier containing the needle MUST NOT count"
-    );
-    assert_eq!(
-        whole_ident_occurrences("xlegacy_semantic_type_expr_bridge", RETIRED_BRIDGE_IDENT),
-        0,
-        "self-test: a leading-prefixed identifier MUST NOT count"
-    );
-    // An unrelated identifier is NOT counted.
-    assert_eq!(
-        whole_ident_occurrences("let raise_node_to_type_expr = 1;", RETIRED_BRIDGE_IDENT),
-        0,
-        "self-test: an unrelated identifier MUST NOT count"
-    );
-}
-
-// ===========================================================================
 // (2) OutputProjector owner-file fence-shape guards: the sanctioned sink-set
 // registration inventory + EXACT module-topology confinement, the carrier
 // item/signature accessor allowlist, and the carrier/payload field privacy. The
@@ -4116,8 +4006,6 @@ fn test_output_cap_gate_self_test_discriminates() {
 // caller decides on the node-domain facts/key, and the demand-bound publication
 // adapters take a `&TypeExpr` demand (not a forgeable node), materialising once
 // at a registered sink — so they are not raw-authority boundaries here. The
-// absence of the retired bridge symbol is tripwired by
-// `retired_kind_b_bridge_symbol_absent_from_production_source`.
 //
 // Replaces the prior name-based single-file `output_sink` closed-allowlist
 // boundary check. Across the registered output sinks above this guard
@@ -4261,9 +4149,8 @@ fn test_output_cap_gate_self_test_discriminates() {
 //     is precise per inline submodule.
 // SCOPE: this is the Kind-A / PUBLICATION boundary. The former Kind-B
 // raise-then-decide residual is RETIRED — its callers decide on the node-domain
-// facts/key and materialise once at a registered sink; the retired bridge
-// symbol's absence is tripwired by the tombstone
-// `retired_kind_b_bridge_symbol_absent_from_production_source`.
+// facts/key and materialise once at a registered sink; the retired
+// raise-then-decide residual is gone.
 //
 // scanner_invariant: cross_sink_raw_authority_to_typeexpr
 // scanner_justification: the transitive DTO-content + forgeable-input PAIRING across multiple sink modules is not expressible as a single Rust visibility / type-state check — the sealed admitted-token chain (private fields + private Seal) is the compiler primary, this scanner is the residual cross-module pairing supplement.
@@ -17371,10 +17258,6 @@ fn hot_detector_spellings_are_live_or_synthetic() {
 }
 
 pub(super) const PRODUCTION_GUARDS: &[(&str, fn())] = &[
-    (
-        "retired_kind_b_bridge_symbol_absent_from_production_source",
-        retired_kind_b_bridge_symbol_absent_from_production_source,
-    ),
     (
         "output_cap_mint_scope_is_per_leaf_not_subtree",
         output_cap_mint_scope_is_per_leaf_not_subtree,

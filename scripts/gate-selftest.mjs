@@ -6259,8 +6259,7 @@ fi
     const TOL =
       "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output";
     const T1 = "cases::g_compile::compile_fail::hot_materialize_structural_rails_smoke";
-    const T2 =
-      "cases::tracked_paths_no_machine_roots::tracked_files_contain_no_machine_specific_path_markers";
+    const T2 = "cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms";
     const names = (r) => r.failures.map((f) => `${f.surface}|${f.name}`).join("\n");
     let ok = true;
 

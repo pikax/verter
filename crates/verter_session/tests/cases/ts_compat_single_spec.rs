@@ -15,8 +15,7 @@
 //!   VARIANT name; (b) a STRUCTURAL field-inventory over a CLOSED target list of
 //!   cache-key / context structs, asserting none gains a field whose NAME is in
 //!   the deny-set OR whose TYPE is in a closed forbidden-selector-type set, with
-//!   an explicit allowlist for the legitimate non-spec `*_profile` fields. Same
-//!   family as `no_phase_archaeology_in_production_code`.
+//!   an explicit allowlist for the legitimate non-spec `*_profile` fields.
 //! - [`every_correction_is_discharged`] — a finite ∃-discharge (§7.1 / §8): the
 //!   on-disk correction set SET-EQUALS the registry-derived corrected-query set
 //!   keyed `(row_file, row_function, query_ordinal, snapshot_id)`, and each
@@ -159,8 +158,7 @@ fn is_token_scan_exempt(rel: &str) -> bool {
 }
 
 /// Enumerate every production `.rs` file under `crates/*/src/` (excluding
-/// `benches/` / `examples/` / `target/` subdirs). Mirrors the
-/// `no_phase_archaeology_in_production_code` production walk.
+/// `benches/` / `examples/` / `target/` subdirs).
 fn production_rs_files() -> Vec<PathBuf> {
     let mut out = Vec::new();
     let crates = workspace_root().join("crates");
