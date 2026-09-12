@@ -4261,6 +4261,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             implicit_undefined_seen,
             &holds,
             degradation,
+            ir.empty_completion,
         ) {
             Ok(joined) => joined,
             Err(failure) => {
@@ -4337,6 +4338,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         implicit_undefined_seen: bool,
         holds: &[HeldCallee],
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+        empty_completion: crate::flow_slice_content::EmptyCompletion,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
         let graph = self.graph();
         // Literal widening is a SINGLE-contributor rule (tsc aggregates
@@ -4492,7 +4494,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         } else if arms.is_empty() {
             if holds.is_empty() {
-                arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)));
+                // A body that contributes no return arm and never completes
+                // normally (throw-only, or ending in a divergent loop) is
+                // `never` only when the function's FORM admits it. The
+                // checker's `mayReturnNever` rule splits purely on that
+                // form: a function declaration and a class method model as
+                // `void`, a function expression / arrow / object-literal
+                // method as `never`. The producer owns the classification;
+                // this reads its typed answer rather than re-deriving one.
+                let primitive = match empty_completion {
+                    crate::flow_slice_content::EmptyCompletion::Void => PrimitiveKind::Void,
+                    crate::flow_slice_content::EmptyCompletion::Never => PrimitiveKind::Never,
+                };
+                arms.push(graph.intern_node(SemanticNodeData::Primitive(primitive)));
                 inference_only.push(false);
             } else {
                 return Err(FlowReturnFailure::EmptyCycle);
@@ -4608,6 +4622,7 @@ fn collect_assignment_spans(
             | crate::flow_slice_content::SliceStatement::Throw
             | crate::flow_slice_content::SliceStatement::ThrowPoint
             | crate::flow_slice_content::SliceStatement::TransparentLoop
+            | crate::flow_slice_content::SliceStatement::DivergentLoop
             | crate::flow_slice_content::SliceStatement::Unsupported(_) => {}
         }
     }
@@ -5049,6 +5064,7 @@ fn slice_statements_have_non_subject_return<'a>(
         | SliceStatement::ThrowPoint
         | SliceStatement::Binding { .. }
         | SliceStatement::TransparentLoop
+        | SliceStatement::DivergentLoop
         | SliceStatement::Unsupported(_) => false,
     })
 }
@@ -10819,6 +10835,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                 }
                 crate::flow_slice_content::SliceStatement::TransparentLoop => {}
+                // The loop is entered and never completes normally: the
+                // region's normal path ends here, exactly as at a `throw`.
+                // The lowering already dropped the unreachable suffix; this
+                // keeps the evaluator's own reachability in agreement.
+                crate::flow_slice_content::SliceStatement::DivergentLoop => {
+                    path_alive = false;
+                }
                 crate::flow_slice_content::SliceStatement::Unsupported(kind) => {
                     return (
                         Err(FlowReturnFailure::Unsupported(match kind {
@@ -11016,6 +11039,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             content.declared_return.as_ref(),
             &content.body,
             content.can_fall_through,
+            content.empty_completion,
             &content.bindings,
             skeleton,
             bound,
@@ -11108,6 +11132,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         declared_return: Option<&crate::flow_slice_content::GatedType>,
         body: &crate::flow_slice_content::SliceRegion,
         can_fall_through: bool,
+        empty_completion: crate::flow_slice_content::EmptyCompletion,
         bindings: &Arc<FlowBindingMap>,
         skeleton: Arc<FunctionBodySkeleton>,
         bound: crate::cache_runtime::flow_slice_node::BoundFlowGraph,
@@ -11583,6 +11608,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 nested_implicit_undefined_seen,
                 &nested_holds,
                 nested_degradation,
+                empty_completion,
             )
         }) {
             Ok((result, _fresh_seed)) => result.return_type(),

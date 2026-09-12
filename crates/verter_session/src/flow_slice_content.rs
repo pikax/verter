@@ -189,6 +189,10 @@ pub struct SliceContent {
     pub body: SliceRegion,
     /// Whether execution can reach past the body without a `return`.
     pub can_fall_through: bool,
+    /// What a body that contributes NO return arm and never completes
+    /// normally models as. Producer-owned: it is a property of the
+    /// function's authored FORM, which only this lowering can see.
+    pub empty_completion: EmptyCompletion,
     /// A budget edge one SELECTED leaf's expression lowering hit (the
     /// expression itself degrades to `any`, the whole evaluation fails
     /// with the typed budget reason). Unselected content never lowers,
@@ -219,6 +223,23 @@ pub struct SliceContent {
     /// reached. Absolute spans: the report rebases them onto the frame
     /// anchor when pairing against the skeleton footprint.
     pub decided_above_call_spans: Vec<verter_span::Span>,
+}
+
+/// What a function body models as when it contributes no return arm and
+/// its end point is unreachable — a throw-only body, or one whose last
+/// reachable construct is a divergent loop.
+///
+/// The checker splits this purely on the function's authored FORM: a
+/// function DECLARATION and a CLASS method model as `void`, while a
+/// function EXPRESSION, an ARROW, and an OBJECT-LITERAL method model as
+/// `never`. This is the checker's `mayReturnNever` rule, and it is the
+/// only thing that distinguishes the two seeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmptyCompletion {
+    /// A function declaration or a class method.
+    Void,
+    /// A function expression, an arrow, or an object-literal method.
+    Never,
 }
 
 /// One formal parameter.
@@ -466,6 +487,12 @@ pub enum SliceStatement {
     /// transparent too, but its body still lowers — as a labeled region, so
     /// its inner rails and its break exits keep deciding.)
     TransparentLoop,
+    /// A return-free loop that is entered and never completes normally —
+    /// its own exit edge is statically unreachable and no `break` targets
+    /// it (`while (true) {}`, `for (;;) {}`). It contributes no return arm
+    /// and, like a `throw`, ends the enclosing region's normal path, so
+    /// the body contributes no implicit `undefined`.
+    DivergentLoop,
     /// An unsupported construct (return-bearing loop, `with`, a
     /// `break`/`continue` jump no enclosing modelled construct absorbs, a
     /// module-level statement). The whole function is unsupported: the
@@ -1621,6 +1648,30 @@ pub(crate) fn build_function_type_param_clause(
     lower_slice_type_params(&resolved.node, source, &SignatureScope::Root)
 }
 
+/// Classify the function's authored form for the empty-completion seed.
+///
+/// An arrow is always `never`-seeded. A `function` node is `void`-seeded
+/// when it is a declaration, and otherwise only when the locator's final
+/// descent step places it as a CLASS member — an object-literal method and
+/// a plain function expression share the declaration's OXC node type and
+/// are separated only by that step.
+fn empty_completion_of(
+    node: &FunctionNode<'_>,
+    locator: &verter_semantic::analysis::function_program::FunctionBodyLocator,
+) -> EmptyCompletion {
+    use verter_semantic::analysis::function_program::FunctionDescentStep;
+    let FunctionNode::Function(function) = node else {
+        return EmptyCompletion::Never;
+    };
+    if function.r#type == oxc_ast::ast::FunctionType::FunctionDeclaration {
+        return EmptyCompletion::Void;
+    }
+    match locator.descent.last() {
+        Some(FunctionDescentStep::ClassMember { .. }) => EmptyCompletion::Void,
+        _ => EmptyCompletion::Never,
+    }
+}
+
 /// One function borrowed from its exact retained parse address table.
 pub(crate) struct FlowSliceSource<'a> {
     pub program: &'a Program<'a>,
@@ -1706,6 +1757,7 @@ pub(crate) fn build_flow_slice_content(
                 bindings,
                 declared_return,
                 can_fall_through: false,
+                empty_completion: empty_completion_of(&node, &entry.locator),
                 params: Arc::from(Vec::new().into_boxed_slice()),
                 type_parameters: Arc::from(Vec::new().into_boxed_slice()),
                 enclosing_type_parameters: Arc::from(Vec::new().into_boxed_slice()),
@@ -1865,6 +1917,7 @@ pub(crate) fn build_flow_slice_content(
         bindings,
         declared_return,
         can_fall_through: region.can_fall_through,
+        empty_completion: empty_completion_of(&node, &entry.locator),
         params: Arc::from(params.into_boxed_slice()),
         type_parameters: Arc::from(type_parameters.into_boxed_slice()),
         enclosing_type_parameters: Arc::from(enclosing_type_parameters.into_boxed_slice()),
@@ -2482,6 +2535,168 @@ fn label_directly_wraps_loop(body: &Statement<'_>) -> bool {
 /// frame can only target a label inside that frame. Unlabeled jumps
 /// always bind within the loop (the loop itself, or a nested
 /// loop/switch) and never escape it.
+/// Whether a loop's own normal-exit edge is statically unreachable, so the
+/// loop is entered and never completes normally.
+///
+/// This mirrors the checker's binder rule and deliberately does NOT
+/// generalise it. The binder marks the exit edge unreachable when the
+/// condition is the bare `true` KEYWORD, or (for `for`) absent; it neither
+/// skips parentheses nor evaluates truthiness. `while (1)` and
+/// `while ((true))` therefore keep a reachable exit and keep contributing
+/// the implicit `undefined`, exactly as the checker does.
+///
+/// The exit is also reachable whenever a `break` can target THIS loop: an
+/// unlabeled `break` whose innermost enclosing breakable construct is the
+/// loop itself, or a labeled `break` naming a label that wraps it. A
+/// `continue`, a `break` captured by a nested loop, and a `break` captured
+/// by a nested `switch` all leave the exit unreachable.
+fn loop_exit_edge_is_unreachable(
+    loop_statement: &Statement<'_>,
+    wrapping_labels: &[Arc<str>],
+) -> bool {
+    let body = match loop_statement {
+        Statement::WhileStatement(while_stmt) => {
+            if !matches!(&while_stmt.test, Expression::BooleanLiteral(literal) if literal.value) {
+                return false;
+            }
+            &while_stmt.body
+        }
+        Statement::DoWhileStatement(do_while) => {
+            if !matches!(&do_while.test, Expression::BooleanLiteral(literal) if literal.value) {
+                return false;
+            }
+            &do_while.body
+        }
+        Statement::ForStatement(for_stmt) => {
+            if for_stmt.test.is_some() {
+                return false;
+            }
+            &for_stmt.body
+        }
+        // `for..in` / `for..of` complete normally once the iterated value is
+        // exhausted, so their exit edge is always reachable.
+        _ => return false,
+    };
+    !loop_body_reaches_exit(body, wrapping_labels, &mut Vec::new(), 0)
+}
+
+/// Whether `statement`, appearing inside a loop body, can transfer control
+/// to that loop's exit edge.
+///
+/// `enclosing_breakables` counts the breakable constructs entered since the
+/// loop body, so an unlabeled `break` is bound to the loop exactly at zero.
+/// It is a LEXICAL binding fact, not a recursion budget: the walk is finite
+/// in the statement tree and has no cutoff.
+/// `nested_labels` are the labels declared between the loop body and
+/// `statement`; `wrapping_labels` are the labels wrapping the loop itself.
+///
+/// Detection is biased toward finding a reaching `break`: an unrecognised
+/// statement form is treated as possibly carrying one, which preserves the
+/// fall-through answer rather than asserting divergence.
+fn loop_body_reaches_exit<'a>(
+    statement: &'a Statement<'a>,
+    wrapping_labels: &[Arc<str>],
+    nested_labels: &mut Vec<&'a str>,
+    enclosing_breakables: u32,
+) -> bool {
+    let recurse =
+        |statement: &'a Statement<'a>, nested_labels: &mut Vec<&'a str>, enclosing_breakables| {
+            loop_body_reaches_exit(
+                statement,
+                wrapping_labels,
+                nested_labels,
+                enclosing_breakables,
+            )
+        };
+    match statement {
+        Statement::BreakStatement(break_stmt) => match break_stmt.label.as_ref() {
+            None => enclosing_breakables == 0,
+            // A label declared inside the body names an inner construct, so
+            // a break naming it cannot reach the loop's own exit.
+            Some(label) => {
+                let name = label.name.as_str();
+                !nested_labels.contains(&name)
+                    && wrapping_labels.iter().any(|wrapping| &**wrapping == name)
+            }
+        },
+        // A `continue` re-enters the loop; it never reaches the exit edge.
+        Statement::ContinueStatement(_) => false,
+        Statement::LabeledStatement(labeled) => {
+            nested_labels.push(labeled.label.name.as_str());
+            let reaches = recurse(&labeled.body, nested_labels, enclosing_breakables);
+            nested_labels.pop();
+            reaches
+        }
+        Statement::BlockStatement(block) => block
+            .body
+            .iter()
+            .any(|statement| recurse(statement, nested_labels, enclosing_breakables)),
+        Statement::IfStatement(if_stmt) => {
+            recurse(&if_stmt.consequent, nested_labels, enclosing_breakables)
+                || if_stmt.alternate.as_ref().is_some_and(|alternate| {
+                    recurse(alternate, nested_labels, enclosing_breakables)
+                })
+        }
+        Statement::WithStatement(with_stmt) => {
+            recurse(&with_stmt.body, nested_labels, enclosing_breakables)
+        }
+        Statement::TryStatement(try_stmt) => {
+            try_stmt
+                .block
+                .body
+                .iter()
+                .any(|statement| recurse(statement, nested_labels, enclosing_breakables))
+                || try_stmt.handler.as_ref().is_some_and(|handler| {
+                    handler
+                        .body
+                        .body
+                        .iter()
+                        .any(|statement| recurse(statement, nested_labels, enclosing_breakables))
+                })
+                || try_stmt.finalizer.as_ref().is_some_and(|finalizer| {
+                    finalizer
+                        .body
+                        .iter()
+                        .any(|statement| recurse(statement, nested_labels, enclosing_breakables))
+                })
+        }
+        // A nested breakable construct captures an unlabeled `break`.
+        Statement::SwitchStatement(switch) => switch.cases.iter().any(|case| {
+            case.consequent
+                .iter()
+                .any(|statement| recurse(statement, nested_labels, enclosing_breakables + 1))
+        }),
+        Statement::DoWhileStatement(do_while) => {
+            recurse(&do_while.body, nested_labels, enclosing_breakables + 1)
+        }
+        Statement::WhileStatement(while_stmt) => {
+            recurse(&while_stmt.body, nested_labels, enclosing_breakables + 1)
+        }
+        Statement::ForStatement(for_stmt) => {
+            recurse(&for_stmt.body, nested_labels, enclosing_breakables + 1)
+        }
+        Statement::ForInStatement(for_in) => {
+            recurse(&for_in.body, nested_labels, enclosing_breakables + 1)
+        }
+        Statement::ForOfStatement(for_of) => {
+            recurse(&for_of.body, nested_labels, enclosing_breakables + 1)
+        }
+        // Forms that cannot lexically carry a `break` bound to an enclosing
+        // loop. A nested function body is excluded by the grammar.
+        Statement::DebuggerStatement(_)
+        | Statement::EmptyStatement(_)
+        | Statement::ExpressionStatement(_)
+        | Statement::ReturnStatement(_)
+        | Statement::ThrowStatement(_)
+        | Statement::VariableDeclaration(_)
+        | Statement::FunctionDeclaration(_)
+        | Statement::ClassDeclaration(_) => false,
+        // Anything else is treated as possibly carrying a reaching break,
+        // which keeps the exit reachable and preserves today's answer.
+        _ => true,
+    }
+}
+
 fn loop_transfers_to_enclosing_label(
     loop_statement: &Statement<'_>,
     direct_labels: &[Arc<str>],
@@ -4678,6 +4893,14 @@ impl Lowerer<'_> {
                     {
                         out.push(SliceStatement::Unsupported(SliceUnsupported::Loop));
                         hit_unsupported = true;
+                        can_fall_through = false;
+                    } else if loop_exit_edge_is_unreachable(statement, &self.loop_direct_labels) {
+                        // The loop never completes normally, so it ends the
+                        // region's normal path exactly as an authored `throw`
+                        // does. The statements after it are unreachable and
+                        // contribute nothing, and the body no longer
+                        // contributes the fall-through `undefined`.
+                        out.push(SliceStatement::DivergentLoop);
                         can_fall_through = false;
                     } else {
                         out.push(SliceStatement::TransparentLoop);

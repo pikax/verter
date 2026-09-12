@@ -631,17 +631,22 @@ catalog_contract!(
 );
 
 #[test]
-fn flow_return_bl13_throw_only_body_is_never() {
-    // A body that terminates with NO contribution and no hold is `never`
-    // (tsc's answer for a throw-only function) — not the empty-cycle
-    // failure, not `void`.
-    assert_catalog_alias("BL13", |expr| assert_primitive(expr, PrimitiveName::Never));
+fn flow_return_bl13_throw_only_declaration_is_void() {
+    // A body that terminates with NO contribution and no hold models by the
+    // function's authored FORM, not by the termination. `bl13` is a
+    // function DECLARATION, so the checker answers `void` — `never` is the
+    // answer for a function expression, an arrow, or an object-literal
+    // method. Confirmed against the pinned checker through the alias
+    // itself: `declare const a: BL13; const p: null = a` reports
+    // "Type 'void' is not assignable to type 'null'".
+    //
+    // Still not the empty-cycle failure.
+    assert_catalog_alias("BL13", |expr| assert_primitive(expr, PrimitiveName::Void));
 }
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_bl15_models_divergent_loop_as_void,
     "BL15",
-    "typeinfo currently does not model divergent loop bodies or apply TypeScript-compatible no-return-expression fallback; keep as the future BL15 divergent-loop contract",
     |expr| assert_primitive(expr, PrimitiveName::Void)
 );
 

@@ -504,7 +504,7 @@ const GUARD_REGISTRY: &[GuardSpec] = &[
     GuardSpec { id: GuardId::NoCachingOfPartialOrBudgetExceededResults, owner: TypeInfoParityBlockId::U6LoopClosure, disposition: GuardDisposition::Owed },
     GuardSpec { id: GuardId::ClosureCaptureBarrierWidensCapturedMutableSlots, owner: TypeInfoParityBlockId::U6LoopClosure, disposition: GuardDisposition::Owed },
     GuardSpec { id: GuardId::PredicateCallDoesNotTriggerClosureBarrier, owner: TypeInfoParityBlockId::U6LoopClosure, disposition: GuardDisposition::Owed },
-    GuardSpec { id: GuardId::DivergentLoopModelsAsVoid, owner: TypeInfoParityBlockId::U6LoopClosure, disposition: GuardDisposition::Owed },
+    GuardSpec { id: GuardId::DivergentLoopModelsAsVoid, owner: TypeInfoParityBlockId::U6LoopClosure, disposition: GuardDisposition::Live { target: GuardTarget::SessionLib } },
     GuardSpec { id: GuardId::FlowPolicyDifferentiatesCacheCandidates, owner: TypeInfoParityBlockId::U6LoopClosure, disposition: GuardDisposition::Owed },
     GuardSpec { id: GuardId::CacheKeysCoverTsJsxModuleresolutionDecoratorLibDimensions, owner: TypeInfoParityBlockId::U3CacheFactModel, disposition: GuardDisposition::Owed },
     GuardSpec { id: GuardId::InstantiationDepthPolicyInIdentityAndFacts, owner: TypeInfoParityBlockId::U3CacheFactModel, disposition: GuardDisposition::Owed },

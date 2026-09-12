@@ -358,6 +358,7 @@ const LIB_LIVE_GUARD_IDS: &[GuardId] = &[
     GuardId::NoFlowSlotInPublishedTypeSurface,
     GuardId::FlowSliceBudgetExceededAdmitsNothing,
     GuardId::FlowSliceIrDetachesFromOxcArena,
+    GuardId::DivergentLoopModelsAsVoid,
     GuardId::CacheSatisfactionIsMaterializedPointNotNominalDemand,
     GuardId::BackfillWritesOnlyRecordedMaterializedPoints,
 ];

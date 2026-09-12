@@ -53,6 +53,7 @@ static LIB_LIVE_GUARD_BINDINGS: &[LibGuardBinding] = &[
     lib_guard!(NoFlowSlotInPublishedTypeSurface => crate::component_meta_flow_return_admission_tests::no_flow_slot_in_published_type_surface),
     lib_guard!(FlowSliceBudgetExceededAdmitsNothing => crate::project_semantic_dispatch::flow_return_tests::flow_slice_budget_exceeded_is_return_only_at_the_memo),
     lib_guard!(FlowSliceIrDetachesFromOxcArena => crate::cache_runtime::flow_slice_node::tests::flow_slice_ir_detaches_from_oxc_arena),
+    lib_guard!(DivergentLoopModelsAsVoid => crate::project_semantic_dispatch::flow_return_loop_completion_tests::an_empty_completion_seeds_by_the_functions_authored_form),
     lib_guard!(CacheSatisfactionIsMaterializedPointNotNominalDemand => crate::semantic_query_memo::tests::cache_satisfaction_is_materialized_point_not_nominal_demand),
     lib_guard!(BackfillWritesOnlyRecordedMaterializedPoints => crate::semantic_query_memo::tests::backfill_writes_only_recorded_materialized_points),
     lib_guard!(GuardRegistryLibBindingsAreComplete => crate::typeinfo_guard_bindings_tests::guard_registry_lib_bindings_are_complete),
