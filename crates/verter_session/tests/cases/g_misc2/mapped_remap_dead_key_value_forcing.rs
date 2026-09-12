@@ -263,3 +263,109 @@ fn single_key_demand_through_remapping_mapper_forces_only_the_producing_key() {
          survivor `e` as well; a count of 6 means it forced the dropped keys too."
     );
 }
+
+/// `WIDE_REMAP_TS` with ONE dropped key's value type edited (`c: boolean`
+/// → `c: symbol`). The edited key is remap-DROPPED, so it contributes
+/// nothing to the published surface and its value is never a semantic
+/// operand of the mapped result.
+const WIDE_REMAP_DEAD_KEY_EDITED_TS: &str = r#"
+export interface WideSource {
+  a: string;
+  b: number;
+  c: symbol;
+  d: string[];
+  e: number[];
+  f: Record<string, string>;
+}
+
+export type Boxed<V> = { boxed: V };
+
+export type Kept<K> = K extends 'b' ? 'kept_b' : K extends 'e' ? 'kept_e' : never;
+
+export type Remapped = {
+  [K in keyof WideSource as Kept<K>]: Boxed<WideSource[K]>
+};
+"#;
+
+/// DISCRIMINATOR (incremental parity after a dead-key edit): editing the
+/// value type of a key the remap DROPS must not change the published
+/// surface, and recomputation must still perform zero dead-key semantic
+/// work.
+///
+/// The edit lands on the mapped type's own owner file, so strict
+/// self-root validation may conservatively reject the warm entry and
+/// recompute — that is allowed. What is NOT allowed is the recomputation
+/// paying for the dead key: the post-edit run must force the same two
+/// surviving keys and no more, and must publish a surface identical to
+/// the one a FRESH host computes from the edited source.
+///
+/// This fails if dead-key work leaks back into recomputation (the
+/// counter exceeds two) or if a dropped key's value edit perturbs the
+/// published surface (incremental/fresh divergence).
+#[test]
+fn dead_key_edit_preserves_surface_and_forces_no_dead_key_work_on_recompute() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert(&host, WIDE_REMAP_TS);
+
+    let before_surface = member_names(
+        &host,
+        project(
+            &host,
+            carrier(&host, "Remapped", ProjectionMode::Expanded),
+            Vec::new(),
+            ProjectionMode::Expanded,
+        ),
+    );
+
+    // Edit the DEAD key `c`'s value type in the same owner file.
+    upsert(&host, WIDE_REMAP_DEAD_KEY_EDITED_TS);
+
+    let before = per_k_materializations(&host);
+    let after_surface = member_names(
+        &host,
+        project(
+            &host,
+            carrier(&host, "Remapped", ProjectionMode::Expanded),
+            Vec::new(),
+            ProjectionMode::Expanded,
+        ),
+    );
+    let forced = per_k_materializations(&host) - before;
+
+    let mut before_sorted = before_surface;
+    before_sorted.sort();
+    let mut after_sorted = after_surface;
+    after_sorted.sort();
+    assert_eq!(
+        after_sorted, before_sorted,
+        "editing a remap-DROPPED key's value type must not change the published mapped \
+         surface: the dropped key contributes no member and its value is not an operand of \
+         the result"
+    );
+
+    // FRESH parity: a host that never saw the pre-edit source must
+    // publish the identical surface.
+    let fresh = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert(&fresh, WIDE_REMAP_DEAD_KEY_EDITED_TS);
+    let mut fresh_sorted = member_names(
+        &fresh,
+        project(
+            &fresh,
+            carrier(&fresh, "Remapped", ProjectionMode::Expanded),
+            Vec::new(),
+            ProjectionMode::Expanded,
+        ),
+    );
+    fresh_sorted.sort();
+    assert_eq!(
+        after_sorted, fresh_sorted,
+        "incremental and fresh evaluation of the edited source must publish the same surface"
+    );
+
+    assert!(
+        forced <= 2,
+        "recomputation after a dead-key edit must still force at most the two SURVIVING keys' \
+         value operands; observed {forced}. More than two means dead-key work leaked back into \
+         the recompute path."
+    );
+}
