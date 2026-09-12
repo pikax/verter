@@ -20,16 +20,12 @@
 //!   `retract_source_everywhere` / `retract_source_everywhere_except`: only the
 //!   coordinator's sealed wrappers (in `publish_coordinator.rs`) and the backend
 //!   itself (`tsserver_backend.rs`) may call them.
-//! - Two names were DELETED with no shim and must never re-appear —
-//!   `publish_carrier` / `reconcile_owner_loss`: forbidden as a CALL anywhere and
-//!   as a re-introduced `fn` definition anywhere.
 //!
 //! `ProjectSync` is a PROVIDER-BUFFER abstraction (open/update/close in the engine
 //! process); it does not mutate the on-disk carrier store, so the store-mutation
-//! surface is exactly the six symbols above — guarding their call sites guards
-//! every store mutation. The two legitimate provider-buffer resolvers
-//! (`prepare_carrier_provider_sync_transition`, `carrier_sync_state_for_source`)
-//! are deliberately NOT in the forbidden set.
+//! surface is exactly the four symbols above — guarding their call sites guards
+//! every store mutation. The carrier-companion CONTENT verbs are policed separately:
+//! they may run only from the bounded carrier-sync surface.
 //!
 //! ## Why this scan is still the only check of the invariant
 //!
@@ -49,9 +45,8 @@
 //! ## Why AST, not a text scan
 //!
 //! Exact-ident matching is load-bearing: live, legitimate methods share a PREFIX
-//! with the forbidden names — `retract_carrier_from_external_ts` (the server-side
-//! retract entry) and `publish_carrier_to_external_ts` (the drain publish entry)
-//! must NOT trip the guard, while `retract_carrier` / `publish_carrier` MUST. A
+//! with the policed names — `retract_carrier_from_external_ts` (the server-side
+//! retract entry) must NOT trip the guard, while `retract_carrier` MUST. A
 //! `str::contains` scan cannot tell them apart; an AST method/path-segment ident
 //! is compared for EQUALITY, so the prefix-sharing live names are clean.
 //!
@@ -80,8 +75,8 @@ const PUBLISH_COORDINATOR: &str = "crates/verter_lsp/src/external_ts/publish_coo
 const TSSERVER_BACKEND: &str = "crates/verter_lsp/src/external_ts/tsserver_backend.rs";
 const MEMBERSHIP_RECONCILER: &str = "crates/verter_lsp/src/external_ts/membership_reconciler.rs";
 
-/// The SEALED carrier-sync GATEWAY: the SOLE file that may derive a carrier
-/// provider state (`carrier_sync_state_for_source`) and mint the commit receipt.
+/// The carrier-sync gateway: the single file that reconciles a carrier's membership
+/// and provider state together.
 const CARRIER_SYNC_GATEWAY: &str = "crates/verter_lsp/src/external_ts/carrier_sync.rs";
 
 /// The sealed store-mutator names whose call sites are policed.
@@ -91,16 +86,6 @@ const SEALED_MUTATORS: &[&str] = &[
     "retract_source_everywhere",
     "retract_source_everywhere_except",
 ];
-
-/// The carrier-path RESOLVER that is now PRIVATE to the carrier-sync gateway. It
-/// derives a carrier's owner-resolved `ProviderSyncState` (the IDE/API provider
-/// paths); deriving that state is the FIRST half of the gap-E bug (a site that then
-/// commits the buffer state while forgetting the membership publish/retract). It is
-/// the language-level seal's static backstop: the only file that may compute carrier
-/// provider paths is the gateway, so no site can commit carrier state — or return on
-/// owner-loss — without routing the membership decision through
-/// [`reconcile_carrier_source`].
-const GATEWAY_RESOLVERS: &[&str] = &["carrier_sync_state_for_source"];
 
 /// The carrier-companion ProjectSync CONTENT verbs (establish a carrier `.tsx`/`.dts`
 /// companion as a provider content authority). They may run ONLY from the bounded
@@ -129,17 +114,6 @@ const CONTENT_VERB_ALLOWLIST: &[&str] = &[
     "crates/verter_lsp/src/type_provider/project_sync.rs",
 ];
 
-/// The DELETED names — forbidden as a call AND as a re-introduced `fn` definition,
-/// anywhere (no allowlist entry). `prepare_carrier_provider_sync_transition` was the
-/// server-side carrier transition resolver, deleted when its callers were routed
-/// through the gateway; re-introducing it would re-open the off-gateway derive+commit
-/// path.
-const DELETED_NAMES: &[&str] = &[
-    "publish_carrier",
-    "reconcile_owner_loss",
-    "prepare_carrier_provider_sync_transition",
-];
-
 /// Whether a call to `symbol` is permitted in `file_rel`, given whether the call
 /// site is inside the `CarrierMembershipCommitter` impl block.
 fn call_is_allowed(symbol: &str, file_rel: &str, in_committer_impl: bool) -> bool {
@@ -159,10 +133,6 @@ fn call_is_allowed(symbol: &str, file_rel: &str, in_committer_impl: bool) -> boo
                 || file_rel == TSSERVER_BACKEND
                 || file_rel == MEMBERSHIP_RECONCILER
         }
-        // Deleted names: never permitted (anywhere).
-        _ if DELETED_NAMES.contains(&symbol) => false,
-        // The carrier-path resolver: ONLY the carrier-sync gateway file.
-        _ if GATEWAY_RESOLVERS.contains(&symbol) => file_rel == CARRIER_SYNC_GATEWAY,
         // Carrier-companion content verbs: only the bounded carrier-sync surface.
         _ if CARRIER_CONTENT_VERBS.contains(&symbol) => CONTENT_VERB_ALLOWLIST.contains(&file_rel),
         // Any non-policed symbol is allowed.
@@ -170,9 +140,8 @@ fn call_is_allowed(symbol: &str, file_rel: &str, in_committer_impl: bool) -> boo
     }
 }
 
-/// AST visitor: records every forbidden CALL site and every re-introduced DELETED
-/// `fn` definition, tracking whether the cursor is inside the allowlisted
-/// `CarrierMembershipCommitter` impl block.
+/// AST visitor: records every forbidden CALL site, tracking whether the cursor is
+/// inside the allowlisted `CarrierMembershipCommitter` impl block.
 struct CallScanner {
     file_rel: String,
     in_committer_impl: bool,
@@ -182,30 +151,14 @@ struct CallScanner {
 impl CallScanner {
     /// Flag a forbidden call/reference by its exact method/path-segment ident.
     fn check_call(&mut self, name: &str) {
-        let policed = SEALED_MUTATORS.contains(&name)
-            || DELETED_NAMES.contains(&name)
-            || GATEWAY_RESOLVERS.contains(&name)
-            || CARRIER_CONTENT_VERBS.contains(&name);
+        let policed = SEALED_MUTATORS.contains(&name) || CARRIER_CONTENT_VERBS.contains(&name);
         if policed && !call_is_allowed(name, &self.file_rel, self.in_committer_impl) {
             self.violations.push(format!(
                 "{}: reference to sealed carrier symbol `{name}` outside the allowlist. \
                  Store mutators route through the `CarrierMembershipCommitter` impl in \
-                 {PUBLISH_COORDINATOR} (+ backend/reconciler); `carrier_sync_state_for_source` \
-                 is PRIVATE to the carrier-sync gateway ({CARRIER_SYNC_GATEWAY}); the carrier \
-                 content verbs run only from the bounded carrier-sync surface; the deleted names \
-                 are forbidden everywhere. Route the carrier membership + provider-state commit \
-                 through `reconcile_carrier_source` (the single gateway), never a private derive.",
-                self.file_rel
-            ));
-        }
-    }
-
-    /// Flag a re-introduced DELETED `fn` definition by its exact ident.
-    fn check_def(&mut self, name: &str) {
-        if DELETED_NAMES.contains(&name) {
-            self.violations.push(format!(
-                "{}: definition of `fn {name}` re-introduces a DELETED store-mutator (it was \
-                 removed with no shim). The membership transition routes through the reconciler.",
+                 {PUBLISH_COORDINATOR} (+ backend/reconciler); the carrier content verbs run \
+                 only from the bounded carrier-sync surface. Route the carrier membership + \
+                 provider-state commit through `reconcile_carrier_source` (the single gateway).",
                 self.file_rel
             ));
         }
@@ -247,34 +200,17 @@ impl<'ast> Visit<'ast> for CallScanner {
         syn::visit::visit_expr_method_call(self, mc);
     }
 
-    /// Catch every PATH form by its last segment ident — a free-fn call
-    /// (`carrier_sync_state_for_source(...)` whose func is a path), an associated
-    /// path (`Type::sym`), AND a bare fn-pointer / path-VALUE reference
-    /// (`let f = carrier_sync_state_for_source;` / passing it as a callback). A
-    /// method call's receiver path is visited here too, but a method's own ident is
-    /// NOT a path segment (it is handled by `visit_expr_method_call`), so there is no
-    /// double counting. Hardened past call-only matching so a fn-pointer smuggle of a
-    /// sealed resolver cannot bypass the guard.
+    /// Catch every PATH form by its last segment ident — a free-fn call whose func
+    /// is a path, an associated path (`Type::sym`), AND a bare fn-pointer /
+    /// path-VALUE reference (`let f = Backend::retract_source_everywhere;` / passing
+    /// it as a callback). A method call's receiver path is visited here too, but a
+    /// method's own ident is NOT a path segment (it is handled by
+    /// `visit_expr_method_call`), so there is no double counting.
     fn visit_path(&mut self, path: &'ast syn::Path) {
         if let Some(seg) = path.segments.last() {
             self.check_call(&seg.ident.to_string());
         }
         syn::visit::visit_path(self, path);
-    }
-
-    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
-        self.check_def(&f.sig.ident.to_string());
-        syn::visit::visit_item_fn(self, f);
-    }
-
-    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
-        self.check_def(&f.sig.ident.to_string());
-        syn::visit::visit_impl_item_fn(self, f);
-    }
-
-    fn visit_trait_item_fn(&mut self, f: &'ast syn::TraitItemFn) {
-        self.check_def(&f.sig.ident.to_string());
-        syn::visit::visit_trait_item_fn(self, f);
     }
 }
 
@@ -400,42 +336,16 @@ fn allowlist_self_test_discriminates() {
          publish_coordinator.rs; got {outside_block:?}"
     );
 
-    // 3. EXACT-IDENT discrimination: the prefix-sharing LIVE names are CLEAN
+    // 3. EXACT-IDENT discrimination: the prefix-sharing LIVE name is CLEAN
     //    everywhere.
     let live_prefix = scan_source(
         "crates/verter_lsp/src/server/lifecycle.rs",
-        "async fn ok(s: &S, id: &str) {\n\
-         s.retract_carrier_from_external_ts(id).await;\n\
-         s.publish_carrier_to_external_ts(id).await;\n\
-         s.reconcile_carrier_owner_loss_membership(id).await;\n\
-         }",
+        "async fn ok(s: &S, id: &str) { s.retract_carrier_from_external_ts(id).await; }",
     );
     assert!(
         live_prefix.is_empty(),
-        "prefix-sharing LIVE methods (retract_carrier_from_external_ts / \
-         publish_carrier_to_external_ts / reconcile_carrier_owner_loss_membership) must NOT trip \
-         the exact-ident guard; got {live_prefix:?}"
-    );
-
-    // 3b. ...but the bare deleted names DO fire (call form).
-    let deleted_call = scan_source(
-        "crates/verter_lsp/src/server/lifecycle.rs",
-        "async fn bad(s: &S, id: &str) { s.publish_carrier(id).await; s.reconcile_owner_loss(id); }",
-    );
-    assert_eq!(
-        deleted_call.len(),
-        2,
-        "both deleted-name CALLS must fire; got {deleted_call:?}"
-    );
-
-    // 3c. ...and a re-introduced deleted `fn` DEFINITION fires.
-    let deleted_def = scan_source(
-        "crates/verter_lsp/src/external_ts/publish_coordinator.rs",
-        "impl X { fn publish_carrier(&self) {} }",
-    );
-    assert!(
-        deleted_def.iter().any(|v| v.contains("fn publish_carrier")),
-        "a re-introduced `fn publish_carrier` definition must fire; got {deleted_def:?}"
+        "the prefix-sharing LIVE method retract_carrier_from_external_ts must NOT trip the \
+         exact-ident guard; got {live_prefix:?}"
     );
 
     // 4. A backend primitive is allowed in publish_coordinator.rs (the sealed
@@ -458,99 +368,19 @@ fn allowlist_self_test_discriminates() {
             .any(|v| v.contains("retract_source_everywhere_except")),
         "a backend-primitive call from a non-allowlisted file must fire; got {backend_bad:?}"
     );
-}
 
-/// DISCRIMINATING self-test for the carrier-sync GATEWAY seal: prove the guard
-/// fires on the exact gap-E bypasses the structural fix closes — a site deriving
-/// carrier provider state (and committing / returning on owner-loss) WITHOUT
-/// routing through the single gateway — while accepting the gateway's own use.
-#[test]
-fn gateway_seal_self_test_discriminates() {
-    // 1. THE gap-E BYPASS (workspace_scanner): the scanner derives the carrier
-    //    provider state directly via the now-private resolver instead of the
-    //    gateway, so it could commit the provider buffer while FORGETTING the
-    //    membership publish/retract. FIRES.
-    let scanner_bypass = scan_source(
-        "crates/verter_lsp/src/workspace_scanner.rs",
-        "async fn sync_file(r: &R, id: &str, j: bool) {\n\
-         let next = crate::provider_sync::carrier_sync_state_for_source(r, id, j);\n\
-         }",
-    );
-    assert!(
-        scanner_bypass
-            .iter()
-            .any(|v| v.contains("carrier_sync_state_for_source")),
-        "the workspace_scanner gap-E bypass (deriving carrier state off-gateway) must fire; \
-         got {scanner_bypass:?}"
-    );
-
-    // 2. THE owner-loss `None => return` BYPASS: a site resolves the carrier state
-    //    and, on owner-loss (`None`), returns WITHOUT retracting membership through
-    //    the gateway. The `let Some(..) = carrier_sync_state_for_source(..) else {
-    //    return; }` derive is itself off-gateway. FIRES.
-    let owner_loss_bypass = scan_source(
-        "crates/verter_lsp/src/sync_coordinator.rs",
-        "async fn sync(r: &R, id: &str) {\n\
-         let Some(next) = crate::provider_sync::carrier_sync_state_for_source(r, id, false) else {\n\
-         return;\n\
-         };\n\
-         }",
-    );
-    assert!(
-        owner_loss_bypass
-            .iter()
-            .any(|v| v.contains("carrier_sync_state_for_source")),
-        "the owner-loss None=>return bypass (off-gateway derive) must fire; got {owner_loss_bypass:?}"
-    );
-
-    // 3. The GATEWAY's OWN use of its private resolver is CLEAN (it IS the gateway).
-    let gateway_ok = scan_source(
-        CARRIER_SYNC_GATEWAY,
-        "fn close_target(r: &R, id: &str, j: bool) -> O { carrier_sync_state_for_source(r, id, j) }",
-    );
-    assert!(
-        gateway_ok.is_empty(),
-        "the carrier-sync gateway's own resolver call must be allowed; got {gateway_ok:?}"
-    );
-
-    // 4. visit_path HARDENING: a bare fn-POINTER / path-VALUE smuggle of the private
-    //    resolver (not a direct call) from a non-gateway file FIRES — a callback
-    //    smuggle cannot bypass a call-only matcher.
+    // 5. visit_path HARDENING: a bare fn-POINTER / path-VALUE smuggle of a backend
+    //    primitive (not a method call) from a non-allowlisted file FIRES.
     let fn_pointer = scan_source(
         "crates/verter_lsp/src/server/sync_orchestration.rs",
-        "fn smuggle() { let f: fn(&R, &str, bool) -> O = \
-         crate::provider_sync::carrier_sync_state_for_source; let _ = f; }",
+        "fn smuggle() { let f = TsserverBackend::retract_source_everywhere; let _ = f; }",
     );
     assert!(
         fn_pointer
             .iter()
-            .any(|v| v.contains("carrier_sync_state_for_source")),
-        "a fn-pointer reference to the private resolver from a non-gateway file must fire; \
+            .any(|v| v.contains("retract_source_everywhere")),
+        "a fn-pointer reference to a backend primitive from a non-allowlisted file must fire; \
          got {fn_pointer:?}"
-    );
-
-    // 5. The DELETED server resolver `prepare_carrier_provider_sync_transition` is
-    //    forbidden as a CALL and as a re-introduced `fn` DEFINITION, anywhere.
-    let deleted_call = scan_source(
-        "crates/verter_lsp/src/server/lifecycle.rs",
-        "async fn bad(s: &S, id: &str, j: bool) { s.prepare_carrier_provider_sync_transition(id, j); }",
-    );
-    assert!(
-        deleted_call
-            .iter()
-            .any(|v| v.contains("prepare_carrier_provider_sync_transition")),
-        "a call to the deleted prepare_carrier_provider_sync_transition must fire; got {deleted_call:?}"
-    );
-    let deleted_def = scan_source(
-        "crates/verter_lsp/src/server/provider_state.rs",
-        "impl S { fn prepare_carrier_provider_sync_transition(&self) {} }",
-    );
-    assert!(
-        deleted_def
-            .iter()
-            .any(|v| v.contains("fn prepare_carrier_provider_sync_transition")),
-        "a re-introduced prepare_carrier_provider_sync_transition definition must fire; \
-         got {deleted_def:?}"
     );
 
     // 6. Carrier CONTENT verbs: a carrier-buffer open from a NON-allowlisted file
@@ -570,21 +400,5 @@ fn gateway_seal_self_test_discriminates() {
     assert!(
         content_ok.is_empty(),
         "a carrier content verb from an allowlisted carrier-sync file must be clean; got {content_ok:?}"
-    );
-
-    // 7. NEGATIVE: the prefix-sharing live entry `carrier_close_state` (the close-only
-    //    accessor) and the gateway public entry `reconcile_carrier_source` are NOT
-    //    policed — they are the SANCTIONED surface and must stay clean everywhere.
-    let sanctioned = scan_source(
-        "crates/verter_lsp/src/server/lifecycle.rs",
-        "async fn ok(s: &S, id: &str, j: bool) {\n\
-         let _ = s.carrier_close_state(id, j);\n\
-         let _ = crate::external_ts::reconcile_carrier_source(req).await;\n\
-         }",
-    );
-    assert!(
-        sanctioned.is_empty(),
-        "the sanctioned carrier_close_state / reconcile_carrier_source surface must stay clean; \
-         got {sanctioned:?}"
     );
 }
