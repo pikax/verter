@@ -183,7 +183,7 @@ schema = 2
 "D3R" = { status = "implemented", commit_message = "feat(session): nominal relation authority for unique-symbol identity and comparability", commit_date = "2026-09-04T02:30:00+01:00" }
 "D4" = { status = "pending" }
 "D5" = { status = "implemented", commit_message = "feat(session): key closure capture obligations to the callback", commit_date = "2026-09-09T12:00:00+01:00", pull_request = 521 }
-"D6" = { status = "pending" }
+"D6" = { status = "implemented", commit_message = "fix(session): close the flow-completion carrier set and end a divergent loop's normal path", commit_date = "2026-09-12T11:30:00+01:00", pull_request = 532 }
 "D7" = { status = "pending" }
 "D8" = { status = "pending" }
 "DEM0" = { status = "pending" }

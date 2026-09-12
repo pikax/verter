@@ -86,9 +86,7 @@ fn commit_session(txn: &mut CheckerDispatchTransaction, session: SessionId) {
 }
 
 fn flow_domain() -> ReturnDomainMetadata {
-    ReturnDomainMetadata::FlowReturn {
-        can_fall_through: false,
-    }
+    ReturnDomainMetadata::FlowReturn
 }
 
 /// A concrete seed on either side of a mixed call/flow SCC reaches both
@@ -170,7 +168,7 @@ fn mixed_seeded_component_close_stages_both_domains() {
             FlowReturnPendingOutcome::EvaluatedValue(FlowReturnResult::new(
                 dispatch.graph(),
                 number,
-                false,
+                crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
                 None,
             )),
             vec![ReturnObligationIdentity::ResolveCall(call_key)],
@@ -436,7 +434,7 @@ fn call_budget_trip_poisons_the_whole_mixed_component() {
         FlowReturnPendingOutcome::EvaluatedValue(FlowReturnResult::new(
             dispatch.graph(),
             number,
-            false,
+            crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
             None,
         )),
         vec![ReturnObligationIdentity::ResolveCall(call_key)],
@@ -517,7 +515,7 @@ fn refused_call_commit_leaves_the_relation_ledger_undrained() {
             FlowReturnPendingOutcome::EvaluatedValue(FlowReturnResult::new(
                 dispatch.graph(),
                 number,
-                false,
+                crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
                 None,
             )),
             Vec::new(),
@@ -591,7 +589,7 @@ fn mixed_component_relation_member_flip_publishes_nothing() {
             FlowReturnPendingOutcome::EvaluatedValue(FlowReturnResult::new(
                 dispatch.graph(),
                 number,
-                false,
+                crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
                 None,
             )),
             Vec::new(),

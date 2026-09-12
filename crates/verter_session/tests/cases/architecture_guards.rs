@@ -5956,6 +5956,12 @@ pub(crate) mod foundations_guards {
         // `SliceContent` slice-gated body lowering the `FlowReturn`
         // family evaluates. Crate-private: the flow-return producer is
         // its only consumer (via `DeclBodyMemo::flow_slice_content`).
+        // The closed inventory of every carrier that transports a
+        // flow-completion fact. Crate-private: the opaque completion
+        // fact and its construction / discharge vocabularies are
+        // substrate internals, and a consumer outside the flow pipeline
+        // has no business minting or reading one.
+        "pub(crate) mod flow_completion_inventory",
         "pub(crate) mod flow_slice_content",
         // Scheduler-side lazy lowering service — worker-shard
         // retained eval-program parses (`DeclLoweringService`).

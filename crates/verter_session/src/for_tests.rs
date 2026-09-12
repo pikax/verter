@@ -928,17 +928,28 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
     FlowGraphFixtureForTests { bound }
 }
 
+/// The completion fact of a hermetically minted result: the fixture never
+/// lowered a body, so the value it stands for does not complete normally.
+/// It is minted through the completion-carrier inventory like every other
+/// completion fact — a fixture is a carrier too.
+fn hermetic_completion() -> crate::flow_completion_inventory::NormalCompletion {
+    crate::flow_completion_inventory::NormalCompletion::minted(
+        false,
+        crate::flow_completion_inventory::CompletionConstruction::HermeticFixture,
+    )
+}
+
 /// Mint the hermetic value payload: a clean flow-return result over `return_type`.
 #[rustfmt::skip]
 pub fn flow_return_result_for_tests(graph: &SemanticGraphStore, return_type: crate::semantic_query::SemanticNodeId) -> crate::semantic_query::FlowReturnResult {
-    crate::semantic_query::FlowReturnResult::new(graph, return_type, false, None)
+    crate::semantic_query::FlowReturnResult::new(graph, return_type, hermetic_completion(), None)
 }
 
 /// Mint a DEGRADED hermetic value payload over `return_type` — the
 /// completion seal must refuse it.
 #[rustfmt::skip]
 pub fn degraded_flow_return_result_for_tests(graph: &SemanticGraphStore, return_type: crate::semantic_query::SemanticNodeId) -> crate::semantic_query::FlowReturnResult {
-    crate::semantic_query::FlowReturnResult::new(graph, return_type, false, Some(crate::semantic_query::FlowReturnDegradation::NonCallableBinding))
+    crate::semantic_query::FlowReturnResult::new(graph, return_type, hermetic_completion(), Some(crate::semantic_query::FlowReturnDegradation::NonCallableBinding))
 }
 
 /// Probe the no-flow allocation contract through the REAL production

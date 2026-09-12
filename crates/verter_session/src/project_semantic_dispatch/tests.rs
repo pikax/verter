@@ -31037,7 +31037,12 @@ fn pre_seal_closure_canonicalizes_union_top_and_is_idempotent() {
             vec![string_node, never_node, string_node].into_boxed_slice(),
         )),
     ));
-    let result = FlowReturnResult::new(&graph, raw, false, None);
+    let result = FlowReturnResult::new(
+        &graph,
+        raw,
+        crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+        None,
+    );
 
     let closed = dispatch.close_flow_result_pre_seal(result);
     assert_eq!(
@@ -31080,7 +31085,12 @@ fn pre_seal_closure_leaves_intersection_top_untouched() {
             vec![number_node, string_node].into_boxed_slice(),
         )),
     ));
-    let result = FlowReturnResult::new(&graph, inter, false, None);
+    let result = FlowReturnResult::new(
+        &graph,
+        inter,
+        crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+        None,
+    );
     let closed = dispatch.close_flow_result_pre_seal(result);
     assert_eq!(
         closed.return_type(),
@@ -31129,8 +31139,12 @@ fn pre_seal_closure_skips_the_pipeline_for_a_canonical_tagged_union_top() {
     );
 
     let epoch_before = dispatch.canonical_evidence_epoch.get();
-    let closed =
-        dispatch.close_flow_result_pre_seal(FlowReturnResult::new(&graph, top, false, None));
+    let closed = dispatch.close_flow_result_pre_seal(FlowReturnResult::new(
+        &graph,
+        top,
+        crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+        None,
+    ));
     assert_eq!(
         closed.return_type(),
         top,
@@ -31407,8 +31421,12 @@ fn incomplete_canonicalization_refuses_the_canonical_stamp_and_pays_the_re_close
     // the pipeline's evidence deposit advances the epoch and re-arms
     // warm-admission suppression in the resurfacing request.
     let epoch_before = dispatch.canonical_evidence_epoch.get();
-    let closed =
-        dispatch.close_flow_result_pre_seal(FlowReturnResult::new(&graph, union.node, false, None));
+    let closed = dispatch.close_flow_result_pre_seal(FlowReturnResult::new(
+        &graph,
+        union.node,
+        crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+        None,
+    ));
     assert_eq!(
         closed.return_type(),
         union.node,

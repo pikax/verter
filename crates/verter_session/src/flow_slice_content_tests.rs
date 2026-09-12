@@ -578,9 +578,15 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
          }\n",
         "pick",
     );
-    assert!(!node.can_fall_through, "both arms return");
+    assert!(
+        !node.can_fall_through.reaches_end_for_assertion(),
+        "both arms return"
+    );
     assert_eq!(node.body.statements.len(), 1, "one if statement");
-    assert!(node.body.can_fall_through == node.can_fall_through);
+    assert!(
+        node.body.can_fall_through.reaches_end_for_assertion()
+            == node.can_fall_through.reaches_end_for_assertion()
+    );
     let SliceStatement::If {
         consequent,
         alternate,
@@ -589,7 +595,10 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
     else {
         panic!("the single statement must be an if");
     };
-    assert!(!consequent.can_fall_through, "the then arm returns");
+    assert!(
+        !consequent.can_fall_through.reaches_end_for_assertion(),
+        "the then arm returns"
+    );
     assert_eq!(consequent.statements.len(), 1);
     assert!(
         matches!(
@@ -604,7 +613,10 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
          decision (`pick` is `\"two\" | 1`, not `string | number`)"
     );
     let alternate = alternate.as_ref().expect("an else arm exists");
-    assert!(!alternate.can_fall_through, "the else arm returns");
+    assert!(
+        !alternate.can_fall_through.reaches_end_for_assertion(),
+        "the else arm returns"
+    );
     assert_eq!(alternate.statements.len(), 1);
     assert!(
         matches!(
@@ -629,7 +641,10 @@ fn if_without_else_falls_through() {
          }\n",
         "pick",
     );
-    assert!(node.can_fall_through, "no else arm: fall-through");
+    assert!(
+        node.can_fall_through.reaches_end_for_assertion(),
+        "no else arm: fall-through"
+    );
     assert_eq!(node.body.statements.len(), 1);
     let SliceStatement::If {
         consequent,
@@ -640,7 +655,7 @@ fn if_without_else_falls_through() {
         panic!("the single statement must be an if");
     };
     assert!(alternate.is_none());
-    assert!(!consequent.can_fall_through);
+    assert!(!consequent.can_fall_through.reaches_end_for_assertion());
     assert_eq!(consequent.statements.len(), 1);
     assert!(matches!(
         &consequent.statements[0],
@@ -655,7 +670,7 @@ fn if_without_else_falls_through() {
 #[test]
 fn bare_return_carries_no_argument() {
     let node = content_for("function done() { return; }\n", "done");
-    assert!(!node.can_fall_through);
+    assert!(!node.can_fall_through.reaches_end_for_assertion());
     assert_eq!(
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
@@ -676,7 +691,7 @@ fn return_free_loop_is_transparent() {
          }\n",
         "count",
     );
-    assert!(!node.can_fall_through);
+    assert!(!node.can_fall_through.reaches_end_for_assertion());
     assert_eq!(node.body.statements.len(), 2);
     assert!(matches!(
         node.body.statements[0],
@@ -3347,7 +3362,7 @@ fn statement_position_calls_are_proven_or_degrade() {
         "a proven `never` call lowers as the terminator: {terminated:?}"
     );
     assert!(
-        !consequent.can_fall_through,
+        !consequent.can_fall_through.reaches_end_for_assertion(),
         "the arm cannot fall through past a callee that never returns: {terminated:?}"
     );
     assert_eq!(
@@ -3522,7 +3537,7 @@ fn return_bearing_loop_is_unsupported() {
         &[SliceStatement::Unsupported(SliceUnsupported::Loop)],
         "the region stops at the unsupported marker; the trailing return is dropped"
     );
-    assert!(!node.can_fall_through);
+    assert!(!node.can_fall_through.reaches_end_for_assertion());
 }
 
 /// @ai-generated - a switch lowers each case clause as its own region
@@ -3548,8 +3563,8 @@ fn switch_lowers_case_regions() {
     };
     assert!(!has_default);
     assert_eq!(cases.len(), 1);
-    assert!(!cases[0].breaks);
-    assert!(!cases[0].region.can_fall_through);
+    assert!(!cases[0].breaks.reaches_end_for_assertion());
+    assert!(!cases[0].region.can_fall_through.reaches_end_for_assertion());
     assert!(matches!(
         cases[0].region.statements.as_ref(),
         [SliceStatement::Return {
@@ -3564,7 +3579,7 @@ fn switch_lowers_case_regions() {
             ..
         }
     ));
-    assert!(!node.can_fall_through);
+    assert!(!node.can_fall_through.reaches_end_for_assertion());
 }
 
 /// @ai-generated - a try lowers each clause as its own region
@@ -3588,7 +3603,7 @@ fn try_lowers_clause_regions() {
     else {
         panic!("expected a single Try statement");
     };
-    assert!(!block.can_fall_through);
+    assert!(!block.can_fall_through.reaches_end_for_assertion());
     assert!(matches!(
         block.statements.as_ref(),
         [SliceStatement::Return {
@@ -3598,12 +3613,12 @@ fn try_lowers_clause_regions() {
     ));
     let catch = catch.as_ref().expect("the catch clause lowers");
     assert!(catch.param.is_none());
-    assert!(catch.region.can_fall_through);
+    assert!(catch.region.can_fall_through.reaches_end_for_assertion());
     assert!(catch.region.statements.is_empty());
     assert!(finally.is_none());
     // The catch falls through, so the try does — and the body has no
     // trailing return.
-    assert!(node.can_fall_through);
+    assert!(node.can_fall_through.reaches_end_for_assertion());
 }
 
 fn pending_break_undefined_flag(region: &SliceRegion) -> Option<bool> {
@@ -4003,7 +4018,10 @@ fn object_return_spread_of_a_frame_binding_reads_the_frame_binding() {
 fn arrow_expression_body_is_single_return() {
     let node = content_for("export const double = (x: number) => x * 2;\n", "double");
     assert_eq!(node.params.len(), 1);
-    assert!(!node.can_fall_through, "an expression body always returns");
+    assert!(
+        !node.can_fall_through.reaches_end_for_assertion(),
+        "an expression body always returns"
+    );
     assert_eq!(
         node.body.statements.as_ref(),
         &[SliceStatement::Return {

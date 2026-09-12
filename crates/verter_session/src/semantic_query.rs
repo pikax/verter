@@ -10348,7 +10348,7 @@ mod tests {
                 SemanticQueryValue::FlowReturn(Arc::new(FlowReturnResult::new(
                     &crate::semantic_query_memo::SemanticGraphStore::new(),
                     node,
-                    false,
+                    crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
                     None,
                 ))),
                 SemanticQueryValueTag::FlowReturn,

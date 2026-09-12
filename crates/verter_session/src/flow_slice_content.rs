@@ -67,6 +67,10 @@ use oxc_ast::ast::{
 use oxc_ast_visit::{walk, Visit};
 use oxc_span::GetSpan;
 use rustc_hash::FxHashSet;
+
+use crate::flow_completion_inventory::{
+    transports_completion, CompletionConstruction, CompletionDischarge, NormalCompletion,
+};
 use verter_semantic::analysis::flow::flow_ir::{FlowExprRole, FlowSliceIR};
 use verter_semantic::analysis::flow::{
     object_entry_descent, value_descent, FlowBindingRef, FrameSpan, FunctionBodySkeleton,
@@ -188,7 +192,11 @@ pub struct SliceContent {
     /// expression.
     pub body: SliceRegion,
     /// Whether execution can reach past the body without a `return`.
-    pub can_fall_through: bool,
+    pub can_fall_through: NormalCompletion,
+    /// What a body that contributes NO return arm and never completes
+    /// normally models as. Producer-owned: it is a property of the
+    /// function's authored FORM, which only this lowering can see.
+    pub empty_completion: EmptyCompletion,
     /// A budget edge one SELECTED leaf's expression lowering hit (the
     /// expression itself degrades to `any`, the whole evaluation fails
     /// with the typed budget reason). Unselected content never lowers,
@@ -219,6 +227,23 @@ pub struct SliceContent {
     /// reached. Absolute spans: the report rebases them onto the frame
     /// anchor when pairing against the skeleton footprint.
     pub decided_above_call_spans: Vec<verter_span::Span>,
+}
+
+/// What a function body models as when it contributes no return arm and
+/// its end point is unreachable — a throw-only body, or one whose last
+/// reachable construct is a divergent loop.
+///
+/// The checker splits this purely on the function's authored FORM: a
+/// function DECLARATION and a CLASS method model as `void`, while a
+/// function EXPRESSION, an ARROW, and an OBJECT-LITERAL method model as
+/// `never`. This is the checker's `mayReturnNever` rule, and it is the
+/// only thing that distinguishes the two seeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmptyCompletion {
+    /// A function declaration or a class method.
+    Void,
+    /// A function expression, an arrow, or an object-literal method.
+    Never,
 }
 
 /// One formal parameter.
@@ -267,8 +292,12 @@ pub struct SliceRegion {
     /// unreachable and dropped.
     pub statements: Arc<[SliceStatement]>,
     /// Whether execution can reach past this region without a `return`.
-    pub can_fall_through: bool,
+    pub can_fall_through: NormalCompletion,
 }
+
+transports_completion!(SliceRegion => SliceRegion);
+transports_completion!(SliceContent => SliceContent);
+transports_completion!(SliceSwitchCase => SliceSwitchCase);
 
 /// One statement of the slice content.
 #[derive(Debug, Clone, PartialEq)]
@@ -466,6 +495,12 @@ pub enum SliceStatement {
     /// transparent too, but its body still lowers — as a labeled region, so
     /// its inner rails and its break exits keep deciding.)
     TransparentLoop,
+    /// A return-free loop that is entered and never completes normally —
+    /// its own exit edge is statically unreachable and no `break` targets
+    /// it (`while (true) {}`, `for (;;) {}`). It contributes no return arm
+    /// and, like a `throw`, ends the enclosing region's normal path, so
+    /// the body contributes no implicit `undefined`.
+    DivergentLoop,
     /// An unsupported construct (return-bearing loop, `with`, a
     /// `break`/`continue` jump no enclosing modelled construct absorbs, a
     /// module-level statement). The whole function is unsupported: the
@@ -483,8 +518,10 @@ pub struct SliceSwitchCase {
     /// without setting it, exactly like a `return`.
     pub region: SliceRegion,
     /// A path through the clause exits the switch via `break` (reaching
-    /// the statement after the switch).
-    pub breaks: bool,
+    /// the statement after the switch) — a reachability fact about the
+    /// statement AFTER the switch, which is why it shares the
+    /// normal-completion carrier.
+    pub breaks: NormalCompletion,
     /// What the clause's dispatch relation establishes.
     pub test: SliceSwitchTest,
 }
@@ -1621,6 +1658,30 @@ pub(crate) fn build_function_type_param_clause(
     lower_slice_type_params(&resolved.node, source, &SignatureScope::Root)
 }
 
+/// Classify the function's authored form for the empty-completion seed.
+///
+/// An arrow is always `never`-seeded. A `function` node is `void`-seeded
+/// when it is a declaration, and otherwise only when the locator's final
+/// descent step places it as a CLASS member — an object-literal method and
+/// a plain function expression share the declaration's OXC node type and
+/// are separated only by that step.
+fn empty_completion_of(
+    node: &FunctionNode<'_>,
+    locator: &verter_semantic::analysis::function_program::FunctionBodyLocator,
+) -> EmptyCompletion {
+    use verter_semantic::analysis::function_program::FunctionDescentStep;
+    let FunctionNode::Function(function) = node else {
+        return EmptyCompletion::Never;
+    };
+    if function.r#type == oxc_ast::ast::FunctionType::FunctionDeclaration {
+        return EmptyCompletion::Void;
+    }
+    match locator.descent.last() {
+        Some(FunctionDescentStep::ClassMember { .. }) => EmptyCompletion::Void,
+        _ => EmptyCompletion::Never,
+    }
+}
+
 /// One function borrowed from its exact retained parse address table.
 pub(crate) struct FlowSliceSource<'a> {
     pub program: &'a Program<'a>,
@@ -1705,13 +1766,20 @@ pub(crate) fn build_flow_slice_content(
             return Some(SliceContent {
                 bindings,
                 declared_return,
-                can_fall_through: false,
+                can_fall_through: NormalCompletion::minted(
+                    false,
+                    CompletionConstruction::SynthesizedRegion,
+                ),
+                empty_completion: empty_completion_of(&node, &entry.locator),
                 params: Arc::from(Vec::new().into_boxed_slice()),
                 type_parameters: Arc::from(Vec::new().into_boxed_slice()),
                 enclosing_type_parameters: Arc::from(Vec::new().into_boxed_slice()),
                 body: SliceRegion {
                     statements: Arc::from(Vec::new().into_boxed_slice()),
-                    can_fall_through: false,
+                    can_fall_through: NormalCompletion::minted(
+                        false,
+                        CompletionConstruction::SynthesizedRegion,
+                    ),
                 },
                 budget_failure: Some(reason),
                 inert_write_spans: FxHashSet::default(),
@@ -1803,7 +1871,7 @@ pub(crate) fn build_flow_slice_content(
         break_targets: Vec::new(),
         loop_direct_labels: Vec::new(),
         break_target_followed_by_return: Vec::new(),
-        current_statement_followed_by_return: false,
+        current_statement_followed_by_return: SuffixReturn::NotGuaranteed,
     };
     if selection.is_some() {
         lowerer.unsafe_invoked_closure_effects =
@@ -1813,7 +1881,10 @@ pub(crate) fn build_flow_slice_content(
     let region = if selection.is_none() {
         SliceRegion {
             statements: Arc::from([]),
-            can_fall_through: false,
+            can_fall_through: NormalCompletion::minted(
+                false,
+                CompletionConstruction::SynthesizedRegion,
+            ),
         }
     } else if node.is_expression_body() {
         // An expression-bodied arrow's body is one synthesized expression
@@ -1828,7 +1899,10 @@ pub(crate) fn build_flow_slice_content(
                 statements: Arc::from([SliceStatement::Unsupported(
                     SliceUnsupported::InvokedClosureEffect,
                 )]),
-                can_fall_through: false,
+                can_fall_through: NormalCompletion::minted(
+                    false,
+                    CompletionConstruction::SynthesizedRegion,
+                ),
             }
         } else {
             let freshness = expression_freshness(&expression.expression);
@@ -1852,7 +1926,10 @@ pub(crate) fn build_flow_slice_content(
             });
             SliceRegion {
                 statements: Arc::from(statements.into_boxed_slice()),
-                can_fall_through: false,
+                can_fall_through: NormalCompletion::minted(
+                    false,
+                    CompletionConstruction::SynthesizedRegion,
+                ),
             }
         }
     } else {
@@ -1864,7 +1941,13 @@ pub(crate) fn build_flow_slice_content(
     Some(SliceContent {
         bindings,
         declared_return,
-        can_fall_through: region.can_fall_through,
+        can_fall_through: NormalCompletion::minted(
+            region
+                .can_fall_through
+                .reaches_end(CompletionDischarge::BodyComposition),
+            CompletionConstruction::BodyFromRootRegion,
+        ),
+        empty_completion: empty_completion_of(&node, &entry.locator),
         params: Arc::from(params.into_boxed_slice()),
         type_parameters: Arc::from(type_parameters.into_boxed_slice()),
         enclosing_type_parameters: Arc::from(enclosing_type_parameters.into_boxed_slice()),
@@ -2482,6 +2565,168 @@ fn label_directly_wraps_loop(body: &Statement<'_>) -> bool {
 /// frame can only target a label inside that frame. Unlabeled jumps
 /// always bind within the loop (the loop itself, or a nested
 /// loop/switch) and never escape it.
+/// Whether a loop's own normal-exit edge is statically unreachable, so the
+/// loop is entered and never completes normally.
+///
+/// This mirrors the checker's binder rule and deliberately does NOT
+/// generalise it. The binder marks the exit edge unreachable when the
+/// condition is the bare `true` KEYWORD, or (for `for`) absent; it neither
+/// skips parentheses nor evaluates truthiness. `while (1)` and
+/// `while ((true))` therefore keep a reachable exit and keep contributing
+/// the implicit `undefined`, exactly as the checker does.
+///
+/// The exit is also reachable whenever a `break` can target THIS loop: an
+/// unlabeled `break` whose innermost enclosing breakable construct is the
+/// loop itself, or a labeled `break` naming a label that wraps it. A
+/// `continue`, a `break` captured by a nested loop, and a `break` captured
+/// by a nested `switch` all leave the exit unreachable.
+fn loop_exit_edge_is_unreachable(
+    loop_statement: &Statement<'_>,
+    wrapping_labels: &[Arc<str>],
+) -> bool {
+    let body = match loop_statement {
+        Statement::WhileStatement(while_stmt) => {
+            if !matches!(&while_stmt.test, Expression::BooleanLiteral(literal) if literal.value) {
+                return false;
+            }
+            &while_stmt.body
+        }
+        Statement::DoWhileStatement(do_while) => {
+            if !matches!(&do_while.test, Expression::BooleanLiteral(literal) if literal.value) {
+                return false;
+            }
+            &do_while.body
+        }
+        Statement::ForStatement(for_stmt) => {
+            if for_stmt.test.is_some() {
+                return false;
+            }
+            &for_stmt.body
+        }
+        // `for..in` / `for..of` complete normally once the iterated value is
+        // exhausted, so their exit edge is always reachable.
+        _ => return false,
+    };
+    !loop_body_reaches_exit(body, wrapping_labels, &mut Vec::new(), 0)
+}
+
+/// Whether `statement`, appearing inside a loop body, can transfer control
+/// to that loop's exit edge.
+///
+/// `enclosing_breakables` counts the breakable constructs entered since the
+/// loop body, so an unlabeled `break` is bound to the loop exactly at zero.
+/// It is a LEXICAL binding fact, not a recursion budget: the walk is finite
+/// in the statement tree and has no cutoff.
+/// `nested_labels` are the labels declared between the loop body and
+/// `statement`; `wrapping_labels` are the labels wrapping the loop itself.
+///
+/// Detection is biased toward finding a reaching `break`: an unrecognised
+/// statement form is treated as possibly carrying one, which preserves the
+/// fall-through answer rather than asserting divergence.
+fn loop_body_reaches_exit<'a>(
+    statement: &'a Statement<'a>,
+    wrapping_labels: &[Arc<str>],
+    nested_labels: &mut Vec<&'a str>,
+    enclosing_breakables: u32,
+) -> bool {
+    let recurse =
+        |statement: &'a Statement<'a>, nested_labels: &mut Vec<&'a str>, enclosing_breakables| {
+            loop_body_reaches_exit(
+                statement,
+                wrapping_labels,
+                nested_labels,
+                enclosing_breakables,
+            )
+        };
+    match statement {
+        Statement::BreakStatement(break_stmt) => match break_stmt.label.as_ref() {
+            None => enclosing_breakables == 0,
+            // A label declared inside the body names an inner construct, so
+            // a break naming it cannot reach the loop's own exit.
+            Some(label) => {
+                let name = label.name.as_str();
+                !nested_labels.contains(&name)
+                    && wrapping_labels.iter().any(|wrapping| &**wrapping == name)
+            }
+        },
+        // A `continue` re-enters the loop; it never reaches the exit edge.
+        Statement::ContinueStatement(_) => false,
+        Statement::LabeledStatement(labeled) => {
+            nested_labels.push(labeled.label.name.as_str());
+            let reaches = recurse(&labeled.body, nested_labels, enclosing_breakables);
+            nested_labels.pop();
+            reaches
+        }
+        Statement::BlockStatement(block) => block
+            .body
+            .iter()
+            .any(|statement| recurse(statement, nested_labels, enclosing_breakables)),
+        Statement::IfStatement(if_stmt) => {
+            recurse(&if_stmt.consequent, nested_labels, enclosing_breakables)
+                || if_stmt.alternate.as_ref().is_some_and(|alternate| {
+                    recurse(alternate, nested_labels, enclosing_breakables)
+                })
+        }
+        Statement::WithStatement(with_stmt) => {
+            recurse(&with_stmt.body, nested_labels, enclosing_breakables)
+        }
+        Statement::TryStatement(try_stmt) => {
+            try_stmt
+                .block
+                .body
+                .iter()
+                .any(|statement| recurse(statement, nested_labels, enclosing_breakables))
+                || try_stmt.handler.as_ref().is_some_and(|handler| {
+                    handler
+                        .body
+                        .body
+                        .iter()
+                        .any(|statement| recurse(statement, nested_labels, enclosing_breakables))
+                })
+                || try_stmt.finalizer.as_ref().is_some_and(|finalizer| {
+                    finalizer
+                        .body
+                        .iter()
+                        .any(|statement| recurse(statement, nested_labels, enclosing_breakables))
+                })
+        }
+        // A nested breakable construct captures an unlabeled `break`.
+        Statement::SwitchStatement(switch) => switch.cases.iter().any(|case| {
+            case.consequent
+                .iter()
+                .any(|statement| recurse(statement, nested_labels, enclosing_breakables + 1))
+        }),
+        Statement::DoWhileStatement(do_while) => {
+            recurse(&do_while.body, nested_labels, enclosing_breakables + 1)
+        }
+        Statement::WhileStatement(while_stmt) => {
+            recurse(&while_stmt.body, nested_labels, enclosing_breakables + 1)
+        }
+        Statement::ForStatement(for_stmt) => {
+            recurse(&for_stmt.body, nested_labels, enclosing_breakables + 1)
+        }
+        Statement::ForInStatement(for_in) => {
+            recurse(&for_in.body, nested_labels, enclosing_breakables + 1)
+        }
+        Statement::ForOfStatement(for_of) => {
+            recurse(&for_of.body, nested_labels, enclosing_breakables + 1)
+        }
+        // Forms that cannot lexically carry a `break` bound to an enclosing
+        // loop. A nested function body is excluded by the grammar.
+        Statement::DebuggerStatement(_)
+        | Statement::EmptyStatement(_)
+        | Statement::ExpressionStatement(_)
+        | Statement::ReturnStatement(_)
+        | Statement::ThrowStatement(_)
+        | Statement::VariableDeclaration(_)
+        | Statement::FunctionDeclaration(_)
+        | Statement::ClassDeclaration(_) => false,
+        // Anything else is treated as possibly carrying a reaching break,
+        // which keeps the exit reachable and preserves today's answer.
+        _ => true,
+    }
+}
+
 fn loop_transfers_to_enclosing_label(
     loop_statement: &Statement<'_>,
     direct_labels: &[Arc<str>],
@@ -2566,24 +2811,103 @@ fn loop_transfers_to_enclosing_label(
 }
 
 /// Whether entering this statement guarantees that the current function
-/// reaches an authored return before normal completion. This is deliberately
-/// stricter than the control inventory's `has_return`: a conditional return
-/// does not prevent a preceding labelled break from reaching function end.
-fn statement_guarantees_current_function_return(statement: &Statement<'_>) -> bool {
-    match statement {
-        Statement::ReturnStatement(_) => true,
-        Statement::BlockStatement(block) => block
-            .body
-            .iter()
-            .any(statement_guarantees_current_function_return),
-        Statement::IfStatement(branch) => {
-            statement_guarantees_current_function_return(&branch.consequent)
-                && branch
-                    .alternate
-                    .as_ref()
-                    .is_some_and(statement_guarantees_current_function_return)
+/// reaches an authored return before normal completion.
+///
+/// THREE states, because two of them conflated the only distinction that
+/// matters here. A pending `break` whose destination is PROVED to reach
+/// the function end contributes an implicit `undefined`; a destination
+/// this lowering cannot classify proves nothing, and answering "does not
+/// return" for it fabricated that contributor out of a coverage gap. The
+/// measured consequence, over one base program's suffix spellings: a
+/// `return` / block / `if` suffix published `"a" | "b"`, while a LABELED,
+/// `try`, `throw` or `switch` suffix published `"a" | undefined` — so
+/// merely LABELING a block changed the answer, and the wrong answer was
+/// admitted warm because nothing marked it.
+///
+/// [`SuffixReturn::Undecided`] is the fail-closed disposition that class
+/// requires: the caller keeps the derivation's value and mints
+/// [`crate::semantic_query::FlowGap::AbruptCompletion`], so the result is
+/// still returned and is never admitted. Deciding those forms HERE is
+/// forbidden — a syntax-only completion classifier is exactly the second
+/// completion authority this substrate must not have, and the answer
+/// belongs to the demanded `FunctionFlowGraph` reduction that owes the
+/// abrupt-completion topology.
+///
+/// Deliberately stricter than the control inventory's `has_return`: a
+/// conditional return does not prevent a preceding labelled break from
+/// reaching function end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SuffixReturn {
+    /// Proved: entering the statement reaches an authored return.
+    Guaranteed,
+    /// Proved: the statement completes normally without returning, so
+    /// control continues to whatever follows it.
+    NotGuaranteed,
+    /// Not decidable from statement shape alone, and never answered as
+    /// either proof.
+    Undecided,
+}
+
+impl SuffixReturn {
+    /// Fold the statements a destination continues into. A proved return
+    /// anywhere ahead dominates — control cannot pass it — and otherwise a
+    /// single undecided statement makes the whole suffix undecided.
+    fn fold(statements: impl Iterator<Item = Self>) -> Self {
+        let mut undecided = false;
+        for statement in statements {
+            match statement {
+                Self::Guaranteed => return Self::Guaranteed,
+                Self::Undecided => undecided = true,
+                Self::NotGuaranteed => {}
+            }
         }
-        _ => false,
+        if undecided {
+            Self::Undecided
+        } else {
+            Self::NotGuaranteed
+        }
+    }
+}
+
+fn suffix_return_of(statement: &Statement<'_>) -> SuffixReturn {
+    match statement {
+        Statement::ReturnStatement(_) => SuffixReturn::Guaranteed,
+        Statement::BlockStatement(block) => {
+            SuffixReturn::fold(block.body.iter().map(suffix_return_of))
+        }
+        Statement::IfStatement(branch) => {
+            let consequent = suffix_return_of(&branch.consequent);
+            // A missing `else` arm completes normally by definition.
+            let alternate = branch
+                .alternate
+                .as_ref()
+                .map_or(SuffixReturn::NotGuaranteed, suffix_return_of);
+            match (consequent, alternate) {
+                (SuffixReturn::Guaranteed, SuffixReturn::Guaranteed) => SuffixReturn::Guaranteed,
+                (SuffixReturn::Undecided, _) | (_, SuffixReturn::Undecided) => {
+                    SuffixReturn::Undecided
+                }
+                _ => SuffixReturn::NotGuaranteed,
+            }
+        }
+        // Forms that complete normally without returning, so a destination
+        // reaching one of them really does reach the function end. The one
+        // residual is an expression statement whose call is proven `never`:
+        // that is the typed terminator feed the graph reduction still owes,
+        // and it is not decidable from the statement's shape either.
+        Statement::EmptyStatement(_)
+        | Statement::DebuggerStatement(_)
+        | Statement::ExpressionStatement(_)
+        | Statement::VariableDeclaration(_)
+        | Statement::FunctionDeclaration(_)
+        | Statement::ClassDeclaration(_)
+        | Statement::TSTypeAliasDeclaration(_)
+        | Statement::TSInterfaceDeclaration(_)
+        | Statement::TSEnumDeclaration(_) => SuffixReturn::NotGuaranteed,
+        // A labeled statement, a `try`, a `throw`, a `switch`, any loop,
+        // any jump, and any form added later. Each carries completion this
+        // lowering cannot reduce, so none of them is answered here.
+        _ => SuffixReturn::Undecided,
     }
 }
 
@@ -3668,11 +3992,13 @@ struct Lowerer<'a> {
     /// For each break target, whether the target statement has a guaranteed
     /// current-function return later in its enclosing statement list. A
     /// pending break contributes implicit `undefined` only when its
-    /// destination can reach the function end rather than that return.
-    break_target_followed_by_return: Vec<bool>,
+    /// destination is PROVED to reach the function end rather than that
+    /// return; an undecided destination proves neither and fails closed
+    /// through [`crate::semantic_query::FlowGap::AbruptCompletion`].
+    break_target_followed_by_return: Vec<SuffixReturn>,
     /// The suffix fact for the statement currently being lowered; captured
     /// when that statement introduces a break target.
-    current_statement_followed_by_return: bool,
+    current_statement_followed_by_return: SuffixReturn,
 }
 
 impl Lowerer<'_> {
@@ -4372,10 +4698,10 @@ impl Lowerer<'_> {
             if !can_fall_through {
                 break;
             }
-            self.current_statement_followed_by_return = enclosing_followed_by_return
-                || statements[index + 1..]
-                    .iter()
-                    .any(statement_guarantees_current_function_return);
+            self.current_statement_followed_by_return = SuffixReturn::fold(
+                std::iter::once(enclosing_followed_by_return)
+                    .chain(statements[index + 1..].iter().map(suffix_return_of)),
+            );
             if self.span_contains_unsafe_invoked_closure(statement.span()) {
                 out.push(SliceStatement::Unsupported(
                     SliceUnsupported::InvokedClosureEffect,
@@ -4409,7 +4735,10 @@ impl Lowerer<'_> {
                 }
                 Statement::BlockStatement(block) => {
                     let child = self.lower_region(&block.body);
-                    can_fall_through = child.region.can_fall_through;
+                    can_fall_through = child
+                        .region
+                        .can_fall_through
+                        .reaches_end(CompletionDischarge::RegionComposition);
                     hit_unsupported = child.hit_unsupported;
                     // A block absorbs no `break` — an exit targeting an
                     // enclosing switch / labeled statement passes through.
@@ -4461,10 +4790,18 @@ impl Lowerer<'_> {
                             .truncate(active_guard_subject_base);
                         lowered
                     });
-                    can_fall_through = consequent.region.can_fall_through
+                    can_fall_through = consequent
+                        .region
+                        .can_fall_through
+                        .reaches_end(CompletionDischarge::RegionComposition)
                         || alternate
                             .as_ref()
-                            .map(|region| region.region.can_fall_through)
+                            .map(|region| {
+                                region
+                                    .region
+                                    .can_fall_through
+                                    .reaches_end(CompletionDischarge::RegionComposition)
+                            })
                             .unwrap_or(true);
                     hit_unsupported = consequent.hit_unsupported
                         || alternate
@@ -4679,6 +5016,14 @@ impl Lowerer<'_> {
                         out.push(SliceStatement::Unsupported(SliceUnsupported::Loop));
                         hit_unsupported = true;
                         can_fall_through = false;
+                    } else if loop_exit_edge_is_unreachable(statement, &self.loop_direct_labels) {
+                        // The loop never completes normally, so it ends the
+                        // region's normal path exactly as an authored `throw`
+                        // does. The statements after it are unreachable and
+                        // contribute nothing, and the body no longer
+                        // contributes the fall-through `undefined`.
+                        out.push(SliceStatement::DivergentLoop);
+                        can_fall_through = false;
                     } else {
                         out.push(SliceStatement::TransparentLoop);
                     }
@@ -4722,7 +5067,11 @@ impl Lowerer<'_> {
                     // the absorbed `break` is what lets execution reach
                     // past the statement even when the body itself cannot,
                     // and its captured state is that edge's layer state.
-                    can_fall_through = child.region.can_fall_through || absorbed;
+                    can_fall_through = child
+                        .region
+                        .can_fall_through
+                        .reaches_end(CompletionDischarge::RegionComposition)
+                        || absorbed;
                     hit_unsupported = child.hit_unsupported;
                     out.push(SliceStatement::Labeled {
                         label,
@@ -4772,7 +5121,8 @@ impl Lowerer<'_> {
                     let has_default = switch.cases.iter().any(|case| case.test.is_none());
                     let discriminant = self.narrow_subject_of(&switch.discriminant);
                     self.break_targets.push(None);
-                    self.break_target_followed_by_return.push(false);
+                    self.break_target_followed_by_return
+                        .push(SuffixReturn::NotGuaranteed);
                     // A clause body evaluates under the dispatch narrow
                     // of the discriminant, so a closure created there
                     // captures a reading the evaluator cannot reproduce
@@ -4824,7 +5174,10 @@ impl Lowerer<'_> {
                         }
                         cases.push(SliceSwitchCase {
                             region: lowered.region,
-                            breaks,
+                            breaks: NormalCompletion::minted(
+                                breaks,
+                                CompletionConstruction::SwitchCaseBreak,
+                            ),
                             test,
                         });
                     }
@@ -4836,10 +5189,15 @@ impl Lowerer<'_> {
                     // case), when the LAST clause falls off the end of the
                     // switch, or when any clause exits via `break`.
                     can_fall_through = !has_default
-                        || cases
-                            .last()
-                            .is_some_and(|case| case.region.can_fall_through)
-                        || cases.iter().any(|case| case.breaks);
+                        || cases.last().is_some_and(|case| {
+                            case.region
+                                .can_fall_through
+                                .reaches_end(CompletionDischarge::RegionComposition)
+                        })
+                        || cases.iter().any(|case| {
+                            case.breaks
+                                .reaches_end(CompletionDischarge::RegionComposition)
+                        });
                     if unprovable_switch_effect {
                         out.push(SliceStatement::Gap(
                             crate::semantic_query::FlowGap::GuardNarrowing,
@@ -4900,9 +5258,11 @@ impl Lowerer<'_> {
                     // clause's OWN break exits always propagate: they fire
                     // after every override decision, they are never
                     // pending.
-                    let finally_blocks_exits = finally
-                        .as_ref()
-                        .is_some_and(|(region, _)| !region.can_fall_through);
+                    let finally_blocks_exits = finally.as_ref().is_some_and(|(region, _)| {
+                        !region
+                            .can_fall_through
+                            .reaches_end(CompletionDischarge::RegionComposition)
+                    });
                     // A named break crossing this try for any enclosing
                     // label remains an authored return-inference path even
                     // when blocks or inner labels wrap the try. An abrupt
@@ -4916,20 +5276,31 @@ impl Lowerer<'_> {
                             .find(|(entry, _)| entry.as_ref() == Some(name))
                             .map(|(_, followed_by_return)| *followed_by_return)
                     };
-                    let pending_break_contributes_undefined = finally_blocks_exits
-                        && clause_may_break.iter().any(|target| match target {
-                            SliceBreakTarget::Named(name) => {
-                                target_followed_by_return(name) == Some(false)
-                            }
-                            SliceBreakTarget::Anonymous => false,
-                        });
+                    // The destination decides the contribution, and an
+                    // UNDECIDED destination decides nothing: the value keeps
+                    // the derivation it always had, and the gap below makes
+                    // the result return without ever being admitted.
+                    let pending_break_destination = |state: SuffixReturn| {
+                        finally_blocks_exits
+                            && clause_may_break.iter().any(|target| match target {
+                                SliceBreakTarget::Named(name) => {
+                                    target_followed_by_return(name) == Some(state)
+                                }
+                                SliceBreakTarget::Anonymous => false,
+                            })
+                    };
+                    let pending_break_destination_undecided =
+                        pending_break_destination(SuffixReturn::Undecided);
+                    let pending_break_contributes_undefined =
+                        pending_break_destination(SuffixReturn::NotGuaranteed)
+                            || pending_break_destination_undecided;
                     let mut pending_break_following_return_targets: Vec<Arc<str>> = Vec::new();
                     if finally_blocks_exits {
                         for target in &clause_may_break {
                             let SliceBreakTarget::Named(name) = target else {
                                 continue;
                             };
-                            if target_followed_by_return(name) == Some(true)
+                            if target_followed_by_return(name) == Some(SuffixReturn::Guaranteed)
                                 && !pending_break_following_return_targets.contains(name)
                             {
                                 pending_break_following_return_targets.push(Arc::clone(name));
@@ -4955,14 +5326,31 @@ impl Lowerer<'_> {
                     if let Some((_, finally_may_break)) = &finally {
                         may_break.extend(finally_may_break.iter().cloned());
                     }
-                    let pre_finally_fall_through = block.can_fall_through
-                        || catch
-                            .as_ref()
-                            .is_some_and(|catch| catch.region.can_fall_through);
+                    let pre_finally_fall_through = block
+                        .can_fall_through
+                        .reaches_end(CompletionDischarge::RegionComposition)
+                        || catch.as_ref().is_some_and(|catch| {
+                            catch
+                                .region
+                                .can_fall_through
+                                .reaches_end(CompletionDischarge::RegionComposition)
+                        });
                     can_fall_through = pre_finally_fall_through
-                        && finally
-                            .as_ref()
-                            .is_none_or(|(region, _)| region.can_fall_through);
+                        && finally.as_ref().is_none_or(|(region, _)| {
+                            region
+                                .can_fall_through
+                                .reaches_end(CompletionDischarge::RegionComposition)
+                        });
+                    if pending_break_destination_undecided {
+                        // A pending break whose destination this lowering
+                        // cannot classify. The contribution above is a
+                        // derivation, not a proof, so the slice carries the
+                        // typed gap ahead of the try: the evaluation returns
+                        // the value and refuses to warm it.
+                        out.push(SliceStatement::Gap(
+                            crate::semantic_query::FlowGap::AbruptCompletion,
+                        ));
+                    }
                     out.push(SliceStatement::Try {
                         block: Box::new(block),
                         catch,
@@ -5123,7 +5511,10 @@ impl Lowerer<'_> {
         LoweredRegion {
             region: SliceRegion {
                 statements: Arc::from(out.into_boxed_slice()),
-                can_fall_through,
+                can_fall_through: NormalCompletion::minted(
+                    can_fall_through,
+                    CompletionConstruction::RegionAccumulator,
+                ),
             },
             hit_unsupported,
             may_break,
