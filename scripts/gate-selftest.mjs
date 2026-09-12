@@ -236,6 +236,11 @@ import {
   resolvePnpm,
   preflightFreshnessTooling,
   pnpmInstallCommand,
+  // resource-ceiling derivation — the same authority the production CLI resolves and prints its ceiling
+  // from; GB9's CLI legs derive their expected values through it rather than pinning host-dependent
+  // literals (the memory-tier build-job count is clamped to the detected CPU count).
+  deriveGateResourceLimits,
+  parseMemorySize,
   // cargo env builder + the PATH sanitizer — exercised by (F5) for the CWD-INDEPENDENT ABSOLUTE-ONLY PATH
   // sanitization that aligns the verdict preflight resolver with the executed test PATH (empty, dot-only,
   // non-dot relative, `..`-relative, and Windows drive-relative / root-relative entries are all dropped) —
@@ -8184,7 +8189,10 @@ fi
 
     // The four EMITTED files a build produces. `plant(state)` installs exactly the requested subset and
     // PROVES the resulting tree by stat-ing all four — a plant that silently failed to apply would
-    // otherwise be indistinguishable from correct behavior.
+    // otherwise be indistinguishable from correct behavior. A mismatch is REPORTED, never thrown: a
+    // throw here would unwind out of main() and silently drop GB10 and every later self-test group.
+    // Instead the caller marks GB9 failed and skips only the assertions that depend on the unproven
+    // tree, so one broken plant cannot cost the remaining groups their coverage.
     const emitted = [
       [
         pluginEntry,
@@ -8195,6 +8203,7 @@ fi
       [sharedSibling, "module.exports = { store: true };\n"],
     ];
     const plant = (label, present) => {
+      let applied = true;
       for (const [p, body] of emitted) {
         if (present.includes(p)) writeFile(p, body);
         else rmSync(p, { force: true });
@@ -8202,11 +8211,13 @@ fi
       for (const [p] of emitted) {
         const want = present.includes(p);
         if (isFile(p) !== want) {
-          throw new Error(
+          fail(
             `(GB9) plant "${label}" did not apply: ${p} should be ${want ? "present" : "absent"}`,
           );
+          applied = false;
         }
       }
+      return applied;
     };
     // Re-stat AFTER the checker/CLI returns: the verdict must have been produced against the tree we
     // planted.
@@ -8240,7 +8251,11 @@ fi
       ],
     ];
     for (const [id, label, present] of refusalLegs) {
-      plant(label, present);
+      if (!plant(label, present)) {
+        // The tree is unproven — a verdict from it would be vacuous, so skip this leg's assertions.
+        ok = false;
+        continue;
+      }
       const res = checkBuildPrerequisites({ repoRoot: synthRoot });
       const report = res.lines.join("\n");
       // The refusal must be about a MISSING MODULE, not about the probe being unable to answer. Without
@@ -8273,22 +8288,26 @@ fi
 
     // ---- Leg 6 — EVERYTHING BUILT. The whole closure loadable => ok and SILENT (no report lines, no
     // marker): a satisfied preflight has nothing to say. ----
-    plant("everything built", allEmitted);
-    const satisfied = checkBuildPrerequisites({ repoRoot: synthRoot });
-    if (!satisfied.ok || satisfied.lines.length !== 0 || satisfied.reason !== "loaded") {
-      fail(
-        `(GB9.6) with the whole closure loadable the check must be ok and silent; got ` +
-          `ok=${satisfied.ok} reason=${satisfied.reason}:\n${satisfied.lines.join("\n")}`,
-      );
+    if (plant("everything built", allEmitted)) {
+      const satisfied = checkBuildPrerequisites({ repoRoot: synthRoot });
+      if (!satisfied.ok || satisfied.lines.length !== 0 || satisfied.reason !== "loaded") {
+        fail(
+          `(GB9.6) with the whole closure loadable the check must be ok and silent; got ` +
+            `ok=${satisfied.ok} reason=${satisfied.reason}:\n${satisfied.lines.join("\n")}`,
+        );
+        ok = false;
+      }
+      assertUnchanged("6", allEmitted);
+    } else {
       ok = false;
     }
-    assertUnchanged("6", allEmitted);
 
     if (!gitAvailable) {
       // TRUE skip (counted in SKIP, never in PASS): without git the production CLI cannot resolve a
-      // synthetic repo root, so the end-to-end legs cannot run. The in-process legs above still ran.
+      // synthetic repo root, so the end-to-end CLI legs cannot run. The in-process legs above (1, 1b-1e,
+      // 2-6) still ran — only the CLI pair and the telemetry leg depend on `git init`.
       skip(
-        "(GB9.2-6) end-to-end production-CLI legs SKIPPED — `git init` is unavailable, so the " +
+        "(GB9.2-cli/3-cli/7) end-to-end production-CLI legs SKIPPED — `git init` is unavailable, so the " +
           "production CLI cannot resolve a synthetic repo root",
       );
     } else {
@@ -8344,67 +8363,80 @@ fi
       // half (harness smoke, then both Vue macro oracle checks), and a terminal state at the archive
       // step. A reintroduced in-CLI build-prerequisite preflight fails the marker-absence assertion and
       // forces a conscious update of these legs rather than passing silently. ----
-      plant("nothing built (CLI legs)", []);
+      // The omitted --build-jobs count in the memory-tier leg is NOT a host-independent 8: the explicit
+      // 12-GiB tier selects the measured 8-job point, and deriveGateResourceLimits additionally clamps it
+      // to this host's detected CPU count. Derive the expectation through the same authority the CLI
+      // resolves and prints from — a literal `jobs=8` would fail on hosts with fewer than eight CPUs.
+      const memoryTierBuildJobs = deriveGateResourceLimits({
+        memoryLimitBytes: parseMemorySize("12GiB"),
+        testThreads: 9,
+      }).buildJobs;
+      // Distinct `-cli` ids: the bare 2/3 collided with the in-process refusal legs 2-5, so a failure
+      // message did not identify which leg failed.
       const cliLegs = [
-        ["2", gateArgs, "resource ceiling: cargo build jobs=7, test threads=9,"],
+        ["2-cli", gateArgs, "resource ceiling: cargo build jobs=7, test threads=9,"],
         [
-          "3",
+          "3-cli",
           memoryTierGateArgs,
-          "resource ceiling: cargo build jobs=8, test threads=9, active child-tree RSS=12.00 GiB",
+          `resource ceiling: cargo build jobs=${memoryTierBuildJobs}, test threads=9, active child-tree RSS=12.00 GiB`,
         ],
       ];
-      for (const [id, args, ceiling] of cliLegs) {
-        const run = runGateCapture(synthGate, args, gateEnv);
-        if (run.out.includes(BUILD_PREREQUISITE_MARKER)) {
-          fail(
-            `(GB9.${id}) the production CLI must not emit a build-prerequisite refusal (the preflight ` +
-              `is not wired into the gate; its discrimination is proven in-process above):\n${run.out}`,
+      if (plant("nothing built (CLI legs)", [])) {
+        for (const [id, args, ceiling] of cliLegs) {
+          const run = runGateCapture(synthGate, args, gateEnv);
+          if (run.out.includes(BUILD_PREREQUISITE_MARKER)) {
+            fail(
+              `(GB9.${id}) the production CLI must not emit a build-prerequisite refusal (the preflight ` +
+                `is not wired into the gate; its discrimination is proven in-process above):\n${run.out}`,
+            );
+            ok = false;
+          }
+          if (!run.out.includes(ceiling)) {
+            fail(
+              `(GB9.${id}) the production CLI must print its resource ceiling from the resolved ` +
+                `overrides/tier before any cargo work; output was:\n${run.out}`,
+            );
+            ok = false;
+          }
+          const smokeAt = run.out.indexOf("HARNESS-SMOKE [typescript]: SATISFIED");
+          const oracleCheckAt = run.out.indexOf("gen:vue-macro-oracle:check passed in");
+          const oracleTestsAt = run.out.indexOf("test:vue-macro-oracle passed in");
+          const archiveAt = run.out.indexOf(
+            "archiving workspace test universe (dev profile) (cargo nextest archive --workspace)",
           );
-          ok = false;
+          if (
+            !(
+              smokeAt >= 0 &&
+              oracleCheckAt > smokeAt &&
+              oracleTestsAt > oracleCheckAt &&
+              archiveAt > oracleTestsAt
+            )
+          ) {
+            fail(
+              `(GB9.${id}) the gate's front half must run harness smoke -> vue-macro-oracle checks -> ` +
+                `archive even with nothing built; got smoke=${smokeAt} oracleCheck=${oracleCheckAt} ` +
+                `oracleTests=${oracleTestsAt} archive=${archiveAt}:\n${run.out}`,
+            );
+            ok = false;
+          }
+          // The terminal state is the ARCHIVE step itself: a compile-shaped gate failure when this host's
+          // cargo launches and refuses the manifest-less synthetic root, or the cargo-unlaunchable setup
+          // refusal on a cargo-free host. Both prove the run proceeded past the front half.
+          const compileFailure =
+            run.code === EXIT_FAIL && run.out.includes("workspace did not compile");
+          const cargoUnlaunchable =
+            run.code === EXIT_USAGE &&
+            run.out.includes("could not launch 'cargo' for the archive build");
+          if (!compileFailure && !cargoUnlaunchable) {
+            fail(
+              `(GB9.${id}) the run must terminate AT THE ARCHIVE STEP; got rc=${run.code}:\n${run.out}`,
+            );
+            ok = false;
+          }
+          assertUnchanged(id, []);
         }
-        if (!run.out.includes(ceiling)) {
-          fail(
-            `(GB9.${id}) the production CLI must print its resource ceiling from the resolved ` +
-              `overrides/tier before any cargo work; output was:\n${run.out}`,
-          );
-          ok = false;
-        }
-        const smokeAt = run.out.indexOf("HARNESS-SMOKE [typescript]: SATISFIED");
-        const oracleCheckAt = run.out.indexOf("gen:vue-macro-oracle:check passed in");
-        const oracleTestsAt = run.out.indexOf("test:vue-macro-oracle passed in");
-        const archiveAt = run.out.indexOf(
-          "archiving workspace test universe (dev profile) (cargo nextest archive --workspace)",
-        );
-        if (
-          !(
-            smokeAt >= 0 &&
-            oracleCheckAt > smokeAt &&
-            oracleTestsAt > oracleCheckAt &&
-            archiveAt > oracleTestsAt
-          )
-        ) {
-          fail(
-            `(GB9.${id}) the gate's front half must run harness smoke -> vue-macro-oracle checks -> ` +
-              `archive even with nothing built; got smoke=${smokeAt} oracleCheck=${oracleCheckAt} ` +
-              `oracleTests=${oracleTestsAt} archive=${archiveAt}:\n${run.out}`,
-          );
-          ok = false;
-        }
-        // The terminal state is the ARCHIVE step itself: a compile-shaped gate failure when this host's
-        // cargo launches and refuses the manifest-less synthetic root, or the cargo-unlaunchable setup
-        // refusal on a cargo-free host. Both prove the run proceeded past the front half.
-        const compileFailure =
-          run.code === EXIT_FAIL && run.out.includes("workspace did not compile");
-        const cargoUnlaunchable =
-          run.code === EXIT_USAGE &&
-          run.out.includes("could not launch 'cargo' for the archive build");
-        if (!compileFailure && !cargoUnlaunchable) {
-          fail(
-            `(GB9.${id}) the run must terminate AT THE ARCHIVE STEP; got rc=${run.code}:\n${run.out}`,
-          );
-          ok = false;
-        }
-        assertUnchanged(id, []);
+      } else {
+        ok = false;
       }
 
       // @ai-generated - Drives the real production CLI to prove startup reporting owns a deadline that
