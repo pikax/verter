@@ -182,7 +182,7 @@ schema = 2
 "D3P" = { status = "implemented", commit_message = "feat(session): flow product lattice substrate", commit_date = "2026-09-05T12:00:00+01:00" }
 "D3R" = { status = "implemented", commit_message = "feat(session): nominal relation authority for unique-symbol identity and comparability", commit_date = "2026-09-04T02:30:00+01:00" }
 "D4" = { status = "pending" }
-"D5" = { status = "pending" }
+"D5" = { status = "implemented", commit_message = "feat(session): key closure capture obligations to the callback", commit_date = "2026-09-09T12:00:00+01:00", pull_request = 521 }
 "D6" = { status = "pending" }
 "D7" = { status = "pending" }
 "D8" = { status = "pending" }
@@ -299,7 +299,7 @@ schema = 2
 "LSO9" = { status = "pending" }
 "MDXP" = { status = "pending" }
 "MDXR0" = { status = "pending" }
-"MEM0" = { status = "pending" }
+"MEM0" = { status = "implemented", commit_message = "feat(*): ratify the aggregate semantic memory budget, allocation ownership inventory, and fixed churn workload", commit_date = "2026-09-08T12:00:00+01:00", pull_request = 524 }
 "MEM1" = { status = "pending" }
 "NCF-AT-CYCLE" = { status = "pending" }
 "NCF-AT-QUERY" = { status = "pending" }
@@ -374,7 +374,7 @@ schema = 2
 "SCP7" = { status = "pending" }
 "SG0" = { status = "implemented", commit_message = "ci(ci): execute the shipped configuration in the canonical gate and CI", commit_date = "2026-09-08T00:00:00+01:00" }
 "SIMP1" = { status = "pending" }
-"SIMP10" = { status = "pending" }
+"SIMP10" = { status = "implemented", commit_message = "refactor(core): assemble SSR properties from keys and values", commit_date = "2026-09-09T12:00:00+01:00" }
 "SIMP11" = { status = "pending" }
 "SIMP12" = { status = "pending" }
 "SIMP13" = { status = "pending" }

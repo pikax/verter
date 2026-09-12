@@ -177,7 +177,7 @@ export const LIVE_UNIVERSE = Object.freeze({
     "atom:A-fixtures-named": "217d0d4c8e036806",
     "atom:A-command-exact": "ad5277458d796772",
     "atom:A-terminal-summary-present": "92a3d03a22524216",
-    "atom:A-node-evidence-re-executed": "ebca8d95b08e4654",
+    "atom:A-node-evidence-re-executed": "bcc7822204f2e968",
     "atom:A-external-refresh-lane-bound": "2052a41c631e146f",
     "atom:A-counters-consistent": "36057347af0bff90",
     "atom:A-zero-unexpected-skips": "bbdef0226518f59b",
@@ -199,7 +199,7 @@ export const LIVE_UNIVERSE = Object.freeze({
     "atom:A-proof-relevance-bound": "3d6b18e1e31f52ed",
     "atom:A-stated-obligation-is-enforced": "6bad1eddf7b06523",
     "atom:A-finding-closed-by-atom": "0df1de1847b62c83",
-    "atom:A-control-mutation-locatable": "bca9f93e1610dc28",
+    "atom:A-control-mutation-locatable": "d901004960773270",
     "atom:A-controls-cover-every-class": "0e6f0bb4bdb3eae1",
     "atom:A-ledger-model-intact": "3b2468c0b2f666b8",
     "finding:C1": "e743680e29457d2a",
@@ -297,7 +297,7 @@ export const LIVE_UNIVERSE = Object.freeze({
     "receiving:TCM0-R-IMPLEMENTATION-BASELINE#2.gate": "72e40192a87f49ab",
     "receiving:TCM0-R-IMPLEMENTATION-BASELINE#3.gate": "91ad285059593c36",
     "receiving:TCM0-R-IMPLEMENTATION-BASELINE#4.gate": "a97f53c6ac04b2c6",
-    "proof:P-targeted-domain.skip_basis": "783b55e844e29576",
+    "proof:P-targeted-domain.skip_basis": "2e5102b1e3fbae14",
   }),
   /**
    * Where each atom's evidence and contract bindings POINT, pinned separately

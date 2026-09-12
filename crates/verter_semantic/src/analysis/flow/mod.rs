@@ -128,6 +128,32 @@ impl SkeletonExprSiteId {
     }
 }
 
+/// One authored nested callable inside one expression site's closure
+/// inventory, in authored order.
+///
+/// A site is NOT a callback identity: several callables share one
+/// expression site whenever the site is a compound the skeleton does not
+/// open per-argument or per-element (`f(() => a, () => b)` records both
+/// on the CALL's site, `[() => a, () => b]` records both on the array's).
+/// This ordinal is what separates them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, NoTypeExpr)]
+pub struct SkeletonClosureId(u32);
+
+impl SkeletonClosureId {
+    /// Index into [`SkeletonExprSite::closures`].
+    #[must_use]
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    /// The record at site-local ordinal `index`, as enumerated from
+    /// [`SkeletonExprSite::closures`].
+    #[must_use]
+    pub const fn from_index(index: u32) -> Self {
+        Self(index)
+    }
+}
+
 /// One `return` site of the indexed function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
 pub struct SkeletonReturnSiteId(u32);
@@ -341,6 +367,12 @@ pub struct SkeletonBinding {
     /// but cannot model" — the latter must fail closed, never fall
     /// through to an outer same-named declaration.
     pub destructured: bool,
+    /// The sites the declaring pattern evaluates while it binds — nested
+    /// defaults and computed keys, in evaluation order. Producing the
+    /// binding runs every one of them, so each is an evaluation effect of
+    /// the binding: a callable authored there is created and retains its
+    /// captures whenever the binding is demanded.
+    pub pattern_sites: Arc<[SkeletonExprSiteId]>,
 }
 
 // ---------------------------------------------------------------------------
@@ -478,6 +510,67 @@ pub enum SkeletonExprShape {
     Other,
 }
 
+/// Whether the indexed program correlated one authored nested callable.
+///
+/// The distinction is the whole point of the record: an authored callable
+/// with no correlated index record asserts NOTHING about what it captures,
+/// and a consumer must fail closed on it rather than read its empty
+/// capture list as "captures nothing".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+pub enum SkeletonClosureCorrelation {
+    /// The indexed program named this callable, so
+    /// [`SkeletonClosure::captures`] is its EXACT and EXHAUSTIVE capture
+    /// set. Empty means the callable provably captures nothing — a
+    /// positive fact, not an absence of information.
+    Exact,
+    /// The indexed program named this callable, but its body creates a
+    /// callable no index record serves (a class, or a parameter-list
+    /// callable), so [`SkeletonClosure::captures`] is only a LOWER BOUND:
+    /// every listed capture is real, and more may exist.
+    Partial,
+    /// The authored callable has no correlated record in the indexed
+    /// program (a class, a callable in a parameter default, or any
+    /// position the index does not serve), so no capture set can be
+    /// asserted for it. [`SkeletonClosure::captures`] is empty and means
+    /// nothing.
+    Uncorrelated,
+}
+
+/// One authored nested callable (arrow, function expression,
+/// object-literal method, or class) evaluated at one expression site.
+///
+/// The site-level [`SkeletonExprSite::capture_bindings`] is the UNION of
+/// every callable at the site, deduplicated: it answers "does anything
+/// here retain this cell", never "which callback retains it". This record
+/// is the per-callback partition of that union, so a consumer can carry
+/// one obligation per (callback, captured binding) and can tell a
+/// capture-free callback from an absent one.
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+pub struct SkeletonClosure {
+    /// The callable's own span — its identity within the frame.
+    pub span: FrameSpan,
+    /// Whether the indexed program correlated this callable.
+    pub correlation: SkeletonClosureCorrelation,
+    /// This callable's OWN captured bindings (its free variables bound by
+    /// an enclosing frame, transitively through its own nested
+    /// callables), deduplicated in the indexed source order. Genuinely
+    /// free / global reads bind to no declaration and never appear here.
+    pub captures: Arc<[FlowBindingRef]>,
+    /// The subset of `captures` this callable actually READS — its own
+    /// free reads, deduplicated in the indexed source order. The
+    /// remaining captures are retained for their cell alone (a
+    /// write-only capture), and demand exactly the callable's execution,
+    /// never a value product.
+    ///
+    /// Recorded per callable because the site-level
+    /// [`SkeletonExprSite::reads`] merges every callable at the site with
+    /// the site's own reads: at `f(() => a, () => { a = 1 })` the merged
+    /// footprint says `a` is read HERE and cannot say by WHICH callable,
+    /// so a site-level answer makes the write-only callback look like a
+    /// value consumer.
+    pub read_captures: Arc<[FlowBindingRef]>,
+}
+
 /// One tracked expression site: span, region membership, containment
 /// parent, shape, and the read / call footprint attributed to this site
 /// (child sites carry their own).
@@ -506,6 +599,10 @@ pub struct SkeletonExprSite {
     /// Prepared construction resolves these in this frame; names above
     /// remain diagnostic metadata only.
     pub capture_bindings: Arc<[FlowBindingRef]>,
+    /// The authored nested callables evaluated at this site, in authored
+    /// order — the per-callback partition of `capture_bindings`. Empty
+    /// for a site holding no closure.
+    pub closures: Arc<[SkeletonClosure]>,
     /// Call / construct footprints attributed to this site.
     pub calls: Arc<[SkeletonCall]>,
 }
@@ -986,6 +1083,24 @@ fn prepare_function_body_skeleton(
                 *capture = bindings.resolve_identity(identity)?;
             }
         }
+        // The per-callable partition resolves through the SAME map as the
+        // site union above, so a subject can never be named one way in the
+        // union and another way in the callback that produced it.
+        for closure in Arc::make_mut(&mut site.closures) {
+            for capture in Arc::make_mut(&mut closure.captures) {
+                if let FlowBindingRef::Captured(identity) = capture {
+                    *capture = bindings.resolve_identity(identity)?;
+                }
+            }
+            // The callable's own read subjects resolve through the SAME
+            // map, so a cell named one way in `captures` is named the
+            // same way here and the two lists stay comparable.
+            for capture in Arc::make_mut(&mut closure.read_captures) {
+                if let FlowBindingRef::Captured(identity) = capture {
+                    *capture = bindings.resolve_identity(identity)?;
+                }
+            }
+        }
         for read in Arc::make_mut(&mut site.reads) {
             read.binding = match &read.binding {
                 Some(FlowBindingRef::Captured(identity)) => {
@@ -1060,6 +1175,7 @@ struct SiteDraft {
     source_type_queries: Vec<SkeletonSourceTypeQuery>,
     captures: Vec<FlowNameId>,
     capture_bindings: Vec<FlowBindingRef>,
+    closures: Vec<SkeletonClosure>,
     calls: Vec<SkeletonCall>,
 }
 
@@ -1192,6 +1308,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             source_type_queries: Vec::new(),
             captures: Vec::new(),
             capture_bindings: Vec::new(),
+            closures: Vec::new(),
             calls: Vec::new(),
         });
         id
@@ -1373,6 +1490,19 @@ impl<'entry> SkeletonBuilder<'entry> {
         id
     }
 
+    /// An authored callable no index record serves asserts nothing about
+    /// what it captures: it is recorded as such, never omitted.
+    fn push_unserved_callable(&mut self, span: verter_span::Span) {
+        let site = self.footprint_site(span);
+        let closure_span = self.frame_span(span);
+        self.sites[site.index()].closures.push(SkeletonClosure {
+            span: closure_span,
+            correlation: SkeletonClosureCorrelation::Uncorrelated,
+            captures: Arc::from([]),
+            read_captures: Arc::from([]),
+        });
+    }
+
     fn push_read(&mut self, name: FlowNameId, span: verter_span::Span) {
         self.push_read_path(name, Arc::from(Vec::new().into_boxed_slice()), span);
     }
@@ -1399,13 +1529,29 @@ impl<'entry> SkeletonBuilder<'entry> {
     /// outer definitions seed the nested evaluator.
     /// Exact subjects are retained in `capture_bindings`; `captures`
     /// keeps their interned display names as diagnostic metadata.
-    fn push_nested_capture_reads(&mut self, span: verter_span::Span) {
+    ///
+    /// EVERY authored nested callable also records its own
+    /// [`SkeletonClosure`] on the site, whether or not the indexed program
+    /// correlated it and whether or not it captures anything. Without that
+    /// per-callable record the site-level union is the only fact available,
+    /// and a site is not a callback: two callbacks sharing one call or one
+    /// array literal are indistinguishable, a capture-free callback is
+    /// indistinguishable from no callback at all, and a callable the index
+    /// does not serve is silently invisible rather than a typed gap.
+    fn push_nested_callable(&mut self, span: verter_span::Span) {
         let Some(captures) = self.nested_captures.get(&span).copied() else {
+            self.push_unserved_callable(span);
             return;
         };
         let site = self.footprint_site(span);
+        let closure_span = self.frame_span(span);
+        let mut own: Vec<FlowBindingRef> = Vec::new();
+        let mut own_seen = FxHashSet::default();
         for identity in captures.bindings.0.iter() {
             let binding = FlowBindingRef::Captured(identity.clone());
+            if own_seen.insert(binding.clone()) {
+                own.push(binding.clone());
+            }
             if self.capture_subjects.insert((site, binding.clone())) {
                 self.sites[site.index()].capture_bindings.push(binding);
             }
@@ -1414,6 +1560,28 @@ impl<'entry> SkeletonBuilder<'entry> {
                 self.sites[site.index()].captures.push(name);
             }
         }
+        // This callable's OWN read subjects, kept apart from the site
+        // footprint below: the site's `reads` merge every callable here,
+        // so only this per-callable list can say that a sibling — and not
+        // this callable — is the one consuming the cell's value.
+        let mut own_reads: Vec<FlowBindingRef> = Vec::new();
+        let mut own_read_seen = FxHashSet::default();
+        for read in captures.reads.iter() {
+            let binding = FlowBindingRef::Captured(read.binding.clone());
+            if own_read_seen.insert(binding.clone()) {
+                own_reads.push(binding);
+            }
+        }
+        self.sites[site.index()].closures.push(SkeletonClosure {
+            span: closure_span,
+            correlation: if captures.exhaustive {
+                SkeletonClosureCorrelation::Exact
+            } else {
+                SkeletonClosureCorrelation::Partial
+            },
+            captures: Arc::from(own.into_boxed_slice()),
+            read_captures: Arc::from(own_reads.into_boxed_slice()),
+        });
         for read in captures.reads.iter() {
             let name = self.intern(&read.binding.name);
             let path: Arc<[_]> = read
@@ -1502,7 +1670,18 @@ impl<'entry> SkeletonBuilder<'entry> {
             initializer,
             annotation_span: None,
             destructured,
+            pattern_sites: Arc::from([]),
         });
+    }
+
+    /// Open every expression one binding pattern evaluates while it binds
+    /// as its own root site, so no footprint is dropped; the pattern's
+    /// bindings then own the sites as evaluation effects.
+    fn open_pattern_sites(&mut self, evaluated: Vec<&Expression<'_>>) -> Arc<[SkeletonExprSiteId]> {
+        evaluated
+            .into_iter()
+            .map(|expression| self.open_root_site(expression))
+            .collect()
     }
 
     fn push_implicit_return(&mut self, argument: SkeletonExprSiteId, span: verter_span::Span) {
@@ -1543,11 +1722,7 @@ impl<'entry> SkeletonBuilder<'entry> {
         let mut identifiers = Vec::new();
         let mut defaults = Vec::new();
         collect_binding_pattern(inner, false, &mut identifiers, &mut defaults);
-        // Nested pattern defaults still evaluate at bind time: track each
-        // as a root site so its footprint is never dropped.
-        for default in defaults {
-            self.open_root_site(default);
-        }
+        let pattern_sites = self.open_pattern_sites(defaults);
         for (name, span, destructured) in identifiers {
             self.push_binding(
                 &name,
@@ -1556,6 +1731,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                 initializer,
                 destructured,
             );
+            self.bindings.last_mut().unwrap().pattern_sites = Arc::clone(&pattern_sites);
         }
     }
 
@@ -1569,11 +1745,10 @@ impl<'entry> SkeletonBuilder<'entry> {
         let mut identifiers = Vec::new();
         let mut defaults = Vec::new();
         collect_binding_pattern(pattern, false, &mut identifiers, &mut defaults);
-        for default in defaults {
-            self.open_root_site(default);
-        }
+        let pattern_sites = self.open_pattern_sites(defaults);
         for (name, span, destructured) in identifiers {
             self.push_binding(&name, kind, span, initializer, destructured);
+            self.bindings.last_mut().unwrap().pattern_sites = Arc::clone(&pattern_sites);
             if !destructured {
                 self.bindings.last_mut().unwrap().annotation_span = annotation_span;
             }
@@ -1872,6 +2047,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                         source_type_queries: draft.source_type_queries.into(),
                         captures: Arc::from(draft.captures.into_boxed_slice()),
                         capture_bindings: Arc::from(draft.capture_bindings.into_boxed_slice()),
+                        closures: Arc::from(draft.closures.into_boxed_slice()),
                         calls: Arc::from(draft.calls.into_boxed_slice()),
                     })
                     .collect::<Vec<_>>()
@@ -1903,14 +2079,20 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
 
     // Nested function / arrow / class bodies are their own frames.
     fn visit_function(&mut self, it: &Function<'a>, _flags: oxc_syntax::scope::ScopeFlags) {
-        self.push_nested_capture_reads(it.span.into());
+        self.push_nested_callable(it.span.into());
     }
 
     fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
-        self.push_nested_capture_reads(it.span.into());
+        self.push_nested_callable(it.span.into());
     }
 
-    fn visit_class(&mut self, _it: &oxc_ast::ast::Class<'a>) {}
+    // A class expression is itself a callable (its constructor) and
+    // creates more (members, field initializers); no index record serves
+    // any of them. A class DECLARATION binds a name instead and is never
+    // walked here.
+    fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
+        self.push_unserved_callable(it.span.into());
+    }
 
     fn visit_statement(&mut self, it: &Statement<'a>) {
         match it {
@@ -2363,12 +2545,12 @@ impl SkeletonBuilder<'_> {
                     let mut identifiers = Vec::new();
                     let mut defaults = Vec::new();
                     collect_binding_pattern(&declarator.id, false, &mut identifiers, &mut defaults);
-                    for default in defaults {
-                        self.open_root_site(default);
-                    }
+                    let pattern_sites = self.open_pattern_sites(defaults);
                     for (name, span, destructured) in identifiers {
                         let interned = self.intern(&name);
                         self.push_binding(&name, kind, span, None, destructured);
+                        self.bindings.last_mut().unwrap().pattern_sites =
+                            Arc::clone(&pattern_sites);
                         if !destructured {
                             let annotation_span = declarator
                                 .type_annotation
@@ -2470,8 +2652,11 @@ fn collect_static_callee_path(
     true
 }
 
-/// Collect every bound identifier (name, span) and every default-value
-/// expression of one binding pattern.
+/// Collect every bound identifier (name, span) and every expression one
+/// binding pattern evaluates at bind time — default values AND computed
+/// keys, in evaluation order. A computed key is as much an evaluated
+/// position as a default: a callable authored there is created and
+/// retains its captures, so dropping it would hide it from the frame.
 fn collect_binding_pattern<'a, 'ast>(
     pattern: &'a BindingPattern<'ast>,
     destructured: bool,
@@ -2488,6 +2673,11 @@ fn collect_binding_pattern<'a, 'ast>(
         }
         BindingPattern::ObjectPattern(object) => {
             for property in &object.properties {
+                if property.computed {
+                    if let Some(key) = property.key.as_expression() {
+                        defaults.push(key);
+                    }
+                }
                 collect_binding_pattern(&property.value, true, identifiers, defaults);
             }
             if let Some(rest) = object.rest.as_ref() {

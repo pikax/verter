@@ -1,22 +1,27 @@
 //! Characterization test for the `RuntimeCompileOptions` -> `SvelteRuntimeOptions`
-//! plumbing gap: `SvelteCarrierCompiler::compile_bundle` used to hardcode
+//! plumbing gap: the shared Svelte bundle orchestration used to hardcode
 //! `runes` / `dev_codegen` / `namespace` / `fragments` / `preserve_whitespace` /
 //! `preserve_comments` / `disclose_version` to `None`/`false` regardless of what
 //! the neutral carrier's `RuntimeCompileOptions` carried — so a caller could
 //! never reach these already-implemented, already-tested (at the
 //! `SvelteRuntimeOptions` level — see `runtime_tests.rs`'s
 //! `fixture_runtime_options`) Svelte compile options through any production
-//! route. This test exercises the CARRIER-LEVEL channel specifically: it
-//! would FAIL against the pre-fix carrier (which ignored `svelte_fragments` /
+//! route. This test exercises the CARRIER-LEVEL channel specifically, through
+//! the host-backed production lane (`SvelteHostIntegrationBackend`), which
+//! derives `RuntimeCompileOptions` off the admitted request: it would FAIL
+//! against the pre-fix carrier (which ignored `svelte_fragments` /
 //! `svelte_preserve_comments` entirely) and PASSES now that the channel
 //! threads through.
 
 use oxc_allocator::Allocator;
 use std::sync::Arc;
-use verter_compiler::framework_common::carrier_compiler::{CarrierCompiler, RuntimeCompileOptions};
+use verter_compiler::compile_request::svelte::SvelteFragmentsRequest;
+use verter_compiler::compile_request::SvelteOptionAttempt;
 use verter_compiler::framework_common::registered_carrier_projection::project_registered_accepted;
-use verter_compiler::framework_common::FrameworkParseArtifact;
-use verter_compiler::svelte::SvelteCarrierCompiler;
+use verter_compiler::framework_common::{
+    FrameworkHostIntegrationBackend as _, FrameworkParseArtifact, SvelteHostExecutionInputs,
+    SvelteHostIntegrationBackend, SvelteHostRuntimeRenderDemand,
+};
 use verter_language::carrier_grammar::{
     CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
     FrameworkAdapterSemanticVersion,
@@ -55,16 +60,33 @@ fn registered_artifact(canonical: &str, source: &str) -> FrameworkParseArtifact 
         .into_framework_parse_artifact()
 }
 
-fn compile_body(canonical: &str, source: &str, opts: RuntimeCompileOptions) -> String {
-    let compiler = SvelteCarrierCompiler;
+fn compile_body(canonical: &str, source: &str, svelte_options: SvelteOptionAttempt) -> String {
     let artifact = registered_artifact(canonical, source);
     let alloc = Allocator::default();
-    let outcome = compiler
-        .compile_bundle(source, &artifact, &opts, &alloc)
+    let backend = SvelteHostIntegrationBackend::registered();
+    let admission = backend
+        .admit_runtime_render(
+            &artifact,
+            SvelteHostRuntimeRenderDemand {
+                svelte_options,
+                filename: Some(canonical.to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("fixture demand admits");
+    let rendered = backend
+        .compile_runtime_render(
+            admission,
+            &artifact,
+            &SvelteHostExecutionInputs::default(),
+            &alloc,
+        )
         .expect("fixture source must compile");
-    outcome
-        .into_produced()
-        .and_then(|bundle| bundle.main.body_code)
+    rendered
+        .runtime_bundle()
+        .main
+        .body_code
+        .clone()
         .expect("a two-root static template must produce a runtime body")
 }
 
@@ -79,7 +101,7 @@ fn svelte_fragments_tree_reaches_codegen_through_the_neutral_carrier() {
     let default_body = compile_body(
         "file:///FragmentsDefault.svelte",
         SOURCE,
-        RuntimeCompileOptions::default(),
+        SvelteOptionAttempt::default(),
     );
     assert!(
         !default_body.contains("$.from_tree"),
@@ -87,9 +109,9 @@ fn svelte_fragments_tree_reaches_codegen_through_the_neutral_carrier() {
          default `$.from_html` skeleton, not `$.from_tree` — got:\n{default_body}"
     );
 
-    let tree_opts = RuntimeCompileOptions {
-        svelte_fragments: Some("tree".to_string()),
-        ..RuntimeCompileOptions::default()
+    let tree_opts = SvelteOptionAttempt {
+        fragments: Some(SvelteFragmentsRequest::Tree),
+        ..SvelteOptionAttempt::default()
     };
     let tree_body = compile_body("file:///FragmentsTree.svelte", SOURCE, tree_opts);
     assert!(
@@ -111,16 +133,16 @@ fn svelte_preserve_comments_reaches_codegen_through_the_neutral_carrier() {
     let default_out = compile_body(
         "file:///CommentsDefault.svelte",
         SOURCE_WITH_COMMENT,
-        RuntimeCompileOptions::default(),
+        SvelteOptionAttempt::default(),
     );
     assert!(
         !default_out.contains("kept"),
         "default (svelte_preserve_comments: None) must drop the HTML comment — got:\n{default_out}"
     );
 
-    let preserved_opts = RuntimeCompileOptions {
-        svelte_preserve_comments: Some(true),
-        ..RuntimeCompileOptions::default()
+    let preserved_opts = SvelteOptionAttempt {
+        preserve_comments: Some(true),
+        ..SvelteOptionAttempt::default()
     };
     let preserved_out = compile_body(
         "file:///CommentsPreserved.svelte",
