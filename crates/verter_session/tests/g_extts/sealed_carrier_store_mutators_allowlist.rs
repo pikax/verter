@@ -87,12 +87,15 @@ const SEALED_MUTATORS: &[&str] = &[
     "retract_source_everywhere_except",
 ];
 
-/// The carrier-companion ProjectSync CONTENT verbs (establish a carrier `.tsx`/`.dts`
-/// companion as a provider content authority). They may run ONLY from the bounded
-/// carrier-sync surface (the tsgo direct-open handlers + the `ProjectSync` definition
-/// itself) — never from a new unrelated file that would sync carrier buffers behind
-/// the gateway's back. Close verbs are NOT policed (closing is always safe).
-const CARRIER_CONTENT_VERBS: &[&str] = &["load_dts", "load_tsx", "open_dts", "open_tsx"];
+/// The carrier-companion ProjectSync CONTENT verbs (establish or update a carrier
+/// `.tsx`/`.dts` companion as a provider content authority). They may run ONLY from
+/// the bounded carrier-sync surface (the tsgo direct-open handlers + the `ProjectSync`
+/// definition itself) — never from a new unrelated file that would sync carrier
+/// buffers behind the gateway's back. Close verbs are NOT policed (closing is always
+/// safe).
+const CARRIER_CONTENT_VERBS: &[&str] = &[
+    "load_dts", "load_tsx", "open_dts", "open_tsx", "sync_dts", "sync_tsx",
+];
 
 /// Files permitted to call the carrier-companion CONTENT verbs: the carrier-sync
 /// gateway, the tsgo direct-open + interactive + drain + coordinator + scanner sync
@@ -401,4 +404,27 @@ fn allowlist_self_test_discriminates() {
         content_ok.is_empty(),
         "a carrier content verb from an allowlisted carrier-sync file must be clean; got {content_ok:?}"
     );
+
+    // 7. The in-place UPDATE verbs push carrier content just like open/load: a call
+    //    or fn-pointer reference from a non-allowlisted file FIRES for each.
+    for verb in ["sync_tsx", "sync_dts"] {
+        let update_call = scan_source(
+            "crates/verter_lsp/src/server/nav_features.rs",
+            &format!(
+                "async fn rogue(sync: &P, p: &str, c: &str) {{ let _ = sync.{verb}(p, c).await; }}"
+            ),
+        );
+        assert!(
+            update_call.iter().any(|v| v.contains(verb)),
+            "carrier update verb `{verb}` from a non-allowlisted file must fire; got {update_call:?}"
+        );
+        let update_path = scan_source(
+            "crates/verter_lsp/src/server/nav_features.rs",
+            &format!("fn smuggle() {{ let f = ProjectSync::{verb}; let _ = f; }}"),
+        );
+        assert!(
+            update_path.iter().any(|v| v.contains(verb)),
+            "a fn-pointer reference to carrier update verb `{verb}` must fire; got {update_path:?}"
+        );
+    }
 }
