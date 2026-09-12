@@ -325,6 +325,10 @@ jobs:
               # record's own owner against that list, and dropping an entry
               # changes which records that lane still refreshes.
               - 'scripts/compile-contracts.mjs'
+              # The probe-state manifests and promotion join records whose
+              # citations the validation-probe authority validator checks.
+              - 'crates/verter_validation_probe/manifest/**'
+              - 'crates/verter_validation_probe/join/**'
               # Inputs to the semantic-memory-budget validator, for the same
               # reason as the closure-register inputs above: it opens these
               # bytes directly. The locked gate file supplies the ratified
@@ -384,6 +388,8 @@ jobs:
           node roadmap/0.1.0-tama/tools/closure-register.mjs --check
           node --test roadmap/0.1.0-tama/tools/closure-register.test.mjs
           node --test roadmap/0.1.0-tama/tools/closure-replay.test.mjs
+          node roadmap/0.1.0-tama/tools/validate-probe-authorities.mjs --manifest crates/verter_validation_probe/manifest --join crates/verter_validation_probe/join
+          node --test roadmap/0.1.0-tama/tools/validate-probe-authorities.test.mjs
           node roadmap/0.1.0-tama/tools/validate-semantic-memory-budget.mjs
           node --test roadmap/0.1.0-tama/tools/semantic-memory-budget.test.mjs
       - name: CI aggregate completeness

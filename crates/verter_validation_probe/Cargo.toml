@@ -1,0 +1,19 @@
+[package]
+name = "verter_validation_probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Test-only validation-probe contract: the closed probe outcome taxonomy with its causal precedence fold, the per-dimension case observation, and the probe-state manifest with its expectation evaluator."
+publish = false
+
+# Test and CI tooling only. No production crate may depend on this crate; the
+# workspace dependency-layer guard lists it among the harnesses nothing may
+# depend on.
+
+[dependencies]
+serde = { workspace = true }
+toml = "1.1"
