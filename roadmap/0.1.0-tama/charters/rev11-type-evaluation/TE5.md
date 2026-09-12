@@ -71,7 +71,7 @@ dispatchable subblocks.
 
 ## Exact predecessor contracts
 
-- **TE4:** implemented ledger row for “Mapped and generic selective forcing”; ledger presence alone satisfies the predecessor. Through TE4's transitive closure, TE5 receives TE1's sealed force capability, TE2's select-before-force conditional semantics and infer scoping, TE3's path/key-domain selective forcing, TA1B's canonical composites, and TE4's demanded-key-only mapped/generic semantics. TE5 closes and enforces those outcomes; it does not redesign them.
+- **TE4:** implemented ledger row for “Mapped and generic selective forcing”; ledger presence alone satisfies the predecessor. Through TE4's transitive closure, TE5 receives TE1's sealed force capability, TE2's dispatch-boundary select-before-force conditional semantics and infer scoping, TE2B's lowering- and instantiation-site branch forcing, TE3's path/key-domain selective forcing, TA1B's canonical composites, and TE4's demanded-key-only mapped/generic semantics. TE5 closes and enforces those outcomes; it does not redesign them.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope

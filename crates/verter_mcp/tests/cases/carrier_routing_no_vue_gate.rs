@@ -40,8 +40,8 @@
 //! Test code (`#[cfg(test)]` + `*_tests.rs`, stripped), comments (stripped),
 //! and explicit `is_svelte()` checks (a DIFFERENT carrier) are excluded.
 //!
-//! Registered in `CRITICAL_RULE_GUARDS` under "Framework Adapter Substrate"
-//! as `mcp_routing_has_no_hardcoded_vue_gate`. Documented in the
+//! Enforces the "Framework Adapter Substrate" rule in `CLAUDE.md` as
+//! `mcp_routing_has_no_hardcoded_vue_gate`. Documented in the
 //! `/framework-adapters` skill.
 
 use std::fs;

@@ -5327,6 +5327,296 @@ fn closed_conditional_does_not_materialise_losing_branch_body() {
     );
 }
 
+/// The losing branch of a DECIDED conditional is a dead operand: it
+/// contributes no semantic dependency fact, so its origin file must not
+/// enter the result's observed self-roots. Rooting a decided conditional
+/// on the loser makes an edit to a file that only the dead branch was
+/// lowered from reject a cached value whose computation never read that
+/// file.
+///
+/// Both branch shells here are lowered from DISTINCT files, so a root set
+/// is attributable to exactly one branch. The deferred shell is the
+/// contrast arm: it publishes both branch references as part of its
+/// value, so both files stay rooted.
+#[test]
+fn decided_conditional_roots_only_on_check_extends_and_the_winner() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let file_scope = |canonical: &str, hash: u8| NodeScopeId::File {
+        canonical_id: Arc::from(canonical),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: [hash; 16],
+        local_scope: None,
+    };
+
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+    let true_branch = graph.intern_node_with_scope(
+        SemanticNodeData::Array {
+            element: string_node,
+            readonly: false,
+        },
+        file_scope("/w/true_branch.ts", 1),
+    );
+    let false_branch = graph.intern_node_with_scope(
+        SemanticNodeData::Array {
+            element: number_node,
+            readonly: false,
+        },
+        file_scope("/w/false_branch.ts", 2),
+    );
+    assert_ne!(
+        true_branch, false_branch,
+        "the two branch shells must be distinct nodes for the root set to \
+         attribute to one branch"
+    );
+
+    let rooted_files = |output: &crate::project_semantic_dispatch::walk::QueryBuildOutput| {
+        let mut files: Vec<String> = output
+            .observed_self_roots
+            .iter()
+            .map(|(canonical, _)| canonical.to_string())
+            .collect();
+        files.sort();
+        files
+    };
+
+    // `string extends string` decides TRUE: only the true branch's file
+    // is a dependency of the answer.
+    let decided_true =
+        dispatch.build_conditional(string_node, string_node, true_branch, false_branch, false);
+    assert!(
+        matches!(decided_true.result, QueryResult::Value(id) if id == true_branch),
+        "the closed check must select the true branch, got {:?}",
+        decided_true.result
+    );
+    assert_eq!(
+        rooted_files(&decided_true),
+        vec!["/w/true_branch.ts".to_string()],
+        "a decided-true conditional must not root on the dead false branch"
+    );
+
+    // `number extends string` decides FALSE: the mirror case, so the
+    // assertion cannot pass by always dropping one fixed branch.
+    let decided_false =
+        dispatch.build_conditional(number_node, string_node, true_branch, false_branch, false);
+    assert!(
+        matches!(decided_false.result, QueryResult::Value(id) if id == false_branch),
+        "the closed check must select the false branch, got {:?}",
+        decided_false.result
+    );
+    assert_eq!(
+        rooted_files(&decided_false),
+        vec!["/w/false_branch.ts".to_string()],
+        "a decided-false conditional must not root on the dead true branch"
+    );
+
+    // An OPEN check keeps both branch references in the published shell,
+    // so both files remain genuine dependencies.
+    let open_check = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("OpenCheck"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("OpenCheck"),
+    });
+    let open_extends = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("OpenExtends"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("OpenExtends"),
+    });
+    let deferred =
+        dispatch.build_conditional(open_check, open_extends, true_branch, false_branch, false);
+    assert_eq!(
+        rooted_files(&deferred),
+        vec![
+            "/w/false_branch.ts".to_string(),
+            "/w/true_branch.ts".to_string()
+        ],
+        "a deferred shell publishes both branch refs, so both stay rooted"
+    );
+
+    // Lattice-extreme checks decide without the relation authority. An
+    // `error` check and a distributive `never` check read neither branch,
+    // so neither branch file is a dependency of the answer.
+    let error_check = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(Arc::from(
+        "error check",
+    ))));
+    let never_check = primitive(&graph, PrimitiveKind::Never);
+    for (label, check, distributive) in [
+        ("error", error_check, false),
+        ("distributive never", never_check, true),
+    ] {
+        let absorbed =
+            dispatch.build_conditional(check, string_node, true_branch, false_branch, distributive);
+        assert!(
+            matches!(absorbed.result, QueryResult::Value(id) if id != true_branch && id != false_branch),
+            "a {label} check must absorb to neither branch, got {:?}",
+            absorbed.result
+        );
+        assert!(
+            rooted_files(&absorbed).is_empty(),
+            "a {label} check reads no branch, so no branch file may be rooted, got {:?}",
+            rooted_files(&absorbed)
+        );
+    }
+
+    // An `any` check publishes the union of both branches, so both stay
+    // rooted.
+    let any_check = primitive(&graph, PrimitiveKind::Any);
+    let any_union =
+        dispatch.build_conditional(any_check, string_node, true_branch, false_branch, false);
+    assert_eq!(
+        rooted_files(&any_union),
+        vec![
+            "/w/false_branch.ts".to_string(),
+            "/w/true_branch.ts".to_string()
+        ],
+        "an any check unions both branches, so both stay rooted"
+    );
+}
+
+#[test]
+fn distributed_conditional_dependencies_follow_member_selections() {
+    use crate::resolver_core::FactVersionRef;
+    use crate::semantic_query::LiteralValue;
+
+    for case in ["true", "false", "mixed", "open"] {
+        let host = host();
+        for file in ["check", "extends", "true", "false"] {
+            upsert_ts(
+                &host,
+                &format!("/w/{file}.ts"),
+                "export type Root = string;",
+            );
+        }
+        let scope = |file: &str| {
+            let canonical = format!("/w/{file}.ts");
+            NodeScopeId::File {
+                whole_hash: host.ensure_indexed_ready(&canonical).unwrap().whole_hash,
+                canonical_id: Arc::from(canonical),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                local_scope: None,
+            }
+        };
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = dispatch.graph();
+        let string = primitive(graph, PrimitiveKind::String);
+        let number = primitive(graph, PrimitiveKind::Number);
+        let boolean = primitive(graph, PrimitiveKind::Boolean);
+        let literal = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "value".to_string(),
+        )));
+        let open = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity::synthetic("Open"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("Open"),
+        });
+        let members = match case {
+            "true" => [string, literal],
+            "false" => [number, boolean],
+            "mixed" => [string, number],
+            "open" => [string, open],
+            _ => unreachable!(),
+        };
+        let check = graph.intern_node_with_scope(
+            SemanticNodeData::Union(
+                crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(members)),
+            ),
+            scope("check"),
+        );
+        let extends = graph.intern_node_with_scope(
+            SemanticNodeData::Primitive(PrimitiveKind::String),
+            scope("extends"),
+        );
+        let branch = |element, file| {
+            graph.intern_node_with_scope(
+                SemanticNodeData::Array {
+                    element,
+                    readonly: false,
+                },
+                scope(file),
+            )
+        };
+        let true_branch = branch(string, "true");
+        let false_branch = branch(number, "false");
+        let mut expected_files = vec!["/w/check.ts", "/w/extends.ts"];
+        if case != "true" {
+            expected_files.push("/w/false.ts");
+        }
+        if case != "false" {
+            expected_files.push("/w/true.ts");
+        }
+
+        // Distinct parent keys reuse the same member queries: the second
+        // parent must inherit the same dependencies from warm member reads.
+        for distributive_check in [check, graph.intern_node(SemanticNodeData::Alias(check))] {
+            let key = SemanticQueryKey::Conditional {
+                check: distributive_check,
+                extends,
+                true_branch,
+                false_branch,
+                distributive: true,
+            };
+            for attempt in 0..2 {
+                let before = graph.stats_snapshot();
+                let (read, evidence) = dispatch.execute_read_with_operand_evidence(key.clone());
+                if attempt == 1 {
+                    let after = graph.stats_snapshot();
+                    assert!(
+                        after.hits > before.hits,
+                        "the repeated parent must hit warm"
+                    );
+                    assert_eq!(
+                        after.misses, before.misses,
+                        "a warm parent must not rebuild members"
+                    );
+                }
+                assert!(
+                    !read.cache_suppress && !read.result_is_partial,
+                    "{case}: {read:?}"
+                );
+                let QueryResult::Value(result) = read.value else {
+                    panic!("{case}: expected a complete distributed value");
+                };
+                match case {
+                    "true" => assert_eq!(result, true_branch),
+                    "false" => assert_eq!(result, false_branch),
+                    _ => assert!(matches!(
+                        graph.node_data(result).as_deref(),
+                        Some(SemanticNodeData::Union(_))
+                    )),
+                }
+                let evidence = evidence.expect("complete conditional carries cache evidence");
+                let mut files: Vec<_> = evidence
+                    .read_set()
+                    .facts
+                    .iter()
+                    .filter_map(|fact| {
+                        if let FactVersionRef::FileWholeHash { canonical_id, .. } = fact {
+                            Some(canonical_id.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                files.sort_unstable();
+                files.dedup();
+                assert_eq!(
+                    files, expected_files,
+                    "{case}: distributed dependencies must follow member selections"
+                );
+            }
+        }
+    }
+}
+
 /// An open/undecidable conditional keeps both branch references
 /// intact in a `Conditional` shell node. Neither branch is recursively
 /// expanded; the shell's fields point at the as-supplied branch ids.

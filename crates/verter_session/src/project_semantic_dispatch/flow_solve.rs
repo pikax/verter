@@ -51,7 +51,9 @@ use verter_semantic::analysis::flow::peeker::{
     DemandSegment, FlowSliceBudget, FlowSliceBudgetAxis, FlowSliceBudgetExceeded, SliceDemand,
     SliceOrigin,
 };
-use verter_semantic::analysis::flow::{FlowBindingRef, SkeletonBindingKind};
+use verter_semantic::analysis::flow::{
+    FlowBindingRef, SkeletonBindingKind, SkeletonClosureCorrelation, SkeletonClosureId,
+};
 
 use super::dispatch_txn::flow_obligation_state::{
     FlowBindingBasis, FlowCaptureDemand, FlowConvergenceEvidence, FlowDemandHandle,
@@ -1258,15 +1260,15 @@ pub(crate) fn build_flow_demand_plan_from_execution(
                 }
             }
             F::Capture => {
-                // Nested function DECLARATIONS anchor on the nested
-                // function's binding identity. The capture SET of a
-                // nested body is beyond this skeleton's authority (nested
-                // bodies carry no reads here), so each nested-function
-                // subject installs as the family's accepted typed gap —
-                // never an omission.
+                // Nested function and class DECLARATIONS anchor on the
+                // declared binding identity. The capture SET of a nested
+                // body is beyond this skeleton's authority (nested bodies
+                // carry no reads here, and no index record serves a class
+                // member), so each such subject installs as the family's
+                // accepted typed gap — never an omission.
                 for node in &selected {
                     let FlowNodeKind::Binding(binding) = graph.node_kind(*node) else { continue };
-                    if bundle.skeleton.binding(binding).kind != SkeletonBindingKind::NestedFunction { continue; }
+                    if !matches!(bundle.skeleton.binding(binding).kind, SkeletonBindingKind::NestedFunction | SkeletonBindingKind::Class) { continue; }
                     let id = push(
                         FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
                         FlowObligationOrigin::Expansion(E::Capture),
@@ -1275,49 +1277,99 @@ pub(crate) fn build_flow_demand_plan_from_execution(
                     )?;
                     expanded.push(id);
                 }
-                // Closure EXPRESSIONS (arrow / function expression sites):
-                // the skeleton authority records exact captured subjects
-                // on the closure's own site — one concrete capture
-                // obligation per (closure site, captured binding),
-                // carrying the binding's real cross-frame identity. Display
-                // names never resolve these subjects: an outer binding need
-                // not have any local declaration in this frame.
+                // Closure EXPRESSIONS (arrow / function expression /
+                // object-literal method): the skeleton authority records
+                // EVERY authored callable evaluated at a site, in authored
+                // order, each carrying its OWN exact captured subjects — so
+                // the obligation identity is the CALLBACK, not the site. A
+                // call's argument list and an array literal are single
+                // expression sites holding several callables
+                // (`f(() => a, () => b)`), and a site-level capture union
+                // cannot say which callback owes which cell. Display names
+                // never resolve these subjects: an outer binding need not
+                // have any local declaration in this frame.
                 for node in &selected {
                     let FlowNodeKind::ExprSite(site) = graph.node_kind(*node) else { continue };
                     let site_record = bundle.skeleton.expr_site(site);
-                    if site_record.capture_bindings.is_empty() { continue; }
-                    let value_captures: FxHashSet<_> = site_record.reads.iter()
-                        .filter_map(|read| read.binding.as_ref()).collect();
-                    for capture in site_record.capture_bindings.iter() {
-                        let demand = if value_captures.contains(capture) { FlowCaptureDemand::Value } else { FlowCaptureDemand::Effect };
-                        let (basis, dischargeable) = match capture {
-                            FlowBindingRef::Local(binding) => match identities.identity(*binding) {
-                                Some(identity) => (
-                                    FlowObligationBasis::CapturedBinding { node: *node, site, identity: identity.clone(), demand },
+                    if site_record.closures.is_empty() { continue; }
+                    for (ordinal, record) in site_record.closures.iter().enumerate() {
+                        let closure = SkeletonClosureId::from_index(u32::try_from(ordinal).unwrap_or(u32::MAX));
+                        // An authored callable the indexed program does not
+                        // serve asserts NOTHING about what it captures, and
+                        // a partially served one names only a lower bound:
+                        // the family's typed gap, never a capture-free
+                        // discharge, and never silence. A partial callable
+                        // still owes its named captures below.
+                        let unproven = match record.correlation {
+                            SkeletonClosureCorrelation::Exact => None,
+                            SkeletonClosureCorrelation::Partial => Some(FlowObligationBasis::PartialClosure { node: *node, site, closure }),
+                            SkeletonClosureCorrelation::Uncorrelated => Some(FlowObligationBasis::UncorrelatedClosure { node: *node, site, closure }),
+                        };
+                        if let Some(basis) = unproven {
+                            let id = push(
+                                FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
+                                FlowObligationOrigin::Expansion(E::Capture),
+                                basis,
+                                Arc::from([]), Arc::from([]),
+                            )?;
+                            expanded.push(id);
+                        } else if record.captures.is_empty() {
+                            // A callable the authority proved captures
+                            // nothing carries its own POSITIVE obligation:
+                            // "enumerated and empty" is a discharge, not an
+                            // omission.
+                            let id = push(
+                                FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
+                                FlowObligationOrigin::Expansion(E::Capture),
+                                FlowObligationBasis::CaptureFreeClosure { node: *node, site, closure },
+                                Arc::from([]), Arc::from([]),
+                            )?;
+                            note_node_obligation(&mut node_obligations, *node, id);
+                            expanded.push(id);
+                            continue;
+                        }
+                        // The demand is THIS callable's, so the read set
+                        // that decides it is THIS callable's too. The site
+                        // footprint merges every callable evaluated here
+                        // with the site's own reads, so in
+                        // `f(() => a, () => { a = 1 })` the sibling reader
+                        // would otherwise make the write-only callback
+                        // demand a value product it never consumes: `Value`
+                        // is discharged by `binding_product_evidence`, not
+                        // by the structural execution an effect-only
+                        // capture proves.
+                        let value_captures: FxHashSet<_> = record.read_captures.iter().collect();
+                        for capture in record.captures.iter() {
+                            let demand = if value_captures.contains(capture) { FlowCaptureDemand::Value } else { FlowCaptureDemand::Effect };
+                            let (basis, dischargeable) = match capture {
+                                FlowBindingRef::Local(binding) => match identities.identity(*binding) {
+                                    Some(identity) => (
+                                        FlowObligationBasis::CapturedBinding { node: *node, site, closure, identity: identity.clone(), demand },
+                                        true,
+                                    ),
+                                    None => (
+                                        FlowObligationBasis::Capture { node: *node, binding: *binding, identity: None },
+                                        false,
+                                    ),
+                                },
+                                FlowBindingRef::Captured(identity) => (
+                                    FlowObligationBasis::CapturedBinding { node: *node, site, closure, identity: identity.clone(), demand },
                                     true,
                                 ),
-                                None => (
-                                    FlowObligationBasis::Capture { node: *node, binding: *binding, identity: None },
-                                    false,
-                                ),
-                            },
-                            FlowBindingRef::Captured(identity) => (
-                                FlowObligationBasis::CapturedBinding { node: *node, site, identity: identity.clone(), demand },
-                                true,
-                            ),
-                        };
-                        let id = push(
-                            FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
-                            FlowObligationOrigin::Expansion(E::Capture),
-                            basis,
-                            Arc::from([]), Arc::from([]),
-                        )?;
-                        // A concrete capture subject may anchor the node's
-                        // out-edge facts; a typed gap discharges nothing.
-                        if dischargeable {
-                            note_node_obligation(&mut node_obligations, *node, id);
+                            };
+                            let id = push(
+                                FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
+                                FlowObligationOrigin::Expansion(E::Capture),
+                                basis,
+                                Arc::from([]), Arc::from([]),
+                            )?;
+                            // A concrete capture subject may anchor the node's
+                            // out-edge facts; a typed gap discharges nothing.
+                            if dischargeable {
+                                note_node_obligation(&mut node_obligations, *node, id);
+                            }
+                            expanded.push(id);
                         }
-                        expanded.push(id);
                     }
                 }
             }

@@ -3907,6 +3907,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_validation_probe"
+version = "0.0.1-beta.3"
+dependencies = [
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "verter_vue_conformance"
 version = "0.0.1-beta.3"
 dependencies = [

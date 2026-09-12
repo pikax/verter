@@ -15,8 +15,8 @@ REFERENCE adapter: re-housed as a true plan/normalize adapter, not a
 privileged hardcoded path.
 
 The canonical rule text is the **Framework Adapter Substrate (CRITICAL)**
-section in `CLAUDE.md` (registered in the R6 meta-guard registry); this
-skill is the module map + contract reference behind it.
+section in `CLAUDE.md`, which names its own guards; this skill is the
+module map + contract reference behind it.
 
 ## Module map
 

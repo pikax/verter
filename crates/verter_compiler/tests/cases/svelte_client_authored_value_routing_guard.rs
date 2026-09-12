@@ -64,9 +64,6 @@
 //! residual classes are covered by the secondary wrap-syntax tripwire plus
 //! the behavioral oracle goldens and the conformance value-wrap cells — and
 //! terminally by the D-61 capability boundary, not by this guard.
-//!
-//! Registered in `CRITICAL_RULE_GUARDS`
-//! (`crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs`).
 
 use super::svelte_guard_support;
 

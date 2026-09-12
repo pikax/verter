@@ -1078,3 +1078,280 @@ fn declaration_span_index_preserves_authored_alias_and_shadow_identities() {
         "declaration addressability never invents a value identity for a type-only binder"
     );
 }
+
+/// A site is not a callback identity. Several callables share one
+/// expression site whenever the site is a compound the skeleton does not
+/// open per element — a call's argument list, an array literal — so the
+/// site-level capture union answers "is this cell retained here" and can
+/// never answer "which callback retains it". The per-callable inventory
+/// is the partition that can: exactly one record per authored callable,
+/// in authored order, each carrying only its OWN captures. Without it a
+/// two-callback call is one undifferentiated capture set, and a
+/// capture-free callback is indistinguishable from no callback at all.
+#[test]
+fn each_callable_sharing_one_site_retains_its_own_capture_partition() {
+    for source in [
+        "function root() { const a = 1; const b = 2; sink(() => a, () => b); return 1; }",
+        "function root() { const a = 1; const b = 2; return [() => a, () => b]; }",
+    ] {
+        let prepared = indexed_structure_of(source);
+        let skeleton = prepared.skeleton();
+        let a = single_binding_named(skeleton, "a");
+        let b = single_binding_named(skeleton, "b");
+        let site = skeleton
+            .expr_sites
+            .iter()
+            .find(|site| site.closures.len() > 1)
+            .unwrap_or_else(|| panic!("both callables share one site: {source}"));
+        assert_eq!(
+            site.capture_bindings.as_ref(),
+            &[FlowBindingRef::Local(a), FlowBindingRef::Local(b)],
+            "the site union deliberately merges both callbacks"
+        );
+        let partition: Vec<_> = site
+            .closures
+            .iter()
+            .map(|closure| (closure.correlation, closure.captures.as_ref()))
+            .collect();
+        assert_eq!(
+            partition,
+            vec![
+                (
+                    SkeletonClosureCorrelation::Exact,
+                    &[FlowBindingRef::Local(a)][..]
+                ),
+                (
+                    SkeletonClosureCorrelation::Exact,
+                    &[FlowBindingRef::Local(b)][..]
+                ),
+            ],
+            "each callback keeps exactly its own capture, in authored order: {source}"
+        );
+        assert!(
+            site.closures[0].span.to_absolute(0).start < site.closures[1].span.to_absolute(0).start,
+            "authored order is the record order"
+        );
+    }
+}
+
+/// A site's read footprint MERGES every callable evaluated there with the
+/// site's own reads, so it can say that a cell is read HERE and never by
+/// WHICH callable. `sink(() => a, () => { a = 1; })` retains `a` twice
+/// and reads it once: without the per-callable read partition the
+/// write-only callback is indistinguishable from the reader, and a
+/// consumer would demand a value it never consumes.
+#[test]
+fn each_callable_keeps_its_own_read_partition_of_the_merged_site_footprint() {
+    let prepared =
+        indexed_structure_of("function root(a) { sink(() => a, () => { a = 1; }); return 1; }");
+    let skeleton = prepared.skeleton();
+    let a = single_binding_named(skeleton, "a");
+    let site = skeleton
+        .expr_sites
+        .iter()
+        .find(|site| site.closures.len() > 1)
+        .expect("both callables share one expression site");
+    assert!(
+        site.reads
+            .iter()
+            .any(|read| read.binding == Some(FlowBindingRef::Local(a))),
+        "the merged footprint records the read with no callable attribution"
+    );
+    let partition: Vec<_> = site
+        .closures
+        .iter()
+        .map(|closure| (closure.captures.as_ref(), closure.read_captures.as_ref()))
+        .collect();
+    assert_eq!(
+        partition,
+        vec![
+            (
+                &[FlowBindingRef::Local(a)][..],
+                &[FlowBindingRef::Local(a)][..]
+            ),
+            (&[FlowBindingRef::Local(a)][..], &[][..]),
+        ],
+        "both callables retain `a`; only the authored first one reads it"
+    );
+}
+
+/// The three outcomes a consumer must be able to tell apart at one call
+/// site: a callback that provably captures nothing, a callback whose only
+/// free read binds no declaration at all (a global — never a capture),
+/// and a callback the indexed program does not serve (a parameter
+/// default), which asserts NOTHING and must fail closed rather than read
+/// as capture-free.
+#[test]
+fn capture_free_globals_only_and_uncorrelated_callables_stay_distinct() {
+    let prepared = indexed_structure_of("function root() { sink(() => 1); return 1; }");
+    let closures = sole_closure_inventory(prepared.skeleton());
+    assert_eq!(
+        closures.len(),
+        1,
+        "a capture-free callback is still recorded"
+    );
+    assert_eq!(closures[0].correlation, SkeletonClosureCorrelation::Exact);
+    assert!(
+        closures[0].captures.is_empty(),
+        "proved capture-free, not unknown"
+    );
+
+    let prepared = indexed_structure_of("function root() { sink(() => globalThing); return 1; }");
+    let closures = sole_closure_inventory(prepared.skeleton());
+    assert_eq!(closures[0].correlation, SkeletonClosureCorrelation::Exact);
+    assert!(
+        closures[0].captures.is_empty(),
+        "a read that binds no declaration is free, never a capture"
+    );
+
+    let prepared = indexed_structure_of("function root(p, q = () => p) { return q; }");
+    let closures = sole_closure_inventory(prepared.skeleton());
+    assert_eq!(
+        closures[0].correlation,
+        SkeletonClosureCorrelation::Uncorrelated,
+        "a parameter-default callable the index does not serve is a typed unknown"
+    );
+    assert!(
+        closures[0].captures.is_empty(),
+        "an uncorrelated record asserts no capture set"
+    );
+}
+
+/// Capture identity is the binding, never the name: the inner `a` shadows
+/// the outer one, and a callable capturing through an intervening
+/// callable reaches the same exact declaration the direct capture does.
+#[test]
+fn per_callable_captures_are_shadow_exact_and_transitive() {
+    let prepared = indexed_structure_of(
+        "function root() { const a = 1; { const a = 2; sink(() => a); } return a; }",
+    );
+    let skeleton = prepared.skeleton();
+    let shadowed: Vec<_> = skeleton
+        .bindings_named(skeleton.name_id("a").unwrap())
+        .collect();
+    assert_eq!(shadowed.len(), 2);
+    let closures = sole_closure_inventory(skeleton);
+    assert_eq!(
+        closures[0].captures.as_ref(),
+        &[FlowBindingRef::Local(shadowed[1])],
+        "the inner declaration is the captured cell"
+    );
+
+    let prepared =
+        indexed_structure_of("function root() { const a = 1; sink(() => () => a); return 1; }");
+    let skeleton = prepared.skeleton();
+    let a = single_binding_named(skeleton, "a");
+    let closures = sole_closure_inventory(skeleton);
+    assert_eq!(
+        closures[0].captures.as_ref(),
+        &[FlowBindingRef::Local(a)],
+        "a capture through an intervening callable names the same declaration"
+    );
+}
+
+/// The indexed program serves no class member body or field initializer
+/// and no parameter-list callable, so a cell retained there is named by
+/// no index record. A class evaluated at a site is therefore an unserved
+/// callable, and a SERVED callable whose body creates one only knows a
+/// lower bound of its captures. Neither may read as an exact capture set:
+/// an exact empty set is a capture-free proof, and every fixture here
+/// really retains `a`.
+#[test]
+fn callables_the_index_cannot_serve_never_read_as_an_exact_capture_set() {
+    use SkeletonClosureCorrelation::{Partial, Uncorrelated};
+    for (source, expected) in [
+        (
+            "function root() { const a = 1; sink(class { m() { return a; } }); return 1; }",
+            Uncorrelated,
+        ),
+        (
+            "function root() { const a = 1; sink(class { m = () => a; }); return 1; }",
+            Uncorrelated,
+        ),
+        (
+            "function root() { const a = 1; sink(() => class { m() { return a; } }); return 1; }",
+            Partial,
+        ),
+        (
+            "function root() { const a = 1; sink(() => { function g(q = () => a) { return q; } return g; }); return 1; }",
+            Partial,
+        ),
+    ] {
+        let prepared = indexed_structure_of(source);
+        let closures = sole_closure_inventory(prepared.skeleton());
+        assert_eq!(closures.len(), 1, "one authored callable at the site: {source}");
+        assert_eq!(
+            closures[0].correlation, expected,
+            "an unserved capture is never an exact set: {source}"
+        );
+    }
+}
+
+/// A computed key inside a destructuring pattern is evaluated at bind
+/// time, so a callable authored there is created — and retains its
+/// captures — exactly like one in an initializer. Every binding-pattern
+/// home (declarator, iteration declarator, catch parameter, parameter
+/// list) must enumerate it; an unenumerated callable is invisible, and
+/// its capture family would seal complete over a retained cell.
+#[test]
+fn callables_in_binding_pattern_computed_keys_are_enumerated() {
+    use SkeletonClosureCorrelation::{Exact, Uncorrelated};
+    for (source, expected) in [
+        (
+            "function root(o) { const a = 1; const { [reg(() => a)]: x } = o; return x; }",
+            Exact,
+        ),
+        (
+            "function root(o) { const a = 1; for (const { [reg(() => a)]: x } of o) {} return 1; }",
+            Exact,
+        ),
+        (
+            "function root() { const a = 1; try {} catch ({ [reg(() => a)]: x }) {} return 1; }",
+            Exact,
+        ),
+        (
+            "function root(o) { const a = 1; const [{ [reg(() => a)]: x } = o] = o; return x; }",
+            Exact,
+        ),
+        (
+            "function root(a, { [reg(() => a)]: x }) { return x; }",
+            Uncorrelated,
+        ),
+    ] {
+        let prepared = indexed_structure_of(source);
+        let skeleton = prepared.skeleton();
+        let closures = sole_closure_inventory(skeleton);
+        assert_eq!(closures.len(), 1, "one authored callable: {source}");
+        assert_eq!(closures[0].correlation, expected, "{source}");
+        if expected == Exact {
+            let a = single_binding_named(skeleton, "a");
+            assert_eq!(
+                closures[0].captures.as_ref(),
+                &[FlowBindingRef::Local(a)],
+                "the key callable's capture is named exactly: {source}"
+            );
+        }
+    }
+}
+
+fn single_binding_named(skeleton: &FunctionBodySkeleton, name: &str) -> SkeletonBindingId {
+    let id = skeleton
+        .name_id(name)
+        .unwrap_or_else(|| panic!("`{name}` must be interned"));
+    let mut bindings = skeleton.bindings_named(id);
+    let binding = bindings
+        .next()
+        .unwrap_or_else(|| panic!("`{name}` must be bound"));
+    assert!(bindings.next().is_none(), "`{name}` binds exactly once");
+    binding
+}
+
+fn sole_closure_inventory(skeleton: &FunctionBodySkeleton) -> &[SkeletonClosure] {
+    let mut sites = skeleton
+        .expr_sites
+        .iter()
+        .filter(|site| !site.closures.is_empty());
+    let site = sites.next().expect("the fixture authors one callable");
+    assert!(sites.next().is_none(), "exactly one site holds a callable");
+    &site.closures
+}
