@@ -16,24 +16,6 @@ pnpm exec vitest run path/to/test.ts           # One test file
 
 Tests are co-located as `*.spec.ts` files next to their source files. Type tests in `packages/types/` use `vitest --typecheck`.
 
-### AI-Generated Tests
-
-When adding tests with AI assistance, mark them appropriately:
-
-```typescript
-// For new test files, add a JSDoc at the top:
-/**
- * @ai-generated - This test file was generated with AI assistance.
- * Brief description of what the tests cover.
- */
-
-// For individual tests in existing files:
-// @ai-generated - Tests X functionality with Y scenarios
-it("does something", () => {
-  /* ... */
-});
-```
-
 ### Sourcemap Testing
 
 For testing sourcemap accuracy (see `macros.map.spec.ts` for examples):

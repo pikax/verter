@@ -59,6 +59,19 @@ Direct owner imports take the `OwnerImportSurfaceDb` path via `resolve_owner_dir
 
 The official/native component-meta payload is the semantic authority. `@verter/component-meta/compat` is a projection layer for `vue-component-meta` interoperability, not a second semantic pipeline.
 
+Guards: `no_napi_direct_verter_compiler_emitters`
+(`crates/verter_session/tests/cases/architecture_guards.rs`) fails if the NAPI
+layer reaches a `verter_compiler` emitter directly instead of routing batch and
+single compiles through the host; `compat_one_napi_call_audit`
+(`crates/verter_session/tests/cases/g_block/block_6i_runtime_arch_guards.rs`)
+asserts one `getComponentMeta` invocation advances the host's native-call
+provenance counter by exactly 1, so compat cannot issue follow-up native calls
+to progressively resolve a payload. The JS counterpart
+`packages/component-meta/test/compat-native-call-surface-allowlist.test.ts`
+pins the compat layer's `_session` call/read surface to a fixed allow-list. The
+remaining clauses below — native-first fixes, no JS meaning recovery,
+cache-owned type recovery, explicit payload versioning — are review-enforced.
+
 - Fix missing/incorrect metadata in the shared/native owner layer first. Compat should only remap representation when the native payload is already correct enough.
 - Rust is the component-meta semantic authority. Resolution, declaration routing, recursion handling, graph construction, payload shaping, and the full Verter API response belong on the native side.
 - `@verter/component-meta` must issue one async native request per query and receive the full Verter API response for that query. Do not introduce JS/native follow-up calls to progressively resolve missing types, missing graph nodes, or deferred declarations.
