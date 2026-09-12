@@ -111,10 +111,8 @@ toml = "1.1"
 # seams exactly when it is built for this crate's tests, never for a production
 # dependent. Mirrors `verter_session`'s self-edge.
 verter_lsp = { path = ".", features = ["test-support"] }
-# Used by `tests/editor_liveness_guards.rs` to AST-parse the LSP provider-sync
-# source so the delegated-stale-close detector is robust against multiline call
-# spans, bare-local stale sets, and aliased delegation (a line-based scan is
-# trivially evadable). Mirrors `verter_session`'s syn-based architecture guards.
+# Used by `tests/cases/typed_prop_callable_role_guard.rs` to AST-parse
+# `src/features/completion.rs`.
 syn = { version = "2.0", features = ["full", "visit", "parsing"] }
 # Used by `tests/stdio_launch_smoke.rs` to build the verter-lsp launch argv and
 # initializationOptions through the SHARED editor-client launch contract, so the

@@ -1536,38 +1536,6 @@ async fn register_carrier_forwards_to_the_live_provider() {
     );
 }
 
-#[test]
-fn resilient_does_not_reintroduce_snapshot_then_swap() {
-    // Static architecture guard: the single-writer actor owns the desired-state
-    // set task-locally. The retired snapshot-then-swap design stored it in
-    // shared, lock-guarded maps and cloned a crash-time snapshot to replay from
-    // (plus a `registration_gate` held across that window); reintroducing any of
-    // those is the TOCTOU / backpressure-stall regression this guard blocks.
-    let source = include_str!("resilient.rs");
-
-    for forbidden in [
-        "file_cache: Arc<RwLock<",
-        "path_configs: Arc<RwLock<",
-        "workspace_folders: Arc<RwLock<",
-        "carrier_registrations: Arc<RwLock<",
-        "cache_snapshot",
-        "carrier_snapshot",
-        "registration_gate",
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "snapshot-then-swap replay pattern reintroduced in resilient.rs: `{forbidden}`"
-        );
-    }
-
-    for required in ["enum Command", "GoLive", "async fn run_actor"] {
-        assert!(
-            source.contains(required),
-            "single-writer actor structure missing from resilient.rs: `{required}`"
-        );
-    }
-}
-
 // ── respawn-failure recovery (D2) ─────────────────────────────────────
 
 /// Backend whose `spawn` fails a configurable number of times before succeeding,

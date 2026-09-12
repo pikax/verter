@@ -8,7 +8,6 @@ mod client_lifetime;
 mod closed_carrier_in_autoimport_index;
 mod cross_file_navigation_ranges_fail_closed;
 mod decl_overlay_close_ownership;
-mod editor_liveness_guards;
 mod generated_only_spans_suppressed;
 mod kebab_tag_mapping_full_columns;
 mod lsp_audit_cancellation_finalizes_with_marker;

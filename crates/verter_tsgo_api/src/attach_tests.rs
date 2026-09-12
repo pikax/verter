@@ -688,3 +688,194 @@ async fn did_open_failure_tracks_no_phantom_overlay() {
     api_conn_keep.close().await.unwrap();
     api_join.await.unwrap();
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Witness FLOW: the version the gate accepted is STORED on the attach and is
+// what the `--api` `updateSnapshot` rail is driven with — never a version the
+// call site re-supplies or hardcodes. Plus the ACCEPTED-witness leg of the
+// non-owning composer (the refused leg lives above), where it proceeds to the
+// `--api` session open while still never originating an LSP `initialize`.
+// ────────────────────────────────────────────────────────────────────────────
+
+/// The recorded `--api` request trace: `(method, params)` per inbound request,
+/// in arrival order. Distinct from [`WireTrace`], which keeps only the overlay
+/// URI — the `--api` rail's assertion is on the full params payload.
+type ApiCallTrace = Arc<StdMutex<Vec<(String, serde_json::Value)>>>;
+
+/// A fake `--api` peer that answers `updateSnapshot` with a STRING snapshot
+/// handle — the pre-integer-handle wire the codec refuses. That refusal is
+/// raised by `gate::require_integer_snapshot_handle`, whose message embeds the
+/// `observed_version` its CALLER supplied, which is what makes the version that
+/// actually reached the rail observable from outside. Records every
+/// `(method, params)` so the wire shape can be pinned too. Ends on client EOF.
+fn spawn_fake_api_server_with_string_snapshot_handle(
+) -> (JsonRpcConnection, ApiCallTrace, tokio::task::JoinHandle<()>) {
+    let (client, server) = tokio::io::duplex(64 * 1024);
+    let (cr, cw) = tokio::io::split(client);
+    let (mut sr, mut sw) = tokio::io::split(server);
+    let calls: ApiCallTrace = Arc::new(StdMutex::new(Vec::new()));
+    let calls_task = Arc::clone(&calls);
+
+    let join = tokio::spawn(async move {
+        let mut framer = MessageFramer::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = match sr.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            framer.push(&chunk[..n]);
+            while let Ok(Some(msg)) = framer.next_message() {
+                let (Some(id), Some(method)) = (
+                    msg.get("id").cloned(),
+                    msg.get("method")
+                        .and_then(|m| m.as_str())
+                        .map(str::to_owned),
+                ) else {
+                    continue;
+                };
+                let params = msg
+                    .get("params")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                calls_task.lock().unwrap().push((method, params));
+                let reply = serde_json::json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": { "snapshot": "handle-as-string" }
+                });
+                let _ = sw.write_all(&encode_message(&reply)).await;
+                let _ = sw.flush().await;
+            }
+        }
+    });
+
+    (JsonRpcConnection::connect(cr, cw), calls, join)
+}
+
+/// A clearance minted through the REAL gate over `version` with the in-band
+/// witness — the clearance `from_parts` stores and `update_snapshot` drives the
+/// rail with.
+fn clearance_for(version: &str) -> GateClearance {
+    gate::validate(&ObservedEngine::from_in_band_server_info(version))
+        .unwrap_or_else(|e| panic!("`{version}` must clear the gate: {e:?}"))
+}
+
+/// Drive `TsgoAttach::update_snapshot` on an attach whose gate clearance
+/// accepted `observed_version`, against an `--api` peer that answers the first
+/// `updateSnapshot` with a string handle. Returns the typed refusal message
+/// (which quotes the version the rail was driven with) and the recorded `--api`
+/// calls.
+async fn update_snapshot_refusal_for(
+    observed_version: &str,
+) -> (String, Vec<(String, serde_json::Value)>) {
+    let (lsp_conn, _lsp_trace, lsp_join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
+    let (api_conn, api_calls, api_join) = spawn_fake_api_server_with_string_snapshot_handle();
+    let api_conn_keep = api_conn.clone();
+
+    let attach = TsgoAttach::<NonOwning>::from_parts(
+        TsgoLspConnection::new_attached(lsp_conn.clone()),
+        ApiAttachClient::new(api_conn),
+        fake_session_handle(),
+        clearance_for(observed_version),
+    );
+    assert_eq!(
+        attach.observed_version(),
+        observed_version,
+        "the attach stores the gate-accepted version as its witness"
+    );
+    assert_eq!(
+        attach.witness(),
+        EngineVersionWitness::InBandServerInfo,
+        "the stored witness is the in-band serverInfo report"
+    );
+
+    let err = attach
+        .update_snapshot("/ws/tsconfig.json")
+        .await
+        .expect_err("a string first-snapshot handle must be refused");
+    let TsgoApiError::UnsupportedTsgoWire(message) = err else {
+        panic!("the integer-handle rail must refuse with UnsupportedTsgoWire");
+    };
+
+    let calls = api_calls.lock().unwrap().clone();
+
+    attach.teardown().await.expect("non-owning teardown");
+    let _ = lsp_conn.close().await;
+    lsp_join.await.unwrap();
+    let _ = api_conn_keep.close().await;
+    api_join.await.unwrap();
+
+    (message, calls)
+}
+
+/// The STORED in-band witness — not a literal baked into the convenience — is
+/// what `update_snapshot` hands the `--api` rail. Discriminating A/B pair: two
+/// attaches that differ ONLY in the gate-accepted version produce refusals
+/// naming their OWN version and not the other's. A hardcoded version literal in
+/// `update_snapshot` would make both legs name the same string and fail here.
+/// The first call for a project also leases it (`openProjects`), pinned on the
+/// same entry so the witness flow and the rail's wire shape are proven together.
+#[tokio::test]
+async fn update_snapshot_drives_the_api_rail_with_the_stored_in_band_witness() {
+    let (first, first_calls) = update_snapshot_refusal_for("7.0.3").await;
+    let (second, _) = update_snapshot_refusal_for("7.0.2").await;
+
+    assert!(
+        first.contains("7.0.3") && !first.contains("7.0.2"),
+        "the rail was driven with the attach's OWN stored witness `7.0.3`: {first}"
+    );
+    assert!(
+        second.contains("7.0.2") && !second.contains("7.0.3"),
+        "the rail was driven with the attach's OWN stored witness `7.0.2`: {second}"
+    );
+
+    assert_eq!(
+        first_calls.len(),
+        1,
+        "the convenience issues exactly ONE rail request: {first_calls:?}"
+    );
+    assert_eq!(
+        first_calls[0].0,
+        crate::proto::types::method::UPDATE_SNAPSHOT
+    );
+    assert_eq!(
+        first_calls[0].1["openProjects"],
+        serde_json::json!(["/ws/tsconfig.json"]),
+        "the FIRST snapshot for a project leases it via `openProjects`: {:?}",
+        first_calls[0].1
+    );
+}
+
+/// The non-owning composer reaches the `--api` session open on an ACCEPTED
+/// witness without ever originating an LSP `initialize` — the editor already
+/// initialized this connection, and a second `initialize` is a protocol
+/// violation. The companion refusal-path assertion lives in
+/// `attach_to_initialized_gates_supplied_version_fail_closed`; this is the
+/// accepted-witness leg, where the composer actually proceeds.
+#[tokio::test]
+async fn attach_to_initialized_opens_the_api_session_without_originating_initialize() {
+    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
+    let lsp = TsgoLspConnection::new_attached(conn.clone());
+
+    // The session handle names a pipe that exists on no platform, so the attach
+    // fails at the pipe CONNECT — after the composer has already done every
+    // wire step it is allowed to do.
+    let _ = TsgoAttach::attach_to_initialized(lsp, "7.0.3").await;
+
+    conn.close().await.unwrap();
+    join.await.unwrap();
+    let methods = trace_methods(&trace);
+    assert!(
+        methods.iter().any(|m| m == INITIALIZE_API_SESSION_METHOD),
+        "an accepted witness proceeds to the `--api` session open: {methods:?}"
+    );
+    assert!(
+        !methods.iter().any(|m| m == "initialize"),
+        "the non-owning composer NEVER originates `initialize` on an \
+         editor-owned connection: {methods:?}"
+    );
+    assert!(
+        !methods.iter().any(|m| m == "initialized"),
+        "nor does it complete an initialize handshake it did not start: {methods:?}"
+    );
+}

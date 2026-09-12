@@ -40,9 +40,7 @@
 //! readers of the advertised / serve set. Live `getExternalFiles` is served
 //! CROSS-PROCESS from the on-disk STORE `ready_files` (the Node plugin's `index.ts` →
 //! `CarrierStoreReader.readyIdeCompanions` → `carrierStore.ts` reading the
-//! `carrier_publish_store` manifest), NOT this in-process ledger. The
-//! `ledger_is_off_the_serve_path` architecture guard pins that no production serve
-//! path reads it.
+//! `carrier_publish_store` manifest), NOT this in-process ledger.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
