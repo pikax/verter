@@ -157,12 +157,14 @@ fn realize_callable_member_inner(
             true_branch_ref,
             false_branch_ref,
             distributive,
+            pending,
         } => {
             let check = *check;
             let extends = *extends;
             let true_branch = *true_branch_ref;
             let false_branch = *false_branch_ref;
             let distributive = *distributive;
+            let pending = pending.clone();
             drop(data);
             let read = dispatch.execute_read(SemanticQueryKey::Conditional {
                 check,
@@ -170,6 +172,7 @@ fn realize_callable_member_inner(
                 true_branch,
                 false_branch,
                 distributive,
+                pending,
             });
             crate::request_context::observe_component_meta_read_suppress(&read);
             emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);

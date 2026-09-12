@@ -45,6 +45,212 @@ use crate::project_semantic_dispatch::walk::{
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use std::fmt;
+use std::sync::Arc;
+
+type SubstitutionPair = (SemanticNodeId, SemanticNodeId);
+
+/// A read-only view of the remaining ordered substitutions. An argument is
+/// interpreted under the suffix AFTER its replacement, never under the pair
+/// that introduced it. No semantic nodes or query results are constructed.
+#[derive(Clone, Default)]
+struct DisplaySubstitution {
+    pairs: Option<Arc<[SubstitutionPair]>>,
+    start: usize,
+}
+
+impl DisplaySubstitution {
+    fn remaining(&self) -> &[SubstitutionPair] {
+        &self.pairs.as_deref().unwrap_or_default()[self.start..]
+    }
+
+    fn from_pairs(pairs: Vec<SubstitutionPair>) -> Self {
+        Self {
+            pairs: (!pairs.is_empty()).then(|| pairs.into()),
+            start: 0,
+        }
+    }
+
+    fn prepend(&self, pairs: &[SubstitutionPair]) -> Self {
+        if pairs.is_empty() {
+            return self.clone();
+        }
+        Self::from_pairs(pairs.iter().chain(self.remaining()).copied().collect())
+    }
+
+    fn resolve(
+        &self,
+        store: &SemanticGraphStore,
+        mut node: SemanticNodeId,
+    ) -> (SemanticNodeId, Self) {
+        let mut suffix = self.clone();
+        while let Some(index) = suffix.remaining().iter().position(|&(parameter, _)| {
+            if parameter == node {
+                return true;
+            }
+            matches!(
+                (store.node_data(parameter).as_deref(), store.node_data(node).as_deref()),
+                (Some(SemanticNodeData::Infer { binder: parameter, .. }),
+                 Some(SemanticNodeData::Infer { binder: occurrence, .. }
+                    | SemanticNodeData::InferRef { binder: occurrence, .. }))
+                    if parameter == occurrence
+            )
+        }) {
+            node = suffix.remaining()[index].1;
+            suffix.start += index + 1;
+        }
+        (node, suffix)
+    }
+
+    fn without_parameter(&self, parameter: SemanticNodeId) -> Self {
+        Self::from_pairs(
+            self.remaining()
+                .iter()
+                .copied()
+                .filter(|pair| pair.0 != parameter)
+                .collect(),
+        )
+    }
+
+    fn in_conditional_scope(&self, store: &SemanticGraphStore, extends: SemanticNodeId) -> Self {
+        let mut accepted = Vec::new();
+        for &(parameter, argument) in self.remaining() {
+            if let Some(SemanticNodeData::Infer { binder, .. }) =
+                store.node_data(parameter).as_deref()
+            {
+                let prefix = Self::from_pairs(accepted.clone());
+                if pattern_declares_infer(store, extends, &prefix, binder) {
+                    continue;
+                }
+            }
+            accepted.push((parameter, argument));
+        }
+        Self::from_pairs(accepted)
+    }
+}
+
+/// The same lexical boundary as semantic substitution: only a declaration in
+/// this extends pattern shadows; a reference or a nested conditional does not.
+fn pattern_declares_infer(
+    store: &SemanticGraphStore,
+    pattern: SemanticNodeId,
+    substitution: &DisplaySubstitution,
+    target: &super::InferBinderId,
+) -> bool {
+    let mut stack = vec![(pattern, substitution.clone(), MAX_DISPLAY_DEPTH)];
+    let mut seen: Vec<(SemanticNodeId, DisplaySubstitution)> = Vec::new();
+    while let Some((node, substitution, depth)) = stack.pop() {
+        if depth == 0 {
+            continue;
+        }
+        let (node, substitution) = substitution.resolve(store, node);
+        if seen.iter().any(|(previous, frame)| {
+            *previous == node && frame.remaining() == substitution.remaining()
+        }) {
+            continue;
+        }
+        seen.push((node, substitution.clone()));
+        let Some(data) = store.node_data(node) else {
+            continue;
+        };
+        let mut children = Vec::new();
+        match data.as_ref() {
+            SemanticNodeData::Infer { binder, .. } if binder == target => return true,
+            SemanticNodeData::Conditional { .. } => continue,
+            SemanticNodeData::Alias(node)
+            | SemanticNodeData::KeyOf { base: node }
+            | SemanticNodeData::Array { element: node, .. } => children.push(*node),
+            SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_) => {
+                children.extend(data.composite_members().expect("composite").iter().copied());
+            }
+            SemanticNodeData::Tuple { elements, .. } => {
+                children.extend(elements.iter().map(|element| element.value))
+            }
+            SemanticNodeData::TemplateLiteral { expressions, .. }
+            | SemanticNodeData::InstantiationRef {
+                args: expressions, ..
+            } => children.extend(expressions.iter().copied()),
+            SemanticNodeData::Object(surface) => {
+                children.extend(surface.positive_members().iter().map(|member| member.value));
+                children.extend(surface.call_signatures.iter().copied());
+                children.extend(surface.construct_signatures.iter().copied());
+                for signature in surface.index_signatures.iter() {
+                    children.extend([signature.key_type, signature.value_type]);
+                }
+                children.extend(surface.keyspace);
+            }
+            SemanticNodeData::Signature {
+                params,
+                return_type,
+                type_parameters,
+                ..
+            } => {
+                children.extend(params.iter().map(|parameter| parameter.ty));
+                children.push(*return_type);
+                for parameter in type_parameters.iter() {
+                    children.extend(parameter.constraint);
+                    children.extend(parameter.default);
+                }
+            }
+            SemanticNodeData::Mapped { source, mapper } => {
+                children.extend([*source, mapper.key_space]);
+                let scoped = substitution.without_parameter(mapper.parameter_node);
+                stack.push((mapper.value_expr, scoped.clone(), depth - 1));
+                if let Some(remap) = mapper.name_remap {
+                    stack.push((remap, scoped, depth - 1));
+                }
+            }
+            SemanticNodeData::IndexedAccess { object, index } => {
+                children.push(*object);
+                if let IndexKey::Computed(index) = index {
+                    children.push(*index);
+                }
+            }
+            SemanticNodeData::ObjectSpreadProgram(program) => {
+                children.extend(program.child_nodes())
+            }
+            _ => {}
+        }
+        stack.extend(
+            children
+                .into_iter()
+                .map(|child| (child, substitution.clone(), depth - 1)),
+        );
+    }
+    false
+}
+
+#[derive(Default)]
+pub(crate) struct DisplayContext {
+    substitution: DisplaySubstitution,
+    ancestors: Vec<(SemanticNodeId, DisplaySubstitution)>,
+}
+
+impl DisplayContext {
+    fn contains(&self, node: &SemanticNodeId) -> bool {
+        self.ancestors.iter().any(|(ancestor, substitution)| {
+            ancestor == node && substitution.remaining() == self.substitution.remaining()
+        })
+    }
+
+    fn push(&mut self, node: SemanticNodeId) {
+        self.ancestors.push((node, self.substitution.clone()));
+    }
+
+    fn pop(&mut self) {
+        self.ancestors.pop();
+    }
+
+    fn scoped<T>(
+        &mut self,
+        substitution: DisplaySubstitution,
+        render: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = std::mem::replace(&mut self.substitution, substitution);
+        let result = render(self);
+        self.substitution = previous;
+        result
+    }
+}
 
 /// A rendered display string projected from a [`SemanticQueryValue`]. A plain
 /// newtype over [`String`]: it is the *output* of the projection, carries no
@@ -96,7 +302,7 @@ pub fn display(
 ) -> DisplayString {
     match value {
         SemanticQueryValue::TypeNode(id) => {
-            display_type_node(store, *id, needs, MAX_DISPLAY_DEPTH, &mut Vec::new())
+            display_type_node(store, *id, needs, MAX_DISPLAY_DEPTH, &mut DisplayContext::default())
         }
         SemanticQueryValue::ObjectProjection(_) => unreachable!(
             "display: ObjectProjection has no producer until witness-gated projection consumers land"
@@ -124,7 +330,7 @@ pub fn display(
         SemanticQueryValue::ProgramAnalysis(p) => display_program_analysis(store, p, needs),
         SemanticQueryValue::FlowReturn(result) => DisplayString(format!(
             "{} (can_fall_through: {})",
-            display_type_node(store, result.return_type(), needs, MAX_DISPLAY_DEPTH, &mut Vec::new()).0,
+            display_type_node(store, result.return_type(), needs, MAX_DISPLAY_DEPTH, &mut DisplayContext::default()).0,
             result.can_fall_through,
         )),
         SemanticQueryValue::ResolveCall(result) => {
@@ -136,7 +342,7 @@ pub fn display(
                 }
             };
             DisplayString(
-                display_type_node(store, return_type, needs, MAX_DISPLAY_DEPTH, &mut Vec::new()).0,
+                display_type_node(store, return_type, needs, MAX_DISPLAY_DEPTH, &mut DisplayContext::default()).0,
             )
         }
         SemanticQueryValue::TruthinessDomain(domain) => {
@@ -161,9 +367,22 @@ pub(crate) fn display_type_node(
     id: SemanticNodeId,
     needs: DisplayNeeds,
     depth: usize,
-    visited: &mut Vec<SemanticNodeId>,
+    visited: &mut DisplayContext,
 ) -> DisplayString {
     // Termination #3: depth cap.
+    let (id, substitution) = visited.substitution.resolve(store, id);
+    visited.scoped(substitution, |visited| {
+        display_resolved_type_node(store, id, needs, depth, visited)
+    })
+}
+
+fn display_resolved_type_node(
+    store: &SemanticGraphStore,
+    id: SemanticNodeId,
+    needs: DisplayNeeds,
+    depth: usize,
+    visited: &mut DisplayContext,
+) -> DisplayString {
     if depth == 0 {
         return DisplayString(TRUNCATION_TOKEN.to_string());
     }
@@ -211,7 +430,9 @@ pub(crate) fn display_type_node(
                 if member.optional {
                     s.push('?');
                 }
-                if member.method_kind.is_some() && resolves_to_function(store, member.value) {
+                if member.method_kind.is_some()
+                    && resolves_to_function(store, member.value, visited)
+                {
                     s.push_str(&render_signature_colon(
                         store,
                         member.value,
@@ -268,18 +489,17 @@ pub(crate) fn display_type_node(
         }
         SemanticNodeData::ObjectSpreadProgram(program) => {
             use crate::semantic_query::{AuthoredPropertyKey, ObjectConstructionEffect};
-            let render_key =
-                |key: &AuthoredPropertyKey, visited: &mut Vec<SemanticNodeId>| match key {
-                    AuthoredPropertyKey::String(name) => member_name_token(name),
-                    AuthoredPropertyKey::Number(number) => number.to_string(),
-                    AuthoredPropertyKey::UniqueSymbol(identity) => {
-                        format!("[unique symbol {}]", identity.symbol)
-                    }
-                    AuthoredPropertyKey::Computed(node) => format!(
-                        "[{}]",
-                        display_type_node(store, *node, needs, child_depth, visited).0
-                    ),
-                };
+            let render_key = |key: &AuthoredPropertyKey, visited: &mut DisplayContext| match key {
+                AuthoredPropertyKey::String(name) => member_name_token(name),
+                AuthoredPropertyKey::Number(number) => number.to_string(),
+                AuthoredPropertyKey::UniqueSymbol(identity) => {
+                    format!("[unique symbol {}]", identity.symbol)
+                }
+                AuthoredPropertyKey::Computed(node) => format!(
+                    "[{}]",
+                    display_type_node(store, *node, needs, child_depth, visited).0
+                ),
+            };
             let mut parts = Vec::with_capacity(program.effects.len());
             for effect in program.effects.iter() {
                 let part = match effect {
@@ -444,11 +664,17 @@ pub(crate) fn display_type_node(
             format!("{obj}[{key}]")
         }
         SemanticNodeData::Mapped { source: _, mapper } => {
-            let param =
-                display_type_node(store, mapper.parameter_node, needs, child_depth, visited).0;
+            let param = visited.scoped(DisplaySubstitution::default(), |visited| {
+                display_type_node(store, mapper.parameter_node, needs, child_depth, visited).0
+            });
             let key_space =
                 display_type_node(store, mapper.key_space, needs, child_depth, visited).0;
-            let value = display_type_node(store, mapper.value_expr, needs, child_depth, visited).0;
+            let scoped = visited
+                .substitution
+                .without_parameter(mapper.parameter_node);
+            let value = visited.scoped(scoped.clone(), |visited| {
+                display_type_node(store, mapper.value_expr, needs, child_depth, visited).0
+            });
             // Readonly / optionality / `as` name-remap are LIVE graph fields,
             // each rendered structurally (TS mapped-modifier spelling).
             let readonly = match mapper.readonly {
@@ -462,10 +688,12 @@ pub(crate) fn display_type_node(
                 OptionalityMod::Keep => "",
             };
             let remap = match mapper.name_remap {
-                Some(node) => format!(
-                    " as {}",
-                    display_type_node(store, node, needs, child_depth, visited).0
-                ),
+                Some(node) => visited.scoped(scoped, |visited| {
+                    format!(
+                        " as {}",
+                        display_type_node(store, node, needs, child_depth, visited).0
+                    )
+                }),
                 None => String::new(),
             };
             format!("{{ {readonly}[{param} in {key_space}{remap}]{optionality}: {value} }}")
@@ -514,6 +742,7 @@ pub(crate) fn display_type_node(
             true_branch_ref,
             false_branch_ref,
             distributive: _,
+            pending,
         } => {
             // `check` / `extends` sit before `extends` / `?`, so any compound
             // operand (Function / Conditional → Loose, Union, Intersection)
@@ -523,18 +752,34 @@ pub(crate) fn display_type_node(
             // `Prec::Union` (wraps Conditional / Function only). The FALSE
             // branch is the trailing, right-associative position and stays bare
             // — `A extends B ? C : D extends E ? F : G` already nests correctly.
-            let check = render_operand(store, *check, needs, child_depth, visited, Prec::Prefix);
-            let extends =
-                render_operand(store, *extends, needs, child_depth, visited, Prec::Prefix);
-            let t = render_operand(
-                store,
-                *true_branch_ref,
-                needs,
-                child_depth,
-                visited,
-                Prec::Union,
+            let scoped = visited.substitution.in_conditional_scope(store, *extends);
+            let true_substitution = scoped.prepend(
+                pending
+                    .as_ref()
+                    .map_or(&[], |frame| frame.true_branch().pairs()),
             );
-            let f = display_type_node(store, *false_branch_ref, needs, child_depth, visited).0;
+            let false_substitution = visited.substitution.prepend(
+                pending
+                    .as_ref()
+                    .map_or(&[], |frame| frame.false_branch().pairs()),
+            );
+            let check = render_operand(store, *check, needs, child_depth, visited, Prec::Prefix);
+            let extends = visited.scoped(scoped, |visited| {
+                render_operand(store, *extends, needs, child_depth, visited, Prec::Prefix)
+            });
+            let t = visited.scoped(true_substitution, |visited| {
+                render_operand(
+                    store,
+                    *true_branch_ref,
+                    needs,
+                    child_depth,
+                    visited,
+                    Prec::Union,
+                )
+            });
+            let f = visited.scoped(false_substitution, |visited| {
+                display_type_node(store, *false_branch_ref, needs, child_depth, visited).0
+            });
             format!("{check} extends {extends} ? {t} : {f}")
         }
         SemanticNodeData::Signature {
@@ -631,7 +876,7 @@ fn render_merged_decl_surface(
     surface: &MergedDeclDisplaySurface,
     needs: DisplayNeeds,
     depth: usize,
-    visited: &mut Vec<SemanticNodeId>,
+    visited: &mut DisplayContext,
 ) -> String {
     let own = render_merged_decl_own_surface(store, &surface.own_surface, needs, depth, visited);
     if surface.heritage_arms.is_empty() {
@@ -651,7 +896,7 @@ fn render_merged_decl_own_surface(
     surface: &MergedDeclSurface,
     needs: DisplayNeeds,
     depth: usize,
-    visited: &mut Vec<SemanticNodeId>,
+    visited: &mut DisplayContext,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
     for member in &surface.members {
@@ -702,12 +947,12 @@ fn render_merged_decl_member(
     merged: &MergedDeclMember,
     needs: DisplayNeeds,
     depth: usize,
-    visited: &mut Vec<SemanticNodeId>,
+    visited: &mut DisplayContext,
 ) -> String {
     let member = &merged.member;
     let mut s = member_prefix(store, member, needs, depth, visited);
     match merged.values.as_slice() {
-        [value] if member.method_kind.is_some() && resolves_to_function(store, *value) => {
+        [value] if member.method_kind.is_some() && resolves_to_function(store, *value, visited) => {
             s.push_str(&render_signature_colon(
                 store, *value, "", needs, depth, visited,
             ));
@@ -739,7 +984,7 @@ fn member_prefix(
     member: &ShallowSurfaceMember,
     needs: DisplayNeeds,
     depth: usize,
-    visited: &mut Vec<SemanticNodeId>,
+    visited: &mut DisplayContext,
 ) -> String {
     let mut s = String::new();
     if member.readonly && needs.contains(DisplayFacet::IncludeReadonlyModifier) {
@@ -769,7 +1014,13 @@ fn display_signature(
     sig: &SignatureRef,
     needs: DisplayNeeds,
 ) -> DisplayString {
-    display_type_node(store, sig.node, needs, MAX_DISPLAY_DEPTH, &mut Vec::new())
+    display_type_node(
+        store,
+        sig.node,
+        needs,
+        MAX_DISPLAY_DEPTH,
+        &mut DisplayContext::default(),
+    )
 }
 
 /// Render a relation outcome from the payload — never recomputed (§14.2).
@@ -805,7 +1056,7 @@ fn display_declaration_analysis(
                 *c,
                 needs,
                 MAX_DISPLAY_DEPTH,
-                &mut Vec::new(),
+                &mut DisplayContext::default(),
                 Prec::Intersection,
             )
         })
@@ -819,7 +1070,13 @@ fn display_program_analysis(
     value: &ProgramAnalysisValue,
     needs: DisplayNeeds,
 ) -> DisplayString {
-    display_type_node(store, value.node, needs, MAX_DISPLAY_DEPTH, &mut Vec::new())
+    display_type_node(
+        store,
+        value.node,
+        needs,
+        MAX_DISPLAY_DEPTH,
+        &mut DisplayContext::default(),
+    )
 }
 
 /// The back-reference token emitted when a node is already on the ancestor
@@ -942,7 +1199,7 @@ fn render_type_parameters(
     type_parameters: &[TypeParamDecl],
     needs: DisplayNeeds,
     depth: usize,
-    visited: &mut Vec<SemanticNodeId>,
+    visited: &mut DisplayContext,
 ) -> String {
     if type_parameters.is_empty() {
         return String::new();
@@ -973,7 +1230,7 @@ fn render_params(
     params: &[FunctionParam],
     needs: DisplayNeeds,
     depth: usize,
-    visited: &mut Vec<SemanticNodeId>,
+    visited: &mut DisplayContext,
 ) -> String {
     let rendered: Vec<String> = params
         .iter()
@@ -1005,33 +1262,35 @@ fn render_signature_colon(
     prefix: &str,
     needs: DisplayNeeds,
     depth: usize,
-    visited: &mut Vec<SemanticNodeId>,
+    visited: &mut DisplayContext,
 ) -> String {
     // Follow the transparent `Alias` chain to the underlying node before
     // matching: a member with `value = Alias(Function)` enters method shorthand
     // (via `resolves_to_function`, which also follows the chain), so the colon
     // form must reach the same `Function` — otherwise an `Alias` falls to the
     // defensive arm and renders the arrow form, an invalid `name(p) => r` hybrid.
-    let resolved = follow_alias_chain(store, sig);
-    match store.node_data(resolved).as_deref() {
-        Some(SemanticNodeData::Signature {
-            params,
-            return_type,
-            type_parameters,
-            ..
-        }) => {
-            let tps = render_type_parameters(store, type_parameters, needs, depth, visited);
-            let rendered_params = render_params(store, params, needs, depth, visited);
-            let ret = display_type_node(store, *return_type, needs, depth, visited).0;
-            format!("{prefix}{tps}({rendered_params}): {ret}")
+    let (resolved, substitution) = follow_alias_chain(store, sig, &visited.substitution);
+    visited.scoped(substitution, |visited| {
+        match store.node_data(resolved).as_deref() {
+            Some(SemanticNodeData::Signature {
+                params,
+                return_type,
+                type_parameters,
+                ..
+            }) => {
+                let tps = render_type_parameters(store, type_parameters, needs, depth, visited);
+                let rendered_params = render_params(store, params, needs, depth, visited);
+                let ret = display_type_node(store, *return_type, needs, depth, visited).0;
+                format!("{prefix}{tps}({rendered_params}): {ret}")
+            }
+            // Defensive: a genuinely non-function signature node renders through its
+            // own arm, prefixed verbatim.
+            _ => format!(
+                "{prefix}{}",
+                display_type_node(store, resolved, needs, depth, visited).0
+            ),
         }
-        // Defensive: a genuinely non-function signature node renders through its
-        // own arm, prefixed verbatim.
-        _ => format!(
-            "{prefix}{}",
-            display_type_node(store, sig, needs, depth, visited).0
-        ),
-    }
+    })
 }
 
 /// Structural precedence of a rendered type, used to decide parenthesisation by
@@ -1101,30 +1360,31 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
 
 /// Precedence of a node id, following the transparent `Alias` chain (bounded by
 /// the display depth cap) to the node that actually renders.
-fn node_precedence(store: &SemanticGraphStore, id: SemanticNodeId) -> Prec {
-    let mut current = id;
-    for _ in 0..MAX_DISPLAY_DEPTH {
-        match store.node_data(current).as_deref() {
-            Some(SemanticNodeData::Alias(target)) => current = *target,
-            Some(data) => return prec_of(data),
-            // Unresolved id renders as the atomic truncation token.
-            None => return Prec::Atom,
-        }
-    }
-    Prec::Atom
+fn node_precedence(
+    store: &SemanticGraphStore,
+    id: SemanticNodeId,
+    visited: &DisplayContext,
+) -> Prec {
+    let (node, _) = follow_alias_chain(store, id, &visited.substitution);
+    store.node_data(node).as_deref().map_or(Prec::Atom, prec_of)
 }
-
 /// Follow the transparent `Alias` chain (bounded by the display depth cap) and
 /// report whether the node ultimately renders as a [`SemanticNodeData::Signature`]
 /// — the only shape that may use object method-shorthand. After intersection
 /// merging a member's `is_method` flag can be ORed true over an `Intersection`
 /// of overloads; such a member must render property-style (with a colon).
-fn resolves_to_function(store: &SemanticGraphStore, id: SemanticNodeId) -> bool {
+fn resolves_to_function(
+    store: &SemanticGraphStore,
+    id: SemanticNodeId,
+    visited: &DisplayContext,
+) -> bool {
     // CALL kind only: method shorthand (`name(p): r`) is a call-signature
     // form — a construct-signature member renders property-style
     // (`name: new (…) => R`).
     matches!(
-        store.node_data(follow_alias_chain(store, id)).as_deref(),
+        store
+            .node_data(follow_alias_chain(store, id, &visited.substitution).0)
+            .as_deref(),
         Some(SemanticNodeData::Signature {
             kind: crate::semantic_query::SignatureKind::Call,
             ..
@@ -1135,17 +1395,22 @@ fn resolves_to_function(store: &SemanticGraphStore, id: SemanticNodeId) -> bool 
 /// Follow the transparent `Alias` chain (bounded by the display depth cap) and
 /// return the id of the node that actually renders. A non-`Alias` node (or an
 /// unresolved id) is returned as-is.
-fn follow_alias_chain(store: &SemanticGraphStore, id: SemanticNodeId) -> SemanticNodeId {
-    let mut current = id;
+fn follow_alias_chain(
+    store: &SemanticGraphStore,
+    id: SemanticNodeId,
+    substitution: &DisplaySubstitution,
+) -> (SemanticNodeId, DisplaySubstitution) {
+    let (mut current, mut substitution) = substitution.resolve(store, id);
     for _ in 0..MAX_DISPLAY_DEPTH {
         match store.node_data(current).as_deref() {
-            Some(SemanticNodeData::Alias(target)) => current = *target,
-            _ => return current,
+            Some(SemanticNodeData::Alias(target)) => {
+                (current, substitution) = substitution.resolve(store, *target);
+            }
+            _ => return (current, substitution),
         }
     }
-    current
+    (current, substitution)
 }
-
 /// True when `id` resolves (through the transparent `Alias` chain) to an
 /// `Array`/`Tuple` node carrying `readonly: true` AND the readonly modifier will
 /// actually be rendered (`IncludeReadonlyModifier` active). Such a node placed in
@@ -1155,13 +1420,16 @@ fn follow_alias_chain(store: &SemanticGraphStore, id: SemanticNodeId) -> Semanti
 fn element_renders_leading_readonly(
     store: &SemanticGraphStore,
     id: SemanticNodeId,
+    visited: &DisplayContext,
     needs: DisplayNeeds,
 ) -> bool {
     if !needs.contains(DisplayFacet::IncludeReadonlyModifier) {
         return false;
     }
     matches!(
-        store.node_data(follow_alias_chain(store, id)).as_deref(),
+        store
+            .node_data(follow_alias_chain(store, id, &visited.substitution).0)
+            .as_deref(),
         Some(SemanticNodeData::Array { readonly: true, .. })
             | Some(SemanticNodeData::Tuple { readonly: true, .. })
     )
@@ -1176,7 +1444,7 @@ fn render_operand(
     id: SemanticNodeId,
     needs: DisplayNeeds,
     depth: usize,
-    visited: &mut Vec<SemanticNodeId>,
+    visited: &mut DisplayContext,
     min_prec: Prec,
 ) -> String {
     let rendered = display_type_node(store, id, needs, depth, visited).0;
@@ -1186,12 +1454,16 @@ fn render_operand(
     // precedence (`Postfix`) is not looser than `min_prec`. Folded here so
     // EVERY postfix base (array element, indexed-access object, and any future
     // postfix base) is uniformly correct.
-    if min_prec == Prec::Postfix && element_renders_leading_readonly(store, id, needs) {
+    if min_prec == Prec::Postfix && element_renders_leading_readonly(store, id, visited, needs) {
         return format!("({rendered})");
     }
-    if node_precedence(store, id) < min_prec {
+    if node_precedence(store, id, visited) < min_prec {
         format!("({rendered})")
     } else {
         rendered
     }
 }
+
+#[cfg(test)]
+#[path = "pending_display_tests.rs"]
+mod pending_display_tests;

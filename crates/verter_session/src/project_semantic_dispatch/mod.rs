@@ -813,12 +813,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 true_branch,
                 false_branch,
                 distributive,
+                pending,
             } => graph.intern_node(SemanticNodeData::Conditional {
                 check: *check,
                 extends: *extends,
                 true_branch_ref: *true_branch,
                 false_branch_ref: *false_branch,
                 distributive: *distributive,
+                pending: pending.clone(),
             }),
             // The normalize-query SUBJECT representation: the
             // pre-normalization member list interned verbatim (the query's
@@ -2792,12 +2794,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true_branch,
                     false_branch,
                     distributive,
+                    pending,
                 } => self.build_conditional(
                     *check,
                     *extends,
                     *true_branch,
                     *false_branch,
                     *distributive,
+                    pending.clone(),
                 ),
                 SemanticQueryKey::NormalizeUnion { members } => self.build_normalize_union(members),
                 SemanticQueryKey::NormalizeIntersection { members } => {

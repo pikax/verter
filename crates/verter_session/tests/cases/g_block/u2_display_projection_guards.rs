@@ -361,6 +361,7 @@ fn precedence_is_structural_not_string_sniffing() {
         true_branch_ref: c,
         false_branch_ref: d,
         distributive: false,
+        pending: None,
     });
 
     // Regression: array element of a union parenthesises.
@@ -463,6 +464,7 @@ fn conditional_operands_apply_precedence() {
             true_branch_ref: tb,
             false_branch_ref: fb,
             distributive: false,
+            pending: None,
         })
     };
 

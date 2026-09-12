@@ -20,10 +20,10 @@ use super::{
 use crate::resolver_core::prepared_decl::PreparedTypeDeclResolution;
 use crate::semantic_query::demand::{Demand, MaterializedPoint, MaterializedSet, ProjectionPath};
 use crate::semantic_query::{
-    BranchSelection, DepSignature, IndexKey, LiteralValue, NodeScopeId, OriginEdgeKind, OriginMeta,
-    PathSegment, PrimitiveKind, ProjectionMode, PropertyKey, QueryError, QueryResult,
-    ReductionDemand, ResolveDeclKey, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-    SurfaceEntry, SurfaceMember, SurfaceView, ValueRootKey,
+    BranchSelection, ConditionalPendingSubstitution, DepSignature, IndexKey, LiteralValue,
+    NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
+    PropertyKey, QueryError, QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeData,
+    SemanticNodeId, SemanticQueryKey, SurfaceEntry, SurfaceMember, SurfaceView, ValueRootKey,
 };
 
 /// The effective prepared VALUE-decl identity resolved by
@@ -6739,8 +6739,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     extends,
                     true_branch_ref,
                     false_branch_ref,
+                    pending,
                     ..
                 } => {
+                    if let Some(pending) = pending {
+                        stack.extend(pending.argument_nodes());
+                    }
                     stack.push(*check);
                     stack.push(*extends);
                     stack.push(*true_branch_ref);
@@ -8996,229 +9000,274 @@ impl<'a> ProjectSemanticDispatch<'a> {
         true_branch: SemanticNodeId,
         false_branch: SemanticNodeId,
         distributive: bool,
-    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        pending: Option<Arc<ConditionalPendingSubstitution>>,
+    ) -> super::walk::QueryBuildOutput {
         verter_audit::attribute_scope!(ConditionalReduce);
-        // Fast-reject (runs BEFORE the distributive-`Union` distribution,
-        // the `infer`-binding paths, and `shallow_relation_check`): `error
-        // extends T` ⇒ `error` (carrier dominates), `any extends T ? X : Y` ⇒
-        // `X | Y` (union of both branches, mode-independent), and DISTRIBUTIVE
-        // naked-`never` ⇒ `never` (empty distribution). Non-distributive
-        // `never` and every other check fall through to the branch logic below
-        // — see `absorb_conditional`.
-        if let Some(absorbed) =
-            self.absorb_conditional(check, extends, true_branch, false_branch, distributive)
-        {
+        if self.ctx.is_cancelled() {
+            return self.cancelled_conditional_output();
+        }
+        if let Some(absorbed) = self.absorb_conditional(check, extends, distributive, |take_true| {
+            self.apply_conditional_branch_pending(
+                if take_true { true_branch } else { false_branch },
+                pending.as_deref(),
+                take_true,
+            )
+        }) {
             return absorbed;
+        }
+        if distributive {
+            if let Some(output) = self.distribute_conditional(check, extends, &mut |member| {
+                self.conditional_query_output(SemanticQueryKey::Conditional {
+                    check: member,
+                    extends,
+                    true_branch,
+                    false_branch,
+                    distributive: false,
+                    pending: pending.clone(),
+                })
+            }) {
+                return output;
+            }
+        }
+        let (selection, infer) = self.conditional_branch_selection(check, extends);
+        if selection != ConditionalBranchSelection::Deferred {
+            let take_true = selection == ConditionalBranchSelection::True;
+            let original = if take_true { true_branch } else { false_branch };
+            let winner =
+                self.apply_conditional_branch_pending(original, pending.as_deref(), take_true);
+            let mut output =
+                self.commit_conditional_winner(check, extends, winner, selection, infer);
+            let frame = pending.as_ref().map(|pending| {
+                if take_true {
+                    pending.true_branch()
+                } else {
+                    pending.false_branch()
+                }
+            });
+            let nodes = std::iter::once(original).chain(
+                frame
+                    .into_iter()
+                    .flat_map(|frame| frame.pairs().iter().map(|&(_, arg)| arg)),
+            );
+            for root in self.observed_self_roots_from_nodes(nodes) {
+                if !output.observed_self_roots.contains(&root) {
+                    output.observed_self_roots.push(root);
+                }
+            }
+            return output;
+        }
+        let suspended_roots = self.observed_self_roots_from_nodes(
+            [check, extends, true_branch, false_branch]
+                .into_iter()
+                .chain(pending.iter().flat_map(|frame| frame.argument_nodes())),
+        );
+        let node = self.graph().intern_node(SemanticNodeData::Conditional {
+            check,
+            extends,
+            true_branch_ref: true_branch,
+            false_branch_ref: false_branch,
+            distributive,
+            pending,
+        });
+        let fence = self.project_generation_signature();
+        self.graph().record_origin_edge(
+            node,
+            OriginEdgeKind::ConditionalSelect,
+            Arc::from([check, extends]),
+            OriginMeta::Branch(BranchSelection::Deferred),
+            fence.clone(),
+        );
+        self.graph().record_conditional_deferred();
+        super::walk::QueryBuildOutput::from((QueryResult::Value(node), fence))
+            .with_observed_self_roots(suspended_roots)
+    }
+
+    /// Transient lowering ingress. Only selected syntax is lowered; no
+    /// callback or syntax enters graph identity. Open operands use the same
+    /// conditional family, and unions use the builder's sole distributor.
+    pub(super) fn build_conditional_from_lowering(
+        &self,
+        check: SemanticNodeId,
+        extends: SemanticNodeId,
+        distributive: bool,
+        lower_branch: &mut dyn FnMut(bool) -> SemanticNodeId,
+    ) -> super::walk::QueryBuildOutput {
+        if self.ctx.is_cancelled() {
+            return self.cancelled_conditional_output();
+        }
+        if let Some(output) =
+            self.absorb_conditional(check, extends, distributive, &mut *lower_branch)
+        {
+            return output;
+        }
+        if distributive {
+            if let Some(output) = self.distribute_conditional(check, extends, &mut |member| {
+                self.build_conditional_from_lowering(member, extends, false, lower_branch)
+            }) {
+                return output;
+            }
+        }
+        let (selection, infer) = self.conditional_branch_selection(check, extends);
+        if self.ctx.is_cancelled() {
+            return self.cancelled_conditional_output();
+        }
+        match selection {
+            ConditionalBranchSelection::True | ConditionalBranchSelection::False => {
+                let winner = lower_branch(selection == ConditionalBranchSelection::True);
+                self.commit_conditional_winner(check, extends, winner, selection, infer)
+            }
+            ConditionalBranchSelection::Deferred => {
+                let true_branch = lower_branch(true);
+                if self.ctx.is_cancelled() {
+                    return self.cancelled_conditional_output();
+                }
+                let false_branch = lower_branch(false);
+                self.conditional_query_output(SemanticQueryKey::Conditional {
+                    check,
+                    extends,
+                    true_branch,
+                    false_branch,
+                    distributive,
+                    pending: None,
+                })
+            }
+        }
+    }
+
+    fn cancelled_conditional_output(&self) -> super::walk::QueryBuildOutput {
+        let mut output = super::walk::QueryBuildOutput::from((
+            QueryResult::Error(QueryError::Cancelled),
+            self.project_generation_signature(),
+        ));
+        output.cache_suppress = true;
+        output.result_is_partial = true;
+        output.partial_reasons = crate::semantic_query::PartialReasonSet::CANCELLED;
+        output
+    }
+
+    fn conditional_query_output(&self, key: SemanticQueryKey) -> super::walk::QueryBuildOutput {
+        let read = self.execute_read(key);
+        let mut output = super::walk::QueryBuildOutput::from((read.value, read.dep_signature));
+        output.cache_suppress = read.cache_suppress;
+        output.result_is_partial = read.result_is_partial;
+        output.partial_reasons = read.partial_reasons;
+        output
+    }
+
+    /// The sole union distributor for materialized and lowering-time
+    /// conditionals. Each member disables distribution; materialized operands
+    /// re-enter the conditional family, while syntax lowers only its winner.
+    fn distribute_conditional(
+        &self,
+        check: SemanticNodeId,
+        extends: SemanticNodeId,
+        reduce_member: &mut dyn FnMut(SemanticNodeId) -> super::walk::QueryBuildOutput,
+    ) -> Option<super::walk::QueryBuildOutput> {
+        let (resolved_check, members) = self.distributive_check_union_members(check)?;
+        let mut output = super::walk::QueryBuildOutput::from((
+            QueryResult::Error(QueryError::Miss),
+            self.project_generation_signature(),
+        ))
+        .with_observed_self_roots(self.observed_self_roots_from_nodes([
+            check,
+            resolved_check,
+            extends,
+        ]));
+        let mut per_member = Vec::with_capacity(members.len());
+        for &member in members.iter() {
+            if self.ctx.is_cancelled() {
+                return Some(self.cancelled_conditional_output());
+            }
+            let member_output = reduce_member(member);
+            output.cache_suppress |= member_output.cache_suppress;
+            output.result_is_partial |= member_output.result_is_partial;
+            output.partial_reasons = output.partial_reasons.union(member_output.partial_reasons);
+            output
+                .observed_self_roots
+                .extend(member_output.observed_self_roots);
+            match member_output.result {
+                QueryResult::Value(node) => per_member.push(node),
+                _ => {
+                    self.fold_into_top_build_local_taint_with(true, true, output.partial_reasons);
+                    self.deposit_operand_self_roots(&output.observed_self_roots);
+                    return None;
+                }
+            }
+        }
+        let normalized = self.conditional_query_output(SemanticQueryKey::NormalizeUnion {
+            members: Arc::from(per_member),
+        });
+        output.cache_suppress |= normalized.cache_suppress;
+        output.result_is_partial |= normalized.result_is_partial;
+        output.partial_reasons = output.partial_reasons.union(normalized.partial_reasons);
+        output.result = normalized.result;
+        Some(output)
+    }
+
+    /// Selection side effects have one owner at both forcing sites. Only a
+    /// demanded winner reaches inference substitution or origin recording.
+    fn commit_conditional_winner(
+        &self,
+        check: SemanticNodeId,
+        extends: SemanticNodeId,
+        winner: SemanticNodeId,
+        selection: ConditionalBranchSelection,
+        infer: Option<super::relation::RelationInferBindings>,
+    ) -> super::walk::QueryBuildOutput {
+        if self.ctx.is_cancelled() {
+            return self.cancelled_conditional_output();
         }
         let graph = self.graph();
         let fence = self.project_generation_signature();
-        // Self-version rooting: root the memo entry on the file content
-        // version each input the ANSWER actually consumed was lowered
-        // from. Branch selection always consumes `check` and `extends`.
-        //
-        // A DECIDED conditional's value is the winning branch alone, so
-        // the losing branch is dead: it contributes no dependency fact
-        // and must not enter the root set. Rooting a decided result on
-        // the loser makes an edit to a file only the dead branch was
-        // lowered from reject a cached value whose computation never read
-        // that file — a cross-file rejection the answer does not depend
-        // on. (Staleness is impossible in the other direction: the memo
-        // key carries both branch node ids, and a re-lowered branch mints
-        // a different id, so an edit that changes the loser changes the
-        // key rather than serving a stale hit.)
-        //
-        // A deferred shell carries both branch references. Distribution
-        // instead inherits branch facts from the per-member query reads;
-        // only the original/resolved check and extends need direct self-roots.
-        let selected_self_roots =
-            |winner: SemanticNodeId| self.observed_self_roots_from_nodes([check, extends, winner]);
-        let suspended_self_roots =
-            || self.observed_self_roots_from_nodes([check, extends, true_branch, false_branch]);
-
-        // Distributive distribution is the dispatch layer's
-        // responsibility. When `distributive == true`
-        // and `check` is a union, re-enter `execute` per-member with
-        // `distributive: false`, then normalise the per-member results
-        // through `NormalizeUnion`. Each sub-dispatch lands in a
-        // different family entry (check differs per member) and the
-        // `distributive: false` flag guarantees no re-distribution, so
-        // the cooperative-wait mechanism terminates and the same-path
-        // sentinel catches any accidental self-recursion.
-        //
-        // Robustness: if any sub-query returns `Recursive` or `Error`
-        // (cycle or miss), fall through to the ordinary deferred-shell
-        // path below so the caller sees a well-formed conditional node
-        // rather than a partial distribution.
-        if distributive {
-            if let Some((resolved_check, members)) = self.distributive_check_union_members(check) {
-                let mut per_member: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
-                let mut distribution_ok = true;
-                // Two-signal fold: accumulate the partiality of every
-                // per-member sub-conditional so an incomplete distribution
-                // (a member whose nested resolution tripped the budget /
-                // recurred / hit a walker fatal) taints the conditional
-                // result, whether it early-returns the normalised union or
-                // falls through to the deferred shell.
-                let mut distribution_is_partial = false;
-                for &member in members.iter() {
-                    let member_read = self.execute_read(SemanticQueryKey::Conditional {
-                        check: member,
-                        extends,
-                        true_branch,
-                        false_branch,
-                        distributive: false,
-                    });
-                    distribution_is_partial |= member_read.result_is_partial;
-                    match member_read.value {
-                        QueryResult::Value(id) => per_member.push(id),
-                        _ => {
-                            distribution_ok = false;
-                            break;
-                        }
-                    }
-                }
-                if distribution_ok {
-                    let normalize_read = self.execute_read(SemanticQueryKey::NormalizeUnion {
-                        members: Arc::from(per_member.into_boxed_slice()),
-                    });
-                    distribution_is_partial |= normalize_read.result_is_partial;
-                    if let QueryResult::Value(normalised) = normalize_read.value {
-                        let mut output =
-                            crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-                                QueryResult::Value(normalised),
-                                fence,
-                            ))
-                            .with_observed_self_roots(
-                                self.observed_self_roots_from_nodes([
-                                    check,
-                                    resolved_check,
-                                    extends,
-                                ]),
-                            );
-                        output.result_is_partial = distribution_is_partial;
-                        return output;
-                    }
-                }
-                // Distribution failed or normalisation did not produce a
-                // value: a partial member taints the request so the
-                // fall-through deferred-shell result does not warm.
-                if distribution_is_partial {
-                    crate::request_context::mark_request_result_partial();
-                }
-                // Fall through to the deferred-shell path below.
-            }
-        }
-
-        // Conditionals route through the shared relation authority via
-        // the tri-state branch-selection oracle
-        // ([`Self::conditional_branch_selection`]) — the SAME
-        // helper the key-domain closedness classifiers in `raise.rs`
-        // consult, so build-time reduction and predicate-time
-        // classification cannot diverge on which branch a conditional
-        // takes. The oracle owns the FULL selection path (the infer
-        // routing AND the relation tail through the sole
-        // `execute(SemanticQueryKey::Relate)` authority); this build path
-        // owns only the selection's SUBSTITUTION side-effects (binding
-        // the returned inference bindings into the true branch +
-        // `InferBind` origin edges).
-        let (selection, infer) = self.conditional_branch_selection(check, extends);
+        let mut result = winner;
         if let Some(selected) = infer {
-            // A binding-producing selection is always TRUE: substitute
-            // the relation payload's fixed inference bindings into the
-            // true branch (the `:8253-8262` TODO is resolved — the
-            // relation's returned bindings are consumed, never
-            // discarded). (The `infer X` binding occupies a separate
-            // name-slot mechanism from regular type parameters. The
-            // binding carries its exact declaration node so nested
-            // same-name infer scopes cannot capture each other.)
-            let mut result = true_branch;
             for binding in selected.bindings.iter() {
                 result = self.substitute_semantic_type_param(result, binding.param, binding.bound);
                 graph.record_origin_edge(
                     result,
                     OriginEdgeKind::InferBind,
-                    Arc::from(vec![check, extends].into_boxed_slice()),
+                    Arc::from([check, extends]),
                     OriginMeta::SubstitutedParam(Arc::clone(&binding.name)),
-                    Arc::clone(&fence),
+                    fence.clone(),
                 );
             }
-            // A substitution that produced a FRESH nested CONDITIONAL (a
-            // nested conditional whose reference shells just bound) is
-            // reduced through the shared deferred evaluator so the
-            // selected branch surfaces its reduced form exactly like the
-            // pre-substitution node would have. ONLY the conditional
-            // shape re-reduces here: every other carrier (IndexedAccess,
-            // InstantiationRef, …) keeps the established demand-driven
-            // reduction under the CALLER's projection context — eagerly
-            // evaluating those context-free would collapse resolvable
-            // accesses to `Miss`.
+            // Only a conditional re-reduces here. Other carriers retain the
+            // consumer's projection context and its existing demand point.
             if matches!(
                 graph.node_data(result).as_deref(),
                 Some(SemanticNodeData::Conditional { .. })
             ) {
                 result = self.evaluate_deferred_semantic_node(result);
             }
-            graph.record_conditional_decided();
-            graph.record_branch_selection_true();
-            return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-                QueryResult::Value(result),
-                fence,
-            ))
-            // A binding-producing selection is decided TRUE: the false
-            // branch is dead and contributes no root.
-            .with_observed_self_roots(selected_self_roots(true_branch));
         }
-        let (result, branch, is_deferred, observed_self_roots) = match selection {
-            ConditionalBranchSelection::True => (
-                true_branch,
-                BranchSelection::True,
-                false,
-                selected_self_roots(true_branch),
-            ),
-            ConditionalBranchSelection::False => (
-                false_branch,
-                BranchSelection::False,
-                false,
-                selected_self_roots(false_branch),
-            ),
+        if self.ctx.is_cancelled() {
+            return self.cancelled_conditional_output();
+        }
+        let branch = match selection {
+            ConditionalBranchSelection::True => {
+                graph.record_branch_selection_true();
+                BranchSelection::True
+            }
+            ConditionalBranchSelection::False => {
+                graph.record_branch_selection_false();
+                BranchSelection::False
+            }
             ConditionalBranchSelection::Deferred => {
-                let node = graph.intern_node(SemanticNodeData::Conditional {
-                    check,
-                    extends,
-                    true_branch_ref: true_branch,
-                    false_branch_ref: false_branch,
-                    distributive,
-                });
-                (
-                    node,
-                    BranchSelection::Deferred,
-                    true,
-                    suspended_self_roots(),
-                )
+                unreachable!("only decided winners are committed")
             }
         };
         graph.record_origin_edge(
             result,
             OriginEdgeKind::ConditionalSelect,
-            Arc::from(vec![check, extends].into_boxed_slice()),
+            Arc::from([check, extends]),
             OriginMeta::Branch(branch),
-            Arc::clone(&fence),
+            fence.clone(),
         );
-        if is_deferred {
-            graph.record_conditional_deferred();
-        } else {
-            graph.record_conditional_decided();
-            match branch {
-                BranchSelection::True => graph.record_branch_selection_true(),
-                BranchSelection::False => graph.record_branch_selection_false(),
-                BranchSelection::Deferred => {}
-            }
-        }
-        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-            QueryResult::Value(result),
-            fence,
-        ))
-        .with_observed_self_roots(observed_self_roots)
+        graph.record_conditional_decided();
+        super::walk::QueryBuildOutput::from((QueryResult::Value(result), fence))
+            .with_observed_self_roots(
+                self.observed_self_roots_from_nodes([check, extends, winner, result]),
+            )
     }
 
     /// The resolved check and its union members, or `None` when the check
@@ -9246,7 +9295,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// shells are STABLE STOPS of the deferred evaluator, so an OPEN
     /// generic check never distributes over its constraint or default —
     /// open conditionals stay deferred shells.
-    fn distributive_check_union_members(
+    pub(super) fn distributive_check_union_members(
         &self,
         check: SemanticNodeId,
     ) -> Option<(SemanticNodeId, Arc<[SemanticNodeId]>)> {
@@ -9606,8 +9655,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     extends,
                     true_branch_ref,
                     false_branch_ref,
+                    pending,
                     ..
                 } => {
+                    if let Some(pending) = pending {
+                        stack.extend(pending.argument_nodes());
+                    }
                     stack.push(*check);
                     stack.push(*extends);
                     stack.push(*true_branch_ref);

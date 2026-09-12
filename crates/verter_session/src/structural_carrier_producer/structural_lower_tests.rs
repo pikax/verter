@@ -797,6 +797,7 @@ fn lowers_conditional_as_deferred_shell() {
             true_branch_ref,
             false_branch_ref,
             distributive,
+            pending: None,
         } => {
             assert_eq!(*check, t_binder, "check is the bound T binder");
             assert!(*distributive, "a naked type-param check is distributive");
@@ -1933,6 +1934,7 @@ fn conditional_reference_binding_survives_nested_same_shape_on_macro_path() {
                 true_branch_ref,
                 false_branch_ref,
                 distributive,
+                pending: None,
             } => (
                 *check,
                 *extends,
@@ -1951,6 +1953,7 @@ fn conditional_reference_binding_survives_nested_same_shape_on_macro_path() {
             true_branch,
             false_branch,
             distributive,
+            pending: None,
         }) {
             crate::semantic_query::QueryResult::Value(
                 crate::semantic_query::SemanticQueryOutput { value: id, .. },

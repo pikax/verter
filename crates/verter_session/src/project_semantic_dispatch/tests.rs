@@ -7,6 +7,723 @@ use crate::semantic_query::{
 };
 use crate::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
+#[test]
+fn decided_lowering_does_not_allocate_the_losing_branch() {
+    use verter_type_expr::TypeExpr;
+    for take_true in [true, false] {
+        let lower = |depth: usize, poison: bool| {
+            let host = host();
+            upsert_ts(
+                &host,
+                "/conditional.ts",
+                "export type Anchor = string; type Heavy<T> = [T, T, T, T];",
+            );
+            let dispatch = ProjectSemanticDispatch::new(&host);
+            let graph = host.project_type_store().semantic_graph();
+            let mut loser = TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number);
+            for _ in 0..depth {
+                loser = TypeExpr::Array {
+                    element: Arc::new(loser),
+                    readonly: false,
+                };
+            }
+            if poison {
+                loser = TypeExpr::ImportType {
+                    specifier: Arc::from("./missing"),
+                    qualifier: Arc::from([Arc::from("Ghost")]),
+                    typeof_query: false,
+                    type_arguments: Arc::from([TypeExpr::Ref {
+                        name: Arc::from("Heavy"),
+                        type_arguments: Arc::from([loser]),
+                    }]),
+                };
+            }
+            let winner = TypeExpr::Primitive(verter_type_expr::PrimitiveName::String);
+            let (yes, no) = if take_true {
+                (winner, loser)
+            } else {
+                (loser, winner)
+            };
+            let expr = TypeExpr::Conditional {
+                check: Arc::new(TypeExpr::Primitive(if take_true {
+                    verter_type_expr::PrimitiveName::String
+                } else {
+                    verter_type_expr::PrimitiveName::Boolean
+                })),
+                extends: Arc::new(TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
+                true_type: Arc::new(yes),
+                false_type: Arc::new(no),
+            };
+            let result = dispatch
+                .lower_type_expr_in_scope_with_context(
+                    "/conditional.ts",
+                    &expr,
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                )
+                .expect("conditional lowers");
+            assert!(matches!(
+                graph.node_data(result).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            ));
+            let stats = graph.stats_snapshot();
+            assert_eq!(
+                stats.decl_subexpression_lowering_count, 4,
+                "only the conditional, decision operands, and winner lower"
+            );
+            (
+                graph.node_count(),
+                stats.misses,
+                stats.origin_edge_count,
+                stats.relation_check_count,
+            )
+        };
+        assert_eq!(lower(0, false), lower(64, true), "the losing import and generic must contribute no allocations, dispatches, relation reads, or origins");
+    }
+}
+
+#[test]
+fn expanded_open_conditional_applies_branch_only_pending_substitution() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let (_, parameter) = reverse_test_binders(graph, "Branch", 9003);
+    let (_, check) = reverse_test_binders(graph, "Check", 9004);
+    let string = primitive(graph, PrimitiveKind::String);
+    let number = primitive(graph, PrimitiveKind::Number);
+    let conditional = graph.intern_node(SemanticNodeData::Conditional {
+        check,
+        extends: string,
+        true_branch_ref: parameter,
+        false_branch_ref: number,
+        distributive: false,
+        pending: None,
+    });
+    let instantiated = dispatch.substitute_semantic_type_param(conditional, parameter, string);
+    let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+        base: instantiated,
+        path: Arc::from([]),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    });
+    let QueryResult::Value(result) = read.value else {
+        panic!("expanded root must resolve")
+    };
+    assert!(
+        !dispatch.subtree_references_node(result, parameter),
+        "expanded branches must not leak their uninstantiated binder"
+    );
+    let expected = graph.intern_node(SemanticNodeData::Conditional {
+        check,
+        extends: string,
+        true_branch_ref: string,
+        false_branch_ref: number,
+        distributive: false,
+        pending: None,
+    });
+    assert_eq!(
+        result, expected,
+        "retain the existing primitive-branch Expanded shell"
+    );
+}
+
+#[test]
+fn conditional_substitution_defers_branches_until_demand() {
+    for take_true in [true, false] {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let (_, parameter) = reverse_test_binders(graph, "Deferred", 9001);
+        let string = primitive(graph, PrimitiveKind::String);
+        let argument = primitive(
+            graph,
+            if take_true {
+                PrimitiveKind::String
+            } else {
+                PrimitiveKind::Number
+            },
+        );
+        let loser_arg = graph.intern_node(SemanticNodeData::Array {
+            element: parameter,
+            readonly: false,
+        });
+        let loser = graph.intern_node(SemanticNodeData::new_import_type(
+            Arc::from("./missing"),
+            Arc::from([Arc::from("Ghost")]),
+            Arc::from([loser_arg]),
+            false,
+        ));
+        let conditional = graph.intern_node(SemanticNodeData::Conditional {
+            check: parameter,
+            extends: string,
+            true_branch_ref: if take_true { parameter } else { loser },
+            false_branch_ref: if take_true { loser } else { parameter },
+            distributive: false,
+            pending: None,
+        });
+        let before = graph.stats_snapshot().relation_check_count;
+        let instantiated =
+            dispatch.substitute_semantic_type_param(conditional, parameter, argument);
+        assert_eq!(
+            graph.stats_snapshot().relation_check_count,
+            before,
+            "substitution cannot select a branch"
+        );
+        for untouched in [loser, loser_arg] {
+            assert_eq!(
+                graph.substitute_memo_get(untouched, parameter, argument),
+                None,
+                "undemanded branches must not be traversed"
+            );
+        }
+        assert_eq!(
+            dispatch.evaluate_deferred_semantic_node(instantiated),
+            argument
+        );
+        for untouched in [loser, loser_arg] {
+            assert_eq!(
+                graph.substitute_memo_get(untouched, parameter, argument),
+                None,
+                "the losing import and its arguments remain untouched after demand"
+            );
+        }
+        let warm_before = graph.stats_snapshot();
+        for _ in 0..4 {
+            assert_eq!(
+                dispatch.substitute_semantic_type_param(conditional, parameter, argument),
+                instantiated
+            );
+            assert_eq!(
+                dispatch.evaluate_deferred_semantic_node(instantiated),
+                argument
+            );
+        }
+        let warm_after = graph.stats_snapshot();
+        assert_eq!(
+            warm_after.relation_check_count,
+            warm_before.relation_check_count
+        );
+        assert_eq!(warm_after.memo_entry_count, warm_before.memo_entry_count);
+        assert_eq!(warm_after.origin_edge_count, warm_before.origin_edge_count);
+    }
+}
+
+#[test]
+fn conditional_pending_frame_is_family_identity_and_reuses_relation_selection() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = dispatch.graph();
+    let (_, parameter) = reverse_test_binders(graph, "Value", 9005);
+    let string = primitive(graph, PrimitiveKind::String);
+    let number = primitive(graph, PrimitiveKind::Number);
+    let template = graph.intern_node(SemanticNodeData::Conditional {
+        check: string,
+        extends: string,
+        true_branch_ref: parameter,
+        false_branch_ref: number,
+        distributive: false,
+        pending: None,
+    });
+    let key_for = |argument| {
+        let node = dispatch.substitute_semantic_type_param(template, parameter, argument);
+        let data = graph.node_data(node).unwrap();
+        let SemanticNodeData::Conditional {
+            check,
+            extends,
+            true_branch_ref,
+            false_branch_ref,
+            distributive,
+            pending,
+        } = data.as_ref()
+        else {
+            panic!("substitution preserves the shell")
+        };
+        SemanticQueryKey::Conditional {
+            check: *check,
+            extends: *extends,
+            true_branch: *true_branch_ref,
+            false_branch: *false_branch_ref,
+            distributive: *distributive,
+            pending: pending.clone(),
+        }
+    };
+    let string_key = key_for(string);
+    let number_key = key_for(number);
+    assert_ne!(string_key, number_key, "only the pending argument differs");
+    assert_eq!(key_for(string), string_key);
+    let relation_key = dispatch.relate_key_for(string, string);
+    let mut selection_receipt = None;
+    for (key, expected) in [(&string_key, string), (&number_key, number)] {
+        let cold = dispatch.execute_read(key.clone());
+        assert!(matches!(cold.value, QueryResult::Value(node) if node == expected));
+        assert!(!cold.result_is_partial && !cold.cache_suppress);
+        let receipt = graph
+            .relation_published_carrier(&relation_key)
+            .expect("the decided relation is published")
+            .admission_seq;
+        if let Some(previous) = selection_receipt {
+            assert_eq!(
+                receipt, previous,
+                "branch-only frames reuse the original relation computation"
+            );
+        }
+        selection_receipt = Some(receipt);
+        let count = graph.slot_candidate_count_for_tests(key);
+        assert_eq!(count, 1);
+        for _ in 0..3 {
+            let warm = dispatch.execute_read(key.clone());
+            assert!(matches!(warm.value, QueryResult::Value(node) if node == expected));
+            assert_eq!(graph.slot_candidate_count_for_tests(key), count);
+        }
+    }
+}
+
+#[test]
+fn pending_conditional_keeps_argument_roots_and_cancelled_work_cold() {
+    use crate::semantic_query::ConditionalPendingSubstitution;
+    let host = host();
+    for file in ["argument", "winner", "loser"] {
+        upsert_ts(
+            &host,
+            &format!("/w/{file}.ts"),
+            "export type Root = string;",
+        );
+    }
+    let scope = |file: &str| {
+        let canonical = format!("/w/{file}.ts");
+        NodeScopeId::File {
+            whole_hash: host.ensure_indexed_ready(&canonical).unwrap().whole_hash,
+            canonical_id: Arc::from(canonical),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            local_scope: None,
+        }
+    };
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = dispatch.graph();
+    let (_, parameter) = reverse_test_binders(graph, "Value", 9008);
+    let string = primitive(graph, PrimitiveKind::String);
+    let argument = graph.intern_node_with_scope(
+        SemanticNodeData::Primitive(PrimitiveKind::Number),
+        scope("argument"),
+    );
+    let winner = graph.intern_node_with_scope(
+        SemanticNodeData::Array {
+            element: parameter,
+            readonly: false,
+        },
+        scope("winner"),
+    );
+    let loser = graph.intern_node_with_scope(
+        SemanticNodeData::Array {
+            element: string,
+            readonly: true,
+        },
+        scope("loser"),
+    );
+    let key = SemanticQueryKey::Conditional {
+        check: string,
+        extends: string,
+        true_branch: winner,
+        false_branch: loser,
+        distributive: false,
+        pending: Some(Arc::new(
+            ConditionalPendingSubstitution::empty().append_both(parameter, argument),
+        )),
+    };
+    let cancelled =
+        crate::request_context::RequestContext::new(70_003, Arc::from("/w/winner.ts"), false, None);
+    cancelled.cancel();
+    {
+        let _guard = crate::request_context::RequestContextGuard::install(cancelled);
+        let read = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
+        assert!(read.cache_suppress && read.result_is_partial);
+        assert!(matches!(
+            read.value,
+            QueryResult::Error(QueryError::Cancelled)
+        ));
+        assert_eq!(graph.slot_candidate_count_for_tests(&key), 0);
+        assert_eq!(graph.substitute_memo_get(winner, parameter, argument), None);
+    }
+    for _ in 0..2 {
+        let (read, evidence) = dispatch.execute_read_with_operand_evidence(key.clone());
+        assert!(!read.cache_suppress && !read.result_is_partial);
+        let QueryResult::Value(result) = read.value else {
+            panic!("clean retry must resolve")
+        };
+        assert!(
+            matches!(graph.node_data(result).as_deref(), Some(SemanticNodeData::Array { element, .. }) if *element == argument)
+        );
+        let evidence = evidence.expect("complete pending result carries evidence");
+        let mut roots: Vec<_> = evidence
+            .self_roots()
+            .iter()
+            .map(|(file, _)| file.as_ref())
+            .collect();
+        roots.sort_unstable();
+        roots.dedup();
+        assert_eq!(
+            roots,
+            ["/w/argument.ts", "/w/winner.ts"],
+            "the branch-only argument roots the winner; the loser never roots it"
+        );
+        assert_eq!(graph.slot_candidate_count_for_tests(&key), 1);
+        assert_eq!(graph.substitute_memo_get(loser, parameter, argument), None);
+    }
+}
+
+#[test]
+fn pending_arguments_remain_visible_to_clause_instantiation() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = dispatch.graph();
+    let (_, parameter) = reverse_test_binders(graph, "Branch", 9010);
+    let argument = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("<clause>"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("U"),
+    });
+    let string = primitive(graph, PrimitiveKind::String);
+    let template = graph.intern_node(SemanticNodeData::Conditional {
+        check: string,
+        extends: string,
+        true_branch_ref: parameter,
+        false_branch_ref: string,
+        distributive: false,
+        pending: None,
+    });
+    let pending = dispatch.substitute_semantic_type_param(template, parameter, argument);
+    for default in [None, Some(string)] {
+        let before = graph.stats_snapshot().relation_check_count;
+        let instantiated = dispatch.instantiate_clause_params_at_call(
+            [("U", default)],
+            pending,
+            crate::semantic_query::ClauseSpelling::Bound,
+        );
+        assert_eq!(
+            graph.stats_snapshot().relation_check_count,
+            before,
+            "clause instantiation does not select a branch"
+        );
+        let result = dispatch.evaluate_deferred_semantic_node(instantiated);
+        let expected = if default.is_some() {
+            PrimitiveKind::String
+        } else {
+            PrimitiveKind::Unknown
+        };
+        assert!(
+            matches!(graph.node_data(result).as_deref(), Some(SemanticNodeData::Primitive(kind)) if *kind == expected),
+            "a clause parameter retained only by the pending frame must instantiate"
+        );
+    }
+}
+
+#[test]
+fn pending_arguments_remain_visible_to_infer_routing() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = dispatch.graph();
+    let (infer, parameter) = reverse_test_binders(graph, "Captured", 9011);
+    let string = primitive(graph, PrimitiveKind::String);
+    let template = graph.intern_node(SemanticNodeData::Conditional {
+        check: string,
+        extends: string,
+        true_branch_ref: parameter,
+        false_branch_ref: string,
+        distributive: false,
+        pending: None,
+    });
+    assert!(!dispatch.subtree_contains_infer(template));
+    let before = graph.stats_snapshot().relation_check_count;
+    let pending = dispatch.substitute_semantic_type_param(template, parameter, infer);
+    assert!(
+        dispatch.subtree_contains_infer(pending),
+        "infer reachability includes the retained argument without selecting the conditional"
+    );
+    assert_eq!(graph.stats_snapshot().relation_check_count, before);
+}
+
+#[test]
+fn duplicate_pending_conditionals_retain_argument_roots_cold_warm_and_after_edit() {
+    use crate::semantic_query::ConditionalPendingSubstitution;
+    let host = host();
+    for file in ["first", "second"] {
+        upsert_ts(
+            &host,
+            &format!("/w/{file}.ts"),
+            "export type Root = string;",
+        );
+    }
+    let graph = host.project_type_store().semantic_graph();
+    let (_, parameter) = reverse_test_binders(graph, "Branch", 9012);
+    let string = primitive(graph, PrimitiveKind::String);
+    for version in [1, 2] {
+        upsert_ts(
+            &host,
+            "/w/argument.ts",
+            &format!("export type Value = {version};"),
+        );
+        let scope = |file: &str| {
+            let canonical = format!("/w/{file}.ts");
+            NodeScopeId::File {
+                whole_hash: host.ensure_indexed_ready(&canonical).unwrap().whole_hash,
+                canonical_id: Arc::from(canonical),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                local_scope: None,
+            }
+        };
+        let expected_hash = host
+            .ensure_indexed_ready("/w/argument.ts")
+            .unwrap()
+            .whole_hash;
+        let argument = graph.intern_node_with_scope(
+            SemanticNodeData::Primitive(PrimitiveKind::Number),
+            scope("argument"),
+        );
+        let shell = SemanticNodeData::Conditional {
+            check: parameter,
+            extends: string,
+            true_branch_ref: parameter,
+            false_branch_ref: string,
+            distributive: false,
+            pending: Some(Arc::new(
+                ConditionalPendingSubstitution::empty().append_both(parameter, argument),
+            )),
+        };
+        let first = graph.intern_node_with_scope(shell.clone(), scope("first"));
+        let second = graph.intern_node_with_scope(shell, scope("second"));
+        let key = SemanticQueryKey::NormalizeUnion {
+            members: Arc::from([first, second]),
+        };
+        for _ in 0..2 {
+            let (read, evidence) =
+                ProjectSemanticDispatch::new(&host).execute_read_with_operand_evidence(key.clone());
+            assert!(matches!(read.value, QueryResult::Value(node) if node == first));
+            assert!(!read.result_is_partial && !read.cache_suppress);
+            assert!(evidence.expect("canonical normalization carries roots").self_roots().iter().any(|(file, hash)| file.as_ref() == "/w/argument.ts" && *hash == expected_hash), "discarding a duplicate conditional retains its frame-only argument root");
+            assert_eq!(graph.slot_candidate_count_for_tests(&key), 1);
+            assert_eq!(
+                graph.substitute_memo_get(parameter, parameter, argument),
+                None,
+                "root collection does not apply the frame"
+            );
+        }
+    }
+}
+
+#[test]
+fn pending_conditional_arguments_remain_visible_to_mapped_value_demand() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = dispatch.graph();
+    let (_, parameter) = reverse_test_binders(graph, "Value", 9006);
+    let (_, key_parameter) = reverse_test_binders(graph, "Key", 9007);
+    let string = primitive(graph, PrimitiveKind::String);
+    let never = primitive(graph, PrimitiveKind::Never);
+    let conditional = graph.intern_node(SemanticNodeData::Conditional {
+        check: string,
+        extends: string,
+        true_branch_ref: parameter,
+        false_branch_ref: never,
+        distributive: false,
+        pending: None,
+    });
+    let value = dispatch.substitute_semantic_type_param(conditional, parameter, key_parameter);
+    let a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("a".into())));
+    let b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("b".into())));
+    let keys = dispatch.intern_normalized_union_or_intersection(&[a, b], true);
+    let read = dispatch.execute_read(SemanticQueryKey::MappedType {
+        source: keys,
+        mapper: crate::semantic_query::MapperKey {
+            parameter_node: key_parameter,
+            key_space: keys,
+            value_expr: value,
+            optionality: crate::semantic_query::OptionalityMod::Keep,
+            readonly: crate::semantic_query::ReadonlyMod::Keep,
+            name_remap: None,
+            kind: crate::semantic_query::MapperKind::Computed,
+        },
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    });
+    let QueryResult::Value(result) = read.value else {
+        panic!("mapped value must resolve")
+    };
+    let surface = require_object_surface(graph, result, "key-dependent pending value");
+    assert_eq!(surface_get_member(&surface, "a").value, a);
+    assert_eq!(surface_get_member(&surface, "b").value, b);
+
+    let missing = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    let suspended = dispatch.substitute_semantic_type_param(conditional, parameter, missing);
+    assert!(
+        graph.node_reaches_unresolved(suspended),
+        "a pending argument is retained unresolved evidence"
+    );
+}
+
+#[test]
+fn conditional_edits_match_fresh_results_at_both_forcing_sites() {
+    use crate::semantic_query::demand::DisplayNeeds;
+    use crate::semantic_query::SemanticQueryValue;
+    for generic in [false, true] {
+        let incremental = host();
+        for (check, yes, no, expected) in [
+            ("string", "yes", "no", "yes"),
+            ("string", "yes", "dead-edit", "yes"),
+            ("string", "winner-edit", "dead-edit", "winner-edit"),
+            ("number", "winner-edit", "dead-edit", "dead-edit"),
+        ] {
+            let source = if generic {
+                format!("type Choose<T> = T extends string ? '{yes}' : '{no}'; export type Result = Choose<{check}>;")
+            } else {
+                format!("export type Result = {check} extends string ? '{yes}' : '{no}';")
+            };
+            upsert_ts(&incremental, "/w/edit-conditional.ts", &source);
+            let fresh = host();
+            upsert_ts(&fresh, "/w/edit-conditional.ts", &source);
+            let resolve = |host: &VerterHost| {
+                let (outcome, _) = host
+                    .resolve_named_symbol_with_audit(
+                        "/w/edit-conditional.ts",
+                        "Result",
+                        Some(ProjectionMode::Expanded),
+                    )
+                    .into_parts();
+                let node = outcome
+                    .ok()
+                    .flatten()
+                    .expect("conditional resolves after an edit");
+                let graph = host.project_type_store().semantic_graph();
+                assert!(matches!(graph.node_data(node).as_deref(),
+                    Some(SemanticNodeData::Literal(LiteralValue::String(value))) if value == expected));
+                crate::semantic_query::display::display(
+                    graph,
+                    &SemanticQueryValue::TypeNode(node),
+                    DisplayNeeds::empty(),
+                )
+                .0
+            };
+            let cold = resolve(&incremental);
+            assert_eq!(cold, resolve(&fresh));
+            let count = incremental
+                .project_type_store()
+                .semantic_graph()
+                .memo_entry_count();
+            assert_eq!(cold, resolve(&incremental));
+            assert_eq!(
+                incremental
+                    .project_type_store()
+                    .semantic_graph()
+                    .memo_entry_count(),
+                count
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_same_name_infer_decided_at_lowering_skips_the_losing_branch() {
+    use verter_type_expr::TypeExpr;
+    let lower = |depth: usize| {
+        let host = host();
+        upsert_ts(&host, "/nested-infer.ts", "export type Anchor = string;");
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let mut loser = TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number);
+        for _ in 0..depth {
+            loser = TypeExpr::Array {
+                element: Arc::new(loser),
+                readonly: false,
+            };
+        }
+        let inner = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::Boolean,
+            )),
+            extends: Arc::new(TypeExpr::Infer {
+                name: "T".to_string(),
+            }),
+            true_type: Arc::new(TypeExpr::Ref {
+                name: Arc::from("T"),
+                type_arguments: Arc::from([]),
+            }),
+            false_type: Arc::new(loser.clone()),
+        };
+        let expr = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
+            extends: Arc::new(TypeExpr::Infer {
+                name: "T".to_string(),
+            }),
+            true_type: Arc::new(inner),
+            false_type: Arc::new(loser),
+        };
+        let result = dispatch
+            .lower_type_expr_in_scope_with_context(
+                "/nested-infer.ts",
+                &expr,
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            )
+            .expect("nested infer conditional lowers");
+        assert!(matches!(
+            graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
+        ));
+        graph.node_count()
+    };
+    assert_eq!(
+        lower(0),
+        lower(64),
+        "nested decided infer must not allocate the losing branch"
+    );
+}
+
+#[test]
+fn distributive_pending_substitution_does_not_traverse_the_losing_branch() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let (_, parameter) = reverse_test_binders(graph, "Distributed", 9002);
+    let string = primitive(graph, PrimitiveKind::String);
+    let hello = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::String("hello".to_string()),
+    ));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(vec![
+            string, hello,
+        ])),
+    ));
+    let yes = primitive(graph, PrimitiveKind::Boolean);
+    let loser = graph.intern_node(SemanticNodeData::Array {
+        element: parameter,
+        readonly: false,
+    });
+    let conditional = graph.intern_node(SemanticNodeData::Conditional {
+        check: parameter,
+        extends: string,
+        true_branch_ref: yes,
+        false_branch_ref: loser,
+        distributive: true,
+        pending: None,
+    });
+    let before = graph.stats_snapshot().relation_check_count;
+    let instantiated = dispatch.substitute_semantic_type_param(conditional, parameter, union);
+    assert_eq!(
+        graph.stats_snapshot().relation_check_count,
+        before,
+        "substitution cannot select a distributive branch"
+    );
+    assert_eq!(
+        graph.substitute_memo_get(loser, parameter, union),
+        None,
+        "an undemanded distributive loser must not be traversed"
+    );
+    let result = dispatch.evaluate_deferred_semantic_node(instantiated);
+    assert_eq!(result, yes, "both union members select the true branch");
+    assert_eq!(
+        graph.substitute_memo_get(loser, parameter, union),
+        None,
+        "the distributive losing branch must remain untouched after demand"
+    );
+}
+
 /// Test-side `IndexKey::Number` constructor. The payload field is
 /// private (proof-carrying `CanonicalIndexInt`), so fixtures route
 /// through the `Display`-checked blessed constructor.
@@ -41,6 +758,7 @@ fn reverse_homomorphic_reduces_more_than_eight_root_conditionals() {
             true_branch_ref: never,
             false_branch_ref: template,
             distributive: false,
+            pending: None,
         });
     }
     let target = reverse_test_target(
@@ -1467,6 +2185,7 @@ fn reverse_homomorphic_nonterminal_tuple_rest_uses_the_broad_number_key() {
         true_branch_ref: projection,
         false_branch_ref: never,
         distributive: false,
+        pending: None,
     });
     let template = graph.intern_node(SemanticNodeData::Conditional {
         check: parameter,
@@ -1474,6 +2193,7 @@ fn reverse_homomorphic_nonterminal_tuple_rest_uses_the_broad_number_key() {
         true_branch_ref: projection,
         false_branch_ref: number_branch,
         distributive: false,
+        pending: None,
     });
     let target = reverse_test_target(
         &graph,
@@ -5270,6 +5990,7 @@ fn closed_conditional_selects_and_emits_edges() {
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -5317,6 +6038,7 @@ fn closed_conditional_does_not_materialise_losing_branch_body() {
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     });
     let node_count_after = graph.node_count();
     // No new structural nodes should have been interned — both
@@ -5385,8 +6107,14 @@ fn decided_conditional_roots_only_on_check_extends_and_the_winner() {
 
     // `string extends string` decides TRUE: only the true branch's file
     // is a dependency of the answer.
-    let decided_true =
-        dispatch.build_conditional(string_node, string_node, true_branch, false_branch, false);
+    let decided_true = dispatch.build_conditional(
+        string_node,
+        string_node,
+        true_branch,
+        false_branch,
+        false,
+        None,
+    );
     assert!(
         matches!(decided_true.result, QueryResult::Value(id) if id == true_branch),
         "the closed check must select the true branch, got {:?}",
@@ -5400,8 +6128,14 @@ fn decided_conditional_roots_only_on_check_extends_and_the_winner() {
 
     // `number extends string` decides FALSE: the mirror case, so the
     // assertion cannot pass by always dropping one fixed branch.
-    let decided_false =
-        dispatch.build_conditional(number_node, string_node, true_branch, false_branch, false);
+    let decided_false = dispatch.build_conditional(
+        number_node,
+        string_node,
+        true_branch,
+        false_branch,
+        false,
+        None,
+    );
     assert!(
         matches!(decided_false.result, QueryResult::Value(id) if id == false_branch),
         "the closed check must select the false branch, got {:?}",
@@ -5429,8 +6163,14 @@ fn decided_conditional_roots_only_on_check_extends_and_the_winner() {
         default: None,
         display_name: Arc::from("OpenExtends"),
     });
-    let deferred =
-        dispatch.build_conditional(open_check, open_extends, true_branch, false_branch, false);
+    let deferred = dispatch.build_conditional(
+        open_check,
+        open_extends,
+        true_branch,
+        false_branch,
+        false,
+        None,
+    );
     assert_eq!(
         rooted_files(&deferred),
         vec![
@@ -5451,8 +6191,14 @@ fn decided_conditional_roots_only_on_check_extends_and_the_winner() {
         ("error", error_check, false),
         ("distributive never", never_check, true),
     ] {
-        let absorbed =
-            dispatch.build_conditional(check, string_node, true_branch, false_branch, distributive);
+        let absorbed = dispatch.build_conditional(
+            check,
+            string_node,
+            true_branch,
+            false_branch,
+            distributive,
+            None,
+        );
         assert!(
             matches!(absorbed.result, QueryResult::Value(id) if id != true_branch && id != false_branch),
             "a {label} check must absorb to neither branch, got {:?}",
@@ -5468,8 +6214,14 @@ fn decided_conditional_roots_only_on_check_extends_and_the_winner() {
     // An `any` check publishes the union of both branches, so both stay
     // rooted.
     let any_check = primitive(&graph, PrimitiveKind::Any);
-    let any_union =
-        dispatch.build_conditional(any_check, string_node, true_branch, false_branch, false);
+    let any_union = dispatch.build_conditional(
+        any_check,
+        string_node,
+        true_branch,
+        false_branch,
+        false,
+        None,
+    );
     assert_eq!(
         rooted_files(&any_union),
         vec![
@@ -5563,6 +6315,7 @@ fn distributed_conditional_dependencies_follow_member_selections() {
                 true_branch,
                 false_branch,
                 distributive: true,
+                pending: None,
             };
             for attempt in 0..2 {
                 let before = graph.stats_snapshot();
@@ -5661,6 +6414,7 @@ fn open_conditional_stays_deferred_with_shell_branch_refs_not_expanded_bodies() 
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -5673,6 +6427,7 @@ fn open_conditional_stays_deferred_with_shell_branch_refs_not_expanded_bodies() 
             true_branch_ref,
             false_branch_ref,
             distributive,
+            pending: None,
         } => {
             assert_eq!(*check, foo);
             assert_eq!(*extends, bar);
@@ -5904,6 +6659,7 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected deferred Conditional Value, got {other:?}"),
@@ -6378,6 +7134,7 @@ fn infer_in_closed_conditional_binds_via_relation() {
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -6451,6 +7208,7 @@ fn infer_in_open_conditional_stays_symbolic_without_private_bind() {
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -6507,6 +7265,7 @@ fn distinct_projections_into_same_open_conditional_materialise_only_visited_sube
         true_branch: string_node,
         false_branch: number_node,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected deferred Conditional Value, got {other:?}"),
@@ -6570,6 +7329,7 @@ fn build_conditional_distributive_union_distributes_per_member_via_execute_no_st
         true_branch,
         false_branch,
         distributive: true,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected distributed union value, got {other:?}"),
@@ -6629,6 +7389,7 @@ fn build_conditional_distributive_false_on_union_check_does_not_distribute() {
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected value result, got {other:?}"),
@@ -6689,6 +7450,7 @@ fn build_conditional_distributive_union_behind_alias_carrier_distributes_per_mem
         true_branch,
         false_branch,
         distributive: true,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected distributed union value, got {other:?}"),
@@ -6757,6 +7519,7 @@ fn build_conditional_distributive_per_member_subquery_has_distributive_false() {
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected deferred conditional for A, got {other:?}"),
@@ -6767,6 +7530,7 @@ fn build_conditional_distributive_per_member_subquery_has_distributive_false() {
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected deferred conditional for B, got {other:?}"),
@@ -6787,6 +7551,7 @@ fn build_conditional_distributive_per_member_subquery_has_distributive_false() {
         true_branch,
         false_branch,
         distributive: true,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected distributed union value, got {other:?}"),
@@ -7030,6 +7795,7 @@ fn open_conditional_distributes_path_into_both_branches_via_execute_not_private_
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected deferred conditional, got {other:?}"),
@@ -7091,6 +7857,7 @@ fn closed_conditional_projects_into_selected_branch_only() {
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected decided conditional, got {other:?}"),
@@ -9230,6 +9997,7 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
             crate::semantic_query::LiteralValue::String("s".to_string()),
         )),
         distributive: true,
+        pending: None,
     });
     let mapped = build_mapped(mapper_over(key_1, param, param, Some(remap)));
     match graph.node_data(mapped).as_deref() {
@@ -10349,6 +11117,7 @@ fn object_record_relation_accepts_numeric_literal_keys() {
             true_branch,
             false_branch,
             distributive: false,
+            pending: None,
         }) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
             other => panic!("expected Conditional Value, got {other:?}"),
@@ -12402,6 +13171,7 @@ fn iterative_deep_array_relation_reaches_the_nested_conditional_oracle() {
         true_branch_ref: string,
         false_branch_ref: never,
         distributive: false,
+        pending: None,
     });
     let nest = |mut node| {
         for _ in 0..500 {
@@ -12493,6 +13263,7 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
         true_branch,
         false_branch: never_node,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -12577,6 +13348,7 @@ fn losing_overload_alternative_deposits_do_not_reach_fixation() {
         true_branch: infer_u,
         false_branch: never_node,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -12656,6 +13428,7 @@ fn reverse_test_conditional(
         true_branch: infer,
         false_branch,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("expected a conditional value, got {other:?}"),
@@ -13298,6 +14071,7 @@ fn reverse_homomorphic_mapped_infers_an_object_property_through_a_template() {
         true_branch: infer_t,
         false_branch: never_node,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("expected a conditional value, got {other:?}"),
@@ -13371,6 +14145,7 @@ fn reverse_homomorphic_reduces_key_sensitive_conditionals_nested_in_template_mem
         true_branch_ref: projection,
         false_branch_ref: never,
         distributive: false,
+        pending: None,
     });
     let template = intern_object_with_members(
         &graph,
@@ -13452,6 +14227,7 @@ fn reverse_homomorphic_reduces_key_conditionals_through_array_tuple_and_function
             true_branch_ref: projection,
             false_branch_ref: never,
             distributive: false,
+            pending: None,
         });
         let (template, source_value) = match label {
             "array" => (
@@ -14419,6 +15195,7 @@ fn reverse_homomorphic_tuple_uses_string_fixed_keys_and_number_rest_keys() {
         true_branch_ref: projection,
         false_branch_ref: never,
         distributive: false,
+        pending: None,
     });
     let template = graph.intern_node(SemanticNodeData::Conditional {
         check: parameter,
@@ -14426,6 +15203,7 @@ fn reverse_homomorphic_tuple_uses_string_fixed_keys_and_number_rest_keys() {
         true_branch_ref: projection,
         false_branch_ref: rest_branch,
         distributive: false,
+        pending: None,
     });
     let target = reverse_test_target(
         &graph,
@@ -15808,6 +16586,7 @@ fn open_mapped_value_body_carrier_stops_in_expanded_and_macro_object_surface() {
         true_branch_ref: true_fn,
         false_branch_ref: never_ty,
         distributive: false,
+        pending: None,
     });
 
     let mapper = MapperKey {
@@ -17515,6 +18294,7 @@ fn conditional_key_domain_classifies_only_the_oracle_selected_branch() {
         true_branch_ref: simple_object(&graph, &[("k", string_ty)]),
         false_branch_ref: t_param,
         distributive: false,
+        pending: None,
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -17684,6 +18464,7 @@ fn value_sensitive_operands_judge_instantiations_by_any_open_argument() {
             identity: decl("B"),
         }),
         distributive: false,
+        pending: None,
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -17964,6 +18745,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
         true_branch_ref: label_obj,
         false_branch_ref: t_param,
         distributive: false,
+        pending: None,
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -17983,6 +18765,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
         true_branch_ref: infer_x,
         false_branch_ref: t_param,
         distributive: false,
+        pending: None,
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -18001,6 +18784,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
         true_branch_ref: infer_x,
         false_branch_ref: label_obj,
         distributive: false,
+        pending: None,
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -18588,6 +19372,7 @@ fn mapped_name_remap_is_judged_by_key_domain_policy() {
         true_branch_ref: lit("x"),
         false_branch_ref: lit("y"),
         distributive: false,
+        pending: None,
     });
     assert!(
         !super::raise::mapped_type_is_open_or_unknown(
@@ -18921,6 +19706,7 @@ fn node_keyof_operand_resets_to_key_domain_position() {
         true_branch_ref: decl_ref("AFix"),
         false_branch_ref: decl_ref("BFix"),
         distributive: false,
+        pending: None,
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -18987,6 +19773,7 @@ fn value_sensitive_all_closed_instantiation_requires_resolvable_base() {
             true_branch_ref: decl_ref("AFix2"),
             false_branch_ref: decl_ref("BFix2"),
             distributive: false,
+            pending: None,
         })
     };
 
@@ -22199,6 +22986,7 @@ fn shallow_conditional_open_returns_empty_surface_with_diagnostic() {
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Conditional Value, got {other:?}"),
@@ -22264,6 +23052,7 @@ fn shallow_conditional_closed_recurses_on_branch() {
         true_branch,
         false_branch: other,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Conditional Value, got {other:?}"),
@@ -22408,6 +23197,7 @@ fn cacheread_carries_walker_diagnostics_for_shallow_with_open_conditional() {
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Conditional Value, got {other:?}"),
@@ -22457,6 +23247,7 @@ fn cacheread_warm_replays_walker_diagnostics_after_memo_hit() {
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Conditional Value, got {other:?}"),
@@ -23532,6 +24323,7 @@ fn projection_budget_counts_instantiate_and_conditional() {
         true_branch: SemanticNodeId(2),
         false_branch: SemanticNodeId(3),
         distributive: false,
+        pending: None,
     };
     assert!(
         super::semantic_query_counts_toward_projection_budget(&conditional),
@@ -26019,6 +26811,7 @@ fn record_shape_classification_sees_binder_inside_program_value() {
             true_branch,
             false_branch,
             distributive: false,
+            pending: None,
         }) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
             other => panic!("expected Conditional Value, got {other:?}"),
@@ -26692,7 +27485,11 @@ fn absorb_conditional_detects_infer_in_bareref_and_typeof_carrier_type_args() {
     ));
     assert!(
         dispatch
-            .absorb_conditional(any, foo_infer, infer_p, never, false)
+            .absorb_conditional(any, foo_infer, false, |take_true| if take_true {
+                infer_p
+            } else {
+                never
+            })
             .is_none(),
         "`any extends Foo<infer P> ? …` must NOT be absorbed — the BareRef \
          carrier's `type_args` carry an infer pattern"
@@ -26716,7 +27513,11 @@ fn absorb_conditional_detects_infer_in_bareref_and_typeof_carrier_type_args() {
     ));
     assert!(
         dispatch
-            .absorb_conditional(any, typeof_infer, infer_p, never, false)
+            .absorb_conditional(any, typeof_infer, false, |take_true| if take_true {
+                infer_p
+            } else {
+                never
+            })
             .is_none(),
         "`any extends (typeof make<infer P>) ? …` must NOT be absorbed — the \
          TypeOf carrier's `type_args` carry an infer pattern"
@@ -26733,7 +27534,11 @@ fn absorb_conditional_detects_infer_in_bareref_and_typeof_carrier_type_args() {
     ));
     assert!(
         dispatch
-            .absorb_conditional(any, foo_string, string_ty, never, false)
+            .absorb_conditional(any, foo_string, false, |take_true| if take_true {
+                string_ty
+            } else {
+                never
+            })
             .is_some(),
         "`any extends Foo<string> ? X : Y` (no infer) must STILL be absorbed to \
          the branch union — the control keeps the infer detection honest"
@@ -26837,6 +27642,7 @@ fn typeparam_binder_substitution_preserves_same_name_infer_declaration() {
         true_branch_ref: infer_t,
         false_branch_ref: t_param,
         distributive: true,
+        pending: None,
     });
     let number = graph.intern_node(SemanticNodeData::Primitive(
         crate::semantic_query::PrimitiveKind::Number,
@@ -26848,6 +27654,7 @@ fn typeparam_binder_substitution_preserves_same_name_infer_declaration() {
         extends: sub_extends,
         true_branch_ref,
         false_branch_ref,
+        pending,
         ..
     } = &*data
     else {
@@ -26856,7 +27663,8 @@ fn typeparam_binder_substitution_preserves_same_name_infer_declaration() {
     // The OUTER occurrences substitute (the gate must not over-block)…
     assert_eq!(*check, number, "the check-position outer `T` substitutes");
     assert_eq!(
-        *false_branch_ref, number,
+        dispatch.apply_conditional_branch_pending(*false_branch_ref, pending.as_deref(), false),
+        number,
         "the false-branch outer `T` substitutes (outside the infer scope)"
     );
     // …while the `infer T` DECLARATION and its bound occurrence survive.

@@ -774,6 +774,7 @@ fn normalized_projection_shape_equivalent(
                     true_branch_ref: left_true,
                     false_branch_ref: left_false,
                     distributive: left_distributive,
+                    pending: left_pending,
                 },
                 SemanticNodeData::Conditional {
                     check: right_check,
@@ -781,9 +782,10 @@ fn normalized_projection_shape_equivalent(
                     true_branch_ref: right_true,
                     false_branch_ref: right_false,
                     distributive: right_distributive,
+                    pending: right_pending,
                 },
             ) => {
-                if left_distributive != right_distributive {
+                if left_distributive != right_distributive || left_pending != right_pending {
                     return Some(false);
                 }
                 stack.push((*left_check, *right_check));
@@ -1290,8 +1292,12 @@ fn node_contains_imported_ref(root: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>)
                 extends,
                 true_branch_ref,
                 false_branch_ref,
+                pending,
                 ..
             } => {
+                if let Some(frame) = pending {
+                    worklist.extend(frame.argument_nodes());
+                }
                 worklist.push(*check);
                 worklist.push(*extends);
                 worklist.push(*true_branch_ref);

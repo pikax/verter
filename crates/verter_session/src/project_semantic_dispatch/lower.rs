@@ -2116,6 +2116,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 true_type,
                 false_type,
             } => {
+                if self.ctx.is_cancelled() {
+                    return self.opaque(QueryError::Miss);
+                }
                 // Conditional relation targets are structural
                 // consumers unless the check side is already an
                 // object-like relation subject. Deferred / primitive
@@ -2205,57 +2208,63 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     substitutions,
                     extends_context,
                 );
-                let true_env_owned;
-                let true_env = if declarations.is_empty() {
-                    env
-                } else {
-                    let mut extended = env.clone();
-                    for (name, binder) in declarations {
-                        let reference = graph.intern_node_with_scope(
-                            SemanticNodeData::InferRef {
-                                name: Arc::clone(&name),
-                                binder,
-                            },
-                            scope.clone(),
+                let mut lowered = [None, None];
+                let output = self.build_conditional_from_lowering(
+                    check_id,
+                    extends_id,
+                    matches!(check.as_ref(), TypeExpr::TypeParameter(_)),
+                    &mut |take_true| {
+                        let index = usize::from(take_true);
+                        if let Some(node) = lowered[index] {
+                            return node;
+                        }
+                        if self.ctx.is_cancelled() {
+                            return self.opaque(QueryError::Miss);
+                        }
+                        let mut true_env;
+                        let branch_env = if take_true && !declarations.is_empty() {
+                            true_env = env.clone();
+                            for (name, binder) in &declarations {
+                                let reference = graph.intern_node_with_scope(
+                                    SemanticNodeData::InferRef {
+                                        name: Arc::clone(name),
+                                        binder: binder.clone(),
+                                    },
+                                    scope.clone(),
+                                );
+                                true_env.insert(name.to_string(), reference);
+                            }
+                            &true_env
+                        } else {
+                            env
+                        };
+                        let node = self.lower_type_expr_with_infer_factory(
+                            infer_binders,
+                            if take_true { true_type } else { false_type },
+                            branch_env,
+                            scope,
+                            name_resolution,
+                            scope_payload,
+                            shadowing,
+                            substitutions,
+                            reduction_context,
                         );
-                        extended.insert(name.to_string(), reference);
-                    }
-                    true_env_owned = extended;
-                    &true_env_owned
-                };
-                let true_id = self.lower_type_expr_with_infer_factory(
-                    infer_binders,
-                    true_type,
-                    true_env,
-                    scope,
-                    name_resolution,
-                    scope_payload,
-                    shadowing,
-                    substitutions,
-                    reduction_context,
+                        lowered[index] = Some(node);
+                        node
+                    },
                 );
-                let false_id = self.lower_type_expr_with_infer_factory(
-                    infer_binders,
-                    false_type,
-                    env,
-                    scope,
-                    name_resolution,
-                    scope_payload,
-                    shadowing,
-                    substitutions,
-                    reduction_context,
+                self.deposit_operand_self_roots(&output.observed_self_roots);
+                self.fold_into_top_build_local_taint_with(
+                    output.result_is_partial,
+                    output.cache_suppress,
+                    output.partial_reasons,
                 );
-                match self.execute_type_node(SemanticQueryKey::Conditional {
-                    check: check_id,
-                    extends: extends_id,
-                    true_branch: true_id,
-                    false_branch: false_id,
-                    distributive: matches!(check.as_ref(), TypeExpr::TypeParameter(_)),
-                }) {
-                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                match output.result {
+                    QueryResult::Value(node) => node,
                     _ => self.opaque(QueryError::Miss),
                 }
             }
+
             TypeExpr::TypeOf(value_ref) => {
                 if value_ref.path.is_empty() {
                     return self.opaque(QueryError::Miss);

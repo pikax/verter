@@ -193,8 +193,12 @@ impl SemanticGraphStore {
                 extends,
                 true_branch_ref,
                 false_branch_ref,
+                pending,
                 ..
             } => {
+                if let Some(pending) = pending {
+                    children.extend(pending.argument_nodes());
+                }
                 children.push(*check);
                 children.push(*extends);
                 children.push(*true_branch_ref);

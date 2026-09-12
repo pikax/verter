@@ -861,8 +861,12 @@ fn push_child_ids(data: &SemanticNodeData, out: &mut Vec<SemanticNodeId>) -> boo
             extends,
             true_branch_ref,
             false_branch_ref,
+            pending,
             ..
         } => {
+            if let Some(pending) = pending {
+                out.extend(pending.argument_nodes());
+            }
             out.extend([*check, *extends, *true_branch_ref, *false_branch_ref]);
             true
         }
@@ -2337,6 +2341,7 @@ fn compare_shallow(
                 true_branch_ref: ta,
                 false_branch_ref: fa,
                 distributive: da,
+                pending: pa,
             },
             D::Conditional {
                 check: cb,
@@ -2344,9 +2349,10 @@ fn compare_shallow(
                 true_branch_ref: tb,
                 false_branch_ref: fb,
                 distributive: db,
+                pending: pb,
             },
         ) => {
-            if da != db {
+            if da != db || pa != pb {
                 return false;
             }
             work.push((*ca, *cb));

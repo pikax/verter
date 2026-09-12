@@ -1004,6 +1004,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 true_branch_ref,
                                 false_branch_ref,
                                 distributive,
+                                pending,
                             } => {
                                 let read = self.execute_read(SemanticQueryKey::Conditional {
                                     check: *check,
@@ -1011,6 +1012,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     true_branch: *true_branch_ref,
                                     false_branch: *false_branch_ref,
                                     distributive: *distributive,
+                                    pending: pending.clone(),
                                 });
                                 let frame = frames.last_mut().expect("active evaluator frame");
                                 let fallback = self.opaque(QueryError::Miss);

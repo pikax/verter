@@ -563,8 +563,12 @@ fn cycle_gate_body_contains_recursive_ref(
                 extends,
                 true_branch_ref,
                 false_branch_ref,
+                pending,
                 ..
             } => {
+                if let Some(pending) = pending {
+                    stack.extend(pending.argument_nodes());
+                }
                 stack.push(*check);
                 stack.push(*extends);
                 stack.push(*true_branch_ref);
@@ -713,8 +717,12 @@ fn cycle_gate_collect_ref_identities(
                 extends,
                 true_branch_ref,
                 false_branch_ref,
+                pending,
                 ..
             } => {
+                if let Some(pending) = pending {
+                    stack.extend(pending.argument_nodes());
+                }
                 stack.push(*check);
                 stack.push(*extends);
                 stack.push(*true_branch_ref);

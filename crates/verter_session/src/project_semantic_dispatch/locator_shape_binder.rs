@@ -698,14 +698,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 },
                 Step::ConditionalTrue => match data {
                     SemanticNodeData::Conditional {
-                        true_branch_ref, ..
-                    } => Position::Node(*true_branch_ref),
+                        true_branch_ref,
+                        pending,
+                        ..
+                    } => Position::Node(self.apply_conditional_branch_pending(
+                        *true_branch_ref,
+                        pending.as_deref(),
+                        true,
+                    )),
                     _ => return None,
                 },
                 Step::ConditionalFalse => match data {
                     SemanticNodeData::Conditional {
-                        false_branch_ref, ..
-                    } => Position::Node(*false_branch_ref),
+                        false_branch_ref,
+                        pending,
+                        ..
+                    } => Position::Node(self.apply_conditional_branch_pending(
+                        *false_branch_ref,
+                        pending.as_deref(),
+                        false,
+                    )),
                     _ => return None,
                 },
                 Step::IndexedAccessObject => match data {

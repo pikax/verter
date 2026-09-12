@@ -322,7 +322,13 @@ fn error_any_never_propagation_lattice() {
     // (error stays FIRST — dominates any/never).
     let c = absorbed_node(
         dispatch
-            .absorb_conditional(error, string, number, string, false)
+            .absorb_conditional(error, string, false, |take_true| {
+                if take_true {
+                    number
+                } else {
+                    string
+                }
+            })
             .expect("error-check absorbs"),
     );
     assert_eq!(
@@ -332,7 +338,11 @@ fn error_any_never_propagation_lattice() {
     // A non-special check does NOT fast-reject (the branch logic decides).
     assert!(
         dispatch
-            .absorb_conditional(string, number, string, number, false)
+            .absorb_conditional(string, number, false, |take_true| if take_true {
+                string
+            } else {
+                number
+            })
             .is_none(),
         "an ordinary conditional check must not fast-reject"
     );
@@ -363,7 +373,13 @@ fn conditional_any_check_unions_both_branches() {
     let assert_unions_both = |distributive: bool| {
         let node = absorbed_node(
             dispatch
-                .absorb_conditional(any, extends, t_branch, f_branch, distributive)
+                .absorb_conditional(any, extends, distributive, |take_true| {
+                    if take_true {
+                        t_branch
+                    } else {
+                        f_branch
+                    }
+                })
                 .expect("any-check must absorb to a union of both branches"),
         );
         match graph.node_data(node).map(|d| (*d).clone()) {
@@ -386,7 +402,12 @@ fn conditional_any_check_unions_both_branches() {
     let same = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let folded = absorbed_node(
         dispatch
-            .absorb_conditional(any, extends, same, same, false)
+            .absorb_conditional(
+                any,
+                extends,
+                false,
+                |take_true| if take_true { same } else { same },
+            )
             .expect("any-check absorbs"),
     );
     assert_eq!(
@@ -405,7 +426,11 @@ fn conditional_any_check_unions_both_branches() {
     let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     assert!(
         dispatch
-            .absorb_conditional(any, infer_u, infer_u, never, false)
+            .absorb_conditional(any, infer_u, false, |take_true| if take_true {
+                infer_u
+            } else {
+                never
+            })
             .is_none(),
         "any extends `infer U` must fall through to the infer-binding path, not union"
     );
@@ -441,7 +466,11 @@ fn conditional_any_check_detects_nested_infer_patterns() {
     });
     assert!(
         dispatch
-            .absorb_conditional(any, wrapper, infer_u, y_branch, false)
+            .absorb_conditional(any, wrapper, false, |take_true| if take_true {
+                infer_u
+            } else {
+                y_branch
+            })
             .is_none(),
         "infer nested in InstantiationRef<infer U> must fall through to the \
          infer-binding path, not union both branches"
@@ -476,7 +505,11 @@ fn conditional_any_check_detects_nested_infer_patterns() {
     let obj = graph.intern_node(SemanticNodeData::Object(obj_surface));
     assert!(
         dispatch
-            .absorb_conditional(any, obj, infer_u, y_branch, false)
+            .absorb_conditional(any, obj, false, |take_true| if take_true {
+                infer_u
+            } else {
+                y_branch
+            })
             .is_none(),
         "infer nested in an Object property value must fall through to the \
          infer-binding path, not union both branches"
@@ -488,7 +521,13 @@ fn conditional_any_check_detects_nested_infer_patterns() {
     let t_branch = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let node = absorbed_node(
         dispatch
-            .absorb_conditional(any, string, t_branch, y_branch, false)
+            .absorb_conditional(any, string, false, |take_true| {
+                if take_true {
+                    t_branch
+                } else {
+                    y_branch
+                }
+            })
             .expect("any extends string ? T : Y must union both branches"),
     );
     match graph.node_data(node).map(|d| (*d).clone()) {
@@ -519,7 +558,13 @@ fn conditional_never_check_is_distributive_gated() {
     // Distributive naked-`never` check ⇒ `never`.
     let collapsed = absorbed_node(
         dispatch
-            .absorb_conditional(never, extends, t_branch, f_branch, true)
+            .absorb_conditional(never, extends, true, |take_true| {
+                if take_true {
+                    t_branch
+                } else {
+                    f_branch
+                }
+            })
             .expect("distributive never-check must absorb to never"),
     );
     assert_eq!(
@@ -534,7 +579,11 @@ fn conditional_never_check_is_distributive_gated() {
     // `never ⇒ never` patch would wrongly return Some(never) here.
     assert!(
         dispatch
-            .absorb_conditional(never, extends, t_branch, f_branch, false)
+            .absorb_conditional(never, extends, false, |take_true| if take_true {
+                t_branch
+            } else {
+                f_branch
+            })
             .is_none(),
         "non-distributive never-check must NOT collapse to never (true branch wins)"
     );

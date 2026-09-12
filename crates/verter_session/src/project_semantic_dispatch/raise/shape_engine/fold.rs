@@ -175,12 +175,23 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             extends,
             true_branch_ref,
             false_branch_ref,
+            pending,
             ..
         } => {
+            let true_branch = dispatch.apply_conditional_branch_pending(
+                *true_branch_ref,
+                pending.as_deref(),
+                true,
+            );
+            let false_branch = dispatch.apply_conditional_branch_pending(
+                *false_branch_ref,
+                pending.as_deref(),
+                false,
+            );
             let check = fold_node(alg, dispatch, *check, active)?;
             let extends = fold_node(alg, dispatch, *extends, active)?;
-            let true_type = fold_node(alg, dispatch, *true_branch_ref, active)?;
-            let false_type = fold_node(alg, dispatch, *false_branch_ref, active)?;
+            let true_type = fold_node(alg, dispatch, true_branch, active)?;
+            let false_type = fold_node(alg, dispatch, false_branch, active)?;
             alg.conditional(check, extends, true_type, false_type)
         }
         SemanticNodeData::TemplateLiteral {

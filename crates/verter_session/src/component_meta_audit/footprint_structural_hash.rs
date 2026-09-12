@@ -567,6 +567,7 @@ impl StructuralEncoder<'_> {
                 true_branch_ref,
                 false_branch_ref,
                 distributive,
+                pending,
             } => {
                 self.buf.push(VariantTag::Conditional as u8);
                 self.buf.push(u8::from(*distributive));
@@ -574,6 +575,27 @@ impl StructuralEncoder<'_> {
                 self.encode_child(*extends, depth);
                 self.encode_child(*true_branch_ref, depth);
                 self.encode_child(*false_branch_ref, depth);
+                match pending {
+                    None => self.buf.push(0),
+                    Some(frame) => {
+                        self.buf.push(1);
+                        self.buf.extend_from_slice(
+                            &(frame.true_branch().pairs().len() as u64).to_le_bytes(),
+                        );
+                        for &(param, arg) in frame.true_branch().pairs() {
+                            self.encode_child(param, depth);
+                            self.encode_child(arg, depth);
+                        }
+                        self.buf.push(2);
+                        self.buf.extend_from_slice(
+                            &(frame.false_branch().pairs().len() as u64).to_le_bytes(),
+                        );
+                        for &(param, arg) in frame.false_branch().pairs() {
+                            self.encode_child(param, depth);
+                            self.encode_child(arg, depth);
+                        }
+                    }
+                }
             }
             SemanticNodeData::Signature {
                 kind,
