@@ -373,7 +373,7 @@ fn flow_result(
     let expr = host
         .project_node_to_type_expr_for_test(result.return_type())
         .expect("return node must project to TypeExpr");
-    (expr, result.can_fall_through)
+    (expr, result.can_fall_through.reaches_end_for_assertion())
 }
 
 /// The POSITIONAL fail-closed assertion: the demanded return is a
@@ -941,7 +941,7 @@ fn function_return_helper_flow_arm_builds_the_identical_key() {
             object_prop(&expr, "ok"),
             &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
         );
-        assert!(!result.can_fall_through);
+        assert!(!result.can_fall_through.reaches_end_for_assertion());
         // The demand admitted under the helper-constructed key: a fresh view
         // warm-reads the same family entry.
         let key = dispatch.flow_return_key_for(&identity);
@@ -5934,7 +5934,12 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
 
         // The member pops PROVISIONAL: the caller-return clone substitutes
         // at the pop; the deposited outcome stays raw.
-        let raw_member = crate::semantic_query::FlowReturnResult::new(graph, binder, false, None);
+        let raw_member = crate::semantic_query::FlowReturnResult::new(
+            graph,
+            binder,
+            crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+            None,
+        );
         let step = dispatch.flow_frame_close_with_evidence_for_tests(
             member_idx,
             super::dispatch_txn::FlowReturnPendingOutcome::EvaluatedValue(raw_member),
@@ -5950,7 +5955,12 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
         let _ = dispatch.flow_frame_close_with_evidence_for_tests(
             root_idx,
             super::dispatch_txn::FlowReturnPendingOutcome::EvaluatedValue(
-                crate::semantic_query::FlowReturnResult::new(graph, number, false, None),
+                crate::semantic_query::FlowReturnResult::new(
+                    graph,
+                    number,
+                    crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+                    None,
+                ),
             ),
             Vec::new(),
             Some(discharge_of(&root_key)),
@@ -7847,7 +7857,12 @@ fn unproven_flow_member_poisons_mixed_machinery_root() {
         let member = super::relation::DrainedFlowReturnMember {
             key: member_key,
             outcome: FlowReturnPendingOutcome::EvaluatedValue(
-                crate::semantic_query::FlowReturnResult::new(graph, number, false, None),
+                crate::semantic_query::FlowReturnResult::new(
+                    graph,
+                    number,
+                    crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+                    None,
+                ),
             ),
             // This member PLANNED cleanly and failed at the proof gate,
             // so it contributes no refusal cause of its own.
@@ -8552,7 +8567,12 @@ fn provenance_distinguishes_first_demands_of_two_runtimes() {
         // runtime B's evaluation evidence is foreign, never a proof.
         let graph = dispatch.graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-        let result = crate::semantic_query::FlowReturnResult::new(graph, number, false, None);
+        let result = crate::semantic_query::FlowReturnResult::new(
+            graph,
+            number,
+            crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+            None,
+        );
         let verdict = dispatch.finalize_flow_demand(
             Some(&carrier),
             None,

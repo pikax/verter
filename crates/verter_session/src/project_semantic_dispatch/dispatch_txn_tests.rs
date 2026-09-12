@@ -940,10 +940,8 @@ fn return_equation_identity_spans_flow_return_and_resolve_call() {
     assert!(matches!(domain, ReturnDomainMetadata::ResolveCall));
     // The flow arm carries its own domain metadata, not a shared shell.
     assert!(matches!(
-        ReturnDomainMetadata::FlowReturn {
-            can_fall_through: true
-        },
-        ReturnDomainMetadata::FlowReturn { .. }
+        ReturnDomainMetadata::FlowReturn,
+        ReturnDomainMetadata::FlowReturn
     ));
 }
 
@@ -1135,7 +1133,12 @@ fn zero_obligation_demand_never_converges_or_seals() {
     let number = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
         crate::semantic_query::PrimitiveKind::Number,
     ));
-    let value = crate::semantic_query::FlowReturnResult::new(&graph, number, false, None);
+    let value = crate::semantic_query::FlowReturnResult::new(
+        &graph,
+        number,
+        crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+        None,
+    );
     assert!(
         matches!(
             runtime.seal_flow_completion(handle, value),

@@ -164,7 +164,12 @@ fn pending_flow_members(
             let flight = store
                 .begin_inline_flow_return_flight(key)
                 .expect("each flow member claims its vacant family flight");
-            let value = FlowReturnResult::new(store, return_type, false, None);
+            let value = FlowReturnResult::new(
+                store,
+                return_type,
+                crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
+                None,
+            );
             PendingFlowReturnMember {
                 key: key.clone(),
                 result: flow_proof_for_member(key, value),
@@ -589,7 +594,7 @@ fn run_exact_fit_pressure_batch(
                 SemanticQueryValue::FlowReturn(Arc::new(FlowReturnResult::new(
                     &store,
                     return_type,
-                    false,
+                    crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
                     None,
                 ))),
                 flow_whole_return_projection(),
@@ -904,7 +909,7 @@ fn flow_scc_publish_accepts_proof_tokens_only() {
     let degraded = FlowReturnResult::new(
         &store,
         degraded_node,
-        false,
+        crate::flow_completion_inventory::NormalCompletion::minted_for_fixture(false),
         Some(crate::semantic_query::FlowReturnDegradation::NonCallableBinding),
     );
     assert!(

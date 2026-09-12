@@ -4,9 +4,10 @@
 //! STRUCTURAL CONFINEMENT. The two DECIDING fields — `return_type` and
 //! `degradation` — are PRIVATE to THIS module, so
 //! [`FlowReturnResult::new`] is the only way to set them anywhere in the
-//! crate, the parent `semantic_query` module included. (`can_fall_through`
-//! is `pub`: it is a plain reachability bit no admission channel reads,
-//! and nothing derives from it.) The confinement matters because the
+//! crate, the parent `semantic_query` module included. (`can_fall_through` is
+//! `pub(crate)`: the fact is opaque — its boolean is private to the
+//! completion-carrier inventory, so no admission channel can read it
+//! without naming an inventory discharge row.) The confinement matters because the
 //! constructor does not merely store the caller's degradation: it folds
 //! [`FlowReturnDegradation::UnresolvedValue`] in when the value reaches a
 //! semantic-miss carrier the evaluation could not attribute to a position.
@@ -36,6 +37,7 @@
 //! [`FlowReturnResult::with_return_type`], re-derives.
 
 use super::{FlowReturnDegradation, SemanticNodeId};
+use crate::flow_completion_inventory::{transports_completion, NormalCompletion};
 
 /// The SUCCESS carrier of a `FlowReturn` query — including DEGRADED
 /// successes. A no-value failure and a usable degraded value are
@@ -62,7 +64,13 @@ pub struct FlowReturnResult {
     /// rebuild, and it re-derives.
     return_type: SemanticNodeId,
     /// Whether execution can reach the end of the body without a return.
-    pub can_fall_through: bool,
+    ///
+    /// The field is `pub`, but the FACT is not readable without naming an
+    /// inventory row: [`NormalCompletion`] keeps its boolean private, so a
+    /// consumer that wants to decide anything from this value must be on
+    /// the completion-carrier inventory.
+    pub(crate) can_fall_through: NormalCompletion,
+
     /// The typed degradation reason, when the evaluation produced a
     /// USABLE result through a modeled-`any` substitution, OR when the
     /// value carries an unresolved semantic carrier. `Some` gates the
@@ -96,6 +104,8 @@ pub struct FlowReturnResult {
     fresh_literal_arms: std::sync::Arc<[SemanticNodeId]>,
 }
 
+transports_completion!(FlowReturnResult => FlowReturnResult);
+
 impl FlowReturnResult {
     /// THE construction point of a flow-return value.
     ///
@@ -118,7 +128,7 @@ impl FlowReturnResult {
     pub(crate) fn new(
         graph: &crate::semantic_query_memo::SemanticGraphStore,
         return_type: SemanticNodeId,
-        can_fall_through: bool,
+        can_fall_through: NormalCompletion,
         degradation: Option<FlowReturnDegradation>,
     ) -> Self {
         Self::new_with_fresh_literal_arms(graph, return_type, can_fall_through, degradation, &[])
@@ -133,7 +143,7 @@ impl FlowReturnResult {
     pub(crate) fn new_with_fresh_literal_arms(
         graph: &crate::semantic_query_memo::SemanticGraphStore,
         return_type: SemanticNodeId,
-        can_fall_through: bool,
+        can_fall_through: NormalCompletion,
         degradation: Option<FlowReturnDegradation>,
         fresh_literal_arms: &[SemanticNodeId],
     ) -> Self {

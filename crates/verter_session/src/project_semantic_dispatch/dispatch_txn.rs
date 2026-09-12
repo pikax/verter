@@ -2932,11 +2932,11 @@ pub(crate) enum ReturnObligationIdentity {
 pub(crate) enum ReturnDomainMetadata {
     // Exercised by the solver's own contract tests: production flow members
     // discharge through the callee-clause fixed point and never enter the
-    // call equation.
+    // call equation. The arm carries NO completion fact: a flow member that
+    // reached this equation would have to re-decide the body's completion
+    // from a copy, which is a second completion authority by construction.
     #[allow(dead_code)]
-    FlowReturn {
-        can_fall_through: bool,
-    },
+    FlowReturn,
     ResolveCall,
 }
 

@@ -194,6 +194,13 @@ pub use crate::fact_signature_helpers::ReadSetSignature;
 mod error_propagation_lattice_tests;
 pub mod external_ts;
 pub mod file_artifact_store;
+/// The closed, code-first inventory of every carrier that transports a
+/// flow-completion fact. Crate-private: the completion fact's opaque
+/// carrier and its construction / discharge vocabularies are substrate
+/// internals, and nothing outside the flow pipeline may mint or read one.
+pub(crate) mod flow_completion_inventory;
+#[cfg(test)]
+mod flow_completion_inventory_tests;
 pub(crate) mod flow_slice_content;
 #[cfg(test)]
 mod flow_slice_content_tests;

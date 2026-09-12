@@ -833,6 +833,8 @@ const BLOCK_TO_REQUIRED_GUARDS = new Map([
       "closure_capture_barrier_widens_captured_mutable_slots",
       "predicate_call_does_not_trigger_closure_barrier",
       "divergent_loop_models_as_void",
+      "flow_completion_carrier_inventory_is_closed",
+      "flow_completion_carriers_publish_the_checkers_answer",
       "flow_policy_differentiates_cache_candidates",
     ],
   ],
@@ -1242,6 +1244,8 @@ const GUARD_REGISTRY_DATA = [
   ["closure_capture_barrier_widens_captured_mutable_slots", "U6LoopClosure", "owed"],
   ["predicate_call_does_not_trigger_closure_barrier", "U6LoopClosure", "owed"],
   ["divergent_loop_models_as_void", "U6LoopClosure", "lib"],
+  ["flow_completion_carrier_inventory_is_closed", "U6LoopClosure", "lib"],
+  ["flow_completion_carriers_publish_the_checkers_answer", "U6LoopClosure", "lib"],
   ["flow_policy_differentiates_cache_candidates", "U6LoopClosure", "owed"],
   // U3.CACHE_FACT_MODEL — owed.
   ["cache_keys_cover_ts_jsx_moduleresolution_decorator_lib_dimensions", "U3CacheFactModel", "owed"],

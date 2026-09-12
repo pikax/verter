@@ -1221,6 +1221,20 @@ The classification mirrors the checker's BINDER (`createFlowCondition`) and is d
 
 Acceptance: `flow_return_loop_completion_tests` (four rows tables, every expectation anchored against `tsc 7.0.2 --strict` via `--declaration --emitDeclarationOnly`), plus the catalog rows `flow_return_bl13_throw_only_declaration_is_void` and `flow_return_bl15_models_divergent_loop_as_void`.
 
+#### The Completion-Carrier Inventory
+
+A completion fact carries no degradation of its own, so a carrier that drops or inverts one publishes a WRONG answer that also WARMS — nothing downstream can tell a lost fall-through edge from a body that genuinely never completes. The defence is the closed inventory in `crates/verter_session/src/flow_completion_inventory.rs`, which makes an unlisted carrier unrepresentable rather than merely undocumented.
+
+`NormalCompletion` is an opaque `Copy` fact whose boolean is private to that module. `NormalCompletion::minted(bool, CompletionConstruction)` is its ONLY constructor and `NormalCompletion::reaches_end(CompletionDischarge)` its ONLY reader, so a new site that produces or consumes a completion fact cannot compile until it names a row; the two site vocabularies are distinct closed enums, so a construction row is unrepresentable at a discharge. Stored carriers (`SliceRegion`, `SliceContent`, `SliceSwitchCase`, `BodyCompletionObservations`, `FlowReturnResult`) claim a `CompletionTransport` row through the sealed `TransportsCompletion` trait, so a row always names a type that really holds the fact. `BodyCompletionObservations` is the typed pair carrying the bare-`return;` and inference-only implicit-`undefined` contributions the join reads alongside the fall-through fact.
+
+The suite (`flow_completion_inventory_tests`) closes the two directions the compiler cannot see. A probe table runs one authored program per row through the ordinary dispatch and pins the checker's answer, so a carrier whose fact is dropped fails with a wrong TYPE — dropping the `switch`-clause `break` fact publishes `number` where the checker answers `1 | undefined`. A process-wide coverage recording (process-wide, not thread-local: a fact is minted on whichever worker lowers the body and discharged on whichever thread evaluates it) then requires the CITED row set to EQUAL the LISTED one, in both directions — a listed row nobody reaches is prose that drifted in, and a cited row the list does not carry is exactly the carrier that gets missed. Re-pointing one discharge at a neighbouring row fails the coverage with that row named.
+
+Two carriers the inventory itself surfaced: the `for_tests` hermetic result fixtures and the unproven-member injection mint real completion facts for bodies they never lowered (the `HermeticFixture` row), and `ReturnDomainMetadata::FlowReturn` carried a `can_fall_through` field no production path ever filled — deleted, because a flow member reaching that equation would have to re-decide the body's completion from a copy, which is a second completion authority by construction.
+
+Suites inspecting a lowered region use `reaches_end_for_assertion` / `minted_for_fixture`, both built in the test configuration alone: a synthetic value handed straight to an assertion takes no decision the pipeline depends on, and giving it a row would put a stage on the inventory that production does not have.
+
+Registry-live guards: `flow_completion_carrier_inventory_is_closed`, `flow_completion_carriers_publish_the_checkers_answer`.
+
 ### Control-Position Narrowing Is Fail-Closed
 
 `SliceGuard::None` means **proved non-narrowing**, never "unsupported or unrecognized". That distinction is the whole contract: a control fact the lowering cannot carry produces a SUPERSET of the checker's type, and a superset is admissible only behind the typed `FlowGap::GuardNarrowing`, which makes the result `ReturnOnly` and never warm. A superset published with no gap is a wrong-complete result.

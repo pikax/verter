@@ -125,7 +125,9 @@ pub fn display(
         SemanticQueryValue::FlowReturn(result) => DisplayString(format!(
             "{} (can_fall_through: {})",
             display_type_node(store, result.return_type(), needs, MAX_DISPLAY_DEPTH, &mut Vec::new()).0,
-            result.can_fall_through,
+            result
+                .can_fall_through
+                .reaches_end(crate::flow_completion_inventory::CompletionDischarge::PublishedResult),
         )),
         SemanticQueryValue::ResolveCall(result) => {
             let return_type = match result.as_ref() {

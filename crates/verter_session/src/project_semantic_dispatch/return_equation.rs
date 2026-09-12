@@ -32,22 +32,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if index.len() != members.len() {
             return Err(ReturnEquationFailure::UnresolvedOutsideHold);
         }
-        if members
-            .iter()
-            .any(|member| match (&member.identity, &member.domain) {
+        if members.iter().any(|member| {
+            !matches!(
+                (&member.identity, &member.domain),
                 (
                     ReturnObligationIdentity::FlowReturn(_),
-                    ReturnDomainMetadata::FlowReturn { can_fall_through },
-                ) => {
-                    let _ = can_fall_through;
-                    false
-                }
-                (ReturnObligationIdentity::ResolveCall(_), ReturnDomainMetadata::ResolveCall) => {
-                    false
-                }
-                _ => true,
-            })
-        {
+                    ReturnDomainMetadata::FlowReturn
+                ) | (
+                    ReturnObligationIdentity::ResolveCall(_),
+                    ReturnDomainMetadata::ResolveCall
+                )
+            )
+        }) {
             return Err(ReturnEquationFailure::UnresolvedOutsideHold);
         }
 
@@ -86,7 +82,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // member's return position widens a FRESH primitive-literal
                 // leaf a held call contributed; a call member consuming
                 // another call keeps the literal (a value position).
-                let widen_fresh = matches!(member.domain, ReturnDomainMetadata::FlowReturn { .. });
+                let widen_fresh = matches!(member.domain, ReturnDomainMetadata::FlowReturn);
                 let mut leaves = seeds[position].clone();
                 for hold in &member.holds {
                     let (contributed, fresh): (&[SemanticNodeId], &[SemanticNodeId]) =

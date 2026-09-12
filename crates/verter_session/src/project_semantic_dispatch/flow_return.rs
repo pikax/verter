@@ -49,6 +49,9 @@ use super::flow_solve::{
 };
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
+use crate::flow_completion_inventory::{
+    BodyCompletionObservations, CompletionConstruction, CompletionDischarge, NormalCompletion,
+};
 use crate::resolver_core::{FactVersionRef, ProgramAnalysisFactRef};
 use crate::semantic_query::{
     FlowReturnDegradation, FlowReturnFailure, FlowReturnKey, FlowReturnResult, FlowReturnStep,
@@ -1904,7 +1907,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
                 crate::semantic_query::PrimitiveKind::Number,
             ));
-        let value = crate::semantic_query::FlowReturnResult::new(self.graph(), number, false, None);
+        let value = crate::semantic_query::FlowReturnResult::new(
+            self.graph(),
+            number,
+            NormalCompletion::minted(false, CompletionConstruction::HermeticFixture),
+            None,
+        );
         let pop = self.flow_frame_pop(
             idx,
             FlowEvaluationOutcome {
@@ -3235,9 +3243,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let next = FlowReturnResult::new_with_fresh_literal_arms(
                     graph,
                     self.intern_normalized_union_or_intersection(&flat, true),
-                    current[i]
-                        .as_ref()
-                        .is_some_and(|result| result.can_fall_through),
+                    NormalCompletion::minted(
+                        current[i].as_ref().is_some_and(|result| {
+                            result
+                                .can_fall_through
+                                .reaches_end(CompletionDischarge::PublishedResult)
+                        }),
+                        CompletionConstruction::ResultRebuild,
+                    ),
                     degradation,
                     &seed_fresh,
                 );
@@ -3811,7 +3824,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // A member projection over a fall-through body would need the
         // `undefined` arm folded into the member access (a tsc error
         // shape) — beyond the modeled member point: fail closed.
-        if member_filter.is_some() && ir.can_fall_through {
+        if member_filter.is_some()
+            && ir
+                .can_fall_through
+                .reaches_end(CompletionDischarge::MemberProjection)
+        {
             return degraded(FlowReturnFailure::UnmodeledDemandPoint, self_roots);
         }
         // The writes the content half lowered as applicable assignments —
@@ -4050,8 +4067,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             anchor: frame_anchor,
             products,
             narrowing_writes: Vec::new(),
-            bare_return_seen: false,
-            implicit_undefined_seen: false,
+            observations: BodyCompletionObservations::none(),
             member_filter,
             holds: Vec::new(),
             degradation: unapplied_write_effect
@@ -4074,8 +4090,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let holds;
         let degradation;
-        let bare_return_seen;
-        let implicit_undefined_seen;
+        let observations;
         let mut call_evidence;
         let mut executed_walk;
         let product_budget_exceeded;
@@ -4087,8 +4102,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
             evaluator.promote_pending_statement_gap();
             holds = std::mem::take(&mut evaluator.holds);
-            bare_return_seen = evaluator.bare_return_seen;
-            implicit_undefined_seen = evaluator.implicit_undefined_seen;
+            observations = evaluator.observations;
             call_evidence = std::mem::take(&mut evaluator.call_evidence);
             executed_walk = std::mem::take(&mut evaluator.executed_walk);
             let finished = evaluator.products.finish(evaluator.plan.as_deref());
@@ -4256,9 +4270,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // switch the case tests make EXHAUSTIVE over the discriminant
             // has no no-matching-case path, which only the resolver can
             // see. The override only ever narrows downward.
-            ir.can_fall_through && body_falls_through,
-            bare_return_seen,
-            implicit_undefined_seen,
+            NormalCompletion::minted(
+                ir.can_fall_through
+                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk)
+                    && body_falls_through,
+                CompletionConstruction::EvaluatorRefinement,
+            ),
+            observations,
             &holds,
             degradation,
             ir.empty_completion,
@@ -4333,9 +4351,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn join_flow_return_contributors(
         &self,
         contributors: Vec<FlowContribution>,
-        can_fall_through: bool,
-        bare_return_seen: bool,
-        implicit_undefined_seen: bool,
+        can_fall_through: NormalCompletion,
+        observations: BodyCompletionObservations,
         holds: &[HeldCallee],
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
         empty_completion: crate::flow_slice_content::EmptyCompletion,
@@ -4456,8 +4473,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // two arms and stay pinned). Deferring is also what makes the
         // decision demand-ORDER-independent — the fixed point is
         // computed once per component, not per entry order.
-        let fresh_seed =
-            all_fresh && !bare_return_seen && !implicit_undefined_seen && !can_fall_through;
+        let fresh_seed = all_fresh
+            && !observations.contributes_arm()
+            && !can_fall_through.reaches_end(CompletionDischarge::FreshLiteralWidening);
         if fresh_seed && arms.len() == 1 && holds.is_empty() {
             arms[0] = widen_literal_node(self, arms[0]);
         }
@@ -4468,7 +4486,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // a recursive component). Alongside VALUE returns, a bare
         // return contributes `undefined` (`if (c) return 1; return;`
         // is `1 | undefined`).
-        if bare_return_seen {
+        if observations.bare_return() {
             if arms.is_empty() {
                 let return_type =
                     graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
@@ -4480,11 +4498,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
             inference_only.push(false);
         }
-        if implicit_undefined_seen {
+        if observations.implicit_undefined() {
             arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
             inference_only.push(false);
         }
-        if can_fall_through {
+        if can_fall_through.reaches_end(CompletionDischarge::ReturnJoin) {
             if arms.is_empty() {
                 arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void)));
                 inference_only.push(false);
@@ -5201,14 +5219,15 @@ struct FlowEvaluator<'d, 'b> {
     /// union-of-facts guard reads its per-disjunct contribution from.
     /// Append-only within a mark's window, so a mark stays an index.
     narrowing_writes: Vec<NarrowingLedgerEntry>,
-    /// Whether a bare `return;` was evaluated. A body whose ONLY return
-    /// contributions are bare returns models as `void` (BL12);
-    /// alongside value returns a bare return contributes `undefined`.
-    bare_return_seen: bool,
-    /// Whether an abrupt `finally` replaced a pending break authored in its
-    /// try/catch clauses. The checker retains that exit as an implicit
-    /// `undefined` contributor even though the runtime edge is overridden.
-    implicit_undefined_seen: bool,
+    /// The two arms this body contributes without an authored value
+    /// expression: a bare `return;` (a body whose ONLY return
+    /// contributions are bare returns models as `void`, and alongside
+    /// value returns a bare return contributes `undefined`), and an
+    /// abrupt `finally` that replaced a pending break authored in its
+    /// try/catch clauses (the checker retains that exit as an implicit
+    /// `undefined` contributor even though the runtime edge is
+    /// overridden).
+    observations: BodyCompletionObservations,
     /// The member-projection demand filter, when this evaluation serves
     /// a single-named-member `ReturnProjectionDemand` (`ReturnType<typeof
     /// f>['b']`). Return sites evaluate ONLY the demanded member of a
@@ -9626,7 +9645,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 fresh_values: Vec::new(),
                             }),
                             Ok(None) => {}
-                            Err(failure) => return (Err(failure), region.can_fall_through),
+                            Err(failure) => {
+                                return (
+                                    Err(failure),
+                                    region
+                                        .can_fall_through
+                                        .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
+                                )
+                            }
                         }
                         self.capture_return_edge();
                         continue;
@@ -9725,7 +9751,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // Bare `return;` — recorded, never a direct
                             // `undefined` contributor: a bare-only body
                             // joins to `void` (BL12).
-                            self.bare_return_seen = true;
+                            self.observations.observe_bare_return();
                         }
                     }
                     self.capture_return_edge();
@@ -9783,7 +9809,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         Ok(contributors) => contributors,
                         Err(failure) => {
                             self.conditional_arm_nesting -= 1;
-                            return (Err(failure), region.can_fall_through);
+                            return (
+                                Err(failure),
+                                region
+                                    .can_fall_through
+                                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
+                            );
                         }
                     };
                     contributors.extend(consequent_contributors);
@@ -9809,7 +9840,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             Ok(contributors) => contributors,
                             Err(failure) => {
                                 self.conditional_arm_nesting -= 1;
-                                return (Err(failure), region.can_fall_through);
+                                return (
+                                    Err(failure),
+                                    region
+                                        .can_fall_through
+                                        .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
+                                );
                             }
                         };
                         contributors.extend(alternate_contributors);
@@ -10041,7 +10077,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         let (case_result, _) = self.eval_region(&case.region);
                         match case_result {
                             Ok(case_contributors) => contributors.extend(case_contributors),
-                            Err(failure) => return (Err(failure), region.can_fall_through),
+                            Err(failure) => {
+                                return (
+                                    Err(failure),
+                                    region
+                                        .can_fall_through
+                                        .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
+                                )
+                            }
                         }
                         let end = self.layer_state();
                         // Only a clause whose path FALLS THROUGH passes its
@@ -10050,8 +10093,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         // that state into the next case would publish the
                         // exited path's writes where the checker has the
                         // dispatch edge's values.
-                        chain_end = case.region.can_fall_through.then_some(end.clone());
-                        last_falls = case.region.can_fall_through;
+                        chain_end = case
+                            .region
+                            .can_fall_through
+                            .reaches_end(CompletionDischarge::EvaluatorRegionWalk)
+                            .then_some(end.clone());
+                        last_falls = case
+                            .region
+                            .can_fall_through
+                            .reaches_end(CompletionDischarge::EvaluatorRegionWalk);
                         last_end = Some(end);
                     }
                     let mut exit_states: Vec<FlowLayerState> = Vec::new();
@@ -10136,11 +10186,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let (try_contributors, try_end, try_writes) =
                         match self.eval_try_clause(&entry, block, None, true) {
                             Ok(clause) => clause,
-                            Err(failure) => return (Err(failure), region.can_fall_through),
+                            Err(failure) => {
+                                return (
+                                    Err(failure),
+                                    region
+                                        .can_fall_through
+                                        .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
+                                )
+                            }
                         };
                     own.extend(try_contributors);
                     let try_narrowings = narrowing_facts_of(&try_end.products);
-                    if block.can_fall_through {
+                    if block
+                        .can_fall_through
+                        .reaches_end(CompletionDischarge::EvaluatorRegionWalk)
+                    {
                         exit_states.push(try_end);
                     }
                     // The try block's throw points. A catch consumes them
@@ -10165,11 +10225,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             finally.is_some(),
                         ) {
                             Ok(clause) => clause,
-                            Err(failure) => return (Err(failure), region.can_fall_through),
+                            Err(failure) => {
+                                return (
+                                    Err(failure),
+                                    region
+                                        .can_fall_through
+                                        .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
+                                )
+                            }
                         };
                         own.extend(catch_contributors);
                         catch_writes = Some(written);
-                        if catch.region.can_fall_through {
+                        if catch
+                            .region
+                            .can_fall_through
+                            .reaches_end(CompletionDischarge::EvaluatorRegionWalk)
+                        {
                             exit_states.push(catch_end);
                         }
                     }
@@ -10251,7 +10322,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             let (finally_contributors, finally_end, finally_writes) =
                                 match self.eval_try_clause(&finally_start, finally, None, false) {
                                     Ok(clause) => clause,
-                                    Err(failure) => return (Err(failure), region.can_fall_through),
+                                    Err(failure) => {
+                                        return (
+                                            Err(failure),
+                                            region.can_fall_through.reaches_end(
+                                                CompletionDischarge::EvaluatorRegionWalk,
+                                            ),
+                                        )
+                                    }
                                 };
                             // The post-statement state: the normal
                             // completions (pre_finally, with its flags and
@@ -10328,11 +10406,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // when an abrupt finally overrides an earlier
                             // completion at runtime.
                             own.extend(finally_contributors);
-                            if !finally.can_fall_through {
+                            if !finally
+                                .can_fall_through
+                                .reaches_end(CompletionDischarge::EvaluatorRegionWalk)
+                            {
                                 if *pending_break_contributes_undefined
                                     && finally_break_base > break_base
                                 {
-                                    self.implicit_undefined_seen = true;
+                                    self.observations.observe_implicit_undefined();
                                 }
                                 // Control edges remain runtime-honest: an
                                 // abrupt finally replaces pending try/catch
@@ -10361,7 +10442,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 self.break_exits.extend(retained_pending_breaks);
                                 self.break_exits.extend(finally_breaks);
                             }
-                            path_alive = !exit_states.is_empty() && finally.can_fall_through;
+                            path_alive = !exit_states.is_empty()
+                                && finally
+                                    .can_fall_through
+                                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk);
                         }
                         None => {
                             // A catch clause exists (a bare `try` is
@@ -10396,7 +10480,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let (result, body_falls) = self.eval_region(body);
                     let body_contributors = match result {
                         Ok(contributors) => contributors,
-                        Err(failure) => return (Err(failure), region.can_fall_through),
+                        Err(failure) => {
+                            return (
+                                Err(failure),
+                                region
+                                    .can_fall_through
+                                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
+                            )
+                        }
                     };
                     contributors.extend(body_contributors);
                     let mut end = self.layer_state();
@@ -10456,7 +10547,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let (result, block_falls) = self.eval_region(block);
                     let block_contributors = match result {
                         Ok(contributors) => contributors,
-                        Err(failure) => return (Err(failure), region.can_fall_through),
+                        Err(failure) => {
+                            return (
+                                Err(failure),
+                                region
+                                    .can_fall_through
+                                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
+                            )
+                        }
                     };
                     contributors.extend(block_contributors);
                     let mut end = self.layer_state();
@@ -10861,12 +10959,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 FlowReturnUnsupported::ModuleDeclaration
                             }
                         })),
-                        region.can_fall_through,
+                        region
+                            .can_fall_through
+                            .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
                     );
                 }
             }
         }
-        (Ok(contributors), region.can_fall_through && path_alive)
+        (
+            Ok(contributors),
+            region
+                .can_fall_through
+                .reaches_end(CompletionDischarge::EvaluatorRegionWalk)
+                && path_alive,
+        )
     }
 
     /// Seed the authored type authority of selected `var` declarations before
@@ -11131,7 +11237,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         capture_context: &Arc<crate::flow_slice_content::NestedFlowContext>,
         declared_return: Option<&crate::flow_slice_content::GatedType>,
         body: &crate::flow_slice_content::SliceRegion,
-        can_fall_through: bool,
+        can_fall_through: NormalCompletion,
         empty_completion: crate::flow_slice_content::EmptyCompletion,
         bindings: &Arc<FlowBindingMap>,
         skeleton: Arc<FunctionBodySkeleton>,
@@ -11451,8 +11557,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.products.clone(),
         ));
         let nested_degradation;
-        let nested_bare_return_seen;
-        let nested_implicit_undefined_seen;
+        let nested_observations;
         let (contributors, nested_body_falls_through) = {
             let mut nested_evaluator = FlowEvaluator {
                 dispatch: self.dispatch,
@@ -11471,8 +11576,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 anchor,
                 products: captured_products,
                 narrowing_writes: Vec::new(),
-                bare_return_seen: false,
-                implicit_undefined_seen: false,
+                observations: BodyCompletionObservations::none(),
                 // A nested function value always evaluates its WHOLE
                 // return (its signature's return type) — the member
                 // filter is a top-level demand axis.
@@ -11570,8 +11674,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 );
             }
             nested_degradation = nested_evaluator.degradation;
-            nested_bare_return_seen = nested_evaluator.bare_return_seen;
-            nested_implicit_undefined_seen = nested_evaluator.implicit_undefined_seen;
+            nested_observations = nested_evaluator.observations;
             self.holds.append(&mut nested_evaluator.holds);
             // A call the NESTED body evaluated is still an evaluated call
             // of this evaluation run: the evidence rides the enclosing
@@ -11603,9 +11706,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let return_type = match contributors.and_then(|contributors| {
             self.dispatch.join_flow_return_contributors(
                 contributors,
-                can_fall_through && nested_body_falls_through,
-                nested_bare_return_seen,
-                nested_implicit_undefined_seen,
+                NormalCompletion::minted(
+                    can_fall_through.reaches_end(CompletionDischarge::EvaluatorRegionWalk)
+                        && nested_body_falls_through,
+                    CompletionConstruction::NestedBodyRefinement,
+                ),
+                nested_observations,
                 &nested_holds,
                 nested_degradation,
                 empty_completion,

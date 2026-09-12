@@ -67,6 +67,10 @@ use oxc_ast::ast::{
 use oxc_ast_visit::{walk, Visit};
 use oxc_span::GetSpan;
 use rustc_hash::FxHashSet;
+
+use crate::flow_completion_inventory::{
+    transports_completion, CompletionConstruction, CompletionDischarge, NormalCompletion,
+};
 use verter_semantic::analysis::flow::flow_ir::{FlowExprRole, FlowSliceIR};
 use verter_semantic::analysis::flow::{
     object_entry_descent, value_descent, FlowBindingRef, FrameSpan, FunctionBodySkeleton,
@@ -188,7 +192,7 @@ pub struct SliceContent {
     /// expression.
     pub body: SliceRegion,
     /// Whether execution can reach past the body without a `return`.
-    pub can_fall_through: bool,
+    pub can_fall_through: NormalCompletion,
     /// What a body that contributes NO return arm and never completes
     /// normally models as. Producer-owned: it is a property of the
     /// function's authored FORM, which only this lowering can see.
@@ -288,8 +292,12 @@ pub struct SliceRegion {
     /// unreachable and dropped.
     pub statements: Arc<[SliceStatement]>,
     /// Whether execution can reach past this region without a `return`.
-    pub can_fall_through: bool,
+    pub can_fall_through: NormalCompletion,
 }
+
+transports_completion!(SliceRegion => SliceRegion);
+transports_completion!(SliceContent => SliceContent);
+transports_completion!(SliceSwitchCase => SliceSwitchCase);
 
 /// One statement of the slice content.
 #[derive(Debug, Clone, PartialEq)]
@@ -510,8 +518,10 @@ pub struct SliceSwitchCase {
     /// without setting it, exactly like a `return`.
     pub region: SliceRegion,
     /// A path through the clause exits the switch via `break` (reaching
-    /// the statement after the switch).
-    pub breaks: bool,
+    /// the statement after the switch) — a reachability fact about the
+    /// statement AFTER the switch, which is why it shares the
+    /// normal-completion carrier.
+    pub breaks: NormalCompletion,
     /// What the clause's dispatch relation establishes.
     pub test: SliceSwitchTest,
 }
@@ -1756,14 +1766,20 @@ pub(crate) fn build_flow_slice_content(
             return Some(SliceContent {
                 bindings,
                 declared_return,
-                can_fall_through: false,
+                can_fall_through: NormalCompletion::minted(
+                    false,
+                    CompletionConstruction::SynthesizedRegion,
+                ),
                 empty_completion: empty_completion_of(&node, &entry.locator),
                 params: Arc::from(Vec::new().into_boxed_slice()),
                 type_parameters: Arc::from(Vec::new().into_boxed_slice()),
                 enclosing_type_parameters: Arc::from(Vec::new().into_boxed_slice()),
                 body: SliceRegion {
                     statements: Arc::from(Vec::new().into_boxed_slice()),
-                    can_fall_through: false,
+                    can_fall_through: NormalCompletion::minted(
+                        false,
+                        CompletionConstruction::SynthesizedRegion,
+                    ),
                 },
                 budget_failure: Some(reason),
                 inert_write_spans: FxHashSet::default(),
@@ -1865,7 +1881,10 @@ pub(crate) fn build_flow_slice_content(
     let region = if selection.is_none() {
         SliceRegion {
             statements: Arc::from([]),
-            can_fall_through: false,
+            can_fall_through: NormalCompletion::minted(
+                false,
+                CompletionConstruction::SynthesizedRegion,
+            ),
         }
     } else if node.is_expression_body() {
         // An expression-bodied arrow's body is one synthesized expression
@@ -1880,7 +1899,10 @@ pub(crate) fn build_flow_slice_content(
                 statements: Arc::from([SliceStatement::Unsupported(
                     SliceUnsupported::InvokedClosureEffect,
                 )]),
-                can_fall_through: false,
+                can_fall_through: NormalCompletion::minted(
+                    false,
+                    CompletionConstruction::SynthesizedRegion,
+                ),
             }
         } else {
             let freshness = expression_freshness(&expression.expression);
@@ -1904,7 +1926,10 @@ pub(crate) fn build_flow_slice_content(
             });
             SliceRegion {
                 statements: Arc::from(statements.into_boxed_slice()),
-                can_fall_through: false,
+                can_fall_through: NormalCompletion::minted(
+                    false,
+                    CompletionConstruction::SynthesizedRegion,
+                ),
             }
         }
     } else {
@@ -1916,7 +1941,12 @@ pub(crate) fn build_flow_slice_content(
     Some(SliceContent {
         bindings,
         declared_return,
-        can_fall_through: region.can_fall_through,
+        can_fall_through: NormalCompletion::minted(
+            region
+                .can_fall_through
+                .reaches_end(CompletionDischarge::BodyComposition),
+            CompletionConstruction::BodyFromRootRegion,
+        ),
         empty_completion: empty_completion_of(&node, &entry.locator),
         params: Arc::from(params.into_boxed_slice()),
         type_parameters: Arc::from(type_parameters.into_boxed_slice()),
@@ -4624,7 +4654,10 @@ impl Lowerer<'_> {
                 }
                 Statement::BlockStatement(block) => {
                     let child = self.lower_region(&block.body);
-                    can_fall_through = child.region.can_fall_through;
+                    can_fall_through = child
+                        .region
+                        .can_fall_through
+                        .reaches_end(CompletionDischarge::RegionComposition);
                     hit_unsupported = child.hit_unsupported;
                     // A block absorbs no `break` — an exit targeting an
                     // enclosing switch / labeled statement passes through.
@@ -4676,10 +4709,18 @@ impl Lowerer<'_> {
                             .truncate(active_guard_subject_base);
                         lowered
                     });
-                    can_fall_through = consequent.region.can_fall_through
+                    can_fall_through = consequent
+                        .region
+                        .can_fall_through
+                        .reaches_end(CompletionDischarge::RegionComposition)
                         || alternate
                             .as_ref()
-                            .map(|region| region.region.can_fall_through)
+                            .map(|region| {
+                                region
+                                    .region
+                                    .can_fall_through
+                                    .reaches_end(CompletionDischarge::RegionComposition)
+                            })
                             .unwrap_or(true);
                     hit_unsupported = consequent.hit_unsupported
                         || alternate
@@ -4945,7 +4986,11 @@ impl Lowerer<'_> {
                     // the absorbed `break` is what lets execution reach
                     // past the statement even when the body itself cannot,
                     // and its captured state is that edge's layer state.
-                    can_fall_through = child.region.can_fall_through || absorbed;
+                    can_fall_through = child
+                        .region
+                        .can_fall_through
+                        .reaches_end(CompletionDischarge::RegionComposition)
+                        || absorbed;
                     hit_unsupported = child.hit_unsupported;
                     out.push(SliceStatement::Labeled {
                         label,
@@ -5047,7 +5092,10 @@ impl Lowerer<'_> {
                         }
                         cases.push(SliceSwitchCase {
                             region: lowered.region,
-                            breaks,
+                            breaks: NormalCompletion::minted(
+                                breaks,
+                                CompletionConstruction::SwitchCaseBreak,
+                            ),
                             test,
                         });
                     }
@@ -5059,10 +5107,15 @@ impl Lowerer<'_> {
                     // case), when the LAST clause falls off the end of the
                     // switch, or when any clause exits via `break`.
                     can_fall_through = !has_default
-                        || cases
-                            .last()
-                            .is_some_and(|case| case.region.can_fall_through)
-                        || cases.iter().any(|case| case.breaks);
+                        || cases.last().is_some_and(|case| {
+                            case.region
+                                .can_fall_through
+                                .reaches_end(CompletionDischarge::RegionComposition)
+                        })
+                        || cases.iter().any(|case| {
+                            case.breaks
+                                .reaches_end(CompletionDischarge::RegionComposition)
+                        });
                     if unprovable_switch_effect {
                         out.push(SliceStatement::Gap(
                             crate::semantic_query::FlowGap::GuardNarrowing,
@@ -5123,9 +5176,11 @@ impl Lowerer<'_> {
                     // clause's OWN break exits always propagate: they fire
                     // after every override decision, they are never
                     // pending.
-                    let finally_blocks_exits = finally
-                        .as_ref()
-                        .is_some_and(|(region, _)| !region.can_fall_through);
+                    let finally_blocks_exits = finally.as_ref().is_some_and(|(region, _)| {
+                        !region
+                            .can_fall_through
+                            .reaches_end(CompletionDischarge::RegionComposition)
+                    });
                     // A named break crossing this try for any enclosing
                     // label remains an authored return-inference path even
                     // when blocks or inner labels wrap the try. An abrupt
@@ -5178,14 +5233,21 @@ impl Lowerer<'_> {
                     if let Some((_, finally_may_break)) = &finally {
                         may_break.extend(finally_may_break.iter().cloned());
                     }
-                    let pre_finally_fall_through = block.can_fall_through
-                        || catch
-                            .as_ref()
-                            .is_some_and(|catch| catch.region.can_fall_through);
+                    let pre_finally_fall_through = block
+                        .can_fall_through
+                        .reaches_end(CompletionDischarge::RegionComposition)
+                        || catch.as_ref().is_some_and(|catch| {
+                            catch
+                                .region
+                                .can_fall_through
+                                .reaches_end(CompletionDischarge::RegionComposition)
+                        });
                     can_fall_through = pre_finally_fall_through
-                        && finally
-                            .as_ref()
-                            .is_none_or(|(region, _)| region.can_fall_through);
+                        && finally.as_ref().is_none_or(|(region, _)| {
+                            region
+                                .can_fall_through
+                                .reaches_end(CompletionDischarge::RegionComposition)
+                        });
                     out.push(SliceStatement::Try {
                         block: Box::new(block),
                         catch,
@@ -5346,7 +5408,10 @@ impl Lowerer<'_> {
         LoweredRegion {
             region: SliceRegion {
                 statements: Arc::from(out.into_boxed_slice()),
-                can_fall_through,
+                can_fall_through: NormalCompletion::minted(
+                    can_fall_through,
+                    CompletionConstruction::RegionAccumulator,
+                ),
             },
             hit_unsupported,
             may_break,
