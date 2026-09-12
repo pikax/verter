@@ -9062,15 +9062,19 @@ fn flow_expr_cold_warm(
 /// restores the overlay the guard established, nor through a MEMBER fact
 /// the guard left on the refined root. A member fact still narrower than
 /// the refined root's own member is a different case: it holds, and the
-/// read keeps it. tsgo 7.0.0-dev, per row.
+/// read keeps it. A member fact that OVERLAPS the refined member — each
+/// says something the other does not — narrows it: the read is the
+/// refined member filtered by the fact. tsgo 7.0.0-dev, per row.
 #[test]
 fn flow_return_switch_case_refinement_outranks_enclosing_guard_fact() {
-    const TYPES: &str = "type P = { k: \"a\", v: \"A\" } | { k: \"b\", v: \"B\" } | { k: \"c\", v: number }\ntype Q = { k: \"a\", v: string | number } | { k: \"b\", v: object }\n";
+    const TYPES: &str = "type P = { k: \"a\", v: \"A\" } | { k: \"b\", v: \"B\" } | { k: \"c\", v: number }\ntype Q = { k: \"a\", v: string | number } | { k: \"b\", v: object }\ntype O = { k: \"a\", v?: \"A\" } | { k: \"b\", v?: \"B\" } | { k: \"c\", v: number }\n";
     let number = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number);
     let string = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String);
     let broader_member = format!("{TYPES}function makeProps(p: P) {{ if (typeof p.v === \"string\") {{ switch (p.k) {{ case \"a\": return {{ v: p.v }}; default: throw 0 }} }} throw 0 }}");
     let broader_member_past_try = format!("{TYPES}function makeProps(p: P) {{ if (typeof p.v === \"string\") {{ try {{ switch (p.k) {{ case \"a\": break; default: throw 0 }} }} finally {{}} return {{ v: p.v }} }} throw 0 }}");
     let narrower_member = format!("{TYPES}function makeProps(p: Q) {{ if (typeof p.v === \"string\") {{ switch (p.k) {{ case \"a\": return {{ v: p.v }}; default: throw 0 }} }} throw 0 }}");
+    let overlapping_member = format!("{TYPES}function makeProps(p: O) {{ if (typeof p.v === \"string\") {{ switch (p.k) {{ case \"a\": return {{ v: p.v }}; default: throw 0 }} }} throw 0 }}");
+    let overlapping_member_past_try = format!("{TYPES}function makeProps(p: O) {{ if (typeof p.v === \"string\") {{ try {{ switch (p.k) {{ case \"a\": break; default: throw 0 }} }} finally {{}} return {{ v: p.v }} }} throw 0 }}");
     for (case, body, expected) in [
         // The case arm `{ v: "a" }`, the default arm `{ v: string }`, and
         // the trailing return `{ v: number }`.
@@ -9105,6 +9109,19 @@ fn flow_return_switch_case_refinement_outranks_enclosing_guard_fact() {
             "member fact narrower than the refined root's member",
             narrower_member.as_str(),
             vec![string.clone()],
+        ),
+        // The guard's member fact `p.v: "A" | "B"` and the `"a"` arm's
+        // optional member `"A" | undefined` overlap: neither subsumes the
+        // other, and the read is the arm's member narrowed by the fact.
+        (
+            "member fact overlapping the refined root's member",
+            overlapping_member.as_str(),
+            vec![string_literal("A")],
+        ),
+        (
+            "member fact overlapping the refined root's member, past a try/finally",
+            overlapping_member_past_try.as_str(),
+            vec![string_literal("A")],
         ),
     ] {
         let (expr, degradation) = flow_expr_cold_warm(body);

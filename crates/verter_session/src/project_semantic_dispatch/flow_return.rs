@@ -6272,7 +6272,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     ///   `finally` executed no write and keeps every entering fact;
     /// - an unwritten root whose value a case refinement narrowed without
     ///   a write keeps an entering fact only while the refined value does
-    ///   not already say more ([`Self::guard_fact_stands`]).
+    ///   not already say more, narrowed to the refined value where the two
+    ///   overlap ([`Self::settled_guard_fact`]).
     ///
     /// An unwritten root still holding its entry value keeps its whole
     /// entering product without a comparison: its facts were established
@@ -6305,8 +6306,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             let mut kept: Vec<FlowNarrowingFact> = Vec::with_capacity(product.facts().len());
             for fact in product.facts() {
-                if self.guard_fact_stands(fact, value, written) {
-                    kept.push(fact.clone());
+                if let Some(narrowed_to) = self.settled_guard_fact(fact, value, written) {
+                    kept.push(FlowNarrowingFact {
+                        narrowed_to,
+                        ..fact.clone()
+                    });
                 }
             }
             into.set_narrowing(&subject, NarrowingProduct::new(kept));
@@ -8738,10 +8742,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// outrank the `"A"` a case over `p.k` selected. The whole-binding
     /// fact is always retired: `node` was computed FROM the
     /// overlay-preferred value, so it is never broader. A MEMBER fact is
-    /// retired only when the refined root's own member is strictly
-    /// narrower; one that still says more (the case left `v: string |
-    /// number`, the guard proved `string`) is still true — nothing was
-    /// written — and stays.
+    /// settled against the refined root's own member
+    /// ([`Self::settled_guard_fact`]): retired when that member is
+    /// strictly narrower, kept when it still says more (the case left `v:
+    /// string | number`, the guard proved `string`), and narrowed to the
+    /// refined member filtered by the fact when the two overlap (the
+    /// case's optional `v?: "A"` under a guard's `"A" | "B"` reads `"A"`).
     fn settle_refined_root_facts(
         &mut self,
         products: &mut FlowProductStore,
@@ -8752,47 +8758,74 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return;
         };
         let mut kept: Vec<FlowNarrowingFact> = Vec::with_capacity(product.facts().len());
+        let mut changed = false;
         for fact in product.facts() {
-            if !fact.path.is_empty() && self.guard_fact_stands(fact, Some(node), false) {
-                kept.push(fact.clone());
-            }
+            let settled = if fact.path.is_empty() {
+                None
+            } else {
+                self.settled_guard_fact(fact, Some(node), false)
+            };
+            changed |= settled != Some(fact.narrowed_to);
+            kept.extend(settled.map(|narrowed_to| FlowNarrowingFact {
+                narrowed_to,
+                ..fact.clone()
+            }));
         }
-        if kept.len() != product.facts().len() {
+        if changed {
             products.set_narrowing(root, NarrowingProduct::new(kept));
         }
     }
 
-    /// Whether guard `fact` still stands on a state whose root holds
-    /// `root_value` — the fact both still describes the value and still
-    /// says more than the value itself does.
+    /// What guard `fact` narrows to on a state whose root holds
+    /// `root_value`, or `None` when the fact no longer stands.
     ///
     /// The comparison is against the value a read would fall through to:
     /// the root projected down the fact's path, through the same shared
     /// navigation a member read uses. A fact the current value already
-    /// meets exactly stands (keeping it keeps two predecessors that agree
-    /// on it agreeing at their join). One the value is strictly narrower
-    /// than does not: the read falls through to the narrower value. One
-    /// the value does not meet — or cannot be compared with — stands only
-    /// when the root was not `written`: an unwritten binding still holds
-    /// the value the guard was about, while a write replaced it.
-    fn guard_fact_stands(
+    /// meets exactly stands unchanged (keeping it keeps two predecessors
+    /// that agree on it agreeing at their join). One the value is
+    /// strictly narrower than does not: the read falls through to the
+    /// narrower value. One the value does not meet stands only when the
+    /// root was not `written` — an unwritten binding still holds the value
+    /// the guard was about, while a write replaced it — and then both the
+    /// fact and the value describe the binding, so the fact narrows to the
+    /// value narrowed by it ([`Self::narrow_node_to_candidate`]); a value
+    /// that projects nowhere, or an undecided narrow, leaves the fact
+    /// unchanged.
+    fn settled_guard_fact(
         &mut self,
         fact: &FlowNarrowingFact,
         root_value: Option<SemanticNodeId>,
         written: bool,
-    ) -> bool {
+    ) -> Option<SemanticNodeId> {
+        let standing = (!written).then_some(fact.narrowed_to);
         let Some(current) =
             root_value.and_then(|root| self.project_segments_navigate(root, &fact.path))
         else {
-            return !written;
+            return standing;
         };
         if current == fact.narrowed_to {
-            return true;
+            return Some(fact.narrowed_to);
         }
-        if self.assignable(current, fact.narrowed_to) != Some(true) {
-            return !written;
+        if self.assignable(current, fact.narrowed_to) == Some(true) {
+            return (self.assignable(fact.narrowed_to, current) == Some(true))
+                .then_some(fact.narrowed_to);
         }
-        self.assignable(fact.narrowed_to, current) == Some(true)
+        if written {
+            return None;
+        }
+        let (narrowed, _) = self.narrow_node_to_candidate(current, fact.narrowed_to);
+        match narrowed {
+            // An equivalent narrow keeps the fact's own node, so two
+            // predecessors holding the same fact still agree at a join.
+            Some(node)
+                if node != fact.narrowed_to
+                    && self.assignable(fact.narrowed_to, node) != Some(true) =>
+            {
+                Some(node)
+            }
+            _ => standing,
+        }
     }
 
     /// The arms of the discriminant's PARENT reference that NO case test
@@ -9370,6 +9403,96 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .0
     }
 
+    /// The checker's narrow of `current` to a `candidate` type — the
+    /// positive edge of a type predicate, and the reconciliation of a
+    /// standing guard fact with a value refined under it. Keeps
+    /// `current`'s arms assignable to the candidate; when NO arm survives
+    /// but the candidate is itself assignable to `current`, the candidate
+    /// IS the narrow; otherwise the pair's intersection, or `never` when
+    /// the shared authority proves the pair disjoint under a checker
+    /// collapse criterion. `None` leaves `current` unchanged: every arm
+    /// survived, or an arm relation was undecided
+    /// ([`PredicateNarrowConsumption::Undecided`]).
+    fn narrow_node_to_candidate(
+        &mut self,
+        current: SemanticNodeId,
+        candidate: SemanticNodeId,
+    ) -> (Option<SemanticNodeId>, PredicateNarrowConsumption) {
+        use PredicateNarrowConsumption as Consumption;
+        let arms = self.enumerated_union_arms_or_self(current);
+        let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        for arm in &arms {
+            match self.assignable(*arm, candidate) {
+                Some(true) => survivors.push(*arm),
+                Some(false) => {}
+                None => return (None, Consumption::Undecided),
+            }
+        }
+        if !survivors.is_empty() {
+            if survivors.len() == arms.len() {
+                return (None, Consumption::Decided);
+            }
+            let node = self
+                .dispatch
+                .intern_normalized_union_or_intersection(&survivors, true);
+            return (Some(node), Consumption::Decided);
+        }
+        let reverse = self.assignable(candidate, current);
+        if reverse == Some(true) {
+            return (Some(candidate), Consumption::Decided);
+        }
+        // Disjointness is not decided here. The evaluator owns no
+        // relation classifier: it asks the shared authority whether the
+        // subject and the candidate can overlap, and consumes the
+        // authority's disjointness PROOF. An undecided verdict is a typed
+        // gap, never a guessed direction.
+        use super::relation::ComparabilityVerdict;
+        let comparable = self.comparable(current, candidate);
+        if matches!(comparable, ComparabilityVerdict::Undecided) {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::NominalRelation,
+            ));
+        }
+        // An undecided REVERSE relation leaves the choice between the
+        // candidate narrow and the intersection fallback unproven: the
+        // value keeps the checker's intersection rule, the relation
+        // obligation stays unclaimed.
+        let consumption = if reverse.is_none() {
+            Consumption::Undecided
+        } else {
+            Consumption::Decided
+        };
+        let ComparabilityVerdict::Disjoint(ref proof) = comparable else {
+            let intersection = self
+                .dispatch
+                .intern_normalized_union_or_intersection(&[current, candidate], false);
+            return (Some(intersection), consumption);
+        };
+        // The pair is PROVED disjoint, and the proof carries the
+        // CHECKER'S intersection-reduction answer for exactly this
+        // pair. A unit-discriminant conflict (disjoint tags, distinct
+        // `unique symbol` identities, a conflicting shared REQUIRED
+        // member whose values are both unit types) reduces the
+        // intersection to `never`; a conflict reachable only through
+        // non-unit member values keeps `A & B`, and the checker-kept
+        // intersection is the value this narrow must publish. The
+        // collapse class is the authority's payload on its own proof —
+        // the evaluator decides nothing about which disjoint pairs
+        // reduce.
+        if !proof.checker_reduces_intersection_to_never() {
+            let intersection = self
+                .dispatch
+                .intern_normalized_union_or_intersection(&[current, candidate], false);
+            return (Some(intersection), consumption);
+        }
+        // The candidate is PROVED disjoint from the whole subject through a
+        // checker collapse criterion — the intersection reduces to
+        // `never`, so the subject reads `never` on the positive edge
+        // while the edge stays alive: a contributor there that reads a
+        // different binding keeps its own type.
+        (Some(self.never_node()), consumption)
+    }
+
     /// [`Self::narrow_to_predicate_target`] carrying the CONSUMPTION
     /// verdict — whether the evaluator genuinely consumed the predicate
     /// fact, and whether the narrow-direction obligation it asked was
@@ -9407,93 +9530,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let current = self
                 .subject_current_node(subject)
                 .expect("the subject answered just above");
-            let arms = self.enumerated_union_arms_or_self(current);
-            let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
-            for arm in &arms {
-                match self.assignable(*arm, target_node) {
-                    Some(true) => survivors.push(*arm),
-                    Some(false) => {}
-                    None => return (GuardNarrowing::Unchanged, Consumption::Undecided),
-                }
-            }
-            if !survivors.is_empty() {
-                if survivors.len() == arms.len() {
-                    return (GuardNarrowing::Unchanged, Consumption::Decided);
-                }
-                let node = self
-                    .dispatch
-                    .intern_normalized_union_or_intersection(&survivors, true);
-                return (
-                    GuardNarrowing::Narrowed(subject.clone(), node),
-                    Consumption::Decided,
-                );
-            }
-            let reverse = self.assignable(target_node, current);
-            if reverse == Some(true) {
-                return (
-                    GuardNarrowing::Narrowed(subject.clone(), target_node),
-                    Consumption::Decided,
-                );
-            }
-            // Disjointness is not decided here. The evaluator owns no
-            // relation classifier: it asks the shared authority whether the
-            // subject and the predicate target can overlap, and consumes the
-            // authority's disjointness PROOF. An undecided verdict is a typed
-            // gap, never a guessed direction.
-            use super::relation::ComparabilityVerdict;
-            let comparable = self.comparable(current, target_node);
-            if matches!(comparable, ComparabilityVerdict::Undecided) {
-                self.record_degradation(FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::NominalRelation,
-                ));
-            }
-            // An undecided REVERSE relation leaves the choice between the
-            // target narrow and the intersection fallback unproven: the
-            // value keeps the checker's intersection rule, the relation
-            // obligation stays unclaimed.
-            let consumption = if reverse.is_none() {
-                Consumption::Undecided
-            } else {
-                Consumption::Decided
+            let (narrowed, consumption) = self.narrow_node_to_candidate(current, target_node);
+            let fact = match narrowed {
+                Some(node) => GuardNarrowing::Narrowed(subject.clone(), node),
+                None => GuardNarrowing::Unchanged,
             };
-            let ComparabilityVerdict::Disjoint(ref proof) = comparable else {
-                let intersection = self
-                    .dispatch
-                    .intern_normalized_union_or_intersection(&[current, target_node], false);
-                return (
-                    GuardNarrowing::Narrowed(subject.clone(), intersection),
-                    consumption,
-                );
-            };
-            // The pair is PROVED disjoint, and the proof carries the
-            // CHECKER'S intersection-reduction answer for exactly this
-            // pair. A unit-discriminant conflict (disjoint tags, distinct
-            // `unique symbol` identities, a conflicting shared REQUIRED
-            // member whose values are both unit types) reduces the
-            // intersection to `never`; a conflict reachable only through
-            // non-unit member values keeps `A & B`, and the checker-kept
-            // intersection is the value this narrow must publish. The
-            // collapse class is the authority's payload on its own proof —
-            // the evaluator decides nothing about which disjoint pairs
-            // reduce.
-            if !proof.checker_reduces_intersection_to_never() {
-                let intersection = self
-                    .dispatch
-                    .intern_normalized_union_or_intersection(&[current, target_node], false);
-                return (
-                    GuardNarrowing::Narrowed(subject.clone(), intersection),
-                    consumption,
-                );
-            }
-            // The target is PROVED disjoint from the whole subject through a
-            // checker collapse criterion — the intersection reduces to
-            // `never`, so the subject reads `never` on the positive edge
-            // while the edge stays alive: a contributor there that reads a
-            // different binding keeps its own type.
-            return (
-                GuardNarrowing::Narrowed(subject.clone(), self.never_node()),
-                consumption,
-            );
+            return (fact, consumption);
         }
         let mut undecided = false;
         let fact = self.narrow_arms_by(subject, |this, arm| {
