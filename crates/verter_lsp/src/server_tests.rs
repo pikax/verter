@@ -10433,6 +10433,21 @@ async fn svelte_progressive_component_completion_uses_committed_child_contract()
             // parent repair work or child projection work.
             server.ensure_current_file_synced(&app_uri).await;
 
+            // Foreground repair settles only the IDE buffer; did_change also
+            // owes a debounced API sync and diagnostics pass. Await this
+            // fixture's first dispatch and completed publish before sampling
+            // counters, so those independent writes cannot be mistaken for
+            // work performed by completion. A cleared dirty bit or live-task
+            // gauge alone can be observed before the coordinator finishes.
+            server.sync_coordinator.await_until(
+                || {
+                    let receipts = &server.sync_coordinator.receipts;
+                    receipts.dispatch_ticks.load(std::sync::atomic::Ordering::SeqCst) > 0
+                        && receipts.diags_published_count.load(std::sync::atomic::Ordering::SeqCst) > 0
+                },
+                || panic!("{provider_label}/{label}/{route}/{child_state}: the parent edit's deferred sync and diagnostics must finish"),
+            ).await;
+
             let provider_calls_for_completion = provider.file_sync_calls().len();
             let projection_count = server.child_public_contract_projection_count_for_test();
             let compile_requests = server.documents.host().metrics_snapshot().compile_requests;
