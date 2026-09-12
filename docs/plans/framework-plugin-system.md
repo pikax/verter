@@ -114,8 +114,8 @@ DTOs, no resolver handle). No plugin resolves a type.
    are deleted/generation-bound, not shimmed.
 
 CRITICAL co-landing: any §4 invariant promoted to a `(CRITICAL)` heading in CLAUDE.md
-or `/framework-adapters` MUST register its guard row in `CRITICAL_RULE_GUARDS` in the
-SAME change (the `every_critical_rule_in_docs_has_registered_guard` meta-guard).
+or `/framework-adapters` MUST land its executable enforcement in the SAME change,
+and the heading names that guard inline.
 
 ---
 
@@ -359,7 +359,7 @@ zero-copy fact bench; ABI version negotiation; crash/error reporting + adapter-d
 **Phase 6 — Hardening + conformance + DX (M–L).**
 Files: audit events (query cost/expansion depth/cache deps/op conflicts);
 `@verter/plugin-conformance` (sourcemap/eval-source/determinism/closed-vocab/parity);
-`npm create verter-plugin`; register all new guards in `CRITICAL_RULE_GUARDS` (co-landed).
+`npm create verter-plugin`; all new guards co-landed with the rules they enforce.
 Gate: full canonical gate + `pnpm test`; new guards green + self-tested;
 `builtin_and_plugin_capability_parity` conformance.
 
@@ -395,7 +395,7 @@ queries; component-meta component-name wire field (if a consumer needs it).
 ## 10. Verification (discriminating; red before green)
 
 - Canonical Rust gate + clippy + fmt + `pnpm test` + frozen lockfile each phase.
-- **New guards** (registered in `CRITICAL_RULE_GUARDS`): `plugin_surface_exposes_no_resolver_handle`,
+- **New guards**: `plugin_surface_exposes_no_resolver_handle`,
   `plugin_edits_route_through_codetransform`, `plugin_recognition_is_typed_ir_only`,
   `plugin_query_returns_neutral_dto_no_node_id`, `extension_plan_key_is_content_free_readdeps_validate_value_side`,
   `extension_plan_computed_once_before_codegen_split`, `builtin_and_plugin_capability_parity`,

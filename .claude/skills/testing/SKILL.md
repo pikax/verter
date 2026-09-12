@@ -56,22 +56,6 @@ pnpm exec playwright test --project=preview 2>&1 | grep "error"  # wasteful re-r
 
 **Test locations**: Unit tests co-located as `*.spec.ts` next to source. Type tests in `packages/types/` use `vitest --typecheck`.
 
-**AI-generated tests**: Add comments indicating AI assistance:
-
-```typescript
-// For new test files, add a JSDoc at the top:
-/**
- * @ai-generated - This test file was generated with AI assistance.
- * Brief description of what the tests cover.
- */
-
-// For individual tests in existing files:
-// @ai-generated - Tests X functionality with Y scenarios
-it("does something", () => {
-  /* ... */
-});
-```
-
 **Sourcemap testing** (see `macros.map.spec.ts`):
 
 ```typescript

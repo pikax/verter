@@ -51,9 +51,9 @@
 //! carrier-neutral `.vue` / `is_vue()` gate in scope is a violation, not an
 //! allowlist entry.
 //!
-//! Registered in `CRITICAL_RULE_GUARDS` under "Framework Adapter Substrate"
-//! as `session_resolution_routing_has_no_hardcoded_vue_gate`. Documented in
-//! the `/framework-adapters` skill.
+//! Enforces the "Framework Adapter Substrate" rule in `CLAUDE.md` as
+//! `session_resolution_routing_has_no_hardcoded_vue_gate`. Documented in the
+//! `/framework-adapters` skill.
 
 use std::fs;
 use std::path::{Path, PathBuf};

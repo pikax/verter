@@ -31,10 +31,8 @@
 //!    `SemanticNodeData`, `GraphTypeNode`, or the typeinfo proto.
 //!
 //! Each scanner ships a discriminator self-test that injects a
-//! forbidden token into a local
-//! string and asserts the scanner verdict flips — mirroring
-//! `every_registry_guard_name_validity_scanner_discriminates_against_fake`
-//! in `g_misc0/critical_rules_have_guards.rs`.
+//! forbidden token into a local string and asserts the scanner verdict
+//! flips, so a scanner that silently stops matching fails here.
 
 use std::fs;
 use std::path::{Path, PathBuf};

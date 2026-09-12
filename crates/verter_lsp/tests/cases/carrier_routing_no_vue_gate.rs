@@ -54,8 +54,8 @@
 //! carrier routing, provider-path reverse-mapping, or barrel/provider sync —
 //! those are exactly the categories that must be carrier-generic.
 //!
-//! Registered in `CRITICAL_RULE_GUARDS` under "Framework Adapter Substrate"
-//! as `carrier_lsp_routing_has_no_hardcoded_vue_gate`. Documented in the
+//! Enforces the "Framework Adapter Substrate" rule in `CLAUDE.md` as
+//! `carrier_lsp_routing_has_no_hardcoded_vue_gate`. Documented in the
 //! `/framework-adapters` skill.
 
 use std::fs;

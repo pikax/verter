@@ -30,8 +30,8 @@
 //! non-carrier primitive that MUST carry a carrier-neutral (`carrier_*` /
 //! `non_carrier_*`) name.
 //!
-//! Registered in `CRITICAL_RULE_GUARDS` under "Framework Adapter Substrate"
-//! as `carrier_routing_has_no_vue_named_generic_primitive`. Documented in the
+//! Enforces the "Framework Adapter Substrate" rule in `CLAUDE.md` as
+//! `carrier_routing_has_no_vue_named_generic_primitive`. Documented in the
 //! `/framework-adapters` skill.
 
 use std::fs;

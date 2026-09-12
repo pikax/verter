@@ -260,6 +260,13 @@ independent of template tag matching in `custom_elements`. Model props use
 Vue's separate model policy (no synthesized `required`; custom-element mode
 does not widen production model types).
 
+Guards: `vmrs_boundary_missing_runtime_semantic_bundle_fails_closed`,
+`vmrs_runtime_bundle_is_the_only_type_based_props_authority`,
+`vmrs_invalid_macro_shapes_render_role_specific_diagnostics_on_both_rails`,
+`vmrs_runtime_failures_preserve_typed_reason_detail_and_absolute_anchor`,
+`vmrs_tsc_unavailable_diagnostics_preserve_exact_outcome_reason_and_detail`,
+`pinned_vue_macro_oracle_carries_provenance_and_discriminating_runtime_facts`.
+
 ## IDE Prefixed-Expression Emit Substrate (`ide/template/emit.rs`)
 
 IDE template codegen emits a Vue binding value as JSX through the typed `EmitOp` vocabulary so the user expression keeps an exact source-map mapping while synthetic JSX scaffolding stays unmapped. `EmitText` (`Static`/`Borrowed`/`Owned`) is the text payload; `EmitOp` variants: `InsertUnmapped` (order-preserving unmapped insert, lowers via `prepend_ordered_unmapped`), `InsertMapped` (`InsertedMapped` chunk, mapped at `source_start`+`content_offset`), `PreserveOriginal` (pure no-op — bytes stay an `Original` 1:1 chunk), `OverwriteSyntheticBoundary` (delete + unmapped insert; NEVER a mapped `out.overwrite`), `MoveOriginal`. `emit_op` is the single lowering point. `emit_jsx_binding_value` emits a `JsxBindingValue` (`source_expr`/`prefix`/`suffix`/`occurrences`/`bindings`) `occurrences` times for RELOCATED emission (native `v-model` emits the expression 2-3x); in-place sites (v-html, v-text, `:[key]`, `.foo=`, `v-bind="obj"`, static `:prop`) preserve the bytes and emit `OverwriteSyntheticBoundary` + `collect_binding_patches` around them. A function-typed `:prop` under a v-if scope (e.g. `<div v-if="ok" :onX="() => handle()">`) gets a type-narrowing guard: `compute_function_guard_injection` (props.rs) locates the injection point in SOURCE coordinates from the OXC AST (arrow-EXPRESSION body start → ternary `!((cond))?undefined:`; arrow-BLOCK / `function` body `{`+1 → block `if(!((cond))) return;`), then the value is kept IN PLACE (boundary split + `collect_binding_patches`) and the guard is an UNMAPPED `prepend_alloc` spliced into the middle — emitted BEFORE `collect_binding_patches` so an arrow-expr body identifier at the injection offset stable-sorts as `<guard><accessor-prefix><identifier>`. The guard is never baked into a mapped overwrite. The v-on inline-handler guard (von.rs) is likewise a synthetic PREFIX inside `out.overwrite(prop.start, trimmed_vs, …)` with the handler body preserved in place — it never bakes the resolved value, so it is not migrated.

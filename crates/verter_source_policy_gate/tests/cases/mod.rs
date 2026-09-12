@@ -23,10 +23,11 @@ mod whole_env_consumer_graph_native_inventory;
 
 /// Exact durable IDs dispatched by [`repository_source_policy_guards`].
 ///
-/// The critical-rule registry parses this const structurally, so a critical
-/// member cannot disappear behind the aggregate's generic libtest name. The
-/// aggregate independently compares this manifest with the executable member
-/// tables before running any rule.
+/// The members run inside one libtest case, so a dropped member would
+/// otherwise disappear behind the aggregate's single generic name. The
+/// aggregate compares this manifest with the executable member tables — in
+/// order — before running any rule, so removing or reordering a guard fails
+/// loudly instead of silently reducing coverage.
 const REQUIRED_REPOSITORY_SOURCE_POLICY_GUARD_IDS: &[&str] = &[
     "every_enumerated_body_reader_is_present_at_its_anchor",
     "every_anchored_body_reader_is_unique",
