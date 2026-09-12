@@ -7,8 +7,8 @@
 //! `external_ts` (e.g. `tsserver_backend.rs`, `mod.rs`, a future sibling) would
 //! still be allowed to call them by the compiler. This static guard is FINER than
 //! the `pub(in external_ts)` seal: it AST-parses every `verter_lsp` production
-//! source file and FAILS if a sealed store-mutator (or a re-introduced deleted
-//! one) is CALLED from anywhere outside the authoritative allowlist.
+//! source file and FAILS if a sealed store-mutator is CALLED from anywhere
+//! outside the authoritative allowlist.
 //!
 //! ## The on-disk store is mutated ONLY through these symbols
 //!
