@@ -2287,6 +2287,67 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             }
                             None => (None, false),
                         };
+                    // Remapping mapper ⇒ key-domain PREIMAGE narrowing.
+                    //
+                    // With an `as <expr>` clause the demanded segment is
+                    // a PRODUCED surface name, not an iteration key, so
+                    // the three-tier iteration-key admission below cannot
+                    // decide it. The coarse alternative — whole-surface
+                    // `MappedType` resolution — forces EVERY surviving
+                    // key's value operand to answer a ONE-key demand,
+                    // which is exactly the key-scaled work a single-key
+                    // projection must not do.
+                    //
+                    // Instead invert the remap. The key domain enumerates
+                    // under the shared `structural_transit` keyspace
+                    // enumerator (names only, no per-member value edges),
+                    // and the remap substitutes into `mapper.name_remap`
+                    // — never `mapper.value_expr`. So every iteration key
+                    // that does not produce the demanded name, INCLUDING
+                    // every remap-dropped key, is eliminated without a
+                    // single value substitution, evaluate walk,
+                    // `Instantiate` dispatch, or per-K materialiser call.
+                    // Only the producing keys are forced; several
+                    // producers of one name union their values exactly as
+                    // `build_mapped_type` folds duplicate produced names.
+                    //
+                    // Declines (falls through to the whole-surface
+                    // fallback) when the preimage is undecidable — open /
+                    // unknown key domain (the L1 carrier-stop stays
+                    // authoritative), unenumerable key space, or any
+                    // `DeferCarrier` remap — or when it is EMPTY, because
+                    // the coarse path owns the exact key-absent miss
+                    // semantics.
+                    if mapper.name_remap.is_some() {
+                        if let Some(narrowed) =
+                            self.narrow_remapped_mapped_key(*source, mapper, literal_key.as_ref())
+                        {
+                            let edge_kind = match next_segment.expect("literal_key implies a segment") {
+                                PathSegment::Member(_) => OriginEdgeKind::ProjectMember,
+                                PathSegment::Index(_) => OriginEdgeKind::ProjectIndex,
+                            };
+                            let meta = match next_segment.expect("literal_key implies a segment") {
+                                PathSegment::Member(member_key) => OriginMeta::ProjectedMember {
+                                    key: member_key.clone(),
+                                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                                },
+                                PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
+                            };
+                            self.graph().record_origin_edge(
+                                narrowed,
+                                edge_kind,
+                                Arc::from(
+                                    vec![current, *source, mapper.key_space].into_boxed_slice(),
+                                ),
+                                meta,
+                                Arc::clone(self.fence),
+                            );
+                            current = narrowed;
+                            index += 1;
+                            self.intermediate_nodes.push(Some(current));
+                            continue;
+                        }
+                    }
                     // Path-precise key-domain admission. Three-tier
                     // check, applied only when we have a literal_name
                     // (without a literal we cannot perform the K =
@@ -5506,6 +5567,114 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     /// extractor fell through the `_ => continue` arm. Per-key
     /// substitution at the producer fixes ALL consumer paths
     /// uniformly.
+    /// Force the value of a REMAPPING mapped type at exactly one
+    /// demanded produced name, or decline.
+    ///
+    /// Resolves the demanded name's key-domain preimage through
+    /// [`ProjectSemanticDispatch::mapped_iteration_keys_producing_name`]
+    /// — which decides every iteration key from `mapper.name_remap`
+    /// alone, so non-producing and remap-dropped keys cost zero value
+    /// forcing — then materialises ONLY the producing keys' values. Per
+    /// key the value splits by [`crate::semantic_query::MapperKind`]
+    /// exactly as the non-remapping narrowing does: an `Identity` mapper
+    /// dispatches `source[K]` through the shared `IndexedAccess` query
+    /// (never substituting into the builtin utilities' lazy
+    /// `Opaque(Miss)` `value_expr` placeholder), a `Computed` mapper
+    /// goes through the selected-key materialiser, which preserves
+    /// String / Number literal kind and keeps the substituted-carrier
+    /// fallback so the free binder never leaks.
+    ///
+    /// Several iteration keys may produce one surface name; their values
+    /// UNION, the same fold `build_mapped_type` applies to duplicate
+    /// produced names.
+    ///
+    /// Returns `None` — decline, take the whole-surface route — when
+    /// there is no literal segment, when the preimage is undecidable
+    /// (open key domain, unenumerable key space, undecidable remap),
+    /// when it is empty (the coarse path owns key-absent miss
+    /// semantics), or when a producing key has no substitutable literal.
+    /// Every decline is fail-closed: a narrowed answer is published only
+    /// when the preimage is fully decided. An `Identity` key whose
+    /// `IndexedAccess` does not close is NOT a decline — the preimage
+    /// proved the member exists, so it publishes the addressable
+    /// deferred carrier rather than the key-absent sentinel.
+    fn narrow_remapped_mapped_key(
+        &mut self,
+        source: SemanticNodeId,
+        mapper: &crate::semantic_query::MapperKey,
+        literal_key: Option<&LiteralKey>,
+    ) -> Option<SemanticNodeId> {
+        let demanded = match literal_key? {
+            LiteralKey::String(text) => {
+                crate::semantic_query::PropertyKey::String(Arc::clone(text))
+            }
+            LiteralKey::Number(number) => {
+                crate::semantic_query::PropertyKey::from_js_number(*number)
+            }
+        };
+        let context = self.context_from_template(
+            crate::semantic_query::ProjectionReductionContext::published(self.mode()),
+        );
+        let iteration_keys = self
+            .dispatch
+            .mapped_iteration_keys_producing_name(source, mapper, &demanded, context)?;
+        if iteration_keys.is_empty() {
+            return None;
+        }
+        let mut folded: Option<SemanticNodeId> = None;
+        for iteration_key in &iteration_keys {
+            let literal = iteration_key.literal.as_ref()?;
+            let key_arg = self
+                .graph()
+                .intern_node(SemanticNodeData::Literal(literal.clone()));
+            let value = if matches!(mapper.kind, crate::semantic_query::MapperKind::Identity) {
+                // The preimage PROVED this produced member exists, so its
+                // value must never surface as `Opaque(Miss)` — that node
+                // is the walker's key-ABSENT sentinel, and forging it for
+                // a present member is indistinguishable from a miss to
+                // every consumer that classifies on it. An access the
+                // shared query cannot close publishes the ADDRESSABLE
+                // deferred `IndexedAccess` carrier instead, exactly as
+                // `build_mapped_type`'s Identity arm does, so the value
+                // stays re-dispatchable by path.
+                let resolved =
+                    match self.execute_read_folding_partial(SemanticQueryKey::IndexedAccess {
+                        base: source,
+                        index: IndexKey::Computed(key_arg),
+                        mode: self.mode(),
+                    }) {
+                        QueryResult::Value(id) => Some(id),
+                        _ => None,
+                    };
+                match resolved {
+                    Some(id)
+                        if !matches!(
+                            self.graph().node_data(id).as_deref(),
+                            Some(SemanticNodeData::Opaque(_))
+                        ) =>
+                    {
+                        id
+                    }
+                    _ => self.graph().intern_node(SemanticNodeData::IndexedAccess {
+                        object: source,
+                        index: IndexKey::Computed(key_arg),
+                    }),
+                }
+            } else {
+                self.dispatch
+                    .materialize_selected_key_mapped_value_with_node(mapper, key_arg, context)
+            };
+            folded = Some(match folded {
+                None => value,
+                Some(existing) if existing == value => existing,
+                Some(existing) => self
+                    .dispatch
+                    .intern_normalized_union_or_intersection(&[existing, value], true),
+            });
+        }
+        folded
+    }
+
     fn synthesise_mapped_surface(
         &mut self,
         source: SemanticNodeId,
@@ -5763,6 +5932,31 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         };
         let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(keys.len());
         for key in keys.into_iter() {
+            // Key-domain decision BEFORE the value operand is forced —
+            // the same ordering `build_mapped_type` uses at the Expanded
+            // publication path. The `as <expr>` remap reads
+            // `mapper.name_remap`, never `mapper.value_expr`, so it is
+            // decidable without forcing the value; deciding it first makes
+            // a remap-DROPPED key genuinely dead (no substitution, no
+            // evaluate, no `Instantiate`, no per-K materialiser call), and
+            // a `DeferCarrier` key abandons the surface without having
+            // forced any earlier key's value in vain.
+            //
+            // `Drop` filters the key; `Keys` emits one member per produced
+            // name; `DeferCarrier` fails the surface closed (the Shallow
+            // walker carrier-stops so the caller keeps the carrier).
+            let produced_names = match self.dispatch.mapped_member_name_remap_outcome(
+                mapper,
+                &key,
+                materialise_context,
+            ) {
+                crate::project_semantic_dispatch::build::MappedKeyRemapOutcome::Keep(n) => vec![n],
+                crate::project_semantic_dispatch::build::MappedKeyRemapOutcome::Keys(ns) => ns,
+                crate::project_semantic_dispatch::build::MappedKeyRemapOutcome::Drop => continue,
+                crate::project_semantic_dispatch::build::MappedKeyRemapOutcome::DeferCarrier => {
+                    return None;
+                }
+            };
             let member = {
                 let source_member = source_members.as_ref().and_then(|m| {
                     m.iter()
@@ -5880,23 +6074,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 source_spans,
                 source_declaration_origin,
             ) = member;
-            // Per-key produced name(s): apply `name_remap` through the same
-            // shared outcome classifier so `as <expr>` clauses fold identically
-            // to the Expanded path. `Drop` filters the key; `Keys` emits one
-            // member per produced name; `DeferCarrier` fails the surface closed
-            // (the Shallow walker carrier-stops so the caller keeps the carrier).
-            let produced_names = match self.dispatch.mapped_member_name_remap_outcome(
-                mapper,
-                &key,
-                materialise_context,
-            ) {
-                crate::project_semantic_dispatch::build::MappedKeyRemapOutcome::Keep(n) => vec![n],
-                crate::project_semantic_dispatch::build::MappedKeyRemapOutcome::Keys(ns) => ns,
-                crate::project_semantic_dispatch::build::MappedKeyRemapOutcome::Drop => continue,
-                crate::project_semantic_dispatch::build::MappedKeyRemapOutcome::DeferCarrier => {
-                    return None;
-                }
-            };
+            // `produced_names` was decided above, before this key's value
+            // operand was forced — see the key-domain ordering note at the
+            // top of the loop.
             for produced_name in produced_names {
                 // Duplicate produced names UNION their per-K values —
                 // same fold as `build_mapped_type` (pinned tsgo, probe12:

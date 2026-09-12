@@ -7817,11 +7817,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    reroute through the keyspace node's literals), else the
     ///    keyspace node's literal union. Neither enumerable → the
     ///    deferred `Mapped` carrier again.
-    /// 3. For each key, reserve a member slot. Member optionality /
-    ///    readonly derive from the mapper's modifiers (`Add` → always
-    ///    on, `Remove` → always off, `Keep` → inherit from the source
-    ///    if available, else default off).
-    /// 4. Member values dispatch on `mapper.kind`. An `Identity` mapper
+    /// 3. For each key, apply the `as`-clause `name_remap` FIRST via
+    ///    [`Self::mapped_member_name_remap_outcome`] — the key-domain
+    ///    decision precedes the value force. `Drop` filters the key;
+    ///    duplicate produced names union their per-key values;
+    ///    `DeferCarrier` fails the whole mapped type closed back to the
+    ///    deferred `Mapped` carrier. A remap-dropped key is DEAD: its
+    ///    value operand is never substituted, evaluated, instantiated,
+    ///    or passed to the per-K materialiser.
+    /// 4. For each surviving key, reserve a member slot. Member
+    ///    optionality / readonly derive from the mapper's modifiers
+    ///    (`Add` → always on, `Remove` → always off, `Keep` → inherit
+    ///    from the source if available, else default off).
+    /// 5. Member values dispatch on `mapper.kind`. An `Identity` mapper
     ///    (the canonical `{ [K in keyof T]: T[K] }` behind `Partial` /
     ///    `Required` / `Readonly`) reuses the matching source member's
     ///    value directly; a key without a projectable source member
@@ -7834,11 +7842,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    (K-independent value bodies hoist one shared evaluation above
     ///    the loop), falling back to the substituted carrier on `Opaque`
     ///    so the free binder never leaks onto the published surface.
-    /// 5. Apply the `as`-clause `name_remap` per key via
-    ///    [`Self::mapped_member_name_remap_outcome`]: `Drop` filters the
-    ///    key; duplicate produced names union their per-key values;
-    ///    `DeferCarrier` fails the whole mapped type closed back to the
-    ///    deferred `Mapped` carrier.
     /// 6. Emit one `Normalize` edge from the mapped result over the full
     ///    contribution set (`[source, key_space, value_expr,
     ///    name_remap?]`) and one `ProjectMember` edge per produced
@@ -8202,6 +8205,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // torn surface (set inside the loop, checked after).
         let mut remap_defers = false;
         for key in &keys {
+            // Key-domain decision BEFORE the value operand is forced.
+            //
+            // The `as <expr>` remap is a KEY-DOMAIN operator: it decides
+            // whether an iteration key survives onto the produced surface
+            // and under which name(s). It reads `mapper.name_remap`, never
+            // `mapper.value_expr`, so it is computable without forcing the
+            // value. Deciding it first makes a REMAP-DROPPED key genuinely
+            // dead: its value operand is never substituted, never
+            // evaluated, never dispatched through `Instantiate`, and never
+            // reaches the per-K materialiser. Forcing the value first and
+            // discarding it on `Drop` is exactly the dead-operand work this
+            // ordering forbids — and `DeferCarrier` (the fail-closed arm)
+            // likewise abandons the surface, so every value forced before
+            // the deferring key was also dead.
+            //
+            // `Drop` filters the key; `Keys` emits one member per produced
+            // name; `DeferCarrier` fails the whole mapped type closed.
+            let produced_names = match self.mapped_member_name_remap_outcome(mapper, key, context) {
+                MappedKeyRemapOutcome::Keep(n) => vec![n],
+                MappedKeyRemapOutcome::Keys(ns) => ns,
+                MappedKeyRemapOutcome::Drop => continue,
+                MappedKeyRemapOutcome::DeferCarrier => {
+                    remap_defers = true;
+                    break;
+                }
+            };
             let source_member = source_members
                 .iter()
                 .find(|member| member.key.cloned_known().as_ref() == Some(&key.key));
@@ -8288,20 +8317,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 };
                 self.materialize_mapped_member_value_for_key(mapper, literal, context)
             };
-            // Apply `name_remap` (the `as <expr>` clause) via the shared
-            // [`Self::mapped_member_name_remap_outcome`] classifier — same
-            // substitution + context-aware evaluation the Shallow walker uses.
-            // `Drop` filters the key, `Keys` emits one member per produced
-            // name, `DeferCarrier` fails the whole mapped type closed.
-            let produced_names = match self.mapped_member_name_remap_outcome(mapper, key, context) {
-                MappedKeyRemapOutcome::Keep(n) => vec![n],
-                MappedKeyRemapOutcome::Keys(ns) => ns,
-                MappedKeyRemapOutcome::Drop => continue,
-                MappedKeyRemapOutcome::DeferCarrier => {
-                    remap_defers = true;
-                    break;
-                }
-            };
+            // `produced_names` was decided above, before this key's value
+            // operand was forced — see the key-domain ordering note at the
+            // top of the loop.
             for produced_name in produced_names {
                 // Duplicate produced names UNION their per-K values: the
                 // numeric key `1` and the string key `"1"` address the
@@ -8895,7 +8913,126 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let evaluated_remap = self
             .evaluate_deferred_semantic_node_with_context(substituted_remap, context)
             .into_active_query_build_node(self);
-        self.classify_remap_outcome(evaluated_remap, context)
+        // A userland helper remap (`as Rename<K>`) lowers to an
+        // `InstantiationRef` carrier, and the deferred-shell evaluator
+        // deliberately STOPS at that carrier without instantiating. Left
+        // there the remap classifies as `DeferCarrier` and the whole
+        // mapped type fails closed — a helper-authored remap would never
+        // decide, while the SAME remap written inline as a conditional
+        // would. Bind the substituted key argument through the shared
+        // `Instantiate` query and re-evaluate the body, exactly as
+        // [`Self::materialize_mapped_member_value_for_key`] does for the
+        // value operand, so builtin, inline and userland-helper remaps
+        // route through one machinery and decide identically.
+        //
+        // Fail-closed is preserved: an `Instantiate` that does not close
+        // leaves the carrier in place and `classify_remap_outcome` still
+        // returns `DeferCarrier`.
+        let reduced_remap = self.reduce_remap_instantiation_carrier(evaluated_remap, context);
+        self.classify_remap_outcome(reduced_remap, context)
+    }
+
+    /// Bind a residual `InstantiationRef` key-remap carrier through the
+    /// shared `Instantiate` query and re-evaluate its body, returning the
+    /// input unchanged for any other shape or when the instantiation does
+    /// not close.
+    ///
+    /// The trailing re-evaluation is what drives a helper whose body is a
+    /// `Conditional` (`type Rename<K> = K extends 'a' ? 'x' : never`) to
+    /// its realised arm; without it the instantiation returns the body
+    /// `Conditional` carrier and the remap would still fail closed.
+    fn reduce_remap_instantiation_carrier(
+        &self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let Some(SemanticNodeData::InstantiationRef { base, args }) =
+            self.graph().node_data(node).as_deref().cloned()
+        else {
+            return node;
+        };
+        let slot = self.type_slot_for(
+            Arc::clone(&base.canonical_id),
+            base.owner,
+            Arc::clone(&base.decl_name),
+        );
+        let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
+        let read = self.execute_read(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
+        ));
+        crate::request_context::observe_component_meta_read_suppress(&read);
+        let QueryResult::Value(instantiated) = read.value else {
+            return node;
+        };
+        self.evaluate_deferred_semantic_node_with_context(instantiated, context)
+            .into_active_query_build_node(self)
+    }
+
+    /// Key-domain PREIMAGE of one demanded PRODUCED name through a
+    /// mapper's `as`-clause remap — the single-key entrance for a
+    /// remapping mapped type.
+    ///
+    /// With an `as <expr>` clause the surface name a consumer demands is
+    /// a PRODUCED name, not an iteration key, so iteration-key
+    /// membership cannot answer it. This helper inverts the remap
+    /// without materialising the mapped surface: it enumerates the key
+    /// DOMAIN (through the shared keyspace enumerator, which evaluates
+    /// under `structural_transit` and therefore reifies no per-member
+    /// value edges) and runs [`Self::mapped_member_name_remap_outcome`]
+    /// per iteration key. The remap substitutes into `mapper.name_remap`
+    /// and never reads `mapper.value_expr`, so every non-producing key —
+    /// including every remap-DROPPED key — is decided with ZERO value
+    /// forcing: no substitution into the value body, no
+    /// `evaluate_deferred_*` walk, no `Instantiate` dispatch, no per-K
+    /// materialiser call.
+    ///
+    /// Returns:
+    /// - `None` — the preimage is UNDECIDABLE and the caller must take
+    ///   the whole-surface route. Three causes, all fail-closed: the key
+    ///   domain is OPEN or unknown (the L1 carrier-stop is authoritative
+    ///   — an open domain is never enumerated to answer a narrower
+    ///   demand), the key space does not enumerate, or some iteration
+    ///   key's remap is [`MappedKeyRemapOutcome::DeferCarrier`] (one
+    ///   undecidable remap makes the whole produced key set unknown).
+    /// - `Some(keys)` — exactly these iteration keys produce `demanded`.
+    ///   An EMPTY vector means the closed key domain provably produces no
+    ///   such name; callers that do not own key-absent miss semantics
+    ///   should treat it as a decline.
+    ///
+    /// Name comparison is `element_access_collides`, the same
+    /// numeric/string element-access identity
+    /// [`Self::build_mapped_type`] folds duplicate produced names with,
+    /// so `M[1]` and `M['1']` address one produced member on both rails.
+    pub(super) fn mapped_iteration_keys_producing_name(
+        &self,
+        source: SemanticNodeId,
+        mapper: &crate::semantic_query::MapperKey,
+        demanded: &PropertyKey,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<Vec<super::enumerate::KeyDomainKey>> {
+        if crate::project_semantic_dispatch::raise::mapped_type_key_domain_is_open_or_unknown(
+            self, source, mapper,
+        ) {
+            return None;
+        }
+        let domain = self.key_literals_from_keyspace_node(mapper.key_space)?;
+        let mut matched: Vec<super::enumerate::KeyDomainKey> = Vec::new();
+        for key in domain {
+            let produces = match self.mapped_member_name_remap_outcome(mapper, &key, context) {
+                MappedKeyRemapOutcome::Keep(name) => name.element_access_collides(demanded),
+                MappedKeyRemapOutcome::Keys(names) => names
+                    .iter()
+                    .any(|name| name.element_access_collides(demanded)),
+                // A dropped key contributes no produced name. It is dead
+                // from here on: the caller never forces its value.
+                MappedKeyRemapOutcome::Drop => false,
+                MappedKeyRemapOutcome::DeferCarrier => return None,
+            };
+            if produces {
+                matched.push(key);
+            }
+        }
+        Some(matched)
     }
 
     /// Classify an evaluated key-remap node into a [`MappedKeyRemapOutcome`].
