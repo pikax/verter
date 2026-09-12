@@ -115,7 +115,7 @@ impl TsserverEngineBackend {
     /// reads the `carrier_publish_store` manifest); this in-process view is the value
     /// the reconciler keeps consistent with that store, used by the production-path
     /// tests to assert membership without the live plugin. NO production serve path
-    /// reads it (pinned by the `ledger_is_off_the_serve_path` architecture guard).
+    /// reads it.
     #[must_use]
     pub fn external_files_for_project(&self, project: &str) -> Vec<String> {
         self.membership_ledger
