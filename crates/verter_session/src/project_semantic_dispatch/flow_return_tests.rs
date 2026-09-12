@@ -8999,3 +8999,99 @@ fn flow_return_type_query_argument_keeps_current_narrowing() {
         verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
     );
 }
+
+/// A switch case's dispatch-edge refinement rides the reaching-TYPE
+/// layer, while an enclosing `typeof` guard's fact rides the narrowing
+/// overlay. The case's own `"a"` is what the read must publish: it is the
+/// newer fact and the strictly narrower one, so the enclosing guard's
+/// broader `string` may not outrank it merely for living in the layer a
+/// read consults first. tsgo 7.0.0-dev: the case arm is `{ v: "a" }`, the
+/// default arm `{ v: string }`, and the trailing return `{ v: number }`.
+#[test]
+fn flow_return_switch_case_refinement_outranks_enclosing_guard_fact() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function makeProps(p: string | number) { if (typeof p === \"string\") { switch (p) { case \"a\": return { v: p }; default: return { v: p } } } return { v: 0 } }",
+    );
+    assert_eq!(degradation, None);
+    assert_eq!(
+        member_types(&expr, "v"),
+        vec![
+            string_literal("a"),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        ]
+    );
+}
+
+/// The clause-entry overlay restore is keyed on the writes the clause
+/// EXECUTED, so the two halves of clause scoping hold at once: a narrow
+/// established inside the clause does not escape, and an entering fact
+/// about a value the clause REPLACED does not come back.
+///
+/// The rows separate that rule from the cheaper ones it would be easy to
+/// mistake it for. Restoring the entry overlay unconditionally fails the
+/// changing-write row; keying on the type-CHANGE subset fails the
+/// unchanged-write row; diffing the clause's end overlay against its
+/// entry fails the write-then-equal-assertion row, because that clause
+/// ends holding exactly the overlay it started with while having PROVED
+/// the fact from the write rather than inherited it. The
+/// strengthening-without-a-write row holds the rule's other edge: only a
+/// write retires an entering fact.
+#[test]
+fn flow_return_clause_entry_restore_excludes_every_executed_write() {
+    const PRELUDE: &str = "declare function mayThrow(): void\nfunction assertA(v: unknown): asserts v is \"a\" { if (v !== \"a\") throw 0 }\nfunction assertOne(v: unknown): asserts v is 1 { if (v !== 1) throw 0 }\n";
+    let boolean = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean);
+    let number = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number);
+    for (case, body, expected) in [
+        // A CHANGING write: past the statement the binding holds the
+        // written value, never the pre-try `typeof p === "string"` fact
+        // about the value the write replaced.
+        (
+            "changing write",
+            "function makeProps(p: string | number) { if (typeof p === \"string\") { try { p = 1 } finally { mayThrow() } return { v: p } } return { v: true } }",
+            vec![boolean.clone(), number.clone()],
+        ),
+        // STRENGTHENING WITHOUT A WRITE: with no catch, reaching past the
+        // statement PROVES the try completed normally, so the clause's
+        // stronger `"a"` holds. Nothing was written, so there is no stale
+        // entering fact to retire and nothing for the write-keyed rule to
+        // do — the strengthening is what survives.
+        (
+            "strengthening without a write",
+            "function makeProps(p: string | number) { if (typeof p === \"string\") { try { assertA(p) } finally { mayThrow() } return { v: p } } return { v: true } }",
+            vec![string_literal("a"), boolean.clone()],
+        ),
+        // An UNCHANGED write: `p` already reaches `number`, so writing
+        // `q` leaves the reaching type exactly where it was and there is
+        // no type CHANGE to key on. The write still replaced the value
+        // the entering `1` fact described, so that fact is retired and
+        // the binding reads `number`. Keying the restore on the
+        // type-change subset instead would revive the literal.
+        (
+            "unchanged write",
+            "function makeProps(p: string | number, q: number) { p = q; if (p === 1) { try { p = q } finally { mayThrow() } return { v: p } } return { v: true } }",
+            vec![boolean.clone(), number.clone()],
+        ),
+        // A write followed by an assertion proving EXACTLY the entering
+        // fact. The write retires that fact as stale, and the assertion
+        // then re-proves it on the only path reaching past the statement,
+        // so the literal stands on the assertion's own proof rather than
+        // on the entering guard. The clause therefore ENDS holding the
+        // overlay it entered with: an overlay diff reads that as "nothing
+        // happened", and dropping the proof for coinciding with the
+        // retired fact publishes the written `number` on an edge that
+        // proved `1`.
+        (
+            "write then assertion equal to the entry guard",
+            "function makeProps(p: string | number, q: number) { p = q; if (p === 1) { try { p = q; assertOne(p) } finally { mayThrow() } return { v: p } } return { v: true } }",
+            vec![
+                verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0)),
+                boolean.clone(),
+            ],
+        ),
+    ] {
+        let (expr, degradation) = flow_expr_for_script(&format!("{PRELUDE}{body}"));
+        assert_eq!(degradation, None, "{case}");
+        assert_eq!(member_types(&expr, "v"), expected, "{case}");
+    }
+}
