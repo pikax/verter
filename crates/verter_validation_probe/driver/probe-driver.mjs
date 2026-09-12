@@ -194,6 +194,19 @@ function readProbe(line) {
     if (entry.request === null || typeof entry.request !== "object") {
       throw new Error("entry request must be an object");
     }
+    // The one filename BOTH compilers must see, so it is required here rather
+    // than defaulted later. Substituting the case id for a missing one would
+    // compile the reference under a name the request never carried, and the
+    // comparator would report the divergence that follows — a scoped style's
+    // scope id above all — as a compiler difference. Refusing the malformed
+    // request says what actually went wrong.
+    const identity = entry.request.identity;
+    if (identity === null || typeof identity !== "object") {
+      throw new Error("entry request must carry an identity object");
+    }
+    if (typeof identity.filename !== "string" || identity.filename === "") {
+      throw new Error("entry request identity.filename must be a non-empty string");
+    }
   }
   return probe;
 }
@@ -247,8 +260,9 @@ function runProbe(probe, where) {
     // reference compiled under a different id diverges on every
     // filename-derived output — a scoped style's scope id above all — which
     // the comparator would then report as a compiler difference the harness
-    // itself manufactured.
-    const filename = entry.request?.identity?.filename ?? entry.canonicalId;
+    // itself manufactured. `readProbe` has already required this field, so
+    // there is no name to fall back to and nothing to fall back for.
+    const filename = entry.request.identity.filename;
     try {
       return producer(entry.source, filename);
     } catch (error) {

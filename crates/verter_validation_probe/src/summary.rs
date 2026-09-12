@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::evaluate::Evaluation;
+use crate::evaluate::{decide, Evaluation, ObservedOutcome};
 use crate::manifest::{ExpectedState, Framework, ProbeStateManifest};
 use crate::outcome::{CaseObservation, Dimension, ProbeOutcomeClass, Terminal};
 use crate::request;
@@ -172,12 +172,17 @@ impl CellRow {
         }
     }
 
-    /// Whether the row's two observation fields agree. A `class` terminal
-    /// carries its class and the other two carry none; a row that says
-    /// otherwise is malformed, and recomputing counters from it would produce
-    /// a number that looks honest.
-    fn is_coherent(&self) -> bool {
-        self.observed_class.is_some() == (self.observed_terminal == ObservedTerminal::Class)
+    /// What this row observed, or `None` when its two observation fields
+    /// contradict each other. A `class` terminal carries its class and the
+    /// other two carry none; a row that says otherwise is malformed, and
+    /// anything recomputed from it would look honest without being so.
+    fn observed(&self) -> Option<ObservedOutcome> {
+        match (self.observed_terminal, self.observed_class) {
+            (ObservedTerminal::Class, Some(class)) => Some(ObservedOutcome::Class(class)),
+            (ObservedTerminal::NotRun, None) => Some(ObservedOutcome::NotRun),
+            (ObservedTerminal::NotApplicable, None) => Some(ObservedOutcome::NotApplicable),
+            _ => None,
+        }
     }
 }
 
@@ -290,6 +295,18 @@ pub enum SummaryError {
         /// The dimension.
         dimension: Dimension,
     },
+    /// A cell row's evaluation is not the one its own expectation and
+    /// observation decide.
+    EvaluationMismatch {
+        /// The case.
+        probe_id: String,
+        /// The dimension.
+        dimension: Dimension,
+        /// What the row claims.
+        declared: Evaluation,
+        /// What its fields decide.
+        decided: Evaluation,
+    },
     /// An observation could not be evaluated against the manifest that
     /// produced it — a runner defect, not a malformed document.
     Observation(String),
@@ -344,6 +361,16 @@ impl std::fmt::Display for SummaryError {
             } => write!(
                 f,
                 "{probe_id} [{dimension}]: the cell's terminal and observed class disagree"
+            ),
+            SummaryError::EvaluationMismatch {
+                probe_id,
+                dimension,
+                declared,
+                decided,
+            } => write!(
+                f,
+                "{probe_id} [{dimension}]: the cell claims `{declared}`, but its own \
+                 expectation and observation decide `{decided}`"
             ),
             SummaryError::Observation(message) => {
                 write!(f, "an observation could not be evaluated: {message}")
@@ -677,13 +704,30 @@ fn recount(block: &FrameworkSummary) -> Result<Counters, SummaryError> {
     for case in &block.cases {
         let mut case_clean = true;
         for cell in &case.cells {
-            if !cell.is_coherent() {
+            let Some(observed) = cell.observed() else {
                 return Err(SummaryError::MalformedCell {
                     probe_id: cell.probe_id.clone(),
                     dimension: cell.dimension,
                 });
+            };
+            // Re-DECIDED, not re-counted from what the row claims. Counting a
+            // declared evaluation answers "do these counters add up", which a
+            // document that miswrote one cell's verdict and the counters to
+            // match still passes — and a gate cell claiming `gate_pass` beside
+            // observations that say otherwise is exactly what the lane's one
+            // real exit must never read as clean. The evaluation is a pure
+            // function of the three fields beside it, so the rule that wrote
+            // it is the rule that checks it.
+            let decided = decide(cell.expected_state, cell.expected_class, observed);
+            if decided != cell.evaluation {
+                return Err(SummaryError::EvaluationMismatch {
+                    probe_id: cell.probe_id.clone(),
+                    dimension: cell.dimension,
+                    declared: cell.evaluation,
+                    decided,
+                });
             }
-            count_cell(&mut counters, cell.evaluation, cell.observed_class);
+            count_cell(&mut counters, decided, cell.observed_class);
             if !cell.succeeded() {
                 case_clean = false;
             }

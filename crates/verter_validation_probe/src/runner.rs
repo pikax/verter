@@ -110,23 +110,26 @@ impl fmt::Display for Phase {
 }
 
 /// A raw execution event, before any per-dimension folding.
+///
+/// The phase each arm carries is [`ProbeRun::outcome_phase`] — the step that
+/// was still running, which is not always the last one announced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecutionEvent {
     /// The driver process could not be started.
     SpawnFailed,
     /// A phase exceeded its deadline.
     TimedOut {
-        /// The last phase the driver announced.
+        /// The phase this outcome belongs to.
         phase: Option<Phase>,
     },
     /// The process died by signal.
     Signaled {
-        /// The last phase the driver announced.
+        /// The phase this outcome belongs to.
         phase: Option<Phase>,
     },
     /// The process exited.
     Exited {
-        /// The last phase the driver announced.
+        /// The phase this outcome belongs to.
         phase: Option<Phase>,
         /// The exit code.
         code: i32,
@@ -577,8 +580,22 @@ impl ProbeRun {
         &self.probe_id
     }
 
-    /// The last phase the driver announced for this probe.
-    pub fn phase(&self) -> Option<Phase> {
+    /// The phase a process outcome belongs to.
+    ///
+    /// Usually the last phase the driver announced — but the COMPILE FRAME
+    /// also moves the probe on, ahead of the marker that follows it. That
+    /// frame is written only once the native call has returned, so from the
+    /// moment it is ingested nothing of the compiler is still running and a
+    /// death or a deadline can only have struck the reference work. Reading
+    /// the marker alone would report a reference that hung before announcing
+    /// itself as a compiler TIMEOUT, and one that died there as a compiler
+    /// CRASH: a verdict about Verter drawn from a step Verter had already
+    /// finished. This is the boundary the reference deadline is armed at, so
+    /// the budget a probe is held to and the cause it is attributed to agree.
+    pub fn outcome_phase(&self) -> Option<Phase> {
+        if self.compile.is_some() {
+            return Some(Phase::Reference);
+        }
         self.phase
     }
 
@@ -1406,7 +1423,7 @@ fn drive_probe(
             Err(RecvTimeoutError::Timeout) => {
                 let _ = child.kill();
                 *stop = Some(LaneStop::Process(ExecutionEvent::TimedOut {
-                    phase: run.phase(),
+                    phase: run.outcome_phase(),
                 }));
                 return;
             }
@@ -1414,12 +1431,16 @@ fn drive_probe(
                 *stop = Some(LaneStop::Process(match child.wait() {
                     Ok(status) => match status.code() {
                         Some(code) => ExecutionEvent::Exited {
-                            phase: run.phase(),
+                            phase: run.outcome_phase(),
                             code,
                         },
-                        None => ExecutionEvent::Signaled { phase: run.phase() },
+                        None => ExecutionEvent::Signaled {
+                            phase: run.outcome_phase(),
+                        },
                     },
-                    Err(_) => ExecutionEvent::Signaled { phase: run.phase() },
+                    Err(_) => ExecutionEvent::Signaled {
+                        phase: run.outcome_phase(),
+                    },
                 }));
                 return;
             }

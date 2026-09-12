@@ -1260,6 +1260,61 @@ fn a_summary_whose_counters_disagree_with_its_cell_rows_is_refused() {
     );
 }
 
+/// A cell whose EVALUATION is not what its own fields decide is refused.
+///
+/// Recomputing the counters from the evaluations the rows declare answers only
+/// "do these numbers add up", and a document that miswrote one verdict and the
+/// counters to match adds up perfectly. The evaluation is a pure function of
+/// the expectation and the observation printed beside it, so the read-back
+/// re-decides it through the same rule that wrote it: a gate cell claiming
+/// `gate_pass` over observations that say otherwise is exactly what the lane's
+/// one real exit must never read as clean.
+#[test]
+fn a_summary_whose_cell_evaluation_is_not_what_its_own_fields_decide_is_refused() {
+    let manifest = vue_manifest();
+    let regressed = one_case_summary(
+        &manifest,
+        vec![
+            phase(CASE, Phase::Compile),
+            compile_frame(CASE, vec![failure_entry(CASE, "host", None)]),
+            phase(CASE, Phase::Reference),
+            reference_frame(
+                CASE,
+                vec![ReferenceResult::Produced {
+                    code: MODULE.to_string(),
+                }],
+            ),
+        ],
+    );
+    assert_eq!(regressed.totals.gated_regressions, 1);
+    assert_ne!(regressed.disposition().exit_code(), 0);
+
+    // Claim the gate PASSED, and zero the counter so the arithmetic still
+    // agrees with the rows. Only re-deciding the cell can catch this.
+    let mut parsed: serde_json::Value =
+        serde_json::from_str(&regressed.to_json()).expect("summary is JSON");
+    let cells = parsed["frameworks"][0]["cases"][0]["cells"]
+        .as_array_mut()
+        .expect("the case carries cells");
+    let gate = cells
+        .iter_mut()
+        .find(|cell| cell["evaluation"] == serde_json::json!("gate_regression"))
+        .expect("the planted regression is a gate cell");
+    gate["evaluation"] = serde_json::json!("gate_pass");
+    parsed["totals"]["gated_regressions"] = serde_json::json!(0);
+    parsed["frameworks"][0]["counters"]["gated_regressions"] = serde_json::json!(0);
+
+    let refused = Summary::from_json_str(&parsed.to_string())
+        .expect_err("a cell claiming a verdict its own fields refuse must be rejected");
+    assert!(
+        matches!(
+            refused,
+            verter_validation_probe::SummaryError::EvaluationMismatch { .. }
+        ),
+        "expected an evaluation mismatch, got {refused}",
+    );
+}
+
 /// A cell row whose terminal and class contradict each other is refused: the
 /// counters are recomputed from those two fields, so an incoherent row would
 /// produce numbers that look honest.
@@ -2184,6 +2239,245 @@ fn a_pause_after_the_compile_frame_is_not_a_compiler_timeout() {
         Some(C::Pass),
         "a pause before the reference marker must not be read as a compiler timeout: {:?}",
         observation.terminal(Dimension::Structural),
+    );
+}
+
+/// A HANG after the compile frame is a reference failure, not a compiler
+/// timeout.
+///
+/// The reference deadline is what bounds the probe from the moment that frame
+/// arrives, and the cause it is attributed to has to move with it: the frame is
+/// written only once the native call has returned, so nothing of the compiler
+/// is still running. Stamping the timeout with the last phase MARKER instead
+/// would report the class that means "the compiler hung" for a hang that
+/// provably happened after the compiler had finished — the taxonomy's most
+/// load-bearing distinction, decided wrongly.
+#[test]
+fn a_hang_after_the_compile_frame_is_a_reference_failure_not_a_compiler_timeout() {
+    let manifest = vue_manifest();
+    let (script, driver) = synthetic_driver(
+        "driver-hang-after-compile",
+        r#"
+  write({ probe_id: id, phase: "load" });
+  write({ probe_id: id, phase: "compile" });
+  write({ probe_id: id, frame: "compile", elapsed_ns: 1, entries: [product(canonicalId)] });
+  // No reference phase marker, and no reference frame: the hang strikes while
+  // the last marker still says `compile`.
+  await sleep(30_000);
+"#,
+    );
+    let cases = [planned(CASE)];
+    let results = runner::run_cases(
+        &manifest,
+        &driver,
+        &cases,
+        PhaseDeadlines {
+            load: std::time::Duration::from_secs(30),
+            compile: std::time::Duration::from_secs(30),
+            reference: std::time::Duration::from_millis(300),
+        },
+    )
+    .unwrap_or_else(|error| panic!("the synthetic driver could not be run: {error}"));
+    let _ = std::fs::remove_file(&script);
+
+    let observation = results[0]
+        .observation
+        .as_ref()
+        .expect("the observation is representable");
+    assert_eq!(
+        observation.terminal(Dimension::Compile).class(),
+        Some(C::Pass),
+        "the compile frame was already ingested, so its terminal stands",
+    );
+    assert_eq!(
+        observation.terminal(Dimension::Structural).class(),
+        Some(C::ReferenceFailure),
+        "a hang after the compile frame must not be attributed to the compiler: {:?}",
+        observation.terminal(Dimension::Structural),
+    );
+}
+
+/// A broken stdout stream is the HARNESS failing, never the compiler.
+///
+/// The runner could not read what the driver said; the driver itself may be
+/// alive and well. Running that through the phase map — which exists to say
+/// which step was executing when a PROCESS ended — would report a crash or a
+/// timeout the compiler never had, and it would say so for every case after it
+/// too.
+#[test]
+fn a_broken_stdout_stream_is_a_harness_failure_not_a_compiler_crash() {
+    let manifest = vue_manifest();
+    let (script, driver) = synthetic_driver(
+        "driver-broken-stream",
+        r#"
+  write({ probe_id: id, phase: "load" });
+  write({ probe_id: id, phase: "compile" });
+  // Bytes that are not a UTF-8 line: the transport, not the compiler.
+  process.stdout.write(Buffer.from([0xff, 0xfe, 0x0a]));
+  await sleep(30_000);
+"#,
+    );
+    let cases = [planned(CASE), planned(CASE)];
+    let results = runner::run_cases(
+        &manifest,
+        &driver,
+        &cases,
+        generous(std::time::Duration::from_secs(30)),
+    )
+    .unwrap_or_else(|error| panic!("the synthetic driver could not be run: {error}"));
+    let _ = std::fs::remove_file(&script);
+
+    for (position, result) in results.iter().enumerate() {
+        let observation = result
+            .observation
+            .as_ref()
+            .expect("the observation is representable");
+        let class = observation.terminal(Dimension::Route).class();
+        assert_eq!(
+            class,
+            Some(C::HarnessFailure),
+            "case {position} must report the harness, not the compiler: {:?}",
+            observation.terminal(Dimension::Route),
+        );
+        assert_ne!(class, Some(C::Crash));
+        assert_ne!(class, Some(C::Timeout));
+    }
+}
+
+/// A frame naming ANOTHER probe stops the lane deliberately, even when the
+/// stream would otherwise carry on perfectly.
+///
+/// The protocol is one probe at a time, so a foreign frame means the stream and
+/// the runner are out of step and the next probe's lines can no longer be told
+/// from this one's. The driver here goes on to answer BOTH probes correctly, so
+/// a runner that merely recorded the refusal and read on would report the
+/// second case as a clean pass — a verdict read off a stream it had already
+/// caught lying about which case it was describing. Evidence that describes a
+/// different case is worse than no evidence, so the driver is killed and every
+/// case after it says so.
+#[test]
+fn a_frame_naming_another_probe_stops_the_lane_and_the_rest_report_it() {
+    let manifest = vue_manifest();
+    let (script, driver) = synthetic_driver(
+        "driver-foreign-frame",
+        r#"
+  write({ probe_id: id, phase: "load" });
+  write({ probe_id: id, phase: "compile" });
+  if (seen === 1) {
+    write({ probe_id: "vue/fixtures/Other.vue", frame: "compile", elapsed_ns: 1,
+            entries: [product(canonicalId)] });
+  }
+  write({ probe_id: id, frame: "compile", elapsed_ns: 1, entries: [product(canonicalId)] });
+  write({ probe_id: id, phase: "reference" });
+  write({ probe_id: id, frame: "reference", reference: [{ code: "export const value = 1\n" }] });
+"#,
+    );
+    let cases = [planned(CASE), planned(CASE)];
+    let results = runner::run_cases(
+        &manifest,
+        &driver,
+        &cases,
+        generous(std::time::Duration::from_secs(30)),
+    )
+    .unwrap_or_else(|error| panic!("the synthetic driver could not be run: {error}"));
+    let _ = std::fs::remove_file(&script);
+
+    let first = results[0]
+        .observation
+        .as_ref()
+        .expect("the observation is representable");
+    assert_eq!(
+        first.terminal(Dimension::Route).class(),
+        Some(C::HarnessFailure),
+        "the refused frame is the probe's own harness failure",
+    );
+    let second = results[1]
+        .observation
+        .as_ref()
+        .expect("the observation is representable");
+    assert_eq!(
+        second.terminal(Dimension::Route).class(),
+        Some(C::HarnessFailure),
+        "the lane must stop rather than read a desynchronised stream: {:?}",
+        second.terminal(Dimension::Route),
+    );
+    assert_ne!(
+        second.terminal(Dimension::Compile).class(),
+        Some(C::Pass),
+        "a case driven after the stream desynchronised must not report a pass",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The committed driver's own protocol refusals
+// ---------------------------------------------------------------------------
+
+/// The committed driver REFUSES a request that carries no `identity.filename`.
+///
+/// That field is the one filename both compilers must compile under. Defaulting
+/// a missing one to the case id would compile the reference under a name the
+/// request never carried, and every filename-derived difference that followed —
+/// a scoped style's scope id above all — would reach the comparator as a
+/// compiler difference the harness itself manufactured. The refusal is a LINE,
+/// so the probe fails and the driver lives on.
+#[test]
+fn the_committed_driver_refuses_a_request_without_an_identity_filename() {
+    use std::io::{BufRead, Write};
+
+    let script = repository_root()
+        .join("crates")
+        .join("verter_validation_probe")
+        .join("driver")
+        .join("probe-driver.mjs");
+    let mut child = std::process::Command::new("node")
+        .arg(&script)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap_or_else(|error| panic!("the committed driver could not be started: {error}"));
+
+    // The canonical request with `identity.filename` removed. Nothing here
+    // reaches the addon: the refusal happens while the line is being read.
+    let mut request: serde_json::Value =
+        serde_json::from_str(&request::substitute("fixtures/App.vue"))
+            .expect("the canonical request is JSON");
+    request["identity"]
+        .as_object_mut()
+        .expect("the request carries an identity object")
+        .remove("filename");
+    let probe = serde_json::json!({
+        "probe_id": CASE,
+        "entries": [{ "canonicalId": CASE, "source": "<template><div/></template>\n",
+                      "request": request }],
+    });
+    let stdin = child.stdin.as_mut().expect("the driver exposes stdin");
+    writeln!(stdin, "{probe}").expect("the probe is written");
+    stdin.flush().expect("the probe is flushed");
+    drop(child.stdin.take());
+
+    let stdout = child.stdout.take().expect("the driver exposes stdout");
+    let answered: Vec<String> = std::io::BufReader::new(stdout)
+        .lines()
+        .map(|line| line.expect("the driver writes UTF-8 lines"))
+        .collect();
+    let _ = child.wait();
+
+    let line = answered
+        .first()
+        .unwrap_or_else(|| panic!("the driver answered nothing: {answered:?}"));
+    let parsed = parse_line(line).unwrap_or_else(|error| panic!("{line}: {error}"));
+    match parsed {
+        DriverLine::Error { error, .. } => assert!(
+            error.contains("identity.filename"),
+            "the refusal must name the missing field: {error}",
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert_eq!(
+        answered.len(),
+        1,
+        "a refused request must not also be compiled: {answered:?}",
     );
 }
 
