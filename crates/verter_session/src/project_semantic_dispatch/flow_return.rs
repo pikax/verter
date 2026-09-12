@@ -5708,16 +5708,53 @@ fn narrowing_facts_of(products: &FlowProductStore) -> Vec<FlowNarrowingFact> {
         .collect()
 }
 
-/// Replace `into`'s whole narrowing overlay with `from`'s.
-fn replace_narrowings(from: &FlowProductStore, into: &mut FlowProductStore) {
-    for subject in into.subjects_in(super::flow_solve::FlowDomain::Narrowing) {
-        into.remove(super::flow_solve::FlowDomain::Narrowing, &subject);
+/// Re-establish one root's `facts` on `products` in ONE product write,
+/// with the same-position replacement [`push_narrowing_into`] applies per
+/// fact: a standing fact about a position `facts` names is replaced, every
+/// other standing fact stays.
+///
+/// A root whose standing product already holds every fact is left
+/// untouched, so re-establishing an overlay the clause boundary already
+/// restored copies and rebuilds nothing. `facts` and the standing product
+/// are both in canonical fact order, so that check is one merge walk.
+fn reestablish_narrowings(
+    products: &mut FlowProductStore,
+    root: &FlowProductSubject,
+    facts: &[FlowNarrowingFact],
+) {
+    let Some(identity) = products.identity(root) else {
+        products.remove(super::flow_solve::FlowDomain::Narrowing, root);
+        return;
+    };
+    let standing: &[FlowNarrowingFact] = products
+        .narrowing(root)
+        .map(NarrowingProduct::facts)
+        .unwrap_or_default();
+    fn position(fact: &FlowNarrowingFact) -> (&[Arc<str>], u64) {
+        (fact.path.as_ref(), fact.narrowed_to.0)
     }
-    for subject in from.subjects_in(super::flow_solve::FlowDomain::Narrowing) {
-        if let Some(product) = from.narrowing(&subject) {
-            into.set_narrowing(&subject, product.clone());
-        }
+    let mut held = standing.iter().map(position).peekable();
+    let holds_all = facts.iter().all(|fact| {
+        let wanted = position(fact);
+        while held.next_if(|standing| *standing < wanted).is_some() {}
+        held.next_if_eq(&wanted).is_some()
+    });
+    if holds_all {
+        return;
     }
+    let replaced: rustc_hash::FxHashSet<&[Arc<str>]> =
+        facts.iter().map(|fact| fact.path.as_ref()).collect();
+    let merged: Vec<FlowNarrowingFact> = standing
+        .iter()
+        .filter(|fact| !replaced.contains(fact.path.as_ref()))
+        .cloned()
+        .chain(facts.iter().map(|fact| FlowNarrowingFact {
+            binding: identity.clone(),
+            path: Arc::clone(&fact.path),
+            narrowed_to: fact.narrowed_to,
+        }))
+        .collect();
+    products.set_narrowing(root, NarrowingProduct::new(merged));
 }
 
 /// Record `path` under `root` narrowing to `node` in `products` — the ONE
@@ -6213,6 +6250,71 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
         }
         self.narrowing_writes.truncate(mark.writes);
+    }
+
+    /// Restore `into`'s narrowing overlay to a `try` statement's ENTRY
+    /// overlay, keeping exactly the entering facts that still stand on
+    /// `into`.
+    ///
+    /// The restore is what keeps a narrow established inside a clause
+    /// from leaking out of it. It must not bring back an entering fact
+    /// that no longer describes `into`, nor one that would mask a narrower
+    /// value `into` already holds:
+    ///
+    /// - a root `into` WROTE since the entry keeps an entering fact only
+    ///   while the written value still lies within it and says no more
+    ///   than it: the fact was about the value the write replaced (`typeof p === "string"` before `try {
+    ///   p = 1 } finally {}` does not describe `p` past the statement,
+    ///   while after `p = "x"` it still does). The written set is `into`'s
+    ///   own executed writes, never the subset whose reaching type
+    ///   changed — an unchanged write replaces the value all the same —
+    ///   and never another predecessor's: the pre-try predecessor of a
+    ///   `finally` executed no write and keeps every entering fact;
+    /// - an unwritten root whose value a case refinement narrowed without
+    ///   a write keeps an entering fact only while the refined value does
+    ///   not already say more, narrowed to the refined value where the two
+    ///   overlap ([`Self::settled_guard_fact`]).
+    ///
+    /// An unwritten root still holding its entry value keeps its whole
+    /// entering product without a comparison: its facts were established
+    /// over exactly that value.
+    fn restore_clause_entry_narrowings(
+        &mut self,
+        entry: &FlowLayerState,
+        into: &mut FlowProductStore,
+    ) {
+        let written: rustc_hash::FxHashSet<FlowProductSubject> = into
+            .writes_since(&entry.write_observation)
+            .iter()
+            .map(|subject| self.canonical_runtime_subject(subject))
+            .collect();
+        for subject in into.subjects_in(super::flow_solve::FlowDomain::Narrowing) {
+            into.remove(super::flow_solve::FlowDomain::Narrowing, &subject);
+        }
+        for subject in entry
+            .products
+            .subjects_in(super::flow_solve::FlowDomain::Narrowing)
+        {
+            let Some(product) = entry.products.narrowing(&subject) else {
+                continue;
+            };
+            let written = written.contains(&subject);
+            let value = into.reaching(&subject);
+            if !written && value == entry.products.reaching(&subject) {
+                into.set_narrowing(&subject, product.clone());
+                continue;
+            }
+            let mut kept: Vec<FlowNarrowingFact> = Vec::with_capacity(product.facts().len());
+            for fact in product.facts() {
+                if let Some(narrowed_to) = self.settled_guard_fact(fact, value, written) {
+                    kept.push(FlowNarrowingFact {
+                        narrowed_to,
+                        ..fact.clone()
+                    });
+                }
+            }
+            into.set_narrowing(&subject, NarrowingProduct::new(kept));
+        }
     }
 
     /// Record one guard fact: `subject`'s member `path` narrows to `node`.
@@ -8613,19 +8715,116 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ReachingTypeProduct::of(node).with_widening(widening),
             );
         };
-        match &subject.root {
-            crate::flow_slice_content::SliceNarrowRoot::Param {
-                ordinal: _,
-                binding,
-                ..
-            } => {
-                rebind(&mut state.products, &FlowProductSubject::Local(*binding));
+        let target = match &subject.root {
+            crate::flow_slice_content::SliceNarrowRoot::Param { binding, .. } => {
+                FlowProductSubject::Local(*binding)
             }
             crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
-                if state.products.reaching(binding).is_some() {
-                    rebind(&mut state.products, binding);
+                if state.products.reaching(binding).is_none() {
+                    return;
                 }
+                binding.clone()
             }
+        };
+        rebind(&mut state.products, &target);
+        let root = self.canonical_runtime_subject(&target);
+        self.settle_refined_root_facts(&mut state.products, &root, node);
+    }
+
+    /// Settle `root`'s overlay after a whole-binding refinement to `node`
+    /// rode its reaching-TYPE layer.
+    ///
+    /// The two layers both answer for the binding, and a read takes the
+    /// overlay's answer first, so an enclosing guard's broader fact left
+    /// standing would mask the refinement — `if (typeof p === "string")
+    /// switch (p) { case "a": … }` would read `string` on an edge that
+    /// proved `"a"`, and a guard's member fact `p.v: "A" | "B"` would
+    /// outrank the `"A"` a case over `p.k` selected. The whole-binding
+    /// fact is always retired: `node` was computed FROM the
+    /// overlay-preferred value, so it is never broader. A MEMBER fact is
+    /// settled against the refined root's own member
+    /// ([`Self::settled_guard_fact`]): retired when that member is
+    /// strictly narrower, kept when it still says more (the case left `v:
+    /// string | number`, the guard proved `string`), and narrowed to the
+    /// refined member filtered by the fact when the two overlap (the
+    /// case's optional `v?: "A"` under a guard's `"A" | "B"` reads `"A"`).
+    fn settle_refined_root_facts(
+        &mut self,
+        products: &mut FlowProductStore,
+        root: &FlowProductSubject,
+        node: SemanticNodeId,
+    ) {
+        let Some(product) = products.narrowing(root).cloned() else {
+            return;
+        };
+        let mut kept: Vec<FlowNarrowingFact> = Vec::with_capacity(product.facts().len());
+        let mut changed = false;
+        for fact in product.facts() {
+            let settled = if fact.path.is_empty() {
+                None
+            } else {
+                self.settled_guard_fact(fact, Some(node), false)
+            };
+            changed |= settled != Some(fact.narrowed_to);
+            kept.extend(settled.map(|narrowed_to| FlowNarrowingFact {
+                narrowed_to,
+                ..fact.clone()
+            }));
+        }
+        if changed {
+            products.set_narrowing(root, NarrowingProduct::new(kept));
+        }
+    }
+
+    /// What guard `fact` narrows to on a state whose root holds
+    /// `root_value`, or `None` when the fact no longer stands.
+    ///
+    /// The comparison is against the value a read would fall through to:
+    /// the root projected down the fact's path, through the same shared
+    /// navigation a member read uses. A fact the current value already
+    /// meets exactly stands unchanged (keeping it keeps two predecessors
+    /// that agree on it agreeing at their join). One the value is
+    /// strictly narrower than does not: the read falls through to the
+    /// narrower value. One the value does not meet stands only when the
+    /// root was not `written` — an unwritten binding still holds the value
+    /// the guard was about, while a write replaced it — and then both the
+    /// fact and the value describe the binding, so the fact narrows to the
+    /// value narrowed by it ([`Self::narrow_node_to_candidate`]); a value
+    /// that projects nowhere, or an undecided narrow, leaves the fact
+    /// unchanged.
+    fn settled_guard_fact(
+        &mut self,
+        fact: &FlowNarrowingFact,
+        root_value: Option<SemanticNodeId>,
+        written: bool,
+    ) -> Option<SemanticNodeId> {
+        let standing = (!written).then_some(fact.narrowed_to);
+        let Some(current) =
+            root_value.and_then(|root| self.project_segments_navigate(root, &fact.path))
+        else {
+            return standing;
+        };
+        if current == fact.narrowed_to {
+            return Some(fact.narrowed_to);
+        }
+        if self.assignable(current, fact.narrowed_to) == Some(true) {
+            return (self.assignable(fact.narrowed_to, current) == Some(true))
+                .then_some(fact.narrowed_to);
+        }
+        if written {
+            return None;
+        }
+        let (narrowed, _) = self.narrow_node_to_candidate(current, fact.narrowed_to);
+        match narrowed {
+            // An equivalent narrow keeps the fact's own node, so two
+            // predecessors holding the same fact still agree at a join.
+            Some(node)
+                if node != fact.narrowed_to
+                    && self.assignable(fact.narrowed_to, node) != Some(true) =>
+            {
+                Some(node)
+            }
+            _ => standing,
         }
     }
 
@@ -9204,6 +9403,96 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .0
     }
 
+    /// The checker's narrow of `current` to a `candidate` type — the
+    /// positive edge of a type predicate, and the reconciliation of a
+    /// standing guard fact with a value refined under it. Keeps
+    /// `current`'s arms assignable to the candidate; when NO arm survives
+    /// but the candidate is itself assignable to `current`, the candidate
+    /// IS the narrow; otherwise the pair's intersection, or `never` when
+    /// the shared authority proves the pair disjoint under a checker
+    /// collapse criterion. `None` leaves `current` unchanged: every arm
+    /// survived, or an arm relation was undecided
+    /// ([`PredicateNarrowConsumption::Undecided`]).
+    fn narrow_node_to_candidate(
+        &mut self,
+        current: SemanticNodeId,
+        candidate: SemanticNodeId,
+    ) -> (Option<SemanticNodeId>, PredicateNarrowConsumption) {
+        use PredicateNarrowConsumption as Consumption;
+        let arms = self.enumerated_union_arms_or_self(current);
+        let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        for arm in &arms {
+            match self.assignable(*arm, candidate) {
+                Some(true) => survivors.push(*arm),
+                Some(false) => {}
+                None => return (None, Consumption::Undecided),
+            }
+        }
+        if !survivors.is_empty() {
+            if survivors.len() == arms.len() {
+                return (None, Consumption::Decided);
+            }
+            let node = self
+                .dispatch
+                .intern_normalized_union_or_intersection(&survivors, true);
+            return (Some(node), Consumption::Decided);
+        }
+        let reverse = self.assignable(candidate, current);
+        if reverse == Some(true) {
+            return (Some(candidate), Consumption::Decided);
+        }
+        // Disjointness is not decided here. The evaluator owns no
+        // relation classifier: it asks the shared authority whether the
+        // subject and the candidate can overlap, and consumes the
+        // authority's disjointness PROOF. An undecided verdict is a typed
+        // gap, never a guessed direction.
+        use super::relation::ComparabilityVerdict;
+        let comparable = self.comparable(current, candidate);
+        if matches!(comparable, ComparabilityVerdict::Undecided) {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::NominalRelation,
+            ));
+        }
+        // An undecided REVERSE relation leaves the choice between the
+        // candidate narrow and the intersection fallback unproven: the
+        // value keeps the checker's intersection rule, the relation
+        // obligation stays unclaimed.
+        let consumption = if reverse.is_none() {
+            Consumption::Undecided
+        } else {
+            Consumption::Decided
+        };
+        let ComparabilityVerdict::Disjoint(ref proof) = comparable else {
+            let intersection = self
+                .dispatch
+                .intern_normalized_union_or_intersection(&[current, candidate], false);
+            return (Some(intersection), consumption);
+        };
+        // The pair is PROVED disjoint, and the proof carries the
+        // CHECKER'S intersection-reduction answer for exactly this
+        // pair. A unit-discriminant conflict (disjoint tags, distinct
+        // `unique symbol` identities, a conflicting shared REQUIRED
+        // member whose values are both unit types) reduces the
+        // intersection to `never`; a conflict reachable only through
+        // non-unit member values keeps `A & B`, and the checker-kept
+        // intersection is the value this narrow must publish. The
+        // collapse class is the authority's payload on its own proof —
+        // the evaluator decides nothing about which disjoint pairs
+        // reduce.
+        if !proof.checker_reduces_intersection_to_never() {
+            let intersection = self
+                .dispatch
+                .intern_normalized_union_or_intersection(&[current, candidate], false);
+            return (Some(intersection), consumption);
+        }
+        // The candidate is PROVED disjoint from the whole subject through a
+        // checker collapse criterion — the intersection reduces to
+        // `never`, so the subject reads `never` on the positive edge
+        // while the edge stays alive: a contributor there that reads a
+        // different binding keeps its own type.
+        (Some(self.never_node()), consumption)
+    }
+
     /// [`Self::narrow_to_predicate_target`] carrying the CONSUMPTION
     /// verdict — whether the evaluator genuinely consumed the predicate
     /// fact, and whether the narrow-direction obligation it asked was
@@ -9241,93 +9530,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let current = self
                 .subject_current_node(subject)
                 .expect("the subject answered just above");
-            let arms = self.enumerated_union_arms_or_self(current);
-            let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
-            for arm in &arms {
-                match self.assignable(*arm, target_node) {
-                    Some(true) => survivors.push(*arm),
-                    Some(false) => {}
-                    None => return (GuardNarrowing::Unchanged, Consumption::Undecided),
-                }
-            }
-            if !survivors.is_empty() {
-                if survivors.len() == arms.len() {
-                    return (GuardNarrowing::Unchanged, Consumption::Decided);
-                }
-                let node = self
-                    .dispatch
-                    .intern_normalized_union_or_intersection(&survivors, true);
-                return (
-                    GuardNarrowing::Narrowed(subject.clone(), node),
-                    Consumption::Decided,
-                );
-            }
-            let reverse = self.assignable(target_node, current);
-            if reverse == Some(true) {
-                return (
-                    GuardNarrowing::Narrowed(subject.clone(), target_node),
-                    Consumption::Decided,
-                );
-            }
-            // Disjointness is not decided here. The evaluator owns no
-            // relation classifier: it asks the shared authority whether the
-            // subject and the predicate target can overlap, and consumes the
-            // authority's disjointness PROOF. An undecided verdict is a typed
-            // gap, never a guessed direction.
-            use super::relation::ComparabilityVerdict;
-            let comparable = self.comparable(current, target_node);
-            if matches!(comparable, ComparabilityVerdict::Undecided) {
-                self.record_degradation(FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::NominalRelation,
-                ));
-            }
-            // An undecided REVERSE relation leaves the choice between the
-            // target narrow and the intersection fallback unproven: the
-            // value keeps the checker's intersection rule, the relation
-            // obligation stays unclaimed.
-            let consumption = if reverse.is_none() {
-                Consumption::Undecided
-            } else {
-                Consumption::Decided
+            let (narrowed, consumption) = self.narrow_node_to_candidate(current, target_node);
+            let fact = match narrowed {
+                Some(node) => GuardNarrowing::Narrowed(subject.clone(), node),
+                None => GuardNarrowing::Unchanged,
             };
-            let ComparabilityVerdict::Disjoint(ref proof) = comparable else {
-                let intersection = self
-                    .dispatch
-                    .intern_normalized_union_or_intersection(&[current, target_node], false);
-                return (
-                    GuardNarrowing::Narrowed(subject.clone(), intersection),
-                    consumption,
-                );
-            };
-            // The pair is PROVED disjoint, and the proof carries the
-            // CHECKER'S intersection-reduction answer for exactly this
-            // pair. A unit-discriminant conflict (disjoint tags, distinct
-            // `unique symbol` identities, a conflicting shared REQUIRED
-            // member whose values are both unit types) reduces the
-            // intersection to `never`; a conflict reachable only through
-            // non-unit member values keeps `A & B`, and the checker-kept
-            // intersection is the value this narrow must publish. The
-            // collapse class is the authority's payload on its own proof —
-            // the evaluator decides nothing about which disjoint pairs
-            // reduce.
-            if !proof.checker_reduces_intersection_to_never() {
-                let intersection = self
-                    .dispatch
-                    .intern_normalized_union_or_intersection(&[current, target_node], false);
-                return (
-                    GuardNarrowing::Narrowed(subject.clone(), intersection),
-                    consumption,
-                );
-            }
-            // The target is PROVED disjoint from the whole subject through a
-            // checker collapse criterion — the intersection reduces to
-            // `never`, so the subject reads `never` on the positive edge
-            // while the edge stays alive: a contributor there that reads a
-            // different binding keeps its own type.
-            return (
-                GuardNarrowing::Narrowed(subject.clone(), self.never_node()),
-                consumption,
-            );
+            return (fact, consumption);
         }
         let mut undecided = false;
         let fact = self.narrow_arms_by(subject, |this, arm| {
@@ -10303,7 +10511,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             let mut normal_inputs = exit_states.clone();
                             normal_inputs.push(entry.clone());
                             for state in &mut normal_inputs {
-                                replace_narrowings(&entry.products, &mut state.products);
+                                self.restore_clause_entry_narrowings(&entry, &mut state.products);
                                 self.flag_clause_type_changes(state, &try_writes.type_changes);
                                 if let Some(written) = &catch_writes {
                                     self.flag_clause_type_changes(state, &written.type_changes);
@@ -10345,7 +10553,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // the entry's overlay) plus exactly the
                             // finally's own writes.
                             let mut post = pre_finally.clone();
-                            replace_narrowings(&entry.products, &mut post.products);
+                            self.restore_clause_entry_narrowings(&entry, &mut post.products);
                             for subject in &finally_writes.executed.0 {
                                 post.products
                                     .apply_executed_write_from(subject, &finally_end.products);
@@ -10378,29 +10586,43 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                         }
                                     }
                                 }
-                                let entry_facts = narrowing_facts_of(&entry.products);
-                                let restored: Vec<FlowNarrowingFact> = try_narrowings
+                                // A fact EQUAL to one the entry carried is
+                                // re-established like any other. The try
+                                // PROVED it on the only path that reaches
+                                // here, and whether the entering overlay
+                                // happened to hold the same fact says
+                                // nothing about that: when the clause also
+                                // WROTE the binding, the restore dropped the
+                                // entering fact as stale and this proof is
+                                // the only thing standing. (The same reason
+                                // `standing_narrowings` counts a
+                                // re-establishment over the write ledger
+                                // instead of diffing the overlay: a state
+                                // diff cannot tell a proof from an
+                                // untouched position.) One product write per
+                                // root, and none for a root whose restored
+                                // product already holds the try's facts.
+                                let mut restored = try_narrowings
                                     .iter()
-                                    .filter(|fact| {
-                                        !entry_facts.contains(fact)
-                                            && !killed.contains(&fact.binding)
-                                    })
-                                    .cloned()
-                                    .collect();
-                                for fact in restored {
+                                    .filter(|fact| !killed.contains(&fact.binding))
+                                    .peekable();
+                                let mut facts: Vec<FlowNarrowingFact> = Vec::new();
+                                while let Some(first) = restored.next() {
+                                    facts.clear();
+                                    facts.push(first.clone());
+                                    while let Some(next) =
+                                        restored.next_if(|next| next.binding == first.binding)
+                                    {
+                                        facts.push(next.clone());
+                                    }
                                     let subject = self
                                         .bindings
-                                        .local(&fact.binding)
+                                        .local(&first.binding)
                                         .map(FlowProductSubject::Local)
                                         .unwrap_or_else(|| {
-                                            FlowProductSubject::Captured(fact.binding.clone())
+                                            FlowProductSubject::Captured(first.binding.clone())
                                         });
-                                    push_narrowing_into(
-                                        &mut self.products,
-                                        &subject,
-                                        &fact.path,
-                                        fact.narrowed_to,
-                                    );
+                                    reestablish_narrowings(&mut self.products, &subject, &facts);
                                 }
                                 for subject in &try_writes.type_changes.0 {
                                     if entry.products.assignment(subject).single_path() {
@@ -10463,7 +10685,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // the statement, so no clause-established
                             // narrow survives — even when the catch itself
                             // returns (tsgo, measured).
-                            replace_narrowings(&entry.products, &mut pre_finally.products);
+                            self.restore_clause_entry_narrowings(&entry, &mut pre_finally.products);
                             self.restore_layer_state(pre_finally);
                             path_alive = !exit_states.is_empty();
                         }
