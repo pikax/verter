@@ -921,10 +921,12 @@ mod tests {
     use verter_language::{ExternalLinkKind, ScriptRegionKind};
 
     /// Test-only convenience over [`VueCarrierCompiler::compile_bundle`] for
-    /// fixtures whose carrier is known to PRODUCE — mirrors the crate's
-    /// `CompileBundleProducedExt`, scoped to `VueCarrierCompiler`'s own
-    /// inherent `compile_bundle` now that Vue no longer implements the
-    /// shared `CarrierCompiler` trait.
+    /// fixtures whose carrier is known to PRODUCE.
+    ///
+    /// Deliberately test-only: production code matches the outcome
+    /// exhaustively, so a refusal can never be unwrapped into "some bundle"
+    /// there. A test that is ABOUT the refusal calls `compile_bundle`
+    /// directly and matches the arm.
     trait VueCompileBundleProducedExt {
         fn compile_bundle_expect_produced(
             &self,

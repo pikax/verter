@@ -464,7 +464,7 @@ fn assemble_main_module_render_function_binding() {
 fn assemble_main_module_template_only_sfc() {
     use oxc_allocator::Allocator;
     use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-    use verter_compiler::framework_common::{CarrierCompiler, RuntimeCompileOptions};
+    use verter_compiler::framework_common::RuntimeCompileOptions;
 
     // Drive the Vue CARRIER `compile_bundle` (the registry-routed producer)
     // so this end-to-end assembly test exercises the neutral bundle path.
@@ -534,7 +534,7 @@ fn assemble_main_module_template_only_sfc() {
 fn assemble_main_module_inline_topology() {
     use oxc_allocator::Allocator;
     use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-    use verter_compiler::framework_common::{CarrierCompiler, RuntimeCompileOptions};
+    use verter_compiler::framework_common::RuntimeCompileOptions;
 
     let source = "<script setup>\nimport { ref } from 'vue'\nconst msg = ref('hello')\n</script>\n<template><div>{{ msg }}</div></template>";
     let alloc = Allocator::new();
@@ -615,7 +615,7 @@ fn assemble_main_module_inline_topology() {
 fn assemble_passes_compiler_returned_bindings_verbatim() {
     use oxc_allocator::Allocator;
     use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-    use verter_compiler::framework_common::{CarrierCompiler, RuntimeCompileOptions};
+    use verter_compiler::framework_common::RuntimeCompileOptions;
 
     // UnusedSetupImport must be elided by the COMPILER (not by any
     // assembly-level text filtering); `msg` is template-used and stays.

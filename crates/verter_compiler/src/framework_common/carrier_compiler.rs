@@ -828,41 +828,6 @@ impl RuntimeCompileOutput {
     }
 }
 
-/// Test-only convenience over [`CarrierCompiler::compile_bundle`] for fixtures
-/// whose carrier is known to PRODUCE.
-///
-/// Deliberately test-only: production code matches the outcome exhaustively, so
-/// a refusal can never be unwrapped into "some bundle" there. A test that is
-/// ABOUT the refusal calls `compile_bundle` directly and matches the arm.
-#[cfg(test)]
-pub(crate) trait CompileBundleProducedExt {
-    fn compile_bundle_expect_produced(
-        &self,
-        source: &str,
-        artifact: &FrameworkParseArtifact,
-        opts: &RuntimeCompileOptions,
-        alloc: &oxc_allocator::Allocator,
-    ) -> Result<RuntimeCompileOutput, CompileUnsupported>;
-}
-
-#[cfg(test)]
-impl<T: CarrierCompiler + ?Sized> CompileBundleProducedExt for T {
-    fn compile_bundle_expect_produced(
-        &self,
-        source: &str,
-        artifact: &FrameworkParseArtifact,
-        opts: &RuntimeCompileOptions,
-        alloc: &oxc_allocator::Allocator,
-    ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
-        self.compile_bundle(source, artifact, opts, alloc)
-            .map(|outcome| {
-                outcome
-                    .into_produced()
-                    .expect("this fixture's carrier produces a runtime surface")
-            })
-    }
-}
-
 /// Why a carrier FAIL-CLOSED on the runtime surface a request asked for.
 ///
 /// The reason is carried STRUCTURALLY — a stable code plus its message and
