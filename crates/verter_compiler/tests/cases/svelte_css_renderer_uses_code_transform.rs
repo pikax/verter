@@ -24,8 +24,8 @@
 //! buffer token, a reassembled buffer shape — via inline-string fixtures
 //! (the production tree is never edited to prove discrimination).
 //!
-//! Registered in `CRITICAL_RULE_GUARDS` under "CodeTransform Is the Single
-//! Source of Truth".
+//! Enforces the "CodeTransform Is the Single Source of Truth" rule in
+//! `CLAUDE.md`.
 
 use super::svelte_guard_support;
 

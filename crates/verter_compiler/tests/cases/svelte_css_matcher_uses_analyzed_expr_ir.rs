@@ -15,8 +15,7 @@
 //! synth-wrap formatting, a semantic `analyzed.source` read, or the retired
 //! `parse_render_call` reparse entry.
 //!
-//! Registered in `CRITICAL_RULE_GUARDS` under "Typed-IR-Only Resolver Rule"
-//! (`crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs`).
+//! Enforces the "Typed-IR-Only Resolver Rule" in `CLAUDE.md`.
 
 use super::svelte_guard_support;
 

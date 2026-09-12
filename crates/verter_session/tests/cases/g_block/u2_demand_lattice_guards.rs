@@ -4,7 +4,7 @@
 //!
 //! Every test here is DISCRIMINATING: it FAILS against a deliberately
 //! broken lattice op and PASSES against the spec-correct one. The three
-//! named guards are load-bearing R6 registry targets:
+//! named guards each pin one load-bearing lattice property:
 //!
 //! - `query_modes_are_presets_over_projection_demand_eval_policy` — each
 //!   `ProjectionMode` resolves (via `From<ProjectionMode> for Demand`) to

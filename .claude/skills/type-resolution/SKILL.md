@@ -368,6 +368,8 @@ Best-architecture target:
 - Projection planning is explicit. Callers request identity/navigation/shallow/expanded behavior and package-boundary/depth policy up front; resolvers do not infer these from ad hoc shape checks.
 - If the current IR cannot represent a TypeScript construct, extend the IR/schema or return a structured unsupported result with diagnostics. Do not recover meaning by reparsing display text.
 
+Guards: `no_macro_string_heuristics_in_resolver_core`, `no_format_then_reparse`, `no_node_modules_substring_outside_workspace_api` (`crates/verter_session/tests/cases/architecture_guards.rs`) mechanically forbid the text-derived-meaning and path-substring patterns the rule text names. The identity/validation-completeness half of the rule is held by the cache-architecture guards (`/type-cache-architecture`), not by these three.
+
 ## Typed Degradation And Completeness Contract (CRITICAL)
 
 Semantic degraded states are part of the type system contract. They must be typed, propagated, and observable.
@@ -376,6 +378,8 @@ Semantic degraded states are part of the type system contract. They must be type
 - `Unknown` is allowed only for a genuine unknown type value with provenance explaining why the producer could not represent it. If the producer knows this is `Unsupported`, `BudgetExceeded`, `Recursive`, `Miss`, or `Unstable`, use that state instead.
 - Public query envelopes must preserve completeness. `Complete` means the required inputs were available, current, and no budget/unsupported/unstable branch affected the answer. A query may return `Complete(None)` only when absence itself was proven under the current facts; missing analysis, stale cache data, unavailable providers, unsupported operators, and budget exits must surface as `Unavailable`, `Partial`, or a typed degraded result.
 - Degraded results may be displayed and returned to callers, but must not be promoted into warm shared caches as complete answers.
+
+Guards: `macro_impacting_constructs_fail_lowering_not_silent_skip` (`crates/verter_session/tests/cases/architecture_guards.rs` + `crates/verter_session/src/owned_artifacts/eval_program_tests.rs`) pins fail-loud lowering over silent skip; `audit_publishes_member_edge_with_published_field_provenance_at_macro_boundaries` (`crates/verter_session/src/component_meta_audit/mod_tests.rs`) pins published-field provenance at the macro boundaries. Typed degraded-state propagation beyond those two boundaries is not yet guarded end to end.
 
 ## Cache Population Target Contract
 
@@ -594,7 +598,7 @@ Edges compose. `ProjectPath(OtherType<string>, ['a','foo'])` produces a node who
 
 **Three distinct `OriginEdgeKind` taxonomies (do not conflate or reconcile).** The nine derivation kinds above live as `verter_session::semantic_query::OriginEdgeKind`. The audit substrate mirrors them and adds one audit-only kind: `verter_audit::OriginEdgeKind` = the same nine + `SharedLoadReuse` (emitted when a request joins a winner's in-flight artifact via scheduler dedup). The typeinfo **wire** graph uses a SEPARATE 10-arm graph-relationship taxonomy (proto `GraphOriginEdgeKind`: `DECLARES`/`INSTANTIATES`/`REFERENCES`/`MEMBER_OF`/`RESOLVES_TO`/`SHARED_LOAD_REUSE`/`FALLTHROUGH`/`RELATION_PROOF_STEP`/`BACK_EDGE_CYCLE`/`AUGMENTATION_STITCH`) — NOT the derivation taxonomy renamed, and only session↔audit is name-isomorphic (modulo `SharedLoadReuse`). The three lists are pinned by `origin_edge_taxonomy_locked` (`crates/verter_session/tests/cases/g_block/typeinfo_graph_contract_guards.rs`).
 
-**Typeinfo wire-contract guard surface.** The closed typeinfo wire surface (proto node/symbol/origin/request/error taxonomies, the split env-hash query identity, the closure-bound and schema-version request contracts, and the `AuditedResult` audit carrier) is pinned by a family of static guards under `crates/verter_session/tests/cases/g_block/typeinfo_{wire_surface,graph_contract,request_contract,audit_contract}_guards.rs`, all registered under the `Typeinfo Wire Contract` rule in `CRITICAL_RULE_GUARDS`.
+**Typeinfo wire-contract guard surface.** The closed typeinfo wire surface (proto node/symbol/origin/request/error taxonomies, the split env-hash query identity, the closure-bound and schema-version request contracts, and the `AuditedResult` audit carrier) is pinned by a family of static guards under `crates/verter_session/tests/cases/g_block/typeinfo_{wire_surface,graph_contract,request_contract,audit_contract}_guards.rs`.
 
 **First-class telemetry.** `SemanticGraphStore` exposes `SemanticGraphStats` as a public API. Per-`SemanticQueryKey`-variant counters (cache hits, misses, same-path-sentinel returns, in-flight peak, cross-thread-join wait time) and per-dispatch-builder counters (instantiations, conditional branch selections, budget/fallback invocations, path length p50/p95, projection depth p50/p95, origin edges emitted, origin edges per node p50/p95) are mandatory — not an optional observability pass. The trace-check harness, benchmark pipeline, and feedback-file report at track exit consume `SemanticGraphStats::snapshot()` directly.
 
@@ -909,7 +913,7 @@ Same-name TypeScript declaration merging is owned end-to-end by the shared layer
 
 **Versioning:** same-file merged values root on the owner's single `FileWholeHash` self-root under a content-free query-identity key (R6) — no dedicated contributor-sequence fact. Cross-file ambient augmentation (`declare module`/`declare global`) is a separate concern documented under **Declaration Augmentation (CRITICAL)** below — it reuses this same `MergedDecl` peer-merge path, it is not a second merge engine.
 
-**Guards** (registered in `critical_rules_have_guards.rs::CRITICAL_RULE_GUARDS`): `eval_env_type_symbols_are_grouped_not_last_wins_map`, `eval_env_add_decl_appends_not_overwrites`, `no_intersection_merge_synthesis_in_verter_session`, `merged_decl_lowers_to_distinct_carrier_not_intersection`, plus the discriminating `declaration_merge_facts` regression and the `declaration_merge` typeinfo oracles.
+**Guards**: `eval_env_type_symbols_are_grouped_not_last_wins_map`, `eval_env_add_decl_appends_not_overwrites`, `no_intersection_merge_synthesis_in_verter_session`, `merged_decl_lowers_to_distinct_carrier_not_intersection`, plus the discriminating `declaration_merge_facts` regression and the `declaration_merge` typeinfo oracles.
 
 **Merge/augmentation WIRE domain (architecture decision).** The wire representation of a merged declaration / module augmentation is ALREADY modelled inside `GraphTypeNode`: kinds **21–25** (`GraphMergedDeclaration` `{merged_symbol, repeated GraphDeclarationPart parts}`, `GraphAmbientModule`, `GraphModuleAugmentation`, `GraphAmbientNamespace`, `GraphGlobalAugmentation`), with decl anchors as nested `GraphDeclarationPart`. The LIVE carrier behind that wire surface is the graph node `SemanticNodeData::MergedDecl { contributors }` — reduced to an `Object` / overload surface and emitted as a `GraphTypeNode`. The `SemanticQueryValue::DeclarationAnalysis(DeclarationAnalysisValue)` value variant is a **non-live shell** with NO producer and is NOT the wire carrier (its rustdoc points back here). A proposal to relocate merge to a distinct `DeclarationAnalysisGraph` wire message is **rejected**: the correct home already exists in the closed contract, so adding the message would be dead duplicate surface (new tags + TS bindings + validation + a `schema_version` bump + permanent compat). A structured-merge-graph producer (actual `GraphMergedDeclaration` emission) lands ONLY together with its first real FFI/TS consumer, as the existing kind 21 — never as a separate message. Do not re-flag "missing wire-proto relocation" as an incomplete deliverable.
 
@@ -930,7 +934,7 @@ Inner declarations NEVER enter file-scope `type_symbols`/`value_symbols`. Parse-
 
 **Cross-file FACTS** ride the stitch's own rail: the cold stitch observes one `FactKey::ModuleAugmentationIndexShape` (the augmenter-set fingerprint — the SOLE `RouteSurface` fact) plus one `FileWholeHash` per contributing file (base ∪ augmenters), and records `self_root_canonicals = {base} ∪ {augmenters}`. A content edit to ANY contributor misses the warm read; torn/partial routes through `ReturnOnly`, never warmed. Query keys stay content-free (R6).
 
-**Guards** (registered in `critical_rules_have_guards.rs::CRITICAL_RULE_GUARDS`): `session_overlay_augmenter_isolated_from_base_index`, `session_overlay_augmentation_isolated_from_base_meta` (the e2e overlay-isolation oracle).
+**Guards**: `session_overlay_augmenter_isolated_from_base_index`, `session_overlay_augmentation_isolated_from_base_meta` (the e2e overlay-isolation oracle).
 
 ## Cross-File Type Resolution (Compiler Integration)
 

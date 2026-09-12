@@ -929,9 +929,9 @@ Hard rules:
   cacheable (an empty fact rail validates vacuously on warm hits);
   `ReadSetSignature::overflow()` is not.
 
-The new guards are registered in
-[`CRITICAL_RULE_GUARDS`](../../crates/verter_session/tests/cases/g_misc0/critical_rules_have_guards.rs)
-under the `Typed SignatureAdmission gate` entry.
+Guards: `empty_and_overflow_are_distinguishable_at_carrier_type`,
+`no_call_site_constructs_empty_signature_from_overflow`,
+`compile_fact_signature_overflow_does_not_publish_compile_slot`.
 
 ## Error-Tolerance Non-Admission + §22 Absorption (CRITICAL)
 
@@ -1004,8 +1004,7 @@ closed, fact-rooted contract (`.claude/skills/type-resolution/SKILL.md`
    the error type, and is excluded from both the absorption and the relation
    flip.
 
-Guards (registered in `CRITICAL_RULE_GUARDS` under
-`Error-Tolerance Non-Admission + §22 Absorption`):
+Guards:
 `error_tolerance_broken_input_is_returnonly_fact_rooted_error_is_cacheable`,
 `error_any_never_propagation_lattice`,
 `error_type_is_returnonly_prone_any_is_cacheable`

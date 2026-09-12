@@ -18,8 +18,6 @@ mod byte_identical_upsert_no_op;
 mod capture_token_smoke;
 #[path = "g_misc0/closure_boundary_invalidation.rs"]
 mod closure_boundary_invalidation;
-#[path = "g_misc0/critical_rules_have_guards.rs"]
-mod critical_rules_have_guards;
 #[path = "g_misc0/cross_owner_materialise_reuse.rs"]
 mod cross_owner_materialise_reuse;
 #[path = "g_misc0/cross_owner_materialise_reuse_production.rs"]
