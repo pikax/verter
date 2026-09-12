@@ -235,6 +235,7 @@ pub(super) enum FamilyKey {
         true_branch: SemanticNodeId,
         false_branch: SemanticNodeId,
         distributive: bool,
+        pending: Option<Arc<crate::semantic_query::ConditionalPendingSubstitution>>,
     },
     /// `value_root` is the env-bearing, content-free
     /// [`crate::semantic_query::ValueRootSlotIdentity`] (R6 — carries the
@@ -1666,6 +1667,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             true_branch,
             false_branch,
             distributive,
+            pending,
         } => (
             FamilyKey::Conditional {
                 check: *check,
@@ -1673,6 +1675,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                 true_branch: *true_branch,
                 false_branch: *false_branch,
                 distributive: *distributive,
+                pending: pending.clone(),
             },
             ModeSlot::Single,
         ),

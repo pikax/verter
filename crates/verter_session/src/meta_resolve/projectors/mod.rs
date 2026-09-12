@@ -559,9 +559,20 @@ pub(crate) fn read_positive_surface_members(
         Some(SemanticNodeData::Conditional {
             true_branch_ref,
             false_branch_ref,
+            pending,
             ..
         }) => {
-            let (true_branch, false_branch) = (*true_branch_ref, *false_branch_ref);
+            let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let true_branch = dispatch.apply_conditional_branch_pending(
+                *true_branch_ref,
+                pending.as_deref(),
+                true,
+            );
+            let false_branch = dispatch.apply_conditional_branch_pending(
+                *false_branch_ref,
+                pending.as_deref(),
+                false,
+            );
             let per_arm = [
                 read_positive_surface_members(ctx, true_branch),
                 read_positive_surface_members(ctx, false_branch),

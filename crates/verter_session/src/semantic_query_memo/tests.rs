@@ -10483,6 +10483,7 @@ mod prepared_identity_bijection {
                     true_branch: node(3),
                     false_branch: node(4),
                     distributive: false,
+                    pending: None,
                 },
                 SemanticQueryKey::Conditional {
                     check: node(1),
@@ -10490,6 +10491,7 @@ mod prepared_identity_bijection {
                     true_branch: node(3),
                     false_branch: node(4),
                     distributive: true,
+                    pending: None,
                 },
             ),
             SemanticQueryKeyTag::TypeOf => (

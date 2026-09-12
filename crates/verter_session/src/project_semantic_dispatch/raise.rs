@@ -1204,6 +1204,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 true_branch_ref,
                 false_branch_ref,
                 distributive,
+                pending,
             } => {
                 let operand_context = structural_operand_context(context);
                 let check = state
@@ -1223,6 +1224,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let true_branch = *true_branch_ref;
                 let false_branch = *false_branch_ref;
                 let distributive = *distributive;
+                let pending = pending.clone();
                 let reduced = self.dispatch_operator_with_recurse(
                     node,
                     SemanticQueryKey::Conditional {
@@ -1231,6 +1233,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         true_branch,
                         false_branch,
                         distributive,
+                        pending: pending.clone(),
                     },
                     context,
                     state,
@@ -1250,11 +1253,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         true_branch_ref: d_true,
                         false_branch_ref: d_false,
                         distributive: d_dist,
+                        pending: d_pending,
                     }) = self.graph().node_data(reduced).as_deref().cloned()
                     {
-                        let reduced_true = self.reduce_subtree(d_true, context, state);
-                        let reduced_false = self.reduce_subtree(d_false, context, state);
-                        if reduced_true != d_true || reduced_false != d_false {
+                        let demanded_true = self.apply_conditional_branch_pending(
+                            d_true,
+                            d_pending.as_deref(),
+                            true,
+                        );
+                        let demanded_false = self.apply_conditional_branch_pending(
+                            d_false,
+                            d_pending.as_deref(),
+                            false,
+                        );
+                        let reduced_true = self.reduce_subtree(demanded_true, context, state);
+                        let reduced_false = self.reduce_subtree(demanded_false, context, state);
+                        if reduced_true != d_true
+                            || reduced_false != d_false
+                            || d_pending.is_some()
+                        {
                             return self.graph().intern_preserving_scope(
                                 reduced,
                                 SemanticNodeData::Conditional {
@@ -1263,6 +1280,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     true_branch_ref: reduced_true,
                                     false_branch_ref: reduced_false,
                                     distributive: d_dist,
+                                    pending: None,
                                 },
                             );
                         }
@@ -3839,7 +3857,15 @@ impl<'a> OpenWalk<'a> {
                 ..
             } => {
                 let (check, extends) = (*check, *extends);
-                let (true_branch, false_branch) = (*true_branch_ref, *false_branch_ref);
+                let pending = match data.as_ref() {
+                    SemanticNodeData::Conditional { pending, .. } => pending.as_deref(),
+                    _ => unreachable!(),
+                };
+                let dispatch = self.dispatch;
+                let true_branch =
+                    || dispatch.apply_conditional_branch_pending(*true_branch_ref, pending, true);
+                let false_branch =
+                    || dispatch.apply_conditional_branch_pending(*false_branch_ref, pending, false);
                 // Consult the shared branch-selection oracle THROUGH the active
                 // dispatcher (NOT a freshly-constructed one): the active
                 // dispatcher carries the `instantiate_active` /
@@ -3883,20 +3909,20 @@ impl<'a> OpenWalk<'a> {
                     super::ConditionalBranchSelection::True => match bare_infer_binding {
                         Some((binder, bound)) => {
                             let mut scoped = self.scoped_with_bound_infer(binder, bound);
-                            let open = scoped.node_is_open(ctx, true_branch);
+                            let open = scoped.node_is_open(ctx, true_branch());
                             self.budget = scoped.budget;
                             open
                         }
-                        None => self.node_is_open(ctx, true_branch),
+                        None => self.node_is_open(ctx, true_branch()),
                     },
                     super::ConditionalBranchSelection::False => {
-                        self.node_is_open(ctx, false_branch)
+                        self.node_is_open(ctx, false_branch())
                     }
                     super::ConditionalBranchSelection::Deferred => {
                         self.node_is_open_at(ctx, check, OperandPosition::ValueSensitive)
                             || self.node_is_open_at(ctx, extends, OperandPosition::ValueSensitive)
-                            || self.node_is_open(ctx, true_branch)
-                            || self.node_is_open(ctx, false_branch)
+                            || self.node_is_open(ctx, true_branch())
+                            || self.node_is_open(ctx, false_branch())
                     }
                 }
             }

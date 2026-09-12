@@ -1050,6 +1050,7 @@ fn parity_deferred_operator_shells() {
         true_branch_ref: str_id,
         false_branch_ref: num_id,
         distributive: false,
+        pending: None,
     });
     assert_classifier_parity(&host, conditional, "conditional-shell");
     assert!(
@@ -2389,6 +2390,7 @@ fn node_improvement_verdict_matches_type_expr_improvement_over_raise() {
         true_branch_ref: string,
         false_branch_ref: string,
         distributive: false,
+        pending: None,
     });
 
     // `Opaque(RecursiveRef)` — raises to `TypeExpr::RecursiveRef`: a STRUCTURAL,
@@ -2582,6 +2584,7 @@ fn publication_score_corpus(
                 true_branch_ref: string,
                 false_branch_ref: number,
                 distributive: false,
+                pending: None,
             }),
         ),
         (

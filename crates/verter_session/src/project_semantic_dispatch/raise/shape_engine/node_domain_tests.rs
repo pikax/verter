@@ -384,6 +384,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         true_branch_ref: dummy,
         false_branch_ref: dummy,
         distributive: false,
+        pending: None,
     });
     let ctor = graph.intern_construct_twin_for_tests(func);
     let alias = graph.intern_node(SemanticNodeData::Alias(open_obj));
@@ -666,6 +667,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
                 true_branch_ref: present,
                 false_branch_ref: present,
                 distributive: false,
+                pending: None,
             }),
         ),
         (
@@ -676,6 +678,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
                 true_branch_ref: present,
                 false_branch_ref: present,
                 distributive: false,
+                pending: None,
             }),
         ),
         (
@@ -686,6 +689,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
                 true_branch_ref: dangling,
                 false_branch_ref: present,
                 distributive: false,
+                pending: None,
             }),
         ),
         (
@@ -696,6 +700,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
                 true_branch_ref: present,
                 false_branch_ref: dangling,
                 distributive: false,
+                pending: None,
             }),
         ),
         (

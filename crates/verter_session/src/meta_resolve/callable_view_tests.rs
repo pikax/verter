@@ -188,6 +188,7 @@ fn conditional(
         true_branch_ref: true_branch,
         false_branch_ref: false_branch,
         distributive: false,
+        pending: None,
     })
 }
 

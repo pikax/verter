@@ -7302,6 +7302,115 @@ impl RelateMemoKey {
 // Canonical semantic key surface
 // ──────────────────────────────────────────────────────────────────────────
 
+/// Store-local positional substitution frame: ordered `(param, arg)` node
+/// pairs. Identity is the pair sequence; no `TypeExpr`, env map, source
+/// hash, span, or display text participates.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PendingSubstitutionFrame {
+    pairs: Arc<[(SemanticNodeId, SemanticNodeId)]>,
+}
+
+impl PendingSubstitutionFrame {
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            pairs: Arc::from(Vec::<(SemanticNodeId, SemanticNodeId)>::new().into_boxed_slice()),
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+
+    #[must_use]
+    pub fn pairs(&self) -> &[(SemanticNodeId, SemanticNodeId)] {
+        &self.pairs
+    }
+
+    #[must_use]
+    pub fn append(&self, param: SemanticNodeId, arg: SemanticNodeId) -> Self {
+        if param == arg {
+            return self.clone();
+        }
+        let mut pairs = Vec::with_capacity(self.pairs.len() + 1);
+        pairs.extend_from_slice(&self.pairs);
+        pairs.push((param, arg));
+        Self {
+            pairs: Arc::from(pairs.into_boxed_slice()),
+        }
+    }
+}
+
+/// Per-branch pending substitution carried on a deferred conditional shell
+/// and on [`SemanticQueryKey::Conditional`] family identity. Each branch is
+/// the sealed pairing of a materialized handle with this frame.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ConditionalPendingSubstitution {
+    true_branch: PendingSubstitutionFrame,
+    false_branch: PendingSubstitutionFrame,
+}
+
+impl ConditionalPendingSubstitution {
+    /// Materialized arguments retained by this frame, without applying it or
+    /// evaluating either branch. Structural reachability readers include these
+    /// children when inspecting the suspended carrier.
+    pub(crate) fn argument_nodes(&self) -> impl Iterator<Item = SemanticNodeId> + '_ {
+        self.true_branch
+            .pairs()
+            .iter()
+            .chain(self.false_branch.pairs())
+            .map(|&(_, argument)| argument)
+    }
+
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            true_branch: PendingSubstitutionFrame::empty(),
+            false_branch: PendingSubstitutionFrame::empty(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.true_branch.is_empty() && self.false_branch.is_empty()
+    }
+
+    #[must_use]
+    pub fn true_branch(&self) -> &PendingSubstitutionFrame {
+        &self.true_branch
+    }
+
+    #[must_use]
+    pub fn false_branch(&self) -> &PendingSubstitutionFrame {
+        &self.false_branch
+    }
+
+    #[must_use]
+    pub fn append_true(&self, param: SemanticNodeId, arg: SemanticNodeId) -> Self {
+        Self {
+            true_branch: self.true_branch.append(param, arg),
+            false_branch: self.false_branch.clone(),
+        }
+    }
+
+    #[must_use]
+    pub fn append_false(&self, param: SemanticNodeId, arg: SemanticNodeId) -> Self {
+        Self {
+            true_branch: self.true_branch.clone(),
+            false_branch: self.false_branch.append(param, arg),
+        }
+    }
+
+    #[must_use]
+    pub fn append_both(&self, param: SemanticNodeId, arg: SemanticNodeId) -> Self {
+        Self {
+            true_branch: self.true_branch.append(param, arg),
+            false_branch: self.false_branch.append(param, arg),
+        }
+    }
+}
+
 /// Canonical semantic query key. Every reusable type-resolution operation
 /// dispatches through [`SemanticQueryApi::execute`] with one of these
 /// variants; two callers that mean the same thing produce the same key and
@@ -7376,6 +7485,10 @@ pub enum SemanticQueryKey {
         true_branch: SemanticNodeId,
         false_branch: SemanticNodeId,
         distributive: bool,
+        /// Content-free pairing of each materialized branch handle with a
+        /// pending positional substitution frame. `None` means both
+        /// branches are already substituted (or never instantiated).
+        pending: Option<Arc<ConditionalPendingSubstitution>>,
     },
     /// `typeof value_root` — resolves the TYPE of a value declaration.
     ///
@@ -8716,6 +8829,8 @@ pub enum SemanticNodeData {
     ///   [`SemanticQueryKey::ProjectPath`] sub-queries.
     /// - `distributive` — `true` when `check` is a naked type parameter
     ///   (TS distributive-conditional semantics).
+    /// - `pending` — sealed handle+pending-substitution pairing for each
+    ///   branch. `None` when both branches are already substituted.
     ///
     /// When the relation engine decides the check (closed case),
     /// [`build_conditional`](crate::project_semantic_dispatch::ProjectSemanticDispatch)
@@ -8730,6 +8845,7 @@ pub enum SemanticNodeData {
         true_branch_ref: SemanticNodeId,
         false_branch_ref: SemanticNodeId,
         distributive: bool,
+        pending: Option<Arc<ConditionalPendingSubstitution>>,
     },
     // §5.6 Signature shape — ONE variant for call AND construct signatures.
     ///
@@ -9148,6 +9264,7 @@ impl PartialEq for SemanticNodeData {
                     true_branch_ref: atr,
                     false_branch_ref: afr,
                     distributive: ad,
+                    pending: ap,
                 },
                 Self::Conditional {
                     check: bck,
@@ -9155,8 +9272,9 @@ impl PartialEq for SemanticNodeData {
                     true_branch_ref: btr,
                     false_branch_ref: bfr,
                     distributive: bd,
+                    pending: bp,
                 },
-            ) => ack == bck && aex == bex && atr == btr && afr == bfr && ad == bd,
+            ) => ack == bck && aex == bex && atr == btr && afr == bfr && ad == bd && ap == bp,
             (
                 Self::Signature {
                     kind: ak,
@@ -9312,12 +9430,14 @@ impl std::hash::Hash for SemanticNodeData {
                 true_branch_ref,
                 false_branch_ref,
                 distributive,
+                pending,
             } => {
                 check.hash(state);
                 extends.hash(state);
                 true_branch_ref.hash(state);
                 false_branch_ref.hash(state);
                 distributive.hash(state);
+                pending.hash(state);
             }
             Self::Signature {
                 kind,

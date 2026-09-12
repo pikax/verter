@@ -984,6 +984,7 @@ fn budget_trip_conditional_suppresses_and_does_not_warm() {
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     };
     let key_second = SemanticQueryKey::Conditional {
         check: intern_single_member_object(&host, "cond_check_second"),
@@ -991,6 +992,7 @@ fn budget_trip_conditional_suppresses_and_does_not_warm() {
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     };
 
     let ctx = RequestContext::with_kind_timing_and_projection_budget(
@@ -1752,6 +1754,7 @@ fn conditional_relation_budget_trip_folds_partial_and_refuses_relation_memo() {
         true_branch,
         false_branch,
         distributive: false,
+        pending: None,
     };
     let read = dispatch.execute_read(conditional_key.clone());
     assert!(

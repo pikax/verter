@@ -1609,12 +1609,23 @@ pub(super) fn project_root_summary(
             extends,
             true_branch_ref,
             false_branch_ref,
+            pending,
             ..
         } => {
+            let true_branch = dispatch.apply_conditional_branch_pending(
+                *true_branch_ref,
+                pending.as_deref(),
+                true,
+            );
+            let false_branch = dispatch.apply_conditional_branch_pending(
+                *false_branch_ref,
+                pending.as_deref(),
+                false,
+            );
             project_root_summary(dispatch, *check, active)?;
             project_root_summary(dispatch, *extends, active)?;
-            project_root_summary(dispatch, *true_branch_ref, active)?;
-            project_root_summary(dispatch, *false_branch_ref, active)?;
+            project_root_summary(dispatch, true_branch, active)?;
+            project_root_summary(dispatch, false_branch, active)?;
             RootOnlySummary::from_summary(summary::conditional(
                 root_only_placeholder_facts(),
                 root_only_placeholder_facts(),

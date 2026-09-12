@@ -629,6 +629,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         true_branch_ref: true_id,
                         false_branch_ref: false_id,
                         distributive,
+                        pending: None,
                     },
                     scope.clone(),
                 )

@@ -1207,6 +1207,7 @@ fn root_conditional_still_distributes() {
         true_branch_ref: true_anchor,
         false_branch_ref: false_anchor,
         distributive: false,
+        pending: None,
     });
 
     let read = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {

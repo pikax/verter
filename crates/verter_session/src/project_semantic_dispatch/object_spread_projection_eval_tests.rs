@@ -1781,6 +1781,7 @@ fn inference_deposits_only_from_exact_whole_branch_positions() {
             true_branch: infer_u,
             false_branch: never,
             distributive: false,
+            pending: None,
         })
     };
     let expect_value = |result: QueryResult<SemanticQueryOutput<SemanticNodeId>>| match result {

@@ -379,6 +379,7 @@ fn lower_node(
                     true_branch_ref,
                     false_branch_ref,
                     distributive,
+                    pending: None,
                 },
                 scope.clone(),
             ))

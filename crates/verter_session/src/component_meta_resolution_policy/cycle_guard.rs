@@ -515,6 +515,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
             true_branch_ref,
             false_branch_ref,
             distributive,
+            pending,
         } => {
             hasher.write_u8(19);
             hasher.write_u8(u8::from(*distributive));
@@ -522,6 +523,23 @@ fn hash_node_rec<H: std::hash::Hasher>(
             hash_node_rec(ctx, *extends, hasher, seen, depth + 1);
             hash_node_rec(ctx, *true_branch_ref, hasher, seen, depth + 1);
             hash_node_rec(ctx, *false_branch_ref, hasher, seen, depth + 1);
+            match pending {
+                None => hasher.write_u8(0),
+                Some(frame) => {
+                    hasher.write_u8(1);
+                    hasher.write_usize(frame.true_branch().pairs().len());
+                    for &(param, arg) in frame.true_branch().pairs() {
+                        hash_node_rec(ctx, param, hasher, seen, depth + 1);
+                        hash_node_rec(ctx, arg, hasher, seen, depth + 1);
+                    }
+                    hasher.write_u8(2);
+                    hasher.write_usize(frame.false_branch().pairs().len());
+                    for &(param, arg) in frame.false_branch().pairs() {
+                        hash_node_rec(ctx, param, hasher, seen, depth + 1);
+                        hash_node_rec(ctx, arg, hasher, seen, depth + 1);
+                    }
+                }
+            }
         }
         SemanticNodeData::Signature {
             kind,

@@ -992,8 +992,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     extends,
                     true_branch_ref,
                     false_branch_ref,
+                    pending,
                     ..
-                } => stack.extend([*check, *extends, *true_branch_ref, *false_branch_ref]),
+                } => {
+                    if let Some(pending) = pending {
+                        stack.extend(pending.argument_nodes());
+                    }
+                    stack.extend([*check, *extends, *true_branch_ref, *false_branch_ref]);
+                }
                 SemanticNodeData::InstantiationRef { args, .. } => {
                     stack.extend(args.iter().copied());
                 }

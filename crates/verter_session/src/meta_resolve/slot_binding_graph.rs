@@ -1700,9 +1700,16 @@ fn node_reaches_non_owner_ref(
             extends,
             true_branch_ref,
             false_branch_ref,
+            pending,
             ..
         } => {
-            recur(*check) || recur(*extends) || recur(*true_branch_ref) || recur(*false_branch_ref)
+            pending
+                .as_ref()
+                .is_some_and(|frame| frame.argument_nodes().any(&recur))
+                || recur(*check)
+                || recur(*extends)
+                || recur(*true_branch_ref)
+                || recur(*false_branch_ref)
         }
         _ => false,
     }

@@ -872,6 +872,7 @@ mod tests {
             true_branch: dummy_node,
             false_branch: dummy_node,
             distributive: false,
+            pending: None,
         };
         let normalize_union = SemanticQueryKey::NormalizeUnion {
             members: Arc::from(Vec::new().into_boxed_slice()),
