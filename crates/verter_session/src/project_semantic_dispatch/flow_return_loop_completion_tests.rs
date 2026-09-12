@@ -263,3 +263,63 @@ fn a_divergent_branch_arm_does_not_terminate_the_enclosing_body() {
         TypeExpr::Literal(LiteralValue::String("a".into())),
     );
 }
+
+/// The loop fixed point an edit produces is the one a fresh host computes.
+///
+/// A completion fact decides whether the body contributes a fall-through
+/// arm, so a stale one survives an edit as a WRONG answer with nothing
+/// marking it — the same wrong-and-warm class the divergence rule closes,
+/// reached through invalidation instead of through classification. Each
+/// step publishes on a host that has already warmed the OTHER spelling and
+/// is compared against a host that has only ever seen this one, so a
+/// retained pre-edit candidate shows up as a type difference rather than as
+/// a count nobody reads.
+///
+/// The two spellings differ by one `break`, which is exactly the fact the
+/// divergence classifier reads: `while (true) {}` ends the body's normal
+/// path and widens the lone literal to `number`, while `while (true) {
+/// break }` leaves the exit reachable and joins `undefined`.
+#[test]
+fn a_loop_fixed_point_survives_an_edit_as_the_fresh_answer() {
+    const EDITED: &str = "/ws/loopcompletion/edited.ts";
+    let divergent = "export function f(c: boolean) { if (c) return 1; while (true) {} }";
+    let reachable = "export function f(c: boolean) { if (c) return 1; while (true) { break } }";
+
+    let upsert = |host: &Arc<VerterHost>, source: &str| {
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(EDITED.to_string()),
+            input_id: EDITED.to_string(),
+            source: Arc::from(source),
+            file_language: lang(EDITED),
+            aliases: Vec::new(),
+        });
+    };
+    let fresh = |source: &str| {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        upsert(&host, source);
+        publish(&host, EDITED, "f")
+    };
+
+    let incremental = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    // Every step warms before the next edit, so each comparison is against
+    // a host holding the previous spelling's published result.
+    for source in [divergent, reachable, divergent] {
+        upsert(&incremental, source);
+        let after_edit = publish(&incremental, EDITED, "f");
+        let from_scratch = fresh(source);
+        assert_eq!(
+            (&after_edit.ty, after_edit.degraded),
+            (&from_scratch.ty, from_scratch.degraded),
+            "the edited host must publish the fresh answer for: {source}"
+        );
+        assert!(
+            !after_edit.degraded,
+            "neither spelling is degraded: {source}"
+        );
+    }
+
+    // The values themselves, so a mutual regression that moved both hosts
+    // together still fails.
+    assert_eq!(fresh(divergent).ty, primitive(PrimitiveName::Number));
+    assert_eq!(fresh(reachable).ty, one_or_undefined());
+}

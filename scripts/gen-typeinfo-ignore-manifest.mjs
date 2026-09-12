@@ -835,7 +835,7 @@ const BLOCK_TO_REQUIRED_GUARDS = new Map([
       "divergent_loop_models_as_void",
       "flow_completion_carrier_inventory_is_closed",
       "flow_completion_carriers_publish_the_checkers_answer",
-      "a_labeled_try_or_throw_suffix_does_not_fabricate_an_undefined_contributor",
+      "a_labeled_try_or_throw_suffix_never_admits_a_fabricated_undefined_contributor",
       "flow_policy_differentiates_cache_candidates",
     ],
   ],
@@ -1248,9 +1248,9 @@ const GUARD_REGISTRY_DATA = [
   ["flow_completion_carrier_inventory_is_closed", "U6LoopClosure", "lib"],
   ["flow_completion_carriers_publish_the_checkers_answer", "U6LoopClosure", "lib"],
   [
-    "a_labeled_try_or_throw_suffix_does_not_fabricate_an_undefined_contributor",
+    "a_labeled_try_or_throw_suffix_never_admits_a_fabricated_undefined_contributor",
     "U6LoopClosure",
-    "owed",
+    "lib",
   ],
   ["flow_policy_differentiates_cache_candidates", "U6LoopClosure", "owed"],
   // U3.CACHE_FACT_MODEL — owed.

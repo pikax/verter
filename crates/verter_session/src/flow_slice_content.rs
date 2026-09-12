@@ -1871,7 +1871,7 @@ pub(crate) fn build_flow_slice_content(
         break_targets: Vec::new(),
         loop_direct_labels: Vec::new(),
         break_target_followed_by_return: Vec::new(),
-        current_statement_followed_by_return: false,
+        current_statement_followed_by_return: SuffixReturn::NotGuaranteed,
     };
     if selection.is_some() {
         lowerer.unsafe_invoked_closure_effects =
@@ -2811,24 +2811,103 @@ fn loop_transfers_to_enclosing_label(
 }
 
 /// Whether entering this statement guarantees that the current function
-/// reaches an authored return before normal completion. This is deliberately
-/// stricter than the control inventory's `has_return`: a conditional return
-/// does not prevent a preceding labelled break from reaching function end.
-fn statement_guarantees_current_function_return(statement: &Statement<'_>) -> bool {
-    match statement {
-        Statement::ReturnStatement(_) => true,
-        Statement::BlockStatement(block) => block
-            .body
-            .iter()
-            .any(statement_guarantees_current_function_return),
-        Statement::IfStatement(branch) => {
-            statement_guarantees_current_function_return(&branch.consequent)
-                && branch
-                    .alternate
-                    .as_ref()
-                    .is_some_and(statement_guarantees_current_function_return)
+/// reaches an authored return before normal completion.
+///
+/// THREE states, because two of them conflated the only distinction that
+/// matters here. A pending `break` whose destination is PROVED to reach
+/// the function end contributes an implicit `undefined`; a destination
+/// this lowering cannot classify proves nothing, and answering "does not
+/// return" for it fabricated that contributor out of a coverage gap. The
+/// measured consequence, over one base program's suffix spellings: a
+/// `return` / block / `if` suffix published `"a" | "b"`, while a LABELED,
+/// `try`, `throw` or `switch` suffix published `"a" | undefined` — so
+/// merely LABELING a block changed the answer, and the wrong answer was
+/// admitted warm because nothing marked it.
+///
+/// [`SuffixReturn::Undecided`] is the fail-closed disposition that class
+/// requires: the caller keeps the derivation's value and mints
+/// [`crate::semantic_query::FlowGap::AbruptCompletion`], so the result is
+/// still returned and is never admitted. Deciding those forms HERE is
+/// forbidden — a syntax-only completion classifier is exactly the second
+/// completion authority this substrate must not have, and the answer
+/// belongs to the demanded `FunctionFlowGraph` reduction that owes the
+/// abrupt-completion topology.
+///
+/// Deliberately stricter than the control inventory's `has_return`: a
+/// conditional return does not prevent a preceding labelled break from
+/// reaching function end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SuffixReturn {
+    /// Proved: entering the statement reaches an authored return.
+    Guaranteed,
+    /// Proved: the statement completes normally without returning, so
+    /// control continues to whatever follows it.
+    NotGuaranteed,
+    /// Not decidable from statement shape alone, and never answered as
+    /// either proof.
+    Undecided,
+}
+
+impl SuffixReturn {
+    /// Fold the statements a destination continues into. A proved return
+    /// anywhere ahead dominates — control cannot pass it — and otherwise a
+    /// single undecided statement makes the whole suffix undecided.
+    fn fold(statements: impl Iterator<Item = Self>) -> Self {
+        let mut undecided = false;
+        for statement in statements {
+            match statement {
+                Self::Guaranteed => return Self::Guaranteed,
+                Self::Undecided => undecided = true,
+                Self::NotGuaranteed => {}
+            }
         }
-        _ => false,
+        if undecided {
+            Self::Undecided
+        } else {
+            Self::NotGuaranteed
+        }
+    }
+}
+
+fn suffix_return_of(statement: &Statement<'_>) -> SuffixReturn {
+    match statement {
+        Statement::ReturnStatement(_) => SuffixReturn::Guaranteed,
+        Statement::BlockStatement(block) => {
+            SuffixReturn::fold(block.body.iter().map(suffix_return_of))
+        }
+        Statement::IfStatement(branch) => {
+            let consequent = suffix_return_of(&branch.consequent);
+            // A missing `else` arm completes normally by definition.
+            let alternate = branch
+                .alternate
+                .as_ref()
+                .map_or(SuffixReturn::NotGuaranteed, suffix_return_of);
+            match (consequent, alternate) {
+                (SuffixReturn::Guaranteed, SuffixReturn::Guaranteed) => SuffixReturn::Guaranteed,
+                (SuffixReturn::Undecided, _) | (_, SuffixReturn::Undecided) => {
+                    SuffixReturn::Undecided
+                }
+                _ => SuffixReturn::NotGuaranteed,
+            }
+        }
+        // Forms that complete normally without returning, so a destination
+        // reaching one of them really does reach the function end. The one
+        // residual is an expression statement whose call is proven `never`:
+        // that is the typed terminator feed the graph reduction still owes,
+        // and it is not decidable from the statement's shape either.
+        Statement::EmptyStatement(_)
+        | Statement::DebuggerStatement(_)
+        | Statement::ExpressionStatement(_)
+        | Statement::VariableDeclaration(_)
+        | Statement::FunctionDeclaration(_)
+        | Statement::ClassDeclaration(_)
+        | Statement::TSTypeAliasDeclaration(_)
+        | Statement::TSInterfaceDeclaration(_)
+        | Statement::TSEnumDeclaration(_) => SuffixReturn::NotGuaranteed,
+        // A labeled statement, a `try`, a `throw`, a `switch`, any loop,
+        // any jump, and any form added later. Each carries completion this
+        // lowering cannot reduce, so none of them is answered here.
+        _ => SuffixReturn::Undecided,
     }
 }
 
@@ -3913,11 +3992,13 @@ struct Lowerer<'a> {
     /// For each break target, whether the target statement has a guaranteed
     /// current-function return later in its enclosing statement list. A
     /// pending break contributes implicit `undefined` only when its
-    /// destination can reach the function end rather than that return.
-    break_target_followed_by_return: Vec<bool>,
+    /// destination is PROVED to reach the function end rather than that
+    /// return; an undecided destination proves neither and fails closed
+    /// through [`crate::semantic_query::FlowGap::AbruptCompletion`].
+    break_target_followed_by_return: Vec<SuffixReturn>,
     /// The suffix fact for the statement currently being lowered; captured
     /// when that statement introduces a break target.
-    current_statement_followed_by_return: bool,
+    current_statement_followed_by_return: SuffixReturn,
 }
 
 impl Lowerer<'_> {
@@ -4617,10 +4698,10 @@ impl Lowerer<'_> {
             if !can_fall_through {
                 break;
             }
-            self.current_statement_followed_by_return = enclosing_followed_by_return
-                || statements[index + 1..]
-                    .iter()
-                    .any(statement_guarantees_current_function_return);
+            self.current_statement_followed_by_return = SuffixReturn::fold(
+                std::iter::once(enclosing_followed_by_return)
+                    .chain(statements[index + 1..].iter().map(suffix_return_of)),
+            );
             if self.span_contains_unsafe_invoked_closure(statement.span()) {
                 out.push(SliceStatement::Unsupported(
                     SliceUnsupported::InvokedClosureEffect,
@@ -5040,7 +5121,8 @@ impl Lowerer<'_> {
                     let has_default = switch.cases.iter().any(|case| case.test.is_none());
                     let discriminant = self.narrow_subject_of(&switch.discriminant);
                     self.break_targets.push(None);
-                    self.break_target_followed_by_return.push(false);
+                    self.break_target_followed_by_return
+                        .push(SuffixReturn::NotGuaranteed);
                     // A clause body evaluates under the dispatch narrow
                     // of the discriminant, so a closure created there
                     // captures a reading the evaluator cannot reproduce
@@ -5194,20 +5276,31 @@ impl Lowerer<'_> {
                             .find(|(entry, _)| entry.as_ref() == Some(name))
                             .map(|(_, followed_by_return)| *followed_by_return)
                     };
-                    let pending_break_contributes_undefined = finally_blocks_exits
-                        && clause_may_break.iter().any(|target| match target {
-                            SliceBreakTarget::Named(name) => {
-                                target_followed_by_return(name) == Some(false)
-                            }
-                            SliceBreakTarget::Anonymous => false,
-                        });
+                    // The destination decides the contribution, and an
+                    // UNDECIDED destination decides nothing: the value keeps
+                    // the derivation it always had, and the gap below makes
+                    // the result return without ever being admitted.
+                    let pending_break_destination = |state: SuffixReturn| {
+                        finally_blocks_exits
+                            && clause_may_break.iter().any(|target| match target {
+                                SliceBreakTarget::Named(name) => {
+                                    target_followed_by_return(name) == Some(state)
+                                }
+                                SliceBreakTarget::Anonymous => false,
+                            })
+                    };
+                    let pending_break_destination_undecided =
+                        pending_break_destination(SuffixReturn::Undecided);
+                    let pending_break_contributes_undefined =
+                        pending_break_destination(SuffixReturn::NotGuaranteed)
+                            || pending_break_destination_undecided;
                     let mut pending_break_following_return_targets: Vec<Arc<str>> = Vec::new();
                     if finally_blocks_exits {
                         for target in &clause_may_break {
                             let SliceBreakTarget::Named(name) = target else {
                                 continue;
                             };
-                            if target_followed_by_return(name) == Some(true)
+                            if target_followed_by_return(name) == Some(SuffixReturn::Guaranteed)
                                 && !pending_break_following_return_targets.contains(name)
                             {
                                 pending_break_following_return_targets.push(Arc::clone(name));
@@ -5248,6 +5341,16 @@ impl Lowerer<'_> {
                                 .can_fall_through
                                 .reaches_end(CompletionDischarge::RegionComposition)
                         });
+                    if pending_break_destination_undecided {
+                        // A pending break whose destination this lowering
+                        // cannot classify. The contribution above is a
+                        // derivation, not a proof, so the slice carries the
+                        // typed gap ahead of the try: the evaluation returns
+                        // the value and refuses to warm it.
+                        out.push(SliceStatement::Gap(
+                            crate::semantic_query::FlowGap::AbruptCompletion,
+                        ));
+                    }
                     out.push(SliceStatement::Try {
                         block: Box::new(block),
                         catch,

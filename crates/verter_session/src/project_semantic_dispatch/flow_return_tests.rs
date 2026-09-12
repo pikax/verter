@@ -4809,6 +4809,97 @@ fn flow_return_abrupt_finally_over_pending_break_contributes_undefined() {
     }
 }
 
+/// A pending break whose destination this lowering cannot classify never
+/// reaches a consumer as a complete answer.
+///
+/// One base program, seven suffix spellings. The break's destination is the
+/// statement AFTER the labeled statement, so the suffix decides whether
+/// that destination reaches the function end (an implicit `undefined`
+/// contributor) or an authored return. The suffix classifier recognises
+/// `return` / block / `if` and nothing else, so before this guard a LABELED,
+/// `try`, `throw` or `switch` suffix answered "does not return" from a
+/// coverage gap and published `"a" | undefined` CLEAN: merely LABELING a
+/// block changed the answer from `"a" | "b"`, and the wrong answer warmed
+/// with nothing marking it.
+///
+/// The proved spellings are the positive control. They must stay clean and
+/// keep their exact values, or a blanket degrade would satisfy the negative
+/// half while telling us nothing.
+///
+/// The remaining, separately owed work is the VALUE: the fabricated
+/// `undefined` is still derived, and removing it needs the abrupt-completion
+/// topology the demanded `FunctionFlowGraph` owes. Until then this boundary
+/// is admission, which is why the gap — not a wider syntax match — is the
+/// fix: a syntax-only classifier for completion is the second completion
+/// authority this substrate must not have.
+#[test]
+pub(crate) fn a_labeled_try_or_throw_suffix_never_admits_a_fabricated_undefined_contributor() {
+    let base = "OUT: INNER: { try { break INNER; } finally { return \"a\" as const; } }";
+    let script = |suffix: &str| format!("function makeProps() {{ {base}{suffix} }}");
+    let a_or_undefined = verter_type_expr::TypeExpr::union(vec![
+        string_literal("a"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
+    ]);
+
+    // A destination this lowering PROVES reaches an authored return keeps
+    // its exact answer, clean and admitted.
+    for (suffix, expected) in [
+        (
+            " return \"b\" as const;",
+            verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")]),
+        ),
+        (
+            " { return \"b\" as const; }",
+            verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")]),
+        ),
+        (
+            " if (true) { return \"b\" as const; } else { return \"c\" as const; }",
+            verter_type_expr::TypeExpr::union(vec![
+                string_literal("a"),
+                string_literal("b"),
+                string_literal("c"),
+            ]),
+        ),
+    ] {
+        assert_eq!(
+            expect_clean_flow_value(&script(suffix)),
+            expected,
+            "a proved destination keeps its answer: {suffix}"
+        );
+    }
+
+    // A destination it cannot classify returns the same derivation it
+    // always did and is refused admission.
+    for suffix in [
+        " S: { return \"b\" as const; }",
+        " try { return \"b\" as const; } finally { }",
+        " throw new Error();",
+        " switch (1) { default: return \"b\" as const; }",
+    ] {
+        match flow_source_probe(&script(suffix)) {
+            FlowSourceProbe::Value {
+                expr,
+                degradation,
+                candidates,
+            } => {
+                assert_eq!(
+                    degradation,
+                    Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                        crate::semantic_query::FlowGap::AbruptCompletion
+                    )),
+                    "an undecided destination fails closed: {suffix}"
+                );
+                assert_eq!(candidates, 0, "a gapped result never warms: {suffix}");
+                assert_eq!(
+                    expr, a_or_undefined,
+                    "the returned value is the unchanged derivation: {suffix}"
+                );
+            }
+            other => panic!("the value still returns for {suffix}, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn flow_return_assignment_uses_fresh_literal_to_select_the_most_specific_union_arm() {
     let expr = expect_clean_flow_value(
