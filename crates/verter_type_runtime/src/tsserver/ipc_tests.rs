@@ -4,11 +4,11 @@ use verter_test_support::unique_temp_dir;
 #[test]
 fn process_death_closes_pending_registration_atomically() {
     let pending = TsserverPendingRequests::default();
-    pending.drain_with_crash_error();
+    pending.fail_with_crash_error();
 
     let (tx, _rx) = oneshot::channel();
     assert!(
-        !pending.insert(1, tx),
+        !pending.table.insert(1, tx),
         "a request racing after EOF must be rejected instead of waiting forever"
     );
 }
@@ -709,9 +709,7 @@ async fn tsserver_shutdown_completes_within_timeout() {
         stdin_tx,
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
-        consecutive_failures: AtomicU32::new(0),
-        last_strike_at: StdMutex::new(None),
-        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        liveness: Arc::new(EngineLiveness::default()),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -1195,7 +1193,7 @@ fn test_tsserver_pos_to_byte_offset_non_ascii() {
 }
 
 async fn send_success_response(pending: &Arc<TsserverPendingRequests>, seq: i64, command: &str) {
-    if let Some(tx) = pending.take(seq) {
+    if let Some(tx) = pending.table.take(seq) {
         let _ = tx.send(serde_json::json!({
             "type": "response",
             "request_seq": seq,
@@ -1221,9 +1219,7 @@ async fn test_configure_tsserver_session_sends_no_inferred_project_options() {
         stdin_tx: stdin_tx.clone(),
         pending: Arc::clone(&pending),
         next_seq: AtomicI64::new(1),
-        consecutive_failures: AtomicU32::new(0),
-        last_strike_at: StdMutex::new(None),
-        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        liveness: Arc::new(EngineLiveness::default()),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -1300,9 +1296,7 @@ async fn run_update_file_capture(
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
-        consecutive_failures: AtomicU32::new(0),
-        last_strike_at: StdMutex::new(None),
-        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        liveness: Arc::new(EngineLiveness::default()),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -1476,9 +1470,7 @@ async fn run_notify_carriers_changed_capture(companions: &[&str]) -> Vec<serde_j
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
-        consecutive_failures: AtomicU32::new(0),
-        last_strike_at: StdMutex::new(None),
-        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        liveness: Arc::new(EngineLiveness::default()),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: TsserverCancellation::create().map(Arc::new),
@@ -1501,7 +1493,7 @@ async fn run_notify_carriers_changed_capture(companions: &[&str]) -> Vec<serde_j
     });
     for _ in 0..2 {
         loop {
-            let response = transport.pending.take_any();
+            let response = transport.pending.table.take_any();
             if let Some(response) = response {
                 let _ = response.send(serde_json::json!({}));
                 break;
@@ -1549,9 +1541,7 @@ async fn carrier_refresh_receipt_waits_for_deferred_plugin_graph_application() {
         stdin_tx,
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
-        consecutive_failures: AtomicU32::new(0),
-        last_strike_at: StdMutex::new(None),
-        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        liveness: Arc::new(EngineLiveness::default()),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: TsserverCancellation::create().map(Arc::new),
@@ -1588,6 +1578,7 @@ async fn carrier_refresh_receipt_waits_for_deferred_plugin_graph_application() {
 
     transport
         .pending
+        .table
         .take_any()
         .expect("configure request remains pending")
         .send(serde_json::json!({ "success": true, "body": {} }))
@@ -1608,6 +1599,7 @@ async fn carrier_refresh_receipt_waits_for_deferred_plugin_graph_application() {
     );
     transport
         .pending
+        .table
         .take_any()
         .expect("host-turn fence remains pending")
         .send(serde_json::json!({ "success": true, "body": {} }))
@@ -2168,9 +2160,7 @@ async fn run_resync_capture(
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
-        consecutive_failures: AtomicU32::new(0),
-        last_strike_at: StdMutex::new(None),
-        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        liveness: Arc::new(EngineLiveness::default()),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -2317,9 +2307,7 @@ async fn carrier_open_send_failure_rolls_back_tracking_for_retry() {
         stdin_tx,
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
-        consecutive_failures: AtomicU32::new(0),
-        last_strike_at: StdMutex::new(None),
-        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        liveness: Arc::new(EngineLiveness::default()),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -2369,9 +2357,7 @@ async fn carrier_activation_rolls_back_when_transient_bootstrap_cannot_be_sent()
         stdin_tx,
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
-        consecutive_failures: AtomicU32::new(0),
-        last_strike_at: StdMutex::new(None),
-        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        liveness: Arc::new(EngineLiveness::default()),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -2415,9 +2401,7 @@ async fn duplicate_carrier_activation_is_a_control_plane_noop() {
         stdin_tx,
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
-        consecutive_failures: AtomicU32::new(0),
-        last_strike_at: StdMutex::new(None),
-        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        liveness: Arc::new(EngineLiveness::default()),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -2500,9 +2484,7 @@ async fn carrier_activation_bootstraps_then_retains_the_authored_source() {
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
-        consecutive_failures: AtomicU32::new(0),
-        last_strike_at: StdMutex::new(None),
-        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        liveness: Arc::new(EngineLiveness::default()),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -3374,9 +3356,7 @@ fn resync_harness() -> ResyncHarness {
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
-        consecutive_failures: AtomicU32::new(0),
-        last_strike_at: StdMutex::new(None),
-        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        liveness: Arc::new(EngineLiveness::default()),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -3580,9 +3560,7 @@ async fn resync_generation_gate_rejects_close_reopen_aba() {
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
-        consecutive_failures: AtomicU32::new(0),
-        last_strike_at: StdMutex::new(None),
-        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        liveness: Arc::new(EngineLiveness::default()),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -3716,9 +3694,7 @@ fn storm_harness_with_crash_notify(crash_notify: Arc<Notify>) -> StormHarness {
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
-        consecutive_failures: AtomicU32::new(0),
-        last_strike_at: StdMutex::new(None),
-        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        liveness: Arc::new(EngineLiveness::default()),
         crash_notify: Some(Arc::clone(&crash_notify)),
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -4052,13 +4028,7 @@ async fn successful_response_resets_hang_counter() {
             )
             .await;
     }
-    assert_eq!(
-        harness
-            .transport
-            .consecutive_failures
-            .load(Ordering::Relaxed),
-        HANG_THRESHOLD - 1,
-    );
+    assert_eq!(harness.transport.liveness.strikes(), HANG_THRESHOLD - 1,);
 
     // Issue a real request and resolve its pending entry from the "tsserver" side.
     let request_transport = Arc::clone(&harness.transport);
@@ -4075,17 +4045,14 @@ async fn successful_response_resets_hang_counter() {
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     {
         let seq = harness.transport.next_seq.load(Ordering::Relaxed) - 1;
-        if let Some(tx) = harness.transport.pending.take(seq) {
+        if let Some(tx) = harness.transport.pending.table.take(seq) {
             let _ = tx.send(serde_json::json!({"success": true, "body": null}));
         }
     }
     let ok = request_task.await.expect("request task must not panic");
     assert!(ok.is_ok(), "an answered request resolves Ok");
     assert_eq!(
-        harness
-            .transport
-            .consecutive_failures
-            .load(Ordering::Relaxed),
+        harness.transport.liveness.strikes(),
         0,
         "a successful response resets the consecutive-timeout counter"
     );
@@ -4187,9 +4154,7 @@ fn test_transport(stdin_tx: mpsc::Sender<TsserverStdinMessage>) -> TsserverTrans
         stdin_tx,
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
-        consecutive_failures: AtomicU32::new(0),
-        last_strike_at: StdMutex::new(None),
-        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        liveness: Arc::new(EngineLiveness::default()),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: TsserverCancellation::create().map(Arc::new),
@@ -4205,9 +4170,7 @@ fn test_transport_with_notify(
         stdin_tx,
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
-        consecutive_failures: AtomicU32::new(0),
-        last_strike_at: StdMutex::new(None),
-        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        liveness: Arc::new(EngineLiveness::default()),
         crash_notify: Some(crash_notify),
         membership_recovery: Mutex::new(None),
         cancellation: TsserverCancellation::create().map(Arc::new),
@@ -4218,24 +4181,26 @@ fn test_transport_with_notify(
 async fn silence_watchdog_restarts_without_timing_out_the_request() {
     let pending = Arc::new(TsserverPendingRequests::default());
     let (tx, _rx) = oneshot::channel();
-    assert!(pending.insert(1, tx));
-    let last_message_at = Arc::new(StdMutex::new(
+    assert!(pending.table.insert(1, tx));
+    let liveness = Arc::new(EngineLiveness::since(
         std::time::Instant::now() - std::time::Duration::from_millis(50),
     ));
     let notify = Arc::new(Notify::new());
     let waiter = notify.notified();
-    tokio::spawn(watch_tsserver_silence(
+    tokio::spawn(watch_engine_silence(
         Arc::downgrade(&pending),
-        last_message_at,
+        liveness,
         Arc::clone(&notify),
+        None,
         std::time::Duration::from_millis(5),
         std::time::Duration::from_millis(20),
+        "tsserver",
     ));
     tokio::time::timeout(std::time::Duration::from_millis(200), waiter)
         .await
         .expect("silent provider must trigger lifecycle recovery");
     assert_eq!(
-        pending.len(),
+        pending.table.len(),
         1,
         "the watchdog signals provider lifecycle recovery; it does not time out requests itself"
     );
@@ -4247,20 +4212,22 @@ async fn silence_watchdog_restarts_without_timing_out_the_request() {
 #[tokio::test]
 async fn silence_watchdog_starts_at_the_new_pending_interval_after_long_idle() {
     let pending = Arc::new(TsserverPendingRequests::default());
-    let last_message_at = Arc::new(StdMutex::new(
+    let liveness = Arc::new(EngineLiveness::since(
         std::time::Instant::now() - std::time::Duration::from_secs(3600),
     ));
     let notify = Arc::new(Notify::new());
-    tokio::spawn(watch_tsserver_silence(
+    tokio::spawn(watch_engine_silence(
         Arc::downgrade(&pending),
-        last_message_at,
+        liveness,
         Arc::clone(&notify),
+        None,
         std::time::Duration::from_millis(2),
         std::time::Duration::from_millis(60),
+        "tsserver",
     ));
 
     let (tx, _rx) = oneshot::channel();
-    assert!(pending.insert(1, tx));
+    assert!(pending.table.insert(1, tx));
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(25), notify.notified())
             .await
@@ -4297,6 +4264,7 @@ async fn production_tsserver_request_outlives_the_ambient_deadline() {
     );
     transport
         .pending
+        .table
         .take_any()
         .expect("request is pending")
         .send(serde_json::json!({ "success": true, "body": { "displayString": "ok" } }))
@@ -4359,7 +4327,7 @@ async fn a_deadline_shortened_tsserver_hop_is_not_charged_to_hang_detection() {
     }
 
     assert_eq!(
-        transport.consecutive_failures.load(Ordering::Relaxed),
+        transport.liveness.strikes(),
         0,
         "a hop the caller's own deadline cut short says nothing about engine health"
     );
@@ -4392,7 +4360,7 @@ async fn a_full_bound_tsserver_timeout_is_still_charged_to_hang_detection() {
     }
 
     assert_eq!(
-        transport.consecutive_failures.load(Ordering::Relaxed),
+        transport.liveness.strikes(),
         HANG_THRESHOLD,
         "an unanswered hop that used its whole configured bound must be charged"
     );
@@ -4450,7 +4418,7 @@ async fn concurrent_full_bound_timeouts_are_one_strike_not_three() {
     }
 
     assert_eq!(
-        transport.consecutive_failures.load(Ordering::Relaxed),
+        transport.liveness.strikes(),
         1,
         "hops that shared ONE window of engine silence are ONE strike, not one each"
     );
@@ -4483,10 +4451,7 @@ async fn a_hop_is_not_charged_while_the_child_is_still_emitting() {
         let transport_for_traffic = Arc::clone(&transport);
         let traffic = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-            *transport_for_traffic
-                .last_message_at
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = std::time::Instant::now();
+            transport_for_traffic.liveness.note_output();
         });
         let _ = transport
             .request_with_timeout(
@@ -4499,7 +4464,7 @@ async fn a_hop_is_not_charged_while_the_child_is_still_emitting() {
     }
 
     assert_eq!(
-        transport.consecutive_failures.load(Ordering::Relaxed),
+        transport.liveness.strikes(),
         0,
         "an unanswered hop against a child that kept emitting is not evidence of a wedge"
     );
@@ -4622,7 +4587,7 @@ async fn interactive_request_preempts_and_then_defers_background_diagnostics() {
 /// a request abandoned without releasing its slot shows up here and nowhere
 /// else.
 fn pending_len(transport: &TsserverTransport) -> usize {
-    transport.pending.len()
+    transport.pending.table.len()
 }
 
 /// Dropping a caller's in-flight request future must release its pending-map
@@ -4771,7 +4736,7 @@ async fn an_answered_tsserver_request_returns_its_result_and_emits_no_cancellati
         let pending = Arc::clone(&transport.pending);
         tokio::spawn(async move {
             for _ in 0..100 {
-                if let Some(tx) = pending.take(1) {
+                if let Some(tx) = pending.table.take(1) {
                     let _ = tx.send(serde_json::json!({
                         "type": "response",
                         "request_seq": 1,
@@ -4857,7 +4822,7 @@ async fn a_tsserver_cancellation_envelope_is_an_error_not_an_empty_result() {
         let pending = Arc::clone(&transport.pending);
         tokio::spawn(async move {
             for _ in 0..100 {
-                if let Some(tx) = pending.take(1) {
+                if let Some(tx) = pending.table.take(1) {
                     let _ = tx.send(serde_json::json!({
                         "type": "response",
                         "request_seq": 1,
@@ -5000,7 +4965,7 @@ async fn hang_strikes_are_suspended_during_a_healthy_project_load() {
         transport.note_hang_failure("quickinfo", std::time::Instant::now());
     }
     assert_eq!(
-        transport.consecutive_failures.load(Ordering::Relaxed),
+        transport.liveness.strikes(),
         0,
         "a silent synchronous monorepo build is busy work, not a wedged child"
     );
@@ -5013,7 +4978,7 @@ async fn hang_strikes_are_suspended_during_a_healthy_project_load() {
         transport.note_hang_failure("quickinfo", std::time::Instant::now());
     }
     assert_eq!(
-        transport.consecutive_failures.load(Ordering::Relaxed),
+        transport.liveness.strikes(),
         HANG_THRESHOLD,
         "ordinary silent full-bound hops must still trip hang detection"
     );
@@ -5028,17 +4993,15 @@ async fn project_load_suspension_has_an_absolute_silence_backstop() {
         .pending
         .project_loads_in_flight
         .store(1, Ordering::Relaxed);
-    *transport
-        .last_message_at
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-        std::time::Instant::now() - LOADING_WEDGE_SILENCE_CAP - std::time::Duration::from_secs(1);
+    transport.liveness.set_last_output_at(
+        std::time::Instant::now() - LOADING_WEDGE_SILENCE_CAP - std::time::Duration::from_secs(1),
+    );
 
     for _ in 0..HANG_THRESHOLD {
         transport.note_hang_failure("quickinfo", std::time::Instant::now());
     }
     assert_eq!(
-        transport.consecutive_failures.load(Ordering::Relaxed),
+        transport.liveness.strikes(),
         HANG_THRESHOLD,
         "a child silent beyond the backstop must restart even if Finish was lost"
     );

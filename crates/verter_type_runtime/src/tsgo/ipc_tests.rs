@@ -67,8 +67,8 @@ fn lsp_wire_pos_fails_closed_on_out_of_range_or_malformed() {
 
 #[test]
 fn process_death_closes_pending_registration_atomically() {
-    let pending = PendingRequests::default();
-    pending.drain_with_crash_error();
+    let pending = PendingRequestTable::default();
+    fail_pending_with_crash_error(&pending);
 
     let (tx, _rx) = oneshot::channel();
     assert!(
@@ -201,11 +201,9 @@ fn test_transport(stdin_tx: mpsc::Sender<StdinMessage>) -> LspTransport {
         interactive_tx: stdin_tx.clone(),
         normal_tx: stdin_tx.clone(),
         background_tx: stdin_tx,
-        pending: Arc::new(PendingRequests::default()),
+        pending: Arc::new(PendingRequestTable::default()),
         next_id: AtomicI64::new(1),
-        consecutive_failures: AtomicU32::new(0),
-        last_strike_at: StdMutex::new(None),
-        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        liveness: Arc::new(EngineLiveness::default()),
         crash_notify: None,
         teardown_intent: Arc::new(AtomicBool::new(false)),
     }
@@ -214,7 +212,7 @@ fn test_transport(stdin_tx: mpsc::Sender<StdinMessage>) -> LspTransport {
 /// Create an `LspTransport` for tests with shared pending map.
 fn test_transport_with_pending(
     stdin_tx: mpsc::Sender<StdinMessage>,
-    pending: Arc<PendingRequests>,
+    pending: Arc<PendingRequestTable>,
 ) -> LspTransport {
     LspTransport {
         control_tx: mpsc::unbounded_channel().0,
@@ -223,9 +221,7 @@ fn test_transport_with_pending(
         background_tx: stdin_tx,
         pending,
         next_id: AtomicI64::new(1),
-        consecutive_failures: AtomicU32::new(0),
-        last_strike_at: StdMutex::new(None),
-        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        liveness: Arc::new(EngineLiveness::default()),
         crash_notify: None,
         teardown_intent: Arc::new(AtomicBool::new(false)),
     }
@@ -235,7 +231,7 @@ fn test_transport_with_pending(
 /// assert on what cancellation actually emitted.
 fn test_transport_with_control(
     stdin_tx: mpsc::Sender<StdinMessage>,
-    pending: Arc<PendingRequests>,
+    pending: Arc<PendingRequestTable>,
 ) -> (LspTransport, mpsc::UnboundedReceiver<StdinMessage>) {
     let (control_tx, control_rx) = mpsc::unbounded_channel();
     (
@@ -246,9 +242,7 @@ fn test_transport_with_control(
             background_tx: stdin_tx,
             pending,
             next_id: AtomicI64::new(1),
-            consecutive_failures: AtomicU32::new(0),
-            last_strike_at: StdMutex::new(None),
-            last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+            liveness: Arc::new(EngineLiveness::default()),
             crash_notify: None,
             teardown_intent: Arc::new(AtomicBool::new(false)),
         },
@@ -258,22 +252,23 @@ fn test_transport_with_control(
 
 #[tokio::test]
 async fn silence_watchdog_restarts_without_timing_out_the_request() {
-    let pending = Arc::new(PendingRequests::default());
+    let pending = Arc::new(PendingRequestTable::default());
     let (tx, _rx) = oneshot::channel();
     assert!(pending.insert(1, tx));
-    let last_message_at = Arc::new(StdMutex::new(
+    let liveness = Arc::new(EngineLiveness::since(
         std::time::Instant::now() - std::time::Duration::from_millis(50),
     ));
     let notify = Arc::new(Notify::new());
     let teardown = Arc::new(AtomicBool::new(false));
     let waiter = notify.notified();
-    tokio::spawn(watch_tsgo_silence(
+    tokio::spawn(watch_engine_silence(
         Arc::downgrade(&pending),
-        last_message_at,
+        liveness,
         Arc::clone(&notify),
-        teardown,
+        Some(teardown),
         std::time::Duration::from_millis(5),
         std::time::Duration::from_millis(20),
+        "tsgo",
     ));
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(10), waiter)
@@ -290,6 +285,43 @@ async fn silence_watchdog_restarts_without_timing_out_the_request() {
         1,
         "the watchdog signals provider lifecycle recovery; it does not time out requests itself"
     );
+}
+
+/// A deliberate `shutdown()` leaves the child silent with work still pending —
+/// exactly the shape the silence watchdog restarts on. Teardown intent must
+/// disarm it, or every clean shutdown respawns an engine into a dying session.
+#[tokio::test]
+async fn silence_watchdog_stays_disarmed_during_deliberate_teardown() {
+    let pending = Arc::new(PendingRequestTable::default());
+    let (tx, _rx) = oneshot::channel();
+    assert!(pending.insert(1, tx));
+    let liveness = Arc::new(EngineLiveness::since(
+        std::time::Instant::now() - std::time::Duration::from_millis(50),
+    ));
+    let notify = Arc::new(Notify::new());
+    let teardown = Arc::new(AtomicBool::new(true));
+    let waiter = notify.notified();
+    tokio::spawn(watch_engine_silence(
+        Arc::downgrade(&pending),
+        liveness,
+        Arc::clone(&notify),
+        Some(Arc::clone(&teardown)),
+        std::time::Duration::from_millis(5),
+        std::time::Duration::from_millis(20),
+        "tsgo",
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), waiter)
+            .await
+            .is_err(),
+        "a silent child during deliberate teardown is the teardown, not a crash"
+    );
+
+    // Clearing the intent re-arms it: the same silence now IS evidence.
+    teardown.store(false, Ordering::SeqCst);
+    tokio::time::timeout(std::time::Duration::from_millis(200), notify.notified())
+        .await
+        .expect("once teardown intent clears, a silent provider must restart");
 }
 
 /// Decode the JSON body of a framed stdin message.
@@ -321,7 +353,7 @@ fn frame_body(msg: &StdinMessage) -> serde_json::Value {
 #[tokio::test]
 async fn dropping_an_in_flight_request_releases_its_pending_slot() {
     let (stdin_tx, _stdin_rx) = mpsc::channel(16);
-    let pending = Arc::new(PendingRequests::default());
+    let pending = Arc::new(PendingRequestTable::default());
     let transport = test_transport_with_pending(stdin_tx, Arc::clone(&pending));
 
     {
@@ -357,7 +389,7 @@ async fn dropping_an_in_flight_request_releases_its_pending_slot() {
 #[tokio::test]
 async fn dropping_an_in_flight_request_cancels_it_at_the_engine() {
     let (stdin_tx, mut stdin_rx) = mpsc::channel(16);
-    let pending = Arc::new(PendingRequests::default());
+    let pending = Arc::new(PendingRequestTable::default());
     let (transport, mut control_rx) = test_transport_with_control(stdin_tx, Arc::clone(&pending));
 
     {
@@ -403,7 +435,7 @@ async fn cancellation_does_not_queue_behind_the_lane_it_cancels() {
     // Capacity 1, and it is already full: the interactive lane cannot accept
     // another byte.
     let (stdin_tx, mut stdin_rx) = mpsc::channel(1);
-    let pending = Arc::new(PendingRequests::default());
+    let pending = Arc::new(PendingRequestTable::default());
     let (transport, mut control_rx) = test_transport_with_control(stdin_tx, Arc::clone(&pending));
 
     {
@@ -436,7 +468,7 @@ async fn cancellation_does_not_queue_behind_the_lane_it_cancels() {
 #[tokio::test]
 async fn an_answered_request_emits_no_cancellation() {
     let (stdin_tx, mut stdin_rx) = mpsc::channel(16);
-    let pending = Arc::new(PendingRequests::default());
+    let pending = Arc::new(PendingRequestTable::default());
     let (transport, mut control_rx) = test_transport_with_control(stdin_tx, Arc::clone(&pending));
 
     let answerer = {
@@ -498,7 +530,7 @@ async fn an_answered_request_emits_no_cancellation() {
 #[tokio::test(start_paused = true)]
 async fn a_hop_times_out_inside_the_callers_request_deadline() {
     let (stdin_tx, _stdin_rx) = mpsc::channel(16);
-    let pending = Arc::new(PendingRequests::default());
+    let pending = Arc::new(PendingRequestTable::default());
     let transport = test_transport_with_pending(stdin_tx, Arc::clone(&pending));
 
     let deadline = std::time::Duration::from_millis(400);
@@ -552,7 +584,7 @@ async fn a_hop_times_out_inside_the_callers_request_deadline() {
 #[tokio::test]
 async fn production_tsgo_request_outlives_the_ambient_deadline() {
     let (stdin_tx, _stdin_rx) = mpsc::channel(16);
-    let pending = Arc::new(PendingRequests::default());
+    let pending = Arc::new(PendingRequestTable::default());
     let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
     let request = {
         let transport = Arc::clone(&transport);
@@ -3186,7 +3218,7 @@ async fn test_read_loop_exits_on_eof() {
     // Wait for the process to exit (stdout will close)
     let _ = child.wait().await;
 
-    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
+    let pending: Arc<PendingRequestTable> = Arc::new(PendingRequestTable::default());
     let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
@@ -3203,7 +3235,7 @@ async fn test_read_loop_exits_on_eof() {
         mpsc::unbounded_channel().0,
         None,
         Arc::new(AtomicBool::new(false)),
-        Arc::new(StdMutex::new(std::time::Instant::now())),
+        Arc::new(EngineLiveness::default()),
     ));
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
@@ -3222,7 +3254,7 @@ async fn test_read_loop_exits_on_eof() {
 /// This must result in a "response channel closed" error, not a hang.
 #[tokio::test]
 async fn test_pending_request_channel_closed_on_read_loop_exit() {
-    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
+    let pending: Arc<PendingRequestTable> = Arc::new(PendingRequestTable::default());
 
     // Register a pending request manually
     let (tx, rx) = oneshot::channel();
@@ -3251,7 +3283,7 @@ async fn test_provider_operations_fail_after_process_death() {
     // Wait for the process to exit
     let _ = child.wait().await;
 
-    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
+    let pending: Arc<PendingRequestTable> = Arc::new(PendingRequestTable::default());
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
     tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
     let transport = Arc::new(test_transport_with_pending(
@@ -3272,7 +3304,7 @@ async fn test_provider_operations_fail_after_process_death() {
         mpsc::unbounded_channel().0,
         None,
         Arc::new(AtomicBool::new(false)),
-        Arc::new(StdMutex::new(std::time::Instant::now())),
+        Arc::new(EngineLiveness::default()),
     ));
 
     let provider = TsgoTypeProvider {
@@ -3344,7 +3376,7 @@ async fn cached_content_resolves_equivalent_path_forms_after_load_file() {
     let (mut child, stdin, stdout) = spawn_short_lived_process().await;
     let _ = child.wait().await;
 
-    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
+    let pending: Arc<PendingRequestTable> = Arc::new(PendingRequestTable::default());
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
     tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
     let transport = Arc::new(test_transport_with_pending(
@@ -3363,7 +3395,7 @@ async fn cached_content_resolves_equivalent_path_forms_after_load_file() {
         mpsc::unbounded_channel().0,
         None,
         Arc::new(AtomicBool::new(false)),
-        Arc::new(StdMutex::new(std::time::Instant::now())),
+        Arc::new(EngineLiveness::default()),
     ));
     let provider = TsgoTypeProvider {
         transport,
@@ -3624,7 +3656,7 @@ async fn concurrent_requests_with_server_requests_do_not_deadlock() {
     let (client_stdout_reader, mut mock_stdout_writer) = tokio::io::duplex(64 * 1024);
     let (mock_stdin_reader, _client_stdin_writer) = tokio::io::duplex(64 * 1024);
 
-    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
+    let pending: Arc<PendingRequestTable> = Arc::new(PendingRequestTable::default());
     let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
@@ -3662,7 +3694,7 @@ async fn concurrent_requests_with_server_requests_do_not_deadlock() {
         control_tx,
         None,
         Arc::new(AtomicBool::new(false)),
-        Arc::new(StdMutex::new(std::time::Instant::now())),
+        Arc::new(EngineLiveness::default()),
     ));
 
     // Spawn a mock "TSGO" task that reads requests from mock_stdout_writer
@@ -3751,7 +3783,7 @@ async fn timed_out_request_is_removed_from_pending() {
     // Create a channel where the receiver is immediately dropped (simulating a dead writer)
     let (stdin_tx, _stdin_rx) = mpsc::channel::<StdinMessage>(16);
 
-    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
+    let pending: Arc<PendingRequestTable> = Arc::new(PendingRequestTable::default());
 
     let transport = test_transport_with_pending(stdin_tx, Arc::clone(&pending));
 
@@ -3796,7 +3828,7 @@ async fn shutdown_completes_within_timeout_when_provider_unresponsive() {
     // Create a channel where we just drop the receiver (simulating unresponsive TSGO)
     let (stdin_tx, _rx) = mpsc::channel::<StdinMessage>(16);
 
-    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
+    let pending: Arc<PendingRequestTable> = Arc::new(PendingRequestTable::default());
 
     let transport = Arc::new(test_transport_with_pending(stdin_tx, pending));
 
@@ -3952,7 +3984,7 @@ async fn test_read_loop_skips_diagnostics_for_unknown_files() {
 
     let (client_stdout_reader, mut mock_writer) = tokio::io::duplex(64 * 1024);
 
-    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
+    let pending: Arc<PendingRequestTable> = Arc::new(PendingRequestTable::default());
     let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
@@ -3979,7 +4011,7 @@ async fn test_read_loop_skips_diagnostics_for_unknown_files() {
         mpsc::unbounded_channel().0,
         None,
         Arc::new(AtomicBool::new(false)),
-        Arc::new(StdMutex::new(std::time::Instant::now())),
+        Arc::new(EngineLiveness::default()),
     ));
 
     // Send publishDiagnostics for a tsconfig file (NOT in contents_cache)
@@ -4186,7 +4218,7 @@ fn resolvable_completion(label: &str) -> Completion {
 /// honored). Stops when the channel closes.
 async fn spawn_resolve_responder(
     mut stdin_rx: mpsc::Receiver<StdinMessage>,
-    pending: Arc<PendingRequests>,
+    pending: Arc<PendingRequestTable>,
     seen: Arc<std::sync::atomic::AtomicUsize>,
 ) {
     while let Some(msg) = stdin_rx.recv().await {
@@ -4235,7 +4267,7 @@ async fn get_completion_details_bounds_enrichment_to_list_cap() {
     // Real child only satisfies the `child` field; all I/O is the channel.
     let child = spawn_long_lived_process(Stdio::null(), Stdio::null(), true);
 
-    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
+    let pending: Arc<PendingRequestTable> = Arc::new(PendingRequestTable::default());
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(256);
     let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     tokio::spawn(spawn_resolve_responder(
@@ -4315,7 +4347,7 @@ async fn get_completion_details_bounds_enrichment_to_list_cap() {
 #[tokio::test]
 async fn get_completion_details_enriches_full_small_list() {
     let child = spawn_long_lived_process(Stdio::null(), Stdio::null(), true);
-    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
+    let pending: Arc<PendingRequestTable> = Arc::new(PendingRequestTable::default());
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(64);
     let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     tokio::spawn(spawn_resolve_responder(
@@ -4364,7 +4396,7 @@ async fn get_completion_details_enriches_full_small_list() {
 /// enrichment is a non-edit field.
 async fn spawn_label_details_only_responder(
     mut stdin_rx: mpsc::Receiver<StdinMessage>,
-    pending: Arc<PendingRequests>,
+    pending: Arc<PendingRequestTable>,
 ) {
     while let Some(msg) = stdin_rx.recv().await {
         let StdinMessage::Frame(bytes) = msg else {
@@ -4403,7 +4435,7 @@ async fn spawn_label_details_only_responder(
 #[tokio::test]
 async fn resolve_completion_returns_some_when_only_label_details_present() {
     let child = spawn_long_lived_process(Stdio::null(), Stdio::null(), true);
-    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
+    let pending: Arc<PendingRequestTable> = Arc::new(PendingRequestTable::default());
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
     tokio::spawn(spawn_label_details_only_responder(
         stdin_rx,
@@ -4749,10 +4781,7 @@ async fn interactive_request_stays_bounded_when_the_writer_is_stalled_behind_a_f
     // they are ONE piece of evidence — not 8. Charging each separately would
     // restart a merely-busy engine after a single bound.
     assert_eq!(
-        provider
-            .transport
-            .consecutive_failures
-            .load(Ordering::Relaxed),
+        provider.transport.liveness.strikes(),
         1,
         "hops that shared one silence window are ONE strike"
     );
@@ -4784,11 +4813,7 @@ async fn interactive_request_stays_bounded_when_the_writer_is_stalled_behind_a_f
         "successive send/response failures past HANG_THRESHOLD must fire crash_notify"
     );
     assert!(
-        provider
-            .transport
-            .consecutive_failures
-            .load(Ordering::Relaxed)
-            >= HANG_THRESHOLD,
+        provider.transport.liveness.strikes() >= HANG_THRESHOLD,
         "send/response stalls must increment the hang-detection counter"
     );
 }

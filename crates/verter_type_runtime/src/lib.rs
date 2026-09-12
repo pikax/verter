@@ -38,6 +38,7 @@ pub mod codec;
 pub mod contents_snapshot;
 pub mod deadline;
 pub mod discovery;
+mod pending;
 pub mod protocol;
 pub mod provider_adapter;
 pub mod resilient;

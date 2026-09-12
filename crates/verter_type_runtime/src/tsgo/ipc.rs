@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 
 use crate::semantic_tokens::SemanticTokenLegendMap;
@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use crate::codec::{LineColumn, PositionEncoding, SourceIndex};
 use crate::contents_snapshot::{convert_per_target, with_target_index};
+use crate::pending::{watch_engine_silence, EngineLiveness, PendingRequestTable};
 use crate::protocol::*;
 use crate::traits::{ProviderFuture, TypeProvider};
 #[cfg(test)]
@@ -60,96 +61,14 @@ fn summarize_lsp_params(params: &serde_json::Value) -> String {
     format!("uri={} line={} character={}", uri, line, character)
 }
 
-/// In-flight requests awaiting a response, keyed by JSON-RPC id.
-///
-/// A `std::sync::Mutex`, not an async one: every critical section is a single
-/// map operation with no await inside it, and a synchronous lock is what lets
-/// [`PendingRequest::drop`] clean up. A cancelled request is dropped, not
-/// awaited to completion, so cleanup that could only run on an async path would
-/// never run at all.
-#[derive(Default)]
-struct PendingRequestState {
-    map: HashMap<i64, oneshot::Sender<serde_json::Value>>,
-    closed: bool,
-    /// Start of the current non-empty interval. A provider that was idle for a
-    /// long time must receive the full silence allowance when new work arrives.
-    pending_since: Option<std::time::Instant>,
-}
-
-#[derive(Default)]
-struct PendingRequests {
-    state: StdMutex<PendingRequestState>,
-}
-
-impl PendingRequests {
-    /// Register a request only while the reader is alive. The closed check and
-    /// insertion share one lock with [`Self::drain_with_crash_error`], closing
-    /// the EOF race where a request could be inserted immediately after the
-    /// reader drained the map and then wait forever for a dead process.
-    fn insert(&self, id: i64, tx: oneshot::Sender<serde_json::Value>) -> bool {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.closed {
-            return false;
-        }
-        if state.map.is_empty() {
-            state.pending_since = Some(std::time::Instant::now());
-        }
-        state.map.insert(id, tx);
-        true
-    }
-
-    fn take(&self, id: i64) -> Option<oneshot::Sender<serde_json::Value>> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let sender = state.map.remove(&id);
-        if state.map.is_empty() {
-            state.pending_since = None;
-        }
-        sender
-    }
-
-    fn pending_since(&self) -> Option<std::time::Instant> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .pending_since
-    }
-
-    /// How many requests are in flight. The leak surface: a request abandoned
-    /// without releasing its slot shows up here and nowhere else.
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .map
-            .len()
-    }
-
-    /// Fail every in-flight request so callers return immediately instead of
-    /// waiting indefinitely. The closed flag makes process death sticky for
-    /// this transport; the resilient owner creates a fresh transport on restart.
-    fn drain_with_crash_error(&self) {
-        let drained: Vec<_> = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state.closed = true;
-            state.pending_since = None;
-            state.map.drain().collect()
-        };
-        for (_id, tx) in drained {
-            let _ = tx.send(serde_json::json!({
-                "error": { "code": -32099, "message": "tsgo process crashed" }
-            }));
-        }
-    }
+/// Fail every in-flight tsgo request after process death. The JSON-RPC error
+/// body is what a caller of this transport already knows how to read.
+fn fail_pending_with_crash_error(pending: &PendingRequestTable) {
+    pending.close_and_fail_with(|| {
+        serde_json::json!({
+            "error": { "code": -32099, "message": "tsgo process crashed" }
+        })
+    });
 }
 
 /// One in-flight request's registration, released on drop.
@@ -169,7 +88,7 @@ impl PendingRequests {
 /// is not a cancel.
 struct PendingRequest {
     id: i64,
-    pending: Arc<PendingRequests>,
+    pending: Arc<PendingRequestTable>,
     control_tx: mpsc::UnboundedSender<StdinMessage>,
     /// Cleared once the response is in hand — a completed request must not emit
     /// a cancellation for an id the engine has already answered.
@@ -492,18 +411,14 @@ struct LspTransport {
     /// Background-priority lane: workspace scanner, shadow graph, diagnostics.
     background_tx: mpsc::Sender<StdinMessage>,
     /// Pending request senders, keyed by request ID. Shared with the read loop.
-    pending: Arc<PendingRequests>,
+    pending: Arc<PendingRequestTable>,
     next_id: AtomicI64,
-    /// Counts consecutive request timeouts. Reset to 0 on any successful response.
-    /// When this reaches `HANG_THRESHOLD`, fires `crash_notify` to trigger a restart
-    /// via the existing `ResilientTypeProvider` crash recovery machinery.
-    consecutive_failures: AtomicU32,
-    /// When the last hang strike was charged, so hops already in flight then are
-    /// not counted as independent evidence. Cleared with the counter.
-    last_strike_at: StdMutex<Option<std::time::Instant>>,
-    /// When the read loop last got ANY output from the child. A child that is
-    /// emitting is working, however slowly; a WEDGED child emits nothing.
-    last_message_at: Arc<StdMutex<std::time::Instant>>,
+    /// Child-output timestamp plus the consecutive-unanswered-hop counter that
+    /// drives hang detection. Shared with the read loop, which stamps output,
+    /// and with the silence watchdog. When the counter reaches `HANG_THRESHOLD`
+    /// the transport fires `crash_notify` to trigger a restart via the existing
+    /// `ResilientTypeProvider` crash recovery machinery.
+    liveness: Arc<EngineLiveness>,
     /// Shared with `ResilientTypeProvider` — signaled when the provider appears hung.
     crash_notify: Option<Arc<Notify>>,
     /// Deliberate-teardown intent. Set by `shutdown()` BEFORE the `shutdown`/`exit`
@@ -545,44 +460,6 @@ const HANG_THRESHOLD: u32 = 3;
 const ENGINE_SILENCE_CAP: std::time::Duration = std::time::Duration::from_secs(120);
 const SILENCE_WATCHDOG_POLL: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Provider-health watchdog, not a request timeout. Feature requests remain
-/// pending until response or client cancellation. A restart is requested only
-/// when the child has pending work and emits no protocol output whatsoever for
-/// the absolute silence cap.
-async fn watch_tsgo_silence(
-    pending: std::sync::Weak<PendingRequests>,
-    last_message_at: Arc<StdMutex<std::time::Instant>>,
-    crash_notify: Arc<Notify>,
-    teardown_intent: Arc<AtomicBool>,
-    poll: std::time::Duration,
-    silence_cap: std::time::Duration,
-) {
-    loop {
-        tokio::time::sleep(poll).await;
-        let Some(pending) = pending.upgrade() else {
-            return;
-        };
-        if teardown_intent.load(Ordering::SeqCst) {
-            continue;
-        }
-        let Some(pending_since) = pending.pending_since() else {
-            continue;
-        };
-        let last_message = *last_message_at
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let silent_for = std::cmp::max(last_message, pending_since).elapsed();
-        if silent_for < silence_cap {
-            continue;
-        }
-        tracing::error!(
-            "tsgo emitted no output for {silent_for:?} while requests were pending; restarting"
-        );
-        crash_notify.notify_waiters();
-        return;
-    }
-}
-
 use crate::traits::ProviderPriority;
 
 /// Build a JSON-RPC message body, OMITTING the `params` key entirely when the
@@ -620,63 +497,24 @@ impl LspTransport {
     /// Only the response-timeout arm used to count, so a request parked on a
     /// full lane behind a stalled writer never reached this path, so the wedge
     /// detector never fired for a stdin-side deadlock.
-    /// CONSECUTIVE MEANS SEQUENTIAL IN TIME. A hop that was already in flight
-    /// when the previous strike was charged observed the SAME window of silence,
-    /// so it is not independent evidence. The LSP fans out — hover, definition,
-    /// completion, references and a background diagnostics pull are routinely in
-    /// flight at the same instant on the same bound — so charging each of them
-    /// separately reaches the threshold after a SINGLE bound's worth of silence
-    /// and restarts an engine that is merely busy building a cold program. The
-    /// restart discards that program, so the next wave is cold too: a
-    /// self-sustaining restart loop. `issued_at` is when this hop's bound
-    /// started; only a hop issued at or after the last strike advances the count.
-    /// A hop is evidence of a WEDGE only if the child produced nothing at all
-    /// while it ran: a busy engine keeps emitting while it works.
-    fn child_was_silent_during(&self, issued_at: std::time::Instant) -> bool {
-        let last = *self
-            .last_message_at
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        last <= issued_at
-    }
-
     fn note_hang_failure(&self, method: &str, issued_at: std::time::Instant) {
-        if !self.child_was_silent_during(issued_at) {
+        let Some(count) = self.liveness.charge_strike(issued_at) else {
+            return;
+        };
+        if count < HANG_THRESHOLD {
             return;
         }
-        let count = {
-            let mut last = self
-                .last_strike_at
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if last.is_some_and(|at| issued_at < at) {
-                return;
-            }
-            *last = Some(std::time::Instant::now());
-            self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1
-        };
-        if count >= HANG_THRESHOLD {
-            if self.teardown_intent.load(Ordering::SeqCst) {
-                tracing::debug!("TSGO request failures during deliberate teardown — not a hang");
-            } else {
-                tracing::error!(
-                    "TSGO appears hung ({count} successive unanswered full-bound hops, \
-                     latest '{method}') — triggering restart"
-                );
-                if let Some(notify) = &self.crash_notify {
-                    notify.notify_waiters();
-                }
-            }
+        if self.teardown_intent.load(Ordering::SeqCst) {
+            tracing::debug!("TSGO request failures during deliberate teardown — not a hang");
+            return;
         }
-    }
-
-    /// Clear hang-detection state after proof the engine is alive and answering.
-    fn clear_hang_evidence(&self) {
-        self.consecutive_failures.store(0, Ordering::Relaxed);
-        *self
-            .last_strike_at
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        tracing::error!(
+            "TSGO appears hung ({count} successive unanswered full-bound hops, \
+             latest '{method}') — triggering restart"
+        );
+        if let Some(notify) = &self.crash_notify {
+            notify.notify_waiters();
+        }
     }
 
     fn finish_response(
@@ -685,7 +523,7 @@ impl LspTransport {
         id: i64,
         value: serde_json::Value,
     ) -> Result<serde_json::Value, TypeProviderError> {
-        self.clear_hang_evidence();
+        self.liveness.clear_strikes();
         if let Some(error) = value.get("error") {
             let message = error
                 .get("message")
@@ -834,7 +672,7 @@ impl LspTransport {
                         // engine that has replied must not be told to cancel.
                         registration.disarm();
                         // Reset consecutive failures on any successful response
-                        self.clear_hang_evidence();
+                        self.liveness.clear_strikes();
                         // Check for JSON-RPC error
                         if let Some(err) = val.get("error") {
                             let msg = err
@@ -1203,12 +1041,6 @@ async fn deliver_document_close(
     Ok(())
 }
 
-/// Close the transport and drain all pending requests, sending crash error
-/// responses so current and future callers fail immediately after process death.
-fn drain_pending(pending: &PendingRequests) {
-    pending.drain_with_crash_error();
-}
-
 /// Read loop that processes JSON-RPC messages from the child's stdout
 /// and dispatches responses to pending request channels.
 /// Also handles `textDocument/publishDiagnostics` notifications and
@@ -1224,13 +1056,13 @@ fn drain_pending(pending: &PendingRequests) {
 #[allow(clippy::too_many_arguments)]
 async fn read_loop(
     stdout: impl tokio::io::AsyncRead + Unpin + Send + 'static,
-    pending: Arc<PendingRequests>,
+    pending: Arc<PendingRequestTable>,
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
     contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>>,
     control_tx: mpsc::UnboundedSender<StdinMessage>,
     crash_notify: Option<Arc<Notify>>,
     teardown_intent: Arc<AtomicBool>,
-    last_message_at: Arc<StdMutex<std::time::Instant>>,
+    liveness: Arc<EngineLiveness>,
 ) {
     let signal_crash = |crash_notify: &Option<Arc<Notify>>| {
         if teardown_intent.load(Ordering::SeqCst) {
@@ -1254,17 +1086,14 @@ async fn read_loop(
             match reader.read_line(&mut header_buf).await {
                 Ok(0) => {
                     // EOF — child process exited
-                    drain_pending(&pending);
+                    fail_pending_with_crash_error(&pending);
                     signal_crash(&crash_notify);
                     return;
                 }
                 Ok(_) => {
                     // ANY output from the child proves its loop is turning. Hang
                     // detection reads this to tell a busy engine from a wedged one.
-                    *last_message_at
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                        std::time::Instant::now();
+                    liveness.note_output();
                     let line = header_buf.trim();
                     if line.is_empty() {
                         break; // End of headers
@@ -1277,7 +1106,7 @@ async fn read_loop(
                 }
                 Err(_) => {
                     // I/O error — child likely crashed
-                    drain_pending(&pending);
+                    fail_pending_with_crash_error(&pending);
                     signal_crash(&crash_notify);
                     return;
                 }
@@ -1295,7 +1124,7 @@ async fn read_loop(
             .await
             .is_err()
         {
-            drain_pending(&pending);
+            fail_pending_with_crash_error(&pending);
             signal_crash(&crash_notify);
             return;
         }
@@ -2366,7 +2195,7 @@ impl TsgoTypeProvider {
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
+        let pending: Arc<PendingRequestTable> = Arc::new(PendingRequestTable::default());
         let (control_tx, control_rx) = mpsc::unbounded_channel::<StdinMessage>();
         let (interactive_tx, interactive_rx) = mpsc::channel::<StdinMessage>(lane_capacity);
         let (normal_tx, normal_rx) = mpsc::channel::<StdinMessage>(lane_capacity);
@@ -2384,7 +2213,7 @@ impl TsgoTypeProvider {
             writer_stall,
         ));
 
-        let last_message_at = Arc::new(StdMutex::new(std::time::Instant::now()));
+        let liveness = Arc::new(EngineLiveness::default());
 
         let transport = Arc::new(LspTransport {
             control_tx: control_tx.clone(),
@@ -2393,20 +2222,19 @@ impl TsgoTypeProvider {
             background_tx,
             pending: Arc::clone(&pending),
             next_id: AtomicI64::new(1),
-            consecutive_failures: AtomicU32::new(0),
-            last_strike_at: StdMutex::new(None),
-            last_message_at: Arc::clone(&last_message_at),
+            liveness: Arc::clone(&liveness),
             crash_notify: crash_notify.as_ref().map(Arc::clone),
             teardown_intent: Arc::clone(&teardown_intent),
         });
         if let Some(notify) = crash_notify.as_ref() {
-            tokio::spawn(watch_tsgo_silence(
+            tokio::spawn(watch_engine_silence(
                 Arc::downgrade(&pending),
-                Arc::clone(&last_message_at),
+                Arc::clone(&liveness),
                 Arc::clone(notify),
-                Arc::clone(&teardown_intent),
+                Some(Arc::clone(&teardown_intent)),
                 SILENCE_WATCHDOG_POLL,
                 ENGINE_SILENCE_CAP,
+                "tsgo",
             ));
         }
         let diagnostics_cache = Arc::new(Mutex::new(HashMap::new()));
@@ -2419,7 +2247,7 @@ impl TsgoTypeProvider {
             control_tx,
             crash_notify,
             Arc::clone(&teardown_intent),
-            last_message_at,
+            liveness,
         ));
 
         Self {
