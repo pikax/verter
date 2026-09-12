@@ -9,6 +9,16 @@ authors.workspace = true
 description = "External TypeScript backend sessions (tsserver/TSGO) for Verter type expansion"
 publish = false
 
+# TEST-ONLY fake-engine shim. The owned-attach test needs a process that
+# answers `--version` deterministically, so the gate's accept/refuse verdict is
+# chosen by the test rather than by whatever tsgo the machine has. Never built
+# by a default/release build: the feature is enabled only by this crate's own
+# test builds through the dev-dependency on itself below.
+[[bin]]
+name = "verter_type_runtime_fake_engine"
+path = "src/bin/verter_type_runtime_fake_engine.rs"
+required-features = ["test-fake-engine"]
+
 [dependencies]
 verter_debug_assert = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -28,6 +38,10 @@ verter_tsgo_api = { path = "../verter_tsgo_api" }
 [dev-dependencies]
 blake3 = { workspace = true }
 verter_test_support = { path = "../verter_test_support" }
+# Self dev-dependency: enables `test-fake-engine` for THIS crate's test builds
+# only, so the fake-engine shim bin exists for `cargo test` (CARGO_BIN_EXE_)
+# while default/release builds never produce it.
+verter_type_runtime = { path = ".", features = ["test-fake-engine"] }
 # Per-test isolated temp dirs (auto-cleaned) for the discovery version-parse
 # tests, so parallel runs never collide on a fixed temp path.
 tempfile = "3.27"
@@ -45,3 +59,4 @@ tokio = { version = "1.52", features = [
 
 [features]
 default = []
+test-fake-engine = ["verter_tsgo_api/test-fake-engine"]

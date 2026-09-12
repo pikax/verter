@@ -321,7 +321,7 @@ impl EngineBackend for TsserverEngineBackend {
         ws.projects.lock().insert(Arc::from(request.tsconfig_uri()));
         // Mint the witness through the contract's sealed `from_ensured` path — the
         // raw seal never leaves the contract module, so this does NOT add a pub
-        // bypass that would violate `provider_op_requires_resolved_project`.
+        // bypass that would violate the bound-project witness type-state.
         Ok(BoundProject::from_ensured(
             &request,
             self.capabilities.clone(),

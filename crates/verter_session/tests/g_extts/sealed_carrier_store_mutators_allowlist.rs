@@ -31,6 +31,21 @@
 //! (`prepare_carrier_provider_sync_transition`, `carrier_sync_state_for_source`)
 //! are deliberately NOT in the forbidden set.
 //!
+//! ## Why this scan is still the only check of the invariant
+//!
+//! Every other invariant this directory once scanned for has a real rail that
+//! subsumes it: the bound-project witness is a compiler-enforced type-state, the
+//! non-owning attach surface has no raw-wire accessor to reach in the first
+//! place, the gated write channel refuses on live wire traffic, and the shared
+//! serve-mode decision fails closed per missing provenance fact under its own
+//! behavioral tests. This one does not. The language seal
+//! (`pub(in crate::external_ts)`) stops a caller OUTSIDE the module, but the
+//! failure mode here is a caller INSIDE it — a sibling `external_ts` file that
+//! commits carrier buffer state while forgetting the membership publish/retract.
+//! Making that unrepresentable needs a capability the store mutators demand and
+//! only the reconciler can mint; until that exists, deleting this scan would
+//! leave the invariant with no check at all.
+//!
 //! ## Why AST, not a text scan
 //!
 //! Exact-ident matching is load-bearing: live, legitimate methods share a PREFIX

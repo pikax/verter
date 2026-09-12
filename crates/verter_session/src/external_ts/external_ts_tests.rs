@@ -4,7 +4,7 @@
 //! `WorkspaceSnapshot` (built from an in-memory workspace via the production
 //! `build_workspace_snapshot` path, so the TS-correct extension model and the
 //! carrier-path conflict pass are exercised end-to-end), the
-//! `provider_op_requires_resolved_project` witness chain, the carrier registry,
+//! bound-project witness chain, the carrier registry,
 //! and the R21 `EnvDims` shape.
 
 use std::sync::Arc;
@@ -885,7 +885,7 @@ fn bootstrap_ownership_view_resolves_not_ready() {
     );
 }
 
-// ── provider_op_requires_resolved_project: the witness chain ──
+// ── The bound-project witness chain ──
 
 #[test]
 fn project_binding_mints_ensure_project_request() {
@@ -922,8 +922,8 @@ fn project_binding_mints_ensure_project_request() {
 fn no_project_and_ambiguous_carry_no_binding() {
     // The fail-closed states hold NO `ProjectBinding`, so there is no way to mint
     // an `EnsureProject` (hence no production op) from them. This is the runtime
-    // shadow of the compile-time guarantee; the static guard
-    // `provider_op_requires_resolved_project` is the source-level backstop.
+    // shadow of the compile-time guarantee: the fabrication this rules out is not
+    // representable, so this case pins the data half of the same invariant.
     let no_project = CarrierOwnershipResolution::NoProject;
     let ambiguous = CarrierOwnershipResolution::Ambiguous {
         candidates: Vec::new(),
@@ -964,7 +964,7 @@ fn bound_project_mints_from_ensure_project_request() {
     // The foreign-backend mint path: a real `EngineBackend` in another crate
     // obtains its `BoundProject` from `BoundProject::from_ensured(&EnsureProject,
     // caps)`. Because an `EnsureProject` is mintable ONLY from a resolved
-    // `ProjectBinding`, this preserves `provider_op_requires_resolved_project`
+    // `ProjectBinding`, this preserves the bound-project witness type-state
     // without exposing the raw seal. The project URI + env dims are READ FROM the
     // request — the backend cannot substitute a different project.
     let ws = workspace_with(&[

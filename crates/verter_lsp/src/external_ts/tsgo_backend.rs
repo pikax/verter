@@ -4,7 +4,7 @@
 //! This backend realises the project-binding half of the external-TS contract for
 //! the OWNED tsgo engine: `ensure_project` mints the [`BoundProject`] witness from
 //! a resolved [`EnsureProject`] (itself mintable only from a resolved
-//! `ProjectBinding`), preserving the `provider_op_requires_resolved_project`
+//! `ProjectBinding`), preserving the bound-project witness
 //! type-state across crates. The negotiated [`EngineCapabilities`] record the
 //! dual-surface handshake (§2.8): the `--api` checker + diagnostics + project
 //! membership are present; wire-level cancellation is NOT (the shipped `--api`

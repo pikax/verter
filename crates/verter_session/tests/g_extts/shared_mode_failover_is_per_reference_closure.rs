@@ -36,20 +36,12 @@
 //!      (the member-local `IncompleteComponent` still outranks it for the
 //!      declaring component).
 //!
-//! Plus one STRUCTURAL fact: `mode.rs` exposes NO per-file /
-//! per-single-project mode-selection API (`select_file_mode`,
-//! `select_project_mode`, `mode_for_file`, …) — the component is the only
-//! selection unit; a narrower API is the split-brain escape hatch.
-//!
 //! The self-test proves every predicate DISCRIMINATES by running the same
 //! predicates against deliberately broken plants: a per-project selector
 //! (split-brain), a subset failover, a directed-reachability component
 //! walker, a whole-graph merge, a mode-free engine identity, a local-only
-//! unresolved check (the target-side split), and a source snippet exposing
-//! `pub fn select_file_mode`.
+//! unresolved check (the target-side split).
 
-use std::fs;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use verter_session::external_ts::{
@@ -176,33 +168,6 @@ fn entry_independent(
 ) -> bool {
     let whole = vec![a, b, c];
     component_of(a) == whole && component_of(b) == whole && component_of(c) == whole
-}
-
-/// Structural fact — the substrate source exposes no per-file /
-/// per-single-project mode-selection API. Returns the offending needles.
-fn per_file_api_violations(mode_source: &str) -> Vec<&'static str> {
-    const FORBIDDEN: &[&str] = &[
-        "fn select_file_mode",
-        "fn select_project_mode",
-        "fn select_uri_mode",
-        "fn select_path_mode",
-        "fn mode_for_file",
-        "fn mode_for_project",
-        "fn mode_for_uri",
-        "fn mode_for_path",
-        "fn file_mode",
-        "fn project_mode",
-    ];
-    FORBIDDEN
-        .iter()
-        .filter(|needle| mode_source.contains(**needle))
-        .copied()
-        .collect()
-}
-
-fn mode_rs_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/external_ts/mode.rs");
-    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
 // ── The guard ──
@@ -365,28 +330,6 @@ fn shared_mode_failover_is_per_reference_closure() {
         declaring_side.owned_reason(),
         Some(OwnedReason::IncompleteComponent),
         "the member-local IncompleteComponent outranks the snapshot-wide reason"
-    );
-
-    // Structural fact — no per-file / per-single-project mode API exists
-    // in the substrate, and the component-unit entry points do.
-    let source = mode_rs_source();
-    let violations = per_file_api_violations(&source);
-    assert!(
-        violations.is_empty(),
-        "mode.rs must expose NO per-file/per-single-project mode-selection API \
-         (the component is the only unit); found: {violations:?}"
-    );
-    assert!(
-        source.contains("pub fn select_component_mode("),
-        "the component-wide selection entry point must exist"
-    );
-    assert!(
-        source.contains("pub fn failover_component_to_owned("),
-        "the component-wide failover entry point must exist"
-    );
-    assert!(
-        source.contains("pub fn connected_component("),
-        "the component constructor must exist"
     );
 }
 
@@ -557,21 +500,4 @@ fn shared_mode_failover_is_per_reference_closure_self_test_discriminates() {
         real_target.mode(),
         "the plant and the real selector disagree on the target side — the predicate discriminates"
     );
-
-    // Plant vs the structural fact — a source snippet exposing a per-file
-    // API is flagged; the real substrate source is clean.
-    let plant_source = "impl ModeApi {\n    pub fn select_file_mode(&self, uri: &str) -> ServeMode {\n        ServeMode::Shared\n    }\n}\n";
-    assert_eq!(
-        per_file_api_violations(plant_source),
-        vec!["fn select_file_mode"],
-        "the structural scan must FLAG a per-file mode API"
-    );
-    let narrower_unit_plant =
-        "pub fn mode_for_project(id: &ProjectIdentity) -> ServeMode { ServeMode::Owned }";
-    assert_eq!(
-        per_file_api_violations(narrower_unit_plant),
-        vec!["fn mode_for_project"],
-        "the structural scan must FLAG a per-single-project mode API"
-    );
-    assert!(per_file_api_violations(&mode_rs_source()).is_empty());
 }
