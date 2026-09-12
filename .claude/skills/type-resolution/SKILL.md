@@ -1235,6 +1235,16 @@ Suites inspecting a lowered region use `reaches_end_for_assertion` / `minted_for
 
 Registry-live guards: `flow_completion_carrier_inventory_is_closed`, `flow_completion_carriers_publish_the_checkers_answer`.
 
+#### What Abrupt-Suffix Completion Still Owes
+
+Completion is still reconstructed from statement SYNTAX in two places, and one of them fabricates a return arm.
+
+The region accumulator in `flow_slice_content.rs` derives `can_fall_through` along the OXC statement walk, and the suffix predicate that decides whether a pending `break` contributes an implicit `undefined` is a hand-maintained match over `return` / block / `if` ONLY. The consequence is exactly that coverage boundary, measured on the four suffix spellings of one base program (`OUT: INNER: { try { break INNER } finally { return "a" as const } }` followed by the suffix): a `return` / block / `if` suffix contributes no `undefined`, while a LABELED, `try`, `throw` or `switch` suffix adds one — the destination reads as reaching the function end although the suffix cannot complete normally. The authored-`return` spelling is separately pinned checker-correct (`X88_nested_label_inherits_enclosing_suffix_return`); the composite spellings are the open class.
+
+Extending that match is NOT the fix and is forbidden: a syntax-only classifier for this is exactly the second completion authority the substrate must not have. The reduction belongs on the DEMANDED `FunctionFlowGraph`, which today carries no completion at all — no completion edge, no reachability fact — and cannot acquire one from the current `FunctionBodySkeleton`, which indexes regions, return sites, bindings, writes and expression sites but records no `throw` statement, no `break` / `continue` jump, no break-target inventory, and no ordered statement list. Closing this therefore needs content-free abrupt-completion topology on the skeleton, ONE reduction over it on the graph, a typed producer feed for the terminators only the evaluation can decide (a proven-`never` call, an unsupported construct, an invoked-closure effect), and the deletion of every present derivation — not a local patch.
+
+Owed guard: `a_labeled_try_or_throw_suffix_does_not_fabricate_an_undefined_contributor`.
+
 ### Control-Position Narrowing Is Fail-Closed
 
 `SliceGuard::None` means **proved non-narrowing**, never "unsupported or unrecognized". That distinction is the whole contract: a control fact the lowering cannot carry produces a SUPERSET of the checker's type, and a superset is admissible only behind the typed `FlowGap::GuardNarrowing`, which makes the result `ReturnOnly` and never warm. A superset published with no gap is a wrong-complete result.
