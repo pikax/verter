@@ -1,0 +1,16 @@
+{
+  // Type-checks the public contract fixtures under `test/*.test-d.ts`. The
+  // package build excludes spec files and vitest does not evaluate type-level
+  // assertions, so without this project those fixtures are never checked.
+  // Discovery is by pattern: a new `*.test-d.ts` is checked automatically.
+  "extends": "./tsconfig.json",
+  "include": ["test/*.test-d.ts"],
+  "exclude": [],
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": "."
+  }
+}

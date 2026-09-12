@@ -376,7 +376,7 @@ schema = 2
 "SIMP1" = { status = "pending" }
 "SIMP10" = { status = "implemented", commit_message = "refactor(core): assemble SSR properties from keys and values", commit_date = "2026-09-09T12:00:00+01:00" }
 "SIMP11" = { status = "pending" }
-"SIMP12" = { status = "pending" }
+"SIMP12" = { status = "implemented", commit_message = "test(meta): replace compat source scanners with public-output evidence", commit_date = "2026-09-12T14:26:00+01:00" }
 "SIMP13" = { status = "pending" }
 "SIMP14" = { status = "pending" }
 "SIMP15" = { status = "pending" }

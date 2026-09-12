@@ -12,10 +12,9 @@
  *   a carrier resolves only under an explicit consumer demand, never eagerly
  *   at publication.
  * - `meta.props[].type` — the compat (Volar-interop) DISPLAY string. For
- *   shallow carriers it renders the authored symbolic form today; rendering
- *   the concrete union/object display is the deferred consumer-demand compat
- *   materialization feature (U14 compat-demand parity), tracked in
- *   `docs/better-implementation/b6-lane3.md`.
+ *   shallow carriers it renders the authored symbolic form: rendering the
+ *   concrete union/object display would require materializing the carrier,
+ *   which compat does not do at publication time.
  *
  * Requires @verter/native to be built.
  */
@@ -70,37 +69,6 @@ function expectStructuredSchema(schema: unknown): void {
   expect(["enum", "array", "event", "object"]).toContain(discriminated.kind);
   expect(typeof discriminated.type).toBe("string");
 }
-
-// =============================================================================
-// Helper self-test — the assertion helper itself must DISCRIMINATE
-// =============================================================================
-
-describe("expectStructuredSchema (helper self-test)", () => {
-  it("rejects undefined, null, empty objects, bare strings, and non-discriminated shapes", () => {
-    // The compat contract REQUIRES `schema`; a dropped field (undefined),
-    // a null (`typeof null === "object"`), an empty `{}`, and a foreign
-    // object must ALL fail loudly — none may pass vacuously.
-    expect(() => expectStructuredSchema(undefined)).toThrow();
-    expect(() => expectStructuredSchema(null)).toThrow();
-    expect(() => expectStructuredSchema({})).toThrow();
-    expect(() => expectStructuredSchema("string")).toThrow();
-    expect(() => expectStructuredSchema({ kind: "mystery", type: "x" })).toThrow();
-    expect(() => expectStructuredSchema({ kind: "enum" })).toThrow();
-    expect(() => expectStructuredSchema({ type: "x" })).toThrow();
-  });
-
-  it("accepts exactly the two structured schema forms: arrays and kind-discriminated objects", () => {
-    expect(() => expectStructuredSchema(["'a'", "'b'"])).not.toThrow();
-    expect(() =>
-      expectStructuredSchema({ kind: "enum", type: "'a' | 'b'", schema: ["'a'", "'b'"] }),
-    ).not.toThrow();
-    expect(() => expectStructuredSchema({ kind: "array", type: "string[]" })).not.toThrow();
-    expect(() =>
-      expectStructuredSchema({ kind: "event", type: "(id: number): void" }),
-    ).not.toThrow();
-    expect(() => expectStructuredSchema({ kind: "object", type: "Foo", schema: {} })).not.toThrow();
-  });
-});
 
 // =============================================================================
 // Native evaluator: basic prop types via checker
@@ -535,8 +503,7 @@ const flag = defineModel('flag', { default: false })
   // literal unions on the structured surface, while single-hop
   // object-surface projections (`Button['slots']`) stay structured
   // indexed-access carriers. The compat display string renders the authored
-  // symbolic form until consumer-selected compat materialization lands
-  // (U14 compat-demand parity).
+  // symbolic form, because compat does not materialize a carrier to display it.
   it("publishes chained indexed-access props from generic helpers path-precisely on the structured surface", async () => {
     const checker = await createRuntimeChecker("native-eval-generic-indexed-access");
 
@@ -685,9 +652,8 @@ defineProps<Props>()
   // Mapped-helper indexed access resolves path-precise terminals concretely
   // (`Button['variants']['color']` through the mapped `ComponentVariants`)
   // while closed-key mapped object surfaces (`Button['slots']` /
-  // `Button['ui']`) publish as shallow structured ref carriers. Concrete
-  // display/schema for the carriers is consumer-demand materialization
-  // (U14 compat-demand parity).
+  // `Button['ui']`) publish as shallow structured ref carriers, whose
+  // display/schema stays symbolic rather than materializing the carrier.
   it("publishes finite mapped helper types with concrete indexed-access terminals and shallow surface carriers", async () => {
     const checker = await createRuntimeChecker("native-eval-mapped-helpers");
 

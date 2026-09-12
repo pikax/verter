@@ -4,8 +4,14 @@ import type { NativeTypeExpr, NativeEvaluatedField } from "./type-expr-bridge.js
 import {
   DecodedTypeGraph,
   createGraphTypeExprRef,
+  LITERAL_STRING,
+  NODE_CONDITIONAL,
+  NODE_INDEXED_ACCESS,
+  NODE_KEY_OF,
+  NODE_LITERAL,
   NODE_MAPPED,
   NODE_PRIMITIVE,
+  NODE_REF,
 } from "./type-graph-core.js";
 
 // =============================================================================
@@ -1551,5 +1557,54 @@ describe("buildEvaluatedTypeMap", () => {
       kind: "array",
       element: { kind: "primitive", name: "string" },
     });
+  });
+});
+
+// =============================================================================
+// Graph operator display text
+// =============================================================================
+
+describe("operator-shaped graph nodes render structurally in display text", () => {
+  /**
+   * `Theme[color] extends Dark ? A : B` as a graph: node 3 is the indexed
+   * access, node 7 the conditional that consumes it.
+   */
+  function operatorGraph(): DecodedTypeGraph {
+    return new DecodedTypeGraph(
+      ["Theme", "color", "Dark", "A", "B"],
+      [
+        { kind: NODE_REF, nameId: 1, typeArgumentNodeIds: [] }, // 1: Theme
+        { kind: NODE_LITERAL, literalKind: LITERAL_STRING, stringId: 2 }, // 2: "color"
+        { kind: NODE_INDEXED_ACCESS, objectNodeId: 1, indexNodeId: 2 }, // 3: Theme[color]
+        { kind: NODE_REF, nameId: 3, typeArgumentNodeIds: [] }, // 4: Dark
+        { kind: NODE_REF, nameId: 4, typeArgumentNodeIds: [] }, // 5: A
+        { kind: NODE_REF, nameId: 5, typeArgumentNodeIds: [] }, // 6: B
+        {
+          kind: NODE_CONDITIONAL,
+          checkNodeId: 3,
+          extendsNodeId: 4,
+          trueTypeNodeId: 5,
+          falseTypeNodeId: 6,
+        }, // 7
+        { kind: NODE_KEY_OF, operandNodeId: 3 }, // 8: keyof Theme[color]
+      ],
+    );
+  }
+
+  // A conditional has no structural descriptor variant, so it lands on the
+  // `unknown` residue. `rawType` is what compat renders as the display string,
+  // so an opaque node-discriminator placeholder there (`graphNode(14)`) reaches
+  // user-visible output; the operands must render as authored type syntax.
+  it("renders a conditional and its nested indexed access as type syntax", () => {
+    const result = typeExprToDescriptor(createGraphTypeExprRef(operatorGraph(), 7));
+    expect(result).toEqual({
+      kind: "unknown",
+      rawType: "Theme[color] extends Dark ? A : B",
+    });
+  });
+
+  it("renders an unresolvable keyof over an indexed access as type syntax", () => {
+    const result = typeExprToDescriptor(createGraphTypeExprRef(operatorGraph(), 8));
+    expect(result).toEqual({ kind: "unknown", rawType: "keyof Theme[color]" });
   });
 });

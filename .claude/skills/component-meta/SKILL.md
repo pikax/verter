@@ -66,11 +66,12 @@ single compiles through the host; `compat_one_napi_call_audit`
 (`crates/verter_session/tests/cases/g_block/block_6i_runtime_arch_guards.rs`)
 asserts one `getComponentMeta` invocation advances the host's native-call
 provenance counter by exactly 1, so compat cannot issue follow-up native calls
-to progressively resolve a payload. The JS counterpart
-`packages/component-meta/test/compat-native-call-surface-allowlist.test.ts`
-pins the compat layer's `_session` call/read surface to a fixed allow-list. The
-remaining clauses below — native-first fixes, no JS meaning recovery,
-cache-owned type recovery, explicit payload versioning — are review-enforced.
+to progressively resolve a payload. On the JS side the compat layer's
+`_session` surface is held by the type system: `ComponentMetaChecker._session`
+is a typed `ProjectSession | null`, so a call or write outside that class's
+public surface is a compile error. The remaining clauses below — native-first
+fixes, no JS meaning recovery, cache-owned type recovery, explicit payload
+versioning — are review-enforced.
 
 - Fix missing/incorrect metadata in the shared/native owner layer first. Compat should only remap representation when the native payload is already correct enough.
 - Rust is the component-meta semantic authority. Resolution, declaration routing, recursion handling, graph construction, payload shaping, and the full Verter API response belong on the native side.
