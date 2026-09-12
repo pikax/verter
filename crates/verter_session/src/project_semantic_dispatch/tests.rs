@@ -3175,6 +3175,110 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
     );
 }
 
+/// A deferred conditional's pending substitution ARGUMENTS are ordinary type
+/// nodes: two suspended conditionals whose frames bind the same parameter to
+/// deep-equal arguments denote the same type and must collapse under
+/// `T | T = T`, exactly as span-only duplicates do everywhere else. Comparing
+/// the frame by arena equality instead kept both arms, so a union built from
+/// two scopes rendered the same conditional twice. The parameter binder stays
+/// exact identity — it selects which binding a branch resolves.
+#[test]
+fn pending_substitution_arguments_collapse_structurally_but_parameters_stay_exact() {
+    use crate::project_semantic_dispatch::canonical_algebra;
+    use crate::semantic_query::ConditionalPendingSubstitution;
+
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+    // Span-only variants: distinct arena ids, deep-equal structure.
+    let spanned_object = |span_start: u32| -> SemanticNodeId {
+        let member = SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            key: crate::semantic_query::AuthoredPropertyKey::string("k"),
+            value: string,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            spans: verter_type_expr::MemberSpans {
+                declaration: Some(verter_span::Span::new(span_start, span_start + 10)),
+                name: Some(verter_span::Span::new(span_start, span_start + 5)),
+                type_annotation: None,
+            },
+            declaration_origin: None,
+        };
+        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+            members: Arc::from(vec![member].into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }))
+    };
+
+    let type_param = |index: u16| -> SemanticNodeId {
+        graph.intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity::synthetic("<pending>"),
+            param_index: index,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("T"),
+        })
+    };
+
+    let conditional = |parameter: SemanticNodeId, argument: SemanticNodeId| -> SemanticNodeId {
+        graph.intern_node(SemanticNodeData::Conditional {
+            check: string,
+            extends: number,
+            true_branch_ref: string,
+            false_branch_ref: number,
+            distributive: false,
+            pending: Some(Arc::new(
+                ConditionalPendingSubstitution::empty().append_true(parameter, argument),
+            )),
+        })
+    };
+
+    let parameter = type_param(0);
+    let argument_a = spanned_object(100);
+    let argument_b = spanned_object(9000);
+    assert_ne!(
+        argument_a, argument_b,
+        "the pending arguments differ only by member spans"
+    );
+
+    let equal_arguments = [
+        conditional(parameter, argument_a),
+        conditional(parameter, argument_b),
+    ];
+    assert_ne!(
+        equal_arguments[0], equal_arguments[1],
+        "distinct argument ids keep the shells arena-distinct"
+    );
+    let collapsed = canonical_algebra::canonical_union(&graph, &equal_arguments);
+    assert_eq!(
+        collapsed.node, equal_arguments[0],
+        "deep-equal pending arguments collapse; first occurrence survives"
+    );
+
+    // A different parameter binder is a different binding, never a duplicate.
+    let distinct_parameters = [equal_arguments[0], conditional(type_param(1), argument_a)];
+    assert!(
+        matches!(
+            graph.node_data(canonical_algebra::canonical_union(&graph, &distinct_parameters).node)
+                .as_deref(),
+            Some(SemanticNodeData::Union(members)) if members.len() == 2
+        ),
+        "a different pending parameter must keep both arms"
+    );
+}
+
 /// The pairwise tier's candidate-narrowing bucket hash must never be FINER
 /// than canonical identity: `compare_structural(a, b) == Equal` implies
 /// `bucket(a) == bucket(b)`, or the pair is never compared and `T | T = T`

@@ -208,7 +208,13 @@ fn pattern_declares_infer(
             SemanticNodeData::ObjectSpreadProgram(program) => {
                 children.extend(program.child_nodes())
             }
-            _ => {}
+            // An unresolved carrier applies its type arguments at the
+            // reference site, so `Foo<infer X>` DECLARES `X` in this pattern
+            // exactly as `infer X` written bare does. Descending through the
+            // single structural accessor keeps every carrier covered; the
+            // non-carrier arms it also reaches return an empty slice and add
+            // no children.
+            other => children.extend(other.carrier_type_args().iter().copied()),
         }
         stack.extend(
             children

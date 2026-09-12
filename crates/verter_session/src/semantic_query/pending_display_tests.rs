@@ -148,6 +148,51 @@ fn pending_display_preserves_exact_infer_scope_in_nested_conditionals() {
 }
 
 #[test]
+fn pending_display_preserves_infer_scope_declared_inside_a_carrier_argument() {
+    // `T extends Foo<infer X> ? X : never` declares `X` in the pattern just
+    // as a bare `infer X` does, so an outer substitution over that binder
+    // must not reach either the declaration or the true branch. Before the
+    // carrier arguments were walked, both collapsed to the outer argument.
+    let store = SemanticGraphStore::new();
+    let check = parameter(&store, "Q", 0);
+    let number = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let string = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let binder = store.alloc_infer_binder_id();
+    let infer = store.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("X"),
+        binder: binder.clone(),
+    });
+    let reference = store.intern_node(SemanticNodeData::InferRef {
+        name: Arc::from("X"),
+        binder,
+    });
+    for (carrier, expected) in [
+        (
+            SemanticNodeData::new_bare_ref(
+                Arc::from("Foo"),
+                crate::semantic_query::NodeScopeId::Global,
+                Arc::from(vec![infer].into_boxed_slice()),
+            ),
+            "Q extends number ? (string extends Foo<infer X> ? X : string) : number",
+        ),
+        (
+            SemanticNodeData::new_import_type(
+                Arc::from("m"),
+                Arc::from(vec![Arc::<str>::from("G")].into_boxed_slice()),
+                Arc::from(vec![infer].into_boxed_slice()),
+                false,
+            ),
+            "Q extends number ? (string extends import(\"m\").G<infer X> ? X : string) : number",
+        ),
+    ] {
+        let extends = store.intern_node(carrier);
+        let inner = conditional(&store, reference, extends, reference, reference, &[]);
+        let outer = conditional(&store, check, number, inner, number, &[(infer, string)]);
+        assert_eq!(render(&store, outer), expected);
+    }
+}
+
+#[test]
 fn pending_display_preserves_a_mapped_binder_and_its_value_scope() {
     let store = SemanticGraphStore::new();
     let check = parameter(&store, "Q", 0);

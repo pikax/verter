@@ -1775,7 +1775,26 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
             constraint.is_some().hash(hasher);
             default.is_some().hash(hasher);
         }
-        D::Conditional { distributive, .. } => distributive.hash(hasher),
+        D::Conditional {
+            distributive,
+            pending,
+            ..
+        } => {
+            distributive.hash(hasher);
+            // The pending ARGUMENTS are pushed children and hash through the
+            // child topology; the frame shape and its parameter binders are
+            // the shallow identity the comparator checks before descending,
+            // so they are written here.
+            pending.is_some().hash(hasher);
+            if let Some(pending) = pending {
+                for frame in [pending.true_branch(), pending.false_branch()] {
+                    frame.pairs().len().hash(hasher);
+                    for (parameter, _) in frame.pairs() {
+                        parameter.hash(hasher);
+                    }
+                }
+            }
+        }
         D::Signature {
             kind,
             params,
@@ -2352,8 +2371,38 @@ fn compare_shallow(
                 pending: pb,
             },
         ) => {
-            if da != db || pa != pb {
+            if da != db {
                 return false;
+            }
+            // The pending frame's ARGUMENTS are ordinary child nodes —
+            // `push_child_ids` pushes them and the bucket hash descends them
+            // structurally — so comparing the whole frame by arena equality
+            // would reject a bucket-matched pair whose arguments are merely
+            // deep-equal, leaving duplicate suspended conditionals
+            // uncollapsed. The frame SHAPE (presence and per-branch pair
+            // counts) and each PARAMETER binder stay exact: they select which
+            // binding a branch resolves, not a type to compare.
+            match (pa, pb) {
+                (None, None) => {}
+                (Some(pa), Some(pb)) => {
+                    for (fa, fb) in [
+                        (pa.true_branch(), pb.true_branch()),
+                        (pa.false_branch(), pb.false_branch()),
+                    ] {
+                        if fa.pairs().len() != fb.pairs().len() {
+                            return false;
+                        }
+                        for (&(param_a, arg_a), &(param_b, arg_b)) in
+                            fa.pairs().iter().zip(fb.pairs().iter())
+                        {
+                            if param_a != param_b {
+                                return false;
+                            }
+                            work.push((arg_a, arg_b));
+                        }
+                    }
+                }
+                _ => return false,
             }
             work.push((*ca, *cb));
             work.push((*ea, *eb));
