@@ -20,7 +20,7 @@
 //! (`SemanticGraphStore` / `ProjectSemanticDispatch`) and the `typeinfo` /
 //! component-meta feature — the LSP/TSC path never routes through them.
 //!
-//! ## `provider_op_requires_resolved_project` (type-state, not a runtime check)
+//! ## The bound-project witness (type-state, not a runtime check)
 //!
 //! The production-result ops live on [`EngineBackend`] and take a
 //! [`BoundProject`]. A `BoundProject` is obtainable ONLY via
@@ -28,9 +28,9 @@
 //! ONLY from a resolved [`ProjectBinding`]. `NoProject` / `Ambiguous` / `NotReady`
 //! carry no binding, so they can reach no production op; the SEPARATE
 //! [`ScratchResolution`] lane carries a distinct [`ScratchProject`] witness for
-//! non-cross-file features only. The impossibility is enforced by the compiler;
-//! the `provider_op_requires_resolved_project` architecture guard is the static
-//! backstop.
+//! non-cross-file features only. The impossibility is enforced by the compiler:
+//! there is no representable call that produces an external-TS result for a
+//! carrier without a resolved binding.
 //!
 //! The tsserver engine is wired live on this contract: the LSP's carrier-publish
 //! coordinator resolves a `.vue`/`.svelte` source to its configured project,

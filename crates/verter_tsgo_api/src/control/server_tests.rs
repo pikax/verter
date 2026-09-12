@@ -581,7 +581,7 @@ async fn abnormal_control_termination_retracts_open_carriers_non_destructively()
 /// UNTRACKED, and the drain would send NO `didClose` for it — the leak.
 ///
 /// NON-DESTRUCTIVE: the drain retracts Verter's OWN overlay only; the relay (editor↔tsgo
-/// path + its OWNED tsgo child) stays ALIVE (`non_owning_attach_lifecycle`).
+/// path + its OWNED tsgo child) stays ALIVE.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sent_but_unsynced_open_is_retracted_on_session_end() {
     // A fake tsgo that answers `initialize` and RECORDS didOpen/didClose but NEVER answers

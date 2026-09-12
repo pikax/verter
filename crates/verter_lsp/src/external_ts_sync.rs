@@ -471,7 +471,7 @@ impl PlannedFile {
 /// takes a resolved [`ProjectBinding`], reading the owning project URI FROM it.
 /// There is no raw-string constructor, so a batch cannot be fabricated for a
 /// `NoProject` / `Ambiguous` / `NotReady` source — this extends the
-/// contract's `provider_op_requires_resolved_project` witness discipline to the
+/// contract's bound-project witness discipline to the
 /// sync seam (the no-owner-⇒-no-publish gate is structural, not advisory). The
 /// `project` field therefore always equals a resolved binding's `tsconfig_uri`.
 #[derive(Debug, Clone, PartialEq, Eq)]

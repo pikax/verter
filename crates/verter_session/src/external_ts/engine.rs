@@ -5,7 +5,7 @@
 //! it). This module defines the TRAIT and its data-transfer objects only — no
 //! concrete engine lives here; the first real backend is a separate concern.
 //!
-//! ## The `provider_op_requires_resolved_project` type-state
+//! ## The bound-project witness type-state
 //!
 //! A config-less / inferred-project operation for a production carrier source is
 //! **not representable**. The ops that PRODUCE external-TS results
@@ -97,7 +97,7 @@ pub enum QueryFeature {
 ///
 /// The fields are private and there is NO public constructor: the ONLY way to
 /// obtain an `EnsureProject` is [`super::ProjectBinding::ensure_project_request`].
-/// This is the first link in the `provider_op_requires_resolved_project`
+/// This is the first link in the bound-project witness
 /// type-state chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnsureProject {
@@ -283,7 +283,7 @@ impl BoundProjectSeal {
     /// never leaves this module — a foreign backend mints its [`BoundProject`]
     /// through [`BoundProject::from_ensured`] (which requires an [`EnsureProject`],
     /// itself mintable only from a resolved [`ProjectBinding`](super::ProjectBinding)),
-    /// so the `provider_op_requires_resolved_project` type-state holds across crates.
+    /// so the bound-project witness type-state holds across crates.
     pub(super) fn new() -> Self {
         Self(())
     }
@@ -324,7 +324,7 @@ impl BoundProject {
     /// Mint the witness directly from an [`EnsureProject`] request — the path a
     /// real [`EngineBackend`] in ANOTHER crate uses inside its `ensure_project`.
     ///
-    /// This PRESERVES the `provider_op_requires_resolved_project` type-state: an
+    /// This PRESERVES the bound-project witness type-state: an
     /// `EnsureProject` is itself mintable ONLY from a resolved [`ProjectBinding`]
     /// (its constructor is `pub(super)`), so requiring one here means a foreign
     /// backend still cannot fabricate a `BoundProject` without a binding. The

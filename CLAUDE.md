@@ -324,7 +324,7 @@ Generated companion names are descriptor-owned and live in the user namespace. T
 
 This rule becomes live for a backend only when that backend's real project-bound path lands; the inferred fallback for that backend is deleted in the same change.
 
-Guards: `provider_op_requires_resolved_project`, `carrier_ownership_extension_rules`, `carrier_never_shadows_real_user_file`, `same_stem_svelte_component_rune_fails_closed`, `no_fallback_to_inferred_anywhere`.
+Guards: the `BoundProject` witness type-state itself (a production external-TS op is unrepresentable without a resolved `ProjectBinding` — the compiler is the enforcement), `owned_binding_gate` (counted per-feature provider delegation plus the non-bound / `NoProject` / empty-snapshot fail-closed legs), `carrier_ownership_extension_rules`, `carrier_never_shadows_real_user_file`, `same_stem_svelte_component_rune_fails_closed`.
 
 See the `/host-session` skill for the contract's three-layer structure (`ProjectResolver`/`CarrierRegistry`/`EngineBackend`), the `BoundProject` witness type-state, and the carrier-publish path.
 

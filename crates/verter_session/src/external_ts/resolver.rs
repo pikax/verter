@@ -49,7 +49,7 @@ pub enum AmbiguityCause {
 /// A resolved configured-project binding: the ONLY state in which external-TS
 /// results are produced for a carrier source.
 ///
-/// A `ProjectBinding` is the head of the `provider_op_requires_resolved_project`
+/// A `ProjectBinding` is the head of the bound-project witness
 /// type-state chain: it (and ONLY it) can mint an [`EnsureProject`], which is the
 /// sole way to reach the engine's `ensure_project` and obtain the
 /// [`BoundProject`](super::engine::BoundProject) witness every production op
@@ -154,7 +154,7 @@ impl ProjectBinding {
     /// crates' `[dev-dependencies]`), so it is UNAVAILABLE in a normal production
     /// build: production code obtains a binding ONLY from
     /// [`WorkspaceProjectResolver::resolve`] (the resolution gate), preserving the
-    /// `provider_op_requires_resolved_project` witness discipline. This is a
+    /// bound-project witness discipline. This is a
     /// test-only seam, not a production path.
     #[cfg(feature = "test-util")]
     #[doc(hidden)]
