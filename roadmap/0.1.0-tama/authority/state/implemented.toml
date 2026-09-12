@@ -182,7 +182,7 @@ schema = 2
 "D3P" = { status = "implemented", commit_message = "feat(session): flow product lattice substrate", commit_date = "2026-09-05T12:00:00+01:00" }
 "D3R" = { status = "implemented", commit_message = "feat(session): nominal relation authority for unique-symbol identity and comparability", commit_date = "2026-09-04T02:30:00+01:00" }
 "D4" = { status = "pending" }
-"D5" = { status = "pending" }
+"D5" = { status = "implemented", commit_message = "feat(session): key closure capture obligations to the callback", commit_date = "2026-09-09T12:00:00+01:00", pull_request = 521 }
 "D6" = { status = "pending" }
 "D7" = { status = "pending" }
 "D8" = { status = "pending" }

@@ -494,6 +494,8 @@ pub struct FunctionNestedCaptures {
     pub span: verter_span::Span,
     pub bindings: CanonicalCaptureIdentity,
     pub reads: Arc<[FunctionCapturedRead]>,
+    /// The child's [`FunctionProgramEntry::captures_exhaustive`].
+    pub exhaustive: bool,
 }
 
 /// The control-region kind of one skeleton region.
@@ -660,6 +662,12 @@ pub struct FunctionProgramEntry {
     /// The content-free capture environment (empty for a top-level
     /// position).
     pub captures: CanonicalCaptureIdentity,
+    /// Whether [`Self::captures`] is EXHAUSTIVE. `false` when this frame,
+    /// or any callable nested in it, creates a callable no entry serves —
+    /// a class (its constructor, member bodies and field initializers) or
+    /// a callable in a parameter list. A cell retained there is named by
+    /// no record, so `captures` is then only a lower bound.
+    pub captures_exhaustive: bool,
     /// The whole-function stable hash (structural content only — the
     /// parser / language / parse-env identity folds in at the artifact
     /// boundary).
@@ -1267,13 +1275,16 @@ fn resolve_nested_capture_reads(entries: &mut [FunctionProgramEntry]) {
             }
         }
         let mut nested = Vec::new();
+        let mut exhaustive = entries[i].captures_exhaustive;
         for &child in &children[i] {
             let child = &entries[child];
+            exhaustive &= child.captures_exhaustive;
             nested.push(FunctionNestedCaptures {
                 function: child.key.clone(),
                 span: child.span,
                 bindings: child.captures.clone(),
                 reads: Arc::clone(&child.captured_reads),
+                exhaustive: child.captures_exhaustive,
             });
             reads.extend(
                 child
@@ -1303,6 +1314,7 @@ fn resolve_nested_capture_reads(entries: &mut [FunctionProgramEntry]) {
         entries[i].captured_reads = reads.into();
         entries[i].nested_captures = nested.into();
         entries[i].captures = CanonicalCaptureIdentity(captures.into());
+        entries[i].captures_exhaustive = exhaustive;
     }
 }
 
@@ -3200,6 +3212,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
                 }
             }
         }
+        inventory.in_parameter_list = true;
         for param in &node.params().items {
             inventory.record_pattern(&param.pattern, FunctionBindingKind::Param, frame_span);
             inventory.visit_binding_pattern(&param.pattern);
@@ -3211,6 +3224,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             inventory.record_pattern(&rest.rest.argument, FunctionBindingKind::Param, frame_span);
             inventory.visit_binding_pattern(&rest.rest.argument);
         }
+        inventory.in_parameter_list = false;
         for stmt in statements {
             inventory.visit_statement(stmt);
         }
@@ -3218,6 +3232,8 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             call_addresses: _,
             bindings,
             unmodeled_bindings,
+            in_parameter_list: _,
+            creates_unserved_callable,
             class_local_scope: _,
             references,
             source_type_queries,
@@ -3301,6 +3317,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             lexical_parent: None,
             nested_declaration_name: None,
             captures: CanonicalCaptureIdentity::default(),
+            captures_exhaustive: !creates_unserved_callable,
             flow_body_stable_hash: hash,
             flow_body_exact_hash: exact_hash,
         }
@@ -3358,6 +3375,11 @@ struct InventoryVisitor<'sink, 'ast> {
         Option<&'sink mut rustc_hash::FxHashMap<verter_span::Span, &'ast CallExpression<'ast>>>,
     bindings: Vec<FunctionBindingRecord>,
     unmodeled_bindings: Vec<FunctionBindingRecord>,
+    /// Set while the frame's formal parameters are walked.
+    in_parameter_list: bool,
+    /// The frame creates a callable no entry serves: a class, or a
+    /// callable in the parameter list.
+    creates_unserved_callable: bool,
     class_local_scope: Option<verter_span::Span>,
     references: Vec<FunctionReferenceRecord>,
     source_type_queries: Vec<FunctionSourceTypeQuery>,
@@ -3483,12 +3505,19 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
     fn visit_function(&mut self, _it: &Function<'a>, _flags: oxc_syntax::scope::ScopeFlags) {
         // Nested function body: not this frame. (visit_function is only
         // reached for nested positions — the entry's own body is driven
-        // statement-by-statement.)
+        // statement-by-statement.) Only body callables are indexed as
+        // children; a parameter-list callable has no entry.
+        self.creates_unserved_callable |= self.in_parameter_list;
     }
 
-    fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'a>) {}
+    fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'a>) {
+        self.creates_unserved_callable |= self.in_parameter_list;
+    }
 
     fn visit_class(&mut self, class: &Class<'a>) {
+        // No entry serves a class's constructor, member bodies or field
+        // initializers, nor any callable inside the class.
+        self.creates_unserved_callable = true;
         // Class evaluation has occurrence authority, but remains outside the
         // function's supported flow topology. Keep only lexical references,
         // write roots and unsupported local declarations from this traversal.
