@@ -849,3 +849,102 @@ fn terminals_inconsistent_with_their_feeding_dimension_are_rejected() {
         assert_eq!(CaseObservation::new(CASE, terminals), Err(expected));
     }
 }
+
+// ---------------------------------------------------------------------------
+// The smoke slice
+// ---------------------------------------------------------------------------
+
+/// An EMPTIED slice is refused. Otherwise the required pull-request lane could
+/// be silently re-scoped to nothing and still publish a green summary: the one
+/// outcome a bounded lane must never be able to report.
+#[test]
+fn an_emptied_smoke_slice_is_refused() {
+    let planted = planted("smoke = [\"vue/fixtures/App.vue\"]\n", "");
+    assert!(
+        violations(&planted).contains(&ManifestViolation::EmptySmokeSlice),
+        "an empty smoke slice must be refused: {:?}",
+        violations(&planted),
+    );
+}
+
+/// A PADDED slice is refused. The pull-request bound is structural, so a slice
+/// that grew past it has changed what the required job costs without anyone
+/// deciding to.
+#[test]
+fn a_smoke_slice_above_the_bound_is_refused() {
+    let padded: Vec<String> = (0..verter_validation_probe::MAX_SMOKE_CASES + 1)
+        .map(|_| format!("\"{CASE}\""))
+        .collect();
+    let planted = planted(
+        "smoke = [\"vue/fixtures/App.vue\"]",
+        &format!("smoke = [{}]", padded.join(", ")),
+    );
+    assert!(
+        violations(&planted).contains(&ManifestViolation::SmokeSliceTooLarge {
+            listed: verter_validation_probe::MAX_SMOKE_CASES + 1,
+        }),
+        "a slice above the bound must be refused: {:?}",
+        violations(&planted),
+    );
+}
+
+/// A HAND-PICKED slice is refused. The listed slice is what a reviewer reads,
+/// and its derivation is what the strata promise; a slice that is not its own
+/// derivation has quietly replaced the representative coverage with a choice
+/// nobody reviewed.
+#[test]
+fn a_smoke_slice_that_is_not_its_own_derivation_is_refused() {
+    let planted = planted(
+        "smoke = [\"vue/fixtures/App.vue\"]",
+        "smoke = [\"vue/fixtures/Other.vue\"]",
+    );
+    assert!(
+        violations(&planted).contains(&ManifestViolation::SmokeSliceNotDerived {
+            expected: vec![CASE.to_string()],
+            listed: vec!["vue/fixtures/Other.vue".to_string()],
+        }),
+        "a hand-picked slice must be refused: {:?}",
+        violations(&planted),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Gate admission
+// ---------------------------------------------------------------------------
+
+/// Only `Route` may gate. Every other dimension's behaviour is owned by an
+/// authority that is not implemented yet, so a gate there would block the
+/// required job on an outcome nobody has promised.
+#[test]
+fn a_gate_outside_route_is_refused() {
+    let planted = planted(
+        "dimension = \"Compile\"\nexpected_state = \"canary\"\nexpected_class = \"pass\"\n\
+         authority = \"vue.runtime-client-product\"\natom = \"product-shape\"",
+        "dimension = \"Compile\"\nexpected_state = \"gate\"\nexpected_class = \"pass\"\n\
+         authority = \"compiler.public-request-route\"\natom = \"route-callable\"",
+    );
+    assert_eq!(
+        violations(&planted),
+        vec![ManifestViolation::GateOutsideRoute {
+            cell: cell(Dimension::Compile)
+        }],
+    );
+}
+
+/// A gate may cite only the implemented route authority. A gate citing a
+/// product authority would turn an unimplemented promise into a required job's
+/// blocking condition.
+#[test]
+fn a_gate_citing_another_authority_is_refused() {
+    let planted = planted(
+        "authority = \"compiler.public-request-route\"\natom = \"route-callable\"",
+        "authority = \"vue.runtime-client-product\"\natom = \"product-shape\"",
+    );
+    assert_eq!(
+        violations(&planted),
+        vec![ManifestViolation::GateAuthorityNotRoute {
+            cell: cell(Dimension::Route),
+            authority: Authority::VueRuntimeClientProduct,
+        }],
+    );
+}

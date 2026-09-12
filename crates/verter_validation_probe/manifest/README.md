@@ -48,6 +48,11 @@ A committed manifest never contains a classless canary, an uncited cell, or a ga
 list its exact class. Observation never implies acceptance: expected classes record Verter behaviour, never
 output derived from the external corpus.
 
+Only `Route` may `gate`, and only citing `compiler.public-request-route`: a gate binds the required job, so
+it may cite only behaviour an implemented authority already owns. A product refusal, a diagnostic, a
+comparison, a runtime or a map result belongs to a framework product authority and becomes gateable when
+that authority is implemented and a promotion moves it — `ProbeStateManifest::validate` refuses the rest.
+
 ## The smoke slice
 
 `smoke` is the bounded case list a pull request runs; the broader lane runs the complete `inventory`. It is

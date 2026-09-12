@@ -55,4 +55,4 @@ pub use outcome::{
     NotApplicableReason, ProbeOutcomeClass, Terminal,
 };
 pub use runner::{classify_execution, ExecutionEvent, Phase, ProbeRun};
-pub use summary::{Counters, Disposition, Lane, Summary, SummaryError};
+pub use summary::{Counters, Disposition, Lane, ObservedTerminal, Summary, SummaryError};

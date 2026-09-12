@@ -39,6 +39,103 @@ pub fn checkout_root() -> PathBuf {
         .expect("the checkout root is a fixed relative path")
 }
 
+/// The commit the checkout is actually AT, read from its own Git state.
+///
+/// The pinned revision is recorded in the manifest and in the workflow, and
+/// every summary artifact republishes it. None of that is evidence that the
+/// bytes the lane compiled came from that commit: a checkout pointed at a
+/// different revision whose fixture set happens to match the inventory would
+/// publish a revision its cases did not come from, which corrupts the one fact
+/// the lane's evidence is anchored on. Reading the commit closes that.
+///
+/// Only a resolvable commit id answers; a checkout whose Git state cannot be
+/// read is reported rather than guessed at.
+#[cfg(feature = "external-corpus")]
+pub fn checkout_revision() -> Result<String, CorpusError> {
+    let root = checkout_root();
+    if !disk::is_directory(&root) {
+        return Err(CorpusError::CheckoutMissing { root });
+    }
+    let git_dir = git_dir(&root)?;
+    let head = read_git_file(&git_dir, "HEAD")?;
+    let head = head.trim();
+    // Detached at the pinned commit, which is what an exact-SHA checkout does.
+    if is_commit_id(head) {
+        return Ok(head.to_string());
+    }
+    let reference = head.strip_prefix("ref: ").map(str::trim).ok_or_else(|| {
+        CorpusError::RevisionUnreadable {
+            root: root.clone(),
+            message: "the checkout's HEAD is neither a commit id nor a symbolic ref".to_string(),
+        }
+    })?;
+    // A loose ref file, then the packed ref table: the two places a checked-out
+    // branch's commit can be.
+    if let Ok(loose) = read_git_file(&git_dir, reference) {
+        let loose = loose.trim();
+        if is_commit_id(loose) {
+            return Ok(loose.to_string());
+        }
+    }
+    let packed = read_git_file(&git_dir, "packed-refs").unwrap_or_default();
+    for line in packed.lines() {
+        let Some((commit, name)) = line.split_once(' ') else {
+            continue;
+        };
+        if name.trim() == reference && is_commit_id(commit) {
+            return Ok(commit.to_string());
+        }
+    }
+    Err(CorpusError::RevisionUnreadable {
+        root,
+        message: format!("the checkout's HEAD ref `{reference}` resolves to no commit"),
+    })
+}
+
+/// The checkout's Git directory, following a `gitdir:` pointer file when the
+/// checkout is a worktree rather than a plain clone.
+#[cfg(feature = "external-corpus")]
+fn git_dir(root: &Path) -> Result<PathBuf, CorpusError> {
+    let dot_git = root.join(".git");
+    if disk::is_directory(&dot_git) {
+        return Ok(dot_git);
+    }
+    if disk::is_file(&dot_git) {
+        let pointer = disk::read_text(&dot_git).map_err(CorpusError::from)?;
+        if let Some(target) = pointer.trim().strip_prefix("gitdir:") {
+            let target = Path::new(target.trim());
+            return Ok(if target.is_absolute() {
+                target.to_path_buf()
+            } else {
+                root.join(target)
+            });
+        }
+    }
+    Err(CorpusError::RevisionUnreadable {
+        root: root.to_path_buf(),
+        message: "the checkout carries no readable Git state".to_string(),
+    })
+}
+
+#[cfg(feature = "external-corpus")]
+fn read_git_file(git_dir: &Path, relative: &str) -> Result<String, CorpusError> {
+    let path =
+        resolve_relative(git_dir, relative).ok_or_else(|| CorpusError::RevisionUnreadable {
+            root: git_dir.to_path_buf(),
+            message: format!("`{relative}` does not name a path inside the Git directory"),
+        })?;
+    disk::read_text(&path).map_err(CorpusError::from)
+}
+
+/// Whether `value` is a full lowercase commit id.
+#[cfg(feature = "external-corpus")]
+fn is_commit_id(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// Every `.vue` case in the checkout, as sorted stable case ids.
 ///
 /// The inventory is DISCOVERED, never declared by the corpus: the manifest's

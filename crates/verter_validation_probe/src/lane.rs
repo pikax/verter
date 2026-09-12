@@ -6,6 +6,8 @@
 //!
 //! * WHICH cases run is the manifest's `smoke` slice or its complete
 //!   inventory, never a filter this module invents;
+//! * WHETHER the checkout is the pinned one is read from its own Git state, so
+//!   a summary can never record a revision its cases did not come from;
 //! * WHETHER the inventory is still true is checked against the checkout in
 //!   BOTH directions, so a fixture added or removed upstream fails the lane
 //!   rather than silently changing what it covers;
@@ -44,6 +46,13 @@ pub enum LaneError {
     Manifest(ManifestError),
     /// The corpus could not be read.
     Corpus(CorpusError),
+    /// The checkout is at a commit other than the pinned one.
+    RevisionDrift {
+        /// What the manifest pins.
+        pinned: String,
+        /// What the checkout is at.
+        checked_out: String,
+    },
     /// The manifest's inventory and the checkout disagree.
     InventoryDrift {
         /// Inventoried, absent from the checkout.
@@ -75,6 +84,14 @@ impl fmt::Display for LaneError {
             }
             LaneError::Manifest(error) => write!(f, "{error}"),
             LaneError::Corpus(error) => write!(f, "{error}"),
+            LaneError::RevisionDrift {
+                pinned,
+                checked_out,
+            } => write!(
+                f,
+                "the manifest pins `{pinned}` but the checkout is at `{checked_out}`; every \
+                 classification would be recorded against a revision its cases did not come from"
+            ),
             LaneError::InventoryDrift { missing, unlisted } => write!(
                 f,
                 "the manifest inventory and the pinned checkout disagree; \
@@ -99,15 +116,41 @@ pub fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest")
 }
 
-/// Load and validate one framework's manifest.
+/// Load and validate one framework's committed manifest.
 pub fn load_manifest(framework: Framework) -> Result<ProbeStateManifest, LaneError> {
+    load_manifest_from(&manifest_dir(), framework)
+}
+
+/// Load and validate one framework's manifest from `dir`.
+///
+/// The directory is a PARAMETER so the lane can be driven over a planted
+/// manifest without overwriting the committed one: a lane whose zero-selection
+/// refusal could only be proven by editing the file it ships is a refusal
+/// nobody can test.
+pub fn load_manifest_from(
+    dir: &Path,
+    framework: Framework,
+) -> Result<ProbeStateManifest, LaneError> {
     let file_name = format!("{}.toml", framework.as_str());
-    let path = manifest_dir().join(&file_name);
+    let path = dir.join(&file_name);
     let text = disk::read_text(&path).map_err(|error| LaneError::ManifestUnreadable {
         path: error.path,
         message: error.message,
     })?;
     ProbeStateManifest::from_manifest_file(&file_name, &text).map_err(LaneError::Manifest)
+}
+
+/// Check the checkout is at the commit the manifest pins.
+pub fn check_revision(manifest: &ProbeStateManifest) -> Result<(), LaneError> {
+    let checked_out = vue_benchmarks::checkout_revision().map_err(LaneError::Corpus)?;
+    if checked_out == manifest.external_revision.as_str() {
+        Ok(())
+    } else {
+        Err(LaneError::RevisionDrift {
+            pinned: manifest.external_revision.as_str().to_string(),
+            checked_out,
+        })
+    }
 }
 
 /// Check the manifest's inventory against the pinned checkout, in both
@@ -169,7 +212,17 @@ pub fn plan(selected: &[String]) -> Result<Vec<PlannedCase>, LaneError> {
 
 /// Run one lane end to end and return its summary.
 pub fn run(lane: Lane, deadlines: PhaseDeadlines) -> Result<Summary, LaneError> {
-    let manifest = load_manifest(Framework::Vue)?;
+    run_with_manifest_dir(lane, deadlines, &manifest_dir())
+}
+
+/// Run one lane end to end over the manifests in `manifest_dir`.
+pub fn run_with_manifest_dir(
+    lane: Lane,
+    deadlines: PhaseDeadlines,
+    manifest_dir: &Path,
+) -> Result<Summary, LaneError> {
+    let manifest = load_manifest_from(manifest_dir, Framework::Vue)?;
+    check_revision(&manifest)?;
     check_inventory(&manifest)?;
     let selected = selection(&manifest, lane);
     let cases = plan(&selected)?;
@@ -192,6 +245,7 @@ pub fn run(lane: Lane, deadlines: PhaseDeadlines) -> Result<Summary, LaneError> 
 
     let run = FrameworkRun {
         manifest: &manifest,
+        request_template: request::REQUEST_VUE,
         selected,
         observed,
     };

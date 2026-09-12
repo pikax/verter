@@ -50,6 +50,14 @@ pub enum CorpusError {
         /// The case id.
         case_id: String,
     },
+    /// The checkout's own commit could not be read, so which revision the
+    /// cases came from cannot be established.
+    RevisionUnreadable {
+        /// The checkout root.
+        root: PathBuf,
+        /// What could not be resolved.
+        message: String,
+    },
     /// The checkout could not be walked or a case could not be read.
     Io {
         /// What was being read.
@@ -81,6 +89,11 @@ impl fmt::Display for CorpusError {
                     "case id `{case_id}` does not name a path inside the corpus"
                 )
             }
+            CorpusError::RevisionUnreadable { root, message } => write!(
+                f,
+                "the pinned corpus checkout at {} does not say which commit it is at: {message}",
+                root.display()
+            ),
             CorpusError::Io { path, message } => {
                 write!(f, "reading {}: {message}", path.display())
             }

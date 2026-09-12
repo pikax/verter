@@ -24,11 +24,13 @@
 // ingested.
 //
 // Every JavaScript step is wrapped: a failure is reported as a LINE, never as
-// an exit. A JS failure before the native call is `stage: "pre-native"`, after
-// it `stage: "post-native"`; both are harness failures. What is left — an
-// unacknowledged termination inside phase "compile" — can therefore only have
-// happened inside the native call, which is what makes crash and timeout
-// truthful classes rather than guesses.
+// an exit. The line carries the phase and stage the driver was ACTUALLY in when
+// it threw — `stage: "pre-native"` before the native call, `"native"` for a
+// throw out of the call itself, `"post-native"` after it returned — and all of
+// them are harness failures. What is left — an unacknowledged termination
+// inside phase "compile" — can therefore only have happened inside the native
+// call, which is what makes crash and timeout truthful classes rather than
+// guesses.
 
 import { createInterface } from "node:readline";
 import { createRequire } from "node:module";
@@ -61,10 +63,28 @@ function describe(error) {
 
 let host = null;
 
+// The addon is reached through the @verter/native PACKAGE — its own entry, as
+// its `exports` map declares it, never a `.node` artifact this driver names
+// itself. The package directory is derived from the repository root because
+// pnpm does not link a workspace package into the workspace root's
+// node_modules, so `require("@verter/native")` from here would never resolve;
+// the directory is handed to node's package resolution rather than a
+// hardcoded entry file, and a missing build says so instead of surfacing as a
+// bare module-not-found.
+const NATIVE_PACKAGE = path.join(REPO_ROOT, "packages", "native");
+
 /** Load the addon and construct one host for the whole process. */
 function ensureHost() {
   if (host) return host;
-  const native = require(path.join(REPO_ROOT, "packages", "native", "index.js"));
+  let native;
+  try {
+    native = require(NATIVE_PACKAGE);
+  } catch (error) {
+    throw new Error(
+      `the @verter/native addon at ${NATIVE_PACKAGE} could not be loaded ` +
+        `(build it with \`pnpm --filter @verter/native build\`): ${describe(error)}`,
+    );
+  }
   host = new native.VerterHost();
   return host;
 }
@@ -178,12 +198,18 @@ function readProbe(line) {
   return probe;
 }
 
-function runProbe(probe) {
+// `where` is the driver's own account of what it was doing, kept current step
+// by step so the outer catch reports where a throw actually happened rather
+// than where the driver's first step was.
+function runProbe(probe, where) {
   const { probe_id, entries } = probe;
 
+  where.phase = "load";
+  where.stage = "pre-native";
   emit({ probe_id, phase: "load" });
   ensureHost();
 
+  where.phase = "compile";
   emit({ probe_id, phase: "compile" });
   let inputs;
   try {
@@ -197,9 +223,11 @@ function runProbe(probe) {
     return;
   }
 
+  where.stage = "native";
   const started = process.hrtime.bigint();
   const answered = host.compileRequests(inputs);
   const elapsed_ns = Number(process.hrtime.bigint() - started);
+  where.stage = "post-native";
 
   try {
     emit({ probe_id, frame: "compile", elapsed_ns, entries: answered });
@@ -208,13 +236,21 @@ function runProbe(probe) {
     return;
   }
 
+  where.phase = "reference";
   emit({ probe_id, phase: "reference" });
   const reference = entries.map((entry) => {
     const framework = entry.request?.framework;
     const producer = referenceProducers.get(framework);
     if (!producer) return { inapplicable: String(framework) };
+    // BOTH compilers see the one filename the canonical request carries. The
+    // case id is not that filename (it is prefixed by the framework), and a
+    // reference compiled under a different id diverges on every
+    // filename-derived output — a scoped style's scope id above all — which
+    // the comparator would then report as a compiler difference the harness
+    // itself manufactured.
+    const filename = entry.request?.identity?.filename ?? entry.canonicalId;
     try {
-      return producer(entry.source, entry.canonicalId);
+      return producer(entry.source, filename);
     } catch (error) {
       return { error: describe(error) };
     }
@@ -234,14 +270,15 @@ for await (const line of lines) {
     emit({ error: describe(error), phase: "protocol" });
     continue;
   }
+  const where = { phase: "load", stage: "pre-native" };
   try {
-    runProbe(probe);
+    runProbe(probe, where);
   } catch (error) {
     emit({
       probe_id: probe.probe_id,
       error: describe(error),
-      phase: "compile",
-      stage: "pre-native",
+      phase: where.phase,
+      stage: where.stage,
     });
   }
 }

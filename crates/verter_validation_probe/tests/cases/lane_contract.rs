@@ -13,9 +13,10 @@ use verter_validation_probe::manifest::{Framework, ProbeStateManifest};
 use verter_validation_probe::outcome::{Dimension, NotApplicableReason, ProbeOutcomeClass as C};
 use verter_validation_probe::request;
 use verter_validation_probe::runner::{
-    classify_execution, parse_line, DiagnosticsSnapshot, DriverLine, ExecutionEvent,
-    FrameViolation, Phase, ProbeRun, ReferenceResult, RequestedEntry, RouteDiagnostic, RouteEntry,
-    RouteFailure, RouteNode, RouteProduct, RouteResponse, VirtualNodeKind,
+    self as runner, classify_execution, parse_line, DiagnosticsSnapshot, DriverCommand, DriverLine,
+    ExecutionEvent, FrameViolation, Phase, PhaseDeadlines, PlannedCase, ProbeRun, ReferenceResult,
+    RequestedEntry, RouteDiagnostic, RouteEntry, RouteFailure, RouteNode, RouteProduct,
+    RouteResponse, VirtualNodeKind,
 };
 use verter_validation_probe::summary::{self, FrameworkRun, Lane, ObservedCase, Summary};
 use verter_validation_probe::{Evaluation, Terminal};
@@ -1106,6 +1107,7 @@ fn one_case_summary(manifest: &ProbeStateManifest, lines: Vec<DriverLine>) -> Su
         .expect("the observation is representable");
     let framework_run = FrameworkRun {
         manifest,
+        request_template: request::REQUEST_VUE,
         selected: vec![CASE.to_string()],
         observed: vec![ObservedCase {
             case_id: CASE.to_string(),
@@ -1116,6 +1118,24 @@ fn one_case_summary(manifest: &ProbeStateManifest, lines: Vec<DriverLine>) -> Su
     };
     summary::build(Lane::Smoke, std::slice::from_ref(&framework_run))
         .expect("the summary is consistent")
+}
+
+/// One case that succeeded at every exercised dimension.
+fn passing_summary(manifest: &ProbeStateManifest) -> Summary {
+    one_case_summary(
+        manifest,
+        vec![
+            phase(CASE, Phase::Compile),
+            compile_frame(CASE, vec![ok_entry(CASE)]),
+            phase(CASE, Phase::Reference),
+            reference_frame(
+                CASE,
+                vec![ReferenceResult::Produced {
+                    code: MODULE.to_string(),
+                }],
+            ),
+        ],
+    )
 }
 
 /// The summary carries every required counter, and reports the lane's real
@@ -1164,13 +1184,18 @@ fn the_summary_carries_every_required_counter_and_its_real_work() {
         "a complete summary round-trips",
     );
 
+    // Every required counter is rendered, including `selected`: a job page that
+    // shows only what was attempted cannot be read against what was chosen.
     let markdown = summary.to_markdown();
     for header in [
+        "selected",
         "attempted",
         "passed",
         "gated regressions",
         "canary failures",
         "known failures",
+        "canary regressions",
+        "unrelated regressions",
         "skips",
         "XPASS candidates",
         "crashes",
@@ -1182,6 +1207,167 @@ fn the_summary_carries_every_required_counter_and_its_real_work() {
             "the job summary omits `{header}`"
         );
     }
+}
+
+/// The counters are AUDITED against the cell rows the document carries, not
+/// trusted. A document whose rows hold a gate regression while its counter
+/// claims none would otherwise be read as internally consistent and disposed
+/// clean — a fail-open path to the lane's one real exit.
+#[test]
+fn a_summary_whose_counters_disagree_with_its_cell_rows_is_refused() {
+    let manifest = vue_manifest();
+    let regressed = one_case_summary(
+        &manifest,
+        vec![
+            phase(CASE, Phase::Compile),
+            compile_frame(CASE, vec![failure_entry(CASE, "host", None)]),
+            phase(CASE, Phase::Reference),
+            reference_frame(
+                CASE,
+                vec![ReferenceResult::Produced {
+                    code: MODULE.to_string(),
+                }],
+            ),
+        ],
+    );
+    assert_eq!(regressed.totals.gated_regressions, 1);
+    let json = regressed.to_json();
+
+    // Claim the gate regression away, in both the block and the totals so the
+    // sum still adds up. Only recounting from the rows can catch this.
+    let mut parsed: serde_json::Value = serde_json::from_str(&json).expect("summary is JSON");
+    parsed["totals"]["gated_regressions"] = serde_json::json!(0);
+    parsed["frameworks"][0]["counters"]["gated_regressions"] = serde_json::json!(0);
+    let planted = parsed.to_string();
+    assert_ne!(planted, json, "the plant must change the document");
+    let refused = Summary::from_json_str(&planted)
+        .expect_err("a summary whose counters contradict its rows must be refused");
+    assert!(
+        matches!(
+            refused,
+            verter_validation_probe::SummaryError::CounterMismatch { .. }
+        ),
+        "expected a counter mismatch, got {refused}",
+    );
+
+    // The same for an INVENTED failure the rows do not carry.
+    let mut parsed: serde_json::Value = serde_json::from_str(&json).expect("summary is JSON");
+    parsed["totals"]["crashes"] = serde_json::json!(3);
+    parsed["frameworks"][0]["counters"]["crashes"] = serde_json::json!(3);
+    assert!(
+        Summary::from_json_str(&parsed.to_string()).is_err(),
+        "a summary claiming crashes its rows never recorded must be refused",
+    );
+}
+
+/// A cell row whose terminal and class contradict each other is refused: the
+/// counters are recomputed from those two fields, so an incoherent row would
+/// produce numbers that look honest.
+#[test]
+fn a_cell_row_whose_terminal_and_class_disagree_is_refused() {
+    let manifest = vue_manifest();
+    let summary = passing_summary(&manifest);
+    let json = summary.to_json();
+    let mut parsed: serde_json::Value = serde_json::from_str(&json).expect("summary is JSON");
+    let cell = &mut parsed["frameworks"][0]["cases"][0]["cells"][0];
+    assert_eq!(cell["observed_terminal"], serde_json::json!("class"));
+    cell["observed_terminal"] = serde_json::json!("not_applicable");
+    assert!(
+        Summary::from_json_str(&parsed.to_string()).is_err(),
+        "a row claiming a class it says it has no terminal for must be refused",
+    );
+}
+
+/// A document with no framework block at all has all-zero totals that are
+/// internally consistent, and would dispose CLEAN having reported nothing —
+/// the same fail-open the per-framework empty-selection check closes.
+#[test]
+fn a_summary_with_no_framework_block_is_refused() {
+    let manifest = vue_manifest();
+    let json = passing_summary(&manifest).to_json();
+    let mut parsed: serde_json::Value = serde_json::from_str(&json).expect("summary is JSON");
+    parsed["frameworks"] = serde_json::json!([]);
+    for counter in verter_validation_probe::Counters::REQUIRED {
+        parsed["totals"][counter] = match parsed["totals"][counter] {
+            serde_json::Value::Object(_) => serde_json::json!({}),
+            _ => serde_json::json!(0),
+        };
+    }
+    assert!(
+        Summary::from_json_str(&parsed.to_string()).is_err(),
+        "a summary carrying no framework block must be refused, not disposed clean",
+    );
+}
+
+/// The attempted case set is audited by ID, not by count. A run that observed
+/// one case twice and skipped another has the right count and the wrong work.
+#[test]
+fn a_summary_whose_attempted_ids_are_not_its_selection_is_refused() {
+    let manifest = vue_manifest();
+    let json = passing_summary(&manifest).to_json();
+
+    let mut swapped: serde_json::Value = serde_json::from_str(&json).expect("summary is JSON");
+    swapped["frameworks"][0]["selected_cases"] = serde_json::json!(["vue/fixtures/Other.vue"]);
+    assert!(
+        Summary::from_json_str(&swapped.to_string()).is_err(),
+        "a block whose attempted id is not the one it selected must be refused",
+    );
+
+    let mut miscounted: serde_json::Value = serde_json::from_str(&json).expect("summary is JSON");
+    miscounted["frameworks"][0]["selected_cases"] = serde_json::json!([CASE, CASE]);
+    assert!(
+        Summary::from_json_str(&miscounted.to_string()).is_err(),
+        "a block recording more selected ids than it selected must be refused",
+    );
+}
+
+/// Each framework block carries the request template ITS cases issued. A
+/// builder that read one framework's template from a crate constant would
+/// publish, for every other framework, a request its cases never sent — with a
+/// digest that agreed with itself.
+#[test]
+fn each_framework_block_carries_its_own_request_template() {
+    const OTHER: &str = r#"{"framework":"svelte"}"#;
+    let manifest = svelte_manifest();
+    let mut run = ProbeRun::new(SVELTE_CASE, requested(SVELTE_CASE));
+    let _ = run.ingest_frame(phase(SVELTE_CASE, Phase::Compile));
+    let _ = run.ingest_frame(compile_frame(SVELTE_CASE, vec![ok_entry(SVELTE_CASE)]));
+    let _ = run.ingest_frame(phase(SVELTE_CASE, Phase::Reference));
+    let _ = run.ingest_frame(reference_frame(
+        SVELTE_CASE,
+        vec![ReferenceResult::Inapplicable {
+            inapplicable: "svelte".to_string(),
+        }],
+    ));
+    let observation = run
+        .finish(&manifest, None)
+        .remove(0)
+        .expect("the observation is representable");
+    let framework_run = FrameworkRun {
+        manifest: &manifest,
+        request_template: OTHER,
+        selected: vec![SVELTE_CASE.to_string()],
+        observed: vec![ObservedCase {
+            case_id: SVELTE_CASE.to_string(),
+            request_digest: String::new(),
+            elapsed_ns: Some(1),
+            observation,
+        }],
+    };
+    let summary = summary::build(Lane::Smoke, std::slice::from_ref(&framework_run))
+        .expect("the summary is consistent");
+    let block = &summary.frameworks[0];
+    assert_eq!(block.request_template, OTHER);
+    assert_eq!(
+        block.template_digest,
+        request::sha256_hex(OTHER.as_bytes()),
+        "the digest must be of the template the block carries",
+    );
+    assert_ne!(
+        block.template_digest,
+        request::template_digest(),
+        "a block must not publish another framework's template digest",
+    );
 }
 
 /// A summary missing a counter is REFUSED, not read as an honest zero. Without
@@ -1205,21 +1391,32 @@ fn a_summary_missing_a_counter_is_refused_rather_than_read_as_zero() {
         ],
     );
     let json = summary.to_json();
-    for counter in verter_validation_probe::Counters::REQUIRED {
-        let mut parsed: serde_json::Value = serde_json::from_str(&json).expect("summary is JSON");
-        parsed["totals"]
-            .as_object_mut()
-            .expect("totals is an object")
-            .remove(counter);
-        let planted = parsed.to_string();
-        assert!(
-            planted != json,
-            "the plant for `{counter}` must actually change the document",
-        );
-        assert!(
-            Summary::from_json_str(&planted).is_err(),
-            "a summary missing `{counter}` must be refused",
-        );
+    // BOTH counter blocks: the totals a reader sees first, and the per-framework
+    // block they are the sum of. A presence check on one of them would let the
+    // other omit a counter and read as zero.
+    for pointer in ["totals", "frameworks"] {
+        for counter in verter_validation_probe::Counters::REQUIRED {
+            let mut parsed: serde_json::Value =
+                serde_json::from_str(&json).expect("summary is JSON");
+            let counters = if pointer == "totals" {
+                &mut parsed["totals"]
+            } else {
+                &mut parsed["frameworks"][0]["counters"]
+            };
+            counters
+                .as_object_mut()
+                .expect("a counter block is an object")
+                .remove(counter);
+            let planted = parsed.to_string();
+            assert!(
+                planted != json,
+                "the plant for `{pointer}.{counter}` must actually change the document",
+            );
+            assert!(
+                Summary::from_json_str(&planted).is_err(),
+                "a summary missing `{pointer}.{counter}` must be refused",
+            );
+        }
     }
 }
 
@@ -1295,12 +1492,13 @@ fn a_summary_whose_attempted_set_differs_from_its_selection_is_refused() {
 
     let under = FrameworkRun {
         manifest: &manifest,
+        request_template: request::REQUEST_VUE,
         selected: vec![CASE.to_string(), "vue/fixtures/Other.vue".to_string()],
         observed: vec![ObservedCase {
             case_id: CASE.to_string(),
             request_digest: String::new(),
             elapsed_ns: None,
-            observation,
+            observation: observation.clone(),
         }],
     };
     assert!(
@@ -1308,8 +1506,33 @@ fn a_summary_whose_attempted_set_differs_from_its_selection_is_refused() {
         "a lane that attempted fewer cases than it selected must be refused",
     );
 
+    let over = FrameworkRun {
+        manifest: &manifest,
+        request_template: request::REQUEST_VUE,
+        selected: vec![CASE.to_string()],
+        observed: vec![
+            ObservedCase {
+                case_id: CASE.to_string(),
+                request_digest: String::new(),
+                elapsed_ns: None,
+                observation: observation.clone(),
+            },
+            ObservedCase {
+                case_id: CASE.to_string(),
+                request_digest: String::new(),
+                elapsed_ns: None,
+                observation: observation.clone(),
+            },
+        ],
+    };
+    assert!(
+        summary::build(Lane::Smoke, std::slice::from_ref(&over)).is_err(),
+        "a lane that attempted more cases than it selected must be refused",
+    );
+
     let empty = FrameworkRun {
         manifest: &manifest,
+        request_template: request::REQUEST_VUE,
         selected: Vec::new(),
         observed: Vec::new(),
     };
@@ -1322,6 +1545,22 @@ fn a_summary_whose_attempted_set_differs_from_its_selection_is_refused() {
 // ---------------------------------------------------------------------------
 // The committed manifest
 // ---------------------------------------------------------------------------
+
+fn workflow_text() -> String {
+    let path = repository_root()
+        .join(".github")
+        .join("workflows")
+        .join("validation-probe.yml");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+}
+
+fn repository_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|crates| crates.parent())
+        .expect("the crate lives at <root>/crates/verter_validation_probe")
+        .to_path_buf()
+}
 
 fn committed_vue_manifest_text() -> String {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1421,15 +1660,7 @@ fn only_the_implemented_route_authority_gates() {
 /// there is no per-fixture job or per-fixture test definition.
 #[test]
 fn the_workflow_declares_exactly_one_probe_job() {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|crates| crates.parent())
-        .expect("the crate lives at <root>/crates/verter_validation_probe")
-        .join(".github")
-        .join("workflows")
-        .join("validation-probe.yml");
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let text = workflow_text();
 
     let mut in_jobs = false;
     let mut jobs = Vec::new();
@@ -1473,6 +1704,118 @@ fn the_workflow_declares_exactly_one_probe_job() {
         upload < dispose && markdown < dispose,
         "the disposition must run after the artifact and the rendered summary are published",
     );
+
+    // Ordering alone is not the guarantee. A publication step that GitHub skips
+    // because an earlier step failed publishes nothing, so the run that goes red
+    // would be exactly the run with no evidence. Each of the three must be
+    // declared to run regardless.
+    for step in ["upload-artifact", "--markdown", "--dispose"] {
+        let at = steps.find(step).expect("the step is declared");
+        let preceding = &steps[..at];
+        let boundary = preceding
+            .rfind("      - name:")
+            .expect("every step carries a name");
+        assert!(
+            preceding[boundary..].contains("if: always()"),
+            "the `{step}` step must run even after a failing probe step, or the red run \
+             loses the evidence it was red about",
+        );
+    }
+}
+
+/// The pinned revision is recorded twice — once for the checkout the workflow
+/// performs, once in the manifest every artifact republishes. They must be the
+/// SAME commit: a workflow bumped to a revision whose fixture set still matches
+/// the inventory would stay green while every artifact recorded a revision its
+/// cases did not come from.
+#[test]
+fn the_workflow_and_the_manifest_pin_the_same_revision() {
+    let text = workflow_text();
+    let pinned = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("VUE_BENCHMARKS_REVISION:"))
+        .map(str::trim)
+        .expect("the workflow pins a corpus revision");
+    let manifest =
+        ProbeStateManifest::from_manifest_file("vue.toml", &committed_vue_manifest_text())
+            .expect("the committed vue manifest is valid");
+    assert_eq!(
+        pinned,
+        manifest.external_revision.as_str(),
+        "the workflow checks out `{pinned}` while the manifest pins `{}`",
+        manifest.external_revision.as_str(),
+    );
+}
+
+/// The disposition is a real PROCESS exit, not a number a caller may ignore.
+///
+/// The binary is run as the workflow's final step runs it, over planted
+/// artifacts: a clean one exits 0, a regressed one exits non-zero, and a
+/// malformed one is refused rather than read as a lane with nothing to report.
+#[test]
+fn the_summary_binary_disposes_as_a_process() {
+    let manifest = vue_manifest();
+    let clean = passing_summary(&manifest).to_json();
+    let regressed = one_case_summary(
+        &manifest,
+        vec![
+            phase(CASE, Phase::Compile),
+            compile_frame(CASE, vec![failure_entry(CASE, "host", None)]),
+            phase(CASE, Phase::Reference),
+            reference_frame(
+                CASE,
+                vec![ReferenceResult::Produced {
+                    code: MODULE.to_string(),
+                }],
+            ),
+        ],
+    )
+    .to_json();
+    let mut parsed: serde_json::Value = serde_json::from_str(&clean).expect("the summary is JSON");
+    parsed["totals"]
+        .as_object_mut()
+        .expect("totals is an object")
+        .remove("gated_regressions");
+    let incomplete = parsed.to_string();
+
+    for (label, document, expected) in [
+        ("a clean summary", clean, Some(0)),
+        ("a gate regression", regressed, Some(1)),
+        ("a summary missing a counter", incomplete, Some(2)),
+    ] {
+        let path = temp_file(&format!("dispose-{}", label.replace(' ', "-")), &document);
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_validation-probe-summary"))
+            .args(["--dispose", "--summary"])
+            .arg(&path)
+            .output()
+            .expect("the summary binary runs");
+        assert_eq!(
+            output.status.code(),
+            expected,
+            "{label} disposed {:?}; stderr: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Write `contents` to a uniquely named file under the platform's temp
+/// directory. Never a literal path: the lane builds every path from the
+/// standard abstractions so it runs the same on every platform.
+///
+/// The unique part comes BEFORE the label so a label ending in an extension
+/// keeps it — node dispatches on the extension, and a `.mjs` buried mid-name is
+/// not a module.
+fn temp_file(label: &str, contents: &str) -> std::path::PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("verter-probe-{unique}-{label}"));
+    std::fs::write(&path, contents)
+        .unwrap_or_else(|error| panic!("writing {}: {error}", path.display()));
+    path
 }
 
 /// A `not_run` cell never counts as a pass, and a skip never counts as work.
@@ -1502,4 +1845,402 @@ fn unreached_and_skipped_cells_are_never_counted_as_passes() {
         .expect("the performance cell is present");
     assert_eq!(performance.evaluation, Evaluation::NotRun);
     assert_eq!(performance.observed_class, None);
+}
+
+// ---------------------------------------------------------------------------
+// Comparison inputs
+// ---------------------------------------------------------------------------
+
+/// A WARNING-severity diagnostic is not a structural difference.
+///
+/// The reference producer reports only errors, so its diagnostics channel is
+/// empty for every module it produced. Comparing Verter's warnings against that
+/// side would report a difference the harness created by discarding the other
+/// compiler's warnings — and would report it on exactly the cases whose
+/// products match, holding each of them back from surfacing as a promotion
+/// candidate.
+#[test]
+fn a_warning_severity_diagnostic_is_not_a_structural_difference() {
+    let manifest = vue_manifest();
+    let mut warned = ok_entry(CASE);
+    warned
+        .response
+        .as_mut()
+        .expect("the entry carries a response")
+        .diagnostics
+        .diagnostics
+        .push(RouteDiagnostic {
+            severity: "warning".to_string(),
+            code: "W1".to_string(),
+            message: "a template hint".to_string(),
+        });
+    let terminals = observe(
+        &manifest,
+        CASE,
+        vec![
+            phase(CASE, Phase::Compile),
+            compile_frame(CASE, vec![warned]),
+            phase(CASE, Phase::Reference),
+            reference_frame(
+                CASE,
+                vec![ReferenceResult::Produced {
+                    code: MODULE.to_string(),
+                }],
+            ),
+        ],
+        None,
+    );
+    assert_eq!(class_at(&terminals, Dimension::Compile), Some(C::Pass));
+    assert_eq!(
+        class_at(&terminals, Dimension::Structural),
+        Some(C::Pass),
+        "identical modules must compare equal despite a warning the reference \
+         compiler's warnings were never captured to match: {:?}",
+        terminals[&Dimension::Structural],
+    );
+
+    // An ERROR the reference did not report is still a real difference — the
+    // restriction drops the uncaptured channel, not the signal.
+    let mut errored = ok_entry(CASE);
+    errored
+        .response
+        .as_mut()
+        .expect("the entry carries a response")
+        .diagnostics
+        .diagnostics
+        .push(RouteDiagnostic {
+            severity: "error".to_string(),
+            code: "E1".to_string(),
+            message: "boom".to_string(),
+        });
+    let terminals = observe(
+        &manifest,
+        CASE,
+        vec![
+            phase(CASE, Phase::Compile),
+            compile_frame(CASE, vec![errored]),
+            phase(CASE, Phase::Reference),
+            reference_frame(
+                CASE,
+                vec![ReferenceResult::Produced {
+                    code: MODULE.to_string(),
+                }],
+            ),
+        ],
+        None,
+    );
+    assert_eq!(
+        class_at(&terminals, Dimension::Compile),
+        Some(C::VerterDiagnostic)
+    );
+    assert_eq!(
+        class_at(&terminals, Dimension::Structural),
+        Some(C::SemanticMismatch),
+        "an error Verter reported and the reference did not is a real difference",
+    );
+}
+
+/// An entry carrying BOTH arms fails closed. The route answers exactly one of
+/// them; an envelope saying two contradictory things is as unexplained as one
+/// saying nothing, and preferring either arm would be the runner inventing an
+/// answer.
+#[test]
+fn a_route_entry_carrying_both_arms_fails_closed() {
+    let manifest = vue_manifest();
+    let mut both = ok_entry(CASE);
+    both.failure = Some(RouteFailure {
+        kind: "host".to_string(),
+        message: "refused".to_string(),
+        diagnostics: DiagnosticsSnapshot::default(),
+    });
+    let terminals = observe(
+        &manifest,
+        CASE,
+        vec![
+            phase(CASE, Phase::Compile),
+            compile_frame(CASE, vec![both]),
+            phase(CASE, Phase::Reference),
+            reference_frame(
+                CASE,
+                vec![ReferenceResult::Produced {
+                    code: MODULE.to_string(),
+                }],
+            ),
+        ],
+        None,
+    );
+    assert_eq!(
+        class_at(&terminals, Dimension::Route),
+        Some(C::HarnessFailure),
+    );
+}
+
+/// A line naming ANOTHER probe is refused rather than believed.
+///
+/// The protocol is one probe at a time, so such a line means the stream and the
+/// runner are out of step. Believing it would attach one case's product,
+/// reference or failure to another case — and the taxonomy's whole promise is
+/// that evidence describes the case it is filed under.
+#[test]
+fn a_line_naming_another_probe_is_refused() {
+    let mut run = ProbeRun::new(CASE, requested(CASE));
+    assert_eq!(
+        run.ingest_frame(compile_frame(
+            "vue/fixtures/Other.vue",
+            vec![ok_entry(CASE)]
+        )),
+        Err(FrameViolation::UnknownProbe {
+            probe_id: "vue/fixtures/Other.vue".to_string(),
+        }),
+    );
+    assert!(
+        !run.has_compile_frame(),
+        "a frame for another probe must not be retained",
+    );
+    assert_eq!(
+        run.ingest_frame(DriverLine::Error {
+            probe_id: Some("vue/fixtures/Other.vue".to_string()),
+            error: "another probe's failure".to_string(),
+        }),
+        Err(FrameViolation::UnknownProbe {
+            probe_id: "vue/fixtures/Other.vue".to_string(),
+        }),
+    );
+    // An error the driver could not attribute belongs to the probe the runner is
+    // waiting on, and is accepted.
+    assert_eq!(
+        run.ingest_frame(DriverLine::Error {
+            probe_id: None,
+            error: "a line the driver could not parse".to_string(),
+        }),
+        Ok(()),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Driving a real driver process
+// ---------------------------------------------------------------------------
+
+/// The header every synthetic driver shares: read one probe per line, answer on
+/// stdout, and never exit on a failure.
+const SYNTHETIC_DRIVER_PRELUDE: &str = r#"
+import { createInterface } from "node:readline";
+const write = (line) => process.stdout.write(`${JSON.stringify(line)}\n`);
+const product = (canonicalId) => ({
+  canonicalId,
+  response: {
+    diagnostics: { diagnostics: [] },
+    products: [
+      {
+        kind: "runtimeClient",
+        nodes: [{ node: { kind: "main" }, code: "export const value = 1\n" }],
+      },
+    ],
+  },
+  failure: null,
+});
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+let seen = 0;
+for await (const line of lines) {
+  if (line.trim() === "") continue;
+  const probe = JSON.parse(line);
+  const id = probe.probe_id;
+  const canonicalId = probe.entries[0].canonicalId;
+  seen += 1;
+"#;
+
+const SYNTHETIC_DRIVER_EPILOGUE: &str = "\n}\n";
+
+fn synthetic_driver(label: &str, body: &str) -> (std::path::PathBuf, DriverCommand) {
+    let script = temp_file(
+        &format!("{label}.mjs"),
+        &format!("{SYNTHETIC_DRIVER_PRELUDE}{body}{SYNTHETIC_DRIVER_EPILOGUE}"),
+    );
+    let command = DriverCommand {
+        program: std::path::PathBuf::from("node"),
+        script: script.clone(),
+    };
+    (script, command)
+}
+
+fn planned(case_id: &str) -> PlannedCase {
+    PlannedCase {
+        case_id: case_id.to_string(),
+        relative_path: "fixtures/App.vue".to_string(),
+        source: "<template><div/></template>\n".to_string(),
+    }
+}
+
+fn generous(compile: std::time::Duration) -> PhaseDeadlines {
+    PhaseDeadlines {
+        load: std::time::Duration::from_secs(30),
+        compile,
+        reference: std::time::Duration::from_secs(30),
+    }
+}
+
+/// A per-probe driver ERROR ends that probe, and the lane keeps running.
+///
+/// The driver reports a recoverable failure as a LINE precisely so the runner
+/// can move on, and then waits for the next probe. A runner that kept waiting
+/// for a frame that will never come would spend the whole deadline, kill a
+/// healthy driver, and record every remaining case as a harness failure: one
+/// recoverable JavaScript throw would cost the entire lane.
+#[test]
+fn a_per_probe_driver_error_ends_that_probe_and_the_lane_keeps_running() {
+    let manifest = vue_manifest();
+    let (script, driver) = synthetic_driver(
+        "driver-error",
+        r#"
+  write({ probe_id: id, phase: "load" });
+  write({ probe_id: id, phase: "compile" });
+  if (seen === 1) {
+    write({ probe_id: id, error: "planted failure", phase: "compile", stage: "native" });
+    continue;
+  }
+  write({ probe_id: id, frame: "compile", elapsed_ns: 1, entries: [product(canonicalId)] });
+  write({ probe_id: id, phase: "reference" });
+  write({ probe_id: id, frame: "reference", reference: [{ code: "export const value = 1\n" }] });
+"#,
+    );
+    let cases = [planned(CASE), planned(CASE)];
+    let results = runner::run_cases(
+        &manifest,
+        &driver,
+        &cases,
+        generous(std::time::Duration::from_secs(30)),
+    )
+    .unwrap_or_else(|error| panic!("the synthetic driver could not be run: {error}"));
+    let _ = std::fs::remove_file(&script);
+
+    assert_eq!(results.len(), 2);
+    let first = results[0]
+        .observation
+        .as_ref()
+        .expect("the observation is representable");
+    assert_eq!(
+        first.terminal(Dimension::Route).class(),
+        Some(C::HarnessFailure),
+        "the probe the driver reported a failure for is that probe's harness failure",
+    );
+    let second = results[1]
+        .observation
+        .as_ref()
+        .expect("the observation is representable");
+    assert_eq!(
+        second.terminal(Dimension::Compile).class(),
+        Some(C::Pass),
+        "the lane must keep running after a per-probe failure: {:?}",
+        second.terminal(Dimension::Route),
+    );
+    assert_eq!(
+        second.terminal(Dimension::Structural).class(),
+        Some(C::Pass)
+    );
+}
+
+/// A pause after the compile frame but BEFORE the reference phase marker is
+/// bounded by the reference deadline, not the compile one.
+///
+/// The compile frame is the native call's answer; what remains is reference
+/// work. A runner that left the compile deadline armed would report a reference
+/// producer that was merely slow as a COMPILER timeout — a verdict about Verter
+/// drawn from a step Verter had already finished.
+#[test]
+fn a_pause_after_the_compile_frame_is_not_a_compiler_timeout() {
+    let manifest = vue_manifest();
+    let (script, driver) = synthetic_driver(
+        "driver-slow-reference",
+        r#"
+  write({ probe_id: id, phase: "load" });
+  write({ probe_id: id, phase: "compile" });
+  write({ probe_id: id, frame: "compile", elapsed_ns: 1, entries: [product(canonicalId)] });
+  await sleep(900);
+  write({ probe_id: id, phase: "reference" });
+  write({ probe_id: id, frame: "reference", reference: [{ code: "export const value = 1\n" }] });
+"#,
+    );
+    let cases = [planned(CASE)];
+    let results = runner::run_cases(
+        &manifest,
+        &driver,
+        &cases,
+        generous(std::time::Duration::from_millis(200)),
+    )
+    .unwrap_or_else(|error| panic!("the synthetic driver could not be run: {error}"));
+    let _ = std::fs::remove_file(&script);
+
+    let observation = results[0]
+        .observation
+        .as_ref()
+        .expect("the observation is representable");
+    assert_eq!(
+        observation.terminal(Dimension::Compile).class(),
+        Some(C::Pass),
+    );
+    assert_eq!(
+        observation.terminal(Dimension::Structural).class(),
+        Some(C::Pass),
+        "a pause before the reference marker must not be read as a compiler timeout: {:?}",
+        observation.terminal(Dimension::Structural),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Gate cells that never ran
+// ---------------------------------------------------------------------------
+
+/// A gate cell whose dimension was NEVER REACHED is a gate regression, and
+/// disposes non-zero.
+///
+/// Not-run is not an outcome class: it can neither meet an expectation nor be
+/// expected by one. A gate reading it as anything but a regression would let a
+/// dimension that was never exercised stand in for one that passed.
+///
+/// The manifest here is built directly because `validate` refuses a gate outside
+/// `Route`, and `Route` is fed by nothing so it can never be unreached. The
+/// evaluation is the same one a future promoted gate would take.
+#[test]
+fn a_gate_cell_whose_dimension_was_never_reached_disposes_non_zero() {
+    let mut manifest = vue_manifest();
+    for entry in &mut manifest.entries {
+        if entry.dimension == Dimension::Performance {
+            entry.expected_state = verter_validation_probe::ExpectedState::Gate;
+            entry.expected_class = Some(C::Pass);
+            entry.authority = Some(verter_validation_probe::Authority::CompilerPublicRequestRoute);
+            entry.atom = Some("route-callable".to_string());
+        }
+    }
+    // A host failure at Route leaves Performance unreached.
+    let summary = one_case_summary(
+        &manifest,
+        vec![
+            phase(CASE, Phase::Compile),
+            compile_frame(CASE, vec![failure_entry(CASE, "host", None)]),
+            phase(CASE, Phase::Reference),
+            reference_frame(
+                CASE,
+                vec![ReferenceResult::Produced {
+                    code: MODULE.to_string(),
+                }],
+            ),
+        ],
+    );
+    let performance = summary.frameworks[0].cases[0]
+        .cells
+        .iter()
+        .find(|cell| cell.dimension == Dimension::Performance)
+        .expect("the performance cell is present");
+    assert_eq!(performance.observed_class, None);
+    assert_eq!(
+        performance.observed_terminal,
+        verter_validation_probe::ObservedTerminal::NotRun
+    );
+    assert_eq!(performance.evaluation, Evaluation::GateRegression);
+    assert_ne!(
+        summary.disposition().exit_code(),
+        0,
+        "a gate that never ran must fail the lane",
+    );
 }

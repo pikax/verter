@@ -64,15 +64,28 @@ fn workload_lane_runs_the_pinned_slice_and_publishes_its_summary() {
         );
     }
 
-    // Determinism: the same slice, re-planned, is the same case set in the
-    // same order. A slice that shuffled between runs would make every
-    // comparison of two summaries meaningless.
+    // Determinism: the slice is re-DERIVED from an independently loaded
+    // manifest and must be the same case set in the same order, and the same
+    // one the summary actually recorded. A slice that shuffled between runs
+    // would make every comparison of two summaries meaningless. (Comparing one
+    // `selection` call against another would prove nothing: it clones a field.)
     let manifest = lane::load_manifest(verter_validation_probe::Framework::Vue)
         .expect("the manifest is valid");
+    let reloaded = lane::load_manifest(verter_validation_probe::Framework::Vue)
+        .expect("the manifest is valid");
     assert_eq!(
-        lane::selection(&manifest, lane),
-        lane::selection(&manifest, lane),
-        "the selection is not deterministic",
+        manifest.derived_smoke_slice(),
+        reloaded.derived_smoke_slice(),
+        "the smoke derivation is not deterministic",
+    );
+    let replanned: Vec<String> = lane::plan(&lane::selection(&reloaded, lane))
+        .expect("the selection is loadable")
+        .into_iter()
+        .map(|case| case.case_id)
+        .collect();
+    assert_eq!(
+        replanned, vue.selected_cases,
+        "re-planning the lane selected a different case set than the summary recorded",
     );
 
     let disposition = summary.disposition();
@@ -150,4 +163,95 @@ fn a_constructed_supported_component_reaches_a_runtime_client_product() {
         "a supported component did not reach a valid runtimeClient product: {:?}",
         observation.terminal(Dimension::Compile),
     );
+}
+
+/// A ZERO-SELECTION manifest fails the lane through the workflow's own entry
+/// point rather than publishing a green summary of nothing.
+///
+/// The refusal is driven over a PLANTED manifest directory, not the committed
+/// one: a lane whose re-scoping refusal could only be exercised by editing the
+/// file it ships is a refusal nobody can test without breaking the lane.
+#[test]
+fn a_planted_zero_selection_manifest_fails_the_lane() {
+    let committed = lane::manifest_dir().join("vue.toml");
+    let text = std::fs::read_to_string(&committed)
+        .unwrap_or_else(|error| panic!("reading {}: {error}", committed.display()));
+    let manifest = lane::load_manifest(verter_validation_probe::Framework::Vue)
+        .expect("the committed manifest is valid");
+
+    // Empty the slice, and prove the plant applied: a mutation that silently
+    // did not match would leave the committed manifest under test and report a
+    // pass.
+    assert!(
+        !manifest.smoke.is_empty(),
+        "the committed slice is already empty, so emptying it proves nothing",
+    );
+    assert!(
+        !text.contains("\nsmoke = []"),
+        "the committed manifest already carries the planted slice",
+    );
+    let planted = plant_smoke(&text, "smoke = []");
+    assert_ne!(planted, text, "the plant did not change the manifest");
+    assert!(
+        planted.contains("\nsmoke = []"),
+        "the plant did not empty the smoke slice",
+    );
+
+    let dir = planted_manifest_dir("zero-selection", &planted);
+    let error = lane::run_with_manifest_dir(Lane::Smoke, PhaseDeadlines::default(), &dir)
+        .err()
+        .unwrap_or_else(|| panic!("a zero-selection manifest must fail the lane, not run it"));
+    assert!(
+        error
+            .to_string()
+            .contains("the smoke slice selects no case"),
+        "the lane refused for the wrong reason: {error}",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Replace the manifest's whole `smoke = [...]` array.
+fn plant_smoke(text: &str, replacement: &str) -> String {
+    let start = text
+        .find("\nsmoke = [")
+        .expect("the manifest lists a smoke slice")
+        + 1;
+    let end = start + text[start..].find(']').expect("the array is closed") + 1;
+    format!("{}{replacement}{}", &text[..start], &text[end..])
+}
+
+/// Write one manifest into a fresh directory under the platform's temp
+/// directory, named as the loader requires.
+fn planted_manifest_dir(label: &str, vue: &str) -> std::path::PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("verter-probe-manifest-{unique}-{label}"));
+    std::fs::create_dir_all(&dir)
+        .unwrap_or_else(|error| panic!("creating {}: {error}", dir.display()));
+    std::fs::write(dir.join("vue.toml"), vue)
+        .unwrap_or_else(|error| panic!("writing {}: {error}", dir.display()));
+    dir
+}
+
+/// The checkout is AT the commit the manifest pins, read from its own Git
+/// state.
+///
+/// The pin is recorded in the manifest and in the workflow, and every summary
+/// republishes it; none of that is evidence about the bytes the lane compiled.
+/// A checkout pointed elsewhere whose fixture set still matched the inventory
+/// would publish a revision its cases did not come from.
+#[test]
+fn the_checkout_is_at_the_pinned_revision() {
+    let manifest = lane::load_manifest(verter_validation_probe::Framework::Vue)
+        .expect("the manifest is valid");
+    let checked_out = verter_validation_probe::corpus::vue_benchmarks::checkout_revision()
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        checked_out,
+        manifest.external_revision.as_str(),
+        "the checkout is at a different commit than the manifest pins",
+    );
+    lane::check_revision(&manifest).unwrap_or_else(|error| panic!("{error}"));
 }

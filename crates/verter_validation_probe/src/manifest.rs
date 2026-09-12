@@ -446,6 +446,18 @@ pub enum ManifestViolation {
         /// The cell.
         cell: CellId,
     },
+    /// A gate cell at a dimension other than `Route`.
+    GateOutsideRoute {
+        /// The cell.
+        cell: CellId,
+    },
+    /// A gate cell citing an authority other than the public request route.
+    GateAuthorityNotRoute {
+        /// The cell.
+        cell: CellId,
+        /// The authority cited.
+        authority: Authority,
+    },
     /// The smoke slice selects no case, so the required lane would publish a
     /// green summary having run nothing.
     EmptySmokeSlice,
@@ -556,6 +568,16 @@ impl fmt::Display for ManifestViolation {
                     "{cell}: the dimension is inapplicable, so the cell must be a skip"
                 )
             }
+            ManifestViolation::GateOutsideRoute { cell } => write!(
+                f,
+                "{cell}: only Route may gate; every other dimension's behaviour is owned by \
+                 an authority that is not yet implemented"
+            ),
+            ManifestViolation::GateAuthorityNotRoute { cell, authority } => write!(
+                f,
+                "{cell}: a gate may cite only `{}`, not `{authority}`",
+                Authority::CompilerPublicRequestRoute
+            ),
             ManifestViolation::EmptySmokeSlice => f.write_str("the smoke slice selects no case"),
             ManifestViolation::SmokeSliceTooLarge { listed } => write!(
                 f,
@@ -932,6 +954,27 @@ impl ProbeStateManifest {
             }
             (Some(_), Some(_)) => {}
             _ => violations.push(ManifestViolation::MissingCitation { cell: cell.clone() }),
+        }
+        // Which cells may GATE is an invariant of every manifest, not a
+        // property of the one this repository happens to ship: a gate binds the
+        // required job, so it may only ever cite behaviour an implemented
+        // authority owns. Today that is the public request route's callability
+        // and typed refusal, both of which are Route outcomes. A product
+        // refusal, a diagnostic, a comparison, a runtime or a map result is
+        // owned by a framework product authority, and becomes gateable only
+        // when that authority is implemented and a promotion moves it.
+        if entry.expected_state == ExpectedState::Gate {
+            if entry.dimension != Dimension::Route {
+                violations.push(ManifestViolation::GateOutsideRoute { cell: cell.clone() });
+            }
+            if let Some(authority) = entry.authority {
+                if authority != Authority::CompilerPublicRequestRoute {
+                    violations.push(ManifestViolation::GateAuthorityNotRoute {
+                        cell: cell.clone(),
+                        authority,
+                    });
+                }
+            }
         }
         match (entry.expected_state, entry.expected_class) {
             (ExpectedState::Skip, Some(_)) => {

@@ -59,6 +59,17 @@ pub struct PhaseDeadlines {
     pub reference: Duration,
 }
 
+impl PhaseDeadlines {
+    /// The deadline that bounds `phase`.
+    pub const fn of(self, phase: Phase) -> Duration {
+        match phase {
+            Phase::Load => self.load,
+            Phase::Compile => self.compile,
+            Phase::Reference => self.reference,
+        }
+    }
+}
+
 impl Default for PhaseDeadlines {
     fn default() -> Self {
         PhaseDeadlines {
@@ -298,11 +309,23 @@ impl DiagnosticsSnapshot {
             .any(|diagnostic| diagnostic.severity == "error")
     }
 
-    /// The comparator's severity-ordered row projection.
-    fn rows(&self) -> Vec<verter_vue_conformance::compare::DiagnosticRow> {
+    /// The comparator's severity-ordered row projection, ERROR severity only.
+    ///
+    /// The reference producer reports only errors — a reference that emitted
+    /// one is a `reference_failure` and is never compared — so for a produced
+    /// module its diagnostics channel carries no warning and no tip. Comparing
+    /// Verter's warnings against that structurally empty side would report a
+    /// difference the harness itself created by discarding the other compiler's
+    /// warnings, and would report it on exactly the cases whose products match:
+    /// each of those would be held back from surfacing as a promotion
+    /// candidate. Restricting both sides to errors keeps the difference that is
+    /// real — Verter erroring where the reference did not — and drops the one
+    /// that is an artefact of a channel nobody captured.
+    fn error_rows(&self) -> Vec<verter_vue_conformance::compare::DiagnosticRow> {
         let mut rows: Vec<_> = self
             .diagnostics
             .iter()
+            .filter(|diagnostic| diagnostic.severity == "error")
             .map(
                 |diagnostic| verter_vue_conformance::compare::DiagnosticRow {
                     kind: diagnostic.severity.clone(),
@@ -452,9 +475,9 @@ struct CompileFrame {
 /// Why a frame was refused before anything was classified from it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FrameViolation {
-    /// A frame for a probe the runner never requested.
+    /// A line naming a probe other than the one being driven.
     UnknownProbe {
-        /// The id the frame claimed.
+        /// The id the line claimed.
         probe_id: String,
     },
     /// A second compile frame for one probe.
@@ -500,7 +523,7 @@ impl fmt::Display for FrameViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FrameViolation::UnknownProbe { probe_id } => {
-                write!(f, "frame for unrequested probe `{probe_id}`")
+                write!(f, "a line arrived naming another probe, `{probe_id}`")
             }
             FrameViolation::DuplicateCompileFrame { probe_id } => {
                 write!(f, "`{probe_id}`: a second compile frame arrived")
@@ -571,12 +594,35 @@ impl ProbeRun {
 
     /// Ingest one driver line.
     ///
-    /// A frame is validated against the entry set this probe holds BEFORE it
-    /// is retained: the count must match, each position's id must be the one
+    /// A line is believed only for the probe it NAMES: the protocol is one
+    /// probe at a time, so a line claiming another probe means the stream and
+    /// the runner are out of step, and pairing it here would attribute one
+    /// case's product, reference, or failure to another case.
+    ///
+    /// A frame is then validated against the entry set this probe holds BEFORE
+    /// it is retained: the count must match, each position's id must be the one
     /// requested there, and no id may repeat. A violation records a harness
     /// failure and the frame is dropped whole — nothing is paired positionally
     /// from a frame that failed its own identity check.
     pub fn ingest_frame(&mut self, line: DriverLine) -> Result<(), FrameViolation> {
+        let claimed = match &line {
+            DriverLine::Phase { probe_id, .. }
+            | DriverLine::Compile { probe_id, .. }
+            | DriverLine::Reference { probe_id, .. } => Some(probe_id.as_str()),
+            // The driver cannot always attribute an error: a probe line it
+            // could not even parse carries no id it could trust. Such a line
+            // belongs to the probe the runner is waiting on.
+            DriverLine::Error { probe_id, .. } => probe_id.as_deref(),
+        };
+        if let Some(claimed) = claimed {
+            if claimed != self.probe_id {
+                let violation = FrameViolation::UnknownProbe {
+                    probe_id: claimed.to_string(),
+                };
+                self.harness.push(violation.to_string());
+                return Err(violation);
+            }
+        }
         match line {
             DriverLine::Phase { phase, .. } => {
                 self.phase = Some(phase);
@@ -719,19 +765,26 @@ impl ProbeRun {
         let mut evidence = Vec::new();
 
         let diagnostics = match (&entry.response, &entry.failure) {
-            (Some(response), _) => &response.diagnostics,
+            (Some(response), None) => &response.diagnostics,
             (None, Some(failure)) => &failure.diagnostics,
-            (None, None) => {
-                // Neither arm: the route answered nothing the classifier can
-                // read. Failing closed keeps an unexplained envelope from
-                // reading as a pass.
+            // Neither arm, or both. The route answers exactly one of them; an
+            // envelope carrying none says nothing the classifier can read, and
+            // one carrying both says two contradictory things. Failing closed on
+            // each keeps an unexplained envelope from reading as a pass and
+            // keeps the runner from silently preferring one arm over the other.
+            (response, failure) => {
+                let message = if response.is_none() && failure.is_none() {
+                    "route entry carries neither a response nor a failure"
+                } else {
+                    "route entry carries both a response and a failure"
+                };
                 return self.all_dimensions(
                     manifest,
                     requested,
                     ProbeOutcomeClass::HarnessFailure,
                     vec![Evidence {
                         source: EvidenceSource::Driver,
-                        message: "route entry carries neither a response nor a failure".to_string(),
+                        message: message.to_string(),
                     }],
                 );
             }
@@ -987,7 +1040,7 @@ impl ProbeRun {
             .as_ref()
             .and_then(|frame| frame.entries.get(position))
             .and_then(|entry| entry.response.as_ref())
-            .map(|response| response.diagnostics.rows())
+            .map(|response| response.diagnostics.error_rows())
             .unwrap_or_default()
     }
 
@@ -1145,10 +1198,44 @@ impl DriverCommand {
     }
 }
 
+/// Why the runner stopped driving probes through this process.
+///
+/// The two arms exist because they are not the same evidence. A process
+/// outcome is classified by the phase it happened in, which is what makes a
+/// compiler crash distinguishable from an addon that would not load. A harness
+/// stop is the probe's own transport or protocol failing — a broken stdout
+/// pipe, a line the runner could not parse, a frame naming another probe — and
+/// running that through the phase map would report a crash or a timeout the
+/// compiler never had.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaneStop {
+    /// The process ended, or was killed for exceeding a phase deadline.
+    Process(ExecutionEvent),
+    /// The harness could not keep speaking to a process that may still be
+    /// alive and healthy.
+    Harness,
+}
+
+impl LaneStop {
+    /// The process outcome, when this stop was one.
+    fn process(&self) -> Option<ExecutionEvent> {
+        match self {
+            LaneStop::Process(event) => Some(*event),
+            LaneStop::Harness => None,
+        }
+    }
+}
+
 /// Drive every planned case through one driver process and fold the results.
 ///
 /// One process serves the whole lane, and each case is its own probe, so a
-/// per-case failure is attributed to that case while the rest keep running.
+/// per-case failure is attributed to that case while the rest keep running:
+/// a driver that reports a failure as a LINE has finished that probe, and the
+/// next one is sent.
+///
+/// Only a [`LaneStop`] ends the lane — the process died, or the harness can no
+/// longer trust what it is reading — and every case after it is recorded as a
+/// harness failure rather than left without an outcome.
 pub fn run_cases(
     manifest: &ProbeStateManifest,
     driver: &DriverCommand,
@@ -1186,7 +1273,7 @@ pub fn run_cases(
     let lines = spawn_reader(stdout);
 
     let mut results = Vec::with_capacity(cases.len());
-    let mut terminated: Option<ExecutionEvent> = None;
+    let mut stop: Option<LaneStop> = None;
     for case in cases {
         let requested = vec![RequestedEntry {
             canonical_id: case.case_id.clone(),
@@ -1194,18 +1281,20 @@ pub fn run_cases(
             request_digest: request::request_digest(&case.relative_path),
         }];
         let mut run = ProbeRun::new(case.case_id.clone(), requested);
-        if terminated.is_none() {
+        if stop.is_none() {
             match write_probe(&mut child, case) {
-                Ok(()) => drive_probe(&mut run, &lines, deadlines, &mut terminated, &mut child),
+                Ok(()) => drive_probe(&mut run, &lines, deadlines, &mut stop, &mut child),
                 Err(message) => {
                     run.record_harness_failure(message);
                 }
             }
         } else {
-            run.record_harness_failure("the driver terminated before this probe was sent");
+            run.record_harness_failure(
+                "the driver stopped serving probes before this one was sent",
+            );
         }
         let elapsed_ns = run.compile.as_ref().map(|frame| frame.elapsed_ns);
-        let observations = run.finish(manifest, terminated);
+        let observations = run.finish(manifest, stop.as_ref().and_then(LaneStop::process));
         results.push(CaseResult {
             case_id: case.case_id.clone(),
             request_digest: request::request_digest(&case.relative_path),
@@ -1245,7 +1334,7 @@ fn drive_probe(
     run: &mut ProbeRun,
     lines: &Receiver<Result<String, String>>,
     deadlines: PhaseDeadlines,
-    terminated: &mut Option<ExecutionEvent>,
+    stop: &mut Option<LaneStop>,
     child: &mut Child,
 ) {
     let mut deadline = Instant::now() + deadlines.load;
@@ -1254,40 +1343,75 @@ fn drive_probe(
         match lines.recv_timeout(remaining) {
             Ok(Ok(line)) => match parse_line(&line) {
                 Ok(parsed) => {
-                    if let DriverLine::Phase { phase, .. } = &parsed {
-                        deadline = Instant::now()
-                            + match phase {
-                                Phase::Load => deadlines.load,
-                                Phase::Compile => deadlines.compile,
-                                Phase::Reference => deadlines.reference,
-                            };
+                    match &parsed {
+                        DriverLine::Phase { phase, .. } => {
+                            deadline = Instant::now() + deadlines.of(*phase);
+                        }
+                        // The compile frame IS the native call's answer, so
+                        // what remains for this probe is reference work and the
+                        // reference deadline is what bounds it. Leaving the
+                        // compile deadline armed would report a reference that
+                        // hung before announcing its phase as a compiler
+                        // timeout — the one distinction the taxonomy leans on
+                        // hardest.
+                        DriverLine::Compile { .. } => {
+                            deadline = Instant::now() + deadlines.reference;
+                        }
+                        DriverLine::Reference { .. } | DriverLine::Error { .. } => {}
                     }
-                    let done = matches!(parsed, DriverLine::Reference { .. });
-                    let _ = run.ingest_frame(parsed);
+                    // A reference frame completes the probe — and so does a
+                    // driver error, which the driver writes INSTEAD of
+                    // finishing the protocol before going back to waiting for
+                    // the next probe. Waiting for a frame that will never come
+                    // would spend the whole deadline and then kill a healthy
+                    // driver, turning one recoverable per-case failure into a
+                    // lane that reports nothing about every case after it.
+                    let done = matches!(
+                        parsed,
+                        DriverLine::Reference { .. } | DriverLine::Error { .. }
+                    );
+                    if run.ingest_frame(parsed).is_err() {
+                        // The line failed its own identity or cardinality
+                        // check, so the stream and the probes are out of step
+                        // and the next probe's lines cannot be told from this
+                        // one's. Stopping the lane deliberately keeps the
+                        // misalignment from cascading into cases whose
+                        // evidence describes a different case.
+                        let _ = child.kill();
+                        *stop = Some(LaneStop::Harness);
+                        return;
+                    }
                     if done {
                         return;
                     }
                 }
                 Err(message) => {
                     run.record_harness_failure(format!("unparseable driver line: {message}"));
+                    // How much of the protocol that line was is unknowable, so
+                    // the same reasoning applies: stop rather than read the
+                    // next probe's lines as this one's.
+                    let _ = child.kill();
+                    *stop = Some(LaneStop::Harness);
                     return;
                 }
             },
             Ok(Err(message)) => {
                 run.record_harness_failure(format!("reading the driver: {message}"));
-                *terminated = Some(ExecutionEvent::Exited {
-                    phase: run.phase(),
-                    code: -1,
-                });
+                // A broken pipe is the harness's own transport failing, NOT a
+                // process outcome: classifying it through the phase map would
+                // report a crash the compiler never had.
+                *stop = Some(LaneStop::Harness);
                 return;
             }
             Err(RecvTimeoutError::Timeout) => {
                 let _ = child.kill();
-                *terminated = Some(ExecutionEvent::TimedOut { phase: run.phase() });
+                *stop = Some(LaneStop::Process(ExecutionEvent::TimedOut {
+                    phase: run.phase(),
+                }));
                 return;
             }
             Err(RecvTimeoutError::Disconnected) => {
-                *terminated = Some(match child.wait() {
+                *stop = Some(LaneStop::Process(match child.wait() {
                     Ok(status) => match status.code() {
                         Some(code) => ExecutionEvent::Exited {
                             phase: run.phase(),
@@ -1296,7 +1420,7 @@ fn drive_probe(
                         None => ExecutionEvent::Signaled { phase: run.phase() },
                     },
                     Err(_) => ExecutionEvent::Signaled { phase: run.phase() },
-                });
+                }));
                 return;
             }
         }
