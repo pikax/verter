@@ -20,6 +20,13 @@ use crate::outcome::{
     Terminal,
 };
 
+/// The largest smoke slice a pull-request lane accepts.
+///
+/// The bound is STRUCTURAL, not a wall clock: a lane whose size is a time
+/// budget grows silently as machines get faster and shrinks as they get
+/// loaded, and neither tells a reviewer what the required job covers.
+pub const MAX_SMOKE_CASES: usize = 24;
+
 /// A first-class Verter target framework. Always a case attribute, never a
 /// runner variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -300,6 +307,16 @@ pub struct ProbeStateManifest {
     /// The complete ratified case list.
     #[serde(default)]
     pub inventory: Vec<Case>,
+    /// The deterministic pull-request smoke slice, by case id.
+    ///
+    /// Listed rather than computed at run time, and then checked to EQUAL its
+    /// own derivation — the lexicographic first `min_cases` of each stratum in
+    /// declaration order. A reviewer reads exactly what a pull request runs,
+    /// and a hand-edited, reordered, emptied, or padded slice fails
+    /// [`ProbeStateManifest::validate`] instead of quietly changing what the
+    /// required lane covers.
+    #[serde(default)]
+    pub smoke: Vec<String>,
     /// One cell per `{ probe_id, dimension }` for every inventory case.
     #[serde(default)]
     pub entries: Vec<ProbeEntry>,
@@ -429,6 +446,33 @@ pub enum ManifestViolation {
         /// The cell.
         cell: CellId,
     },
+    /// A gate cell at a dimension other than `Route`.
+    GateOutsideRoute {
+        /// The cell.
+        cell: CellId,
+    },
+    /// A gate cell citing an authority other than the public request route.
+    GateAuthorityNotRoute {
+        /// The cell.
+        cell: CellId,
+        /// The authority cited.
+        authority: Authority,
+    },
+    /// The smoke slice selects no case, so the required lane would publish a
+    /// green summary having run nothing.
+    EmptySmokeSlice,
+    /// The smoke slice is larger than the bound a pull-request lane accepts.
+    SmokeSliceTooLarge {
+        /// The cases listed.
+        listed: usize,
+    },
+    /// The smoke slice is not the deterministic derivation of its own strata.
+    SmokeSliceNotDerived {
+        /// The lexicographic first-`min_cases`-per-stratum slice.
+        expected: Vec<String>,
+        /// What the manifest lists.
+        listed: Vec<String>,
+    },
 }
 
 impl fmt::Display for ManifestViolation {
@@ -524,6 +568,29 @@ impl fmt::Display for ManifestViolation {
                     "{cell}: the dimension is inapplicable, so the cell must be a skip"
                 )
             }
+            ManifestViolation::GateOutsideRoute { cell } => write!(
+                f,
+                "{cell}: only Route may gate; every other dimension's behaviour is owned by \
+                 an authority that is not yet implemented"
+            ),
+            ManifestViolation::GateAuthorityNotRoute { cell, authority } => write!(
+                f,
+                "{cell}: a gate may cite only `{}`, not `{authority}`",
+                Authority::CompilerPublicRequestRoute
+            ),
+            ManifestViolation::EmptySmokeSlice => f.write_str("the smoke slice selects no case"),
+            ManifestViolation::SmokeSliceTooLarge { listed } => write!(
+                f,
+                "the smoke slice lists {listed} cases, above the {MAX_SMOKE_CASES} a \
+                 pull-request lane accepts"
+            ),
+            ManifestViolation::SmokeSliceNotDerived { expected, listed } => write!(
+                f,
+                "the smoke slice is not the lexicographic first-min_cases-per-stratum \
+                 derivation; expected [{}], found [{}]",
+                expected.join(", "),
+                listed.join(", ")
+            ),
         }
     }
 }
@@ -694,6 +761,7 @@ impl ProbeStateManifest {
         self.validate_header(&mut violations);
         let inventory = self.validate_inventory(&mut violations);
         self.validate_strata(&mut violations);
+        self.validate_smoke(&mut violations);
         self.validate_cells(&inventory, &mut violations);
         if violations.is_empty() {
             Ok(())
@@ -776,6 +844,57 @@ impl ProbeStateManifest {
         }
     }
 
+    /// The deterministic smoke slice this manifest's strata and inventory
+    /// derive: within each stratum, in declaration order, the lexicographic
+    /// first `min_cases` inventory cases that fall into it.
+    ///
+    /// A case belongs to the FIRST stratum whose pattern matches its file
+    /// name, exactly as the stratum-coverage check assigns it, so the two can
+    /// never disagree about which family a case counts towards.
+    pub fn derived_smoke_slice(&self) -> Vec<String> {
+        let mut buckets: Vec<Vec<&str>> = vec![Vec::new(); self.strata.len()];
+        for case in &self.inventory {
+            let file_name = case.case_id.rsplit('/').next().unwrap_or_default();
+            if let Some(index) = self
+                .strata
+                .iter()
+                .position(|stratum| glob_matches(&stratum.pattern, file_name))
+            {
+                buckets[index].push(case.case_id.as_str());
+            }
+        }
+        let mut slice = Vec::new();
+        for (stratum, bucket) in self.strata.iter().zip(buckets.iter_mut()) {
+            bucket.sort_unstable();
+            slice.extend(
+                bucket
+                    .iter()
+                    .take(stratum.min_cases as usize)
+                    .map(|case_id| case_id.to_string()),
+            );
+        }
+        slice
+    }
+
+    fn validate_smoke(&self, violations: &mut Vec<ManifestViolation>) {
+        if self.smoke.is_empty() {
+            violations.push(ManifestViolation::EmptySmokeSlice);
+            return;
+        }
+        if self.smoke.len() > MAX_SMOKE_CASES {
+            violations.push(ManifestViolation::SmokeSliceTooLarge {
+                listed: self.smoke.len(),
+            });
+        }
+        let expected = self.derived_smoke_slice();
+        if expected != self.smoke {
+            violations.push(ManifestViolation::SmokeSliceNotDerived {
+                expected,
+                listed: self.smoke.clone(),
+            });
+        }
+    }
+
     fn validate_cells(
         &self,
         inventory: &BTreeSet<String>,
@@ -835,6 +954,27 @@ impl ProbeStateManifest {
             }
             (Some(_), Some(_)) => {}
             _ => violations.push(ManifestViolation::MissingCitation { cell: cell.clone() }),
+        }
+        // Which cells may GATE is an invariant of every manifest, not a
+        // property of the one this repository happens to ship: a gate binds the
+        // required job, so it may only ever cite behaviour an implemented
+        // authority owns. Today that is the public request route's callability
+        // and typed refusal, both of which are Route outcomes. A product
+        // refusal, a diagnostic, a comparison, a runtime or a map result is
+        // owned by a framework product authority, and becomes gateable only
+        // when that authority is implemented and a promotion moves it.
+        if entry.expected_state == ExpectedState::Gate {
+            if entry.dimension != Dimension::Route {
+                violations.push(ManifestViolation::GateOutsideRoute { cell: cell.clone() });
+            }
+            if let Some(authority) = entry.authority {
+                if authority != Authority::CompilerPublicRequestRoute {
+                    violations.push(ManifestViolation::GateAuthorityNotRoute {
+                        cell: cell.clone(),
+                        authority,
+                    });
+                }
+            }
         }
         match (entry.expected_state, entry.expected_class) {
             (ExpectedState::Skip, Some(_)) => {

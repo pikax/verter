@@ -68,15 +68,97 @@ impl fmt::Display for Evaluation {
     }
 }
 
+/// What a cell observed, reduced to exactly what the decision reads.
+///
+/// A [`Terminal`] also carries the evidence behind the outcome and the reason
+/// a dimension went unreached or unexercised. None of that decides anything,
+/// and a decision that could see it could come to depend on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObservedOutcome {
+    /// The dimension produced this class.
+    Class(ProbeOutcomeClass),
+    /// The dimension was never reached.
+    NotRun,
+    /// The dimension cannot be exercised for this framework.
+    NotApplicable,
+}
+
+impl ObservedOutcome {
+    /// What a terminal observed.
+    pub fn of(terminal: &Terminal) -> Self {
+        match terminal {
+            Terminal::Class { class, .. } => ObservedOutcome::Class(*class),
+            Terminal::NotRun { .. } => ObservedOutcome::NotRun,
+            Terminal::NotApplicable { .. } => ObservedOutcome::NotApplicable,
+        }
+    }
+}
+
+/// Decide one cell from its expectation and its observation, and nothing else.
+///
+/// This is a pure function of the three values a published cell row carries,
+/// which is what lets the summary's read-back RE-DERIVE an evaluation instead
+/// of trusting the one written beside it. A second implementation over there
+/// would be a second authority, and two of those diverge; a document whose
+/// gate cell claims `gate_pass` beside observations that say otherwise has to
+/// be refused by the same rule that wrote it.
+///
+/// An expected class is met only by that exact class: a `crash`, `timeout`, or
+/// `harness_failure` never satisfies an expected diagnostic, refusal, or
+/// unsupported outcome. A cell without an expected class (which validation
+/// rejects for every state but `skip`) never matches.
+pub fn decide(
+    expected_state: ExpectedState,
+    expected_class: Option<ProbeOutcomeClass>,
+    observed: ObservedOutcome,
+) -> Evaluation {
+    match expected_state {
+        ExpectedState::Skip => Evaluation::Skipped,
+        ExpectedState::Gate => match (observed, expected_class) {
+            (ObservedOutcome::Class(observed), Some(expected)) if observed == expected => {
+                Evaluation::GatePass
+            }
+            _ => Evaluation::GateRegression,
+        },
+        ExpectedState::Canary | ExpectedState::KnownFail => {
+            let observed = match observed {
+                ObservedOutcome::NotRun => return Evaluation::NotRun,
+                ObservedOutcome::NotApplicable => return Evaluation::NotApplicable,
+                ObservedOutcome::Class(class) => class,
+            };
+            decide_non_gate(expected_state, expected_class, observed)
+        }
+    }
+}
+
+fn decide_non_gate(
+    expected_state: ExpectedState,
+    expected_class: Option<ProbeOutcomeClass>,
+    observed: ProbeOutcomeClass,
+) -> Evaluation {
+    let pass = ProbeOutcomeClass::Pass;
+    match (expected_state, expected_class) {
+        (ExpectedState::Canary, Some(expected)) if expected == pass => {
+            if observed == pass {
+                Evaluation::ObservedPass
+            } else {
+                Evaluation::CanaryRegression
+            }
+        }
+        (_, Some(_)) if observed == pass => Evaluation::Xpass,
+        (ExpectedState::Canary, Some(expected)) if expected == observed => {
+            Evaluation::CanaryExpected
+        }
+        (ExpectedState::KnownFail, Some(expected)) if expected == observed => {
+            Evaluation::KnownFailExpected
+        }
+        _ => Evaluation::UnrelatedRegression,
+    }
+}
+
 impl ProbeEntry {
     /// Evaluate this cell against its case's observation, reading only the
     /// terminal of the cell's own dimension.
-    ///
-    /// An expected class is met only by that exact class: a `crash`,
-    /// `timeout`, or `harness_failure` never satisfies an expected
-    /// diagnostic, refusal, or unsupported outcome. A cell without an
-    /// expected class (which validation rejects for every state but `skip`)
-    /// never matches.
     ///
     /// # Panics
     ///
@@ -88,43 +170,11 @@ impl ProbeEntry {
             self.probe_id,
             "a cell is evaluated only against its own case's observation"
         );
-        let terminal = observation.terminal(self.dimension);
-        match self.expected_state {
-            ExpectedState::Skip => Evaluation::Skipped,
-            ExpectedState::Gate => match (terminal.class(), self.expected_class) {
-                (Some(observed), Some(expected)) if observed == expected => Evaluation::GatePass,
-                _ => Evaluation::GateRegression,
-            },
-            ExpectedState::Canary | ExpectedState::KnownFail => {
-                let observed = match terminal {
-                    Terminal::NotRun { .. } => return Evaluation::NotRun,
-                    Terminal::NotApplicable { .. } => return Evaluation::NotApplicable,
-                    Terminal::Class { class, .. } => *class,
-                };
-                self.evaluate_non_gate(observed)
-            }
-        }
-    }
-
-    fn evaluate_non_gate(&self, observed: ProbeOutcomeClass) -> Evaluation {
-        let pass = ProbeOutcomeClass::Pass;
-        match (self.expected_state, self.expected_class) {
-            (ExpectedState::Canary, Some(expected)) if expected == pass => {
-                if observed == pass {
-                    Evaluation::ObservedPass
-                } else {
-                    Evaluation::CanaryRegression
-                }
-            }
-            (_, Some(_)) if observed == pass => Evaluation::Xpass,
-            (ExpectedState::Canary, Some(expected)) if expected == observed => {
-                Evaluation::CanaryExpected
-            }
-            (ExpectedState::KnownFail, Some(expected)) if expected == observed => {
-                Evaluation::KnownFailExpected
-            }
-            _ => Evaluation::UnrelatedRegression,
-        }
+        decide(
+            self.expected_state,
+            self.expected_class,
+            ObservedOutcome::of(observation.terminal(self.dimension)),
+        )
     }
 }
 
