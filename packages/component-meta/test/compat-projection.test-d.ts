@@ -10,11 +10,14 @@
 // build fails this check rather than skipping it. The two subjects are checked
 // against separately-derived expected types on purpose: `src` and `dist` each
 // declare their own `unique symbol` graph brand, so the two module graphs are
-// deliberately not mutually assignable.
+// deliberately not mutually assignable. Each subject's expected result type is
+// imported from its OWN module graph rather than read back off the helper under
+// test, so a helper that widened to `any` cannot make its own assertion pass.
 
 import type * as SourceCompat from "../src/compat/index.js";
 import type * as PublishedCompat from "../dist/compat/index.js";
 import type { NativeComponentMetaResult } from "../src/native-component-meta.js";
+import type { NativeComponentMetaResult as PublishedNativeComponentMetaResult } from "../dist/index.js";
 
 /**
  * Exact type identity, so a widening to `any` fails instead of quietly
@@ -38,25 +41,25 @@ const _source_payload_helper: Equals<
 > = true;
 
 // ── Published contract ───────────────────────────────────────────
-
-type PublishedResult = NonNullable<
-  ReturnType<typeof PublishedCompat.projectDeclaredOnlyNativeResult>
->;
+// The expected type is the published `NativeComponentMetaResult` imported from
+// the `.` export map entry — NOT the helper's own return type. Reading it back
+// off the helper would let a widening to `(meta: any) => any` satisfy its own
+// assertion.
 
 const _published_result_helper: Equals<
   typeof PublishedCompat.projectDeclaredOnlyNativeResult,
-  (meta: PublishedResult | null) => PublishedResult | null
+  (meta: PublishedNativeComponentMetaResult | null) => PublishedNativeComponentMetaResult | null
 > = true;
 
 const _published_payload_helper: Equals<
   typeof PublishedCompat.projectDeclaredOnlyFromNativePayload,
-  (payload: Buffer | null) => PublishedResult | null
+  (payload: Buffer | null) => PublishedNativeComponentMetaResult | null
 > = true;
 
-// The published helpers return the NATIVE result: `fallthroughSurface` and
-// `acceptedProps` are native-only fields, so a helper that started returning
-// the Volar `ComponentMeta` shape fails here.
-const _published_result_is_native_shaped: PublishedResult extends {
+// The published result is the NATIVE shape: `fallthroughSurface` and
+// `acceptedProps` are native-only fields, so a published declaration that
+// carried the Volar `ComponentMeta` shape instead fails here.
+const _published_result_is_native_shaped: PublishedNativeComponentMetaResult extends {
   filePath: string;
   fallthroughSurface: unknown;
   acceptedProps: unknown;
