@@ -3911,7 +3911,11 @@ name = "verter_validation_probe"
 version = "0.0.1-beta.3"
 dependencies = [
  "serde",
+ "serde_json",
+ "sha2",
  "toml",
+ "verter_language",
+ "verter_vue_conformance",
 ]
 
 [[package]]

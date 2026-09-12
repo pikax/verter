@@ -7,13 +7,33 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Test-only validation-probe contract: the closed probe outcome taxonomy with its causal precedence fold, the per-dimension case observation, and the probe-state manifest with its expectation evaluator."
+description = "Test-only validation-probe contract: the closed probe outcome taxonomy with its causal precedence fold, the per-dimension case observation, the probe-state manifest with its expectation evaluator, and the table-driven external workload probe lane."
 publish = false
 
 # Test and CI tooling only. No production crate may depend on this crate; the
 # workspace dependency-layer guard lists it among the harnesses nothing may
 # depend on.
 
+[features]
+# Opt-in EXTERNAL lane: the workload probe reads a pinned third-party corpus
+# checked out under `.integration-tests/repos/`. OFF by default so the
+# canonical hermetic run (`node scripts/gate.mjs`) neither reads nor requires
+# any external checkout.
+external-corpus = []
+
+[[bin]]
+name = "validation-probe-summary"
+path = "src/bin/summary.rs"
+
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 toml = "1.1"
+# The structural comparator and its canonicalizer. The lane decides equality
+# with the existing conformance comparator and writes nothing of its own; the
+# same canonicalizer is the product's parse-and-build validity check.
+# The single file-language classification authority. The corpus walker asks
+# it which paths are carrier cases instead of matching extensions by hand.
+verter_language = { path = "../verter_language" }
+verter_vue_conformance = { path = "../verter_vue_conformance" }

@@ -5252,6 +5252,15 @@ pub(crate) mod foundations_guards {
             // call, no VerterHost/WorkspaceAccess context to route
             // through. `D14_ALLOW_LIST` carries the full rationale.
             "crates/verter_test_support/src/lib.rs",
+            // test/CI-only external workload probe lane — the crate's SOLE
+            // disk boundary, through which its corpus adapter, its lane and
+            // its summary binary all read and write. Reads a pinned
+            // third-party corpus checkout (feature-gated), its own committed
+            // manifests, and its own published summary artifact; never
+            // workspace/semantic/overlay/VFS state, and no production crate
+            // may depend on the crate. `D14_ALLOW_LIST` carries the full
+            // rationale.
+            "crates/verter_validation_probe/src/disk.rs",
         ]
         .into_iter()
         .map(String::from)
@@ -9403,6 +9412,10 @@ pub(crate) mod foundations_guards {
         (
             "crates/verter_test_support/src/lib.rs",
             "dev-dependency-only shared test-harness crate (`unique_temp_dir` etc.), never depended on by production code. The only `std::fs::` calls are inside `#[cfg(test)] mod tests` — a self-test that the minted path is actually a writable scratch dir. No production-path call, and the crate has no `VerterHost`/`WorkspaceAccess` context to route through — sibling of the `verter_lsp/src/config.rs` and `verter_lsp/src/test_utils.rs` test-fixture entries above.",
+        ),
+        (
+            "crates/verter_validation_probe/src/disk.rs",
+            "test/CI-only validation-probe lane, and the crate's SOLE disk boundary — the corpus adapter, the lane and the summary binary all route through this one module, so the whole crate is this single entry rather than one per reader. It reads a pinned third-party corpus checkout under `.integration-tests/repos/` (gated behind `feature = \"external-corpus\"`), its own committed `manifest/*.toml`, and its own published `target/validation-probe/summary.json`. None of that is workspace, semantic, overlay or VFS state, and no production crate may depend on this crate (the dependency-layer guard lists it among the harnesses) — sibling of the `verter_vue_conformance/src/lib.rs` and `verter_svelte_conformance/src/generate.rs` corpus-tooling entries.",
         ),
 ];
 

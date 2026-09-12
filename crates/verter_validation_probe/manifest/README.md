@@ -11,6 +11,7 @@ A manifest is added by the lane that pins its corpus. Its shape:
 framework = "vue"                  # vue | svelte
 comparison = "structural"          # structural (comparator bound) | none
 external_revision = "<commit id>"   # the full pinned corpus commit
+smoke = ["vue/<relative-path>"]    # the deterministic pull-request slice (see below)
 
 [comparator]                       # exactly when comparison = structural; equals the catalog identity
 crate = "verter_vue_conformance"
@@ -46,3 +47,12 @@ atom = "route-callable"            # durable atom id of that authority
 A committed manifest never contains a classless canary, an uncited cell, or a gate whose cited atom does not
 list its exact class. Observation never implies acceptance: expected classes record Verter behaviour, never
 output derived from the external corpus.
+
+## The smoke slice
+
+`smoke` is the bounded case list a pull request runs; the broader lane runs the complete `inventory`. It is
+listed by case id rather than computed at run time, and then checked to EQUAL its own derivation — the
+lexicographic first `min_cases` cases of each stratum, in stratum declaration order. So a reviewer reads
+exactly what the required job covers, and a slice that was emptied, padded, reordered, or hand-picked fails
+`ProbeStateManifest::validate` instead of quietly re-scoping the lane. The bound (`MAX_SMOKE_CASES`) is
+structural, never a wall clock: a size expressed as a time budget drifts with the machine.

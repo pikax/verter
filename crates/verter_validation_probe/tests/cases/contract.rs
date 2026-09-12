@@ -18,6 +18,8 @@ framework = "vue"
 comparison = "structural"
 external_revision = "0123456789abcdef0123456789abcdef01234567"
 
+smoke = ["vue/fixtures/App.vue"]
+
 [comparator]
 crate = "verter_vue_conformance"
 path = "src/compare.rs"
