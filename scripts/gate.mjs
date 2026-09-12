@@ -1442,6 +1442,39 @@ async function runPrepare(ctx) {
   return EXIT_PASS;
 }
 
+// The single owning LOCAL invocation of the anti-binary-growth layout check
+// (scripts/check-integration-test-layout.mjs). CI's rust-test-build job invokes the
+// same script once before building its archive, so the invariant has exactly one
+// implementation and one invocation per owning context.
+async function runIntegrationTestLayoutCheck(ctx) {
+  const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs, memoryLimitBytes } = ctx;
+  log("Anti-binary-growth integration-test layout (cargo metadata) …");
+  const result = await ctx.supervisor.runStep("front", {
+    cmd: process.execPath,
+    args: ["scripts/check-integration-test-layout.mjs"],
+    cwd: repoRealpath,
+    env: cargoEnv,
+    phase: "test",
+    deadlineMs,
+    stallMs,
+    targetDir: runnerTarget,
+    memoryLimitBytes,
+  });
+  recordContainedStepTelemetry(ctx, "integration-test-layout", result);
+  if (result.reason) {
+    err(
+      `integration-test layout check ${result.reason} after ${Math.round(result.durationMs / 1000)}s`,
+    );
+    return mapStepReason(result);
+  }
+  if (result.code !== 0) {
+    err(`integration-test layout check failed (exit ${result.code})`);
+    return EXIT_FAIL;
+  }
+  log(`integration-test layout check passed in ${Math.round(result.durationMs / 1000)}s`);
+  return EXIT_PASS;
+}
+
 async function runVueMacroOracleChecks(ctx) {
   const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs, memoryLimitBytes } = ctx;
   for (const [index, invocation] of vueMacroOracleGateCommands(process.execPath).entries()) {
@@ -2073,10 +2106,13 @@ async function runHarnessSmokeChecks(ctx) {
 
 // ----------------------------------------------------------------------------------------------------
 // runGate: the full canonical gate.
-//   0. Verify the non-cargo BUILD PREREQUISITES the suite loads from disk.
-//   1. Verify the pinned Vue macro oracle and its extractor.
-//   2. archive (build ONCE, dev profile) + list (parse rust-suites).
-//   3. POST-LIST LANES — Surface 1 nextest from the archive. It overlaps the serial shipped check and
+//   0. Anti-binary-growth integration-test layout check (the single owning local
+//      invocation of scripts/check-integration-test-layout.mjs; CI's rust-test-build
+//      job runs the same script once before its archive build).
+//   1. Verify the non-cargo BUILD PREREQUISITES the suite loads from disk.
+//   2. Verify the pinned Vue macro oracle and its extractor.
+//   3. archive (build ONCE, dev profile) + list (parse rust-suites).
+//   4. POST-LIST LANES — Surface 1 nextest from the archive. It overlaps the serial shipped check and
 //      contract when the build-jobs/test-threads ceiling can be split across both without oversubscribing
 //      it; otherwise the two lanes run serially instead (see deriveGateLaneResourceSplit's `concurrent`
 //      flag). Surface includes deliberate shared-process coverage
@@ -2084,12 +2120,19 @@ async function runHarnessSmokeChecks(ctx) {
 //      SINGLE-TEST-UNIVERSE at the top of this file. The shipped lane is a compile-only check under
 //      `no-debug-assertions` plus, only after check success, a small package-scoped nextest run of
 //      `verter_shipped_cfg_contract`. NOT a second workspace archive.
-//   4. Reduce fixed receipt slots; tolerated-only complete Surface 1 coverage => PASS-WITH-TOLERATED.
+//   5. Reduce fixed receipt slots; tolerated-only complete Surface 1 coverage => PASS-WITH-TOLERATED.
 // ----------------------------------------------------------------------------------------------------
 async function runGate(opts, ctx) {
   const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs, memoryLimitBytes } = ctx;
 
-  // ---------- REAL CONFORMANCE-HARNESS SMOKES (the gate's FIRST step) ----------
+  // ---------- ANTI-BINARY-GROWTH LAYOUT CHECK (the gate's FIRST step) ----------
+  // The layout tool only drives `cargo metadata`, so it runs before any harness
+  // smoke or archive work pays for a build: a hidden or duplicate
+  // integration-test binary must fail the gate before compilation balloons it.
+  const layoutResult = await runIntegrationTestLayoutCheck(ctx);
+  if (layoutResult !== EXIT_PASS) return layoutResult;
+
+  // ---------- REAL CONFORMANCE-HARNESS SMOKES ----------
   // These smokes exercise the two broader runtime boundaries before Cargo pays to build the Rust universe:
   // the real Vapor DOM/runtime
   // preload and the real workspace-domain TypeScript virtual host. Both run through the same contained-step

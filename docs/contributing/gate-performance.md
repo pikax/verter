@@ -423,12 +423,13 @@ distinct `own_crate_root()` helper — the two must not be conflated.
 Verified: `cargo test -p verter_source_policy_gate` (180/180 passing,
 non-vacuous — several tests assert the production scan found real production
 matches, not an empty/mocked tree), plus
-`cargo test -p verter_session --test main -- cases::typeinfo_ignored_test_manifest cases::g_misc0::critical_rules_have_guards cases::architecture_guards cases::integration_test_layout_guard`
+`cargo test -p verter_session --test main -- cases::typeinfo_ignored_test_manifest cases::g_misc0::critical_rules_have_guards cases::architecture_guards`
 (318/319, 1 pre-existing `#[ignore]`, 0 failed) — covering the R6 registry
-scanner (finds the moved guard names at their new path), the `live_guard!`
+scanner (finds the moved guard names at their new path) and the `live_guard!`
 binary-identity binding (still resolves — `architecture_guards.rs` stayed
-put), and the anti-binary-growth layout guard (the new crate needs no
-allowlist entry).
+put). That run also exercised `cases::integration_test_layout_guard`, the
+since-retired Rust mirror of the anti-binary-growth layout check, which now
+lives solely in `scripts/check-integration-test-layout.mjs`.
 
 The non-blocking oversize-source-line advisory (scan of `crates/*/src` for
 files over 1,500 lines) used to run synchronously before the mutex

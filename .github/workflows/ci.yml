@@ -89,6 +89,7 @@ jobs:
               - 'scripts/gen-svelte-goldens.mjs'
               - 'scripts/sccache-env.mjs'
               - 'scripts/sccache-env.test.mjs'
+              - 'scripts/check-integration-test-layout.test.mjs'
               - 'scripts/compiler-ci-lane-selftest.mjs'
               - 'scripts/provider-ci*.mjs'
               - 'scripts/svelte-golden-lib.mjs'

@@ -8355,14 +8355,19 @@ fi
         join(synthRoot, "scripts", "vue-macro-runtime-oracle", "oracle.test.mjs"),
         "process.exit(0);\n",
       );
+      writeFile(
+        join(synthRoot, "scripts", "check-integration-test-layout.mjs"),
+        "process.exit(0);\n",
+      );
 
       // ---- End-to-end CLI pair — nothing built, the loudest historical refusal state. The production
       // gate performs no build-prerequisite refusal, so these runs pin what it does instead: the printed
       // resource ceiling (explicit overrides in the first run; the explicit 12-GiB memory tier with an
       // omitted build-job count, and the independent test-thread override, in the second), the front
-      // half (harness smoke, then both Vue macro oracle checks), and a terminal state at the archive
-      // step. A reintroduced in-CLI build-prerequisite preflight fails the marker-absence assertion and
-      // forces a conscious update of these legs rather than passing silently. ----
+      // half (layout check, harness smoke, then both Vue macro oracle checks), and a terminal state at
+      // the archive step. A reintroduced in-CLI build-prerequisite preflight fails the
+      // marker-absence assertion and forces a conscious update of these legs rather than passing
+      // silently. ----
       // The omitted --build-jobs count in the memory-tier leg is NOT a host-independent 8: the explicit
       // 12-GiB tier selects the measured 8-job point, and deriveGateResourceLimits additionally clamps it
       // to this host's detected CPU count. Derive the expectation through the same authority the CLI
@@ -8398,6 +8403,7 @@ fi
             );
             ok = false;
           }
+          const layoutAt = run.out.indexOf("integration-test layout check passed in");
           const smokeAt = run.out.indexOf("HARNESS-SMOKE [typescript]: SATISFIED");
           const oracleCheckAt = run.out.indexOf("gen:vue-macro-oracle:check passed in");
           const oracleTestsAt = run.out.indexOf("test:vue-macro-oracle passed in");
@@ -8406,16 +8412,18 @@ fi
           );
           if (
             !(
-              smokeAt >= 0 &&
+              layoutAt >= 0 &&
+              smokeAt > layoutAt &&
               oracleCheckAt > smokeAt &&
               oracleTestsAt > oracleCheckAt &&
               archiveAt > oracleTestsAt
             )
           ) {
             fail(
-              `(GB9.${id}) the gate's front half must run harness smoke -> vue-macro-oracle checks -> ` +
-                `archive even with nothing built; got smoke=${smokeAt} oracleCheck=${oracleCheckAt} ` +
-                `oracleTests=${oracleTestsAt} archive=${archiveAt}:\n${run.out}`,
+              `(GB9.${id}) the gate's front half must run layout check -> harness smoke -> ` +
+                `vue-macro-oracle checks -> archive even with nothing built; got layout=${layoutAt} ` +
+                `smoke=${smokeAt} oracleCheck=${oracleCheckAt} oracleTests=${oracleTestsAt} ` +
+                `archive=${archiveAt}:\n${run.out}`,
             );
             ok = false;
           }
@@ -8474,13 +8482,18 @@ fi
       writeFile(join(synthRoot, "nextest"), trappingProbeBody);
       writeFile(join(synthRoot, "check"), trappingProbeBody);
       // This leg owns startup telemetry ordering, so keep the already-separately-tested Vue macro oracle
-      // checks as successful production-path stand-ins and let the run reach the archive discriminator.
+      // checks and the layout check as successful production-path stand-ins and let the run reach the
+      // archive discriminator.
       writeFile(
         join(synthRoot, "scripts", "gen-vue-macro-runtime-oracle.mjs"),
         "process.exit(0);\n",
       );
       writeFile(
         join(synthRoot, "scripts", "vue-macro-runtime-oracle", "oracle.test.mjs"),
+        "process.exit(0);\n",
+      );
+      writeFile(
+        join(synthRoot, "scripts", "check-integration-test-layout.mjs"),
         "process.exit(0);\n",
       );
       rmSync(telemetryProbeLog, { force: true });

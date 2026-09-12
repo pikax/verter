@@ -47,7 +47,6 @@ mod g_session;
 mod g_type;
 mod host_backend_routing_guards;
 mod host_preset_policy;
-mod integration_test_layout_guard;
 mod native_content_handoff;
 mod nextest_slow_timeout_matches_advertised_budget;
 mod one_parse_per_style_block;
