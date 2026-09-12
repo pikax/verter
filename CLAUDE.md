@@ -507,7 +507,7 @@ Name the durable invariant or regression boundary instead: what input fails, wha
 
 A code or test comment may cite a GitHub issue only when it records a specific independently reported product defect that is outside the DAG-controlled `[[github_issue]]` mappings. The comment must still state the durable behavior; the issue reference is supplemental. Never cite a DAG-managed issue, PR, node, or charter as code/test rationale, because the DAG coordinates implementation rather than defining the defect.
 
-The architecture guard `no_phase_archaeology_in_production_code` enforces the production-source subset on `crates/*/src/**`. Implementer and reviewer policy applies the broader rule to tests and non-Rust code as well.
+This rule is implementer- and reviewer-enforced across production source, tests, and non-Rust code. It carries no runtime source scanner: a guard that detected roadmap vocabulary would itself be the name-keyed source scanner the landed-guard policy above forbids.
 
 See `/testing` skill for full TS/Rust test patterns, sourcemap testing, and server cleanup.
 

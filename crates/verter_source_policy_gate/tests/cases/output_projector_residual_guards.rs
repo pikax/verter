@@ -23,8 +23,8 @@
 //! These guards pin the EXACT shape of that trusted surface, each with the
 //! mechanism that MATCHES it:
 //!
-//! 1. The fence-SHAPE guards — each pins one facet of the trusted vault /
-//!    registration surface the compiler cannot express:
+//! The fence-SHAPE guards — section `(2)` below — each pin one facet of the
+//! trusted vault / registration surface the compiler cannot express:
 //!    - `sealed_module_is_private_not_pub_super` — pins the structural fact
 //!      that makes the carrier-can't-name-`sealed` seal COMPILER-enforced:
 //!      `mod sealed` inside `mod projector` is PRIVATE (no visibility modifier,
@@ -4005,7 +4005,7 @@ fn test_output_cap_gate_self_test_discriminates() {
 // `project_slot_binding_member_with_terminal_id`) is RETIRED: every Kind-B
 // caller decides on the node-domain facts/key, and the demand-bound publication
 // adapters take a `&TypeExpr` demand (not a forgeable node), materialising once
-// at a registered sink — so they are not raw-authority boundaries here. The
+// at a registered sink — so they are not raw-authority boundaries here.
 //
 // Replaces the prior name-based single-file `output_sink` closed-allowlist
 // boundary check. Across the registered output sinks above this guard

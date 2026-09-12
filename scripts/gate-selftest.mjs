@@ -302,6 +302,7 @@ import {
   resolveIsolationTargets,
   classifyAttempts,
 } from "./triage-gate-internals.mjs";
+import { PROVIDER_LIVE_SELECTORS } from "./provider-ci-internals.mjs";
 
 const SELFTEST_DIR = dirname(fileURLToPath(import.meta.url));
 // The PRODUCTION gate CLI — exercised by the U-P0 "no bypass mode" scenario and by GB15, which invokes
@@ -1285,7 +1286,9 @@ async function main() {
     const gateSource = readFileSync(GATE, "utf8");
     const oracleAt = gateSource.indexOf("const oraclePrereq = checkOracleCachePrerequisite(");
     const smokeAt = gateSource.indexOf("const harnessSmokesOk = await runHarnessSmokeChecks(ctx);");
-    const freshnessAt = gateSource.indexOf("const preflight = await preflightFreshnessTooling(");
+    // The gate proper runs NO in-gate freshness preflight: proto regeneration freshness is owned by the
+    // dedicated `pnpm proto:check` CI lane, so a call site reappearing here is a regression.
+    const freshnessAt = gateSource.indexOf("preflightFreshnessTooling(");
     const archiveAt = gateSource.indexOf("const out = await archiveAndList(ctx);", smokeAt);
     const bf2Source = readFileSync(join(SELFTEST_DIR, "bf2-authoritative.mjs"), "utf8");
     const bf2OracleAt = bf2Source.indexOf("const oracle = checkOracleCachePrerequisite(");
@@ -1294,8 +1297,8 @@ async function main() {
     if (
       !(
         oracleAt === -1 &&
+        freshnessAt === -1 &&
         smokeAt >= 0 &&
-        smokeAt < freshnessAt &&
         smokeAt < archiveAt &&
         bf2OracleAt >= 0 &&
         bf2OracleAt < bf2VaporAt &&
@@ -1303,9 +1306,9 @@ async function main() {
       )
     ) {
       fail(
-        `(GB15.2) core order must be TypeScript smoke -> freshness -> cargo archive with no oracle ` +
-          `preflight, while dedicated BF2 must order oracle -> vapor smoke -> nextest list; got ` +
-          `coreOracle=${oracleAt} smoke=${smokeAt} freshness=${freshnessAt} archive=${archiveAt} ` +
+        `(GB15.2) core order must be TypeScript smoke -> cargo archive with neither an oracle nor a ` +
+          `freshness preflight, while dedicated BF2 must order oracle -> vapor smoke -> nextest list; got ` +
+          `coreOracle=${oracleAt} smoke=${smokeAt} freshnessPreflight=${freshnessAt} archive=${archiveAt} ` +
           `bf2Oracle=${bf2OracleAt} bf2Vapor=${bf2VaporAt} bf2List=${bf2ListAt}`,
       );
       ok = false;
@@ -1351,12 +1354,12 @@ async function main() {
     const cargoStarted = live.out.indexOf(
       "archiving workspace test universe (dev profile) (cargo nextest archive --workspace)",
     );
-    const freshnessWasNonInstalling =
-      live.out.includes("freshness-tooling preflight: already-present") ||
-      live.out.includes("freshness-tooling preflight: path-fallback");
-    if (!freshnessWasNonInstalling || live.out.includes("freshness-tooling preflight: installed")) {
+    // No freshness leg may run inside the gate at all — and with `pnpm` removed from PATH above, a
+    // reintroduced installing preflight would announce itself here rather than failing silently.
+    if (live.out.includes("freshness-tooling preflight:")) {
       fail(
-        `(GB15.3) production smoke leg must prove a non-installing freshness path; output:\n${live.out}`,
+        `(GB15.3) the gate must run NO freshness-tooling preflight (proto freshness is the dedicated ` +
+          `\`pnpm proto:check\` lane); output:\n${live.out}`,
       );
       ok = false;
     }
@@ -1370,7 +1373,8 @@ async function main() {
     if (ok) {
       pass(
         "(GB15) commands target the harness-owned executable in exact vapor/typescript modes; core runs " +
-          "only TypeScript before freshness/Cargo, while BF2 owns oracle -> vapor -> exact list ordering",
+          "only TypeScript before Cargo with no oracle or freshness preflight, while BF2 owns " +
+          "oracle -> vapor -> exact list ordering",
       );
     }
   }
@@ -1830,14 +1834,20 @@ async function main() {
         ["--exhaustive", "--target-dir", join(parseRoot, "target", "gate-runner")],
         { VERTER_GATE_LOCK: join(parseRoot, "gate.lock.d") },
       );
+      // `--exhaustive` must PARSE and be APPLIED, then the run must refuse on the synthetic tree's
+      // missing setup prerequisite — the conformance-harness smoke, which the gate runs as its first
+      // setup step. The claim under test is the argv one: the flag reaches policy selection rather than
+      // being rejected as unknown, and the refusal that follows is a setup refusal, not a parse error.
       if (
         accepted.code !== EXIT_USAGE ||
-        !accepted.out.includes(BUILD_PREREQUISITE_MARKER) ||
-        accepted.out.includes("unknown argument")
+        !accepted.out.includes("execution policy: exhaustive") ||
+        !accepted.out.includes(HARNESS_SMOKE_MARKER) ||
+        accepted.out.includes("unknown argument") ||
+        accepted.out.includes("ARGUMENT VALUE ERROR")
       ) {
         fail(
-          `(GB17.6) positive --exhaustive must parse and reach the synthetic prerequisite refusal: ` +
-            `rc=${accepted.code}\n${accepted.out}`,
+          `(GB17.6) positive --exhaustive must parse, select the exhaustive policy, and reach the ` +
+            `synthetic setup refusal: rc=${accepted.code}\n${accepted.out}`,
         );
         ok = false;
       }
@@ -1875,7 +1885,7 @@ async function main() {
         if (
           malformed.code !== EXIT_USAGE ||
           !malformed.out.includes("ARGUMENT VALUE ERROR") ||
-          malformed.out.includes(BUILD_PREREQUISITE_MARKER)
+          malformed.out.includes(HARNESS_SMOKE_MARKER)
         ) {
           fail(
             `(GB17.6) ${label} must fail at strict value parsing before setup/Cargo: ` +
@@ -2052,19 +2062,29 @@ async function main() {
     const shippedCheckMarker = join(stubDir, "shipped-check.marker");
     const shippedContractMarker = join(stubDir, "shipped-contract.marker");
 
-    // A minimal but VALID `cargo nextest list --message-format json` fixture: one testcase per
-    // TRYBUILD_EXCLUDED_SUITES row, so archiveAndList's own trybuild-coverage guard
-    // (verifyTrybuildExclusionCoverage) is satisfied for real — this exercises the gate's REAL post-list
-    // wiring rather than a shortcut around it.
+    // A VALID `cargo nextest list --message-format json` fixture. It is DERIVED from
+    // `PROVIDER_LIVE_SELECTORS` — the same authority `verifyProviderCiPartition` checks the listing
+    // against — plus one provider-free core test, so the gate's REAL post-list wiring (the provider
+    // partition, suite inventory, extract-dir layout, per-lane fan-out) runs for real instead of being
+    // short-circuited by a listing the partition step rejects. Deriving it means a new provider selector
+    // lands in this fixture automatically rather than silently un-executing this scenario.
     const suitesJson = {};
-    TRYBUILD_EXCLUDED_SUITES.forEach((row, i) => {
-      suitesJson[`${row.package}::bin${i}`] = {
-        "package-name": row.package,
-        "binary-id": `${row.package}::bin${i}`,
-        "binary-path": join(stubDir, `bin${i}`),
-        testcases: { [`${row.modulePrefix}dummy`]: {} },
-      };
-    });
+    const suiteFor = (pkg) =>
+      (suitesJson[`${pkg}::main`] ||= {
+        "package-name": pkg,
+        "binary-id": `${pkg}::main`,
+        "binary-path": join(stubDir, `${pkg}-main`),
+        testcases: {},
+      });
+    for (const selector of PROVIDER_LIVE_SELECTORS) {
+      const suite = suiteFor(selector.package);
+      if (selector.kind === "exact") {
+        for (const name of selector.values) suite.testcases[name] = {};
+      } else {
+        suite.testcases[selector.example] = {};
+      }
+    }
+    suiteFor("verter_core_fixture").testcases["unit::provider_free_control"] = {};
     writeFileSync(
       listJsonPath,
       JSON.stringify({

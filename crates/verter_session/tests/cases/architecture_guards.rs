@@ -8934,8 +8934,6 @@ fn every_consumer_has_production_call_site() {
 //   - §3.12: the synthesis must drive the carrier walk in
 //     `ProjectionMode::Navigate`; an `Expanded` projection re-introduces
 //     the giant-tree pathology that motivated the rewrite.
-//   - §3.12 (no phase archaeology): the synthesis source must read as
-//     final-state — no plan-phase / cutover / agent-id vocabulary.
 //   - §10 R12b: the synthesis must merge dep-signatures via
 //     `dispatch.execute_read(..)` rather than the bare `dispatch.execute(..)`.
 //     `execute` discards the `dep_signature` half so callers that go
