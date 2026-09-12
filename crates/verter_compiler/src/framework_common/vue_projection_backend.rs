@@ -24,7 +24,7 @@ use crate::framework_common::generated_chunk::{
 };
 use crate::framework_common::vue_bridge::VueCarrierCompiler;
 use crate::framework_common::vue_carrier_frontend::VueSfcV3;
-use crate::framework_common::{CarrierCompiler, FrameworkParseArtifact};
+use crate::framework_common::FrameworkParseArtifact;
 use crate::standalone::{DirectCompileError, StandaloneCompiler};
 
 /// Vue IDE projection backend.

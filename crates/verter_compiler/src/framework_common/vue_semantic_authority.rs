@@ -14,7 +14,7 @@ use crate::compile::types::{
 use crate::compile::{compile_from_parsed_legacy, RawTemplateData};
 
 use super::capability::{FrameworkSemanticAuthority, Present};
-use super::carrier_compiler::{CarrierCompiler, RuntimeDiagnostic};
+use super::carrier_compiler::RuntimeDiagnostic;
 use super::catalog::{SemanticCap, TypedCapabilityRegistration};
 use super::registered_carrier_projection::TemplateFactsProduct;
 use super::vue_bridge::VueCarrierCompiler;

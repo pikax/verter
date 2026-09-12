@@ -21,7 +21,7 @@ use crate::framework_common::carrier_compiler::RuntimeBlockContentInputs;
 use crate::framework_common::catalog::{RuntimeCap, TypedCapabilityRegistration};
 use crate::framework_common::vue_bridge::VueCarrierCompiler;
 use crate::framework_common::vue_carrier_frontend::VueSfcV3;
-use crate::framework_common::{CarrierCompiler, FrameworkParseArtifact};
+use crate::framework_common::FrameworkParseArtifact;
 use crate::standalone::{
     compile_vue_parsed_runtime, DirectCompileError, DirectCompileOutput, VueParsedRuntimeError,
 };
