@@ -9000,27 +9000,117 @@ fn flow_return_type_query_argument_keeps_current_narrowing() {
     );
 }
 
+/// [`flow_expr_for_script`] with the warm half asserted: a CLEAN result
+/// must serve a fresh request's warm read exactly, so a wrong answer
+/// cannot hide behind a cold build that happens to be right.
+fn flow_expr_cold_warm(
+    script: &str,
+) -> (
+    verter_type_expr::TypeExpr,
+    Option<crate::semantic_query::FlowReturnDegradation>,
+) {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let canonical = "/ws/flow-control-probe.ts";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(crate::u6_flow_shape_corpus_tests::module_script(script)),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    let key = |dispatch: &ProjectSemanticDispatch<'_>| FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(canonical),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from("makeProps"),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(canonical),
+        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
+    };
+    let cold = with_dispatch(&host, |dispatch| flow_result_value(dispatch, key(dispatch)));
+    if cold.degradation().is_none() {
+        let warm = with_dispatch(&host, |dispatch| {
+            dispatch
+                .graph()
+                .get_flow_return_result(dispatch.ctx, &key(dispatch))
+        });
+        assert_eq!(
+            warm.as_ref(),
+            Some(&cold),
+            "a clean result serves its warm read"
+        );
+    }
+    let expr = host
+        .project_node_to_type_expr_for_test(cold.return_type())
+        .expect("return node must project to TypeExpr");
+    (expr, cold.degradation())
+}
+
 /// A switch case's dispatch-edge refinement rides the reaching-TYPE
-/// layer, while an enclosing `typeof` guard's fact rides the narrowing
-/// overlay. The case's own `"a"` is what the read must publish: it is the
-/// newer fact and the strictly narrower one, so the enclosing guard's
-/// broader `string` may not outrank it merely for living in the layer a
-/// read consults first. tsgo 7.0.0-dev: the case arm is `{ v: "a" }`, the
-/// default arm `{ v: string }`, and the trailing return `{ v: number }`.
+/// layer, while an enclosing `typeof` guard's facts ride the narrowing
+/// overlay. The case's own refinement is what a read must publish: it is
+/// the newer fact and the narrower one, so an enclosing guard's broader
+/// fact may not outrank it merely for living in the layer a read consults
+/// first — neither at the case itself, nor when a clause boundary later
+/// restores the overlay the guard established, nor through a MEMBER fact
+/// the guard left on the refined root. A member fact still narrower than
+/// the refined root's own member is a different case: it holds, and the
+/// read keeps it. tsgo 7.0.0-dev, per row.
 #[test]
 fn flow_return_switch_case_refinement_outranks_enclosing_guard_fact() {
-    let (expr, degradation) = flow_expr_for_script(
-        "function makeProps(p: string | number) { if (typeof p === \"string\") { switch (p) { case \"a\": return { v: p }; default: return { v: p } } } return { v: 0 } }",
-    );
-    assert_eq!(degradation, None);
-    assert_eq!(
-        member_types(&expr, "v"),
-        vec![
-            string_literal("a"),
-            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
-            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
-        ]
-    );
+    const TYPES: &str = "type P = { k: \"a\", v: \"A\" } | { k: \"b\", v: \"B\" } | { k: \"c\", v: number }\ntype Q = { k: \"a\", v: string | number } | { k: \"b\", v: object }\n";
+    let number = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number);
+    let string = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String);
+    let broader_member = format!("{TYPES}function makeProps(p: P) {{ if (typeof p.v === \"string\") {{ switch (p.k) {{ case \"a\": return {{ v: p.v }}; default: throw 0 }} }} throw 0 }}");
+    let broader_member_past_try = format!("{TYPES}function makeProps(p: P) {{ if (typeof p.v === \"string\") {{ try {{ switch (p.k) {{ case \"a\": break; default: throw 0 }} }} finally {{}} return {{ v: p.v }} }} throw 0 }}");
+    let narrower_member = format!("{TYPES}function makeProps(p: Q) {{ if (typeof p.v === \"string\") {{ switch (p.k) {{ case \"a\": return {{ v: p.v }}; default: throw 0 }} }} throw 0 }}");
+    for (case, body, expected) in [
+        // The case arm `{ v: "a" }`, the default arm `{ v: string }`, and
+        // the trailing return `{ v: number }`.
+        (
+            "whole-binding refinement at the case",
+            "function makeProps(p: string | number) { if (typeof p === \"string\") { switch (p) { case \"a\": return { v: p }; default: return { v: p } } } return { v: 0 } }",
+            vec![string_literal("a"), number.clone(), string.clone()],
+        ),
+        // Only the `"a"` case completes the try normally, and nothing is
+        // written: the clause-entry restore must not bring the guard's
+        // `string` back over the surviving `"a"`.
+        (
+            "whole-binding refinement past a try/finally",
+            "function makeProps(p: string | number) { if (typeof p === \"string\") { try { switch (p) { case \"a\": break; default: throw 0 } } finally {} return { v: p } } return { v: 0 } }",
+            vec![string_literal("a"), number.clone()],
+        ),
+        // The guard's member fact `p.v: "A" | "B"` is broader than the
+        // `"a"` arm's own member `"A"`.
+        (
+            "member fact broader than the refined root's member",
+            broader_member.as_str(),
+            vec![string_literal("A")],
+        ),
+        (
+            "member fact broader than the refined root's member, past a try/finally",
+            broader_member_past_try.as_str(),
+            vec![string_literal("A")],
+        ),
+        // The `"a"` arm's member is `string | number`; the guard's
+        // `string` is the narrower, still-valid answer.
+        (
+            "member fact narrower than the refined root's member",
+            narrower_member.as_str(),
+            vec![string.clone()],
+        ),
+    ] {
+        let (expr, degradation) = flow_expr_cold_warm(body);
+        assert_eq!(degradation, None, "{case}");
+        assert_eq!(member_types(&expr, "v"), expected, "{case}");
+    }
 }
 
 /// The clause-entry overlay restore is keyed on the writes the clause
@@ -9089,9 +9179,34 @@ fn flow_return_clause_entry_restore_excludes_every_executed_write() {
                 boolean.clone(),
             ],
         ),
+        // Read INSIDE the finally after a write that keeps the value
+        // within the entering fact. The finally starts from the join of
+        // the pre-try state and the written try end; the entering
+        // `string` still describes both predecessors, so it stands at
+        // the join.
+        (
+            "same-type write read inside the finally",
+            "function makeProps(p: string | number) { if (typeof p === \"string\") { try { p = \"x\" } finally { return { v: p } } } return { v: true } }",
+            vec![
+                boolean.clone(),
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            ],
+        ),
     ] {
-        let (expr, degradation) = flow_expr_for_script(&format!("{PRELUDE}{body}"));
+        let (expr, degradation) = flow_expr_cold_warm(&format!("{PRELUDE}{body}"));
         assert_eq!(degradation, None, "{case}");
         assert_eq!(member_types(&expr, "v"), expected, "{case}");
     }
+    // The CHANGING write read inside the finally: the entering fact does
+    // not describe the written try end, so it cannot stand at the join,
+    // and the read of the clause-flagged value fails closed rather than
+    // publishing the pre-try `string` clean.
+    let (_, degradation) = flow_expr_cold_warm(
+        "function makeProps(p: string | number) { if (typeof p === \"string\") { try { p = 1 } finally { return { v: p } } } return { v: true } }",
+    );
+    assert_eq!(
+        degradation,
+        Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition),
+        "changing write read inside the finally"
+    );
 }

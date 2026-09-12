@@ -5708,70 +5708,53 @@ fn narrowing_facts_of(products: &FlowProductStore) -> Vec<FlowNarrowingFact> {
         .collect()
 }
 
-/// Replace `into`'s whole narrowing overlay with `from`'s, EXCEPT for the
-/// roots in `retyped`, which lose their facts entirely.
+/// Re-establish one root's `facts` on `products` in ONE product write,
+/// with the same-position replacement [`push_narrowing_into`] applies per
+/// fact: a standing fact about a position `facts` names is replaced, every
+/// other standing fact stays.
 ///
-/// A clause boundary restores the ENTERING overlay, which is what keeps a
-/// narrow established inside a `try` or a sibling `case` from leaking out.
-/// A binding the clause WROTE is not a candidate for that restore: the
-/// entering fact describes the value the write REPLACED, so reinstating it
-/// would revive a guard the write killed (`typeof p === "string"` before
-/// `try { p = 1 } finally {}` does not describe `p` past the statement).
-/// Both halves of the boundary hold at once — the clause's own facts do
-/// not escape, and the entry's facts about a replaced value do not return.
-///
-/// `retyped` is keyed on the writes the clause EXECUTED, never on the
-/// subset whose reaching type changed: an unchanged write still replaces
-/// the value the entering fact was about, so it retires that fact too. A
-/// state DIFF cannot decide this either, because a clause that writes and
-/// then re-asserts the entering guard ends with the overlay it started
-/// with while having PROVED the fact from the write rather than inherited
-/// it — and that re-established fact is clause-scoped like any other.
-fn replace_narrowings(
-    from: &FlowProductStore,
-    into: &mut FlowProductStore,
-    retyped: &[FlowProductSubject],
-) {
-    for subject in into.subjects_in(super::flow_solve::FlowDomain::Narrowing) {
-        into.remove(super::flow_solve::FlowDomain::Narrowing, &subject);
-    }
-    for subject in from.subjects_in(super::flow_solve::FlowDomain::Narrowing) {
-        if retyped.contains(&subject) {
-            continue;
-        }
-        if let Some(product) = from.narrowing(&subject) {
-            into.set_narrowing(&subject, product.clone());
-        }
-    }
-}
-
-/// Drop the fact at exactly `path` under `root`, removing the product when
-/// that was its last fact.
-///
-/// The counterpart of [`push_narrowing_into`]: a whole-binding narrow that
-/// rides the reaching-TYPE layer must RETIRE the overlay fact it
-/// supersedes. A read consults the overlay before the reaching layers and
-/// returns the first answer it finds, so a surviving older fact would mask
-/// the newer, strictly narrower value the baked edge proved.
-fn retire_narrowing_at_path(
+/// A root whose standing product already holds every fact is left
+/// untouched, so re-establishing an overlay the clause boundary already
+/// restored copies and rebuilds nothing. `facts` and the standing product
+/// are both in canonical fact order, so that check is one merge walk.
+fn reestablish_narrowings(
     products: &mut FlowProductStore,
     root: &FlowProductSubject,
-    path: &Arc<[Arc<str>]>,
+    facts: &[FlowNarrowingFact],
 ) {
-    let Some(product) = products.narrowing(root) else {
+    let Some(identity) = products.identity(root) else {
+        products.remove(super::flow_solve::FlowDomain::Narrowing, root);
         return;
     };
-    let facts: Vec<FlowNarrowingFact> = product
-        .facts()
-        .iter()
-        .filter(|fact| fact.path != *path)
-        .cloned()
-        .collect();
-    if facts.is_empty() {
-        products.remove(super::flow_solve::FlowDomain::Narrowing, root);
-    } else {
-        products.set_narrowing(root, NarrowingProduct::new(facts));
+    let standing: &[FlowNarrowingFact] = products
+        .narrowing(root)
+        .map(NarrowingProduct::facts)
+        .unwrap_or_default();
+    fn position(fact: &FlowNarrowingFact) -> (&[Arc<str>], u64) {
+        (fact.path.as_ref(), fact.narrowed_to.0)
     }
+    let mut held = standing.iter().map(position).peekable();
+    let holds_all = facts.iter().all(|fact| {
+        let wanted = position(fact);
+        while held.next_if(|standing| *standing < wanted).is_some() {}
+        held.next_if_eq(&wanted).is_some()
+    });
+    if holds_all {
+        return;
+    }
+    let replaced: rustc_hash::FxHashSet<&[Arc<str>]> =
+        facts.iter().map(|fact| fact.path.as_ref()).collect();
+    let merged: Vec<FlowNarrowingFact> = standing
+        .iter()
+        .filter(|fact| !replaced.contains(fact.path.as_ref()))
+        .cloned()
+        .chain(facts.iter().map(|fact| FlowNarrowingFact {
+            binding: identity.clone(),
+            path: Arc::clone(&fact.path),
+            narrowed_to: fact.narrowed_to,
+        }))
+        .collect();
+    products.set_narrowing(root, NarrowingProduct::new(merged));
 }
 
 /// Record `path` under `root` narrowing to `node` in `products` — the ONE
@@ -6267,6 +6250,67 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
         }
         self.narrowing_writes.truncate(mark.writes);
+    }
+
+    /// Restore `into`'s narrowing overlay to a `try` statement's ENTRY
+    /// overlay, keeping exactly the entering facts that still stand on
+    /// `into`.
+    ///
+    /// The restore is what keeps a narrow established inside a clause
+    /// from leaking out of it. It must not bring back an entering fact
+    /// that no longer describes `into`, nor one that would mask a narrower
+    /// value `into` already holds:
+    ///
+    /// - a root `into` WROTE since the entry keeps an entering fact only
+    ///   while the written value still lies within it and says no more
+    ///   than it: the fact was about the value the write replaced (`typeof p === "string"` before `try {
+    ///   p = 1 } finally {}` does not describe `p` past the statement,
+    ///   while after `p = "x"` it still does). The written set is `into`'s
+    ///   own executed writes, never the subset whose reaching type
+    ///   changed — an unchanged write replaces the value all the same —
+    ///   and never another predecessor's: the pre-try predecessor of a
+    ///   `finally` executed no write and keeps every entering fact;
+    /// - an unwritten root whose value a case refinement narrowed without
+    ///   a write keeps an entering fact only while the refined value does
+    ///   not already say more ([`Self::guard_fact_stands`]).
+    ///
+    /// An unwritten root still holding its entry value keeps its whole
+    /// entering product without a comparison: its facts were established
+    /// over exactly that value.
+    fn restore_clause_entry_narrowings(
+        &mut self,
+        entry: &FlowLayerState,
+        into: &mut FlowProductStore,
+    ) {
+        let written: rustc_hash::FxHashSet<FlowProductSubject> = into
+            .writes_since(&entry.write_observation)
+            .iter()
+            .map(|subject| self.canonical_runtime_subject(subject))
+            .collect();
+        for subject in into.subjects_in(super::flow_solve::FlowDomain::Narrowing) {
+            into.remove(super::flow_solve::FlowDomain::Narrowing, &subject);
+        }
+        for subject in entry
+            .products
+            .subjects_in(super::flow_solve::FlowDomain::Narrowing)
+        {
+            let Some(product) = entry.products.narrowing(&subject) else {
+                continue;
+            };
+            let written = written.contains(&subject);
+            let value = into.reaching(&subject);
+            if !written && value == entry.products.reaching(&subject) {
+                into.set_narrowing(&subject, product.clone());
+                continue;
+            }
+            let mut kept: Vec<FlowNarrowingFact> = Vec::with_capacity(product.facts().len());
+            for fact in product.facts() {
+                if self.guard_fact_stands(fact, value, written) {
+                    kept.push(fact.clone());
+                }
+            }
+            into.set_narrowing(&subject, NarrowingProduct::new(kept));
+        }
     }
 
     /// Record one guard fact: `subject`'s member `path` narrows to `node`.
@@ -8660,19 +8704,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // A whole-binding fact rides the reaching-TYPE product, keeping
         // the binding's own literal-widening provenance: a narrow
         // replaces the value, never the freshness the value carries.
-        //
-        // The overlay's own whole-binding fact for this root is RETIRED in
-        // the same step. The two layers both answer for the whole binding,
-        // and a read takes the overlay's answer first, so leaving an
-        // enclosing guard's broader fact standing would mask the value
-        // baked here — `if (typeof p === "string") switch (p) { case "a":
-        // … }` would read `string` on an edge that proved `"a"`. Retiring
-        // is sound in this direction and no other: the baked node was
-        // computed FROM the overlay-preferred current value, so it is
-        // never broader than the fact it replaces.
-        let retire_overlay = |products: &mut FlowProductStore, target: &FlowProductSubject| {
-            retire_narrowing_at_path(products, target, &subject.path);
-        };
         let rebind = |products: &mut FlowProductStore, target: &FlowProductSubject| {
             let widening = products.widening(target).cloned();
             products.set_reaching_type(
@@ -8680,29 +8711,88 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ReachingTypeProduct::of(node).with_widening(widening),
             );
         };
-        match &subject.root {
-            crate::flow_slice_content::SliceNarrowRoot::Param {
-                ordinal: _,
-                binding,
-                ..
-            } => {
-                let target = FlowProductSubject::Local(*binding);
-                rebind(&mut state.products, &target);
-                retire_overlay(
-                    &mut state.products,
-                    &self.canonical_runtime_subject(&target),
-                );
+        let target = match &subject.root {
+            crate::flow_slice_content::SliceNarrowRoot::Param { binding, .. } => {
+                FlowProductSubject::Local(*binding)
             }
             crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
-                if state.products.reaching(binding).is_some() {
-                    rebind(&mut state.products, binding);
-                    retire_overlay(
-                        &mut state.products,
-                        &self.canonical_runtime_subject(binding),
-                    );
+                if state.products.reaching(binding).is_none() {
+                    return;
                 }
+                binding.clone()
+            }
+        };
+        rebind(&mut state.products, &target);
+        let root = self.canonical_runtime_subject(&target);
+        self.settle_refined_root_facts(&mut state.products, &root, node);
+    }
+
+    /// Settle `root`'s overlay after a whole-binding refinement to `node`
+    /// rode its reaching-TYPE layer.
+    ///
+    /// The two layers both answer for the binding, and a read takes the
+    /// overlay's answer first, so an enclosing guard's broader fact left
+    /// standing would mask the refinement — `if (typeof p === "string")
+    /// switch (p) { case "a": … }` would read `string` on an edge that
+    /// proved `"a"`, and a guard's member fact `p.v: "A" | "B"` would
+    /// outrank the `"A"` a case over `p.k` selected. The whole-binding
+    /// fact is always retired: `node` was computed FROM the
+    /// overlay-preferred value, so it is never broader. A MEMBER fact is
+    /// retired only when the refined root's own member is strictly
+    /// narrower; one that still says more (the case left `v: string |
+    /// number`, the guard proved `string`) is still true — nothing was
+    /// written — and stays.
+    fn settle_refined_root_facts(
+        &mut self,
+        products: &mut FlowProductStore,
+        root: &FlowProductSubject,
+        node: SemanticNodeId,
+    ) {
+        let Some(product) = products.narrowing(root).cloned() else {
+            return;
+        };
+        let mut kept: Vec<FlowNarrowingFact> = Vec::with_capacity(product.facts().len());
+        for fact in product.facts() {
+            if !fact.path.is_empty() && self.guard_fact_stands(fact, Some(node), false) {
+                kept.push(fact.clone());
             }
         }
+        if kept.len() != product.facts().len() {
+            products.set_narrowing(root, NarrowingProduct::new(kept));
+        }
+    }
+
+    /// Whether guard `fact` still stands on a state whose root holds
+    /// `root_value` — the fact both still describes the value and still
+    /// says more than the value itself does.
+    ///
+    /// The comparison is against the value a read would fall through to:
+    /// the root projected down the fact's path, through the same shared
+    /// navigation a member read uses. A fact the current value already
+    /// meets exactly stands (keeping it keeps two predecessors that agree
+    /// on it agreeing at their join). One the value is strictly narrower
+    /// than does not: the read falls through to the narrower value. One
+    /// the value does not meet — or cannot be compared with — stands only
+    /// when the root was not `written`: an unwritten binding still holds
+    /// the value the guard was about, while a write replaced it.
+    fn guard_fact_stands(
+        &mut self,
+        fact: &FlowNarrowingFact,
+        root_value: Option<SemanticNodeId>,
+        written: bool,
+    ) -> bool {
+        let Some(current) =
+            root_value.and_then(|root| self.project_segments_navigate(root, &fact.path))
+        else {
+            return !written;
+        };
+        if current == fact.narrowed_to {
+            return true;
+        }
+        if self.assignable(current, fact.narrowed_to) != Some(true) {
+            return !written;
+        }
+        self.assignable(fact.narrowed_to, current) == Some(true)
     }
 
     /// The arms of the discriminant's PARENT reference that NO case test
@@ -10351,24 +10441,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     if !exit_states.is_empty() {
                         self.flag_conditionally_defined_bindings(&mut pre_finally, &exit_states);
                     }
-                    // Every binding a clause RETYPED by writing it, in the
-                    // overlay's own subject vocabulary. The clause-entry
-                    // overlay restores around these, never onto them: the
-                    // entering fact was about the value the write replaced.
-                    // Keyed on the EXECUTED writes, so an unchanged write
-                    // retires the entering fact exactly as a changing one
-                    // does — the write replaced the value either way.
-                    let clause_retyped: Vec<FlowProductSubject> = try_writes
-                        .executed
-                        .0
-                        .iter()
-                        .chain(
-                            catch_writes
-                                .iter()
-                                .flat_map(|written| written.executed.0.iter()),
-                        )
-                        .map(|subject| self.canonical_runtime_subject(subject))
-                        .collect();
                     match finally {
                         Some(finally) => {
                             // The finally BODY runs on every completion:
@@ -10397,11 +10469,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             let mut normal_inputs = exit_states.clone();
                             normal_inputs.push(entry.clone());
                             for state in &mut normal_inputs {
-                                replace_narrowings(
-                                    &entry.products,
-                                    &mut state.products,
-                                    &clause_retyped,
-                                );
+                                self.restore_clause_entry_narrowings(&entry, &mut state.products);
                                 self.flag_clause_type_changes(state, &try_writes.type_changes);
                                 if let Some(written) = &catch_writes {
                                     self.flag_clause_type_changes(state, &written.type_changes);
@@ -10443,11 +10511,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // the entry's overlay) plus exactly the
                             // finally's own writes.
                             let mut post = pre_finally.clone();
-                            replace_narrowings(
-                                &entry.products,
-                                &mut post.products,
-                                &clause_retyped,
-                            );
+                            self.restore_clause_entry_narrowings(&entry, &mut post.products);
                             for subject in &finally_writes.executed.0 {
                                 post.products
                                     .apply_executed_write_from(subject, &finally_end.products);
@@ -10486,36 +10550,37 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 // here, and whether the entering overlay
                                 // happened to hold the same fact says
                                 // nothing about that: when the clause also
-                                // WROTE the binding, the entering fact was
-                                // retired as stale and this proof is the
-                                // only thing standing. Re-pushing a fact
-                                // the restore already reinstated replaces
-                                // it with itself, so the general case
-                                // costs nothing. (The same reason
+                                // WROTE the binding, the restore dropped the
+                                // entering fact as stale and this proof is
+                                // the only thing standing. (The same reason
                                 // `standing_narrowings` counts a
                                 // re-establishment over the write ledger
                                 // instead of diffing the overlay: a state
                                 // diff cannot tell a proof from an
-                                // untouched position.)
-                                let restored: Vec<FlowNarrowingFact> = try_narrowings
+                                // untouched position.) One product write per
+                                // root, and none for a root whose restored
+                                // product already holds the try's facts.
+                                let mut restored = try_narrowings
                                     .iter()
                                     .filter(|fact| !killed.contains(&fact.binding))
-                                    .cloned()
-                                    .collect();
-                                for fact in restored {
+                                    .peekable();
+                                let mut facts: Vec<FlowNarrowingFact> = Vec::new();
+                                while let Some(first) = restored.next() {
+                                    facts.clear();
+                                    facts.push(first.clone());
+                                    while let Some(next) =
+                                        restored.next_if(|next| next.binding == first.binding)
+                                    {
+                                        facts.push(next.clone());
+                                    }
                                     let subject = self
                                         .bindings
-                                        .local(&fact.binding)
+                                        .local(&first.binding)
                                         .map(FlowProductSubject::Local)
                                         .unwrap_or_else(|| {
-                                            FlowProductSubject::Captured(fact.binding.clone())
+                                            FlowProductSubject::Captured(first.binding.clone())
                                         });
-                                    push_narrowing_into(
-                                        &mut self.products,
-                                        &subject,
-                                        &fact.path,
-                                        fact.narrowed_to,
-                                    );
+                                    reestablish_narrowings(&mut self.products, &subject, &facts);
                                 }
                                 for subject in &try_writes.type_changes.0 {
                                     if entry.products.assignment(subject).single_path() {
@@ -10578,11 +10643,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // the statement, so no clause-established
                             // narrow survives — even when the catch itself
                             // returns (tsgo, measured).
-                            replace_narrowings(
-                                &entry.products,
-                                &mut pre_finally.products,
-                                &clause_retyped,
-                            );
+                            self.restore_clause_entry_narrowings(&entry, &mut pre_finally.products);
                             self.restore_layer_state(pre_finally);
                             path_alive = !exit_states.is_empty();
                         }
