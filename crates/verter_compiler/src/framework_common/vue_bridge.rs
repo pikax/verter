@@ -2951,7 +2951,7 @@ mod tests {
         assert!(artifact.diagnostics().is_empty());
     }
 
-    // ── Vue CarrierCompiler impl ───────────────────────────────────
+    // ── Vue carrier compiler inherent methods ───────────────────────
 
     #[test]
     fn vue_compiler_parse_stamps_the_parse_key_and_vue_identity() {

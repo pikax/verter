@@ -466,8 +466,8 @@ fn assemble_main_module_template_only_sfc() {
     use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
     use verter_compiler::framework_common::RuntimeCompileOptions;
 
-    // Drive the Vue CARRIER `compile_bundle` (the registry-routed producer)
-    // so this end-to-end assembly test exercises the neutral bundle path.
+    // Drive the Vue carrier `compile_bundle` producer so this end-to-end
+    // assembly test exercises the neutral bundle path.
     let source = "<template><div>hello</div></template>";
     let alloc = Allocator::new();
     let compiler = VueCarrierCompiler;

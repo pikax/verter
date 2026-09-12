@@ -14,7 +14,7 @@ use std::time::Duration;
 use oxc_allocator::Allocator;
 use serde_json::Value;
 use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-use verter_compiler::framework_common::{CarrierCompiler, RuntimeCompileOptions};
+use verter_compiler::framework_common::RuntimeCompileOptions;
 
 use super::bf2_seed_matrix::run_bounded;
 use super::{assemble_vue_main_module, CompileProfile, HmrStrategy};
