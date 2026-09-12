@@ -73,9 +73,9 @@ use crate::flow_completion_inventory::{
 };
 use verter_semantic::analysis::flow::flow_ir::{FlowExprRole, FlowSliceIR};
 use verter_semantic::analysis::flow::{
-    object_entry_descent, value_descent, FlowBindingRef, FrameSpan, FunctionBodySkeleton,
-    NameMeaning, ObjectEntryDescent, ObjectEntryKey, ObjectEntryKind, SkeletonBindingId,
-    SkeletonBindingKind, SkeletonPathSegment, ValueDescent,
+    object_entry_descent, sequence_value_takes_call_rail, value_descent, FlowBindingRef, FrameSpan,
+    FunctionBodySkeleton, NameMeaning, ObjectEntryDescent, ObjectEntryKey, ObjectEntryKind,
+    SkeletonBindingId, SkeletonBindingKind, SkeletonPathSegment, ValueDescent,
 };
 use verter_semantic::analysis::function_program::{
     for_each_call_expression, inventory_statement_list, FunctionControlRegion, FunctionDescentStep,
@@ -6629,6 +6629,18 @@ impl Lowerer<'_> {
         })
     }
 
+    /// Whether a sequence's LAST operand — its value provider — lowers
+    /// through a structural arm this half owns: a NARROWABLE REFERENCE
+    /// (lowered as the read, so the frame's substitutions stay visible),
+    /// or a call routed to the structural call rails by the ONE shared
+    /// predicate (`sequence_value_takes_call_rail`) the classifier's own
+    /// sequence verdict is decided through — so this half can never
+    /// delegate a form the classifier still calls an unmodeled-call
+    /// position.
+    fn sequence_value_lowers_structurally(&self, last: &Expression<'_>) -> bool {
+        self.narrow_subject_of(last).is_some() || sequence_value_takes_call_rail(last)
+    }
+
     /// The narrowable reference an expression NAMES: a static member
     /// chain rooted at an identifier the frame's lexical authority
     /// resolves to a simple parameter or a modelable same-frame local.
@@ -7047,12 +7059,15 @@ impl Lowerer<'_> {
                     },
                 }
             }
-            // A sequence whose LAST operand is a narrowable reference
-            // (`(touch(), u)`): the sequence's VALUE is that operand —
-            // the earlier operands' evaluation effects ride the slice's
-            // typed effect obligations regardless. Lowering it as the
-            // reference keeps the frame's substitutions (the narrowing
-            // overlay above all) visible at the read; folding the whole
+            // A sequence whose LAST operand is its structural value
+            // provider: a NARROWABLE REFERENCE (`(touch(), u)`) or a CALL
+            // routed to the structural call rails (`(0, f())` is `f()`'s
+            // value). The sequence's VALUE is that operand — the earlier
+            // operands' evaluation effects ride the slice's typed effect
+            // obligations regardless. Lowering it as the operand keeps
+            // the frame's substitutions (the narrowing overlay above
+            // all) visible at the read, and routes the call through the
+            // same rails its bare spelling takes; folding the whole
             // sequence through the leaf lowering answered a fabricated
             // `any` for it, clean and warm. Any other sequence keeps the
             // leaf lowering.
@@ -7062,12 +7077,15 @@ impl Lowerer<'_> {
             // (`(assertString(x), x)` is `string`). Such a call is
             // certified decided-above only when it provably establishes
             // no narrowing; every other one flags the enclosing
-            // statement's guard-narrowing gap.
+            // statement's guard-narrowing gap. The routed call answers
+            // its own question through the rails — a callee they cannot
+            // represent keeps the positional fail-closed marker, so the
+            // sequence context invents no arm.
             Expression::SequenceExpression(sequence)
                 if sequence
                     .expressions
                     .last()
-                    .is_some_and(|last| self.narrow_subject_of(last).is_some()) =>
+                    .is_some_and(|last| self.sequence_value_lowers_structurally(last)) =>
             {
                 let last = sequence
                     .expressions

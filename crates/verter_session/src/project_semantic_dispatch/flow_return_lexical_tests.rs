@@ -1417,14 +1417,23 @@ export function ncUse(k: boolean) {
 // the callee's clause is instantiated and an overload group reached
 // through one degrades exactly as it does at a bare call.
 //
-// A call in a LOGICAL / NULLISH / SEQUENCE operand, under a non-null
-// assertion, or as a MEMBER BASE does NOT: those forms are `Leaf` to the
-// shared descent, and the shallow leaf pass answers each of them `any`
-// BEFORE the call-carrier gate can refuse anything. They publish
+// A call in a LOGICAL / NULLISH operand, under a non-null assertion, or
+// as a MEMBER BASE does NOT: those forms are `Leaf` to the shared
+// descent, and the shallow leaf pass answers each of them `any` BEFORE
+// the call-carrier gate can refuse anything. They publish
 // `Primitive(Any)` cleanly and warm — under the checker's answer, never
 // over it, and never the callee's raw return carrier — and the rows
 // below assert exactly that, so a change that starts routing any of them
 // through the call sink has to say so here.
+//
+// A call in a SEQUENCE's value operand is the one composite spelling
+// that DOES route to the call sink (D7): the sequence's value is its
+// last operand, so `(k, tnAmb("a"))` is `tnAmb("a")`'s value with `k`'s
+// evaluation discarded — the call lowers through the same rails its bare
+// spelling takes, and the discarded operands keep the
+// discarded-operand discipline. `tnAmbSequence` / `tnAmbSeqDiscard` /
+// `tnAmbSeqNested` below assert that in
+// `flow_return_sequence_call_context_value_surfaces`.
 export declare function tnAmb(x: string): "TA";
 export declare function tnAmb(x: number): "TB";
 
@@ -1451,6 +1460,14 @@ export function tnAmbNullish(k: null) {
 
 export function tnAmbSequence(k: boolean) {
   return (k, tnAmb("a"));
+}
+
+export function tnAmbSeqDiscard(k: number) {
+  return (tnAmb(k), tnAmb("a"));
+}
+
+export function tnAmbSeqNested(k: boolean, m: boolean) {
+  return (k, (m, tnAmb("a")));
 }
 
 export function tnAmbNonNull(k: boolean) {
@@ -5736,7 +5753,12 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 /// tnAmbNullish       "TA"              fails closed ← composes a call
 /// tnGenericLogical   string | true     fails closed ← composes a call
 /// tnGenericMember    string            fails closed ← composes a call
-/// tnAmbSequence      "TA"              fails closed ← call position
+/// tnAmbSequence      "TA"              "TA"         ← D7: the sequence's
+///                                                     value operand IS
+///                                                     the call, so it
+///                                                     rides the call
+///                                                     rails — asserted
+///                                                     in its own test
 /// tnAmbNonNull       "TA"              fails closed ← call position
 /// tnAmbAs            "TA"              "TA"         ← exact value, but
 ///                                                     DEGRADED and never
@@ -5756,10 +5778,13 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 /// `leaf_answer_is_fabricated_at_a_call_position` flips the four
 /// composing rows back to a warm `Primitive(Any)` with `degradation:
 /// None`; dropping `SequenceExpression` / the type-carrier recursion
-/// from `value_is_unmodeled_call` flips the two call-position rows the
-/// same way; making the gate unconditional on the form (dropping the
-/// `embeds_any` conjunct) flips `tnAmbAs` / `tnStrTernary` to full
-/// fail-closed marker values, which is the over-refusal direction.
+/// from `value_is_unmodeled_call` flips the `tnAmbNonNull` call-position
+/// row the same way (the `tnAmbSequence` row left this table at D7 and
+/// now fails under `flow_return_sequence_call_context_value_surfaces`
+/// when the sequence delegation is dropped); making the gate
+/// unconditional on the form (dropping the `embeds_any` conjunct) flips
+/// `tnAmbAs` / `tnStrTernary` to full fail-closed marker values, which
+/// is the over-refusal direction.
 #[test]
 fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
     let host = make_r5_host();
@@ -5777,7 +5802,9 @@ fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
 
     // The CALL POSITIONS: the form's own value is the call's return, and
     // the substrate has no arm for it. `any` is not published.
-    assert_fails_closed(&host, "tnAmbSequence");
+    // (`tnAmbSequence` used to sit here; D7 routes the sequence's value
+    // operand through the call rails, and the row moved to
+    // `flow_return_sequence_call_context_value_surfaces`.)
     assert_fails_closed(&host, "tnAmbNonNull");
 
     // The two rows that ARE exact, and the explicit-type-argument row the
@@ -5814,6 +5841,63 @@ fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
         "tnGenericBare",
         TypeExpr::Primitive(PrimitiveName::String),
     );
+}
+
+/// D7 — a SEQUENCE's call-context value surfaces.
+///
+/// A sequence's value is its last operand, so a CALL in that operand is
+/// the sequence's value: `(k, tnAmb("a"))` is `tnAmb("a")`'s value with
+/// `k`'s evaluation discarded. The call therefore lowers through the
+/// SAME structural call rails its bare spelling takes — one callee, one
+/// answer — and the whole sequence publishes that value exactly as the
+/// `if` / ternary twins of the same body do.
+///
+/// The discarded operands keep their own discipline: a discarded call
+/// still RUNS, and one this frame can neither certify nor evidence (an
+/// exported overload pair) flags the enclosing statement's typed
+/// `GuardNarrowing` gap — the value still publishes exact, DEGRADED,
+/// never warm (`tnAmbSeqDiscard`, the `tnAmbAs` rule one spelling over).
+/// A clean discarded operand (a parameter read) leaves the result clean
+/// and warm.
+///
+/// The form recursion is exact, not spellings: a NESTED sequence's value
+/// is its own last operand, so `(k, (m, tnAmb("a")))` surfaces the same
+/// value (`tnAmbSeqNested`).
+///
+/// Mutation recipe: dropping the sequence delegation from the content
+/// half's sequence arm (or re-adding `SequenceExpression` last-operands
+/// to `value_is_unmodeled_call`'s recursion) flips all three rows back
+/// to the fail-closed marker — `tnAmbSequence` to `assert_fails_closed`,
+/// `tnAmbSeqDiscard` to candidates 0.
+#[test]
+fn flow_return_sequence_call_context_value_surfaces() {
+    let host = make_r5_host();
+
+    // The sequence's value operand IS the call: the overload group
+    // resolves exactly as it does at the bare / `if` / ternary spellings
+    // — clean, warm, one candidate.
+    assert_clean_warm(&host, "tnAmbSequence", string_lit("TA"));
+    // And the value relation recurses through a nested sequence.
+    assert_clean_warm(&host, "tnAmbSeqNested", string_lit("TA"));
+
+    // A DISCARDED operand's call still runs: an uncertifiable one (an
+    // exported overload pair) keeps the typed guard-narrowing gap, so
+    // the value publishes exact but DEGRADED and never warms.
+    let discarded =
+        r5_eval(&host, "tnAmbSeqDiscard").expect("tnAmbSeqDiscard must produce a value");
+    assert_eq!(
+        discarded.ty,
+        string_lit("TA"),
+        "tnAmbSeqDiscard return type"
+    );
+    assert_eq!(
+        discarded.degradation,
+        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+            crate::semantic_query::FlowGap::GuardNarrowing
+        )),
+        "tnAmbSeqDiscard: the discarded unprovable call degrades to the typed gap"
+    );
+    assert_eq!(discarded.candidates, 0, "tnAmbSeqDiscard never warms");
 }
 
 /// The overload-visibility rule agrees across every group SHAPE, because

@@ -42,10 +42,14 @@
 //! used to be taken downstream, off the leaf lowering's ANSWER — the
 //! content half fails closed only when the shared shallow pass minted an
 //! unreduced `ReturnType<callee>` carrier it could recognise. For
-//! `new f()`, `` tag`…` ``, `f?.()`, `await f()` and `(k, f())` that pass
-//! answers a bare `any` with no carrier in it, so nothing fired and a
+//! `new f()`, `` tag`…` ``, `f?.()`, `await f()` and a sequence whose
+//! value operand is one of those (`(k, new f())`) that pass answers a
+//! bare `any` with no carrier in it, so nothing fired and a
 //! fabricated `any` published warm and clean under a promise that a call
-//! with no structural arm fails closed. Whether an expression is a call
+//! with no structural arm fails closed. (A sequence whose value operand
+//! is a BARE call is not in that class: the content half's sequence arm
+//! routes it to the structural call rails —
+//! [`sequence_value_takes_call_rail`].) Whether an expression is a call
 //! position is a property of the FORM, so it is decided here, where the
 //! form is.
 
@@ -90,7 +94,8 @@ pub enum ValueDescent<'a, 'ast> {
     /// produced by a call the substrate does not model —
     /// `new f()`, `` tag`…` ``, an optional call chain (`f?.()`), an
     /// awaited call (`await f()`), or a sequence whose last operand is
-    /// one of those.
+    /// one of those (a sequence whose last operand is a bare call routes
+    /// to the call rails instead — [`sequence_value_takes_call_rail`]).
     ///
     /// This variant exists because the fail-closed promise has to key on
     /// the EXPRESSION FORM, not on whatever the shared shallow pass
@@ -132,7 +137,11 @@ pub enum ValueDescent<'a, 'ast> {
     Reference,
     /// Either logical operand may provide the result.
     Logical,
-    /// Only the final sequence operand provides the result.
+    /// Only the final sequence operand provides the result. A final
+    /// operand that is a call rides the content half's structural call
+    /// rails from the sequence arm — the sequence wrapping adds the
+    /// discarded operands' evaluation effects, never a different verdict
+    /// ([`sequence_value_takes_call_rail`]).
     Sequence,
     /// No value-structural descent: the form answers as a whole, through
     /// the shared shallow-pass leaf lowering.
@@ -380,6 +389,41 @@ pub fn static_property_key_text<'a>(key: &'a PropertyKey<'_>) -> Option<&'a str>
     }
 }
 
+/// Whether `operand` — a sequence's LAST operand, the one that provides
+/// the sequence's value — is a call form the content half's sequence arm
+/// routes to its structural call rails: a paren-transparent
+/// [`Expression::CallExpression`], or a nested sequence (recursively the
+/// same question, because a nested sequence's value is its own last
+/// operand).
+///
+/// The routed call then answers its OWN question through the call rails
+/// — a callee they cannot represent keeps the positional fail-closed
+/// marker — so wrapping such a call in a sequence is not itself an
+/// unmodeled-call POSITION; the sequence's value-structural shape is
+/// plain [`ValueDescent::Sequence`] (last operand provides the value,
+/// the discarded ones ride the effect obligations). Every OTHER last
+/// operand keeps the verdict [`value_is_unmodeled_call`]'s recursion
+/// already gave it (`(0, new f())` still fails closed).
+///
+/// ONE home, consumed by BOTH halves: the classifier's sequence arm
+/// decides its verdict through this predicate, and the content half's
+/// sequence arm gates its delegation on the same one, so the two cannot
+/// disagree about a single form.
+#[must_use]
+pub fn sequence_value_takes_call_rail(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::ParenthesizedExpression(paren) => {
+            sequence_value_takes_call_rail(&paren.expression)
+        }
+        Expression::CallExpression(_) => true,
+        Expression::SequenceExpression(sequence) => sequence
+            .expressions
+            .last()
+            .is_some_and(sequence_value_takes_call_rail),
+        _ => false,
+    }
+}
+
 /// Whether `expression`'s VALUE is produced by a CALL the flow substrate
 /// has no structural arm for — the predicate
 /// [`ValueDescent::UnmodeledCall`] is decided by, and the same predicate
@@ -388,7 +432,11 @@ pub fn static_property_key_text<'a>(key: &'a PropertyKey<'_>) -> Option<&'a str>
 /// A bare `CallExpression` counts as unmodeled HERE even though the
 /// content half owns structural arms for one: those arms only ever see a
 /// call in an expression position the half itself reached, and every
-/// position this predicate is asked about is one they did not.
+/// position this predicate is asked about is one they did not. The ONE
+/// exception is a sequence's value operand — the content half's sequence
+/// arm DELIBERATELY reaches the call rails from there, so a sequence
+/// delegating to them is not an unmodeled-call position
+/// ([`sequence_value_takes_call_rail`]).
 ///
 /// Value-transparent wrappers (parentheses, the five TYPE carriers) are
 /// followed through: `f()!` is still a call position. That is safe for
@@ -409,10 +457,11 @@ pub fn value_is_unmodeled_call(expression: &Expression<'_>) -> bool {
         Expression::TSInstantiationExpression(inner) => value_is_unmodeled_call(&inner.expression),
         Expression::ChainExpression(chain) => chain_is_call_valued(&chain.expression),
         Expression::AwaitExpression(inner) => value_is_unmodeled_call(&inner.argument),
-        Expression::SequenceExpression(sequence) => sequence
-            .expressions
-            .last()
-            .is_some_and(value_is_unmodeled_call),
+        Expression::SequenceExpression(sequence) => {
+            sequence.expressions.last().is_some_and(|last| {
+                !sequence_value_takes_call_rail(last) && value_is_unmodeled_call(last)
+            })
+        }
         // An ASSIGNMENT's value IS its right-hand side — the SAME relation
         // that puts a sequence's last operand here. `(z = fs())` publishing
         // a warm fabricated `any` while `(0, fs())` failed closed was that

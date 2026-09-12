@@ -3835,6 +3835,51 @@ fn symbolic_and_unrepresentable_calls() {
     );
 }
 
+/// @ai-generated - a sequence whose value operand is a call routes that call through the SAME structural call rails its bare spelling takes
+#[test]
+fn sequence_wrapped_call_rides_the_bare_calls_rail() {
+    let node = content_for(
+        "function helper() { return 1; }\n\
+         function run() { return (0, helper()); }\n",
+        "run",
+    );
+    let [SliceStatement::Return {
+        argument: Some(SliceExpr::Call(SliceCall::Direct(target), _)),
+        ..
+    }] = node.body.statements.as_ref()
+    else {
+        panic!(
+            "the sequence's value operand must ride the direct call rail: {:?}",
+            node.body.statements
+        );
+    };
+    assert_eq!(target.declaration.name.as_ref(), "helper");
+
+    // The discriminator: a sequence around a call with NO structural arm
+    // keeps the positional fail-closed marker — the sequence context
+    // invents no arm for the wrapped form.
+    let memo = memo_for(
+        "class Service {\n\
+         \x20 helper() { return 1; }\n\
+         \x20 run() { return (0, this.helper()); }\n\
+         }\n",
+    );
+    let index = memo.function_program_index();
+    let entry = member_entry_of(&index, "Service", 1);
+    let (selection, skeleton) = selection_for(&memo, entry, &[]);
+    let node = memo
+        .flow_slice_content(entry, selection, &skeleton)
+        .expect("the class method slice content must build");
+    assert_eq!(
+        node.body.statements.as_ref(),
+        &[SliceStatement::Return {
+            argument: Some(SliceExpr::UnreducedCallValue),
+            freshness: SliceFreshness::Pinned,
+        }],
+        "an unrepresentable callee fails closed through the sequence too"
+    );
+}
+
 /// A SPREAD entry lowers STRUCTURALLY — its source is an ordinary
 /// selected value position, lowered by whatever arm its own form takes,
 /// and the direct members around it keep their own lowered values.

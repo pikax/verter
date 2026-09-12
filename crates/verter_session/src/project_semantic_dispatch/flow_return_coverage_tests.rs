@@ -185,6 +185,22 @@ export function callRest() {
   return restFn(1, 2, 3);
 }
 
+export function callSeqRest() {
+  return (0, restFn(1, 2, 3));
+}
+export function callSeqNew() {
+  return (0, new CtorC(1));
+}
+export function callSeqOptional() {
+  return (0, maybeFn?.());
+}
+export function callSeqTagged() {
+  return (0, tag`a${1}b`);
+}
+export async function callSeqAwait() {
+  return (0, await asyncSrc());
+}
+
 export declare function thisFn(this: { z: number }, a: number): "this";
 export function callThisParam() {
   return thisFn.call({ z: 1 }, 1);
@@ -3116,6 +3132,54 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
         "callOptional",
         "callTagged",
         "callAwait",
+    ] {
+        assert_fails_closed(&host, CALLS, name);
+    }
+}
+
+/// D7 — the SEQUENCE wrapping of a call does not change the call's
+/// verdict, in either direction.
+///
+/// The sequence's value is its last operand, so a call there lowers
+/// through the SAME structural call rails its bare spelling takes:
+/// `(0, restFn(1, 2, 3))` surfaces `restFn`'s `"rest"` clean and warm,
+/// exactly like the bare `callRest` twin — the sequence context never
+/// converts a resolved call into a fail-closed marker.
+///
+/// The discriminator runs the other way with the same fixture: every
+/// call form with NO structural arm (`new`, an optional call, a tagged
+/// template, `await`) keeps the fail-closed verdict when a sequence
+/// wraps it — the sequence context never converts an unmodeled call
+/// into a published value either. The delegation answers the CALL's own
+/// question; it invents no arm.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`) — the answers the fail-closed rows decline to
+/// produce:
+///
+/// ```text
+/// callSeqNew       CtorC
+/// callSeqOptional  number | undefined
+/// callSeqTagged    boolean
+/// callSeqAwait     Promise<number>
+/// ```
+///
+/// Mutation recipe: dropping the sequence delegation from the content
+/// half's sequence arm flips `callSeqRest` to the fail-closed marker;
+/// widening the delegation past the paren-transparent `CallExpression`
+/// form (a `New` / chain / tagged / `await` last operand) flips the four
+/// negative rows to a published value.
+#[test]
+fn a_sequence_wrapped_call_keeps_the_calls_own_verdict() {
+    let host = ts_host();
+    // A resolved call surfaces through the sequence, clean and warm.
+    assert_clean_warm(&host, CALLS, "callSeqRest", string_lit("rest"));
+    // Every form with no structural arm keeps failing closed.
+    for name in [
+        "callSeqNew",
+        "callSeqOptional",
+        "callSeqTagged",
+        "callSeqAwait",
     ] {
         assert_fails_closed(&host, CALLS, name);
     }
