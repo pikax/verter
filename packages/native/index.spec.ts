@@ -388,6 +388,111 @@ const height = ref('100px')
     }
   });
 
+  it("duplicate-attribute public lint-route proof: parse-attributed dirty case, clean control, update and fresh-host agreement", () => {
+    // Public input-to-result proof for the advertised
+    // `no-duplicate-attributes` rule. Verified against the native binary:
+    // a static duplicate attribute is error-severity at parse (Vue parity)
+    // and is publicly attributed to the SECOND occurrence's authored name
+    // range, but the shared semantic fact extraction fail-closes template
+    // facts for ANY error parse (`compile_inner`'s `has_parse_errors` gate
+    // drops TEMPLATE_DATA extraction), so `lint` receives no template
+    // snapshot for exactly the rule's target input and the rule identity
+    // cannot fire through the public host. Repairing that extraction gap
+    // belongs to the semantic fact-extraction pipeline in verter_compiler,
+    // not to the lint route: when TEMPLATE_DATA extraction serves error
+    // parses, flip the two gap assertions below to expect the
+    // `no-duplicate-attributes` diagnostic at the second `id`.
+    const RULE = "no-duplicate-attributes";
+    const RULE_CONFIG = JSON.stringify({ rules: { [RULE]: "error" } });
+    const DIRTY = [
+      '<script setup lang="ts">',
+      "const label = 'row'",
+      "</script>",
+      "<template>",
+      '  <div id="unique" class="first"></div>',
+      '  <span id="dup" id="other" :data-label="label"></span>',
+      "</template>",
+    ].join("\n");
+    const CLEAN = DIRTY.replace(' id="other"', "");
+
+    const host = new VerterHost();
+
+    // The rule is advertised through the public metadata route.
+    const metadata = host.getLintRuleMetadata();
+    expect(
+      metadata.some((m) => m.name === RULE && m.category === "vue-essential"),
+      "rule must be advertised through getLintRuleMetadata",
+    ).toBe(true);
+
+    // Dirty case: the duplicate is publicly detected at parse level and
+    // attributed to the second occurrence's authored name range.
+    const dirty = host.upsert({ inputId: "DupAttrLintRoute.vue", source: DIRTY, fileKind: "vue" });
+    const parseDup = (dirty.diagnostics?.diagnostics ?? []).filter(
+      (d) => d.code === "DuplicateAttribute",
+    );
+    expect(parseDup).toHaveLength(1);
+    expect(parseDup[0].severity).toBe("error");
+    const secondId = DIRTY.indexOf('id="other"');
+    expect(DIRTY.slice(parseDup[0].spanStart, parseDup[0].spanEnd)).toBe("id");
+    expect([parseDup[0].spanStart, parseDup[0].spanEnd]).toEqual([secondId, secondId + 2]);
+
+    // Known gap (see comment above): the advertised rule identity does not
+    // fire through `lint`, and the public analysis carries no template facts
+    // for the error parse that a duplicate attribute necessarily is.
+    const dirtyLint = host.lint(dirty.canonicalId, RULE_CONFIG).filter((d) => d.rule === RULE);
+    expect(
+      dirtyLint,
+      "known gap: no no-duplicate-attributes diagnostic until semantic fact extraction serves error parses",
+    ).toEqual([]);
+    expect(JSON.parse(host.getAnalysis(dirty.canonicalId) ?? "{}").template).toBe(null);
+
+    // Update removing the duplicate in the same host clears the parse error
+    // and the lint route agrees (unique-attribute control).
+    const updated = host.upsert({
+      inputId: "DupAttrLintRoute.vue",
+      source: CLEAN,
+      fileKind: "vue",
+    });
+    expect(updated.changed).toBe(true);
+    expect(
+      (updated.diagnostics?.diagnostics ?? []).filter((d) => d.code === "DuplicateAttribute"),
+    ).toEqual([]);
+    expect(host.lint(updated.canonicalId, RULE_CONFIG).filter((d) => d.rule === RULE)).toEqual([]);
+
+    // Liveness control for the gap above: the same host's public analysis
+    // DOES carry template facts for the clean parse of this very file, and
+    // an unrelated template-fact rule (require-v-for-key) fires through
+    // `lint` with default config on a clean parse — so the gap is the
+    // error-parse fail-close in semantic fact extraction, not a route that
+    // never serves template facts or rules.
+    expect(JSON.parse(host.getAnalysis(updated.canonicalId) ?? "{}").template).not.toBeNull();
+    const vfor = host.upsert({
+      inputId: "VForKeyLintLiveness.vue",
+      source: ["<template>", '  <ul><li v-for="i in 3">{{ i }}</li></ul>', "</template>"].join(
+        "\n",
+      ),
+      fileKind: "vue",
+    });
+    expect(host.lint(vfor.canonicalId, null).map((d) => d.rule)).toContain("require-v-for-key");
+
+    // A fresh host fed the clean source agrees — no stale facts or diagnostics.
+    const fresh = new VerterHost();
+    const cleanResult = fresh.upsert({
+      inputId: "DupAttrLintRoute.vue",
+      source: CLEAN,
+      fileKind: "vue",
+    });
+    expect(
+      (cleanResult.diagnostics?.diagnostics ?? []).filter((d) => d.code === "DuplicateAttribute"),
+    ).toEqual([]);
+    expect(fresh.lint(cleanResult.canonicalId, RULE_CONFIG).filter((d) => d.rule === RULE)).toEqual(
+      [],
+    );
+
+    fresh.close();
+    host.close();
+  });
+
   it("returns a testing-mode public API that exposes script setup bindings", () => {
     const host = new VerterHost();
     host.upsert({
