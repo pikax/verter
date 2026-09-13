@@ -2480,19 +2480,44 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                     crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
                                         // Absent from the SOURCE surface. That
                                         // proves absence from the MAPPED surface
-                                        // only when the key domain is derived
+                                        // only when TWO things hold.
+                                        //
+                                        // First, the key domain must be derived
                                         // from the source — the homomorphic
                                         // `[K in keyof Src]` shape. An
                                         // independent key space (`[K in 1e21]`
                                         // over an unrelated source) produces keys
                                         // the source never had, so a source miss
-                                        // says nothing about it: stay `Undecided`
-                                        // and let the coarse path answer.
+                                        // says nothing about it.
+                                        //
+                                        // Second, the source's own key domain
+                                        // must be CLOSED. `project_known_key`
+                                        // decides membership against the explicit
+                                        // `members` list alone, so it answers
+                                        // `AbsentProven` for every key an INDEX
+                                        // SIGNATURE would supply: on
+                                        // `{ a: string; [k: string]: string }`
+                                        // the name `b` is not a member and is not
+                                        // absent either. An index signature makes
+                                        // the surface's key domain open, and an
+                                        // open domain never refutes a key — the
+                                        // same one-sidedness the primitive tier
+                                        // below documents. Missing members are
+                                        // positive evidence only.
+                                        //
+                                        // Either way it stays `Undecided` and the
+                                        // coarse path owns the answer.
                                         let homomorphic_over_source = matches!(
                                             self.graph().node_data(mapper.key_space).as_deref(),
                                             Some(SemanticNodeData::KeyOf { base }) if *base == *source
                                         );
-                                        return if homomorphic_over_source {
+                                        let source_domain_is_closed = view
+                                            .index_signatures
+                                            .is_empty()
+                                            && !view.has_known_index_signature();
+                                        return if homomorphic_over_source
+                                            && source_domain_is_closed
+                                        {
                                             MappedKeyAdmission::AbsentProven
                                         } else {
                                             MappedKeyAdmission::Undecided
