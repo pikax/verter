@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // check-integration-test-layout.mjs
 //
-// ANTI-BINARY-GROWTH GUARD (fast-fail CI Node check).
+// ANTI-BINARY-GROWTH GUARD — the single owning implementation of the
+// integration-test layout check.
 //
 // Mechanically prevents re-adding standalone integration-test binaries after the
 // consolidation onto a single `tests/main.rs` per crate. Every workspace package
@@ -11,10 +12,11 @@
 // `tests/*.rs` auto-becomes its own test binary at compile time and balloons the
 // gate; this guard fails the build before that happens.
 //
-// This is the Node half of a DUAL guard. The in-gate Rust durability mirror is
-// `crates/verter_session/tests/cases/integration_test_layout_guard.rs`; both read
-// the SAME committed allowlist JSON, so the exception set cannot drift between
-// them.
+// Invoked ONCE per owning context: CI runs it in the `rust-test-build` job
+// before building the test archive, and the local canonical gate runs it as a
+// front-half preflight in `scripts/gate.mjs` (before any archive work pays for a
+// build). The discrimination cases and the exact allowlist pin live in
+// `scripts/check-integration-test-layout.test.mjs`.
 //
 // Cross-platform: drives `cargo metadata --format-version 1 --no-deps` and
 // Node's `node:fs` / `node:path` only — NO Unix `find` / `grep`, and all path
@@ -27,11 +29,12 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
 const ALLOWLIST_PATH = resolve(__dirname, "integration-test-layout-allowlist.json");
+const ALLOWLIST_REL = "scripts/integration-test-layout-allowlist.json";
 
 const HELP = `check-integration-test-layout.mjs — anti-binary-growth integration-test layout guard
 
@@ -67,13 +70,14 @@ WHAT IT CHECKS
        even when another valid target exists).
 
 THE ALLOWLIST (central, exact, stale-failing)
-  scripts/integration-test-layout-allowlist.json is the SINGLE source of truth,
-  shared with the Rust guard. Each entry is exact:
+  scripts/integration-test-layout-allowlist.json is the SINGLE source of truth.
+  Each entry is exact:
     { package, target, src_path (repo-relative, forward-slash), reason }
   No globs, no prefixes, no package-wide switches. STALE-FAILING: if an
   allowlisted (package, target) no longer exists in cargo metadata, or its
   src_path moved, the guard FAILS — a removed binary cannot leave a dead
-  exception.
+  exception. The committed exception SET is additionally pinned exactly by the
+  self-test (scripts/check-integration-test-layout.test.mjs).
 
 OPTIONS
   --json   Print a JSON report ({ ok, failures, allowlist }) instead of text.
@@ -89,36 +93,26 @@ function toRepoRelPosix(absPath) {
   return rel.split(sep).join("/");
 }
 
-/** Normalize any path's separators to forward slashes (no rebasing). */
-function toPosix(p) {
-  return p.split(sep).join("/");
-}
-
-function loadAllowlist() {
-  let raw;
-  try {
-    raw = readFileSync(ALLOWLIST_PATH, "utf8");
-  } catch (err) {
-    throw new Error(`failed to read allowlist ${toRepoRelPosix(ALLOWLIST_PATH)}: ${err.message}`);
-  }
+/**
+ * Pure allowlist parser/validator (no I/O) so the duplicate-key rejection is
+ * unit-testable. THROWS on a malformed or duplicate-keyed allowlist — a broken
+ * allowlist must not silently degrade into "no exceptions", and a duplicate
+ * (package, target) would let a STALE duplicate hide behind a correct one in
+ * the matched-set bookkeeping below.
+ */
+export function parseAllowlist(raw) {
   let parsed;
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    throw new Error(
-      `allowlist ${toRepoRelPosix(ALLOWLIST_PATH)} is not valid JSON: ${err.message}`,
-    );
+    throw new Error(`${ALLOWLIST_REL} is not valid JSON: ${err.message}`);
   }
   // The `allow` array is MANDATORY: a missing / non-array `allow` is a broken
-  // allowlist, not "no exceptions" — fail loud (mirrors the Rust guard's panic).
-  // NOTE: the Rust guard additionally pins the allowlist to EXACTLY its
-  // known process-isolated entries; that durable exact-count pin lives there on
-  // purpose. This Node check is the fast structural mirror and does NOT replicate
-  // that exact-count pin.
+  // allowlist, not "no exceptions" — fail loud.
   if (!Array.isArray(parsed.allow)) {
     throw new Error(
-      `allowlist ${toRepoRelPosix(ALLOWLIST_PATH)} is missing a top-level \`allow\` ` +
-        `array (a missing or non-array \`allow\` is a broken allowlist, not "no exceptions").`,
+      `${ALLOWLIST_REL} is missing a top-level \`allow\` array (a missing or ` +
+        `non-array \`allow\` is a broken allowlist, not "no exceptions").`,
     );
   }
   const entries = parsed.allow;
@@ -163,6 +157,201 @@ function loadAllowlist() {
     seenPkgTarget.add(pkgTarget);
   }
   return entries;
+}
+
+function loadAllowlist() {
+  let raw;
+  try {
+    raw = readFileSync(ALLOWLIST_PATH, "utf8");
+  } catch (err) {
+    throw new Error(`failed to read allowlist ${ALLOWLIST_REL}: ${err.message}`);
+  }
+  return parseAllowlist(raw);
+}
+
+/**
+ * Pure checker over per-package layouts. A layout is a plain object distilled
+ * from `cargo metadata` + the on-disk `tests/` directory (all paths
+ * repo-relative, forward-slash normalized):
+ *   {
+ *     name,                       // cargo package name
+ *     expectedMainSrcPosix,       // "<pkg>/tests/main.rs"
+ *     mainRsExists,               // whether tests/main.rs exists on disk
+ *     testTargets: [{ name, src }],  // integration-test targets (kind "test")
+ *     immediateTestFiles: [src],  // IMMEDIATE tests/*.rs files on disk
+ *     autoDiscoverableCandidates: [src], // tests/*.rs + tests/<dir>/main.rs
+ *   }
+ * Returns the ordered list of { package, message } failures. EMPTY = conformant.
+ * No I/O — the self-test feeds synthetic layouts through this directly.
+ */
+export function computeFailures(packageLayouts, allowlist) {
+  const failures = [];
+
+  // Track which allowlist entries got matched against a real metadata target
+  // (for the stale-failing check). Keyed `${package}::${target}`.
+  const allowKey = (pkgName, target) => `${pkgName}::${target}`;
+  const matchedAllow = new Set();
+
+  // Build a quick lookup of allowlist entries by (package,target).
+  const allowByKey = new Map();
+  for (const e of allowlist) {
+    allowByKey.set(allowKey(e.package, e.target), e);
+  }
+
+  for (const pkg of packageLayouts) {
+    const pkgName = pkg.name;
+    const testTargets = pkg.testTargets ?? [];
+
+    // ---- Exactly ONE tests/main.rs binary. Two [[test]] blocks both
+    //      `path = "tests/main.rs"` make cargo metadata report TWO targets with
+    //      identical src; each individually `continue`s on the sanctioned-main
+    //      path below, so without this count the second compiled binary slips by.
+    const mainTargets = testTargets.filter((t) => t.src === pkg.expectedMainSrcPosix);
+    if (mainTargets.length > 1) {
+      const names = mainTargets.map((t) => t.name).join(", ");
+      failures.push({
+        package: pkgName,
+        message:
+          `package \`${pkgName}\` has ${mainTargets.length} tests/main.rs ` +
+          `integration-test targets (${names}) — exactly one tests/main.rs binary is ` +
+          `allowed; a second [[test]] pointing at tests/main.rs still compiles a ` +
+          `separate binary.`,
+      });
+    }
+
+    // ---- Rule on metadata test targets: each must be tests/main.rs OR allowlisted.
+    for (const t of testTargets) {
+      if (t.src === pkg.expectedMainSrcPosix) {
+        continue; // the one sanctioned consolidated target
+      }
+      // Not tests/main.rs -> must be EXACTLY allowlisted (package + target + src_path).
+      const entry = allowByKey.get(allowKey(pkgName, t.name));
+      if (!entry) {
+        failures.push({
+          package: pkgName,
+          message:
+            `integration-test target \`${t.name}\` (src ${t.src}) is not ` +
+            `tests/main.rs and is not allowlisted. Consolidate it into ` +
+            `${pkg.expectedMainSrcPosix} (e.g. under tests/cases/), or add an exact ` +
+            `allowlist entry to ${ALLOWLIST_REL} if it genuinely needs a separate ` +
+            `test process.`,
+        });
+        continue;
+      }
+      // Allowlisted by (package,target): verify src_path matches exactly (stale-failing on move).
+      if (entry.src_path !== t.src) {
+        failures.push({
+          package: pkgName,
+          message:
+            `allowlisted target \`${t.name}\` src_path moved: allowlist expects ` +
+            `\`${entry.src_path}\` but cargo metadata reports \`${t.src}\`. ` +
+            `Update ${ALLOWLIST_REL} to the new path (the exact exception must ` +
+            `track the real binary).`,
+        });
+        // Still mark matched so we don't ALSO report it stale below.
+      }
+      matchedAllow.add(allowKey(pkgName, t.name));
+    }
+
+    // ---- GOV-D4 (1): if tests/main.rs exists on disk, metadata MUST contain it.
+    if (pkg.mainRsExists) {
+      const hasMainTarget = testTargets.some((t) => t.src === pkg.expectedMainSrcPosix);
+      if (!hasMainTarget) {
+        failures.push({
+          package: pkgName,
+          message:
+            `${pkg.expectedMainSrcPosix} exists on disk but cargo metadata does ` +
+            `NOT report a tests/main.rs integration-test target — a missing or ` +
+            `misconfigured [[test]] / autotests setting is hiding it.`,
+        });
+      }
+    }
+
+    // ---- GOV-D4 (2): tests/*.rs present immediately but ZERO metadata test targets
+    //                  => autotests = false (or misconfig) is hiding tests.
+    const immediate = pkg.immediateTestFiles ?? [];
+    if (immediate.length > 0 && testTargets.length === 0) {
+      const names = [...immediate].sort();
+      failures.push({
+        package: pkgName,
+        message:
+          `${names.length} immediate tests/*.rs file(s) exist (${names.join(", ")}) ` +
+          `but cargo metadata reports ZERO integration-test targets — \`autotests = ` +
+          `false\` (or an equivalent misconfig) is hiding compiled test binaries.`,
+      });
+    }
+
+    // ---- GOV-D4 (4): stray IMMEDIATE tests/*.rs other than main.rs / allowlisted src.
+    // (Files under tests/cases/ or any subdir are fine — only the immediate level.)
+    const allowedImmediateSrcRel = new Set([pkg.expectedMainSrcPosix]);
+    // `expectedMainSrcPosix` is `<dir>/tests/main.rs`; the immediate `tests/`
+    // prefix is `<dir>/tests/`. An allowlist src is "allowed immediate" only when
+    // it sits DIRECTLY under that prefix (no further `/`) — a subdir src is not
+    // at the immediate level.
+    const testsPrefix = pkg.expectedMainSrcPosix.slice(0, -"main.rs".length);
+    for (const e of allowlist) {
+      if (e.package !== pkgName) continue;
+      if (e.src_path.startsWith(testsPrefix)) {
+        const tail = e.src_path.slice(testsPrefix.length);
+        if (tail.length > 0 && !tail.includes("/")) {
+          allowedImmediateSrcRel.add(e.src_path);
+        }
+      }
+    }
+    for (const rel of immediate) {
+      if (allowedImmediateSrcRel.has(rel)) continue;
+      failures.push({
+        package: pkgName,
+        message:
+          `stray immediate test file ${rel} — only tests/main.rs (plus exactly ` +
+          `allowlisted files) may live at the top tests/*.rs level, because each ` +
+          `such file auto-becomes its own test binary. Move it under tests/cases/ ` +
+          `(or another subdirectory) and wire it through tests/main.rs.`,
+      });
+    }
+
+    // ---- HIDDEN AUTO-DISCOVERABLE BINARY: every cargo-auto-discoverable position
+    //      (tests/*.rs and tests/<dir>/main.rs one subdir deep) must correspond to
+    //      a reported metadata target. A candidate WITHOUT a matching target is
+    //      a binary cargo compiles but metadata does not report (the autotests=false
+    //      hiding case). This fires PER CANDIDATE even when the package has OTHER
+    //      metadata targets, so it catches a hidden tests/rogue/main.rs next to a
+    //      valid tests/main.rs (which the zero-targets GOV-D4(2) rule cannot).
+    const reportedSrcs = new Set(testTargets.map((t) => t.src));
+    for (const cand of pkg.autoDiscoverableCandidates ?? []) {
+      if (reportedSrcs.has(cand)) continue;
+      failures.push({
+        package: pkgName,
+        message:
+          `${cand} is a cargo-auto-discoverable integration-test position ` +
+          `(tests/*.rs or tests/<dir>/main.rs) but cargo metadata reports no ` +
+          `integration-test target for it — \`autotests = false\` (or an explicit ` +
+          `[[test]] that omits it) is hiding a separately-compiled test binary. Wire ` +
+          `it through tests/main.rs (e.g. as a module under tests/cases/) or remove it.`,
+      });
+    }
+  }
+
+  // ---- STALE-FAILING: every allowlist entry must have matched a real target.
+  const knownPackages = new Set(packageLayouts.map((p) => p.name));
+  for (const e of allowlist) {
+    const key = allowKey(e.package, e.target);
+    if (matchedAllow.has(key)) continue;
+    // Distinguish "package missing" from "target missing" for a clearer message.
+    const reasonText = knownPackages.has(e.package)
+      ? `cargo metadata reports no integration-test target named \`${e.target}\` ` +
+        `for package \`${e.package}\` (it was removed or renamed)`
+      : `package \`${e.package}\` is not a workspace member in cargo metadata`;
+    failures.push({
+      package: e.package,
+      message:
+        `STALE allowlist entry: ${reasonText}. Remove the dead exception from ` +
+        `${ALLOWLIST_REL} (an allowlisted binary that no longer exists must not ` +
+        `leave a lingering exception).`,
+    });
+  }
+
+  return failures;
 }
 
 function runCargoMetadata() {
@@ -233,6 +422,37 @@ function autoDiscoverableTestCandidates(testsDir) {
   return out;
 }
 
+/** Distill the per-package layouts (plain, repo-rel-posix) `cargo metadata` + disk. */
+function collectPackageLayouts(metadata) {
+  const wsMembers = new Set(metadata.workspace_members ?? []);
+  const packages = (metadata.packages ?? []).filter((p) => wsMembers.has(p.id));
+
+  const layouts = [];
+  for (const pkg of packages) {
+    const manifestDir = dirname(pkg.manifest_path);
+    const testsDir = join(manifestDir, "tests");
+    // Repo-relative like every other src the pure checker compares against.
+    const expectedMainSrcPosix = toRepoRelPosix(join(testsDir, "main.rs"));
+
+    // Integration-test targets reported by cargo metadata (kind includes "test").
+    const testTargets = (pkg.targets ?? [])
+      .filter((t) => Array.isArray(t.kind) && t.kind.includes("test"))
+      .map((t) => ({ name: t.name, src: toRepoRelPosix(t.src_path) }));
+
+    layouts.push({
+      name: pkg.name,
+      expectedMainSrcPosix,
+      mainRsExists: existsSync(join(testsDir, "main.rs")),
+      testTargets,
+      immediateTestFiles: immediateTestRsFiles(testsDir).map((abs) => toRepoRelPosix(abs)),
+      autoDiscoverableCandidates: autoDiscoverableTestCandidates(testsDir).map((abs) =>
+        toRepoRelPosix(abs),
+      ),
+    });
+  }
+  return layouts;
+}
+
 function main() {
   const args = process.argv.slice(2);
   if (args.includes("--help") || args.includes("-h")) {
@@ -248,190 +468,8 @@ function main() {
   }
 
   const allowlist = loadAllowlist();
-  const metadata = runCargoMetadata();
-
-  // Index: which workspace packages exist, and their (package -> manifest dir).
-  const wsMembers = new Set(metadata.workspace_members ?? []);
-  const packages = (metadata.packages ?? []).filter((p) => wsMembers.has(p.id));
-
-  // failures: array of { package, message }.
-  const failures = [];
-
-  // Track which allowlist entries got matched against a real metadata target
-  // (for the stale-failing check). Keyed `${package}::${target}`.
-  const allowKey = (pkgName, target) => `${pkgName}::${target}`;
-  const matchedAllow = new Set();
-
-  // Build a quick lookup of allowlist entries by (package,target).
-  const allowByKey = new Map();
-  for (const e of allowlist) {
-    allowByKey.set(allowKey(e.package, e.target), e);
-  }
-
-  for (const pkg of packages) {
-    const pkgName = pkg.name;
-    const manifestDir = dirname(pkg.manifest_path);
-    const manifestDirPosix = toPosix(manifestDir);
-    const expectedMainSrcPosix = `${manifestDirPosix}/tests/main.rs`;
-    const testsDir = join(manifestDir, "tests");
-
-    // Integration-test targets reported by cargo metadata (kind includes "test").
-    const testTargets = (pkg.targets ?? []).filter(
-      (t) => Array.isArray(t.kind) && t.kind.includes("test"),
-    );
-
-    // ---- Exactly ONE tests/main.rs binary. Two [[test]] blocks both
-    //      `path = "tests/main.rs"` make cargo metadata report TWO targets with
-    //      identical src; each individually `continue`s on the sanctioned-main
-    //      path below, so without this count the second compiled binary slips by.
-    const mainTargets = testTargets.filter((t) => toPosix(t.src_path) === expectedMainSrcPosix);
-    if (mainTargets.length > 1) {
-      const names = mainTargets.map((t) => t.name).join(", ");
-      failures.push({
-        package: pkgName,
-        message:
-          `package \`${pkgName}\` has ${mainTargets.length} tests/main.rs ` +
-          `integration-test targets (${names}) — exactly one tests/main.rs binary is ` +
-          `allowed; a second [[test]] pointing at tests/main.rs still compiles a ` +
-          `separate binary.`,
-      });
-    }
-
-    // ---- Rule on metadata test targets: each must be tests/main.rs OR allowlisted.
-    for (const t of testTargets) {
-      const srcPosix = toPosix(t.src_path);
-      const repoRelSrc = toRepoRelPosix(t.src_path);
-      if (srcPosix === expectedMainSrcPosix) {
-        continue; // the one sanctioned consolidated target
-      }
-      // Not tests/main.rs -> must be EXACTLY allowlisted (package + target + src_path).
-      const entry = allowByKey.get(allowKey(pkgName, t.name));
-      if (!entry) {
-        failures.push({
-          package: pkgName,
-          message:
-            `integration-test target \`${t.name}\` (src ${repoRelSrc}) is not ` +
-            `tests/main.rs and is not allowlisted. Consolidate it into ` +
-            `${toRepoRelPosix(join(testsDir, "main.rs"))} (e.g. under tests/cases/), ` +
-            `or add an exact allowlist entry to ` +
-            `${toRepoRelPosix(ALLOWLIST_PATH)} if it genuinely needs a separate ` +
-            `test process.`,
-        });
-        continue;
-      }
-      // Allowlisted by (package,target): verify src_path matches exactly (stale-failing on move).
-      if (entry.src_path !== repoRelSrc) {
-        failures.push({
-          package: pkgName,
-          message:
-            `allowlisted target \`${t.name}\` src_path moved: allowlist expects ` +
-            `\`${entry.src_path}\` but cargo metadata reports \`${repoRelSrc}\`. ` +
-            `Update ${toRepoRelPosix(ALLOWLIST_PATH)} to the new path (the exact ` +
-            `exception must track the real binary).`,
-        });
-        // Still mark matched so we don't ALSO report it stale below.
-      }
-      matchedAllow.add(allowKey(pkgName, t.name));
-    }
-
-    // ---- GOV-D4 (1): if tests/main.rs exists on disk, metadata MUST contain it.
-    const mainRsAbs = join(testsDir, "main.rs");
-    if (existsSync(mainRsAbs)) {
-      const hasMainTarget = testTargets.some((t) => toPosix(t.src_path) === expectedMainSrcPosix);
-      if (!hasMainTarget) {
-        failures.push({
-          package: pkgName,
-          message:
-            `${toRepoRelPosix(mainRsAbs)} exists on disk but cargo metadata does ` +
-            `NOT report a tests/main.rs integration-test target — a missing or ` +
-            `misconfigured [[test]] / autotests setting is hiding it.`,
-        });
-      }
-    }
-
-    // ---- GOV-D4 (2): tests/*.rs present immediately but ZERO metadata test targets
-    //                  => autotests = false (or misconfig) is hiding tests.
-    const immediate = immediateTestRsFiles(testsDir);
-    if (immediate.length > 0 && testTargets.length === 0) {
-      const names = immediate.map((p) => toRepoRelPosix(p)).sort();
-      failures.push({
-        package: pkgName,
-        message:
-          `${names.length} immediate tests/*.rs file(s) exist (${names.join(", ")}) ` +
-          `but cargo metadata reports ZERO integration-test targets — \`autotests = ` +
-          `false\` (or an equivalent misconfig) is hiding compiled test binaries.`,
-      });
-    }
-
-    // ---- GOV-D4 (4): stray IMMEDIATE tests/*.rs other than main.rs / allowlisted src.
-    // (Files under tests/cases/ or any subdir are fine — only the immediate level.)
-    const allowedImmediateSrcRel = new Set([toRepoRelPosix(mainRsAbs)]);
-    for (const e of allowlist) {
-      if (e.package === pkgName) {
-        // Only treat an allowlist src as "allowed immediate" if it lives directly
-        // under this package's tests/ (the immediate level the rule constrains).
-        const eAbs = resolve(REPO_ROOT, e.src_path);
-        if (toPosix(dirname(eAbs)) === toPosix(testsDir)) {
-          allowedImmediateSrcRel.add(e.src_path);
-        }
-      }
-    }
-    for (const fileAbs of immediate) {
-      const rel = toRepoRelPosix(fileAbs);
-      if (allowedImmediateSrcRel.has(rel)) continue;
-      failures.push({
-        package: pkgName,
-        message:
-          `stray immediate test file ${rel} — only tests/main.rs (plus exactly ` +
-          `allowlisted files) may live at the top tests/*.rs level, because each ` +
-          `such file auto-becomes its own test binary. Move it under tests/cases/ ` +
-          `(or another subdirectory) and wire it through tests/main.rs.`,
-      });
-    }
-
-    // ---- HIDDEN AUTO-DISCOVERABLE BINARY: every cargo-auto-discoverable position
-    //      (tests/*.rs and tests/<dir>/main.rs one subdir deep) must correspond to
-    //      a reported metadata target. A candidate WITHOUT a matching target is a
-    //      binary cargo compiles but metadata does not report (the autotests=false
-    //      hiding case). This fires PER CANDIDATE even when the package has OTHER
-    //      metadata targets, so it catches a hidden tests/rogue/main.rs next to a
-    //      valid tests/main.rs (which the zero-targets GOV-D4(2) rule cannot).
-    const reportedSrcs = new Set(testTargets.map((t) => toPosix(t.src_path)));
-    for (const candAbs of autoDiscoverableTestCandidates(testsDir)) {
-      const candPosix = toPosix(candAbs);
-      if (reportedSrcs.has(candPosix)) continue;
-      failures.push({
-        package: pkgName,
-        message:
-          `${toRepoRelPosix(candAbs)} is a cargo-auto-discoverable integration-test ` +
-          `position (tests/*.rs or tests/<dir>/main.rs) but cargo metadata reports no ` +
-          `integration-test target for it — \`autotests = false\` (or an explicit ` +
-          `[[test]] that omits it) is hiding a separately-compiled test binary. Wire ` +
-          `it through tests/main.rs (e.g. as a module under tests/cases/) or remove it.`,
-      });
-    }
-  }
-
-  // ---- STALE-FAILING: every allowlist entry must have matched a real target.
-  for (const e of allowlist) {
-    const key = allowKey(e.package, e.target);
-    if (!matchedAllow.has(key)) {
-      // Distinguish "package missing" from "target missing" for a clearer message.
-      const pkgExists = packages.some((p) => p.name === e.package);
-      const reasonText = pkgExists
-        ? `cargo metadata reports no integration-test target named \`${e.target}\` ` +
-          `for package \`${e.package}\` (it was removed or renamed)`
-        : `package \`${e.package}\` is not a workspace member in cargo metadata`;
-      failures.push({
-        package: e.package,
-        message:
-          `STALE allowlist entry: ${reasonText}. Remove the dead exception from ` +
-          `${toRepoRelPosix(ALLOWLIST_PATH)} (an allowlisted binary that no longer ` +
-          `exists must not leave a lingering exception).`,
-      });
-    }
-  }
-
+  const layouts = collectPackageLayouts(runCargoMetadata());
+  const failures = computeFailures(layouts, allowlist);
   const ok = failures.length === 0;
 
   if (jsonOut) {
@@ -465,15 +503,19 @@ function main() {
     `\nThe consolidation rule: each crate exposes AT MOST one tests/main.rs ` +
     `integration-test binary (extra cases live under tests/cases/ and are wired ` +
     `through main.rs). A new top-level tests/*.rs auto-becomes a separate binary ` +
-    `and is forbidden unless exactly allowlisted in ` +
-    `${toRepoRelPosix(ALLOWLIST_PATH)}.\n`;
+    `and is forbidden unless exactly allowlisted in ${ALLOWLIST_REL}.\n`;
   process.stderr.write(report);
   process.exit(1);
 }
 
-try {
-  main();
-} catch (err) {
-  process.stderr.write(`check-integration-test-layout: ${err.message}\n`);
-  process.exit(2);
+const isMain =
+  Boolean(process.argv[1]) && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
+
+if (isMain) {
+  try {
+    main();
+  } catch (err) {
+    process.stderr.write(`check-integration-test-layout: ${err.message}\n`);
+    process.exit(2);
+  }
 }

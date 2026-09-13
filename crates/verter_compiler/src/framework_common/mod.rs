@@ -10,13 +10,13 @@
 //! `verter_session` (unnameable from compiler-side producers).
 //!
 //! On top of the carrier wrappers it owns the compiler-side carrier
-//! framework substrate: the [`CarrierCompiler`] trait (parse / IDE /
-//! runtime) and the immutable per-capability catalogs
+//! framework substrate: the immutable per-capability catalogs
 //! (`registered_carrier_projection::built_in_frontend_catalog` and
-//! friends) production selectors dispatch through. Vue is the reference
-//! implementation ([`vue_bridge::VueCarrierCompiler`]), delegating
-//! call-for-call to the existing Vue pipeline with ZERO edits to any Vue
-//! parser/codegen module.
+//! friends) production selectors dispatch through.
+//! [`vue_bridge::VueCarrierCompiler`] exposes the equivalent typed
+//! capabilities as inherent methods, delegating call-for-call to the
+//! existing Vue pipeline with ZERO edits to any Vue parser/codegen
+//! module.
 
 pub mod capability;
 pub mod carrier_compiler;
@@ -50,7 +50,7 @@ pub use capability::{
     ProductExecutionGrant, ProductExecutionGrants, ProjectionBackend, RuntimeCompilerBackend,
 };
 pub use carrier_compiler::{
-    CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
+    CarrierCompileOutcome, CompileUnsupported, IdeCompileOptions, IdeOutput,
     RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
     RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
     RuntimeMainModule, RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock,

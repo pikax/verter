@@ -18,10 +18,10 @@ pub enum ProviderPathKind {
 
 /// A provider path kind that is NEVER a declaration overlay (`Decl`).
 ///
-/// The generic stale-path closers (`background_drain::close_stale_provider_paths`,
-/// `sync_coordinator::close_stale_paths`, `workspace_scanner::close_stale_paths`)
-/// consume THIS kind, not [`ProviderPathKind`], so the type system FORBIDS them from
-/// naming — and therefore from issuing a raw `close_dts` against — a `Decl` overlay.
+/// The generic stale-path close operation ([`close_stale_provider_path`] and its
+/// slice form [`close_stale_provider_paths`]) consumes THIS kind, not
+/// [`ProviderPathKind`], so the type system FORBIDS it from naming — and therefore
+/// from issuing a raw `close_dts` against — a `Decl` overlay.
 /// A declaration overlay is closed ONLY through the declaration-overlay lifecycle
 /// owner (`DeclOverlayOwner`), which serializes the close against any concurrent
 /// open of the same overlay. This makes the "stray unguarded Decl close" class a
@@ -75,6 +75,74 @@ pub fn non_decl_close_targets(
             NonDeclProviderPathKind::from_provider_path_kind(*kind).map(|k| (k, path.clone()))
         })
         .collect()
+}
+
+/// Close ONE stale non-decl provider surface: retire its active generation, issue
+/// the per-kind provider close, and finalize the retire only on a CONFIRMED close.
+///
+/// This is the single implementation of the stale-close operation. Every caller
+/// that retires a store-backed provider surface — the background drain, the sync
+/// coordinator, the workspace scanner, the server's own `close_provider_paths`,
+/// and the interactive IDE sync's post-commit close of a superseded IDE path —
+/// routes through it, so the forget/close/finalize ordering exists in exactly one
+/// place.
+///
+/// Ordering and failure semantics (why the three steps cannot be reordered or
+/// split):
+///
+/// - **Forget BEFORE dispatch.** EVERY closing store-backed surface (IDE / API /
+///   Shadow) stops being the active synced virtual surface the moment the close is
+///   decided, so its active generation is retired first, under a fresh close
+///   EPOCH. In-flight captures stay valid (snapshots are historical), and the
+///   `Closing` state keeps the path failing closed until the provider close is
+///   CONFIRMED. Retiring only the `Api` role would leave a closed IDE / Shadow
+///   surface `Current` — capturable by an interactive query against a CLOSED
+///   provider buffer.
+/// - **Finalize only on a confirmed close, and only via THIS close's token.** A
+///   reopen (or a newer close) during the await makes the epoch mismatch, so the
+///   finalize is a no-op and the fresh snapshot survives.
+/// - **An error drops the token**, leaving the `Closing` state in place — fail
+///   closed for a path whose provider surface may still be live.
+///
+/// A declaration overlay (`Decl`) is unrepresentable in [`NonDeclProviderPathKind`]:
+/// its lifecycle is owned by `DeclOverlayOwner`, never this generic close.
+///
+/// `context` names the caller in the close-failure log, so a failed close stays
+/// attributable to the path that issued it.
+pub async fn close_stale_provider_path(
+    sync: &crate::type_provider::project_sync::ProjectSync,
+    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
+    kind: NonDeclProviderPathKind,
+    path: &str,
+    context: &str,
+) {
+    let close_token = provider_surfaces.forget(path);
+    let result = match kind {
+        NonDeclProviderPathKind::Ide => sync.close_tsx(path).await,
+        NonDeclProviderPathKind::Api => sync.close_dts(path).await,
+        NonDeclProviderPathKind::Shadow => sync.close_file(path).await,
+    };
+    match result {
+        Ok(()) => {
+            provider_surfaces.finalize_close(close_token);
+        }
+        Err(error) => {
+            tracing::warn!("{context}: failed to close stale provider path {path}: {error}");
+        }
+    }
+}
+
+/// Close every stale non-decl provider surface in `stale_paths`, in order, through
+/// [`close_stale_provider_path`].
+pub async fn close_stale_provider_paths(
+    sync: &crate::type_provider::project_sync::ProjectSync,
+    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
+    stale_paths: &[(NonDeclProviderPathKind, String)],
+    context: &str,
+) {
+    for (kind, path) in stale_paths {
+        close_stale_provider_path(sync, provider_surfaces, *kind, path, context).await;
+    }
 }
 
 /// The identity of an API companion's DECLARATIONS — the surface an importer's

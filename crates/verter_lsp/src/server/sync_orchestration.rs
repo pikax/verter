@@ -1877,26 +1877,14 @@ impl VerterLanguageServer {
                     .as_ref()
                     .filter(|path| !owned_commit_superseded && path.as_str() != ide_path.as_str())
                 {
-                    // Retire the stale path's recorded surface under a close
-                    // EPOCH (a `Current` surface for a closed buffer would stay
-                    // capturable); finalize only on a CONFIRMED close.
-                    let close_token = self
-                        .documents
-                        .provider_surfaces()
-                        .forget(stale_ide_path.as_str());
-                    match sync.close_tsx(stale_ide_path).await {
-                        Ok(()) => {
-                            self.documents
-                                .provider_surfaces()
-                                .finalize_close(close_token);
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                "ensure_current_file_synced: failed to close stale IDE path {}: {error}",
-                                stale_ide_path
-                            );
-                        }
-                    }
+                    crate::provider_sync::close_stale_provider_path(
+                        sync,
+                        self.documents.provider_surfaces(),
+                        crate::provider_sync::NonDeclProviderPathKind::Ide,
+                        stale_ide_path,
+                        "ensure_current_file_synced",
+                    )
+                    .await;
                 }
 
                 if unresolved {

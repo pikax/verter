@@ -17,6 +17,7 @@ use super::*;
 
 #[path = "background_drain_owner_loss.rs"]
 mod owner_loss;
+use crate::provider_sync::close_stale_provider_paths;
 use owner_loss::{reconcile_unowned_carrier_buffer, reconcile_unowned_carrier_provider_file};
 
 /// Outcome of a single pending-file provider-sync pass, used by the drain loop
@@ -1501,44 +1502,6 @@ pub(super) async fn sync_pending_non_carrier_provider_file(
                 prepared.provider_path
             );
             false
-        }
-    }
-}
-
-pub(super) async fn close_stale_provider_paths(
-    sync: &ProjectSync,
-    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
-    stale_paths: &[(NonDeclProviderPathKind, String)],
-    context: &str,
-) {
-    for (kind, path) in stale_paths {
-        // EVERY closing store-backed surface (IDE / API / Shadow) is no longer
-        // the active synced virtual surface — retire its active generation under
-        // a fresh close EPOCH (in-flight captures stay valid; the `Closing`
-        // state keeps the path failing closed until the provider close is
-        // CONFIRMED). Retiring only the API role would leave a closed IDE /
-        // Shadow surface `Current` — capturable by an interactive query against
-        // a CLOSED provider buffer. Capture the epoch-stamped token so the
-        // finalize is scoped to THIS close.
-        let close_token = provider_surfaces.forget(path);
-        // A declaration overlay (`Decl`) is unrepresentable here — its lifecycle is
-        // owned by `DeclOverlayOwner`, never this generic close.
-        let result = match kind {
-            NonDeclProviderPathKind::Ide => sync.close_tsx(path).await,
-            NonDeclProviderPathKind::Api => sync.close_dts(path).await,
-            NonDeclProviderPathKind::Shadow => sync.close_file(path).await,
-        };
-        match result {
-            // Only a CONFIRMED close finalizes, and only via THIS close's token —
-            // a reopen (or newer close) during the await makes the epoch mismatch
-            // and the finalize a no-op (the fresh snapshot survives). An error
-            // drops the token, leaving the `Closing` state (fail closed).
-            Ok(()) => {
-                provider_surfaces.finalize_close(close_token);
-            }
-            Err(error) => {
-                tracing::warn!("{context}: failed to close stale provider path {path}: {error}");
-            }
         }
     }
 }

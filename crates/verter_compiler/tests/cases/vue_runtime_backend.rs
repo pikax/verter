@@ -15,8 +15,8 @@ use verter_compiler::compile_request::{
 };
 use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
 use verter_compiler::framework_common::{
-    vue_runtime_backend_registration, CarrierCompiler, CatalogCapability, CatalogRow,
-    FrameworkEpoch, FrameworkParseArtifact, ImmutableCapabilityCatalog, RuntimeBlockContentInput,
+    vue_runtime_backend_registration, CatalogCapability, CatalogRow, FrameworkEpoch,
+    FrameworkParseArtifact, ImmutableCapabilityCatalog, RuntimeBlockContentInput,
     RuntimeBlockContentInputs, RuntimeCompileOptions, RuntimeCompilerBackend, VueRuntimeBackend,
     VueRuntimeError, VueRuntimeExecutionFacts, VueRuntimeInputs, VueSfcV3,
 };

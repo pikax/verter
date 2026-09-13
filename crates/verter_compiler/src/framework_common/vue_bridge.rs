@@ -26,10 +26,10 @@ use crate::compile_request::{
     IdeProductRequest, VueBackendRequest, VueCompileRequest,
 };
 use crate::framework_common::carrier_compiler::{
-    CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
-    RuntimeCompileOptions, RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic,
-    RuntimeMainModule, RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock,
-    RuntimeTemplateBlock, SourceMapFidelity,
+    CarrierCompileOutcome, CompileUnsupported, IdeCompileOptions, IdeOutput, RuntimeCompileOptions,
+    RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic, RuntimeMainModule,
+    RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock, RuntimeTemplateBlock,
+    SourceMapFidelity,
 };
 use crate::framework_common::FrameworkParseArtifact;
 use verter_language::ParseOptions;
@@ -198,7 +198,7 @@ pub fn build_vue_parse_artifact(
     ))
 }
 
-/// The Vue carrier compiler — the reference [`CarrierCompiler`].
+/// The Vue carrier compiler — the reference typed carrier compiler.
 ///
 /// Delegates call-for-call to the existing Vue pipeline (`parse_sfc` +
 /// `compile_from_parsed`): it edits NO Vue parser or codegen module and
@@ -324,19 +324,25 @@ pub fn resolve_vue_backend_for_audit(
     Some(request.resolve_vue_backend(parsed.is_vapor()))
 }
 
-impl CarrierCompiler for VueCarrierCompiler {
-    fn adapter_id(&self) -> FrameworkAdapterId {
+impl VueCarrierCompiler {
+    /// The adapter identity this compiler answers to in the immutable
+    /// capability catalog.
+    #[must_use]
+    pub fn adapter_id(&self) -> FrameworkAdapterId {
         FrameworkAdapterId::vue()
     }
 
-    fn carrier_language_id(&self) -> LanguageId {
+    /// The carrier LANGUAGE id this compiler serves.
+    #[must_use]
+    pub fn carrier_language_id(&self) -> LanguageId {
         // The `.vue` SFC carrier language. A same-adapter non-carrier row
         // (e.g. an external Vue template) is NOT this language and is not
         // routed through the SFC parse path.
         LanguageId::new("vue")
     }
 
-    fn parse(
+    /// Parse carrier `source` into the framework-neutral artifact.
+    pub fn parse(
         &self,
         source: &str,
         opts: &ParseOptions,
@@ -374,7 +380,7 @@ impl CarrierCompiler for VueCarrierCompiler {
         Ok(build_vue_parse_artifact(source, parsed, opts))
     }
 
-    fn compile_ide(
+    pub fn compile_ide(
         &self,
         source: &str,
         artifact: &FrameworkParseArtifact,
@@ -414,7 +420,7 @@ impl CarrierCompiler for VueCarrierCompiler {
         .map(|companion| companion.ide)
     }
 
-    fn compile_bundle(
+    pub fn compile_bundle(
         &self,
         source: &str,
         artifact: &FrameworkParseArtifact,
@@ -433,8 +439,8 @@ impl CarrierCompiler for VueCarrierCompiler {
 
 /// The one Vue bundle orchestration over an admitted parse: ordered
 /// runtime, IDE-projection, and template-fact capability calls with shared
-/// prerequisites and deduplicated diagnostics. Shared by the compatibility
-/// [`CarrierCompiler::compile_bundle`] route and the Vue host-integration
+/// prerequisites and deduplicated diagnostics. Shared by
+/// [`VueCarrierCompiler::compile_bundle`] and the Vue host-integration
 /// backend so both drive the identical single-population pass.
 ///
 /// Every product-backend leg requires — and consumes — its own
@@ -904,7 +910,6 @@ fn exact_slice_source_map(source: &str, source_start: u32, output: &str) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::framework_common::carrier_compiler::CompileBundleProducedExt;
     use crate::framework_common::{
         carrier_compiler::OutputSourceSpaceKind, FrameworkSemanticAuthority,
         RuntimeBlockContentInput, RuntimeBlockContentInputs,
@@ -914,6 +919,40 @@ mod tests {
     use std::process::Command;
     use verter_css_syntax::CssDialect;
     use verter_language::{ExternalLinkKind, ScriptRegionKind};
+
+    /// Test-only convenience over [`VueCarrierCompiler::compile_bundle`] for
+    /// fixtures whose carrier is known to PRODUCE.
+    ///
+    /// Deliberately test-only: production code matches the outcome
+    /// exhaustively, so a refusal can never be unwrapped into "some bundle"
+    /// there. A test that is ABOUT the refusal calls `compile_bundle`
+    /// directly and matches the arm.
+    trait VueCompileBundleProducedExt {
+        fn compile_bundle_expect_produced(
+            &self,
+            source: &str,
+            artifact: &FrameworkParseArtifact,
+            opts: &RuntimeCompileOptions,
+            alloc: &oxc_allocator::Allocator,
+        ) -> Result<RuntimeCompileOutput, CompileUnsupported>;
+    }
+
+    impl VueCompileBundleProducedExt for VueCarrierCompiler {
+        fn compile_bundle_expect_produced(
+            &self,
+            source: &str,
+            artifact: &FrameworkParseArtifact,
+            opts: &RuntimeCompileOptions,
+            alloc: &oxc_allocator::Allocator,
+        ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
+            self.compile_bundle(source, artifact, opts, alloc)
+                .map(|outcome| {
+                    outcome
+                        .into_produced()
+                        .expect("this fixture's carrier produces a runtime surface")
+                })
+        }
+    }
 
     /// Stand in for the host's identity for the tool that produced the bytes
     /// these tests supply.
@@ -2912,7 +2951,7 @@ mod tests {
         assert!(artifact.diagnostics().is_empty());
     }
 
-    // ── Vue CarrierCompiler impl ───────────────────────────────────
+    // ── Vue carrier compiler inherent methods ───────────────────────
 
     #[test]
     fn vue_compiler_parse_stamps_the_parse_key_and_vue_identity() {

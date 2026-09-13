@@ -385,14 +385,13 @@ Verified per file (not by filename) rather than assumed:
 
 | file | verdict | why |
 |---|---|---|
-| `architecture_guards.rs` | **kept in `verter_session`** | one `#[test]` (`foundations_guards::external_corpus_paths_not_present_outside_gated_tests`) is bound by name into `typeinfo_ignored_test_manifest.rs`'s `live_guard!` registry, which requires the bound test to run in the SAME binary the canonical gates execute; the file's `foundations_guards`/`w5f_test_archaeology`/`general_test_archaeology`/`packages_ts_archaeology` submodules also share internal helper functions across that boundary. Relocating it needs a scoped design decision (repoint the one binding, or prove the "same binary" invariant can relax), not a same-session mechanical move. |
+| `architecture_guards.rs` | **kept in `verter_session`** | one `#[test]` (`foundations_guards::external_corpus_paths_not_present_outside_gated_tests`) is bound by name into `typeinfo_ignored_test_manifest.rs`'s `live_guard!` registry, which requires the bound test to run in the SAME binary the canonical gates execute; the file's `foundations_guards` submodule also shares internal helper functions across that boundary. Relocating it needs a scoped design decision (repoint the one binding, or prove the "same binary" invariant can relax), not a same-session mechanical move. |
 | `output_projector_residual_guards.rs` | moved | pure scan plus a check against `verter_session`'s public API (sealed `TypeExpr`/`NoTypeExpr` capability fence) — never runs it |
 | `whole_env_consumer_graph_native_inventory.rs` | moved | pure `syn`/`walkdir` scan of `verter_session`'s `src/` |
 | `residual_type_expr_body_reader_inventory.rs` | moved | pure `syn`/`walkdir` scan |
 | `handle_capable_consumer_guards.rs` | moved | pure `syn`/`walkdir` scan (reads sibling `verter_session` test files that stayed behind, e.g. `architecture_guards.rs`) |
 | `tracked_paths_are_portable.rs` | moved | scan plus a check against `verter_session`'s public API (`framework::descriptor` registry) — never runs it |
 | `scanners_replacement.rs` | moved | pure JSON/schema scan |
-| `tracked_paths_no_machine_roots.rs` | moved | pure `git ls-files` scan |
 | `framework_known_bug_manifest.rs` | moved | pure `syn` scan |
 | `svelte_typecheck_gate.rs` | kept | drives a real `tsc.js` subprocess — not a scan |
 | `vue_macro_tsc_typecheck_gate.rs` | kept | drives a real `tsc.js` subprocess — not a scan |
@@ -424,12 +423,13 @@ distinct `own_crate_root()` helper — the two must not be conflated.
 Verified: `cargo test -p verter_source_policy_gate` (180/180 passing,
 non-vacuous — several tests assert the production scan found real production
 matches, not an empty/mocked tree), plus
-`cargo test -p verter_session --test main -- cases::typeinfo_ignored_test_manifest cases::g_misc0::critical_rules_have_guards cases::architecture_guards cases::integration_test_layout_guard`
+`cargo test -p verter_session --test main -- cases::typeinfo_ignored_test_manifest cases::g_misc0::critical_rules_have_guards cases::architecture_guards`
 (318/319, 1 pre-existing `#[ignore]`, 0 failed) — covering the R6 registry
-scanner (finds the moved guard names at their new path), the `live_guard!`
+scanner (finds the moved guard names at their new path) and the `live_guard!`
 binary-identity binding (still resolves — `architecture_guards.rs` stayed
-put), and the anti-binary-growth layout guard (the new crate needs no
-allowlist entry).
+put). That run also exercised `cases::integration_test_layout_guard`, the
+since-retired Rust mirror of the anti-binary-growth layout check, which now
+lives solely in `scripts/check-integration-test-layout.mjs`.
 
 The non-blocking oversize-source-line advisory (scan of `crates/*/src` for
 files over 1,500 lines) used to run synchronously before the mutex

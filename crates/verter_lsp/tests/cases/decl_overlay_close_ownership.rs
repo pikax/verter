@@ -9,8 +9,9 @@
 //! strand an open carrier root's bare import on TS2307) and a closed root can never
 //! resurrect an overlay no live root reaches.
 //!
-//! The generic stale-path closers (`background_drain::close_stale_provider_paths`,
-//! `sync_coordinator::close_stale_paths`, `workspace_scanner::close_stale_paths`)
+//! The generic stale-path close operation
+//! (`provider_sync::close_stale_provider_path` and its slice form
+//! `provider_sync::close_stale_provider_paths`)
 //! and the provider-state close dispatch must NEVER issue a raw `close_dts` for a
 //! `Decl`-classified path. The type split (`NonDeclProviderPathKind`) already makes
 //! that a compile-time impossibility at the generic closers; THIS guard is the
@@ -28,9 +29,10 @@
 //! before it: a close governed by a non-`Decl` kind (`Api`/`Ide`/`Shadow`) serves a
 //! non-Decl arm and is safe; a close governed by `ProviderPathKind::Decl` (or
 //! reachable from a `Decl` classification with no nearer non-`Decl` kind) is the
-//! footgun. The single SAFE outside-owner shape is
-//! `provider_state::close_provider_paths`, whose `Decl` arm DELEGATES to
-//! `guarded_close` and whose only raw `close_dts` is on the non-`Decl` `Api` arm.
+//! footgun. Outside the owner, `provider_state::close_provider_paths` DELEGATES its
+//! `Decl` arm to `guarded_close` and hands every other kind to the generic
+//! stale-path close; the only outside-owner raw `close_dts` is that operation's
+//! `Api` arm, whose `NonDeclProviderPathKind` input cannot name a `Decl` path.
 //!
 //! The sanctioned delegation is the `guarded_close(` CALL ITSELF — and that call is
 //! not a raw `close_dts(`. A delegation grants NO blanket exemption to any other raw
@@ -39,7 +41,7 @@
 //! also raw-closes is flagged on the stray close, and a function that delegates in
 //! one branch but strays in another is flagged on the stray branch. The lone safe
 //! pairing is a raw close fenced to a more-recent non-`Decl` kind (the `Api` arm of
-//! the delegating dispatch).
+//! the generic stale-path close's per-kind dispatch).
 //!
 //! Discriminates: against a tree where any non-owner function issues a raw
 //! `close_dts(` reachable from a `ProviderPathKind::Decl` classification (and not
@@ -376,8 +378,8 @@ fn function_bodies(code: &str) -> Vec<(usize, String)> {
 }
 
 /// The non-`Decl` provider-path-kind discriminants — the kinds a raw `close_dts`
-/// may legitimately serve outside the owner (the generic non-Decl closers and the
-/// `Api`/`Ide`/`Shadow` arms of the provider-state close dispatch).
+/// may legitimately serve outside the owner (the `Api`/`Ide`/`Shadow` arms of the
+/// generic stale-path close's per-kind dispatch).
 const NON_DECL_KIND_TOKENS: &[&str] = &[
     "ProviderPathKind::Api",
     "ProviderPathKind::Ide",
@@ -388,10 +390,12 @@ const NON_DECL_KIND_TOKENS: &[&str] = &[
 /// provider `close_dts(` call that is REACHABLE from a `ProviderPathKind::Decl`
 /// classification WITHOUT routing through the lifecycle owner's serialized
 /// [`guarded_close`]. The owner is the sole authority that pairs `Decl` with a
-/// `close_dts`; outside it the ONLY safe pairing is a `Decl` branch that DELEGATES
-/// to `guarded_close` while its raw `close_dts` sits on a NON-`Decl` arm (e.g.
-/// `provider_state::close_provider_paths`, whose `Api` arm closes directly and whose
-/// `Decl` arm is `unreachable!`, delegated above).
+/// `close_dts`; outside it the ONLY safe pairing is a raw `close_dts` fenced to a
+/// NON-`Decl` arm — whether or not the same function also delegates a `Decl` branch
+/// to `guarded_close` (in production the two are split: `provider_state`'s dispatch
+/// delegates `Decl` and raw-closes nothing, and the raw close lives one level down in
+/// the generic stale-path close, whose `Api` arm closes directly and whose input
+/// kind cannot name a `Decl` path at all).
 ///
 /// Detection is PER CALL SITE, over the CODE-ONLY view (comments + strings blanked),
 /// so the footgun is caught no matter how the tokens are separated and the word
@@ -400,7 +404,7 @@ const NON_DECL_KIND_TOKENS: &[&str] = &[
 /// `ProviderPathKind::…` token textually BEFORE the call within the same function:
 ///
 ///   * nearest governing kind is a NON-`Decl` kind (`Api`/`Ide`/`Shadow`) → the
-///     close serves a non-Decl arm → SAFE (this is the `close_provider_paths` shape);
+///     close serves a non-Decl arm → SAFE (the generic stale-path close's shape);
 ///   * nearest governing kind is `ProviderPathKind::Decl` → a raw close on a `Decl`
 ///     control path → OFFENSE (a preceding `guarded_close(` delegation does not
 ///     exempt it — see below);
@@ -512,13 +516,18 @@ fn no_stray_declaration_overlay_close_outside_the_lifecycle_owner() {
 // string or nested comment desyncing the code-only scan.
 // ---------------------------------------------------------------------------
 
-/// The legitimate delegation shape (`provider_state::close_provider_paths`): the
-/// `Decl` arm DELEGATES through `guarded_close`, and the only raw `close_dts` is on
-/// the non-`Decl` `Api` arm. MUST NOT be flagged.
+/// A legitimate shape the detector must tolerate: ONE function whose `Decl` arm
+/// DELEGATES through `guarded_close` while its only raw `close_dts` sits on the
+/// non-`Decl` `Api` arm. Production splits these two halves across the provider-state
+/// dispatch and the generic stale-path close, so this fused form is a synthetic
+/// detector-capability case, not a mirror of a live function — it is the hardest
+/// safe shape to classify (delegation and raw close in one brace-matched region) and
+/// the one a coarser `guarded_close`-substring rule would misjudge in either
+/// direction. MUST NOT be flagged.
 #[test]
 fn safe_decl_delegation_with_non_decl_raw_close_is_not_flagged() {
     let src = r#"
-        async fn close_provider_paths(&self, paths: &[(ProviderPathKind, String)]) {
+        async fn delegate_decl_then_close_non_decl(&self, paths: &[(ProviderPathKind, String)]) {
             for (kind, path) in paths {
                 if *kind == ProviderPathKind::Decl {
                     let target = self.decl_overlay_owner.close_target_for(path);

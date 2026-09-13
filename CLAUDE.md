@@ -261,9 +261,7 @@ The codebase MUST build, test, and materialize on macOS, Windows, AND Linux. Pla
 
 Guard-enforced — `tracked_paths_are_portable` (`crates/verter_source_policy_gate/tests/cases/tracked_paths_are_portable.rs`) enumerates `git ls-files -z` and enforces: valid UTF-8; no NTFS-illegal characters (`< > : " | ? * \` plus control chars); no trailing dot or space; no reserved device basenames (`CON`/`PRN`/`AUX`/`NUL`/`COM1`–`COM9`/`LPT1`–`LPT9`, with or without extension, plus `CONIN$`/`CONOUT$` — the `$`-suffixed forms only); no case-insensitive path collisions (lowercase-fold approximation of NTFS/APFS folding, not the exact filesystem fold tables); ≤200-byte relative paths.
 
-Portable content and exact authority evidence use two distinct guard rails. `tracked_paths_no_machine_roots` (`crates/verter_source_policy_gate/tests/cases/tracked_paths_no_machine_roots.rs`) still reads and scans every tracked file's raw bytes for its closed set of known machine-root markers. Build/test/runtime inputs, generated output, source, fixtures, and portable documentation fail on any hit. Exact, already-ratified authority evidence may retain the environment where it was produced only through `scripts/manifests/portability-machine-marker-evidence-exceptions.tsv`: exact repository path, exact worktree SHA-256, an existing pin document containing that digest, a permitted evidence/ruling root, and an exact historical Git-object pin are all required. There is no directory, suffix, basename, glob, or generic `docs`/`evidence` exemption, and stale rows fail in either direction.
-
-Future machine-bound raw logs default to external digest-bound bundles. Do not commit a new raw log and grow the exception manifest merely for convenience; keep the raw bundle external and commit only the portable ruling/summary plus its exact digest unless a new architecture act explicitly authorizes in-tree evidence.
+Future machine-bound raw logs (benchmarks, traces, heap profiles) stay out of the tracked tree; commit only the portable ruling/summary plus its exact digest unless a new architecture act explicitly authorizes in-tree evidence.
 
 Review-enforced (the guard does not cover these):
 
@@ -273,15 +271,15 @@ Review-enforced (the guard does not cover these):
 - OS-specific binaries (`tsgo`, `.exe` suffixes) are discovered platform-aware, never via a hardcoded per-OS name.
 - Temp and cwd paths come from std abstractions, not literal paths.
 
-Guards: `tracked_paths_are_portable`, `tracked_files_contain_no_machine_specific_path_markers`, and the authority-evidence admission/liveness tests in `tracked_paths_no_machine_roots.rs`. Durable mechanism record: `docs/contributing/portability-fixed-marker-scanner-rulings.md`.
+Guard: `tracked_paths_are_portable`.
 
 ### Anti-Binary-Growth Integration-Test Layout (CRITICAL)
 
-Each crate exposes AT MOST one `tests/main.rs` integration-test binary; extra cases live under `tests/cases/` and are wired through `main.rs`. A second top-level `tests/*.rs` auto-becomes its own test binary and re-balloons the gate, so it is forbidden unless EXACTLY allowlisted. The only sanctioned exceptions are genuine "needs a separate test process" cases (process-global state that must be isolated): `verter_session` `allocator_canaries` (a counting `#[global_allocator]`), `verter_compiler` `allocator_canaries` (a separate counting `#[global_allocator]` for the style-pipeline allocation canaries), and `verter_lsp` `lsp_audit_trace_out_env_var` (a process-global env mutation). The allowlist (`scripts/integration-test-layout-allowlist.json`) is the single source of truth shared by both guards, is EXACT (package + target + repo-relative `src_path`, no globs/prefixes), and is STALE-FAILING — an allowlisted target that no longer exists in `cargo metadata` (or whose `src_path` moved) FAILS the guard.
+Each crate exposes AT MOST one `tests/main.rs` integration-test binary; extra cases live under `tests/cases/` and are wired through `main.rs`. A second top-level `tests/*.rs` auto-becomes its own test binary and re-balloons the gate, so it is forbidden unless EXACTLY allowlisted. The only sanctioned exceptions are genuine "needs a separate test process" cases (process-global state that must be isolated): `verter_session` `allocator_canaries` (a counting `#[global_allocator]`), `verter_compiler` `allocator_canaries` (a separate counting `#[global_allocator]` for the style-pipeline allocation canaries), and `verter_lsp` `lsp_audit_trace_out_env_var` (a process-global env mutation). The allowlist (`scripts/integration-test-layout-allowlist.json`) is the single source of truth, is EXACT (package + target + repo-relative `src_path`, no globs/prefixes), and is STALE-FAILING — an allowlisted target that no longer exists in `cargo metadata` (or whose `src_path` moved) FAILS the guard.
 
-Dual guard: the fast-fail CI Node check `scripts/check-integration-test-layout.mjs` (runs before the Rust gate) and the in-gate Rust mirror (`crates/verter_session/tests/cases/integration_test_layout_guard.rs`), both reading the same allowlist.
+Single implementation: `scripts/check-integration-test-layout.mjs` (drives `cargo metadata`), invoked once per owning context — by CI's `rust-test-build` job before building the test archive, and by the local canonical gate (`scripts/gate.mjs`) as a front-half preflight. The former in-gate Rust mirror was retired with its unique cases preserved in `scripts/check-integration-test-layout.test.mjs`.
 
-Guards: `integration_test_layout_is_consolidated`, `layout_checker_discriminates_stray_and_stale`, `allowlist_is_the_known_standalone_targets`.
+Guards: the script's live workspace run, plus its self-test's `computeFailures` discrimination fixtures and the committed-allowlist exact pin.
 
 ### Framework Adapter Substrate (CRITICAL)
 
@@ -509,7 +507,7 @@ Name the durable invariant or regression boundary instead: what input fails, wha
 
 A code or test comment may cite a GitHub issue only when it records a specific independently reported product defect that is outside the DAG-controlled `[[github_issue]]` mappings. The comment must still state the durable behavior; the issue reference is supplemental. Never cite a DAG-managed issue, PR, node, or charter as code/test rationale, because the DAG coordinates implementation rather than defining the defect.
 
-The architecture guard `no_phase_archaeology_in_production_code` enforces the production-source subset on `crates/*/src/**`. Implementer and reviewer policy applies the broader rule to tests and non-Rust code as well.
+This rule is implementer- and reviewer-enforced across production source, tests, and non-Rust code. It carries no runtime source scanner: a guard that detected roadmap vocabulary would itself be the name-keyed source scanner the landed-guard policy above forbids.
 
 See `/testing` skill for full TS/Rust test patterns, sourcemap testing, and server cleanup.
 

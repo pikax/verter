@@ -1289,3 +1289,66 @@ fn provider_script_language_skips_framework_carriers() {
     assert_eq!(provider_script_language(&host, "/x/Box.svelte"), None);
     assert_eq!(provider_script_language(&host, "/x/App.vue"), None);
 }
+
+/// A provider close that FAILS must leave the retired surface in the `Closing`
+/// (tombstoned) state — never finalized back to fully-unknown. `forget` already
+/// retired the active generation, so the path must keep failing closed: its
+/// provider buffer may still be live, and a finalize would make a genuinely
+/// same-named real file classify `NotVirtual` and be edited in place.
+///
+/// Discriminating: it records a `Current` `Api` surface, makes every provider
+/// file-op fail, and drives the shared stale close. A close that finalized
+/// unconditionally (or finalized before awaiting the provider) would leave the
+/// path neither `Current` nor `Closing` and FAIL both assertions; the
+/// error-drops-the-token path keeps it `Closing`.
+#[tokio::test]
+async fn a_failed_provider_close_leaves_the_surface_closing_not_finalized() {
+    use crate::provider_surface_store::{ProviderSurfaceStore, RecordSurface};
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::project_sync::ProjectSync;
+    use crate::ProjectSyncMode;
+    use std::sync::Arc as StdArc;
+
+    let mock = MockTypeProvider::new();
+    let sync = ProjectSync::new(StdArc::new(mock.clone()), ProjectSyncMode::FullProject);
+    let provider_surfaces = ProviderSurfaceStore::new();
+
+    let api_path = "/workspace/src/Child.vue.ts";
+    provider_surfaces.record(RecordSurface::carrier_api_legacy(
+        api_path.to_string(),
+        "/workspace/src/Child.vue".to_string(),
+        StdArc::from("declare const Child: { new(props?: { foo: string }): {} }"),
+        None,
+        StdArc::from("<script setup lang=\"ts\">\ndefineProps<{ foo: string }>();\n</script>\n"),
+    ));
+    assert!(
+        provider_surfaces.is_tracked(api_path),
+        "precondition: the recorded API surface is Current before the close"
+    );
+
+    // The provider close errors.
+    mock.set_fail_file_ops(true);
+    close_stale_provider_path(
+        &sync,
+        &provider_surfaces,
+        NonDeclProviderPathKind::Api,
+        api_path,
+        "failed_close_test",
+    )
+    .await;
+
+    assert!(
+        !provider_surfaces.is_tracked(api_path),
+        "the retired generation must NOT be vouched as Current after a close attempt"
+    );
+    assert!(
+        provider_surfaces.is_tombstoned(api_path),
+        "a FAILED provider close must leave the path Closing (fail closed) — finalizing \
+         would let a real same-named file be edited in place while the provider buffer \
+         may still be live"
+    );
+    assert!(
+        provider_surfaces.is_known_virtual_surface(api_path),
+        "a Closing path stays a KNOWN virtual surface until its close is confirmed"
+    );
+}

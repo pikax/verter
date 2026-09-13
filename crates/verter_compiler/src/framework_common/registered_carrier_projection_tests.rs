@@ -1201,7 +1201,7 @@ fn fixture_registry_rejects_without_panic_when_known_projector_is_absent() {
 
 // Parse selection is catalog-typed (`parse_registered_frontend` /
 // `InstalledCarrierFrontend`). Geometry after parse still matches the
-// closed `KnownRegisteredCompiler` enum — not `&dyn CarrierCompiler`.
+// closed `KnownRegisteredCompiler` enum — not dyn dispatch.
 
 // ── FL2-E TE-C-12 / T-B1-D03: Svelte style dialect derives from `lang` ──
 

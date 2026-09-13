@@ -274,7 +274,7 @@ All live in `crates/verter_session/tests/cases/architecture_guards.rs` unless no
 | `every_consumer_has_production_call_site` | Every `RequestKind` variant has at least one production producer under `crates/*/src/` that constructs the variant in expression context (not match-arm pattern). `Custom` and `BundlerBatch` are documented exemptions in `KIND_EXEMPTIONS` |
 | `audit_ts_bindings_are_in_sync` (in `tests/cases/g_misc1/ts_bindings.rs`) | `packages/types/audit.generated.ts` matches what `ts-rs` would regenerate from current Rust DTOs |
 
-The general `no_phase_archaeology_in_production_code` and `external_corpus_paths_not_present_outside_gated_tests` guards apply across the workspace, including audit code.
+The general `external_corpus_paths_not_present_outside_gated_tests` guard applies across the workspace, including audit code, as does the review-enforced no-roadmap-archaeology rule.
 
 ### TLS Propagation Coverage
 

@@ -19,8 +19,7 @@ use super::capability::{
     CarrierFrontend, FrameworkEpochId, FrameworkSemanticAuthority, ProjectionBackend,
 };
 use super::carrier_compiler::{
-    CarrierCompiler, CompileUnsupported, RuntimeBlockContentInputs, RuntimeDiagnostic,
-    RuntimeDiagnosticSeverity,
+    CompileUnsupported, RuntimeBlockContentInputs, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
 };
 use super::catalog::{CatalogCapability, CatalogRow, ImmutableCapabilityCatalog};
 use super::vue_bridge::VueCarrierCompiler;
@@ -360,35 +359,6 @@ fn parse_options_for_accepted(accepted: &AcceptedRegisteredCarrierSource) -> Par
 }
 
 #[cfg(test)]
-pub(crate) fn registered_artifact_for_tests(
-    artifact: &Arc<UnregisteredFrameworkParseArtifact>,
-    inventory: Arc<CarrierBlockInventory>,
-    carrier: Arc<dyn CarrierParse>,
-) -> Arc<FrameworkParseArtifact> {
-    let carrier_structure_hash = compute_carrier_structure_hash(&inventory);
-    let epoch = frontend_epoch(&artifact.adapter_id, &artifact.language_id)
-        .unwrap_or_else(|| FrameworkEpochId::new(artifact.adapter_id.as_str()));
-    Arc::new(FrameworkParseArtifact {
-        adapter_id: artifact.adapter_id.clone(),
-        language_id: artifact.language_id.clone(),
-        epoch,
-        parse_key: Arc::clone(&artifact.parse_key),
-        syntax_profile: Arc::clone(&artifact.syntax_profile),
-        common: FrameworkParseCommon {
-            inventory,
-            diagnostics: artifact.diagnostics.clone(),
-        },
-        carrier_structure_hash,
-        carrier: RegisteredCarrierPayload::new(
-            carrier,
-            artifact.adapter_id.clone(),
-            artifact.language_id.clone(),
-        ),
-        _geometry: super::registered_geometry_state::RegisteredGeometry { _private: () },
-    })
-}
-
-#[cfg(test)]
 pub(crate) fn parse_registered_source_for_tests(
     language: verter_language::FileLanguage,
     config: CarrierGrammarConfig,
@@ -543,8 +513,8 @@ impl RegisteredCarrierProjection {
 /// The registered compilers this crate knows how to project — a closed,
 /// exhaustive dispatch set for the registered-projection path.
 ///
-/// There is no external `&dyn CarrierCompiler` entry point into registered
-/// projection: a bogus third-party `CarrierCompiler` implementation cannot
+/// There is no external dyn-dispatch entry point into registered
+/// projection: a bogus third-party carrier compiler cannot
 /// reach a projection arm at all, because it is not a variant of this
 /// enum — the match below is exhaustive by construction, with no
 /// wildcard arm and no `unreachable!()`.

@@ -622,9 +622,8 @@ mod tests {
         )
     }
 
-    /// Test-only convenience for fixtures whose carrier is known to PRODUCE —
-    /// mirrors the crate's `CompileBundleProducedExt`, over the free
-    /// [`compile_bundle_direct`] rather than a `CarrierCompiler` impl.
+    /// Test-only convenience for fixtures whose carrier is known to
+    /// PRODUCE, over the free [`compile_bundle_direct`].
     fn compile_bundle_expect_produced(
         source: &str,
         artifact: &FrameworkParseArtifact,

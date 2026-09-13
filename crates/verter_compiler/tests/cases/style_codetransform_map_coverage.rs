@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use oxc_allocator::Allocator;
 use verter_compiler::framework_common::carrier_compiler::{
-    CarrierCompiler, RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
+    RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
 };
 use verter_compiler::framework_common::registered_carrier_projection::project_registered_accepted;
 use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
@@ -498,7 +498,7 @@ fn registered_artifact(canonical: &str, source: &str) -> FrameworkParseArtifact 
 }
 
 /// The GENUINE option-off/on A/B proof, driven through the real public entry point the toggle
-/// actually reaches: `CarrierCompiler::compile_bundle`'s `RuntimeCompileOptions.source_map`
+/// actually reaches: `VueCarrierCompiler::compile_bundle`'s `RuntimeCompileOptions.source_map`
 /// field (`vue_bridge.rs`), with a SUPPLIED external style block (`<style src="...">`) — the
 /// only style shape `compile_bundle`'s own `opts.block_content.styles` override loop touches at
 /// all (an authored, non-`src` inline style compiles through a different internal path that

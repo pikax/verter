@@ -78,17 +78,6 @@ pub use crate::fact_signature_helpers::ReadSetSignature;
 /// directly.
 pub use crate::cache_runtime::singleflight::ComputeAdmission;
 
-/// Constructs `ComputeAdmission::Failed` for the
-/// `compute_admission_failed_variant_is_constructible` discriminator
-/// in `tests/cases/g_block/block_1_i_discriminators.rs`. The Failed variant is
-/// part of the three-variant contract for
-/// `cooperative_admit_with_post_publish`; this helper proves it is
-/// constructible so the variant cannot be silently dropped.
-pub fn cooperative_admission_failed_variant_for_tests(
-) -> crate::cache_runtime::singleflight::ComputeAdmission<(), ()> {
-    crate::cache_runtime::singleflight::ComputeAdmission::Failed
-}
-
 /// Fan `sig` into every active tracer on the current thread's TLS
 /// stack. Integration tests use this to verify that the multi-level
 /// fan-out delivers observations into all nested tracer scopes without

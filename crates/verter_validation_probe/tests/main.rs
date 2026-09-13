@@ -2,4 +2,6 @@
 
 mod cases {
     mod contract;
+    mod lane_contract;
+    mod workload_lane;
 }

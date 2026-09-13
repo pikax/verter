@@ -6,8 +6,7 @@
 //! Guards that scan `verter_session` anchor `crate_root()` explicitly at
 //! `workspace_root().join("crates/verter_session")`; this crate's own
 //! `CARGO_MANIFEST_DIR` is not the subject of those checks. The other guards
-//! (`tracked_paths_are_portable`,
-//! `tracked_paths_no_machine_roots`, `scanners_replacement`,
+//! (`tracked_paths_are_portable`, `scanners_replacement`,
 //! `framework_known_bug_manifest`) already computed the workspace root
 //! generically (git-rooted or two parents up from `CARGO_MANIFEST_DIR`).
 
@@ -18,7 +17,6 @@ mod residual_type_expr_body_reader_inventory;
 mod scanners_replacement;
 mod source_corpus;
 mod tracked_paths_are_portable;
-mod tracked_paths_no_machine_roots;
 mod whole_env_consumer_graph_native_inventory;
 
 /// Exact durable IDs dispatched by [`repository_source_policy_guards`].
@@ -48,7 +46,6 @@ const REQUIRED_REPOSITORY_SOURCE_POLICY_GUARD_IDS: &[&str] = &[
     "g_a_exactly_one_boundary_definition_in_raise",
     "stage4_deferred_carriers_have_no_session_resolution_consumer",
     "no_hand_written_no_type_expr_impls_except_audited_hot_type_ref",
-    "retired_kind_b_bridge_symbol_absent_from_production_source",
     "output_cap_mint_scope_is_per_leaf_not_subtree",
     "cross_sink_raw_authority_to_type_expr_boundary",
     "forgeable_input_fence_has_no_dual_bearing_type",

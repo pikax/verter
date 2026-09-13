@@ -44,7 +44,7 @@ use super::registered_carrier_projection::{
 use super::vue_bridge::{vue_carrier_bundle, VueCarrierCompiler};
 use super::vue_carrier_frontend::{VueCarrierFrontend, VueParseAdmission, VueSfcV3};
 use super::vue_semantic_authority::{VueSemanticAdmission, VueSemanticAuthority};
-use super::{CarrierCompiler, FrameworkParseArtifact};
+use super::FrameworkParseArtifact;
 
 /// Vue host-integration backend for the native host epoch.
 ///

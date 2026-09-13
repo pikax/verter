@@ -167,7 +167,7 @@ schema = 2
 "CPF0" = { status = "pending" }
 "CPF1" = { status = "pending" }
 "CVO0" = { status = "implemented", commit_message = "feat(*): add the validation-probe outcome taxonomy and probe-state manifest contract", commit_date = "2026-09-11T08:30:00+01:00", pull_request = 525 }
-"CVO1" = { status = "pending" }
+"CVO1" = { status = "implemented", commit_message = "feat(*): add the pinned vue-benchmarks external workload probe lane", commit_date = "2026-09-12T11:30:00+01:00" }
 "CVO1S" = { status = "pending" }
 "CVO2" = { status = "pending" }
 "CVO3" = { status = "pending" }
@@ -181,7 +181,7 @@ schema = 2
 "D3I" = { status = "implemented", commit_message = "feat(flowslice): complete stable binding identity", commit_date = "2026-09-05T11:21:01Z", pull_request = 503 }
 "D3P" = { status = "implemented", commit_message = "feat(session): flow product lattice substrate", commit_date = "2026-09-05T12:00:00+01:00" }
 "D3R" = { status = "implemented", commit_message = "feat(session): nominal relation authority for unique-symbol identity and comparability", commit_date = "2026-09-04T02:30:00+01:00" }
-"D4" = { status = "pending" }
+"D4" = { status = "implemented", commit_message = "fix(session): retire guard facts a clause rewrote and unmask case refinements", commit_date = "2026-09-12T16:30:00+01:00" }
 "D5" = { status = "implemented", commit_message = "feat(session): key closure capture obligations to the callback", commit_date = "2026-09-09T12:00:00+01:00", pull_request = 521 }
 "D6" = { status = "implemented", commit_message = "fix(session): close the flow-completion carrier set and end a divergent loop's normal path", commit_date = "2026-09-12T11:30:00+01:00", pull_request = 532 }
 "D7" = { status = "pending" }
@@ -387,7 +387,7 @@ schema = 2
 "SIMP6" = { status = "implemented", commit_message = "test(lsp): prove provider attach, admission and close ordering through real protocol traffic", commit_date = "2026-09-12T16:00:00+01:00" }
 "SIMP7" = { status = "implemented", commit_message = "perf(lsp): reuse one source index per provider response batch", commit_date = "2026-09-10T12:00:00+01:00" }
 "SIMP8" = { status = "implemented", commit_message = "refactor(lsp): give both provider transports one pending-request owner", commit_date = "2026-09-12T23:30:00+01:00" }
-"SIMP9" = { status = "pending" }
+"SIMP9" = { status = "implemented", commit_message = "refactor(lsp): close stale provider surfaces through one lifecycle operation", commit_date = "2026-09-12T22:20:00+01:00" }
 "SKL0" = { status = "pending" }
 "SKL1" = { status = "pending" }
 "SKL2" = { status = "pending" }

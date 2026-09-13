@@ -1,27 +1,22 @@
-//! Carrier-compiler trait and framework-neutral I/O.
+//! Framework-neutral carrier-compile I/O.
 //!
-//! One trait per carrier: parse, IDE codegen, runtime bundle.
-//! Vue is the reference (`vue_bridge::VueCarrierCompiler`). Eval-source
+//! Parse, IDE codegen, runtime bundle. Eval-source
 //! and template facts belong to
 //! [`super::capability::FrameworkSemanticAuthority`]. Script facts go
-//! through the host `ScriptFactProvider` seam — not this trait.
+//! through the host `ScriptFactProvider` seam — not this surface.
 //!
 //! Each adapter's IDE codegen owns its own
-//! [`crate::code_transform::CodeTransform`]. The trait does not thread
+//! [`crate::code_transform::CodeTransform`]. No entry here threads
 //! a borrowed transform (that would be a second, coarse map).
 
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
-use verter_language::{
-    FrameworkAdapterId, LanguageId, ParseOptions, SyntaxReject, UnregisteredFrameworkParseArtifact,
-};
-
-use super::FrameworkParseArtifact;
+use verter_language::FrameworkAdapterId;
 
 use crate::compile::types::{CompileDiagnosticSeverity, DestructuredBlockMeta};
 
-/// IDE-codegen options threaded into [`CarrierCompiler::compile_ide`].
+/// IDE-codegen options threaded into the carrier IDE-compile entry.
 ///
 /// The neutral subset the framework-neutral IDE seam needs: the file
 /// name (for component-name + source-map identity) and the IDE-only
@@ -41,7 +36,7 @@ pub struct IdeCompileOptions {
     pub block_content: RuntimeBlockContentInputs,
 }
 
-/// The rendered IDE (TSX/JSX) artifact a [`CarrierCompiler::compile_ide`]
+/// The rendered IDE (TSX/JSX) artifact a carrier IDE compile
 /// produces.
 ///
 /// Carries the codegen output verbatim from the adapter's own
@@ -352,8 +347,8 @@ pub enum CompileUnsupported {
 }
 
 /// The registry-dispatched routes' grant mint: the
-/// [`CarrierCompiler::compile_bundle`] / [`CarrierCompiler::compile_ide`]
-/// entries mint their leg grants directly from the neutral option demand
+/// `compile_bundle` / `compile_ide` entries mint their leg grants
+/// directly from the neutral option demand
 /// at the route boundary, because those routes carry no host-issued
 /// admission. Crate-private: an external caller reaches a product backend
 /// only through an admission carve, so grant minting authority never
@@ -377,7 +372,7 @@ pub(crate) fn registry_route_execution_grants(
     }
 }
 
-/// Runtime-codegen options threaded into [`CarrierCompiler::compile_bundle`].
+/// Runtime-codegen options threaded into the carrier runtime-bundle compile.
 ///
 /// The neutral, framework-shared subset of the host's compile profile a
 /// carrier consults to produce its executable module. Each carrier reads
@@ -746,7 +741,7 @@ pub struct RuntimeCustomBlock {
     pub content: String,
 }
 
-/// The neutral runtime bundle a [`CarrierCompiler::compile_bundle`] produces.
+/// The neutral runtime bundle a carrier runtime compile produces.
 ///
 /// NOT `VerterCompileResult` (which is Vue-shaped). It losslessly carries
 /// every field the host's runtime assembly + virtual-file population needs:
@@ -828,41 +823,6 @@ impl RuntimeCompileOutput {
     }
 }
 
-/// Test-only convenience over [`CarrierCompiler::compile_bundle`] for fixtures
-/// whose carrier is known to PRODUCE.
-///
-/// Deliberately test-only: production code matches the outcome exhaustively, so
-/// a refusal can never be unwrapped into "some bundle" there. A test that is
-/// ABOUT the refusal calls `compile_bundle` directly and matches the arm.
-#[cfg(test)]
-pub(crate) trait CompileBundleProducedExt {
-    fn compile_bundle_expect_produced(
-        &self,
-        source: &str,
-        artifact: &FrameworkParseArtifact,
-        opts: &RuntimeCompileOptions,
-        alloc: &oxc_allocator::Allocator,
-    ) -> Result<RuntimeCompileOutput, CompileUnsupported>;
-}
-
-#[cfg(test)]
-impl<T: CarrierCompiler + ?Sized> CompileBundleProducedExt for T {
-    fn compile_bundle_expect_produced(
-        &self,
-        source: &str,
-        artifact: &FrameworkParseArtifact,
-        opts: &RuntimeCompileOptions,
-        alloc: &oxc_allocator::Allocator,
-    ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
-        self.compile_bundle(source, artifact, opts, alloc)
-            .map(|outcome| {
-                outcome
-                    .into_produced()
-                    .expect("this fixture's carrier produces a runtime surface")
-            })
-    }
-}
-
 /// Why a carrier FAIL-CLOSED on the runtime surface a request asked for.
 ///
 /// The reason is carried STRUCTURALLY — a stable code plus its message and
@@ -922,309 +882,5 @@ impl CarrierCompileOutcome {
             Self::Produced(output) => Some(output),
             Self::RuntimeSurfaceRefused(_) => None,
         }
-    }
-}
-
-/// The compiler-side carrier framework trait.
-///
-/// One impl per carrier framework. The host's carrier dispatch reaches
-/// these operations through the [`super::registry`] lookup; Vue's impl
-/// (`vue_bridge::VueCarrierCompiler`) delegates to the existing Vue
-/// pipeline without editing any Vue parser/codegen module.
-pub trait CarrierCompiler: Send + Sync {
-    /// The adapter id this compiler answers to (the registry key).
-    fn adapter_id(&self) -> FrameworkAdapterId;
-
-    /// The carrier LANGUAGE id this compiler serves.
-    ///
-    /// One adapter may own several languages (a carrier file vs. an
-    /// external template); only the CARRIER language dispatches into this
-    /// compiler's parse path. The host's carrier dispatch validates a
-    /// file's resolved carrier language against this id so a same-adapter
-    /// non-carrier row (e.g. an external template) is NOT routed through
-    /// the SFC parse path.
-    fn carrier_language_id(&self) -> LanguageId;
-
-    /// Parse carrier `source` into the framework-neutral artifact.
-    ///
-    /// Recoverable malformed syntax is NOT a rejection: framework
-    /// tokenizers collect diagnostics inline, so ordinary malformed input
-    /// still returns `Ok` with the problem recorded on the artifact's
-    /// mapped diagnostic channel (`common.diagnostics` / the host's parse
-    /// channel). `Err(SyntaxReject)` is reserved for a request this
-    /// frontend cannot honor at all — an explicitly unsupported
-    /// parse-option combination, or a construction failure that is not
-    /// itself recoverable syntax — and is returned BEFORE any artifact is
-    /// constructed: nothing downstream publishes for a rejected request.
-    fn parse(
-        &self,
-        source: &str,
-        opts: &ParseOptions,
-    ) -> Result<Arc<UnregisteredFrameworkParseArtifact>, SyntaxReject>;
-
-    /// Generate the IDE (TSX/JSX) artifact for the carrier, or a typed
-    /// [`CompileUnsupported`].
-    ///
-    /// The adapter's IDE codegen owns its own `CodeTransform` (the
-    /// single-source-of-truth for generated-code edits) and returns the
-    /// rendered [`IdeOutput`] verbatim — no post-hoc string munging.
-    fn compile_ide(
-        &self,
-        source: &str,
-        artifact: &FrameworkParseArtifact,
-        opts: &IdeCompileOptions,
-    ) -> Result<IdeOutput, CompileUnsupported>;
-
-    /// Produce the framework-neutral RUNTIME bundle for the carrier.
-    ///
-    /// `artifact` MUST match `source` plus the parse-affecting options the
-    /// carrier requires (the same precondition the per-framework
-    /// pre-parsed compile entry requires today): the host owns the
-    /// cached-parse validity decision and hands over either the valid
-    /// cached artifact or a fresh carrier parse of the merged source.
-    ///
-    /// The carrier owns the typed downcast and native compile and returns a
-    /// [`CarrierCompileOutcome`]: either a neutral [`RuntimeCompileOutput`]
-    /// re-expressing every field the host's runtime assembly + virtual-file
-    /// population needs, or a product-free
-    /// [`RuntimeSurfaceRefusal`]. A carrier that cannot serve the
-    /// requested target AT ALL returns a typed [`CompileUnsupported`].
-    ///
-    /// The carrier produces exactly the products the request asked for: the
-    /// runtime module and its side-files under `want_runtime`, the IDE artifact
-    /// under `want_ide`. Template facts under `want_template_data` are filled
-    /// from the catalog semantic authority — `compile_bundle` does not
-    /// independently extract them. It attempts the runtime compile only under
-    /// `want_runtime`, so a request that did not ask for a runtime product can
-    /// never be refused one — and a request that IS refused publishes nothing
-    /// at all.
-    ///
-    /// The adapter's codegen owns its own `CodeTransform` (the single
-    /// source of truth for generated-code edits); the returned `code` /
-    /// `source_map` pairs are produced by that transform verbatim.
-    fn compile_bundle(
-        &self,
-        source: &str,
-        artifact: &FrameworkParseArtifact,
-        opts: &RuntimeCompileOptions,
-        alloc: &oxc_allocator::Allocator,
-    ) -> Result<CarrierCompileOutcome, CompileUnsupported>;
-}
-
-#[cfg(test)]
-mod contract_tests {
-    //! `CarrierCompiler` contract tests against a minimal in-tree TEST
-    //! carrier — the reusable contract harness every later carrier
-    //! vertical re-runs against its own compiler. The fixture is NOT Vue:
-    //! it pins the trait's framework-NEUTRAL contract (the eval-source
-    //! length + raw-offset invariant, the typed unsupported answer) with
-    //! no Vue coupling.
-
-    use super::*;
-    use std::any::Any;
-    use verter_language::{CarrierParse, FrameworkAdapterId, LanguageId};
-    use verter_span::Span;
-
-    /// A trivial carrier payload — the fixture's parse "result".
-    #[derive(Debug)]
-    struct FixtureCarrier;
-    impl CarrierParse for FixtureCarrier {
-        fn __verter_as_any(&self) -> &dyn Any {
-            self
-        }
-        fn __verter_as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
-            self
-        }
-    }
-
-    /// A minimal carrier compiler. Its `parse` records ONE script region
-    /// for the `@@...@@`-fenced run in the source (a stand-in for a
-    /// framework's script block); the rest is "markup" to be blanked.
-    struct FixtureCompiler;
-
-    impl FixtureCompiler {
-        const ADAPTER: &'static str = "fixture";
-
-        /// Find the byte range between the first `@@` opener and the next
-        /// `@@` closer, exclusive — the fixture's "script region".
-        fn script_span(source: &str) -> Option<Span> {
-            let open = source.find("@@")?;
-            let content_start = open + 2;
-            let close = source[content_start..].find("@@")? + content_start;
-            Some(Span::new(content_start as u32, close as u32))
-        }
-
-        fn inventory(source: &str) -> verter_language::CarrierBlockInventory {
-            use verter_language::parse_artifact::carrier_inventory::{
-                BlockId, CarrierBlock, CarrierBlockInventory, InternedNameId, MarkupSyntaxArena,
-                NormalizedNameTable, ScriptRole, ScriptSourceType as InventoryScriptSourceType,
-                SectionRole, SourceSlice, SourceSpaceDescriptor, SourceSpaceId, SourceSpan,
-                SyntaxTermination, TaggedSyntax,
-            };
-            use verter_language::registered_source_authority::{
-                CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
-            };
-
-            let authority = RegisteredSourceAuthority::new().expect("fixture source authority");
-            let registered = authority
-                .register_source(
-                    CanonicalFileId::new("fixture://carrier"),
-                    FileIncarnation::new(1),
-                    SourceGeneration::new(1),
-                    verter_language::FileLanguage::vue(),
-                    Arc::from(source),
-                )
-                .expect("fixture source registration");
-            let source_space = SourceSpaceId(0);
-            let blocks: Arc<[CarrierBlock]> = Self::script_span(source)
-                .map(|span| {
-                    let content = SourceSpan::new(source_space, span.start, span.end);
-                    let empty = SourceSpan::new(source_space, 0, 0);
-                    CarrierBlock::Section {
-                        id: BlockId(0),
-                        role: SectionRole::Script {
-                            role: ScriptRole::Module,
-                            dialect: InventoryScriptSourceType::TypeScript,
-                        },
-                        syntax: TaggedSyntax {
-                            authored_name: SourceSlice::new(empty),
-                            normalized_name: InternedNameId(0),
-                            opening_span: SourceSpan::new(source_space, 0, span.start),
-                            opening_name_span: empty,
-                            attribute_insertion_anchor: empty,
-                            content_span: content,
-                            closing_span: Some(SourceSpan::new(
-                                source_space,
-                                span.end,
-                                source.len() as u32,
-                            )),
-                            closing_name_span: Some(empty),
-                            full_span: SourceSpan::new(source_space, 0, source.len() as u32),
-                            termination: SyntaxTermination::Closed,
-                            attributes: Arc::default(),
-                        },
-                    }
-                })
-                .into_iter()
-                .collect::<Vec<_>>()
-                .into();
-            CarrierBlockInventory::new_registered(
-                Arc::from([SourceSpaceDescriptor::registered(source_space, &registered)]),
-                Arc::new(NormalizedNameTable {
-                    values: Arc::from([Arc::<str>::from("script")]),
-                }),
-                blocks,
-                Arc::new(MarkupSyntaxArena::default()),
-                &[&registered],
-            )
-            .expect("fixture inventory")
-        }
-
-        fn registered(&self, source: &str) -> Arc<FrameworkParseArtifact> {
-            let parsed = self
-                .parse(source, &ParseOptions::default())
-                .expect("fixture compiler parse");
-            crate::framework_common::registered_carrier_projection::registered_artifact_for_tests(
-                &parsed,
-                Arc::new(Self::inventory(source)),
-                Arc::new(FixtureCarrier),
-            )
-        }
-    }
-
-    impl CarrierCompiler for FixtureCompiler {
-        fn adapter_id(&self) -> FrameworkAdapterId {
-            FrameworkAdapterId::new(Self::ADAPTER)
-        }
-
-        fn carrier_language_id(&self) -> LanguageId {
-            LanguageId::new(Self::ADAPTER)
-        }
-
-        fn parse(
-            &self,
-            source: &str,
-            _opts: &ParseOptions,
-        ) -> Result<Arc<UnregisteredFrameworkParseArtifact>, verter_language::SyntaxReject>
-        {
-            let language = verter_language::FileLanguage::vue();
-            let syntax_profile = verter_language::syntax_profile_id_for(
-                &language,
-                &verter_language::ParseOptions::default(),
-            )
-            .expect("Vue syntax profile");
-            let parse_key = verter_language::parse_key_for(
-                source,
-                &language,
-                verter_language::VUE_SYNTAX_COMPATIBILITY_DOMAIN,
-                verter_language::VUE_SYNTAX_COMPATIBILITY_EPOCH,
-                &syntax_profile,
-            )
-            .expect("Vue parse key");
-            Ok(Arc::new(UnregisteredFrameworkParseArtifact::new(
-                self.adapter_id(),
-                LanguageId::new(Self::ADAPTER),
-                Arc::new(parse_key),
-                Arc::new(syntax_profile),
-                Vec::new(),
-                Arc::new(FixtureCarrier),
-            )))
-        }
-
-        fn compile_ide(
-            &self,
-            _source: &str,
-            _artifact: &FrameworkParseArtifact,
-            opts: &IdeCompileOptions,
-        ) -> Result<IdeOutput, CompileUnsupported> {
-            // The fixture projects no IDE virtual file — it returns the
-            // typed unsupported answer (invariant 4), never a silent empty.
-            let _ = opts;
-            Err(CompileUnsupported::NoIdeProjection {
-                adapter_id: self.adapter_id(),
-            })
-        }
-
-        fn compile_bundle(
-            &self,
-            _source: &str,
-            _artifact: &FrameworkParseArtifact,
-            _opts: &RuntimeCompileOptions,
-            _alloc: &oxc_allocator::Allocator,
-        ) -> Result<CarrierCompileOutcome, CompileUnsupported> {
-            // The fixture produces no runtime module — the typed unsupported
-            // answer (invariant 4), never a silent empty bundle.
-            Err(CompileUnsupported::NoIdeProjection {
-                adapter_id: self.adapter_id(),
-            })
-        }
-    }
-
-    #[test]
-    fn adapter_id_is_the_registration_key() {
-        let compiler = FixtureCompiler;
-        assert_eq!(compiler.adapter_id(), FrameworkAdapterId::new("fixture"));
-    }
-
-    #[test]
-    fn compile_ide_returns_typed_unsupported_never_silent_empty() {
-        let compiler = FixtureCompiler;
-        let source = "@@x@@";
-        let artifact = compiler.registered(source);
-        let err = compiler
-            .compile_ide(source, &artifact, &IdeCompileOptions::default())
-            .expect_err("the fixture projects no IDE file");
-        assert_eq!(
-            err,
-            CompileUnsupported::NoIdeProjection {
-                adapter_id: FrameworkAdapterId::new("fixture"),
-            }
-        );
-    }
-
-    #[test]
-    fn target_missing_ide_is_constructible() {
-        let err = CompileUnsupported::TargetMissingIde;
-        assert!(matches!(err, CompileUnsupported::TargetMissingIde));
     }
 }

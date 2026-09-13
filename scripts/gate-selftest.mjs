@@ -236,6 +236,11 @@ import {
   resolvePnpm,
   preflightFreshnessTooling,
   pnpmInstallCommand,
+  // resource-ceiling derivation — the same authority the production CLI resolves and prints its ceiling
+  // from; GB9's CLI legs derive their expected values through it rather than pinning host-dependent
+  // literals (the memory-tier build-job count is clamped to the detected CPU count).
+  deriveGateResourceLimits,
+  parseMemorySize,
   // cargo env builder + the PATH sanitizer — exercised by (F5) for the CWD-INDEPENDENT ABSOLUTE-ONLY PATH
   // sanitization that aligns the verdict preflight resolver with the executed test PATH (empty, dot-only,
   // non-dot relative, `..`-relative, and Windows drive-relative / root-relative entries are all dropped) —
@@ -269,7 +274,6 @@ import {
   ORACLE_CACHE_PREREQUISITE_MARKER,
   ORACLE_CACHE_PROVISION_COMMAND,
   ORACLE_CACHE_PROBE_MAX_MS,
-  ORACLE_CACHE_PROBE_MODULE_SEGMENTS,
   // core archive feature isolation + dedicated BF2 exact inventory + shipped-cfg scan (GB12).
   ARCHIVE_FEATURES,
   BF2_AUTHORITATIVE_FEATURE,
@@ -302,6 +306,7 @@ import {
   resolveIsolationTargets,
   classifyAttempts,
 } from "./triage-gate-internals.mjs";
+import { PROVIDER_LIVE_SELECTORS } from "./provider-ci-internals.mjs";
 
 const SELFTEST_DIR = dirname(fileURLToPath(import.meta.url));
 // The PRODUCTION gate CLI — exercised by the U-P0 "no bypass mode" scenario and by GB15, which invokes
@@ -720,6 +725,54 @@ function writeSuccessfulToolShim(dir, tool) {
   const shim = join(dir, tool);
   writeFileSync(shim, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   return shim;
+}
+
+// A `cargo metadata` document the gate's integration-test layout preflight ACCEPTS, for legs that drive
+// the real gate at the real repo root with a cargo stand-in first on PATH. Built from the COMMITTED
+// allowlist: `workspace_members` plus, per entry, a test target at its exact src_path resolved against
+// the repo root the layout tool itself derives (dirname of its scripts dir), so the check's disk side
+// reads the repo's own conformant tests/ trees and the preflight passes, letting the run proceed past
+// the gate's first step. Deriving from the allowlist keeps the fixture tracking the real exception set
+// instead of drifting behind a hand-copied package list. Returns the fixture path.
+function writeLayoutConformantMetadataFixture(dir) {
+  const committedAllowlist = JSON.parse(
+    readFileSync(join(SELFTEST_DIR, "integration-test-layout-allowlist.json"), "utf8"),
+  ).allow;
+  const repoRoot = dirname(SELFTEST_DIR);
+  const pkgs = new Map();
+  for (const entry of committedAllowlist) {
+    const pkgDir = dirname(dirname(entry.src_path)); // "crates/<name>"
+    const pkg = pkgs.get(entry.package) ?? {
+      name: entry.package,
+      id: entry.package,
+      manifest_path: join(repoRoot, pkgDir, "Cargo.toml"),
+      targets: [
+        {
+          kind: ["test"],
+          name: "main",
+          test: true,
+          src_path: join(repoRoot, pkgDir, "tests", "main.rs"),
+        },
+      ],
+    };
+    pkg.targets.push({
+      kind: ["test"],
+      name: entry.target,
+      test: true,
+      src_path: join(repoRoot, entry.src_path),
+    });
+    pkgs.set(entry.package, pkg);
+  }
+  const fixturePath = join(dir, "layout-metadata.json");
+  writeFileSync(
+    fixturePath,
+    JSON.stringify({
+      workspace_members: [...pkgs.values()].map((p) => p.id),
+      packages: [...pkgs.values()],
+    }),
+    "utf8",
+  );
+  return fixturePath;
 }
 
 // ====================================================================================================
@@ -1285,7 +1338,9 @@ async function main() {
     const gateSource = readFileSync(GATE, "utf8");
     const oracleAt = gateSource.indexOf("const oraclePrereq = checkOracleCachePrerequisite(");
     const smokeAt = gateSource.indexOf("const harnessSmokesOk = await runHarnessSmokeChecks(ctx);");
-    const freshnessAt = gateSource.indexOf("const preflight = await preflightFreshnessTooling(");
+    // The gate proper runs NO in-gate freshness preflight: proto regeneration freshness is owned by the
+    // dedicated `pnpm proto:check` CI lane, so a call site reappearing here is a regression.
+    const freshnessAt = gateSource.indexOf("preflightFreshnessTooling(");
     const archiveAt = gateSource.indexOf("const out = await archiveAndList(ctx);", smokeAt);
     const bf2Source = readFileSync(join(SELFTEST_DIR, "bf2-authoritative.mjs"), "utf8");
     const bf2OracleAt = bf2Source.indexOf("const oracle = checkOracleCachePrerequisite(");
@@ -1294,8 +1349,8 @@ async function main() {
     if (
       !(
         oracleAt === -1 &&
+        freshnessAt === -1 &&
         smokeAt >= 0 &&
-        smokeAt < freshnessAt &&
         smokeAt < archiveAt &&
         bf2OracleAt >= 0 &&
         bf2OracleAt < bf2VaporAt &&
@@ -1303,9 +1358,9 @@ async function main() {
       )
     ) {
       fail(
-        `(GB15.2) core order must be TypeScript smoke -> freshness -> cargo archive with no oracle ` +
-          `preflight, while dedicated BF2 must order oracle -> vapor smoke -> nextest list; got ` +
-          `coreOracle=${oracleAt} smoke=${smokeAt} freshness=${freshnessAt} archive=${archiveAt} ` +
+        `(GB15.2) core order must be TypeScript smoke -> cargo archive with neither an oracle nor a ` +
+          `freshness preflight, while dedicated BF2 must order oracle -> vapor smoke -> nextest list; got ` +
+          `coreOracle=${oracleAt} smoke=${smokeAt} freshnessPreflight=${freshnessAt} archive=${archiveAt} ` +
           `bf2Oracle=${bf2OracleAt} bf2Vapor=${bf2VaporAt} bf2List=${bf2ListAt}`,
       );
       ok = false;
@@ -1313,18 +1368,50 @@ async function main() {
     const stubDir = freshTmpDir("gatetest-harness-smoke-cargostub-");
     const stubName = IS_WINDOWS ? "cargo.exe" : "cargo";
     const stubPath = join(stubDir, stubName);
+    // The gate's FIRST step is the integration-test layout preflight, whose real
+    // `cargo metadata` call the stand-in below must ANSWER (with the layout-conformant
+    // fixture) so this run reaches the harness smokes under test; every other cargo
+    // subcommand still fails, terminating the run at the archive step as before.
+    const layoutMetadataFixture = writeLayoutConformantMetadataFixture(stubDir);
+    let windowsMetadataPreload = "";
     if (IS_WINDOWS) {
       // A copied Node launcher is a spawnable .exe stand-in. Cargo's first arg (`nextest`) is not a JS
-      // file, so it fails immediately without reaching the real Cargo binary later on PATH.
+      // file, so it fails immediately without reaching the real Cargo binary later on PATH. The one
+      // exception the layout preflight needs — `metadata` — is answered by a NODE_OPTIONS --require
+      // preload. Node resolves the copied launcher's entry against the spawn cwd before the preload
+      // runs, so the dispatch matches the resolved entry's BASENAME: only the layout preflight's
+      // `cargo metadata` invocation produces it (its cwd is the repo root, which has no `metadata`
+      // file); every other invocation (gate, smokes, `nextest archive`) has a different entry basename,
+      // the preload no-ops, and the pre-candidate fail-fast behavior is preserved.
       copyFileSync(process.execPath, stubPath);
+      const preload = join(stubDir, "cargo-metadata-preload.cjs");
+      writeFileSync(
+        preload,
+        "const entry = process.argv[1];\n" +
+          'if (entry !== undefined && require("node:path").basename(entry) === "metadata") {\n' +
+          '  const { readFileSync } = require("node:fs");\n' +
+          `  process.stdout.write(readFileSync(${JSON.stringify(layoutMetadataFixture)}, "utf8"));\n` +
+          "  process.exit(0);\n" +
+          "}\n",
+      );
+      windowsMetadataPreload = `--require ${JSON.stringify(preload)}`;
     } else {
-      writeFileSync(stubPath, "#!/bin/sh\nexit 9\n", { mode: 0o755 });
+      writeFileSync(
+        stubPath,
+        `#!/bin/sh\nif [ "$1" = "metadata" ]; then\n  cat "${layoutMetadataFixture}"\n  exit 0\nfi\nexit 9\n`,
+        { mode: 0o755 },
+      );
     }
     const bufShim = writeSuccessfulToolShim(stubDir, "buf");
     const oxfmtShim = writeSuccessfulToolShim(stubDir, "oxfmt");
     const delimiter = pathDelimiterFor(IS_WINDOWS);
     const hermeticPath = `${stubDir}${delimiter}${pathWithoutTool(process.env.PATH, "pnpm")}`;
     const smokeEnv = { PATH: hermeticPath };
+    if (IS_WINDOWS) {
+      // Only the Windows copied-exe stand-in dispatches through the preload; append to (never
+      // clobber) any ambient NODE_OPTIONS.
+      smokeEnv.NODE_OPTIONS = `${process.env.NODE_OPTIONS ? `${process.env.NODE_OPTIONS} ` : ""}${windowsMetadataPreload}`;
+    }
     const pnpmPath = resolvePnpm(smokeEnv);
     const resolvedBuf = resolvePathShim("buf", smokeEnv);
     const resolvedOxfmt = resolvePathShim("oxfmt", smokeEnv);
@@ -1351,12 +1438,12 @@ async function main() {
     const cargoStarted = live.out.indexOf(
       "archiving workspace test universe (dev profile) (cargo nextest archive --workspace)",
     );
-    const freshnessWasNonInstalling =
-      live.out.includes("freshness-tooling preflight: already-present") ||
-      live.out.includes("freshness-tooling preflight: path-fallback");
-    if (!freshnessWasNonInstalling || live.out.includes("freshness-tooling preflight: installed")) {
+    // No freshness leg may run inside the gate at all — and with `pnpm` removed from PATH above, a
+    // reintroduced installing preflight would announce itself here rather than failing silently.
+    if (live.out.includes("freshness-tooling preflight:")) {
       fail(
-        `(GB15.3) production smoke leg must prove a non-installing freshness path; output:\n${live.out}`,
+        `(GB15.3) the gate must run NO freshness-tooling preflight (proto freshness is the dedicated ` +
+          `\`pnpm proto:check\` lane); output:\n${live.out}`,
       );
       ok = false;
     }
@@ -1370,7 +1457,8 @@ async function main() {
     if (ok) {
       pass(
         "(GB15) commands target the harness-owned executable in exact vapor/typescript modes; core runs " +
-          "only TypeScript before freshness/Cargo, while BF2 owns oracle -> vapor -> exact list ordering",
+          "only TypeScript before Cargo with no oracle or freshness preflight, while BF2 owns " +
+          "oracle -> vapor -> exact list ordering",
       );
     }
   }
@@ -1825,19 +1913,28 @@ async function main() {
       for (const name of GATE_CLI_MODULE_FILES) {
         writeFileSync(join(parseScripts, name), readFileSync(join(SELFTEST_DIR, name)));
       }
+      // The gate's first front-half step runs the layout check before the harness smoke; this leg
+      // owns the argv discrimination, not layout, so plant the same successful stand-in GB9 uses.
+      writeFileSync(join(parseScripts, "check-integration-test-layout.mjs"), "process.exit(0);\n");
       const accepted = runGateCapture(
         join(parseScripts, "gate.mjs"),
         ["--exhaustive", "--target-dir", join(parseRoot, "target", "gate-runner")],
         { VERTER_GATE_LOCK: join(parseRoot, "gate.lock.d") },
       );
+      // `--exhaustive` must PARSE and be APPLIED, then the run must refuse on the synthetic tree's
+      // missing setup prerequisite — the conformance-harness smoke, which the gate runs as its first
+      // setup step. The claim under test is the argv one: the flag reaches policy selection rather than
+      // being rejected as unknown, and the refusal that follows is a setup refusal, not a parse error.
       if (
         accepted.code !== EXIT_USAGE ||
-        !accepted.out.includes(BUILD_PREREQUISITE_MARKER) ||
-        accepted.out.includes("unknown argument")
+        !accepted.out.includes("execution policy: exhaustive") ||
+        !accepted.out.includes(HARNESS_SMOKE_MARKER) ||
+        accepted.out.includes("unknown argument") ||
+        accepted.out.includes("ARGUMENT VALUE ERROR")
       ) {
         fail(
-          `(GB17.6) positive --exhaustive must parse and reach the synthetic prerequisite refusal: ` +
-            `rc=${accepted.code}\n${accepted.out}`,
+          `(GB17.6) positive --exhaustive must parse, select the exhaustive policy, and reach the ` +
+            `synthetic setup refusal: rc=${accepted.code}\n${accepted.out}`,
         );
         ok = false;
       }
@@ -1875,7 +1972,7 @@ async function main() {
         if (
           malformed.code !== EXIT_USAGE ||
           !malformed.out.includes("ARGUMENT VALUE ERROR") ||
-          malformed.out.includes(BUILD_PREREQUISITE_MARKER)
+          malformed.out.includes(HARNESS_SMOKE_MARKER)
         ) {
           fail(
             `(GB17.6) ${label} must fail at strict value parsing before setup/Cargo: ` +
@@ -2052,19 +2149,29 @@ async function main() {
     const shippedCheckMarker = join(stubDir, "shipped-check.marker");
     const shippedContractMarker = join(stubDir, "shipped-contract.marker");
 
-    // A minimal but VALID `cargo nextest list --message-format json` fixture: one testcase per
-    // TRYBUILD_EXCLUDED_SUITES row, so archiveAndList's own trybuild-coverage guard
-    // (verifyTrybuildExclusionCoverage) is satisfied for real — this exercises the gate's REAL post-list
-    // wiring rather than a shortcut around it.
+    // A VALID `cargo nextest list --message-format json` fixture. It is DERIVED from
+    // `PROVIDER_LIVE_SELECTORS` — the same authority `verifyProviderCiPartition` checks the listing
+    // against — plus one provider-free core test, so the gate's REAL post-list wiring (the provider
+    // partition, suite inventory, extract-dir layout, per-lane fan-out) runs for real instead of being
+    // short-circuited by a listing the partition step rejects. Deriving it means a new provider selector
+    // lands in this fixture automatically rather than silently un-executing this scenario.
     const suitesJson = {};
-    TRYBUILD_EXCLUDED_SUITES.forEach((row, i) => {
-      suitesJson[`${row.package}::bin${i}`] = {
-        "package-name": row.package,
-        "binary-id": `${row.package}::bin${i}`,
-        "binary-path": join(stubDir, `bin${i}`),
-        testcases: { [`${row.modulePrefix}dummy`]: {} },
-      };
-    });
+    const suiteFor = (pkg) =>
+      (suitesJson[`${pkg}::main`] ||= {
+        "package-name": pkg,
+        "binary-id": `${pkg}::main`,
+        "binary-path": join(stubDir, `${pkg}-main`),
+        testcases: {},
+      });
+    for (const selector of PROVIDER_LIVE_SELECTORS) {
+      const suite = suiteFor(selector.package);
+      if (selector.kind === "exact") {
+        for (const name of selector.values) suite.testcases[name] = {};
+      } else {
+        suite.testcases[selector.example] = {};
+      }
+    }
+    suiteFor("verter_core_fixture").testcases["unit::provider_free_control"] = {};
     writeFileSync(
       listJsonPath,
       JSON.stringify({
@@ -2108,6 +2215,15 @@ async function main() {
     const wasmLibDir = join(stubDir, "wasm-target-lib");
     mkdirSync(wasmLibDir, { recursive: true });
     writeFileSync(join(wasmLibDir, "libcore-0000000000000000.rlib"), "", "utf8");
+
+    // The gate's first step — the integration-test layout preflight — runs the REAL
+    // scripts/check-integration-test-layout.mjs, whose bare `cargo metadata
+    // --format-version 1 --no-deps` is the one metadata call shape the wasm scope probe
+    // never builds (that probe always pins `--manifest-path`). Serve the bare call the
+    // layout-conformant fixture so the preflight passes and the run proceeds to the
+    // archive/list and lane invocations this scenario observes; the wasm probe keeps the
+    // one-package wasm fixture above through the --manifest-path dispatch below.
+    const layoutMetadataPath = writeLayoutConformantMetadataFixture(stubDir);
     const rustcStub = join(stubDir, "rustc");
     writeFileSync(rustcStub, `#!/usr/bin/env bash\nprintf '%s\\n' "${wasmLibDir}"\nexit 0\n`, {
       mode: 0o755,
@@ -2132,15 +2248,25 @@ async function main() {
     // scenario then reports a lane running while it is disabled.
     //
     // The stub dispatches on the REAL argv shape each production call site builds (buildNextestArchiveArgs
-    // / the list step / buildSurface1RunArgs / buildShippedCfgCheckArgs / buildShippedCfgContractArgs) and
-    // records the ACTUAL env + argv each per-lane invocation receives, then fails fast (archive/list
-    // succeed so the gate reaches the lanes; the lane invocations themselves exit non-zero once recorded,
-    // since only their observed inputs — never the overall verdict — are under test here).
+    // / the list step / buildSurface1RunArgs / buildShippedCfgCheckArgs / buildShippedCfgContractArgs, and
+    // the two `cargo metadata` callers: the layout preflight's bare no-manifest-path invocation vs the
+    // wasm scope probe's --manifest-path one) and records the ACTUAL env + argv each per-lane invocation
+    // receives, then fails fast (archive/list succeed so the gate reaches the lanes; the lane invocations
+    // themselves exit non-zero once recorded, since only their observed inputs — never the overall
+    // verdict — are under test here).
     writeFileSync(
       stubPath,
       `#!/usr/bin/env bash
 if [ "$1" = "metadata" ]; then
-  cat "${wasmMetadataPath}"
+  manifest_pinned=""
+  for a in "$@"; do
+    if [ "$a" = "--manifest-path" ]; then manifest_pinned="1"; fi
+  done
+  if [ -n "$manifest_pinned" ]; then
+    cat "${wasmMetadataPath}"
+  else
+    cat "${layoutMetadataPath}"
+  fi
   exit 0
 elif [ "$1" = "test" ] && [ "$2" = "--target" ]; then
   printf 'running 1 tests\\ntest the_stand_in_case ... ok\\n\\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 filtered out; finished in 0.00s\\n'
@@ -3418,9 +3544,14 @@ fi
       const stubPath = join(stubDir, "cargo");
       // The stub records that it ran (touch the marker) and then fails — modelling a build the gate must
       // treat as a real failure. `printf >> marker` so a multi-invocation still leaves the marker present.
+      // The ONE exception is the layout preflight's bare `cargo metadata` call: it is ANSWERED with the
+      // layout-conformant fixture (exit 0) WITHOUT touching the marker. A fail-all answer makes the gate
+      // die at its first step on the metadata call itself, so the marker + exit-1 pair stops attesting a
+      // post-preflight cargo invocation (the archive step) and the scenario would pass vacuously.
+      const layoutMetadataPath = writeLayoutConformantMetadataFixture(stubDir);
       writeFileSync(
         stubPath,
-        `#!/usr/bin/env bash\nprintf 'invoked %s\\n' "$*" >> "${marker}"\nexit 3\n`,
+        `#!/usr/bin/env bash\nif [ "$1" = "metadata" ]; then\n  cat "${layoutMetadataPath}"\n  exit 0\nfi\nprintf 'invoked %s\\n' "$*" >> "${marker}"\nexit 3\n`,
         { mode: 0o755 },
       );
       try {
@@ -6259,8 +6390,7 @@ fi
     const TOL =
       "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output";
     const T1 = "cases::g_compile::compile_fail::hot_materialize_structural_rails_smoke";
-    const T2 =
-      "cases::tracked_paths_no_machine_roots::tracked_files_contain_no_machine_specific_path_markers";
+    const T2 = "cases::tracked_paths_are_portable::tracked_paths_are_portable_across_platforms";
     const names = (r) => r.failures.map((f) => `${f.surface}|${f.name}`).join("\n");
     let ok = true;
 
@@ -7458,27 +7588,29 @@ fi
   //
   // HOW IT IS DRIVEN. Leg 1 calls the real `checkBuildPrerequisites` in-process against injected probe
   // outcomes (including every fail-closed shape: spawn error, signal, timeout, unparseable output). Legs
-  // 2-6 drive the REAL PRODUCTION CLI end-to-end — a byte-copy of `gate.mjs` + `gate-internals.mjs` in a
-  // SYNTHETIC git root holding a faithful MINIATURE of the real package graph (probe dir → package
-  // manifest → emitted entry → emitted helper → language-shared entry → its emitted sibling), so every
-  // artifact can be genuinely present or absent without touching the developer's tree and without a test
-  // seam on the production gate (which has none). The miniature uses absolute `main` fields rather than
-  // symlinks so it is portable to hosts that refuse symlink creation.
+  // 2-6 call the REAL checker — real spawn, no injection — against a SYNTHETIC root holding a faithful
+  // MINIATURE of the real package graph (probe dir → package manifest → emitted entry → emitted helper →
+  // language-shared entry → its emitted sibling), so every artifact can be genuinely present or absent
+  // without touching the developer's tree. The miniature uses absolute `main` fields rather than symlinks
+  // so it is portable to hosts that refuse symlink creation. The production CLI runs NO
+  // build-prerequisite preflight — its front half is the harness smoke and the Vue macro oracle — so the
+  // checker is driven in-process here, and the CLI legs below pin the CLI side of that boundary: the
+  // printed resource ceiling, the front half, and a terminal state at the archive step.
   //
-  // DISCRIMINATION (six directions, so a green run is not vacuous). Each end-to-end leg re-stats its
-  // planted files AFTER the CLI returns, so a run whose verdict was produced against a different tree
-  // state than intended is caught rather than trusted:
-  //   * nothing built            => exit 127, marker + probe target + producer command, and NEITHER the
-  //                                 freshness preflight NOR the archive build was reached (the ordering
-  //                                 half — the freshness preflight's `pnpm install` is what turns the
-  //                                 silent-SKIP state into the 64-failure state).
-  //   * plugin entry missing     => 127.
-  //   * language-shared missing  => 127 (the REVERSE single-missing direction).
+  // DISCRIMINATION (six directions, so a green run is not vacuous). Each leg re-stats its planted files
+  // AFTER the checker/CLI returns, so a run whose verdict was produced against a different tree state
+  // than intended is caught rather than trusted:
+  //   * nothing built            => refuse, typed `module-not-found`, marker + probe target + producer
+  //                                 command.
+  //   * plugin entry missing     => refuse.
+  //   * language-shared missing  => refuse (the REVERSE single-missing direction).
   //   * a transitively-required
   //     HELPER missing, BOTH
-  //     entries present          => 127 — the case a stat-based check accepts.
-  //   * everything present       => no refusal, SATISFIED, and the run PROCEEDS into the freshness
-  //                                 preflight.
+  //     entries present          => refuse — the case a stat-based check accepts.
+  //   * everything present       => ok and silent.
+  //   * nothing built, through
+  //     the production CLI       => NO refusal: the front half runs and the run terminates at the
+  //                                 archive step (the marker-absence pin).
   // --------------------------------------------------------------------------------------------------
   {
     let ok = true;
@@ -8109,11 +8241,180 @@ fi
       gitAvailable = false;
     }
 
+    // The MINIATURE package graph. Every edge the real chain has, and nothing else:
+    //   <probe dir>/package.json  --main-->  <plugin>/dist/index.js
+    //   <plugin>/dist/index.js    requires   ./helpers/carrierStore   (an EMITTED sibling)
+    //   <plugin>/dist/index.js    requires   @verter/language-shared  (via <plugin>/node_modules)
+    //   <language-shared>/dist/index.js requires ./carrier/store      (an EMITTED sibling)
+    // `main` fields are ABSOLUTE so no symlink is needed (portable to hosts that refuse them); Node
+    // resolves `main` with path.resolve, so an absolute value is honoured.
+    const pluginPkg = join(synthRoot, "packages", "typescript-plugin");
+    const sharedPkg = join(synthRoot, "packages", "language-shared");
+    const pluginEntry = join(pluginPkg, "dist", "index.js");
+    const pluginHelper = join(pluginPkg, "dist", "helpers", "carrierStore.js");
+    const sharedEntry = join(sharedPkg, "dist", "index.js");
+    const sharedSibling = join(sharedPkg, "dist", "carrier", "store.js");
+    const probeDir = join(synthRoot, ...BUILD_PREREQUISITE_PROBE_SEGMENTS);
+    const sharedLink = join(pluginPkg, "node_modules", "@verter", "language-shared");
+
+    const writeFile = (p, body) => {
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, body);
+    };
+    const isFile = (p) => {
+      try {
+        return statSync(p).isFile();
+      } catch {
+        return false;
+      }
+    };
+    // The probe resolves the environment tsserver runs under from the Rust launcher, so the miniature
+    // carries a copy: without it every leg would fail closed as `environment-unknown` and leg 6 could
+    // never be satisfied — the legs would still refuse, but for the wrong reason, which is a
+    // vacuous version of this scenario.
+    writeFile(
+      join(synthRoot, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS),
+      readFileSync(join(REPO_REALPATH, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS), "utf8"),
+    );
+    // The static scaffolding: manifests and the emitted siblings that never move between legs.
+    writeFile(
+      join(probeDir, "package.json"),
+      JSON.stringify({ name: "@verter/typescript-plugin", main: pluginEntry }),
+    );
+    writeFile(
+      join(pluginPkg, "package.json"),
+      JSON.stringify({ name: "@verter/typescript-plugin", main: pluginEntry }),
+    );
+    writeFile(
+      join(sharedLink, "package.json"),
+      JSON.stringify({ name: "@verter/language-shared", main: sharedEntry }),
+    );
+    writeFile(
+      join(sharedPkg, "package.json"),
+      JSON.stringify({ name: "@verter/language-shared", main: sharedEntry }),
+    );
+
+    // The four EMITTED files a build produces. `plant(state)` installs exactly the requested subset and
+    // PROVES the resulting tree by stat-ing all four — a plant that silently failed to apply would
+    // otherwise be indistinguishable from correct behavior. A mismatch is REPORTED, never thrown: a
+    // throw here would unwind out of main() and silently drop GB10 and every later self-test group.
+    // Instead the caller marks GB9 failed and skips only the assertions that depend on the unproven
+    // tree, so one broken plant cannot cost the remaining groups their coverage.
+    const emitted = [
+      [
+        pluginEntry,
+        'require("./helpers/carrierStore");\nrequire("@verter/language-shared");\nmodule.exports = function init() {};\n',
+      ],
+      [pluginHelper, "module.exports = { carrierStore: true };\n"],
+      [sharedEntry, 'require("./carrier/store");\nmodule.exports = { languageShared: true };\n'],
+      [sharedSibling, "module.exports = { store: true };\n"],
+    ];
+    const plant = (label, present) => {
+      let applied = true;
+      for (const [p, body] of emitted) {
+        if (present.includes(p)) writeFile(p, body);
+        else rmSync(p, { force: true });
+      }
+      for (const [p] of emitted) {
+        const want = present.includes(p);
+        if (isFile(p) !== want) {
+          fail(
+            `(GB9) plant "${label}" did not apply: ${p} should be ${want ? "present" : "absent"}`,
+          );
+          applied = false;
+        }
+      }
+      return applied;
+    };
+    // Re-stat AFTER the checker/CLI returns: the verdict must have been produced against the tree we
+    // planted.
+    const assertUnchanged = (label, present) => {
+      for (const [p] of emitted) {
+        const want = present.includes(p);
+        if (isFile(p) !== want) {
+          fail(
+            `(GB9.${label}) the tree changed under the run: ${p} is no longer ${want ? "present" : "absent"}`,
+          );
+          ok = false;
+        }
+      }
+    };
+
+    const allEmitted = emitted.map(([p]) => p);
+
+    // ---- Legs 2-5: refusal discrimination through the REAL checker (real spawn, real tree) ----
+    const refusalLegs = [
+      ["2", "nothing built", []],
+      ["3", "the plugin entry missing", allEmitted.filter((p) => p !== pluginEntry)],
+      [
+        "4",
+        "language-shared missing (the REVERSE single-missing direction)",
+        allEmitted.filter((p) => p !== sharedEntry),
+      ],
+      [
+        "5",
+        "a transitively-required HELPER missing while BOTH entries are present",
+        allEmitted.filter((p) => p !== pluginHelper),
+      ],
+    ];
+    for (const [id, label, present] of refusalLegs) {
+      if (!plant(label, present)) {
+        // The tree is unproven — a verdict from it would be vacuous, so skip this leg's assertions.
+        ok = false;
+        continue;
+      }
+      const res = checkBuildPrerequisites({ repoRoot: synthRoot });
+      const report = res.lines.join("\n");
+      // The refusal must be about a MISSING MODULE, not about the probe being unable to answer. Without
+      // this pin, a miniature that lost its tsserver-launcher copy would refuse as
+      // `environment-unknown` and every leg above would still pass while testing nothing about missing
+      // artifacts.
+      if (res.ok || res.reason !== "module-not-found") {
+        fail(
+          `(GB9.${id}) with ${label} the check must refuse as a MISSING ARTIFACT (module-not-found), ` +
+            `never as an unanswerable probe; got ok=${res.ok} reason=${res.reason}:\n${report}`,
+        );
+        ok = false;
+      }
+      if (
+        !report.includes(BUILD_PREREQUISITE_MARKER) ||
+        !report.includes(probeDir) ||
+        !report.includes(BUILD_PREREQUISITE_COMMAND)
+      ) {
+        fail(`(GB9.${id}) the refusal must name the probe target and the producer command`);
+        ok = false;
+      }
+      for (const pkg of BUILD_PREREQUISITE_PACKAGES) {
+        if (!report.includes(pkg.id)) {
+          fail(`(GB9.${id}) the refusal must name the producing package ${pkg.id}`);
+          ok = false;
+        }
+      }
+      assertUnchanged(id, present);
+    }
+
+    // ---- Leg 6 — EVERYTHING BUILT. The whole closure loadable => ok and SILENT (no report lines, no
+    // marker): a satisfied preflight has nothing to say. ----
+    if (plant("everything built", allEmitted)) {
+      const satisfied = checkBuildPrerequisites({ repoRoot: synthRoot });
+      if (!satisfied.ok || satisfied.lines.length !== 0 || satisfied.reason !== "loaded") {
+        fail(
+          `(GB9.6) with the whole closure loadable the check must be ok and silent; got ` +
+            `ok=${satisfied.ok} reason=${satisfied.reason}:\n${satisfied.lines.join("\n")}`,
+        );
+        ok = false;
+      }
+      assertUnchanged("6", allEmitted);
+    } else {
+      ok = false;
+    }
+
     if (!gitAvailable) {
       // TRUE skip (counted in SKIP, never in PASS): without git the production CLI cannot resolve a
-      // synthetic repo root, so the end-to-end legs cannot run. The in-process leg above still ran.
+      // synthetic repo root, so the end-to-end CLI legs cannot run. The in-process legs above (1, 1b-1e,
+      // 2-6) still ran — only the CLI pair and the telemetry leg depend on `git init`.
       skip(
-        "(GB9.2-6) end-to-end build-prerequisite legs SKIPPED — `git init` is unavailable, so the " +
+        "(GB9.2-cli/3-cli/7) end-to-end production-CLI legs SKIPPED — `git init` is unavailable, so the " +
           "production CLI cannot resolve a synthetic repo root",
       );
     } else {
@@ -8136,35 +8437,11 @@ fi
       ];
       const gateEnv = { VERTER_GATE_LOCK: join(synthRoot, "gate.lock.d") };
 
-      // Freshness shims, so the freshness preflight resolves "already-present" and never attempts a
-      // `pnpm install` inside the synthetic root. Both the POSIX (extensionless) and the Windows (.CMD)
-      // spellings are written so the leg is deterministic on either host.
-      const synthBin = join(synthRoot, "node_modules", ".bin");
-      mkdirSync(synthBin, { recursive: true });
-      for (const tool of ["buf", "oxfmt"]) {
-        writeFileSync(join(synthBin, tool), "");
-        writeFileSync(join(synthBin, `${tool}.CMD`), "");
-      }
-
-      // Oracle-cache shim: this scenario exercises the BUILD-prerequisite preflight, not the (separate)
-      // oracle-cache one — but the real production `gate.mjs` byte-copy runs BOTH in sequence, so leg 6
-      // ("everything built") would otherwise fail the oracle-cache preflight here (no real
-      // `.oracle-npm-cache` in a synthetic root) and never reach the freshness-preflight line this
-      // scenario asserts on. Plant a trivial always-succeeding `ensureOracleDomain` at the exact module
-      // path the real preflight probe imports, so it resolves SATISFIED without any real npm/network work
-      // — this is a stand-in for the ORACLE-CACHE preflight, proven separately and for real by GB11.
-      const oracleCacheStub = join(synthRoot, ...ORACLE_CACHE_PROBE_MODULE_SEGMENTS);
-      mkdirSync(dirname(oracleCacheStub), { recursive: true });
-      writeFileSync(
-        oracleCacheStub,
-        "export function ensureOracleDomain(framework) {\n" +
-          '  return { installDir: "/synthetic-oracle/" + framework, realizedClosureSha256: "stub" };\n' +
-          "}\n",
-      );
-
-      // This GB9 synthetic root is scoped to build-prerequisite discrimination. Give the newly-required
-      // harness-smoke phase a receipt-only stand-in so the successful GB9 leg can continue to the freshness
-      // marker it owns; GB15 executes both REAL harness modes through the production CLI.
+      // This GB9 synthetic root is scoped to build-prerequisite discrimination. Give the required
+      // harness-smoke phase a receipt-only stand-in and the Vue macro oracle checks successful
+      // stand-ins (the same pair GB9.7 plants), so the CLI legs below exercise the gate's CURRENT front
+      // half and reach the archive step; GB15 executes both REAL harness modes through the production
+      // CLI.
       const synthSmoke = join(
         synthRoot,
         "packages",
@@ -8177,194 +8454,105 @@ fi
         synthSmoke,
         'const mode = process.argv[2];\nprocess.stdout.write(JSON.stringify({ schema: "verter-harness-smoke/v1", mode, ok: true }));\n',
       );
-
-      // The MINIATURE package graph. Every edge the real chain has, and nothing else:
-      //   <probe dir>/package.json  --main-->  <plugin>/dist/index.js
-      //   <plugin>/dist/index.js    requires   ./helpers/carrierStore   (an EMITTED sibling)
-      //   <plugin>/dist/index.js    requires   @verter/language-shared  (via <plugin>/node_modules)
-      //   <language-shared>/dist/index.js requires ./carrier/store      (an EMITTED sibling)
-      // `main` fields are ABSOLUTE so no symlink is needed (portable to hosts that refuse them); Node
-      // resolves `main` with path.resolve, so an absolute value is honoured.
-      const pluginPkg = join(synthRoot, "packages", "typescript-plugin");
-      const sharedPkg = join(synthRoot, "packages", "language-shared");
-      const pluginEntry = join(pluginPkg, "dist", "index.js");
-      const pluginHelper = join(pluginPkg, "dist", "helpers", "carrierStore.js");
-      const sharedEntry = join(sharedPkg, "dist", "index.js");
-      const sharedSibling = join(sharedPkg, "dist", "carrier", "store.js");
-      const probeDir = join(synthRoot, ...BUILD_PREREQUISITE_PROBE_SEGMENTS);
-      const sharedLink = join(pluginPkg, "node_modules", "@verter", "language-shared");
-
-      const writeFile = (p, body) => {
-        mkdirSync(dirname(p), { recursive: true });
-        writeFileSync(p, body);
-      };
-      const isFile = (p) => {
-        try {
-          return statSync(p).isFile();
-        } catch {
-          return false;
-        }
-      };
-      // The probe resolves the environment tsserver runs under from the Rust launcher, so the miniature
-      // carries a copy: without it every leg would fail closed as `environment-unknown` and leg 6 could
-      // never reach SATISFIED — the legs would still refuse, but for the wrong reason, which is a
-      // vacuous version of this scenario.
       writeFile(
-        join(synthRoot, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS),
-        readFileSync(join(REPO_REALPATH, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS), "utf8"),
-      );
-      // The static scaffolding: manifests and the emitted siblings that never move between legs.
-      writeFile(
-        join(probeDir, "package.json"),
-        JSON.stringify({ name: "@verter/typescript-plugin", main: pluginEntry }),
+        join(synthRoot, "scripts", "gen-vue-macro-runtime-oracle.mjs"),
+        "process.exit(0);\n",
       );
       writeFile(
-        join(pluginPkg, "package.json"),
-        JSON.stringify({ name: "@verter/typescript-plugin", main: pluginEntry }),
+        join(synthRoot, "scripts", "vue-macro-runtime-oracle", "oracle.test.mjs"),
+        "process.exit(0);\n",
       );
       writeFile(
-        join(sharedLink, "package.json"),
-        JSON.stringify({ name: "@verter/language-shared", main: sharedEntry }),
-      );
-      writeFile(
-        join(sharedPkg, "package.json"),
-        JSON.stringify({ name: "@verter/language-shared", main: sharedEntry }),
+        join(synthRoot, "scripts", "check-integration-test-layout.mjs"),
+        "process.exit(0);\n",
       );
 
-      // The four EMITTED files a build produces. `plant(state)` installs exactly the requested subset and
-      // PROVES the resulting tree by stat-ing all four — a plant that silently failed to apply would
-      // otherwise be indistinguishable from correct behavior.
-      const emitted = [
+      // ---- End-to-end CLI pair — nothing built, the loudest historical refusal state. The production
+      // gate performs no build-prerequisite refusal, so these runs pin what it does instead: the printed
+      // resource ceiling (explicit overrides in the first run; the explicit 12-GiB memory tier with an
+      // omitted build-job count, and the independent test-thread override, in the second), the front
+      // half (layout check, harness smoke, then both Vue macro oracle checks), and a terminal state at
+      // the archive step. A reintroduced in-CLI build-prerequisite preflight fails the
+      // marker-absence assertion and forces a conscious update of these legs rather than passing
+      // silently. ----
+      // The omitted --build-jobs count in the memory-tier leg is NOT a host-independent 8: the explicit
+      // 12-GiB tier selects the measured 8-job point, and deriveGateResourceLimits additionally clamps it
+      // to this host's detected CPU count. Derive the expectation through the same authority the CLI
+      // resolves and prints from — a literal `jobs=8` would fail on hosts with fewer than eight CPUs.
+      const memoryTierBuildJobs = deriveGateResourceLimits({
+        memoryLimitBytes: parseMemorySize("12GiB"),
+        testThreads: 9,
+      }).buildJobs;
+      // Distinct `-cli` ids: the bare 2/3 collided with the in-process refusal legs 2-5, so a failure
+      // message did not identify which leg failed.
+      const cliLegs = [
+        ["2-cli", gateArgs, "resource ceiling: cargo build jobs=7, test threads=9,"],
         [
-          pluginEntry,
-          'require("./helpers/carrierStore");\nrequire("@verter/language-shared");\nmodule.exports = function init() {};\n',
+          "3-cli",
+          memoryTierGateArgs,
+          `resource ceiling: cargo build jobs=${memoryTierBuildJobs}, test threads=9, active child-tree RSS=12.00 GiB`,
         ],
-        [pluginHelper, "module.exports = { carrierStore: true };\n"],
-        [sharedEntry, 'require("./carrier/store");\nmodule.exports = { languageShared: true };\n'],
-        [sharedSibling, "module.exports = { store: true };\n"],
       ];
-      const plant = (label, present) => {
-        for (const [p, body] of emitted) {
-          if (present.includes(p)) writeFile(p, body);
-          else rmSync(p, { force: true });
-        }
-        for (const [p] of emitted) {
-          const want = present.includes(p);
-          if (isFile(p) !== want) {
-            throw new Error(
-              `(GB9) plant "${label}" did not apply: ${p} should be ${want ? "present" : "absent"}`,
-            );
-          }
-        }
-      };
-      // Re-stat AFTER the CLI returns: the verdict must have been produced against the tree we planted.
-      const assertUnchanged = (label, present) => {
-        for (const [p] of emitted) {
-          const want = present.includes(p);
-          if (isFile(p) !== want) {
+      if (plant("nothing built (CLI legs)", [])) {
+        for (const [id, args, ceiling] of cliLegs) {
+          const run = runGateCapture(synthGate, args, gateEnv);
+          if (run.out.includes(BUILD_PREREQUISITE_MARKER)) {
             fail(
-              `(GB9.${label}) the tree changed under the run: ${p} is no longer ${want ? "present" : "absent"}`,
+              `(GB9.${id}) the production CLI must not emit a build-prerequisite refusal (the preflight ` +
+                `is not wired into the gate; its discrimination is proven in-process above):\n${run.out}`,
             );
             ok = false;
           }
-        }
-      };
-
-      const allEmitted = emitted.map(([p]) => p);
-      const refusalLegs = [
-        ["2", "nothing built", []],
-        ["3", "the plugin entry missing", allEmitted.filter((p) => p !== pluginEntry)],
-        [
-          "4",
-          "language-shared missing (the REVERSE single-missing direction)",
-          allEmitted.filter((p) => p !== sharedEntry),
-        ],
-        [
-          "5",
-          "a transitively-required HELPER missing while BOTH entries are present",
-          allEmitted.filter((p) => p !== pluginHelper),
-        ],
-      ];
-      for (const [id, label, present] of refusalLegs) {
-        plant(label, present);
-        const run = runGateCapture(synthGate, id === "3" ? memoryTierGateArgs : gateArgs, gateEnv);
-        if (run.code !== EXIT_USAGE || !run.out.includes(BUILD_PREREQUISITE_MARKER)) {
-          fail(
-            `(GB9.${id}) with ${label} the gate must FAIL SETUP (127) carrying the marker; got ` +
-              `${run.code}\n${run.out}`,
+          if (!run.out.includes(ceiling)) {
+            fail(
+              `(GB9.${id}) the production CLI must print its resource ceiling from the resolved ` +
+                `overrides/tier before any cargo work; output was:\n${run.out}`,
+            );
+            ok = false;
+          }
+          const layoutAt = run.out.indexOf("integration-test layout check passed in");
+          const smokeAt = run.out.indexOf("HARNESS-SMOKE [typescript]: SATISFIED");
+          const oracleCheckAt = run.out.indexOf("gen:vue-macro-oracle:check passed in");
+          const oracleTestsAt = run.out.indexOf("test:vue-macro-oracle passed in");
+          const archiveAt = run.out.indexOf(
+            "archiving workspace test universe (dev profile) (cargo nextest archive --workspace)",
           );
-          ok = false;
+          if (
+            !(
+              layoutAt >= 0 &&
+              smokeAt > layoutAt &&
+              oracleCheckAt > smokeAt &&
+              oracleTestsAt > oracleCheckAt &&
+              archiveAt > oracleTestsAt
+            )
+          ) {
+            fail(
+              `(GB9.${id}) the gate's front half must run layout check -> harness smoke -> ` +
+                `vue-macro-oracle checks -> archive even with nothing built; got layout=${layoutAt} ` +
+                `smoke=${smokeAt} oracleCheck=${oracleCheckAt} oracleTests=${oracleTestsAt} ` +
+                `archive=${archiveAt}:\n${run.out}`,
+            );
+            ok = false;
+          }
+          // The terminal state is the ARCHIVE step itself: a compile-shaped gate failure when this host's
+          // cargo launches and refuses the manifest-less synthetic root, or the cargo-unlaunchable setup
+          // refusal on a cargo-free host. Both prove the run proceeded past the front half.
+          const compileFailure =
+            run.code === EXIT_FAIL && run.out.includes("workspace did not compile");
+          const cargoUnlaunchable =
+            run.code === EXIT_USAGE &&
+            run.out.includes("could not launch 'cargo' for the archive build");
+          if (!compileFailure && !cargoUnlaunchable) {
+            fail(
+              `(GB9.${id}) the run must terminate AT THE ARCHIVE STEP; got rc=${run.code}:\n${run.out}`,
+            );
+            ok = false;
+          }
+          assertUnchanged(id, []);
         }
-        if (
-          id === "3" &&
-          !run.out.includes(
-            "resource ceiling: cargo build jobs=8, test threads=9, active child-tree RSS=12.00 GiB",
-          )
-        ) {
-          fail(
-            `(GB9.3) an omitted build-job value must follow the explicit 12-GiB memory tier while the ` +
-              `test-thread override remains independent; output was:\n${run.out}`,
-          );
-          ok = false;
-        }
-        if (!run.out.includes(probeDir) || !run.out.includes(BUILD_PREREQUISITE_COMMAND)) {
-          fail(`(GB9.${id}) the refusal must name the probe target and the producer command`);
-          ok = false;
-        }
-        if (
-          id === "2" &&
-          !run.out.includes("resource ceiling: cargo build jobs=7, test threads=9,")
-        ) {
-          fail(
-            `(GB9.2) the real production CLI must preserve explicit resource overrides before its ` +
-              `cargo-free prerequisite refusal; output was:\n${run.out}`,
-          );
-          ok = false;
-        }
-        // The refusal must be about a MISSING MODULE, not about the probe being unable to answer. Without
-        // this, a miniature that lost its tsserver-launcher copy would refuse as `environment-unknown` and
-        // every leg above would still pass while testing nothing about missing artifacts.
-        if (!run.out.includes("MODULE_NOT_FOUND")) {
-          fail(
-            `(GB9.${id}) the refusal must report MODULE_NOT_FOUND (a missing artifact), not a probe that ` +
-              `could not answer:\n${run.out}`,
-          );
-          ok = false;
-        }
-        // ORDERING, the load-bearing half: the refusal precedes the freshness preflight (whose `pnpm
-        // install` is exactly what turns the silent-skip state into the 64-failure state) and any cargo.
-        if (
-          run.out.includes("freshness-tooling preflight:") ||
-          run.out.includes("archiving workspace test universe")
-        ) {
-          fail(
-            `(GB9.${id}) the refusal must run BEFORE the freshness preflight and before the archive ` +
-              `build; the run reached one of them:\n${run.out}`,
-          );
-          ok = false;
-        }
-        assertUnchanged(id, present);
-      }
-
-      // Leg 6 — EVERYTHING BUILT. The check must pass and the run must PROCEED (not stop quietly).
-      plant("everything built", allEmitted);
-      const allThere = runGateCapture(synthGate, gateArgs, gateEnv);
-      if (allThere.out.includes(BUILD_PREREQUISITE_MARKER)) {
-        fail(`(GB9.6) with the whole closure loadable the refusal must NOT fire:\n${allThere.out}`);
+      } else {
         ok = false;
       }
-      if (!allThere.out.includes("build-prerequisite preflight: SATISFIED")) {
-        fail(`(GB9.6) the satisfied preflight must be reported:\n${allThere.out}`);
-        ok = false;
-      }
-      if (!allThere.out.includes("freshness-tooling preflight:")) {
-        fail(
-          `(GB9.6) a satisfied build-prerequisite preflight must let the gate PROCEED into the freshness ` +
-            `preflight; it did not:\n${allThere.out}`,
-        );
-        ok = false;
-      }
-      assertUnchanged("6", allEmitted);
 
       // @ai-generated - Drives the real production CLI to prove startup reporting owns a deadline that
       // is separate from the canonical build/test timeout and cannot replace the canonical exit verdict.
@@ -8401,13 +8589,18 @@ fi
       writeFile(join(synthRoot, "nextest"), trappingProbeBody);
       writeFile(join(synthRoot, "check"), trappingProbeBody);
       // This leg owns startup telemetry ordering, so keep the already-separately-tested Vue macro oracle
-      // checks as successful production-path stand-ins and let the run reach the archive discriminator.
+      // checks and the layout check as successful production-path stand-ins and let the run reach the
+      // archive discriminator.
       writeFile(
         join(synthRoot, "scripts", "gen-vue-macro-runtime-oracle.mjs"),
         "process.exit(0);\n",
       );
       writeFile(
         join(synthRoot, "scripts", "vue-macro-runtime-oracle", "oracle.test.mjs"),
+        "process.exit(0);\n",
+      );
+      writeFile(
+        join(synthRoot, "scripts", "check-integration-test-layout.mjs"),
         "process.exit(0);\n",
       );
       rmSync(telemetryProbeLog, { force: true });
@@ -8419,7 +8612,7 @@ fi
         synthGate,
         // The trapping startup probe consumes >2.5s, so a wrongly early canonical deadline still expires
         // before the archive marker. Two seconds leaves deterministic headroom for the synthetic
-        // prerequisite/oracle/harness front half after the correctly delayed deadline starts; the previous
+        // oracle/harness front half after the correctly delayed deadline starts; the previous
         // 1s bound raced that legitimate front half on a loaded Windows host and produced rc=124 instead of
         // reaching the deliberate archive exit 9.
         ["--timeout", "2s", "--stall", "60s", "--target-dir", synthTarget],
@@ -8497,18 +8690,21 @@ fi
 
     if (ok) {
       pass(
-        "(GB9) BUILD-PREREQUISITE PREFLIGHT: the gate refuses, loudly and as its FIRST step, when the " +
-          "tsserver plugin the real-provider suites load cannot be loaded from this tree — naming the " +
-          "probe target, the load error and the producer command (exit 127), instead of running the suite " +
-          "and reporting ~64 opaque `TS2307: Cannot find module './Comp.vue'` failures. The oracle is a " +
-          "REAL LOAD, so the discriminator a stat-based check FAILS is covered: both entries present with " +
-          "one emitted HELPER missing is still a refusal. Six directions through the REAL production CLI " +
-          "on a synthetic miniature of the package graph — nothing built / plugin entry missing / " +
-          "language-shared missing / helper missing => 127 before the freshness preflight and before " +
-          "cargo; everything built => SATISFIED and the run proceeds — plus every fail-closed probe shape " +
-          "(spawn error, signal, timeout, unparseable output) in-process. A seventh real-production leg " +
-          "proves slow/trapping/unavailable startup telemetry is aggregate-bounded, reaped, report-only, " +
-          "and consumes none of the canonical build/test timeout. Every plant is stat-proven applied and " +
+        "(GB9) BUILD-PREREQUISITE CHECKER: `checkBuildPrerequisites` refuses, loudly and with a TYPED " +
+          "reason, when the tsserver plugin the real-provider suites load cannot be loaded from the " +
+          "tree — naming the probe target, the load error, the producing packages and the producer " +
+          "command — instead of a suite run reporting ~64 opaque `TS2307: Cannot find module " +
+          "'./Comp.vue'` failures. The oracle is a REAL LOAD, so the discriminator a stat-based check " +
+          "FAILS is covered: both entries present with one emitted HELPER missing is still a refusal. " +
+          "Five tree states through the REAL checker on a synthetic miniature of the package graph — " +
+          "nothing built / plugin entry missing / language-shared missing / helper missing => a " +
+          "module-not-found refusal; everything built => ok and silent — plus every fail-closed probe " +
+          "shape (spawn error, signal, timeout, unparseable output) in-process, and a CLI pair proving " +
+          "the production gate emits NO build-prerequisite refusal: it prints its resource ceiling from " +
+          "explicit overrides and from the explicit 12-GiB memory tier, runs harness smoke -> Vue macro " +
+          "oracle, and terminates at the archive step. A seventh real-production leg proves " +
+          "slow/trapping/unavailable startup telemetry is aggregate-bounded, reaped, report-only, and " +
+          "consumes none of the canonical build/test timeout. Every plant is stat-proven applied and " +
           "re-stated after the run.",
       );
     }
@@ -8877,7 +9073,7 @@ fi
         : "";
     if (
       supervisorFactoryCount !== 1 ||
-      productionRunStepCount !== 8 ||
+      productionRunStepCount !== 9 ||
       gateSource.includes("await runContainedStep({") ||
       !gateSource.includes('ctx.supervisor.runStep("surface-1", {') ||
       !gateSource.includes('ctx.supervisor.runStep("shipped-cfg", {') ||
@@ -8887,7 +9083,7 @@ fi
         teardownSource.indexOf("mutex.release()")
     ) {
       fail(
-        `(GB18.10) production must construct exactly one supervisor, route all eight currently ` +
+        `(GB18.10) production must construct exactly one supervisor, route all nine currently ` +
           `sequential contained commands through it (including the wasm JS-boundary, Surface 1 and ` +
           `shipped lanes), and await its ` +
           `close before mutex release; factory=${supervisorFactoryCount} runStep=${productionRunStepCount}`,
