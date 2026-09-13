@@ -9,6 +9,13 @@
 // generated source shows it. These cases mount real compiled output through
 // the pinned official runtime and read the custom properties actually set
 // on the mounted element, initially and after a reactive change.
+//
+// These cases execute OFFICIAL output: this hermetic package has no Verter
+// binding. The complementary lane that mounts VERTER's own assembled client
+// module (compiled through the real carrier, same fixture class, values
+// compared against the official module per reactive state) is the
+// `vue_css_vars_client_mount` runtime proof in the bf2-authoritative Rust
+// lane (`crates/verter_session/src/compile/map_equality_tests/`).
 
 import { describe, expect, it } from "vitest";
 

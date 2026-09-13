@@ -89,23 +89,42 @@ export function clientRuntimeHref() {
 }
 
 /**
- * Redirects every `from "vue"` import of an assembled module to
- * `runtimeHref`, by syntax location — a string literal that merely
- * contains the text is an ordinary expression node, never a rewritten
- * source. The module and the mounting host must share ONE runtime instance
- * graph, so both resolve `vue` to the same entry.
+ * Adapts an assembled SFC client module for a standalone mount, by syntax
+ * location — a string literal that merely contains the text is an ordinary
+ * expression node, never a rewritten source.
+ *
+ * 1. Every `from "vue"` import is redirected to `runtimeHref`: the module and
+ *    the mounting host must share ONE runtime instance graph.
+ * 2. Side-effect imports of the Vue virtual-module namespace
+ *    (`"<id>?vue&type=style|custom&..."`) are REMOVED. Those are the dev
+ *    server's style/custom-block delivery channel — only the bundler
+ *    resolves them; standalone Node cannot, and the stylesheet bytes are
+ *    irrelevant to what a mount observes (jsdom applies no stylesheet, and
+ *    custom properties come from the `useCssVars` registration, not the
+ *    sheet).
  */
 function redirectVueImports(code, runtimeHref) {
   const ast = parseModule(code, "vue-client-mount-module");
-  const sources = ast.body
-    .filter(
-      (statement) => statement.type === "ImportDeclaration" && statement.source.value === "vue",
-    )
-    .map((statement) => statement.source)
-    .sort((a, b) => b.start - a.start);
+  const edits = [];
+  for (const statement of ast.body) {
+    if (statement.type !== "ImportDeclaration") continue;
+    if (statement.source.value === "vue") {
+      edits.push({
+        start: statement.source.start,
+        end: statement.source.end,
+        text: JSON.stringify(runtimeHref),
+      });
+    } else if (
+      statement.specifiers.length === 0 &&
+      String(statement.source.value).includes("?vue&type=")
+    ) {
+      edits.push({ start: statement.start, end: statement.end, text: "" });
+    }
+  }
+  edits.sort((a, b) => b.start - a.start);
   let out = code;
-  for (const source of sources) {
-    out = out.slice(0, source.start) + JSON.stringify(runtimeHref) + out.slice(source.end);
+  for (const edit of edits) {
+    out = out.slice(0, edit.start) + edit.text + out.slice(edit.end);
   }
   return out;
 }

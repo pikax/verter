@@ -37,30 +37,36 @@ use oxc_sourcemap::{SourceMap, Token};
 /// prepends `--` itself). It must therefore be spellable as a CSS custom
 /// property AND distinct per authored expression.
 ///
-/// Characters a custom property cannot carry fold to `_`, which on its own
-/// is lossy: `obj.tone` and `obj+tone` would both spell `obj_tone`, the
-/// second registration would be dropped as a duplicate of the first, and
-/// every reference in the stylesheet would silently read the first
-/// expression's value. A folded expression therefore also carries a digest
-/// of its authored text, so distinct expressions keep distinct properties.
-/// An expression that needs no folding keeps the plain `scope-expression`
-/// name.
+/// The encoding has two disjoint halves. An expression built solely from
+/// characters a custom property can carry verbatim (`[A-Za-z0-9-]`, in
+/// particular no `_`) keeps the plain `scope-expression` name. Every other
+/// expression — anything that folds, and anything containing `_` — also
+/// carries a digest of its authored text. The halves cannot meet: a digest
+/// name always contains `_`, a plain name never does, and two digest names
+/// only collide when their (different) authored texts share a sha256 digest.
+/// Folding alone is lossy (`obj.tone` and `obj+tone` both spell `obj_tone`),
+/// and gating the digest on folding alone still leaves a collision: the
+/// authored identifier `obj_tone_05eec45d` would spell exactly the name
+/// `obj.tone` digests to, and the second registration would be dropped as a
+/// duplicate. `_` therefore joins the digest half too.
 #[must_use]
 pub fn generate_var_name(scope_id: &str, expression: &str) -> String {
     let mut out = String::with_capacity(2 + scope_id.len() + 1 + expression.len());
     out.push_str("--");
     out.push_str(scope_id);
     out.push('-');
-    let mut folded = false;
+    let mut digest_needed = false;
     for character in expression.chars() {
-        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+        if character.is_ascii_alphanumeric() || character == '-' {
             out.push(character);
         } else {
-            folded = true;
+            // `_` passes through unchanged but moves the expression into the
+            // digest half; every other character folds to `_` as before.
+            digest_needed = true;
             out.push('_');
         }
     }
-    if folded {
+    if digest_needed {
         out.push('_');
         push_expression_digest(&mut out, expression);
     }

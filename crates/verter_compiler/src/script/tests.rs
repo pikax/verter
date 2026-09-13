@@ -2816,6 +2816,49 @@ mod css_variable_registration {
     }
 
     #[test]
+    fn authored_identifier_matching_a_folded_name_stays_distinct() {
+        // The smallest collision the digest scheme must survive: one
+        // expression that folds (`obj.tone`) and a SECOND, authored
+        // identifier that literally spells the first one's full generated
+        // name. Deriving the twin from the first compile (instead of
+        // hardcoding today's digest) keeps the case the smallest regression
+        // for whatever encoding `generate_var_name` uses.
+        let folded = compile_sfc(
+            ".x { color: v-bind(obj.tone); }",
+            "const obj = ref({ tone: 'red' })",
+        );
+        let [folded_name] = assert_sides_agree(&folded)
+            .try_into()
+            .expect("the folded expression owns exactly one reference");
+        // Strip `--<scope>-`: the remainder is the authored twin, which must
+        // be a plain identifier (no folding of its own).
+        let twin = folded_name
+            .strip_prefix("--")
+            .and_then(|rest| rest.split_once('-'))
+            .map(|(_, expression)| expression)
+            .expect("the generated name is `--<scope>-<encoded>`")
+            .to_string();
+        assert!(
+            twin.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "the derived twin must be a fold-free identifier: {twin:?}"
+        );
+
+        let script_body = format!("const obj = ref({{ tone: 'red' }})\nconst {twin} = 'blue'");
+        let both = compile_sfc(
+            &format!(".x {{ color: v-bind(obj.tone); background: v-bind({twin}); }}"),
+            &script_body,
+        );
+        let references = assert_sides_agree(&both);
+        assert_eq!(
+            references.len(),
+            2,
+            "an authored identifier equal to a folded expression's full generated \
+             name must keep its own custom property: {references:?}"
+        );
+        assert_ne!(references[0], references[1], "{references:?}");
+    }
+
+    #[test]
     fn repeated_expression_registers_one_custom_property() {
         let result = compile_sfc(
             ".x { color: v-bind(tone); } .y { border-color: v-bind(tone); }",

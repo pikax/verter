@@ -51,6 +51,7 @@ test("BF2 is absent from the core archive and has exact source-derived nextest c
     "public_api_typescript_observation",
     "svelte_official_conformance_gate",
     "svelte_official_conformance_matrix",
+    "vue_css_vars_client_mount",
   ]);
 
   const source = scanBf2AuthoritativeSourceInventory(REPO_ROOT);

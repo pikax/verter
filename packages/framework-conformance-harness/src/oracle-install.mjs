@@ -33,7 +33,6 @@
 // dynamically from the isolated install. No production path holds a static
 // top-level import of an oracle package.
 
-import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   copyFileSync,
@@ -50,6 +49,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { VUE_DOMAIN, SVELTE_DOMAIN, EVIDENCE_LOCK_DIGESTS } from "./domain-pin.mjs";
+import { execNpmSync } from "./npm-invocation.mjs";
 import {
   assertEvidenceStaticPinned,
   assertPackagesPinned,
@@ -75,8 +75,6 @@ export const ORACLE_INSTALLS_ROOT = process.env.BF2_ORACLE_INSTALLS
 const ORACLE_NPM_CACHE_ROOT = process.env.BF2_ORACLE_NPM_CACHE
   ? path.resolve(process.env.BF2_ORACLE_NPM_CACHE)
   : path.join(HARNESS_ROOT, ".oracle-npm-cache");
-
-const NPM = process.platform === "win32" ? "npm.cmd" : "npm";
 
 const FRAMEWORKS = Object.freeze({
   vue: {
@@ -462,7 +460,7 @@ function realizeInstall(entry, framework, installDir) {
     try {
       copyFileSync(path.join(oracleDir, "package.json"), path.join(stage, "package.json"));
       copyFileSync(entry.lockPath(), path.join(stage, "package-lock.json"));
-      execFileSync(NPM, npmArgs, { cwd: stage, stdio: "pipe" });
+      execNpmSync(npmArgs, { cwd: stage, stdio: "pipe" });
       // Validate the stage before it is reader-visible: swap only after
       // `npm ci` and closure validation succeed.
       const staged = validateRealizedTree(entry, stage);

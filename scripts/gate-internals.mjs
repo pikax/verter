@@ -1716,6 +1716,7 @@ export const BF2_AUTHORITATIVE_MODULES = Object.freeze([
   "public_api_typescript_observation",
   "svelte_official_conformance_gate",
   "svelte_official_conformance_matrix",
+  "vue_css_vars_client_mount",
 ]);
 
 // A feature-gated module may deliberately contribute contracts to a sibling's

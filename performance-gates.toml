@@ -439,7 +439,7 @@ operation = "official_case_enumeration_and_classification; target_manifest=vue-o
 # pinned framework source commits it asserts via EXPECTED_VUE/
 # EXPECTED_SVELTE, and the oracle npm closure that supplies its one runtime
 # dependency (@babel/parser, resolved via --vue-modules).
-corpus_fingerprint = "git-blob:c0bbd7d146137a5cb1ffbf8a5cc8748f6c7ed295 (packages/framework-conformance-harness/evidence/generate-official-case-manifests.mjs); vue-source-head:3adb225775c9b28223a56e07f7a2f874b6fbb138; svelte-source-head:56a036f4ce873a24ee6631a06d03d372523d7a9b; vue-modules-lock:git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944 (oracles/vue/package-lock.json)"
+corpus_fingerprint = "git-blob:76c8952816abe33ebf7e65c69cc4de22c76df507 (packages/framework-conformance-harness/evidence/generate-official-case-manifests.mjs); vue-source-head:3adb225775c9b28223a56e07f7a2f874b6fbb138; svelte-source-head:56a036f4ce873a24ee6631a06d03d372523d7a9b; vue-modules-lock:git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944 (oracles/vue/package-lock.json)"
 # No Revision 11 normalized product-request type exists for this offline
 # evidence-preparation tool (same gap A6 names for its own request digest).
 # SHA-256 over the literal pinned invocation description string below (no
@@ -451,8 +451,8 @@ corpus_fingerprint = "git-blob:c0bbd7d146137a5cb1ffbf8a5cc8748f6c7ed295 (package
 # so their corpus_fingerprint/request-identity inputs move together even
 # though this edit does not change either manifest's row count.
 #
-#   verter-rev11-cell:BF2_VUE_ORACLE_MANIFEST_GENERATE;operation=official_case_enumeration_and_classification;target_manifest=vue-official-cases.tsv;generator=git-blob:c0bbd7d146137a5cb1ffbf8a5cc8748f6c7ed295;vue-source-head=3adb225775c9b28223a56e07f7a2f874b6fbb138;svelte-source-head=56a036f4ce873a24ee6631a06d03d372523d7a9b;vue-modules-lock=git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944
-normalized_product_request_digest = "5e270a920fd26be414b07868c2a6c0c149e0d5cd892bcba22c9ef50b5e17ebb4"
+#   verter-rev11-cell:BF2_VUE_ORACLE_MANIFEST_GENERATE;operation=official_case_enumeration_and_classification;target_manifest=vue-official-cases.tsv;generator=git-blob:76c8952816abe33ebf7e65c69cc4de22c76df507;vue-source-head=3adb225775c9b28223a56e07f7a2f874b6fbb138;svelte-source-head=56a036f4ce873a24ee6631a06d03d372523d7a9b;vue-modules-lock=git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944
+normalized_product_request_digest = "bcb6a06acbd4acbdd2afc8ce3e58c05930ab14f1a8dda1901e84d47948c1c461"
 result_contract = "vue_official_case_manifest_tsv_row_set"
 semantic_profile = "none"
 execution_profile = "node_v20.20.2_default_flags_under_sandbox_exec_deny_network(command-proofs/bf2-oracle-manifest-generate/deny-network.sb, git-blob:5d41a32d8ba2ac7bfe905d87b406ea8f234de519)"
@@ -601,13 +601,13 @@ owner = "BF2"
 # source tree and assigns a disposition per suite. Makes ZERO calls to the
 # Svelte compiler and writes no golden/compiled output.
 operation = "official_case_enumeration_and_classification; target_manifest=svelte-official-cases.tsv"
-corpus_fingerprint = "git-blob:c0bbd7d146137a5cb1ffbf8a5cc8748f6c7ed295 (packages/framework-conformance-harness/evidence/generate-official-case-manifests.mjs); vue-source-head:3adb225775c9b28223a56e07f7a2f874b6fbb138; svelte-source-head:56a036f4ce873a24ee6631a06d03d372523d7a9b; vue-modules-lock:git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944 (oracles/vue/package-lock.json)"
+corpus_fingerprint = "git-blob:76c8952816abe33ebf7e65c69cc4de22c76df507 (packages/framework-conformance-harness/evidence/generate-official-case-manifests.mjs); vue-source-head:3adb225775c9b28223a56e07f7a2f874b6fbb138; svelte-source-head:56a036f4ce873a24ee6631a06d03d372523d7a9b; vue-modules-lock:git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944 (oracles/vue/package-lock.json)"
 # SHA-256 over the literal pinned invocation description string below (no
 # trailing newline) — see the sibling BF2_VUE_ORACLE_MANIFEST_GENERATE
 # cell's identical-shape comment for the shared rationale.
 #
-#   verter-rev11-cell:BF2_SVELTE_ORACLE_MANIFEST_GENERATE;operation=official_case_enumeration_and_classification;target_manifest=svelte-official-cases.tsv;generator=git-blob:c0bbd7d146137a5cb1ffbf8a5cc8748f6c7ed295;vue-source-head=3adb225775c9b28223a56e07f7a2f874b6fbb138;svelte-source-head=56a036f4ce873a24ee6631a06d03d372523d7a9b;vue-modules-lock=git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944
-normalized_product_request_digest = "ad8e293cab6969017805bab4e537ac7ea4a1f9003dec53d16ba60266f1193963"
+#   verter-rev11-cell:BF2_SVELTE_ORACLE_MANIFEST_GENERATE;operation=official_case_enumeration_and_classification;target_manifest=svelte-official-cases.tsv;generator=git-blob:76c8952816abe33ebf7e65c69cc4de22c76df507;vue-source-head=3adb225775c9b28223a56e07f7a2f874b6fbb138;svelte-source-head=56a036f4ce873a24ee6631a06d03d372523d7a9b;vue-modules-lock=git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944
+normalized_product_request_digest = "8a5c7f16b97838a0fdedb5c149ea416345a21bd762a6aabd674e59a2914d264b"
 result_contract = "svelte_official_case_manifest_tsv_row_set"
 semantic_profile = "none"
 execution_profile = "node_v20.20.2_default_flags_under_sandbox_exec_deny_network(command-proofs/bf2-oracle-manifest-generate/deny-network.sb, git-blob:5d41a32d8ba2ac7bfe905d87b406ea8f234de519)"

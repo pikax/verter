@@ -52,6 +52,7 @@ import {
   CLOSURE_COLUMNS,
 } from "../src/closure-verify.mjs";
 import { VUE_DOMAIN, SVELTE_DOMAIN, EVIDENCE_LOCK_DIGESTS } from "../src/domain-pin.mjs";
+import { execNpmSync, npmInvocation } from "../src/npm-invocation.mjs";
 import { oracleLinkBaseDir, realizedClosureDigest } from "../src/oracle-install.mjs";
 import {
   HARNESS_ROOT,
@@ -64,7 +65,6 @@ import {
 const ORACLE_NPM_CACHE = process.env.BF2_ORACLE_NPM_CACHE
   ? path.resolve(process.env.BF2_ORACLE_NPM_CACHE)
   : path.join(HARNESS_ROOT, ".oracle-npm-cache");
-const NPM = process.platform === "win32" ? "npm.cmd" : "npm";
 
 const scratchDirs = [];
 function scratchDir(prefix) {
@@ -337,9 +337,13 @@ describe("realized closure from a disposable, scripts-disabled, network-denied i
       // top of npm's own --offline: the established sandbox-exec pattern.
       const profile = path.join(installDir, "deny-network.sb");
       writeFileSync(profile, "(version 1)\n(allow default)\n(deny network*)\n");
-      execFileSync("sandbox-exec", ["-f", profile, NPM, ...npmArgs], { cwd: installDir });
+      const { file, prefix, execOptions } = npmInvocation();
+      execFileSync(file, [...prefix, ...npmArgs], { ...execOptions, cwd: installDir });
     } else {
-      execFileSync(NPM, npmArgs, { cwd: installDir });
+      // `execNpmSync` runs npm without the `npm.cmd` shim Node's
+      // CVE-2024-27980 mitigation EINVALs on; the darwin branch needs the
+      // invocation split because sandbox-exec must wrap it instead.
+      execNpmSync(npmArgs, { cwd: installDir });
     }
     return installDir;
   }
