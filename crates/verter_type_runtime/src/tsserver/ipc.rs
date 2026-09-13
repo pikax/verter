@@ -20,6 +20,7 @@ use crate::codec::{
     line_column_to_offset_utf16, offset_to_line_column_utf16, LineColumn, SourceIndex,
 };
 use crate::contents_snapshot::{convert_per_target, with_target_index};
+use crate::pending::{watch_engine_silence, EngineLiveness, PendingRequestTable, PendingWorkClock};
 use crate::protocol::*;
 use crate::traits::{ProviderFuture, TypeProvider};
 
@@ -65,25 +66,17 @@ fn summarize_tsserver_args(arguments: &serde_json::Value) -> String {
     format!("file={} line={} offset={}", file, line, offset)
 }
 
-/// In-flight requests awaiting a response, keyed by tsserver sequence number.
+/// tsserver's in-flight requests plus the admission state that decides which of
+/// them may enter the engine.
 ///
-/// A `std::sync::Mutex`, not an async one: every critical section is a single
-/// map operation with no await inside it, and a synchronous lock is what lets
-/// [`TsserverPendingRequest::drop`] clean up. A cancelled request is dropped,
-/// not awaited to completion, so cleanup that could only run on an async path
-/// would never run at all.
-#[derive(Default)]
-struct TsserverPendingState {
-    map: HashMap<i64, oneshot::Sender<serde_json::Value>>,
-    closed: bool,
-    /// Start of the current non-empty interval. A provider that was idle for a
-    /// long time must receive a full silence allowance after new work arrives.
-    pending_since: Option<std::time::Instant>,
-}
-
+/// The request table itself is the shared transport bookkeeping; everything
+/// around it is tsserver-specific, because tsserver runs every request on one
+/// JavaScript thread: a background pull that is allowed to start in front of a
+/// user request delays that user request by its full duration.
 #[derive(Default)]
 struct TsserverPendingRequests {
-    state: StdMutex<TsserverPendingState>,
+    /// In-flight requests awaiting a response, keyed by tsserver sequence number.
+    table: PendingRequestTable,
     /// User-facing requests currently in flight. Background diagnostics may
     /// enter tsserver only while this is zero.
     interactive_in_flight: AtomicU32,
@@ -103,90 +96,22 @@ struct TsserverPendingRequests {
 }
 
 impl TsserverPendingRequests {
-    /// Atomically reject registrations after stdout has closed. Sharing this
-    /// lock with [`Self::drain_with_crash_error`] prevents an EOF/request race
-    /// from stranding an unbounded production request on a dead process.
-    fn insert(&self, seq: i64, tx: oneshot::Sender<serde_json::Value>) -> bool {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.closed {
-            return false;
-        }
-        if state.map.is_empty() {
-            state.pending_since = Some(std::time::Instant::now());
-        }
-        state.map.insert(seq, tx);
-        true
-    }
-
-    fn take(&self, seq: i64) -> Option<oneshot::Sender<serde_json::Value>> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let sender = state.map.remove(&seq);
-        if state.map.is_empty() {
-            state.pending_since = None;
-        }
-        sender
-    }
-
-    fn pending_since(&self) -> Option<std::time::Instant> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .pending_since
-    }
-
-    /// How many requests are in flight. The leak surface: a request abandoned
-    /// without releasing its slot shows up here and nowhere else.
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .map
-            .len()
-    }
-
-    /// Take one arbitrary in-flight sender. Tests that need to answer "whatever
-    /// request the transport just issued" do not know its sequence number, so
-    /// they cannot use [`Self::take`]; this keeps them off the inner map.
-    #[cfg(test)]
-    fn take_any(&self) -> Option<oneshot::Sender<serde_json::Value>> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let seq = *state.map.keys().next()?;
-        let sender = state.map.remove(&seq);
-        if state.map.is_empty() {
-            state.pending_since = None;
-        }
-        sender
-    }
-
-    /// Fail every in-flight request so callers return immediately instead of
-    /// waiting indefinitely, and reject later registrations on this dead
-    /// transport. A provider restart creates a new pending state.
-    fn drain_with_crash_error(&self) {
-        let drained: Vec<_> = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state.closed = true;
-            state.pending_since = None;
-            state.map.drain().collect()
-        };
-        for (_seq, tx) in drained {
-            let _ = tx.send(serde_json::json!({
+    /// Fail every in-flight request after process death. The failure body is
+    /// tsserver's own response shape, so a caller reads it exactly as it would
+    /// read a real refusal.
+    fn fail_with_crash_error(&self) {
+        self.table.close_and_fail_with(|| {
+            serde_json::json!({
                 "success": false,
                 "message": "tsserver process crashed"
-            }));
-        }
+            })
+        });
+    }
+}
+
+impl PendingWorkClock for TsserverPendingRequests {
+    fn pending_since(&self) -> Option<std::time::Instant> {
+        self.table.pending_since()
     }
 }
 
@@ -354,7 +279,7 @@ impl Drop for TsserverPendingRequest {
         if !self.armed {
             return;
         }
-        self.pending.take(self.seq);
+        self.pending.table.take(self.seq);
         if let Some(cancellation) = &self.cancellation {
             cancellation.cancel(self.seq);
         }
@@ -396,20 +321,15 @@ struct TsserverTransport {
     /// Pending request senders, keyed by sequence number.
     pending: Arc<TsserverPendingRequests>,
     next_seq: AtomicI64,
-    /// Counts consecutive request timeouts. Reset to 0 on any successful response.
-    /// When this reaches `HANG_THRESHOLD`, fires `crash_notify` to trigger a restart
-    /// via the `ResilientProvider` crash-recovery machinery — a wedged-but-alive
-    /// tsserver (accepts requests, never responds) must be detected and restarted,
-    /// not silently time out every request for the rest of the session.
-    consecutive_failures: AtomicU32,
-    /// When the last hang strike was charged, so hops that were already in flight
-    /// then are not counted as independent evidence. See
-    /// [`TsserverTransport::note_hang_failure`]. Cleared with the counter.
-    last_strike_at: StdMutex<Option<std::time::Instant>>,
-    /// When the read loop last got ANY output from the child — a response OR an
-    /// event. Shared with the read loop. A child that is emitting is working,
-    /// however slowly; a WEDGED child emits nothing at all.
-    last_message_at: Arc<StdMutex<std::time::Instant>>,
+    /// Child-output timestamp plus the consecutive-unanswered-hop counter that
+    /// drives hang detection. Shared with the read loop, which stamps every
+    /// response OR event, and with the silence watchdog. When the counter
+    /// reaches `HANG_THRESHOLD` the transport fires `crash_notify` so the
+    /// `ResilientProvider` restarts the wedged process — a wedged-but-alive
+    /// tsserver (accepts requests, never responds) must be detected and
+    /// restarted, not silently time out every request for the rest of the
+    /// session.
+    liveness: Arc<EngineLiveness>,
     /// Shared with `ResilientProvider` — signaled when the provider appears hung.
     crash_notify: Option<Arc<Notify>>,
     /// Singleflight + cooldown stamp for `reloadProjects` membership recovery.
@@ -435,40 +355,6 @@ const HANG_THRESHOLD: u32 = 3;
 const LOADING_WEDGE_SILENCE_CAP: std::time::Duration = std::time::Duration::from_secs(120);
 
 const SILENCE_WATCHDOG_POLL: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Provider-health watchdog, deliberately separate from request completion.
-/// Requests have no latency timeout. Only a process with pending work and no
-/// response/event output at all for the absolute silence cap is restarted; a
-/// slow engine that emits project-loading progress remains healthy.
-async fn watch_tsserver_silence(
-    pending: std::sync::Weak<TsserverPendingRequests>,
-    last_message_at: Arc<StdMutex<std::time::Instant>>,
-    crash_notify: Arc<Notify>,
-    poll: std::time::Duration,
-    silence_cap: std::time::Duration,
-) {
-    loop {
-        tokio::time::sleep(poll).await;
-        let Some(pending) = pending.upgrade() else {
-            return;
-        };
-        let Some(pending_since) = pending.pending_since() else {
-            continue;
-        };
-        let last_message = *last_message_at
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let silent_for = std::cmp::max(last_message, pending_since).elapsed();
-        if silent_for < silence_cap {
-            continue;
-        }
-        tracing::error!(
-            "tsserver emitted no output for {silent_for:?} while requests were pending; restarting"
-        );
-        crash_notify.notify_waiters();
-        return;
-    }
-}
 
 /// Quiet window before background engine work is admitted. This mirrors editor
 /// idle scheduling: bursts of hover/completion/navigation finish first instead
@@ -518,7 +404,7 @@ impl TsserverTransport {
             // Wake the background future immediately; the out-of-band file is
             // what stops tsserver itself. A later engine response for this seq
             // is intentionally ignored because no caller still owns it.
-            if let Some(tx) = self.pending.take(background_seq) {
+            if let Some(tx) = self.pending.table.take(background_seq) {
                 let _ = tx.send(serde_json::json!({
                     "success": true,
                     "body": { "canceled": true }
@@ -553,57 +439,29 @@ impl TsserverTransport {
     /// more — a loop in which the engine never gets far enough to answer, and
     /// requests come back fast and EMPTY instead of slow and correct.
     ///
-    /// CONSECUTIVE MEANS SEQUENTIAL IN TIME. A hop that was already in flight when
-    /// the previous strike was charged observed the SAME window of silence, so it
-    /// is not independent evidence. The LSP fans out — hover, definition,
-    /// completion, references and a background diagnostics pull are routinely in
-    /// flight at the same instant on the same bound — so charging each of them
-    /// separately reaches the threshold after a SINGLE bound's worth of silence
-    /// and restarts an engine that is merely busy. `issued_at` is when this hop's
-    /// bound started; only a hop issued at or after the last strike advances the
-    /// count, so reaching [`HANG_THRESHOLD`] takes that many successive windows in
-    /// which the engine answered nothing at all.
-    /// A hop is evidence of a WEDGE only if the child produced nothing at all
-    /// while it ran.
-    ///
     /// A response resets the counter outright, but a busy tsserver also emits
     /// EVENTS while it works — `projectLoadingStart`/`Finish`, diagnostics,
     /// telemetry, `requestCompleted`. Those prove the child's loop is turning.
-    /// Without this gate, a request whose answer the caller does not even use —
-    /// `notify_carrier_changed` awaits `projectInfo` purely as an ORDERING FENCE
-    /// and discards the body — becomes proof that the engine is hung, and three
-    /// carrier changes against a cold project destroy it.
-    fn child_was_silent_during(&self, issued_at: std::time::Instant) -> bool {
-        let last = *self
-            .last_message_at
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        last <= issued_at
-    }
-
+    /// Without the silence gate, a request whose answer the caller does not even
+    /// use — `notify_carrier_changed` awaits `projectInfo` purely as an ORDERING
+    /// FENCE and discards the body — becomes proof that the engine is hung, and
+    /// three carrier changes against a cold project destroy it.
+    ///
+    /// A synchronous configured-project build is silent by design, so an active
+    /// `projectLoadingStart` suspends the charge entirely until the child has
+    /// also been silent past [`LOADING_WEDGE_SILENCE_CAP`] — a lost
+    /// `projectLoadingFinish` must not disable wedge recovery for the session.
     fn note_hang_failure(&self, command: &str, issued_at: std::time::Instant) {
-        if !self.child_was_silent_during(issued_at) {
+        if !self.liveness.was_silent_during(issued_at) {
             return;
         }
-        if self.pending.project_loads_in_flight.load(Ordering::Relaxed) > 0 {
-            let last = *self
-                .last_message_at
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if last.elapsed() < LOADING_WEDGE_SILENCE_CAP {
-                return;
-            }
+        if self.pending.project_loads_in_flight.load(Ordering::Relaxed) > 0
+            && self.liveness.last_output_at().elapsed() < LOADING_WEDGE_SILENCE_CAP
+        {
+            return;
         }
-        let count = {
-            let mut last = self
-                .last_strike_at
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if last.is_some_and(|at| issued_at < at) {
-                return;
-            }
-            *last = Some(std::time::Instant::now());
-            self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1
+        let Some(count) = self.liveness.charge_strike(issued_at) else {
+            return;
         };
         if count >= HANG_THRESHOLD {
             tracing::error!(
@@ -616,22 +474,13 @@ impl TsserverTransport {
         }
     }
 
-    /// Clear hang-detection state after proof the engine is alive and answering.
-    fn clear_hang_evidence(&self) {
-        self.consecutive_failures.store(0, Ordering::Relaxed);
-        *self
-            .last_strike_at
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-    }
-
     fn finish_response(
         &self,
         command: &str,
         seq: i64,
         value: serde_json::Value,
     ) -> Result<serde_json::Value, TypeProviderError> {
-        self.clear_hang_evidence();
+        self.liveness.clear_strikes();
         if let Some(false) = value.get("success").and_then(|flag| flag.as_bool()) {
             let message = value
                 .get("message")
@@ -888,7 +737,7 @@ impl TsserverTransport {
                     .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
 
                 let (tx, rx) = oneshot::channel();
-                if !self.pending.insert(seq, tx) {
+                if !self.pending.table.insert(seq, tx) {
                     return Err(TypeProviderError::new("tsserver process is not available"));
                 }
                 // Armed from the instant the seq is registered: every exit from
@@ -919,7 +768,7 @@ impl TsserverTransport {
                             != epoch
                     {
                         registration.disarm();
-                        self.pending.take(seq);
+                        self.pending.table.take(seq);
                         return Err(TypeProviderError::new(
                             "tsserver background request preempted by interactive traffic",
                         ));
@@ -955,12 +804,12 @@ impl TsserverTransport {
                         // to cancel — release the slot without naming a seq the
                         // engine has never seen.
                         registration.disarm();
-                        self.pending.take(seq);
+                        self.pending.table.take(seq);
                         return Err(TypeProviderError::new("stdin writer closed"));
                     }
                     Err(mpsc::error::SendTimeoutError::Timeout(_)) => {
                         registration.disarm();
-                        self.pending.take(seq);
+                        self.pending.table.take(seq);
                         if full_bound {
                             self.note_hang_failure(command, issued_at);
                         }
@@ -986,7 +835,7 @@ impl TsserverTransport {
                         registration.disarm();
                         // Any response (even a tsserver-level error) proves the process
                         // is alive and answering — reset the hang detector.
-                        self.clear_hang_evidence();
+                        self.liveness.clear_strikes();
                         // Check for tsserver error
                         if let Some(false) = val.get("success").and_then(|v| v.as_bool()) {
                             let msg = val
@@ -1104,7 +953,7 @@ impl TsserverTransport {
                     .map_err(|error| TypeProviderError::new(format!("serialize error: {error}")))?;
 
                 let (tx, rx) = oneshot::channel();
-                if !self.pending.insert(seq, tx) {
+                if !self.pending.table.insert(seq, tx) {
                     return Err(TypeProviderError::new("tsserver process is not available"));
                 }
                 let mut registration = TsserverPendingRequest {
@@ -1128,7 +977,7 @@ impl TsserverTransport {
                             != epoch
                     {
                         registration.disarm();
-                        self.pending.take(seq);
+                        self.pending.table.take(seq);
                         return Err(TypeProviderError::new(
                             "tsserver background request preempted by interactive traffic",
                         ));
@@ -1146,7 +995,7 @@ impl TsserverTransport {
                     .is_err()
                 {
                     registration.disarm();
-                    self.pending.take(seq);
+                    self.pending.table.take(seq);
                     return Err(TypeProviderError::new("stdin writer closed"));
                 }
 
@@ -1225,7 +1074,7 @@ async fn read_loop(
     pending: Arc<TsserverPendingRequests>,
     cancellation: Arc<TsserverCancellation>,
     crash_notify: Option<Arc<Notify>>,
-    last_message_at: Arc<StdMutex<std::time::Instant>>,
+    liveness: Arc<EngineLiveness>,
 ) {
     let mut reader = BufReader::new(stdout);
     let mut line_buf = String::new();
@@ -1235,7 +1084,7 @@ async fn read_loop(
         match reader.read_line(&mut line_buf).await {
             Ok(0) => {
                 // EOF — process exited
-                pending.drain_with_crash_error();
+                pending.fail_with_crash_error();
                 if let Some(notify) = &crash_notify {
                     notify.notify_waiters();
                 }
@@ -1250,9 +1099,7 @@ async fn read_loop(
                 // detection reads this to tell a busy engine from a wedged one:
                 // a busy tsserver keeps emitting events while it builds; a
                 // wedged one goes silent.
-                *last_message_at
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = std::time::Instant::now();
+                liveness.note_output();
 
                 // Check if this is a Content-Length header (modern tsserver)
                 if let Some(len_str) = trimmed.strip_prefix("Content-Length:") {
@@ -1260,7 +1107,7 @@ async fn read_loop(
                         // Read the blank line
                         line_buf.clear();
                         if reader.read_line(&mut line_buf).await.is_err() {
-                            pending.drain_with_crash_error();
+                            pending.fail_with_crash_error();
                             if let Some(notify) = &crash_notify {
                                 notify.notify_waiters();
                             }
@@ -1272,7 +1119,7 @@ async fn read_loop(
                             .await
                             .is_err()
                         {
-                            pending.drain_with_crash_error();
+                            pending.fail_with_crash_error();
                             if let Some(notify) = &crash_notify {
                                 notify.notify_waiters();
                             }
@@ -1291,7 +1138,7 @@ async fn read_loop(
                 }
             }
             Err(_) => {
-                pending.drain_with_crash_error();
+                pending.fail_with_crash_error();
                 if let Some(notify) = &crash_notify {
                     notify.notify_waiters();
                 }
@@ -1315,7 +1162,7 @@ fn handle_message(
                 if let Some(cancellation) = cancellation {
                     cancellation.acknowledge(request_seq);
                 }
-                if let Some(tx) = pending.take(request_seq) {
+                if let Some(tx) = pending.table.take(request_seq) {
                     let _ = tx.send(msg.clone());
                 }
             }
@@ -2288,26 +2135,26 @@ impl TsserverTypeProvider {
         let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
         tokio::spawn(tsserver_stdin_writer_loop(stdin, stdin_rx));
 
-        let last_message_at = Arc::new(StdMutex::new(std::time::Instant::now()));
+        let liveness = Arc::new(EngineLiveness::default());
 
         let transport = Arc::new(TsserverTransport {
             stdin_tx: stdin_tx.clone(),
             pending: Arc::clone(&pending),
             next_seq: AtomicI64::new(1),
-            consecutive_failures: AtomicU32::new(0),
-            last_strike_at: StdMutex::new(None),
-            last_message_at: Arc::clone(&last_message_at),
+            liveness: Arc::clone(&liveness),
             crash_notify: crash_notify.clone(),
             membership_recovery: Mutex::new(None),
             cancellation: Some(Arc::clone(&cancellation)),
         });
         if let Some(notify) = crash_notify.as_ref() {
-            tokio::spawn(watch_tsserver_silence(
+            tokio::spawn(watch_engine_silence(
                 Arc::downgrade(&pending),
-                Arc::clone(&last_message_at),
+                Arc::clone(&liveness),
                 Arc::clone(notify),
+                None,
                 SILENCE_WATCHDOG_POLL,
                 LOADING_WEDGE_SILENCE_CAP,
+                "tsserver",
             ));
         }
 
@@ -2322,7 +2169,7 @@ impl TsserverTypeProvider {
             pending,
             cancellation,
             crash_notify,
-            last_message_at,
+            liveness,
         ));
 
         // Log stderr
