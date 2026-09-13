@@ -455,6 +455,22 @@ const height = ref('100px')
     ).toEqual([]);
     expect(host.lint(updated.canonicalId, RULE_CONFIG).filter((d) => d.rule === RULE)).toEqual([]);
 
+    // Lane-liveness control for the routed gap above: the same host's public
+    // analysis DOES carry template facts for the clean parse of this very
+    // file, and an unrelated template-fact rule (require-v-for-key) fires
+    // through `lint` with default config on a clean parse — so the gap is
+    // the error-parse fail-close in the shared fact-extraction lane, not a
+    // route that never serves template facts or rules.
+    expect(JSON.parse(host.getAnalysis(updated.canonicalId) ?? "{}").template).not.toBeNull();
+    const vfor = host.upsert({
+      inputId: "ECRV5LaneLiveness.vue",
+      source: ["<template>", '  <ul><li v-for="i in 3">{{ i }}</li></ul>', "</template>"].join(
+        "\n",
+      ),
+      fileKind: "vue",
+    });
+    expect(host.lint(vfor.canonicalId, null).map((d) => d.rule)).toContain("require-v-for-key");
+
     // A fresh host fed the clean source agrees — no stale facts or diagnostics.
     const fresh = new VerterHost();
     const cleanResult = fresh.upsert({
