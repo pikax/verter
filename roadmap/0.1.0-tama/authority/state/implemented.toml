@@ -168,7 +168,7 @@ schema = 2
 "CPF1" = { status = "pending" }
 "CVO0" = { status = "implemented", commit_message = "feat(*): add the validation-probe outcome taxonomy and probe-state manifest contract", commit_date = "2026-09-11T08:30:00+01:00", pull_request = 525 }
 "CVO1" = { status = "implemented", commit_message = "feat(*): add the pinned vue-benchmarks external workload probe lane", commit_date = "2026-09-12T11:30:00+01:00" }
-"CVO1S" = { status = "pending" }
+"CVO1S" = { status = "implemented", commit_message = "feat(*): add the pinned svelte-benchmarks external workload probe lane", commit_date = "2026-09-13T19:30:00+01:00" }
 "CVO2" = { status = "pending" }
 "CVO3" = { status = "implemented", commit_message = "test(*): add the false-green control set for the validation probe machinery", commit_date = "2026-09-12T17:30:00+01:00" }
 "CVO4" = { status = "pending" }

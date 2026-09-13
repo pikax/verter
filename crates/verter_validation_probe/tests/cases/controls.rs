@@ -211,7 +211,7 @@ fn requested(case_id: &str, source: &str) -> Vec<RequestedEntry> {
     vec![RequestedEntry {
         canonical_id: case_id.to_string(),
         source: source.to_string(),
-        request_digest: request::request_digest("fixtures/App.vue"),
+        request_digest: request::request_digest(Framework::Vue, "fixtures/App.vue"),
     }]
 }
 

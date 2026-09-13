@@ -161,7 +161,7 @@ fn requested(case_id: &str) -> Vec<RequestedEntry> {
     vec![RequestedEntry {
         canonical_id: case_id.to_string(),
         source: "<template><div/></template>\n".to_string(),
-        request_digest: request::request_digest("fixtures/App.vue"),
+        request_digest: request::request_digest(Framework::Vue, "fixtures/App.vue"),
     }]
 }
 
@@ -949,6 +949,88 @@ fn an_unparseable_product_is_malformed_and_emits_no_comparison() {
     );
 }
 
+/// A Svelte product that is not a valid ES module is `product_malformed`, and
+/// its `Structural` cell stays NOT APPLICABLE rather than borrowing a pass.
+///
+/// Svelte is compile-only: no structural comparator is bound, so `Compile` is
+/// the last dimension that can say anything about the emitted module. If the
+/// validity check were skipped along with the comparison, a Svelte case could
+/// emit unparseable JavaScript and still be counted as a pass — the one
+/// failure this arm's whole evidence value depends on catching.
+///
+/// Both halves of the check are exercised, because they fail in different
+/// stages of the same canonicalizer: a TRUNCATED module fails the parser, and
+/// a module that parses cleanly but redeclares a `const` fails the semantic
+/// builder. A validity check that only parsed would accept the second.
+#[test]
+fn a_svelte_product_that_is_not_a_valid_module_is_malformed_not_a_pass() {
+    let manifest = svelte_manifest();
+    let plants = [
+        ("a truncated module", "export const value = "),
+        (
+            "a duplicate const binding",
+            "const value = 1\nconst value = 2\nexport { value }\n",
+        ),
+    ];
+
+    // The same shape that DOES pass, so the only difference between this and a
+    // pass is the emitted module itself.
+    let valid = observe(
+        &manifest,
+        SVELTE_CASE,
+        vec![
+            phase(SVELTE_CASE, Phase::Compile),
+            compile_frame(SVELTE_CASE, vec![ok_entry(SVELTE_CASE)]),
+        ],
+        None,
+    );
+    assert_eq!(
+        class_at(&valid, Dimension::Compile),
+        Some(C::Pass),
+        "the control module does not pass, so a malformed verdict below proves nothing",
+    );
+
+    for (label, code) in plants {
+        let entry = RouteEntry {
+            canonical_id: SVELTE_CASE.to_string(),
+            response: Some(RouteResponse {
+                diagnostics: DiagnosticsSnapshot::default(),
+                products: vec![RouteProduct {
+                    kind: "runtimeClient".to_string(),
+                    nodes: Some(vec![RouteNode {
+                        node: VirtualNodeKind {
+                            kind: "main".to_string(),
+                        },
+                        code: code.to_string(),
+                    }]),
+                }],
+            }),
+            failure: None,
+        };
+        let terminals = observe(
+            &manifest,
+            SVELTE_CASE,
+            vec![
+                phase(SVELTE_CASE, Phase::Compile),
+                compile_frame(SVELTE_CASE, vec![entry]),
+            ],
+            None,
+        );
+        assert_eq!(
+            class_at(&terminals, Dimension::Compile),
+            Some(C::ProductMalformed),
+            "{label} was not classified malformed",
+        );
+        assert_eq!(
+            terminals[&Dimension::Structural],
+            Terminal::NotApplicable {
+                reason: NotApplicableReason::ComparatorAbsent,
+            },
+            "{label}: an unbound comparator must stay not applicable, never a pass",
+        );
+    }
+}
+
 /// A differing product is a structural mismatch and nothing more: the route
 /// answered and the product is valid.
 #[test]
@@ -1013,62 +1095,130 @@ fn driver_lines_are_parsed_by_shape_and_an_unknown_shape_is_refused() {
 
 /// The template is canonical JSON with sorted keys at every level, and its
 /// only substitution is the filename.
+///
+/// Table-driven over EVERY framework: the template is a case attribute, so a
+/// second corpus's template has to be canonical, has to substitute only the
+/// filename, and has to keep its own framework tag — not merely exist.
 #[test]
 fn the_request_template_is_canonical_and_substitutes_only_the_filename() {
+    for framework in Framework::ALL {
+        let template = request::template_for(framework);
+        let value: serde_json::Value =
+            serde_json::from_str(template).expect("the template is JSON");
+        assert_sorted(&value, "$");
+        assert!(
+            !template.contains(' ') || template.contains("case relative path"),
+            "the {framework} template carries no incidental whitespace",
+        );
+        assert_eq!(
+            value["framework"],
+            serde_json::json!(framework.as_str()),
+            "the {framework} template is tagged for another framework",
+        );
+
+        let substituted = request::substitute(framework, "tests/fixtures/App.case");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&substituted).expect("the substituted request is JSON");
+        assert_eq!(
+            parsed["identity"]["filename"],
+            serde_json::json!("tests/fixtures/App.case"),
+        );
+        assert_eq!(parsed["framework"], serde_json::json!(framework.as_str()));
+        assert_eq!(
+            parsed["products"][0]["kind"],
+            serde_json::json!("runtimeClient")
+        );
+
+        // Everything but the filename is untouched.
+        let mut expected: serde_json::Value =
+            serde_json::from_str(template).expect("the template is JSON");
+        expected["identity"]["filename"] = serde_json::json!("tests/fixtures/App.case");
+        assert_eq!(parsed, expected);
+    }
+}
+
+/// Every framework issues its OWN template, and no two frameworks share one.
+///
+/// A lane that handed one framework's request to another's cases would compile
+/// under the wrong arm's options and publish a template its cases never sent,
+/// with a digest that agreed with itself.
+#[test]
+fn each_framework_issues_its_own_distinct_template() {
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for framework in Framework::ALL {
+        assert!(
+            seen.insert(request::template_for(framework)),
+            "{framework} shares a request template with another framework",
+        );
+    }
+    assert_ne!(
+        request::template_digest(Framework::Vue),
+        request::template_digest(Framework::Svelte),
+    );
+}
+
+/// The Svelte template omits every optional option, so the host's own defaults
+/// apply rather than the probe's opinion of them.
+#[test]
+fn the_svelte_template_asks_for_one_runtime_client_product_and_no_options() {
     let value: serde_json::Value =
-        serde_json::from_str(request::REQUEST_VUE).expect("the template is JSON");
-    assert_sorted(&value, "$");
-    assert!(
-        !request::REQUEST_VUE.contains(' ') || request::REQUEST_VUE.contains("case relative path"),
-        "the template carries no incidental whitespace",
-    );
-
-    let substituted = request::substitute("tests/fixtures/App.vue");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&substituted).expect("the substituted request is JSON");
+        serde_json::from_str(request::REQUEST_SVELTE).expect("the template is JSON");
     assert_eq!(
-        parsed["identity"]["filename"],
-        serde_json::json!("tests/fixtures/App.vue"),
+        value["options"],
+        serde_json::json!({}),
+        "the svelte template states an option, so the host default is no longer what ran",
     );
-    assert_eq!(parsed["framework"], serde_json::json!("vue"));
     assert_eq!(
-        parsed["products"][0]["kind"],
-        serde_json::json!("runtimeClient")
+        value["products"],
+        serde_json::json!([{ "inline": null, "kind": "runtimeClient", "runtimeSourceMap": false }]),
     );
-
-    // Everything but the filename is untouched.
-    let mut expected: serde_json::Value =
-        serde_json::from_str(request::REQUEST_VUE).expect("the template is JSON");
-    expected["identity"]["filename"] = serde_json::json!("tests/fixtures/App.vue");
-    assert_eq!(parsed, expected);
+    assert_eq!(
+        value["identity"],
+        serde_json::json!({
+            "componentId": null,
+            "filename": request::FILENAME_PLACEHOLDER,
+            "forceJs": false,
+            "isProduction": false,
+        }),
+    );
 }
 
 /// A path carrying a quote produces an escaped string, never a request whose
 /// shape the corpus decided.
 #[test]
 fn a_hostile_path_is_escaped_rather_than_interpolated() {
-    let substituted = request::substitute(r#"a"/,"framework":"svelte"."#);
-    let parsed: serde_json::Value =
-        serde_json::from_str(&substituted).expect("the substituted request is still JSON");
-    assert_eq!(parsed["framework"], serde_json::json!("vue"));
-    assert_eq!(
-        parsed["identity"]["filename"],
-        serde_json::json!(r#"a"/,"framework":"svelte"."#),
-    );
+    for framework in Framework::ALL {
+        let hostile = r#"a"/,"framework":"elsewhere"."#;
+        let substituted = request::substitute(framework, hostile);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&substituted).expect("the substituted request is still JSON");
+        assert_eq!(parsed["framework"], serde_json::json!(framework.as_str()));
+        assert_eq!(parsed["identity"]["filename"], serde_json::json!(hostile),);
+    }
 }
 
 /// Digests are stable and distinguish cases.
 #[test]
 fn digests_are_stable_and_case_distinguishing() {
-    assert_eq!(request::template_digest(), request::template_digest());
-    assert_eq!(request::template_digest().len(), 64);
+    for framework in Framework::ALL {
+        assert_eq!(
+            request::template_digest(framework),
+            request::template_digest(framework)
+        );
+        assert_eq!(request::template_digest(framework).len(), 64);
+        assert_ne!(
+            request::request_digest(framework, "a/App.case"),
+            request::request_digest(framework, "b/App.case"),
+        );
+        assert_eq!(
+            request::request_digest(framework, "a/App.case"),
+            request::request_digest(framework, "a/App.case"),
+        );
+    }
+    // The same path under two frameworks is two different requests.
     assert_ne!(
-        request::request_digest("a/App.vue"),
-        request::request_digest("b/App.vue"),
-    );
-    assert_eq!(
-        request::request_digest("a/App.vue"),
-        request::request_digest("a/App.vue"),
+        request::request_digest(Framework::Vue, "a/App.case"),
+        request::request_digest(Framework::Svelte, "a/App.case"),
     );
 }
 
@@ -1107,11 +1257,11 @@ fn one_case_summary(manifest: &ProbeStateManifest, lines: Vec<DriverLine>) -> Su
         .expect("the observation is representable");
     let framework_run = FrameworkRun {
         manifest,
-        request_template: request::REQUEST_VUE,
+        request_template: request::template_for(Framework::Vue),
         selected: vec![CASE.to_string()],
         observed: vec![ObservedCase {
             case_id: CASE.to_string(),
-            request_digest: request::request_digest("fixtures/App.vue"),
+            request_digest: request::request_digest(Framework::Vue, "fixtures/App.vue"),
             elapsed_ns: Some(1_000),
             observation,
         }],
@@ -1135,6 +1285,87 @@ fn passing_summary(manifest: &ProbeStateManifest) -> Summary {
                 }],
             ),
         ],
+    )
+}
+
+/// One passing case of EVERY framework, folded into the ONE summary the lane
+/// publishes.
+///
+/// Built through `summary::build` from two real `FrameworkRun`s rather than by
+/// cloning a block and relabelling it: a document whose second block is the
+/// first one wearing another name would satisfy a coverage check while proving
+/// nothing about a lane that actually drove two corpora.
+fn every_framework_summary() -> Summary {
+    let vue = vue_manifest();
+    let svelte = svelte_manifest();
+    let runs = vec![
+        one_case_run(&vue, CASE, Framework::Vue, "fixtures/App.vue"),
+        one_case_run(
+            &svelte,
+            SVELTE_CASE,
+            Framework::Svelte,
+            "fixtures/App.svelte",
+        ),
+    ];
+    let framework_runs: Vec<FrameworkRun<'_>> = runs
+        .into_iter()
+        .map(|(manifest, framework, selected, observed)| FrameworkRun {
+            manifest,
+            request_template: request::template_for(framework),
+            selected,
+            observed,
+        })
+        .collect();
+    summary::build(Lane::Smoke, &framework_runs).expect("the summary is consistent")
+}
+
+/// One framework's passing single-case run.
+fn one_case_run<'a>(
+    manifest: &'a ProbeStateManifest,
+    case_id: &str,
+    framework: Framework,
+    relative_path: &str,
+) -> (
+    &'a ProbeStateManifest,
+    Framework,
+    Vec<String>,
+    Vec<ObservedCase>,
+) {
+    let mut run = ProbeRun::new(
+        case_id,
+        vec![RequestedEntry {
+            canonical_id: case_id.to_string(),
+            source: "<template><div/></template>\n".to_string(),
+            request_digest: request::request_digest(framework, relative_path),
+        }],
+    );
+    for line in [
+        phase(case_id, Phase::Compile),
+        compile_frame(case_id, vec![ok_entry(case_id)]),
+        phase(case_id, Phase::Reference),
+        reference_frame(
+            case_id,
+            vec![ReferenceResult::Produced {
+                code: MODULE.to_string(),
+            }],
+        ),
+    ] {
+        let _ = run.ingest_frame(line);
+    }
+    let observation = run
+        .finish(manifest, None)
+        .remove(0)
+        .expect("the observation is representable");
+    (
+        manifest,
+        framework,
+        vec![case_id.to_string()],
+        vec![ObservedCase {
+            case_id: case_id.to_string(),
+            request_digest: request::request_digest(framework, relative_path),
+            elapsed_ns: Some(1_000),
+            observation,
+        }],
     )
 }
 
@@ -1420,7 +1651,7 @@ fn each_framework_block_carries_its_own_request_template() {
     );
     assert_ne!(
         block.template_digest,
-        request::template_digest(),
+        request::template_digest(Framework::Vue),
         "a block must not publish another framework's template digest",
     );
 }
@@ -1547,7 +1778,7 @@ fn a_summary_whose_attempted_set_differs_from_its_selection_is_refused() {
 
     let under = FrameworkRun {
         manifest: &manifest,
-        request_template: request::REQUEST_VUE,
+        request_template: request::template_for(Framework::Vue),
         selected: vec![CASE.to_string(), "vue/fixtures/Other.vue".to_string()],
         observed: vec![ObservedCase {
             case_id: CASE.to_string(),
@@ -1563,7 +1794,7 @@ fn a_summary_whose_attempted_set_differs_from_its_selection_is_refused() {
 
     let over = FrameworkRun {
         manifest: &manifest,
-        request_template: request::REQUEST_VUE,
+        request_template: request::template_for(Framework::Vue),
         selected: vec![CASE.to_string()],
         observed: vec![
             ObservedCase {
@@ -1587,7 +1818,7 @@ fn a_summary_whose_attempted_set_differs_from_its_selection_is_refused() {
 
     let empty = FrameworkRun {
         manifest: &manifest,
-        request_template: request::REQUEST_VUE,
+        request_template: request::template_for(Framework::Vue),
         selected: Vec::new(),
         observed: Vec::new(),
     };
@@ -1617,59 +1848,146 @@ fn repository_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-fn committed_vue_manifest_text() -> String {
+fn committed_manifest_text(framework: Framework) -> String {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("manifest")
-        .join("vue.toml");
+        .join(format!("{framework}.toml"));
     std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
 }
 
-/// The committed manifest is valid, bounded, and carries no classless canary.
+fn committed_manifest(framework: Framework) -> ProbeStateManifest {
+    ProbeStateManifest::from_manifest_file(
+        &format!("{framework}.toml"),
+        &committed_manifest_text(framework),
+    )
+    .unwrap_or_else(|error| panic!("the committed {framework} manifest is invalid: {error}"))
+}
+
+/// EVERY committed manifest is valid, bounded, and carries no classless canary.
+///
+/// Table-driven over the closed framework set rather than written once per
+/// corpus: a framework added to the lane and not to its manifest fails here,
+/// which is the whole point of the set being closed.
 #[test]
-fn the_committed_vue_manifest_is_valid_bounded_and_fully_classified() {
-    let manifest =
-        ProbeStateManifest::from_manifest_file("vue.toml", &committed_vue_manifest_text())
-            .unwrap_or_else(|error| panic!("the committed vue manifest is invalid: {error}"));
+fn every_committed_manifest_is_valid_bounded_and_fully_classified() {
+    let mut combined_smoke = 0usize;
+    for framework in Framework::ALL {
+        let manifest = committed_manifest(framework);
 
-    assert_eq!(manifest.framework, Framework::Vue);
-    assert!(
-        !manifest.smoke.is_empty(),
-        "the smoke slice selects no case"
-    );
-    assert!(
-        manifest.smoke.len() <= verter_validation_probe::MAX_SMOKE_CASES,
-        "the smoke slice lists {} cases",
-        manifest.smoke.len(),
-    );
-    assert_eq!(
-        manifest.smoke,
-        manifest.derived_smoke_slice(),
-        "the smoke slice is not its own deterministic derivation",
-    );
-
-    let inventory: std::collections::BTreeSet<&str> = manifest
-        .inventory
-        .iter()
-        .map(|case| case.case_id.as_str())
-        .collect();
-    for case_id in &manifest.smoke {
+        assert_eq!(manifest.framework, framework);
         assert!(
-            inventory.contains(case_id.as_str()),
-            "the smoke slice selects `{case_id}`, which is not inventoried",
+            !manifest.smoke.is_empty(),
+            "the {framework} smoke slice selects no case"
         );
+        assert!(
+            manifest.smoke.len() <= verter_validation_probe::MAX_SMOKE_CASES,
+            "the {framework} smoke slice lists {} cases",
+            manifest.smoke.len(),
+        );
+        assert_eq!(
+            manifest.smoke,
+            manifest.derived_smoke_slice(),
+            "the {framework} smoke slice is not its own deterministic derivation",
+        );
+        combined_smoke += manifest.smoke.len();
+
+        let inventory: std::collections::BTreeSet<&str> = manifest
+            .inventory
+            .iter()
+            .map(|case| case.case_id.as_str())
+            .collect();
+        for case_id in &manifest.smoke {
+            assert!(
+                inventory.contains(case_id.as_str()),
+                "the {framework} smoke slice selects `{case_id}`, which is not inventoried",
+            );
+        }
+
+        for entry in &manifest.entries {
+            if matches!(
+                entry.expected_state,
+                verter_validation_probe::ExpectedState::Canary
+                    | verter_validation_probe::ExpectedState::KnownFail
+                    | verter_validation_probe::ExpectedState::Gate
+            ) {
+                assert!(
+                    entry.expected_class.is_some(),
+                    "{} [{}] is classless",
+                    entry.probe_id,
+                    entry.dimension,
+                );
+            }
+        }
     }
 
-    for entry in &manifest.entries {
-        if matches!(
-            entry.expected_state,
-            verter_validation_probe::ExpectedState::Canary
-                | verter_validation_probe::ExpectedState::KnownFail
-                | verter_validation_probe::ExpectedState::Gate
-        ) {
+    // ONE pull-request job drives every framework's slice, so the bound a
+    // reviewer cares about is the COMBINED inventory that job runs.
+    assert!(
+        combined_smoke <= Framework::ALL.len() * verter_validation_probe::MAX_SMOKE_CASES,
+        "the combined smoke inventory lists {combined_smoke} cases for one job",
+    );
+}
+
+/// A GENERATED corpus digests every case it inventories.
+///
+/// The Svelte corpus commits no components, so its revision pin says which
+/// generator ran and nothing about what it wrote. Without a digest per case, a
+/// generator whose output drifted would be classified as though it were the
+/// ratified corpus.
+#[test]
+fn the_generated_corpus_digests_every_inventoried_case() {
+    let manifest = committed_manifest(Framework::Svelte);
+    for case in &manifest.inventory {
+        assert!(
+            case.digest.is_some(),
+            "{} carries no content digest, so its bytes are unpinned",
+            case.case_id,
+        );
+    }
+    let digests: std::collections::BTreeSet<&str> = manifest
+        .inventory
+        .iter()
+        .filter_map(|case| case.digest.as_ref().map(|digest| digest.as_str()))
+        .collect();
+    assert!(
+        digests.len() > 1,
+        "every inventoried case digests the same, so the digests cannot discriminate",
+    );
+}
+
+/// No `Structural`, `Runtime` or `Map` cell of a framework with no bound
+/// comparator, executor or validator is anything but an OWNED skip.
+///
+/// A silent pass at an unbound dimension is the failure mode the applicability
+/// header exists to close: it would report a comparison nobody ran.
+#[test]
+fn unbound_dimensions_are_owned_skips_in_every_committed_manifest() {
+    for framework in Framework::ALL {
+        let manifest = committed_manifest(framework);
+        for entry in &manifest.entries {
+            let Some(reason) = manifest.not_applicable_reason(entry.dimension) else {
+                continue;
+            };
+            assert_eq!(
+                entry.expected_state,
+                verter_validation_probe::ExpectedState::Skip,
+                "{} [{}] is not a skip although {reason:?} makes the dimension inapplicable",
+                entry.probe_id,
+                entry.dimension,
+            );
             assert!(
-                entry.expected_class.is_some(),
-                "{} [{}] is classless",
+                entry
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| !reason.trim().is_empty()),
+                "{} [{}] is an unowned skip",
+                entry.probe_id,
+                entry.dimension,
+            );
+            assert!(
+                entry.authority.is_some() && entry.atom.is_some(),
+                "{} [{}] cites no owner",
                 entry.probe_id,
                 entry.dimension,
             );
@@ -1678,36 +1996,36 @@ fn the_committed_vue_manifest_is_valid_bounded_and_fully_classified() {
 }
 
 /// Only `Route` may gate, and only on the outcomes the implemented route
-/// authority actually owns.
+/// authority actually owns — in EVERY committed manifest.
 #[test]
 fn only_the_implemented_route_authority_gates() {
-    let manifest =
-        ProbeStateManifest::from_manifest_file("vue.toml", &committed_vue_manifest_text())
-            .expect("the committed vue manifest is valid");
-    for entry in &manifest.entries {
-        if entry.expected_state != verter_validation_probe::ExpectedState::Gate {
-            continue;
-        }
-        assert_eq!(
-            entry.dimension,
-            Dimension::Route,
-            "{} gates at {}",
-            entry.probe_id,
-            entry.dimension,
-        );
-        assert_eq!(
-            entry.authority,
-            Some(verter_validation_probe::Authority::CompilerPublicRequestRoute),
-        );
-        assert!(
-            matches!(
+    for framework in Framework::ALL {
+        let manifest = committed_manifest(framework);
+        for entry in &manifest.entries {
+            if entry.expected_state != verter_validation_probe::ExpectedState::Gate {
+                continue;
+            }
+            assert_eq!(
+                entry.dimension,
+                Dimension::Route,
+                "{} gates at {}",
+                entry.probe_id,
+                entry.dimension,
+            );
+            assert_eq!(
+                entry.authority,
+                Some(verter_validation_probe::Authority::CompilerPublicRequestRoute),
+            );
+            assert!(
+                matches!(
+                    entry.expected_class,
+                    Some(C::Pass) | Some(C::RequestRefused)
+                ),
+                "{} gates on {:?}, which the route authority's atoms do not own",
+                entry.probe_id,
                 entry.expected_class,
-                Some(C::Pass) | Some(C::RequestRefused)
-            ),
-            "{} gates on {:?}, which the route authority's atoms do not own",
-            entry.probe_id,
-            entry.expected_class,
-        );
+            );
+        }
     }
 }
 
@@ -1778,60 +2096,121 @@ fn the_workflow_declares_exactly_one_probe_job() {
     }
 }
 
-/// The pinned revision is recorded twice — once for the checkout the workflow
-/// performs, once in the manifest every artifact republishes. They must be the
-/// SAME commit: a workflow bumped to a revision whose fixture set still matches
-/// the inventory would stay green while every artifact recorded a revision its
-/// cases did not come from.
+/// Every pinned revision is recorded twice — once for the checkout the
+/// workflow performs, once in the manifest every artifact republishes. They
+/// must be the SAME commit: a workflow bumped to a revision whose case set
+/// still matches the inventory would stay green while every artifact recorded
+/// a revision its cases did not come from.
 #[test]
-fn the_workflow_and_the_manifest_pin_the_same_revision() {
+fn the_workflow_and_every_manifest_pin_the_same_revision() {
     let text = workflow_text();
-    let pinned = text
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("VUE_BENCHMARKS_REVISION:"))
-        .map(str::trim)
-        .expect("the workflow pins a corpus revision");
-    let manifest =
-        ProbeStateManifest::from_manifest_file("vue.toml", &committed_vue_manifest_text())
-            .expect("the committed vue manifest is valid");
-    assert_eq!(
-        pinned,
-        manifest.external_revision.as_str(),
-        "the workflow checks out `{pinned}` while the manifest pins `{}`",
-        manifest.external_revision.as_str(),
-    );
+    for framework in Framework::ALL {
+        let key = format!("{}_BENCHMARKS_REVISION:", framework.as_str().to_uppercase());
+        let pinned = text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(&key))
+            .map(str::trim)
+            .unwrap_or_else(|| panic!("the workflow pins no {framework} corpus revision"));
+        let manifest = committed_manifest(framework);
+        assert_eq!(
+            pinned,
+            manifest.external_revision.as_str(),
+            "the workflow checks out `{pinned}` for {framework} while the manifest pins `{}`",
+            manifest.external_revision.as_str(),
+        );
+    }
 }
 
 /// The disposition is a real PROCESS exit, not a number a caller may ignore.
 ///
 /// The binary is run as the workflow's final step runs it, over planted
 /// artifacts: a clean one exits 0, a regressed one exits non-zero, and a
-/// malformed one is refused rather than read as a lane with nothing to report.
+/// malformed one — a missing counter, or a framework the lane covers and the
+/// document does not — is refused rather than read as a lane with nothing to
+/// report.
 #[test]
 fn the_summary_binary_disposes_as_a_process() {
     let manifest = vue_manifest();
-    let clean = passing_summary(&manifest).to_json();
-    let regressed = one_case_summary(
-        &manifest,
-        vec![
-            phase(CASE, Phase::Compile),
-            compile_frame(CASE, vec![failure_entry(CASE, "host", None)]),
-            phase(CASE, Phase::Reference),
-            reference_frame(
-                CASE,
-                vec![ReferenceResult::Produced {
-                    code: MODULE.to_string(),
-                }],
-            ),
-        ],
-    )
-    .to_json();
+    let clean = every_framework_summary().to_json();
+    let regressed = {
+        let mut regressed = every_framework_summary();
+        let gated = one_case_summary(
+            &manifest,
+            vec![
+                phase(CASE, Phase::Compile),
+                compile_frame(CASE, vec![failure_entry(CASE, "host", None)]),
+                phase(CASE, Phase::Reference),
+                reference_frame(
+                    CASE,
+                    vec![ReferenceResult::Produced {
+                        code: MODULE.to_string(),
+                    }],
+                ),
+            ],
+        );
+        assert!(
+            gated.totals.gated_regressions > 0,
+            "the planted regression did not regress a gate cell",
+        );
+        // The vue block is REPLACED by the one whose gate cell regressed, so
+        // the document still covers every framework and differs from the clean
+        // one only in what it observed.
+        let block = gated.frameworks.into_iter().next().expect("one block");
+        let slot = regressed
+            .frameworks
+            .iter_mut()
+            .find(|candidate| candidate.framework == Framework::Vue)
+            .expect("the clean summary carries a vue block");
+        let clean_counters = slot.counters.clone();
+        *slot = block;
+        assert_ne!(
+            slot.counters, clean_counters,
+            "the planted block is the clean one, so the plant did not apply",
+        );
+        let mut totals: serde_json::Value =
+            serde_json::to_value(&regressed).expect("the summary is serializable");
+        // Totals are the sum of the blocks; re-deriving them through the
+        // document's own reader keeps the plant from failing validation for a
+        // reason other than the one under test.
+        totals["totals"] =
+            serde_json::to_value(sum_counters(&regressed)).expect("the counters are serializable");
+        let text = totals.to_string();
+        Summary::from_json_str(&text).expect("the planted regression is a valid document");
+        text
+    };
+
     let mut parsed: serde_json::Value = serde_json::from_str(&clean).expect("the summary is JSON");
     parsed["totals"]
         .as_object_mut()
         .expect("totals is an object")
         .remove("gated_regressions");
     let incomplete = parsed.to_string();
+
+    // A summary that dropped one framework's block. Its counters recompute,
+    // its totals add up, and it would dispose CLEAN having reported on half
+    // the lane's workload — so the workflow's own entry point has to refuse
+    // it, not merely the runner that built it.
+    let omitted = {
+        let mut summary = every_framework_summary();
+        summary
+            .frameworks
+            .retain(|block| block.framework != Framework::Svelte);
+        let mut value: serde_json::Value =
+            serde_json::to_value(&summary).expect("the summary is serializable");
+        value["totals"] =
+            serde_json::to_value(sum_counters(&summary)).expect("the counters are serializable");
+        let text = value.to_string();
+        // The plant applied and produced a document that is otherwise VALID:
+        // without this, a refusal would prove only that the fixture was
+        // malformed.
+        Summary::from_json_str(&text)
+            .expect("a single-framework summary is a valid document; only the lane refuses it");
+        assert!(
+            !text.contains("\"svelte\""),
+            "the plant left a svelte block behind",
+        );
+        text
+    };
 
     // The binary this run owns, not the one the BUILD machine left behind:
     // `CARGO_BIN_EXE_*` is expanded at compile time, so under the shared Rust
@@ -1846,6 +2225,7 @@ fn the_summary_binary_disposes_as_a_process() {
         ("a clean summary", clean, Some(0)),
         ("a gate regression", regressed, Some(1)),
         ("a summary missing a counter", incomplete, Some(2)),
+        ("a summary missing a framework", omitted, Some(2)),
     ] {
         let path = temp_file(&format!("dispose-{}", label.replace(' ', "-")), &document);
         let output = std::process::Command::new(&binary)
@@ -1862,6 +2242,40 @@ fn the_summary_binary_disposes_as_a_process() {
         );
         let _ = std::fs::remove_file(&path);
     }
+}
+
+/// The sum of a document's per-framework counters, as its own reader computes
+/// the totals.
+fn sum_counters(summary: &Summary) -> verter_validation_probe::Counters {
+    let mut totals = verter_validation_probe::Counters::default();
+    for block in &summary.frameworks {
+        totals.selected += block.counters.selected;
+        totals.attempted += block.counters.attempted;
+        totals.passed += block.counters.passed;
+        totals.gated_regressions += block.counters.gated_regressions;
+        totals.skips += block.counters.skips;
+        totals.xpass_candidates += block.counters.xpass_candidates;
+        totals.crashes += block.counters.crashes;
+        totals.timeouts += block.counters.timeouts;
+        totals.harness_failures += block.counters.harness_failures;
+        for (map, source) in [
+            (&mut totals.canary_failures, &block.counters.canary_failures),
+            (&mut totals.known_failures, &block.counters.known_failures),
+            (
+                &mut totals.canary_regressions,
+                &block.counters.canary_regressions,
+            ),
+            (
+                &mut totals.unrelated_regressions,
+                &block.counters.unrelated_regressions,
+            ),
+        ] {
+            for (class, count) in source {
+                *map.entry(class.clone()).or_insert(0) += count;
+            }
+        }
+    }
+    totals
 }
 
 /// Write `contents` to a uniquely named file under the platform's temp
@@ -2449,7 +2863,7 @@ fn the_committed_driver_refuses_a_request_without_an_identity_filename() {
     // The canonical request with `identity.filename` removed. Nothing here
     // reaches the addon: the refusal happens while the line is being read.
     let mut request: serde_json::Value =
-        serde_json::from_str(&request::substitute("fixtures/App.vue"))
+        serde_json::from_str(&request::substitute(Framework::Vue, "fixtures/App.vue"))
             .expect("the canonical request is JSON");
     request["identity"]
         .as_object_mut()

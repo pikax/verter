@@ -5,6 +5,10 @@ manifest input any validator reads: `ProbeStateManifest::from_manifest_file` / `
 contract, and the authority validator (`validate-probe-authorities.mjs`) checks every citation against
 the validation-authority catalog and the implementation ledger.
 
+Every framework in the closed target set has one. The lane runs all of them into ONE summary, and that
+summary is refused unless it carries a block per framework, so a manifest is not optional coverage: a
+framework the lane cannot load a manifest for fails the lane.
+
 A manifest is added by the lane that pins its corpus. Its shape:
 
 ```toml
@@ -53,6 +57,14 @@ it may cite only behaviour an implemented authority already owns. A product refu
 comparison, a runtime or a map result belongs to a framework product authority and becomes gateable when
 that authority is implemented and a promotion moves it — `ProbeStateManifest::validate` refuses the rest.
 
+## A generated corpus
+
+A corpus whose components are COMMITTED upstream is pinned by `external_revision` alone. A corpus that
+GENERATES its components at that revision — `pikax/svelte-benchmarks` does — is not: the revision says which
+generator ran and nothing about what it wrote. Such a manifest carries a `digest` on every `[[inventory]]`
+row: the SHA-256 of the case's LF-normalized bytes, checked as the lane loads the case, so generator drift
+fails the lane instead of being classified as though it were the ratified corpus.
+
 ## The smoke slice
 
 `smoke` is the bounded case list a pull request runs; the broader lane runs the complete `inventory`. It is
@@ -60,4 +72,6 @@ listed by case id rather than computed at run time, and then checked to EQUAL it
 lexicographic first `min_cases` cases of each stratum, in stratum declaration order. So a reviewer reads
 exactly what the required job covers, and a slice that was emptied, padded, reordered, or hand-picked fails
 `ProbeStateManifest::validate` instead of quietly re-scoping the lane. The bound (`MAX_SMOKE_CASES`) is
-structural, never a wall clock: a size expressed as a time budget drifts with the machine.
+structural, never a wall clock: a size expressed as a time budget drifts with the machine. It bounds each
+framework's slice; the one pull-request job runs every framework's, so the combined inventory it drives is
+bounded by `MAX_SMOKE_CASES` per framework.
