@@ -64,7 +64,7 @@ const SVELTE_CASE: &str = "svelte/fixtures/App.svelte";
 const TEMPLATE: &str = "<template><div/></template>\n";
 
 // ---------------------------------------------------------------------------
-// Shared harness constructs (CVO3-A)
+// Shared harness constructs
 // ---------------------------------------------------------------------------
 
 const COMPARATOR_TOML: &str = r#"
