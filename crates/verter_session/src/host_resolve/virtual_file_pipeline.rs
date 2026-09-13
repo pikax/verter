@@ -34,6 +34,54 @@ use oxc_allocator::Allocator;
 use verter_compiler::compile::format_import_specifier;
 use verter_compiler::framework_common::{RuntimeDiagnosticSeverity, RuntimeTemplateBlock};
 
+/// Consume the compiler-owned Vue Main body. Artifacts are the CCA2A
+/// transport when present; `body_code` is the publication payload. A
+/// missing body is a planted-reconstruction refusal, never host composition.
+pub(super) fn take_compiler_vue_main(
+    compiled: &verter_compiler::framework_common::RuntimeCompileOutput,
+    snapshot: &CompileInput,
+    force_js: bool,
+) -> Result<(String, Option<Arc<str>>, String), DiagnosticsSnapshot> {
+    match &compiled.main.body_code {
+        Some(body) => {
+            let code = compiled
+                .main
+                .artifacts
+                .as_ref()
+                .and_then(|set| {
+                    set.artifacts()
+                        .iter()
+                        .find(|artifact| artifact.name() == "main")
+                })
+                .and_then(|artifact| match &artifact.content {
+                    verter_compiler::assembly::ArtifactContent::Available(content) => {
+                        Some(content.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| body.clone());
+            let source_map = (!compiled.main.source_map.is_empty())
+                .then(|| Arc::from(compiled.main.source_map.clone()));
+            let lang = compiled.main.lang.clone().unwrap_or_else(|| {
+                if force_js {
+                    "js".to_string()
+                } else {
+                    snapshot
+                        .meta
+                        .script_lang
+                        .as_deref()
+                        .unwrap_or("js")
+                        .to_string()
+                }
+            });
+            Ok((code, source_map, lang))
+        }
+        None => Err(vue_main_reconstruction_diagnostics(
+            snapshot.source.len() as u32
+        )),
+    }
+}
+
 /// Planted host-side Vue topology reconstruction is forbidden: Vue main
 /// bytes come from the compiler-owned assembled body.
 pub(super) fn vue_main_reconstruction_diagnostics(source_len: u32) -> DiagnosticsSnapshot {
@@ -3683,30 +3731,8 @@ impl VerterHost {
                 canonical_id: snapshot.canonical_id.clone(),
             });
         }
-        let (main_code, main_source_map, main_lang) = match &compiled.main.body_code {
-            Some(body) => (
-                body.clone(),
-                (!compiled.main.source_map.is_empty())
-                    .then(|| Arc::from(compiled.main.source_map.clone())),
-                compiled.main.lang.clone().unwrap_or_else(|| {
-                    if profile.force_js {
-                        "js".to_string()
-                    } else {
-                        snapshot
-                            .meta
-                            .script_lang
-                            .as_deref()
-                            .unwrap_or("js")
-                            .to_string()
-                    }
-                }),
-            ),
-            None => {
-                return Err(fatal(vue_main_reconstruction_diagnostics(
-                    snapshot.source.len() as u32,
-                )));
-            }
-        };
+        let (main_code, main_source_map, main_lang) =
+            take_compiler_vue_main(compiled, snapshot, profile.force_js).map_err(fatal)?;
 
         Ok(RenderOnlyMain {
             code: Arc::from(main_code),
@@ -3780,31 +3806,8 @@ pub(super) fn publish_runtime_nodes(
     // for.
     if let Some(compiled) = products.runtime_bundle() {
         if publish_runtime_module && compiled.has_runtime_surface() {
-            let (main_code, main_source_map, main_lang) = match &compiled.main.body_code {
-                // Compiler-owned assembled body (Vue main or Svelte ESM).
-                Some(body) => (
-                    body.clone(),
-                    (!compiled.main.source_map.is_empty())
-                        .then(|| Arc::from(compiled.main.source_map.clone())),
-                    compiled.main.lang.clone().unwrap_or_else(|| {
-                        if policy.assembly.force_js {
-                            "js".to_string()
-                        } else {
-                            snapshot
-                                .meta
-                                .script_lang
-                                .as_deref()
-                                .unwrap_or("js")
-                                .to_string()
-                        }
-                    }),
-                ),
-                None => {
-                    return Err(vue_main_reconstruction_diagnostics(
-                        snapshot.source.len() as u32
-                    ));
-                }
-            };
+            let (main_code, main_source_map, main_lang) =
+                take_compiler_vue_main(compiled, snapshot, policy.assembly.force_js)?;
             outputs.insert(
                 VirtualNodeKind::Main,
                 CachedVirtualFile {

@@ -154,4 +154,11 @@ fn planted_host_vue_topology_reconstruction_is_refused() {
     .expect_err("blocks without a compiler-owned body must refuse");
     assert_eq!(err.diagnostics[0].code, "HOST_VUE_MAIN_NOT_ASSEMBLED");
     assert!(!outputs.contains_key(&crate::types::VirtualNodeKind::Main));
+
+    let render = take_compiler_vue_main(products.runtime_bundle().expect("bundle"), &input, false);
+    let render_err = render.expect_err("render lane must refuse the same planted reconstruction");
+    assert_eq!(
+        render_err.diagnostics[0].code,
+        "HOST_VUE_MAIN_NOT_ASSEMBLED"
+    );
 }

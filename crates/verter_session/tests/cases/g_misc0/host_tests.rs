@@ -2579,6 +2579,44 @@ const x = 2
 }
 
 #[test]
+fn syntax_error_does_not_warm_or_publish_main() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = upsert_vue(
+        &host,
+        "/src/Broken.vue",
+        "<script setup>const x =</script><template><div>{{ x }}</div></template>",
+    );
+    let query = VirtualQuery {
+        raw_id: Some("/src/Broken.vue".to_string()),
+        canonical_id: None,
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile_dev(),
+    };
+    let first = host.get_virtual_file(query.clone());
+    assert!(
+        first.as_ref().is_err() || first.as_ref().is_ok_and(|r| r.stale || r.code.is_empty()),
+        "syntax error must not publish a fresh Main, got {first:?}"
+    );
+    if let Ok(first) = first.as_ref() {
+        assert!(
+            !first.cache_hit,
+            "a refused/partial assembly must not warm: {first:?}"
+        );
+    }
+    let second = host.get_virtual_file(query);
+    match second {
+        Err(_) => {}
+        Ok(response) => {
+            assert!(
+                !response.cache_hit,
+                "a later read must not be a warm hit of the refused assembly"
+            );
+            assert!(response.stale || response.code.is_empty());
+        }
+    }
+}
+
+#[test]
 fn explicit_no_hmr_request_does_not_emit_file_trailer() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let _ = upsert_vue(
