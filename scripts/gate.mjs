@@ -136,7 +136,11 @@
 //      disjoint RSS is summed against one gate ceiling (default: 50% of physical RAM). A ceiling trip reaps
 //      every lane and is the distinct, non-PASS
 //      `ABORTED — memory ceiling` outcome (exit 123). Repeated sampler failure also aborts rather than
-//      silently running unmonitored. Raw per-lane output (concurrent or serial) is buffered and replayed
+//      silently running unmonitored. The native snapshot itself is awaited asynchronously under a
+//      load-tolerant budget (NATIVE_PROCESS_SNAPSHOT_BUDGET_MS), so a snapshot that is merely SLOW under
+//      build load is a successful sample — only genuinely unavailable sampling (consecutive failures at
+//      that budget) is the `ABORTED — memory safety monitor unavailable` outcome. Raw per-lane output
+//      (concurrent or serial) is buffered and replayed
 //      exactly once in Surface/check/contract order so parseable status rows never interleave.
 //   9. Terminal-outcome accounting: a test that did not PASS fails the gate and is NAMED, whatever its
 //      outcome class. nextest reports several non-`FAIL` terminal outcomes — `N timed out`, `N exec
