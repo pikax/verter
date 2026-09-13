@@ -39,6 +39,13 @@ pub enum Framework {
 }
 
 impl Framework {
+    /// Every first-class target, in declaration order.
+    ///
+    /// The lane covers this whole set: a framework declared here and absent
+    /// from a published summary is a lane that reported on one corpus and
+    /// stayed silent about the other.
+    pub const ALL: [Framework; 2] = [Framework::Vue, Framework::Svelte];
+
     /// The serialized name, also the manifest file stem and case-id prefix.
     pub const fn as_str(self) -> &'static str {
         match self {

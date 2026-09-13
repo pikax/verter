@@ -273,6 +273,17 @@ pub enum SummaryError {
     /// The document carries no framework block at all, so its all-zero totals
     /// would dispose clean having reported nothing.
     NoFrameworks,
+    /// The document carries no block for a framework the lane covers.
+    MissingFramework {
+        /// The framework with nothing to say for it.
+        framework: String,
+    },
+    /// The document carries two blocks for one framework, so its totals
+    /// double-count a corpus.
+    DuplicateFramework {
+        /// The framework.
+        framework: String,
+    },
     /// A framework's attempted case set is not its selection, whatever the
     /// counts say.
     SelectionMismatch {
@@ -348,6 +359,17 @@ impl std::fmt::Display for SummaryError {
             SummaryError::NoFrameworks => {
                 f.write_str("the summary carries no framework block at all")
             }
+            SummaryError::MissingFramework { framework } => write!(
+                f,
+                "the summary carries no `{framework}` block; the lane covers every framework, \
+                 so a document that omits one reported on part of its workload and stayed \
+                 silent about the rest"
+            ),
+            SummaryError::DuplicateFramework { framework } => write!(
+                f,
+                "the summary carries more than one `{framework}` block, so its totals \
+                 double-count that corpus"
+            ),
             SummaryError::SelectionMismatch { framework, detail } => {
                 write!(f, "{framework}: {detail}")
             }
@@ -513,6 +535,41 @@ impl Summary {
         }
         if totals != self.totals {
             return Err(SummaryError::TotalsMismatch);
+        }
+        Ok(())
+    }
+
+    /// Check the document covers EVERY framework the lane targets, exactly
+    /// once.
+    ///
+    /// Deliberately separate from [`Summary::validate`]: validity is a
+    /// property of the document, and a single-framework document is a
+    /// perfectly valid one. COVERAGE is a property of the lane's published
+    /// artifact — the one thing a reader is entitled to assume when a lane
+    /// reports "no gate regression". A summary that dropped a corpus is
+    /// internally consistent about the corpus it kept, and its totals would
+    /// dispose clean having never reported on the other, so the lane's own
+    /// publication and the artifact's entry point both require this.
+    pub fn require_every_framework(&self) -> Result<(), SummaryError> {
+        for framework in Framework::ALL {
+            let blocks = self
+                .frameworks
+                .iter()
+                .filter(|block| block.framework == framework)
+                .count();
+            match blocks {
+                1 => {}
+                0 => {
+                    return Err(SummaryError::MissingFramework {
+                        framework: framework.as_str().to_string(),
+                    })
+                }
+                _ => {
+                    return Err(SummaryError::DuplicateFramework {
+                        framework: framework.as_str().to_string(),
+                    })
+                }
+            }
         }
         Ok(())
     }

@@ -1295,11 +1295,11 @@ pub fn run_cases(
         let requested = vec![RequestedEntry {
             canonical_id: case.case_id.clone(),
             source: case.source.clone(),
-            request_digest: request::request_digest(&case.relative_path),
+            request_digest: request::request_digest(manifest.framework, &case.relative_path),
         }];
         let mut run = ProbeRun::new(case.case_id.clone(), requested);
         if stop.is_none() {
-            match write_probe(&mut child, case) {
+            match write_probe(&mut child, manifest.framework, case) {
                 Ok(()) => drive_probe(&mut run, &lines, deadlines, &mut stop, &mut child),
                 Err(message) => {
                     run.record_harness_failure(message);
@@ -1314,7 +1314,7 @@ pub fn run_cases(
         let observations = run.finish(manifest, stop.as_ref().and_then(LaneStop::process));
         results.push(CaseResult {
             case_id: case.case_id.clone(),
-            request_digest: request::request_digest(&case.relative_path),
+            request_digest: request::request_digest(manifest.framework, &case.relative_path),
             elapsed_ns,
             observation: observations
                 .into_iter()
@@ -1327,9 +1327,9 @@ pub fn run_cases(
     Ok(results)
 }
 
-fn write_probe(child: &mut Child, case: &PlannedCase) -> Result<(), String> {
+fn write_probe(child: &mut Child, framework: Framework, case: &PlannedCase) -> Result<(), String> {
     let request: serde_json::Value =
-        serde_json::from_str(&request::substitute(&case.relative_path))
+        serde_json::from_str(&request::substitute(framework, &case.relative_path))
             .map_err(|error| format!("the canonical request is not JSON: {error}"))?;
     let probe = serde_json::json!({
         "probe_id": case.case_id,

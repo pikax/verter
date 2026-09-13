@@ -1,0 +1,4621 @@
+# The Svelte probe-state manifest: one pinned external workload, the complete
+# ratified case inventory, and one declared cell per case per dimension.
+#
+# The corpus is a WORKLOAD, never an oracle. Nothing here derives an
+# expected output from it: a cell records what Verter is expected to do and
+# which authority owns that behaviour.
+#
+# This corpus COMMITS no components. Its `fixtures` tree is written by the
+# upstream generator at the pinned revision, so every inventory row carries the
+# SHA-256 of the case's LF-normalized bytes: the revision pin says which
+# generator ran, and the digest says what it produced.
+#
+# Only `Route` may gate, because `compiler.public-request-route` is the only
+# authority behind these cells whose owning node is implemented. Every
+# `Compile` cell is a canary or a known-fail owned by
+# `svelte.runtime-client-product`, and is promoted only when that authority is
+# implemented and the promotion is ratified.
+#
+# No Svelte structural comparator exists, so every `Structural` cell is an
+# owned skip rather than a silent pass — as are `Runtime` and `Map`, whose
+# executor and validator are unbound for every framework.
+#
+# The `smoke` slice is the deterministic lexicographic first-`min_cases` of
+# each stratum, and is checked to equal that derivation, so what a pull
+# request runs is readable here and cannot be quietly re-scoped.
+
+framework = "svelte"
+comparison = "none"
+external_revision = "e19c48b81ad24b75a6d4b81377b4a7ebc39a1900"
+
+# The deterministic pull-request slice. Listed here and checked to equal
+# the lexicographic first-`min_cases` of each stratum below.
+smoke = ["svelte/fixtures/20/Comp00000.svelte","svelte/fixtures/20/Comp00010.svelte","svelte/fixtures/20/Comp00001.svelte","svelte/fixtures/20/Comp00011.svelte","svelte/fixtures/20/Comp00002.svelte","svelte/fixtures/20/Comp00012.svelte","svelte/fixtures/20/Comp00003.svelte","svelte/fixtures/20/Comp00013.svelte","svelte/fixtures/20/Comp00004.svelte","svelte/fixtures/20/Comp00014.svelte","svelte/fixtures/20/Comp00005.svelte","svelte/fixtures/20/Comp00015.svelte","svelte/fixtures/20/Comp00006.svelte","svelte/fixtures/20/Comp00016.svelte","svelte/fixtures/20/Comp00007.svelte","svelte/fixtures/20/Comp00017.svelte","svelte/fixtures/20/Comp00008.svelte","svelte/fixtures/20/Comp00018.svelte","svelte/fixtures/20/Comp00009.svelte","svelte/fixtures/20/Comp00019.svelte"]
+
+[applicability]
+# No runtime executor and no source-map validator are bound for this lane,
+# so every Runtime and Map cell is an owned skip rather than a silent pass.
+runtime = "inapplicable"
+map = "inapplicable"
+
+# The generator's own fixture families: it cycles ten component templates by
+# file index, so a file name's last digit is the template that produced it.
+
+[[strata]]
+id = "generated-template-0"
+pattern = "Comp*0.svelte"
+min_cases = 2
+
+[[strata]]
+id = "generated-template-1"
+pattern = "Comp*1.svelte"
+min_cases = 2
+
+[[strata]]
+id = "generated-template-2"
+pattern = "Comp*2.svelte"
+min_cases = 2
+
+[[strata]]
+id = "generated-template-3"
+pattern = "Comp*3.svelte"
+min_cases = 2
+
+[[strata]]
+id = "generated-template-4"
+pattern = "Comp*4.svelte"
+min_cases = 2
+
+[[strata]]
+id = "generated-template-5"
+pattern = "Comp*5.svelte"
+min_cases = 2
+
+[[strata]]
+id = "generated-template-6"
+pattern = "Comp*6.svelte"
+min_cases = 2
+
+[[strata]]
+id = "generated-template-7"
+pattern = "Comp*7.svelte"
+min_cases = 2
+
+[[strata]]
+id = "generated-template-8"
+pattern = "Comp*8.svelte"
+min_cases = 2
+
+[[strata]]
+id = "generated-template-9"
+pattern = "Comp*9.svelte"
+min_cases = 2
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00000.svelte"
+digest = "4317d1f1918c9bfbba827a26a1b11a997f4cfb48c36c4ecc8727b01b24274c86"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00001.svelte"
+digest = "7469bf721f8005786c324a18f67796b1f2eed2bf87ebf9710639991bdb985551"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00002.svelte"
+digest = "b14fdb23f757cee491df42da5d565b89a8d4dee5b6d0f7145eef8edbff85e8b2"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00003.svelte"
+digest = "ad10de1300468f4af2c9d689d9d18841e78e5a7da82e051518ca769fb8e181d2"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00004.svelte"
+digest = "57e81f965d2af15aff94786e1f6bf322e872d5dd8022e4ac50e5fe67643cb89d"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00005.svelte"
+digest = "87e4b52065a7403754650ad7b1a0a5277b88f108b49a1384e4a5e3ad0201fe19"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00006.svelte"
+digest = "35e5da66029add2414bfe177101789674fb492ab4505d65d203f24791167fe40"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00007.svelte"
+digest = "f3e9b64691c35a8c7d096b9dae6f0d07532360fee6edc07b3b0cbf909d6068d7"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00008.svelte"
+digest = "a58f2629610712b1d21e527d9a987a4cb9b09bc4a164a4457dea88bcc2eb1bfe"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00009.svelte"
+digest = "b39e68a34f5a253f90d253c0523581ede44a6813493ae41bee6571220d2f5232"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00010.svelte"
+digest = "939c6480f8bad0645e4defdd54a0daddaab4b7294f43937abe32a499e7fec817"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00011.svelte"
+digest = "e6cc55999e99acf075cf865b370f3813936e0b7a90d975709af873c630d808ef"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00012.svelte"
+digest = "e568b397f67c59fabc14f23c32a4d2c1548d67de3df1574c01f9eb5dcde215d4"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00013.svelte"
+digest = "31561345342486fcfc78ab9ff0c8db2ffb91190b403ca971f641c21b70ee0b6a"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00014.svelte"
+digest = "78ae32877c7df70f9494b11deb91054b65fac083830a95047fbf9b2ea7fa73f5"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00015.svelte"
+digest = "0f7360a24a6003fe90e97b57d15e302876739c4540eb3745786f7d3cb1e8a803"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00016.svelte"
+digest = "d96235e575ff55b529640ceb50414faf83dc333f0155b0d95c9546da252566f1"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00017.svelte"
+digest = "5ffe1031f3bfc123cc5c81ea979499b76efd05d4de4a6e56e9ddb2bda4898d17"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00018.svelte"
+digest = "37d581233f21389422967b58fe65f7597a5ddb213972b9704bb842a47d43af37"
+
+[[inventory]]
+case_id = "svelte/fixtures/20/Comp00019.svelte"
+digest = "3e71762f68b62484e51f39837fba2d63f1839e6c610ab7b48d10c4caf983268e"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00000.svelte"
+digest = "4317d1f1918c9bfbba827a26a1b11a997f4cfb48c36c4ecc8727b01b24274c86"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00001.svelte"
+digest = "7469bf721f8005786c324a18f67796b1f2eed2bf87ebf9710639991bdb985551"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00002.svelte"
+digest = "b14fdb23f757cee491df42da5d565b89a8d4dee5b6d0f7145eef8edbff85e8b2"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00003.svelte"
+digest = "ad10de1300468f4af2c9d689d9d18841e78e5a7da82e051518ca769fb8e181d2"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00004.svelte"
+digest = "57e81f965d2af15aff94786e1f6bf322e872d5dd8022e4ac50e5fe67643cb89d"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00005.svelte"
+digest = "87e4b52065a7403754650ad7b1a0a5277b88f108b49a1384e4a5e3ad0201fe19"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00006.svelte"
+digest = "35e5da66029add2414bfe177101789674fb492ab4505d65d203f24791167fe40"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00007.svelte"
+digest = "f3e9b64691c35a8c7d096b9dae6f0d07532360fee6edc07b3b0cbf909d6068d7"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00008.svelte"
+digest = "a58f2629610712b1d21e527d9a987a4cb9b09bc4a164a4457dea88bcc2eb1bfe"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00009.svelte"
+digest = "b39e68a34f5a253f90d253c0523581ede44a6813493ae41bee6571220d2f5232"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00010.svelte"
+digest = "939c6480f8bad0645e4defdd54a0daddaab4b7294f43937abe32a499e7fec817"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00011.svelte"
+digest = "e6cc55999e99acf075cf865b370f3813936e0b7a90d975709af873c630d808ef"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00012.svelte"
+digest = "e568b397f67c59fabc14f23c32a4d2c1548d67de3df1574c01f9eb5dcde215d4"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00013.svelte"
+digest = "31561345342486fcfc78ab9ff0c8db2ffb91190b403ca971f641c21b70ee0b6a"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00014.svelte"
+digest = "78ae32877c7df70f9494b11deb91054b65fac083830a95047fbf9b2ea7fa73f5"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00015.svelte"
+digest = "0f7360a24a6003fe90e97b57d15e302876739c4540eb3745786f7d3cb1e8a803"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00016.svelte"
+digest = "d96235e575ff55b529640ceb50414faf83dc333f0155b0d95c9546da252566f1"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00017.svelte"
+digest = "5ffe1031f3bfc123cc5c81ea979499b76efd05d4de4a6e56e9ddb2bda4898d17"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00018.svelte"
+digest = "37d581233f21389422967b58fe65f7597a5ddb213972b9704bb842a47d43af37"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00019.svelte"
+digest = "3e71762f68b62484e51f39837fba2d63f1839e6c610ab7b48d10c4caf983268e"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00020.svelte"
+digest = "83912265d58e8b95c13f597a96ec27d45e2495b6824028f17b614aca3abc8430"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00021.svelte"
+digest = "bd5d9f41cfa681919bd20198c78f5c799f075cf8f74e05a5f78c393d7dc55319"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00022.svelte"
+digest = "aae9d92c4a4acc43c2365d5f73de8c936a196ccfd91ae95a893b96cdf66cecf3"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00023.svelte"
+digest = "27b7b9e3c80749864b8912f325cfbcfcc4b797c8c5262bf988facb5bbb6223a0"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00024.svelte"
+digest = "9d98f45cb0091ae70b16fe72de93fd1b7b2cc11df8ebb747319678c71dfae5e0"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00025.svelte"
+digest = "2bf8ee14659eadff06fabc03aff4a1af91dcf106f3dea050b11014433e05a447"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00026.svelte"
+digest = "a052da753dc5e122fc1a90430d01c3bce536eab27e88083023dff9a38abfd505"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00027.svelte"
+digest = "72717462353e9fb25fd39b5d148ec5b1f60e5595bb6deb9b8e07b4201c4a38f1"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00028.svelte"
+digest = "fc0ce399685491359ae70776d7f631983600abe112c17ead3f23e59fcd3209dd"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00029.svelte"
+digest = "bfd2dac9ca10915193e788491e7f22e722ec4e038eeee62548b9fee140e7548b"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00030.svelte"
+digest = "846f2a6ec32a1f6f1d5b2b699234dbf42028bb3992a1c731e59089848f16f1b0"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00031.svelte"
+digest = "0620c66dc003ca2a3fc733b7725ddedc222999d7757c2143146147098c133d0e"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00032.svelte"
+digest = "1691dddb07352c9d59219804a54a1ad23601594aef77715212de0358d844f07a"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00033.svelte"
+digest = "9266182e512118bda9904783bbc2633d602c980c0d6f665d1d0bbd2baba39fbf"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00034.svelte"
+digest = "45e205520aec25078bcffa40a145723cd309eb73c99a229725c8038571f94540"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00035.svelte"
+digest = "e0c3fd299cf6f6c748d6957c81db188443df5209aee6af92763f7293227fb0b6"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00036.svelte"
+digest = "2d618ea10d39be5915125a089c72cc511f2116714cabdf26a01871dda12cd5f5"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00037.svelte"
+digest = "2ea828133bcba43b59feba5e1fc02471432ce6e5cd24268e2eca0a880dfff375"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00038.svelte"
+digest = "beacb1e3dc99dec34e27a10bdf65b320562f45b29faecc8eb7c68a773a137f1f"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00039.svelte"
+digest = "9f0962d0ec8bdec0119e4762230706b82e29af04b984890cf08b3fbb00d396f1"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00040.svelte"
+digest = "ca2c272845244bc1294b742aa9cc77a141295fe108f648a6b6e7eec1a03cdfa4"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00041.svelte"
+digest = "315bd07963600e8a9cacf3bcbe850fcefc1c15156fa643f00d1c8d6def57822b"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00042.svelte"
+digest = "abf31707ad4f35eef35aea92fcecee89d7525f78b4365198651d5482cd13485a"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00043.svelte"
+digest = "2dae87abc3d8a6ef43d1ffb576833d5ddf89eb4b1b4c6e8cef24ea46cba9a286"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00044.svelte"
+digest = "8ce98ac1c16a72c54647945304fcc2138488ef887cbc8e3e25ec823481b8d18d"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00045.svelte"
+digest = "7a407cf4860e7b7c221001bd8d2f68260628714ec2917789c4b3f4b317d7c3fd"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00046.svelte"
+digest = "7c5c05f2f1349d04813944814f8a4e64a19ee7cb61d7fe0ae7e2555bb09db27b"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00047.svelte"
+digest = "483d62a51f50887c4ba967d2821608659870c5398057dde3e4ab267c3a21fed0"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00048.svelte"
+digest = "809acab1ccc722b0da0b2712d041f9cc734e350ca2bf432b73de9d70aa256164"
+
+[[inventory]]
+case_id = "svelte/fixtures/50/Comp00049.svelte"
+digest = "3c562c2bcd97490af136abf6879abf886aa6b80c889af03dad040c3242c846d2"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00000.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00000.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00000.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00000.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00000.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00000.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00000.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00000.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00000.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00000.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00000.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00000.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00001.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00001.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00001.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00001.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00001.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00001.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00001.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00001.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00001.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00001.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00001.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00001.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00002.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00002.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00002.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00002.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00002.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00002.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00002.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00002.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00002.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00002.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00002.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00002.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00003.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00003.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00003.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00003.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00003.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00003.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00003.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00003.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00003.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00003.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00003.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00003.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00004.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00004.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00004.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00004.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00004.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00004.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00004.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00004.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00004.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00004.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00004.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00004.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00005.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00005.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00005.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00005.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00005.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00005.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00005.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00005.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00005.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00005.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00005.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00005.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00006.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00006.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00006.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00006.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00006.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00006.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00006.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00006.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00006.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00006.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00006.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00006.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00007.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00007.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00007.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00007.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00007.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00007.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00007.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00007.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00007.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00007.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00007.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00007.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00008.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00008.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00008.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00008.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00008.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00008.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00008.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00008.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00008.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00008.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00008.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00008.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00009.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00009.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00009.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00009.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00009.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00009.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00009.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00009.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00009.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00009.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00009.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00009.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00010.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00010.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00010.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00010.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00010.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00010.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00010.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00010.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00010.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00010.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00010.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00010.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00011.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00011.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00011.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00011.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00011.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00011.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00011.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00011.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00011.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00011.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00011.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00011.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00012.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00012.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00012.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00012.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00012.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00012.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00012.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00012.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00012.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00012.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00012.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00012.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00013.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00013.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00013.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00013.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00013.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00013.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00013.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00013.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00013.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00013.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00013.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00013.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00014.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00014.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00014.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00014.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00014.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00014.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00014.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00014.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00014.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00014.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00014.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00014.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00015.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00015.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00015.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00015.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00015.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00015.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00015.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00015.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00015.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00015.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00015.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00015.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00016.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00016.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00016.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00016.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00016.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00016.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00016.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00016.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00016.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00016.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00016.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00016.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00017.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00017.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00017.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00017.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00017.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00017.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00017.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00017.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00017.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00017.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00017.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00017.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00018.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00018.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00018.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00018.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00018.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00018.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00018.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00018.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00018.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00018.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00018.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00018.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00019.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00019.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00019.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00019.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00019.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00019.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00019.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00019.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00019.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00019.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/20/Comp00019.svelte"
+framework = "svelte"
+case = "fixtures/20/Comp00019.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00000.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00000.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00000.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00000.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00000.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00000.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00000.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00000.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00000.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00000.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00000.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00000.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00001.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00001.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00001.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00001.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00001.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00001.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00001.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00001.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00001.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00001.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00001.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00001.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00002.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00002.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00002.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00002.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00002.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00002.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00002.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00002.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00002.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00002.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00002.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00002.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00003.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00003.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00003.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00003.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00003.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00003.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00003.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00003.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00003.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00003.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00003.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00003.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00004.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00004.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00004.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00004.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00004.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00004.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00004.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00004.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00004.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00004.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00004.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00004.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00005.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00005.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00005.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00005.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00005.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00005.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00005.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00005.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00005.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00005.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00005.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00005.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00006.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00006.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00006.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00006.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00006.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00006.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00006.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00006.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00006.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00006.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00006.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00006.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00007.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00007.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00007.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00007.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00007.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00007.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00007.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00007.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00007.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00007.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00007.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00007.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00008.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00008.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00008.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00008.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00008.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00008.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00008.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00008.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00008.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00008.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00008.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00008.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00009.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00009.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00009.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00009.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00009.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00009.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00009.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00009.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00009.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00009.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00009.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00009.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00010.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00010.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00010.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00010.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00010.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00010.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00010.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00010.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00010.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00010.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00010.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00010.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00011.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00011.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00011.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00011.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00011.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00011.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00011.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00011.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00011.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00011.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00011.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00011.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00012.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00012.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00012.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00012.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00012.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00012.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00012.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00012.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00012.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00012.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00012.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00012.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00013.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00013.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00013.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00013.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00013.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00013.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00013.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00013.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00013.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00013.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00013.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00013.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00014.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00014.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00014.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00014.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00014.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00014.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00014.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00014.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00014.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00014.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00014.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00014.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00015.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00015.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00015.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00015.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00015.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00015.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00015.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00015.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00015.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00015.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00015.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00015.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00016.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00016.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00016.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00016.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00016.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00016.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00016.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00016.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00016.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00016.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00016.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00016.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00017.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00017.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00017.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00017.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00017.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00017.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00017.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00017.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00017.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00017.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00017.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00017.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00018.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00018.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00018.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00018.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00018.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00018.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00018.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00018.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00018.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00018.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00018.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00018.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00019.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00019.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00019.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00019.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00019.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00019.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00019.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00019.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00019.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00019.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00019.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00019.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00020.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00020.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00020.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00020.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00020.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00020.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00020.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00020.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00020.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00020.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00020.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00020.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00021.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00021.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00021.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00021.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00021.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00021.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00021.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00021.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00021.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00021.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00021.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00021.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00022.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00022.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00022.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00022.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00022.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00022.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00022.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00022.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00022.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00022.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00022.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00022.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00023.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00023.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00023.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00023.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00023.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00023.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00023.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00023.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00023.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00023.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00023.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00023.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00024.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00024.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00024.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00024.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00024.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00024.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00024.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00024.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00024.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00024.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00024.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00024.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00025.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00025.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00025.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00025.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00025.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00025.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00025.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00025.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00025.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00025.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00025.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00025.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00026.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00026.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00026.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00026.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00026.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00026.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00026.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00026.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00026.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00026.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00026.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00026.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00027.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00027.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00027.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00027.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00027.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00027.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00027.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00027.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00027.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00027.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00027.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00027.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00028.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00028.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00028.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00028.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00028.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00028.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00028.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00028.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00028.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00028.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00028.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00028.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00029.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00029.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00029.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00029.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00029.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00029.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00029.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00029.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00029.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00029.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00029.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00029.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00030.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00030.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00030.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00030.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00030.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00030.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00030.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00030.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00030.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00030.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00030.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00030.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00031.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00031.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00031.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00031.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00031.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00031.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00031.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00031.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00031.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00031.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00031.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00031.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00032.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00032.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00032.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00032.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00032.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00032.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00032.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00032.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00032.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00032.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00032.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00032.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00033.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00033.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00033.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00033.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00033.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00033.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00033.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00033.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00033.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00033.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00033.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00033.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00034.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00034.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00034.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00034.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00034.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00034.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00034.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00034.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00034.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00034.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00034.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00034.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00035.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00035.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00035.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00035.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00035.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00035.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00035.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00035.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00035.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00035.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00035.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00035.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00036.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00036.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00036.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00036.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00036.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00036.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00036.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00036.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00036.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00036.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00036.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00036.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00037.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00037.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00037.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00037.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00037.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00037.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00037.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00037.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00037.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00037.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00037.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00037.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00038.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00038.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00038.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00038.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00038.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00038.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00038.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00038.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00038.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00038.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00038.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00038.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00039.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00039.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00039.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00039.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00039.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00039.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00039.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00039.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00039.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00039.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00039.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00039.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00040.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00040.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00040.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00040.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00040.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00040.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00040.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00040.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00040.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00040.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00040.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00040.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00041.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00041.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00041.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00041.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00041.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00041.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00041.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00041.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00041.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00041.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00041.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00041.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00042.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00042.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00042.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00042.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00042.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00042.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00042.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00042.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00042.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00042.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00042.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00042.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00043.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00043.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00043.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00043.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00043.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00043.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00043.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00043.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00043.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00043.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00043.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00043.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00044.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00044.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00044.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00044.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00044.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00044.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00044.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00044.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00044.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00044.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00044.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00044.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00045.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00045.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00045.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00045.svelte"
+dimension = "Compile"
+expected_state = "canary"
+expected_class = "pass"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00045.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00045.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00045.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00045.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00045.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00045.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00045.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00045.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00046.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00046.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00046.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00046.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00046.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00046.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00046.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00046.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00046.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00046.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00046.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00046.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00047.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00047.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00047.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00047.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00047.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00047.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00047.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00047.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00047.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00047.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00047.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00047.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00048.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00048.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00048.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00048.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00048.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00048.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00048.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00048.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00048.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00048.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00048.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00048.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00049.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00049.svelte"
+dimension = "Route"
+expected_state = "gate"
+expected_class = "pass"
+authority = "compiler.public-request-route"
+atom = "route-callable"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00049.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00049.svelte"
+dimension = "Compile"
+expected_state = "known-fail"
+expected_class = "unsupported"
+reason = "the Svelte client emitter declares this component outside its contract"
+authority = "svelte.runtime-client-product"
+atom = "product-shape"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00049.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00049.svelte"
+dimension = "Structural"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "product-identity"
+reason = "no Svelte structural comparator"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00049.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00049.svelte"
+dimension = "Runtime"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "runtime-behavior"
+reason = "runtime_executor_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00049.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00049.svelte"
+dimension = "Map"
+expected_state = "skip"
+authority = "svelte.runtime-client-product"
+atom = "source-map"
+reason = "map_validator_absent"
+
+[[entries]]
+probe_id = "svelte/fixtures/50/Comp00049.svelte"
+framework = "svelte"
+case = "fixtures/50/Comp00049.svelte"
+dimension = "Performance"
+expected_state = "canary"
+expected_class = "pass"
+authority = "compiler.equivalent-work-ledger"
+atom = "equivalent-work-ledger"
