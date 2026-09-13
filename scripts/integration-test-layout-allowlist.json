@@ -1,12 +1,11 @@
 {
   "comment": [
     "CENTRAL allowlist for the anti-binary-growth integration-test-layout guard.",
-    "SINGLE SOURCE OF TRUTH read by BOTH:",
-    "  - scripts/check-integration-test-layout.mjs (the fast-fail CI Node check), and",
-    "  - crates/verter_session/tests/cases/integration_test_layout_guard.rs (the in-gate Rust guard).",
+    "SINGLE SOURCE OF TRUTH read by scripts/check-integration-test-layout.mjs; the committed",
+    "exception SET is additionally pinned exactly by scripts/check-integration-test-layout.test.mjs.",
     "Each entry is an EXACT, stale-failing exception: { package, target, src_path, reason }.",
     "src_path is repo-relative, FORWARD-SLASH normalized.",
-    "RULES (enforced by both guards):",
+    "RULES (enforced by the check):",
     "  - EXACT: package + target + normalized src_path must all match a real cargo-metadata test target.",
     "  - NO globs, NO prefixes, NO package-wide switches.",
     "  - STALE-FAILING: if an allowlisted (package,target) no longer exists in cargo metadata,",

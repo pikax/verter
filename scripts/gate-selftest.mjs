@@ -727,6 +727,54 @@ function writeSuccessfulToolShim(dir, tool) {
   return shim;
 }
 
+// A `cargo metadata` document the gate's integration-test layout preflight ACCEPTS, for legs that drive
+// the real gate at the real repo root with a cargo stand-in first on PATH. Built from the COMMITTED
+// allowlist: `workspace_members` plus, per entry, a test target at its exact src_path resolved against
+// the repo root the layout tool itself derives (dirname of its scripts dir), so the check's disk side
+// reads the repo's own conformant tests/ trees and the preflight passes, letting the run proceed past
+// the gate's first step. Deriving from the allowlist keeps the fixture tracking the real exception set
+// instead of drifting behind a hand-copied package list. Returns the fixture path.
+function writeLayoutConformantMetadataFixture(dir) {
+  const committedAllowlist = JSON.parse(
+    readFileSync(join(SELFTEST_DIR, "integration-test-layout-allowlist.json"), "utf8"),
+  ).allow;
+  const repoRoot = dirname(SELFTEST_DIR);
+  const pkgs = new Map();
+  for (const entry of committedAllowlist) {
+    const pkgDir = dirname(dirname(entry.src_path)); // "crates/<name>"
+    const pkg = pkgs.get(entry.package) ?? {
+      name: entry.package,
+      id: entry.package,
+      manifest_path: join(repoRoot, pkgDir, "Cargo.toml"),
+      targets: [
+        {
+          kind: ["test"],
+          name: "main",
+          test: true,
+          src_path: join(repoRoot, pkgDir, "tests", "main.rs"),
+        },
+      ],
+    };
+    pkg.targets.push({
+      kind: ["test"],
+      name: entry.target,
+      test: true,
+      src_path: join(repoRoot, entry.src_path),
+    });
+    pkgs.set(entry.package, pkg);
+  }
+  const fixturePath = join(dir, "layout-metadata.json");
+  writeFileSync(
+    fixturePath,
+    JSON.stringify({
+      workspace_members: [...pkgs.values()].map((p) => p.id),
+      packages: [...pkgs.values()],
+    }),
+    "utf8",
+  );
+  return fixturePath;
+}
+
 // ====================================================================================================
 async function main() {
   process.stderr.write(
@@ -1320,18 +1368,50 @@ async function main() {
     const stubDir = freshTmpDir("gatetest-harness-smoke-cargostub-");
     const stubName = IS_WINDOWS ? "cargo.exe" : "cargo";
     const stubPath = join(stubDir, stubName);
+    // The gate's FIRST step is the integration-test layout preflight, whose real
+    // `cargo metadata` call the stand-in below must ANSWER (with the layout-conformant
+    // fixture) so this run reaches the harness smokes under test; every other cargo
+    // subcommand still fails, terminating the run at the archive step as before.
+    const layoutMetadataFixture = writeLayoutConformantMetadataFixture(stubDir);
+    let windowsMetadataPreload = "";
     if (IS_WINDOWS) {
       // A copied Node launcher is a spawnable .exe stand-in. Cargo's first arg (`nextest`) is not a JS
-      // file, so it fails immediately without reaching the real Cargo binary later on PATH.
+      // file, so it fails immediately without reaching the real Cargo binary later on PATH. The one
+      // exception the layout preflight needs — `metadata` — is answered by a NODE_OPTIONS --require
+      // preload. Node resolves the copied launcher's entry against the spawn cwd before the preload
+      // runs, so the dispatch matches the resolved entry's BASENAME: only the layout preflight's
+      // `cargo metadata` invocation produces it (its cwd is the repo root, which has no `metadata`
+      // file); every other invocation (gate, smokes, `nextest archive`) has a different entry basename,
+      // the preload no-ops, and the pre-candidate fail-fast behavior is preserved.
       copyFileSync(process.execPath, stubPath);
+      const preload = join(stubDir, "cargo-metadata-preload.cjs");
+      writeFileSync(
+        preload,
+        "const entry = process.argv[1];\n" +
+          'if (entry !== undefined && require("node:path").basename(entry) === "metadata") {\n' +
+          '  const { readFileSync } = require("node:fs");\n' +
+          `  process.stdout.write(readFileSync(${JSON.stringify(layoutMetadataFixture)}, "utf8"));\n` +
+          "  process.exit(0);\n" +
+          "}\n",
+      );
+      windowsMetadataPreload = `--require ${JSON.stringify(preload)}`;
     } else {
-      writeFileSync(stubPath, "#!/bin/sh\nexit 9\n", { mode: 0o755 });
+      writeFileSync(
+        stubPath,
+        `#!/bin/sh\nif [ "$1" = "metadata" ]; then\n  cat "${layoutMetadataFixture}"\n  exit 0\nfi\nexit 9\n`,
+        { mode: 0o755 },
+      );
     }
     const bufShim = writeSuccessfulToolShim(stubDir, "buf");
     const oxfmtShim = writeSuccessfulToolShim(stubDir, "oxfmt");
     const delimiter = pathDelimiterFor(IS_WINDOWS);
     const hermeticPath = `${stubDir}${delimiter}${pathWithoutTool(process.env.PATH, "pnpm")}`;
     const smokeEnv = { PATH: hermeticPath };
+    if (IS_WINDOWS) {
+      // Only the Windows copied-exe stand-in dispatches through the preload; append to (never
+      // clobber) any ambient NODE_OPTIONS.
+      smokeEnv.NODE_OPTIONS = `${process.env.NODE_OPTIONS ? `${process.env.NODE_OPTIONS} ` : ""}${windowsMetadataPreload}`;
+    }
     const pnpmPath = resolvePnpm(smokeEnv);
     const resolvedBuf = resolvePathShim("buf", smokeEnv);
     const resolvedOxfmt = resolvePathShim("oxfmt", smokeEnv);
@@ -1833,6 +1913,9 @@ async function main() {
       for (const name of GATE_CLI_MODULE_FILES) {
         writeFileSync(join(parseScripts, name), readFileSync(join(SELFTEST_DIR, name)));
       }
+      // The gate's first front-half step runs the layout check before the harness smoke; this leg
+      // owns the argv discrimination, not layout, so plant the same successful stand-in GB9 uses.
+      writeFileSync(join(parseScripts, "check-integration-test-layout.mjs"), "process.exit(0);\n");
       const accepted = runGateCapture(
         join(parseScripts, "gate.mjs"),
         ["--exhaustive", "--target-dir", join(parseRoot, "target", "gate-runner")],
@@ -2132,6 +2215,15 @@ async function main() {
     const wasmLibDir = join(stubDir, "wasm-target-lib");
     mkdirSync(wasmLibDir, { recursive: true });
     writeFileSync(join(wasmLibDir, "libcore-0000000000000000.rlib"), "", "utf8");
+
+    // The gate's first step — the integration-test layout preflight — runs the REAL
+    // scripts/check-integration-test-layout.mjs, whose bare `cargo metadata
+    // --format-version 1 --no-deps` is the one metadata call shape the wasm scope probe
+    // never builds (that probe always pins `--manifest-path`). Serve the bare call the
+    // layout-conformant fixture so the preflight passes and the run proceeds to the
+    // archive/list and lane invocations this scenario observes; the wasm probe keeps the
+    // one-package wasm fixture above through the --manifest-path dispatch below.
+    const layoutMetadataPath = writeLayoutConformantMetadataFixture(stubDir);
     const rustcStub = join(stubDir, "rustc");
     writeFileSync(rustcStub, `#!/usr/bin/env bash\nprintf '%s\\n' "${wasmLibDir}"\nexit 0\n`, {
       mode: 0o755,
@@ -2156,15 +2248,25 @@ async function main() {
     // scenario then reports a lane running while it is disabled.
     //
     // The stub dispatches on the REAL argv shape each production call site builds (buildNextestArchiveArgs
-    // / the list step / buildSurface1RunArgs / buildShippedCfgCheckArgs / buildShippedCfgContractArgs) and
-    // records the ACTUAL env + argv each per-lane invocation receives, then fails fast (archive/list
-    // succeed so the gate reaches the lanes; the lane invocations themselves exit non-zero once recorded,
-    // since only their observed inputs — never the overall verdict — are under test here).
+    // / the list step / buildSurface1RunArgs / buildShippedCfgCheckArgs / buildShippedCfgContractArgs, and
+    // the two `cargo metadata` callers: the layout preflight's bare no-manifest-path invocation vs the
+    // wasm scope probe's --manifest-path one) and records the ACTUAL env + argv each per-lane invocation
+    // receives, then fails fast (archive/list succeed so the gate reaches the lanes; the lane invocations
+    // themselves exit non-zero once recorded, since only their observed inputs — never the overall
+    // verdict — are under test here).
     writeFileSync(
       stubPath,
       `#!/usr/bin/env bash
 if [ "$1" = "metadata" ]; then
-  cat "${wasmMetadataPath}"
+  manifest_pinned=""
+  for a in "$@"; do
+    if [ "$a" = "--manifest-path" ]; then manifest_pinned="1"; fi
+  done
+  if [ -n "$manifest_pinned" ]; then
+    cat "${wasmMetadataPath}"
+  else
+    cat "${layoutMetadataPath}"
+  fi
   exit 0
 elif [ "$1" = "test" ] && [ "$2" = "--target" ]; then
   printf 'running 1 tests\\ntest the_stand_in_case ... ok\\n\\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 filtered out; finished in 0.00s\\n'
@@ -3442,9 +3544,14 @@ fi
       const stubPath = join(stubDir, "cargo");
       // The stub records that it ran (touch the marker) and then fails — modelling a build the gate must
       // treat as a real failure. `printf >> marker` so a multi-invocation still leaves the marker present.
+      // The ONE exception is the layout preflight's bare `cargo metadata` call: it is ANSWERED with the
+      // layout-conformant fixture (exit 0) WITHOUT touching the marker. A fail-all answer makes the gate
+      // die at its first step on the metadata call itself, so the marker + exit-1 pair stops attesting a
+      // post-preflight cargo invocation (the archive step) and the scenario would pass vacuously.
+      const layoutMetadataPath = writeLayoutConformantMetadataFixture(stubDir);
       writeFileSync(
         stubPath,
-        `#!/usr/bin/env bash\nprintf 'invoked %s\\n' "$*" >> "${marker}"\nexit 3\n`,
+        `#!/usr/bin/env bash\nif [ "$1" = "metadata" ]; then\n  cat "${layoutMetadataPath}"\n  exit 0\nfi\nprintf 'invoked %s\\n' "$*" >> "${marker}"\nexit 3\n`,
         { mode: 0o755 },
       );
       try {
@@ -8355,14 +8462,19 @@ fi
         join(synthRoot, "scripts", "vue-macro-runtime-oracle", "oracle.test.mjs"),
         "process.exit(0);\n",
       );
+      writeFile(
+        join(synthRoot, "scripts", "check-integration-test-layout.mjs"),
+        "process.exit(0);\n",
+      );
 
       // ---- End-to-end CLI pair — nothing built, the loudest historical refusal state. The production
       // gate performs no build-prerequisite refusal, so these runs pin what it does instead: the printed
       // resource ceiling (explicit overrides in the first run; the explicit 12-GiB memory tier with an
       // omitted build-job count, and the independent test-thread override, in the second), the front
-      // half (harness smoke, then both Vue macro oracle checks), and a terminal state at the archive
-      // step. A reintroduced in-CLI build-prerequisite preflight fails the marker-absence assertion and
-      // forces a conscious update of these legs rather than passing silently. ----
+      // half (layout check, harness smoke, then both Vue macro oracle checks), and a terminal state at
+      // the archive step. A reintroduced in-CLI build-prerequisite preflight fails the
+      // marker-absence assertion and forces a conscious update of these legs rather than passing
+      // silently. ----
       // The omitted --build-jobs count in the memory-tier leg is NOT a host-independent 8: the explicit
       // 12-GiB tier selects the measured 8-job point, and deriveGateResourceLimits additionally clamps it
       // to this host's detected CPU count. Derive the expectation through the same authority the CLI
@@ -8398,6 +8510,7 @@ fi
             );
             ok = false;
           }
+          const layoutAt = run.out.indexOf("integration-test layout check passed in");
           const smokeAt = run.out.indexOf("HARNESS-SMOKE [typescript]: SATISFIED");
           const oracleCheckAt = run.out.indexOf("gen:vue-macro-oracle:check passed in");
           const oracleTestsAt = run.out.indexOf("test:vue-macro-oracle passed in");
@@ -8406,16 +8519,18 @@ fi
           );
           if (
             !(
-              smokeAt >= 0 &&
+              layoutAt >= 0 &&
+              smokeAt > layoutAt &&
               oracleCheckAt > smokeAt &&
               oracleTestsAt > oracleCheckAt &&
               archiveAt > oracleTestsAt
             )
           ) {
             fail(
-              `(GB9.${id}) the gate's front half must run harness smoke -> vue-macro-oracle checks -> ` +
-                `archive even with nothing built; got smoke=${smokeAt} oracleCheck=${oracleCheckAt} ` +
-                `oracleTests=${oracleTestsAt} archive=${archiveAt}:\n${run.out}`,
+              `(GB9.${id}) the gate's front half must run layout check -> harness smoke -> ` +
+                `vue-macro-oracle checks -> archive even with nothing built; got layout=${layoutAt} ` +
+                `smoke=${smokeAt} oracleCheck=${oracleCheckAt} oracleTests=${oracleTestsAt} ` +
+                `archive=${archiveAt}:\n${run.out}`,
             );
             ok = false;
           }
@@ -8474,13 +8589,18 @@ fi
       writeFile(join(synthRoot, "nextest"), trappingProbeBody);
       writeFile(join(synthRoot, "check"), trappingProbeBody);
       // This leg owns startup telemetry ordering, so keep the already-separately-tested Vue macro oracle
-      // checks as successful production-path stand-ins and let the run reach the archive discriminator.
+      // checks and the layout check as successful production-path stand-ins and let the run reach the
+      // archive discriminator.
       writeFile(
         join(synthRoot, "scripts", "gen-vue-macro-runtime-oracle.mjs"),
         "process.exit(0);\n",
       );
       writeFile(
         join(synthRoot, "scripts", "vue-macro-runtime-oracle", "oracle.test.mjs"),
+        "process.exit(0);\n",
+      );
+      writeFile(
+        join(synthRoot, "scripts", "check-integration-test-layout.mjs"),
         "process.exit(0);\n",
       );
       rmSync(telemetryProbeLog, { force: true });
@@ -8953,7 +9073,7 @@ fi
         : "";
     if (
       supervisorFactoryCount !== 1 ||
-      productionRunStepCount !== 8 ||
+      productionRunStepCount !== 9 ||
       gateSource.includes("await runContainedStep({") ||
       !gateSource.includes('ctx.supervisor.runStep("surface-1", {') ||
       !gateSource.includes('ctx.supervisor.runStep("shipped-cfg", {') ||
@@ -8963,7 +9083,7 @@ fi
         teardownSource.indexOf("mutex.release()")
     ) {
       fail(
-        `(GB18.10) production must construct exactly one supervisor, route all eight currently ` +
+        `(GB18.10) production must construct exactly one supervisor, route all nine currently ` +
           `sequential contained commands through it (including the wasm JS-boundary, Surface 1 and ` +
           `shipped lanes), and await its ` +
           `close before mutex release; factory=${supervisorFactoryCount} runStep=${productionRunStepCount}`,
