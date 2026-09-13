@@ -17,7 +17,8 @@ use tower_lsp_server::ls_types::Uri;
 
 use crate::documents::line_index::LineIndex;
 use crate::provider_sync::{
-    commit_sync_transition, prepare_sync_transition, ProviderPathKind, ProviderSyncState,
+    close_stale_provider_path, commit_sync_transition, prepare_sync_transition,
+    NonDeclProviderPathKind, ProviderPathKind, ProviderSyncState,
 };
 use crate::type_provider::merge;
 
@@ -1213,41 +1214,22 @@ impl VerterLanguageServer {
                     .await;
                 continue;
             }
-            // EVERY closing store-backed surface (IDE / API / Shadow) is no longer
-            // the active synced virtual surface — retire its active generation
-            // under a fresh close EPOCH (historical snapshots stay valid for any
-            // in-flight rename that already captured them; the `Closing` state
-            // keeps the path failing closed until the provider close is
-            // CONFIRMED). Retiring only the API role would leave a closed IDE /
-            // Shadow surface `Current`: after a `did_close`, a reopen of the same
-            // text (before a successful re-sync) could then capture the stale
-            // snapshot and serve a query against a CLOSED provider buffer.
-            // Capture the epoch-stamped close token so the finalize is scoped to
-            // THIS close.
-            let close_token = self.documents.provider_surfaces().forget(path);
-            let result = match kind {
-                ProviderPathKind::Ide => sync.close_tsx(path).await,
-                ProviderPathKind::Api => sync.close_dts(path).await,
-                ProviderPathKind::Shadow => sync.close_file(path).await,
-                // Delegated above (the guarded close is the SOLE Decl-close path).
-                ProviderPathKind::Decl => unreachable!("Decl is delegated to the guarded close"),
+            // Every other kind is a non-decl store-backed surface: close it through
+            // the shared forget/close/finalize operation, per path and IN ORDER, so
+            // a `Decl` entry later in the slice still reaches the guarded close at
+            // its own position. `Decl` is already delegated above, so the narrowing
+            // cannot drop a path here.
+            let Some(non_decl) = NonDeclProviderPathKind::from_provider_path_kind(*kind) else {
+                unreachable!("Decl is delegated to the guarded close");
             };
-            match result {
-                // Only a CONFIRMED close finalizes, and only via THIS close's
-                // token — if the path was reopened (or retired again by a newer
-                // close) during the await, the epoch no longer matches and the
-                // finalize is a no-op (the fresh snapshot is preserved). On an
-                // error the token is dropped, so the `Closing` state persists
-                // (fail closed).
-                Ok(()) => {
-                    self.documents
-                        .provider_surfaces()
-                        .finalize_close(close_token);
-                }
-                Err(error) => {
-                    tracing::warn!("failed to close provider path {path}: {error}");
-                }
-            }
+            close_stale_provider_path(
+                sync,
+                self.documents.provider_surfaces(),
+                non_decl,
+                path,
+                "provider_state",
+            )
+            .await;
         }
     }
 

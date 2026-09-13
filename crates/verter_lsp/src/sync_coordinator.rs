@@ -21,9 +21,9 @@ use tower_lsp_server::Client;
 use crate::documents::line_index::LineIndex;
 use crate::documents::DocumentRegistry;
 use crate::provider_sync::{
-    commit_sync_transition, genuinely_stale_after_sync, non_decl_close_targets,
-    open_unresolved_carrier_commit, open_unresolved_carrier_state, revert_unsynced_kinds,
-    NonDeclProviderPathKind, ProviderPathKind, ProviderSyncState,
+    close_stale_provider_paths, commit_sync_transition, genuinely_stale_after_sync,
+    non_decl_close_targets, open_unresolved_carrier_commit, open_unresolved_carrier_state,
+    revert_unsynced_kinds, ProviderPathKind, ProviderSyncState,
 };
 use crate::type_provider::merge;
 use crate::type_provider::project_sync::ProjectSync;
@@ -1253,7 +1253,7 @@ async fn sync_file(
                 // transaction reclaimed the source, or an owner-loss advanced the barrier)
                 // requeues and closes NOTHING — the computed stale paths may be the newer
                 // transaction's LIVE buffers. Only an admitted commit closes them (and
-                // `close_stale_paths` retires any closed `Api` surface's active generation in
+                // the shared stale close retires any closed `Api` surface's active generation in
                 // the provider-surface store so a closed `{carrier}.ts` is never later
                 // vouched as current by a rename).
                 if deps.carrier_transaction_coordinator.admit_owned(
@@ -1268,10 +1268,11 @@ async fn sync_file(
                         .insert(canonical_id.to_string());
                     return SyncFileOutcome::Retry;
                 } else {
-                    close_stale_paths(
+                    close_stale_provider_paths(
                         project_sync,
                         deps.documents.provider_surfaces(),
                         &non_decl_close_targets(&genuinely_stale),
+                        "sync_coordinator(carrier)",
                     )
                     .await;
                 }
@@ -1414,18 +1415,20 @@ async fn preserve_open_unresolved_carrier(
     let commit = open_unresolved_carrier_commit(previous.as_ref(), target, ide_synced);
     commit_sync_transition(&deps.provider_sync_states, canonical_id, commit.committed);
     if let Some(dropped) = commit.dropped_api {
-        close_stale_paths(
+        close_stale_provider_paths(
             project_sync,
             deps.documents.provider_surfaces(),
             &non_decl_close_targets(std::slice::from_ref(&dropped)),
+            "sync_coordinator(open_unresolved)",
         )
         .await;
     }
     if let Some(stale) = commit.stale_ide_after_success {
-        close_stale_paths(
+        close_stale_provider_paths(
             project_sync,
             deps.documents.provider_surfaces(),
             &non_decl_close_targets(std::slice::from_ref(&stale)),
+            "sync_coordinator(open_unresolved_ext_flip)",
         )
         .await;
     }
@@ -1445,57 +1448,13 @@ async fn clear_provider_sync_state(
         // The declaration overlay (`Decl`), if any, is released by `DeclOverlayOwner`
         // via the `did_close` lifecycle, never closed here — the generic close
         // touches only non-decl artifacts.
-        close_stale_paths(sync, provider_surfaces, &state.active_non_decl_paths()).await;
-    }
-}
-
-/// Close stale provider paths AND retire any closed `Api` surface's active
-/// generation in the provider-surface store.
-///
-/// A closed `{carrier}.ts` API path is no longer the active synced virtual
-/// surface: the store must `forget` it so a later cross-file rename's
-/// `current_snapshot()` does not VOUCH the now-closed generation as current
-/// (historical snapshots stay valid for any in-flight rename that already
-/// captured them — `forget` only retires the active generation). This mirrors the
-/// sibling [`crate::background_drain::close_stale_provider_paths`]; the
-/// coordinator MUST forget too, or a coordinator-driven close leaves the store
-/// vouching a stale surface (the fail-closed invariant relies on this).
-async fn close_stale_paths(
-    sync: &ProjectSync,
-    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
-    stale_paths: &[(NonDeclProviderPathKind, String)],
-) {
-    for (kind, path) in stale_paths {
-        // Retire EVERY closing store-backed surface (IDE / API / Shadow) under a
-        // fresh close EPOCH (see the sibling
-        // `background_drain::close_stale_provider_paths`): the `Closing` state
-        // keeps the path failing closed until the provider close is CONFIRMED.
-        // Retiring only the API role would leave a closed IDE / Shadow surface
-        // `Current` — capturable by an interactive query against a CLOSED
-        // provider buffer. Capture the epoch-stamped token so the finalize is
-        // scoped to THIS close.
-        let close_token = provider_surfaces.forget(path);
-        // A declaration overlay (`Decl`) is unrepresentable here — its lifecycle is
-        // owned by `DeclOverlayOwner`, never this generic close.
-        let result = match kind {
-            NonDeclProviderPathKind::Ide => sync.close_tsx(path).await,
-            NonDeclProviderPathKind::Api => sync.close_dts(path).await,
-            NonDeclProviderPathKind::Shadow => sync.close_file(path).await,
-        };
-        match result {
-            // Only a CONFIRMED close finalizes, and only via THIS close's token —
-            // a reopen (or newer close) during the await makes the epoch mismatch
-            // and the finalize a no-op (the fresh snapshot survives). An error
-            // drops the token, leaving the `Closing` state (fail closed).
-            Ok(()) => {
-                provider_surfaces.finalize_close(close_token);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "sync_coordinator: failed to close stale provider path {path}: {error}"
-                );
-            }
-        }
+        close_stale_provider_paths(
+            sync,
+            provider_surfaces,
+            &state.active_non_decl_paths(),
+            "sync_coordinator(clear_state)",
+        )
+        .await;
     }
 }
 

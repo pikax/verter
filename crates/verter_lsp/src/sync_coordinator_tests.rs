@@ -107,10 +107,11 @@ async fn sync_coordinator_closes_stale_owner_ids_when_owner_changes() {
     );
 
     let provider_surfaces = crate::provider_surface_store::ProviderSurfaceStore::new();
-    close_stale_paths(
+    close_stale_provider_paths(
         &sync,
         &provider_surfaces,
         &non_decl_close_targets(&transition.stale_paths),
+        "sync_coordinator_owner_change_test",
     )
     .await;
     commit_sync_transition(&states, "/workspace/src/App.vue", transition.next);
@@ -151,20 +152,21 @@ async fn sync_coordinator_closes_stale_owner_ids_when_owner_changes() {
     );
 }
 
-/// H2 (stale false-vouch): the coordinator's `close_stale_paths` MUST `forget`
-/// a closed `Api` surface in the provider-surface store. Otherwise the store
-/// keeps vouching the closed `{carrier}.ts` generation as CURRENT, and a later
+/// Stale false-vouch: the coordinator's stale close MUST `forget` a closed
+/// `Api` surface in the provider-surface store. Otherwise the store keeps
+/// vouching the closed `{carrier}.ts` generation as CURRENT, and a later
 /// cross-file rename's `current_snapshot()` maps a returned offset through a
 /// STALE surface — the fail-closed invariant the store exists to guarantee.
 ///
 /// Discriminating: it records an `Api` `CarrierApi` snapshot (so the path is
-/// tracked), drives `close_stale_paths` with that path as a stale `Api` path,
-/// and asserts the store NO LONGER tracks it. Against the pre-fix
-/// `close_stale_paths` (which only `close_dts`'d and never `forget`'d) the path
-/// stays tracked and the assertion FAILS; after the fix it is forgotten.
+/// tracked), drives the coordinator's stale close with that path as a stale
+/// `Api` path, and asserts the store NO LONGER tracks it. A close that only
+/// `close_dts`'d and never `forget`'d would leave the path tracked and FAIL the
+/// assertion.
 #[tokio::test]
-async fn close_stale_paths_forgets_closed_api_surface_in_store() {
+async fn stale_close_forgets_closed_api_surface_in_store() {
     use crate::provider_surface_store::{ProviderSurfaceStore, RecordSurface};
+    use crate::provider_sync::NonDeclProviderPathKind;
 
     let mock = MockTypeProvider::new();
     let sync = ProjectSync::new(Arc::new(mock.clone()), ProjectSyncMode::FullProject);
@@ -186,7 +188,13 @@ async fn close_stale_paths_forgets_closed_api_surface_in_store() {
 
     // Drive the coordinator close path with the API path stale.
     let stale_paths = vec![(NonDeclProviderPathKind::Api, api_path.to_string())];
-    close_stale_paths(&sync, &provider_surfaces, &stale_paths).await;
+    close_stale_provider_paths(
+        &sync,
+        &provider_surfaces,
+        &stale_paths,
+        "sync_coordinator_false_vouch_test",
+    )
+    .await;
 
     // The provider close still happened (behavior preserved)...
     let calls = mock.file_sync_calls();
@@ -201,7 +209,7 @@ async fn close_stale_paths_forgets_closed_api_surface_in_store() {
     // the now-closed surface to a later cross-file rename.
     assert!(
         !provider_surfaces.is_tracked(api_path),
-        "close_stale_paths must forget a closed Api surface so it is no longer vouched as \
+        "the stale close must forget a closed Api surface so it is no longer vouched as \
          current; a still-tracked surface would false-vouch a stale generation to a rename"
     );
 }

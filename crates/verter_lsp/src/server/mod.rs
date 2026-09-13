@@ -13,7 +13,7 @@ use crate::features::diagnostics::map_diagnostics;
 use crate::provider_sync::{
     commit_sync_transition, genuinely_stale_after_sync, non_decl_close_targets,
     open_unresolved_carrier_commit, open_unresolved_carrier_state, prepare_sync_transition,
-    revert_unsynced_kinds, NonDeclProviderPathKind, ProviderPathKind, ProviderSyncState,
+    revert_unsynced_kinds, ProviderPathKind, ProviderSyncState,
 };
 use crate::statistics::Statistics;
 use crate::type_provider::project_sync::ProjectSync;
