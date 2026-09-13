@@ -246,34 +246,58 @@ row keyed adapter × epoch × capability:
   length) and `template_facts` (neutral template facts wrapping
   `RawTemplateData`), both over an ALREADY-ADMITTED parse artifact — no
   re-parse.
-- `ProjectionBackend` — `project_ide`: the rendered TSX/JSX IDE companion.
-  The adapter's IDE codegen owns its OWN `CodeTransform` (the single
-  source of truth for generated-code edits) and returns the rendered
-  output verbatim — NO borrowed caller `CodeTransform` (a shared one
-  would be a second, coarse, non-authoritative map). An unsupported
-  `CompileTarget` bit → typed `CompileUnsupported` (invariant 4), never a
+- `ProjectionBackend` — `project_ide(grant, source, artifact, request,
+  inputs)`: the rendered TSX/JSX IDE companion over an already-admitted
+  parse, driven by an IDE-only `CompileRequest`. The adapter's IDE codegen
+  owns its OWN `CodeTransform` (the single source of truth for
+  generated-code edits) and returns the rendered output verbatim — NO
+  borrowed caller `CodeTransform` (a shared one would be a second, coarse,
+  non-authoritative map). Refusal is the framework's typed `Self::Error`
+  — `VueProjectionError` / `SvelteProjectionError`: a non-IDE product in
+  the request is `NotIdeOnly`, a parsed-core refusal is
+  `Direct(DirectCompileError)`, and the compile-unsupported class (e.g.
+  `TargetMissingIde`) rides `Unsupported(CompileUnsupported)` — never a
   silent empty.
-- `RuntimeCompilerBackend<FrameworkEpoch>` — `compile_runtime` (one
-  consume-once execution grant drives one runtime compile): the
-  framework-neutral RUNTIME emit, returned as the neutral
-  `RuntimeCompileOutput` (a `RuntimeMainModule` body + neutral
-  script/template/style/custom blocks + scope id + optional IDE `tsx`
-  (when `want_ide`) + optional template facts + neutral `diagnostics`) or
-  a typed refusal (`CarrierCompileOutcome::RuntimeSurfaceRefused` — never
-  a silent empty). Vue uses `VerterCompileResult` INTERNALLY then
-  re-expresses it neutrally (`vue_result_to_runtime_bundle`); it leaves
-  `main.body_code = None` so the host assembles the `_sfc_main` module
-  from the block fields (`assemble_vue_main_module`). A carrier that
-  projects ONLY an IDE surface (Svelte today) returns a bundle with no
-  runtime surface (`has_runtime_surface() == false`) carrying just the
-  `tsx` — the host populates `CachedTsx` and emits NO `Main` virtual node.
-  The compatible `VueCarrierCompiler::compile_bundle` inherent entry keeps
-  serving the registry route with the same neutral output.
+- `RuntimeCompilerBackend<FrameworkEpoch>` —
+  `compile_runtime(grant, source, artifact, request, inputs)`: the runtime
+  emit over an already-admitted parse. The request is a RUNTIME-ONLY
+  `CompileRequest` — runtime `ProductKind` targets only; an IDE or
+  template-fact product in the request is a typed `NotRuntimeOnly`
+  refusal, because this backend cannot publish IDE or template-fact
+  products. It consumes its `ProductExecutionGrant` by value for the
+  requested runtime kind (a grant carved for another leg fails typed
+  `ExecutionUngranted` before any compile work runs) and returns
+  `DirectCompileOutput` (artifact set + style blocks + the compile's own
+  non-fatal diagnostics) or the framework's typed refusal
+  (`VueRuntimeError` / `SvelteRuntimeError`).
 - `FrameworkHostIntegrationBackend<FrameworkEpoch, HostEpoch>` — the
   host-composition leg: issues the ONE `CompileAdmission` (composing
   parse + semantic admissions over an already-admitted artifact) for
   host-backed multi-product and runtime-render demands; consume-once, one
   issuance drives one execution.
+
+The retained CCA1T4 option/output bucket is NOT part of these typed
+contracts: `RuntimeCompileOptions` in, `RuntimeCompileOutput` /
+`CarrierCompileOutcome` out belongs to the inherent/free compatibility
+entries — `VueCarrierCompiler::compile_ide` / `compile_bundle` (public
+inherent methods) and the crate-internal bundle orchestrations
+(`vue_carrier_bundle` / `svelte_carrier_bundle`) shared with the
+host-integration backends. There is no registry left to serve: these
+routes carry no host-issued admission, so they mint their leg grants
+crate-privately at the route boundary (`ProductExecutionGrant`'s
+crate-private mint) and drive the SAME catalog backends. The neutral
+bundle is a `RuntimeMainModule` body + neutral
+script/template/style/custom blocks + scope id + optional IDE `tsx`
+(when `want_ide`) + optional template facts + neutral `diagnostics`, or
+a `CarrierCompileOutcome::RuntimeSurfaceRefused` / `CompileUnsupported`
+refusal — never a silent empty. Vue uses `VerterCompileResult`
+INTERNALLY then re-expresses it neutrally
+(`vue_result_to_runtime_bundle`); it leaves `main.body_code = None` so
+the host assembles the `_sfc_main` module from the block fields
+(`assemble_vue_main_module`). A carrier that projects ONLY an IDE
+surface (Svelte today) returns a bundle with no runtime surface
+(`has_runtime_surface() == false`) carrying just the `tsx` — the host
+populates `CachedTsx` and emits NO `Main` virtual node.
 
 Framework-PRIVATE resolved inputs (Vue's macro DTO / prop-constness /
 style `v-bind()` usage facts) ride TYPED on
