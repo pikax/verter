@@ -152,6 +152,8 @@ impl CompileArtifactSet {
     }
 
     /// Attach validated descriptors with typed `attachedTo` relations.
+    /// Subsequent calls merge with already-attached descriptors and re-run
+    /// identity, order, overlap, and source checks across the combined set.
     /// Stale, cancelled, partial, or source-mismatched descriptors fail closed.
     pub fn attach_custom_blocks(
         mut self,
@@ -159,8 +161,10 @@ impl CompileArtifactSet {
     ) -> Result<Self, CustomBlockDescriptorError> {
         let ids: std::collections::BTreeSet<_> =
             self.artifacts.iter().map(|a| a.id().clone()).collect();
+        let mut combined = std::mem::take(&mut self.custom_blocks);
+        combined.extend(descriptors);
         self.custom_blocks =
-            super::custom_block::validate_attachment(&self.source_units, &ids, descriptors)?;
+            super::custom_block::validate_attachment(&self.source_units, &ids, combined)?;
         Ok(self)
     }
 

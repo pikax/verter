@@ -16,16 +16,20 @@ impl CanonicalEncode for Tag {
     }
 }
 
-fn source(role: &str, revision: &'static str) -> ArtifactSourceUnit {
+fn source_named(tag: &'static str, role: &str, revision: &'static str) -> ArtifactSourceUnit {
     ArtifactSourceUnit {
         unit: SourceUnit::mint(
-            SourceId::from_canonical(&Tag("Component.vue")),
+            SourceId::from_canonical(&Tag(tag)),
             SourceRevision::from_canonical(&Tag(revision)),
             role,
             ContentId::from_content_bytes(b"hello"),
         ),
         source_span: Span::new(20, 40),
     }
+}
+
+fn source(role: &str, revision: &'static str) -> ArtifactSourceUnit {
+    source_named("Component.vue", role, revision)
 }
 
 fn artifact(unit: &SourceUnit) -> CompileArtifact {
@@ -127,18 +131,18 @@ fn local_src_backed_and_empty_round_trip_named_fields_without_copying_external_c
         artifact.id().clone(),
         "i18n",
         0,
-        Span::new(20, 24),
+        Span::new(20, 27),
         local_text("{\"a\":1}"),
         None,
         Some("json"),
-        vec![("lang".into(), "json".into())],
+        vec![("z".into(), "1".into()), ("lang".into(), "json".into())],
     );
     let src_backed = complete(
         &unit,
         artifact.id().clone(),
         "docs",
         1,
-        Span::new(24, 28),
+        Span::new(27, 31),
         CustomBlockContent::SrcBacked,
         Some("./docs.md"),
         None,
@@ -149,7 +153,7 @@ fn local_src_backed_and_empty_round_trip_named_fields_without_copying_external_c
         artifact.id().clone(),
         "note",
         2,
-        Span::new(28, 28),
+        Span::new(31, 31),
         CustomBlockContent::Empty,
         None,
         None,
@@ -160,7 +164,7 @@ fn local_src_backed_and_empty_round_trip_named_fields_without_copying_external_c
         artifact.id().clone(),
         "unknown",
         3,
-        Span::new(30, 40),
+        Span::new(32, 40),
         CustomBlockContent::Unavailable(ArtifactUnavailableReason::Unsupported),
         None,
         None,
@@ -194,8 +198,38 @@ fn local_src_backed_and_empty_round_trip_named_fields_without_copying_external_c
     assert_eq!(blocks[0]["content"]["availability"], "local");
     assert_eq!(blocks[0]["content"]["text"], "{\"a\":1}");
     assert_eq!(
+        local.attributes(),
+        &[
+            ("z".to_string(), "1".to_string()),
+            ("lang".to_string(), "json".to_string())
+        ]
+    );
+    assert_eq!(local.source_content(), unit.unit.content());
+    assert_eq!(local.lifecycle(), CustomBlockLifecycle::Complete);
+    assert_eq!(
         blocks[0]["region"],
-        serde_json::json!({"start": 20, "end": 24})
+        serde_json::json!({"start": 20, "end": 27})
+    );
+    assert_eq!(
+        blocks[0]["attributes"],
+        serde_json::json!([{"name": "z", "value": "1"}, {"name": "lang", "value": "json"}])
+    );
+    assert_eq!(
+        blocks[0]["sourceContent"],
+        hex::encode(unit.unit.content().canonical_bytes())
+    );
+    assert_eq!(blocks[0]["lifecycle"], "complete");
+    assert_eq!(
+        blocks[0]["provenance"]["inputBasis"],
+        hex::encode(local.provenance().input_basis.canonical_bytes())
+    );
+    assert_eq!(
+        blocks[0]["provenance"]["producer"],
+        hex::encode(local.provenance().producer.canonical_bytes())
+    );
+    assert_eq!(
+        blocks[0]["provenance"]["inputs"],
+        serde_json::json!([hex::encode(unit.unit.id().canonical_bytes())])
     );
     assert_eq!(
         blocks[0]["sourceUnit"],
@@ -236,7 +270,7 @@ fn identity_binds_unit_revision_role_order_region_attributes_lang_src_and_conten
         artifact.id().clone(),
         "i18n",
         0,
-        Span::new(20, 30),
+        Span::new(20, 24),
         local_text("body"),
         None,
         Some("json"),
@@ -247,7 +281,7 @@ fn identity_binds_unit_revision_role_order_region_attributes_lang_src_and_conten
         artifact.id().clone(),
         "docs",
         0,
-        Span::new(20, 30),
+        Span::new(20, 24),
         local_text("body"),
         None,
         Some("json"),
@@ -269,14 +303,14 @@ fn identity_binds_unit_revision_role_order_region_attributes_lang_src_and_conten
         base.id()
     );
     other_role.source_order = 0;
-    other_role.region = Span::new(21, 30);
+    other_role.region = Span::new(21, 25);
     assert_ne!(
         CustomBlockDescriptor::try_new(other_role.clone())
             .unwrap()
             .id(),
         base.id()
     );
-    other_role.region = Span::new(20, 30);
+    other_role.region = Span::new(20, 24);
     other_role.lang = Some("yaml".into());
     other_role.attributes = vec![("lang".into(), "yaml".into())];
     assert_ne!(
@@ -305,7 +339,7 @@ fn identity_binds_unit_revision_role_order_region_attributes_lang_src_and_conten
         artifact.id().clone(),
         "i18n",
         0,
-        Span::new(20, 30),
+        Span::new(20, 24),
         local_text("body"),
         None,
         Some("json"),
@@ -318,8 +352,8 @@ fn identity_binds_unit_revision_role_order_region_attributes_lang_src_and_conten
 fn malformed_alias_order_and_region_fail_closed() {
     use CustomBlockDescriptorError as E;
     let unit = source("custom:i18n", "one");
-    let (artifact, set) = set_for(unit.clone());
-    let id = artifact.id().clone();
+    let (host, set) = set_for(unit.clone());
+    let id = host.id().clone();
     assert_eq!(
         CustomBlockDescriptor::try_new(request(
             &unit,
@@ -393,7 +427,7 @@ fn malformed_alias_order_and_region_fail_closed() {
             id.clone(),
             "i18n",
             0,
-            Span::new(20, 30),
+            Span::new(20, 24),
             local_text("body"),
             Some("./x"),
             None,
@@ -403,12 +437,60 @@ fn malformed_alias_order_and_region_fail_closed() {
         .unwrap_err(),
         E::Malformed
     );
+    assert_eq!(
+        CustomBlockDescriptor::try_new(request(
+            &unit,
+            id.clone(),
+            "i18n",
+            0,
+            Span::new(20, 24),
+            local_text("body"),
+            None,
+            None,
+            vec![("src".into(), "./docs.md".into())],
+            CustomBlockLifecycle::Complete,
+        ))
+        .unwrap_err(),
+        E::AliasedAttribute
+    );
+    assert_eq!(
+        CustomBlockDescriptor::try_new(request(
+            &unit,
+            id.clone(),
+            "i18n",
+            0,
+            Span::new(20, 30),
+            CustomBlockContent::Empty,
+            None,
+            Some("json"),
+            vec![],
+            CustomBlockLifecycle::Complete,
+        ))
+        .unwrap_err(),
+        E::AliasedAttribute
+    );
+    assert_eq!(
+        CustomBlockDescriptor::try_new(request(
+            &unit,
+            id.clone(),
+            "i18n",
+            0,
+            Span::new(20, 24),
+            local_text("{\"a\":1}"),
+            None,
+            None,
+            vec![],
+            CustomBlockLifecycle::Complete,
+        ))
+        .unwrap_err(),
+        E::InvalidRegion
+    );
     let first = complete(
         &unit,
         id.clone(),
         "i18n",
         0,
-        Span::new(20, 30),
+        Span::new(20, 21),
         local_text("a"),
         None,
         None,
@@ -448,9 +530,20 @@ fn malformed_alias_order_and_region_fail_closed() {
         set.clone().attach_custom_blocks(vec![outside]).unwrap_err(),
         E::InvalidRegion
     );
+    let overlap_left = complete(
+        &unit,
+        id.clone(),
+        "i18n",
+        0,
+        Span::new(20, 30),
+        CustomBlockContent::Empty,
+        None,
+        None,
+        vec![],
+    );
     let overlap = CustomBlockDescriptor::try_new(request(
         &unit,
-        id,
+        id.clone(),
         "docs",
         1,
         Span::new(25, 35),
@@ -462,7 +555,129 @@ fn malformed_alias_order_and_region_fail_closed() {
     ))
     .unwrap();
     assert_eq!(
-        set.attach_custom_blocks(vec![first, overlap]).unwrap_err(),
+        set.clone()
+            .attach_custom_blocks(vec![overlap_left, overlap])
+            .unwrap_err(),
+        E::InvalidRegion
+    );
+    let reversed_later = complete(
+        &unit,
+        id.clone(),
+        "i18n",
+        0,
+        Span::new(30, 34),
+        CustomBlockContent::Empty,
+        None,
+        None,
+        vec![],
+    );
+    let reversed_earlier = complete(
+        &unit,
+        id.clone(),
+        "docs",
+        1,
+        Span::new(20, 24),
+        CustomBlockContent::Empty,
+        None,
+        None,
+        vec![],
+    );
+    assert_eq!(
+        set.clone()
+            .attach_custom_blocks(vec![reversed_later, reversed_earlier])
+            .unwrap_err(),
+        E::InvalidOrder
+    );
+    let second = complete(
+        &unit,
+        id.clone(),
+        "docs",
+        1,
+        Span::new(30, 40),
+        CustomBlockContent::Empty,
+        None,
+        None,
+        vec![],
+    );
+    let sequential = set
+        .clone()
+        .attach_custom_blocks(vec![first.clone()])
+        .unwrap()
+        .attach_custom_blocks(vec![second.clone()])
+        .unwrap();
+    assert_eq!(sequential.custom_blocks().len(), 2);
+    assert_eq!(sequential.custom_blocks()[0].id(), first.id());
+    assert_eq!(sequential.custom_blocks()[1].id(), second.id());
+    let after_empty = sequential.attach_custom_blocks(vec![]).unwrap();
+    assert_eq!(after_empty.custom_blocks().len(), 2);
+
+    let other_unit = source_named("Other.vue", "custom:i18n", "one");
+    let other_artifact = artifact(&other_unit.unit);
+    let multi_source = CompileArtifactSet::new(
+        vec![unit.clone(), other_unit.clone()],
+        vec![host.clone(), other_artifact.clone()],
+    )
+    .unwrap();
+    let left = complete(
+        &unit,
+        id.clone(),
+        "i18n",
+        0,
+        Span::new(20, 24),
+        CustomBlockContent::Empty,
+        None,
+        None,
+        vec![],
+    );
+    let right = complete(
+        &other_unit,
+        other_artifact.id().clone(),
+        "i18n",
+        0,
+        Span::new(20, 24),
+        CustomBlockContent::Empty,
+        None,
+        None,
+        vec![],
+    );
+    let attached = multi_source
+        .attach_custom_blocks(vec![left, right])
+        .unwrap();
+    assert_eq!(attached.custom_blocks().len(), 2);
+
+    let sibling = source("custom:docs", "one");
+    let sibling_artifact = artifact(&sibling.unit);
+    let same_source = CompileArtifactSet::new(
+        vec![unit.clone(), sibling.clone()],
+        vec![host.clone(), sibling_artifact.clone()],
+    )
+    .unwrap();
+    let unit_block = complete(
+        &unit,
+        id.clone(),
+        "i18n",
+        0,
+        Span::new(20, 30),
+        CustomBlockContent::Empty,
+        None,
+        None,
+        vec![],
+    );
+    let sibling_overlap = complete(
+        &sibling,
+        sibling_artifact.id().clone(),
+        "docs",
+        1,
+        Span::new(25, 35),
+        CustomBlockContent::Empty,
+        None,
+        None,
+        vec![],
+    );
+    assert_eq!(
+        same_source
+            .attach_custom_blocks(vec![unit_block, sibling_overlap])
+            .unwrap_err(),
         E::InvalidRegion
     );
 }
@@ -478,7 +693,7 @@ fn stale_cancelled_partial_and_source_mismatch_cannot_publish_or_warm() {
         id.clone(),
         "i18n",
         0,
-        Span::new(20, 30),
+        Span::new(20, 24),
         local_text("body"),
         None,
         None,
@@ -494,7 +709,7 @@ fn stale_cancelled_partial_and_source_mismatch_cannot_publish_or_warm() {
             id.clone(),
             "i18n",
             0,
-            Span::new(20, 30),
+            Span::new(20, 24),
             local_text("body"),
             None,
             None,
@@ -516,7 +731,7 @@ fn stale_cancelled_partial_and_source_mismatch_cannot_publish_or_warm() {
         id.clone(),
         "i18n",
         0,
-        Span::new(20, 30),
+        Span::new(20, 24),
         local_text("body"),
         None,
         None,
@@ -539,7 +754,7 @@ fn stale_cancelled_partial_and_source_mismatch_cannot_publish_or_warm() {
         id,
         "i18n",
         0,
-        Span::new(20, 30),
+        Span::new(20, 24),
         local_text("body"),
         None,
         None,
@@ -589,7 +804,7 @@ fn construction_is_metadata_only_and_unknown_absent_cells_do_zero_work() {
         artifact.id().clone(),
         "i18n",
         0,
-        Span::new(20, 30),
+        Span::new(20, 38),
         local_text("not executable {{{"),
         None,
         None,

@@ -87,6 +87,10 @@ pub struct CustomBlockDescriptorRequest {
     pub src: Option<String>,
     pub attributes: Vec<(String, String)>,
     pub source_order: u32,
+    /// SFC-absolute content region in UTF-8 bytes. For
+    /// [`CustomBlockContent::Local`], `region.len()` must equal `text.len()`.
+    /// Other content states use the claimed block region; an empty body does
+    /// not require an empty span.
     pub region: Span,
     pub content: CustomBlockContent,
     pub provenance: ArtifactProvenance,
@@ -174,6 +178,9 @@ impl CustomBlockDescriptor {
             (CustomBlockContent::Local { text, content }, None) => {
                 if text.is_empty() {
                     return Err(E::Malformed);
+                }
+                if u32::try_from(text.len()).ok() != Some(request.region.len()) {
+                    return Err(E::InvalidRegion);
                 }
                 if *content != ContentId::from_content_bytes(text.as_bytes()) {
                     return Err(E::Malformed);
@@ -274,12 +281,10 @@ fn check_named_attr(
         .iter()
         .find(|(key, _)| key == name)
         .map(|(_, value)| value.as_str());
-    match (dedicated, from_attrs) {
-        (Some(left), Some(right)) if left != right => {
-            Err(CustomBlockDescriptorError::AliasedAttribute)
-        }
-        _ => Ok(()),
+    if dedicated != from_attrs {
+        return Err(CustomBlockDescriptorError::AliasedAttribute);
     }
+    Ok(())
 }
 
 fn encode_attributes(attributes: &[(String, String)]) -> Vec<u8> {
@@ -322,26 +327,41 @@ pub(crate) fn validate_attachment(
     mut descriptors: Vec<CustomBlockDescriptor>,
 ) -> Result<Vec<CustomBlockDescriptor>, CustomBlockDescriptorError> {
     use CustomBlockDescriptorError as E;
-    descriptors.sort_by(|a, b| a.source_order.cmp(&b.source_order).then(a.id.cmp(&b.id)));
-    let mut orders = BTreeSet::new();
+    descriptors.sort_by(|a, b| {
+        a.source_id
+            .cmp(&b.source_id)
+            .then(a.source_order.cmp(&b.source_order))
+            .then(a.id.cmp(&b.id))
+    });
+    let mut orders: BTreeMap<&SourceId, BTreeSet<u32>> = BTreeMap::new();
     let mut ids = BTreeSet::new();
-    let mut regions: BTreeMap<&SourceUnitId, Vec<Span>> = BTreeMap::new();
+    let mut regions: BTreeMap<&SourceId, Vec<Span>> = BTreeMap::new();
     for descriptor in &descriptors {
         check_against_set(source_units, artifact_ids, descriptor)?;
-        if !orders.insert(descriptor.source_order) {
+        if !orders
+            .entry(&descriptor.source_id)
+            .or_default()
+            .insert(descriptor.source_order)
+        {
             return Err(E::DuplicateOrder);
         }
         if !ids.insert(&descriptor.id) {
             return Err(E::DuplicateIdentity);
         }
-        let unit_regions = regions.entry(&descriptor.source_unit).or_default();
-        if unit_regions
+        let source_regions = regions.entry(&descriptor.source_id).or_default();
+        if source_regions
             .iter()
             .any(|existing| spans_overlap(*existing, descriptor.region))
         {
             return Err(E::InvalidRegion);
         }
-        unit_regions.push(descriptor.region);
+        if source_regions
+            .last()
+            .is_some_and(|previous| descriptor.region.start <= previous.start)
+        {
+            return Err(E::InvalidOrder);
+        }
+        source_regions.push(descriptor.region);
     }
     Ok(descriptors)
 }
