@@ -3544,9 +3544,14 @@ fi
       const stubPath = join(stubDir, "cargo");
       // The stub records that it ran (touch the marker) and then fails — modelling a build the gate must
       // treat as a real failure. `printf >> marker` so a multi-invocation still leaves the marker present.
+      // The ONE exception is the layout preflight's bare `cargo metadata` call: it is ANSWERED with the
+      // layout-conformant fixture (exit 0) WITHOUT touching the marker. A fail-all answer makes the gate
+      // die at its first step on the metadata call itself, so the marker + exit-1 pair stops attesting a
+      // post-preflight cargo invocation (the archive step) and the scenario would pass vacuously.
+      const layoutMetadataPath = writeLayoutConformantMetadataFixture(stubDir);
       writeFileSync(
         stubPath,
-        `#!/usr/bin/env bash\nprintf 'invoked %s\\n' "$*" >> "${marker}"\nexit 3\n`,
+        `#!/usr/bin/env bash\nif [ "$1" = "metadata" ]; then\n  cat "${layoutMetadataPath}"\n  exit 0\nfi\nprintf 'invoked %s\\n' "$*" >> "${marker}"\nexit 3\n`,
         { mode: 0o755 },
       );
       try {
