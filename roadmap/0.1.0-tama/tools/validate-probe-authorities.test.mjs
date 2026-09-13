@@ -354,6 +354,25 @@ test("a comparison-eligible basis whose owner is not implemented is refused", ()
   );
 });
 
+test("a comparison-eligible equivalent-work basis whose owner is not implemented is refused", () => {
+  const artifact = observationArtifact();
+  artifact.rows[0].comparison_eligible = true;
+  refusedOnce(
+    run({ implemented: ["ROUTE", "VUE"], observations: [artifact] }),
+    /@cold: equivalent_work_basis: .*owned by WORK, whose ledger row is not implemented/,
+  );
+});
+
+test("a pending citation is permitted only on a comparison-ineligible row", () => {
+  const artifact = observationArtifact();
+  assert.deepEqual(run({ observations: [artifact] }), []);
+  artifact.rows[0].equivalent_work_basis = {
+    authority: "compiler.equivalent-work-ledger",
+    atom: "equivalent-work-ledger",
+  };
+  assert.deepEqual(run({ implemented: ["ROUTE"], observations: [artifact] }), []);
+});
+
 test("a structural manifest without its comparator is refused", () => {
   const manifest = vueManifest();
   delete manifest.comparator;

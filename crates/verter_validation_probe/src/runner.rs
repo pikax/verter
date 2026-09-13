@@ -206,6 +206,9 @@ pub enum DriverLine {
         elapsed_ns: u64,
         /// The route's answer, one entry per requested entry, in order.
         entries: Vec<RouteEntry>,
+        /// Peak/live-bytes pair from the CPER0M memory audit, present only
+        /// when the request line carried `observe.memory`.
+        memory: Option<MemoryBytes>,
     },
     /// The reference frame.
     Reference {
@@ -221,6 +224,16 @@ pub enum DriverLine {
         /// The message, verbatim; retained as evidence, never classified from.
         error: String,
     },
+}
+
+/// The CPER0M-backed peak/live-bytes pair copied off a compile frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryBytes {
+    /// High-water live bytes since enable or the last reset.
+    pub peak_bytes: u64,
+    /// Live heap bytes at the snapshot.
+    pub live_bytes: u64,
 }
 
 /// One `compileRequests` answer, carried whole.
@@ -419,10 +432,17 @@ pub fn parse_line(line: &str) -> Result<DriverLine, String> {
                     .ok_or("a compile frame must carry entries")?,
             )
             .map_err(|error| error.to_string())?;
+            let memory = match object.get("memory") {
+                None => None,
+                Some(value) => {
+                    Some(serde_json::from_value(value.clone()).map_err(|error| error.to_string())?)
+                }
+            };
             Ok(DriverLine::Compile {
                 probe_id,
                 elapsed_ns,
                 entries,
+                memory,
             })
         }
         Some("reference") => {
@@ -473,6 +493,7 @@ pub struct RequestedEntry {
 struct CompileFrame {
     elapsed_ns: u64,
     entries: Vec<RouteEntry>,
+    memory: Option<MemoryBytes>,
 }
 
 /// Why a frame was refused before anything was classified from it.
@@ -604,6 +625,16 @@ impl ProbeRun {
         self.compile.is_some()
     }
 
+    /// Nanoseconds bracketing the compile call, when the frame arrived.
+    pub fn elapsed_ns(&self) -> Option<u64> {
+        self.compile.as_ref().map(|frame| frame.elapsed_ns)
+    }
+
+    /// The compile frame's memory pair, when `observe.memory` produced one.
+    pub fn memory(&self) -> Option<MemoryBytes> {
+        self.compile.as_ref().and_then(|frame| frame.memory)
+    }
+
     /// Record a harness-side failure against this probe.
     pub fn record_harness_failure(&mut self, message: impl Into<String>) {
         self.harness.push(message.into());
@@ -652,6 +683,7 @@ impl ProbeRun {
             DriverLine::Compile {
                 elapsed_ns,
                 entries,
+                memory,
                 ..
             } => {
                 if self.compile.is_some() {
@@ -687,6 +719,7 @@ impl ProbeRun {
                 self.compile = Some(CompileFrame {
                     elapsed_ns,
                     entries,
+                    memory,
                 });
                 Ok(())
             }
@@ -1225,7 +1258,7 @@ impl DriverCommand {
 /// running that through the phase map would report a crash or a timeout the
 /// compiler never had.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LaneStop {
+pub(crate) enum LaneStop {
     /// The process ended, or was killed for exceeding a phase deadline.
     Process(ExecutionEvent),
     /// The harness could not keep speaking to a process that may still be
@@ -1235,7 +1268,7 @@ enum LaneStop {
 
 impl LaneStop {
     /// The process outcome, when this stop was one.
-    fn process(&self) -> Option<ExecutionEvent> {
+    pub(crate) fn process(&self) -> Option<ExecutionEvent> {
         match self {
             LaneStop::Process(event) => Some(*event),
             LaneStop::Harness => None,
@@ -1275,19 +1308,7 @@ pub fn run_cases(
         }
     }
 
-    let mut child = Command::new(&driver.program)
-        .arg(&driver.script)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|error| RunError::SpawnFailed {
-            message: error.to_string(),
-        })?;
-    let stdout = child.stdout.take().ok_or_else(|| RunError::Io {
-        message: "the driver exposes no stdout".to_string(),
-    })?;
-    let lines = spawn_reader(stdout);
+    let (mut child, lines) = spawn_driver(driver)?;
 
     let mut results = Vec::with_capacity(cases.len());
     let mut stop: Option<LaneStop> = None;
@@ -1299,7 +1320,7 @@ pub fn run_cases(
         }];
         let mut run = ProbeRun::new(case.case_id.clone(), requested);
         if stop.is_none() {
-            match write_probe(&mut child, manifest.framework, case) {
+            match write_probe(&mut child, manifest.framework, case, false) {
                 Ok(()) => drive_probe(&mut run, &lines, deadlines, &mut stop, &mut child),
                 Err(message) => {
                     run.record_harness_failure(message);
@@ -1310,7 +1331,7 @@ pub fn run_cases(
                 "the driver stopped serving probes before this one was sent",
             );
         }
-        let elapsed_ns = run.compile.as_ref().map(|frame| frame.elapsed_ns);
+        let elapsed_ns = run.elapsed_ns();
         let observations = run.finish(manifest, stop.as_ref().and_then(LaneStop::process));
         results.push(CaseResult {
             case_id: case.case_id.clone(),
@@ -1327,11 +1348,16 @@ pub fn run_cases(
     Ok(results)
 }
 
-fn write_probe(child: &mut Child, framework: Framework, case: &PlannedCase) -> Result<(), String> {
+pub(crate) fn write_probe(
+    child: &mut Child,
+    framework: Framework,
+    case: &PlannedCase,
+    observe_memory: bool,
+) -> Result<(), String> {
     let request: serde_json::Value =
         serde_json::from_str(&request::substitute(framework, &case.relative_path))
             .map_err(|error| format!("the canonical request is not JSON: {error}"))?;
-    let probe = serde_json::json!({
+    let mut probe = serde_json::json!({
         "probe_id": case.case_id,
         "entries": [{
             "canonicalId": case.case_id,
@@ -1339,6 +1365,9 @@ fn write_probe(child: &mut Child, framework: Framework, case: &PlannedCase) -> R
             "request": request,
         }],
     });
+    if observe_memory {
+        probe["observe"] = serde_json::json!({ "memory": true });
+    }
     let stdin = child
         .stdin
         .as_mut()
@@ -1347,7 +1376,25 @@ fn write_probe(child: &mut Child, framework: Framework, case: &PlannedCase) -> R
     stdin.flush().map_err(|error| error.to_string())
 }
 
-fn drive_probe(
+pub(crate) fn spawn_driver(
+    driver: &DriverCommand,
+) -> Result<(Child, Receiver<Result<String, String>>), RunError> {
+    let mut child = Command::new(&driver.program)
+        .arg(&driver.script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|error| RunError::SpawnFailed {
+            message: error.to_string(),
+        })?;
+    let stdout = child.stdout.take().ok_or_else(|| RunError::Io {
+        message: "the driver exposes no stdout".to_string(),
+    })?;
+    Ok((child, spawn_reader(stdout)))
+}
+
+pub(crate) fn drive_probe(
     run: &mut ProbeRun,
     lines: &Receiver<Result<String, String>>,
     deadlines: PhaseDeadlines,
