@@ -1784,3 +1784,279 @@ fn selected_script(code: &str, lang: &str) -> RuntimeBlockContentInput {
         producer: None,
     }
 }
+
+// ── Assembled runtime-client source maps ──────────────────────────────
+//
+// The block-level map tests (sourcemap_e2e_tests) stop at each block's own
+// output; these pin the PUBLISHED artifact's map, where generated
+// imports/helpers, the `__sfc__` rewrite, and multi-fragment sequencing have
+// all already shifted generated coordinates.
+
+/// Authored anchors after a non-BMP character on their own lines, on both
+/// the script and template sides (0-based line map in the comments):
+///
+/// ```text
+/// line 1: const label = "🎉"; const count = 1    script anchors (🎉 = 2 UTF-16
+///                                                  units before `count`'s col 26)
+/// line 2: const total = count + 1                second authored script line
+/// line 5:   <div>🎉{{ count }} {{ label }}</div>  template anchors (🎉 before
+///                                                  both interpolations)
+/// ```
+const ASSEMBLY_MAP_SOURCE: &str = concat!(
+    "<script setup lang=\"ts\">\n",
+    "const label = \"\u{1f389}\"; const count = 1\n",
+    "const total = count + 1\n",
+    "</script>\n",
+    "<template>\n",
+    "  <div>\u{1f389}{{ count }} {{ label }}</div>\n",
+    "</template>\n",
+);
+
+/// Byte offset -> 0-based (line, UTF-16 column): the coordinate space of
+/// BOTH sides of a source map. `count`'s authored column on line 1 is 26
+/// only when the 🎉 (4 bytes, 2 UTF-16 units) is counted as 2.
+fn utf16_line_col(code: &str, byte_offset: usize) -> (u32, u32) {
+    let mut line = 0u32;
+    let mut column = 0u32;
+    for character in code[..byte_offset].chars() {
+        if character == '\n' {
+            line += 1;
+            column = 0;
+        } else {
+            column += character.len_utf16() as u32;
+        }
+    }
+    (line, column)
+}
+
+/// 0-based (line, UTF-16 column) -> byte offset, for extracting the text a
+/// mapped authored position actually points at.
+fn utf16_line_col_to_byte_offset(code: &str, line: u32, column: u32) -> Option<usize> {
+    let mut current_line = 0u32;
+    let mut utf16_count = 0u32;
+    for (byte_offset, character) in code.char_indices() {
+        if current_line == line && utf16_count == column {
+            return Some(byte_offset);
+        }
+        if character == '\n' {
+            current_line += 1;
+            utf16_count = 0;
+        } else {
+            utf16_count += character.len_utf16() as u32;
+        }
+    }
+    (current_line == line && utf16_count == column).then_some(code.len())
+}
+
+/// The token covering a generated (line, UTF-16 column), with a panic
+/// message that names the position — every anchor below locates itself by a
+/// context needle so the assertion cannot drift onto a different occurrence.
+fn token_at(
+    map: &oxc_sourcemap::SourceMap,
+    lookup: &[&[oxc_sourcemap::Token]],
+    position: (u32, u32),
+) -> oxc_sourcemap::Token {
+    map.lookup_token(lookup, position.0, position.1)
+        .unwrap_or_else(|| {
+            panic!(
+                "no map token covers the anchor at {}:{}",
+                position.0, position.1
+            )
+        })
+}
+
+/// The authored text at a mapped position, resolved through UTF-16 columns —
+/// a byte/UTF-16 confusion on either side lands inside the 🎉 and returns
+/// text that is not the anchor.
+fn authored_text_at<'source>(
+    source: &'source str,
+    token: &oxc_sourcemap::Token,
+    len: usize,
+) -> &'source str {
+    let byte_offset =
+        utf16_line_col_to_byte_offset(source, token.get_src_line(), token.get_src_col())
+            .unwrap_or_else(|| {
+                panic!(
+                    "mapped authored position {}:{} is out of bounds for the SFC",
+                    token.get_src_line(),
+                    token.get_src_col()
+                )
+            });
+    &source[byte_offset..(byte_offset + len).min(source.len())]
+}
+
+/// Selected authored script and template anchors in the ASSEMBLED
+/// runtime-client JavaScript map back to their own authored SFC line and
+/// text after generated imports/helpers and multiline assembly, with a
+/// non-BMP character before each anchor honored as 2 UTF-16 units on both
+/// the generated and authored side.
+#[test]
+fn assembled_runtime_client_maps_authored_anchors_after_generated_preamble() {
+    let artifact = registered_artifact("file:///assembly-map.vue", ASSEMBLY_MAP_SOURCE);
+    let request = runtime_request(
+        "AssemblyMap.vue",
+        vec![client_product(true, None)],
+        VueCompileRequest::default(),
+        false,
+    );
+    let via_backend = compile_via_backend(ASSEMBLY_MAP_SOURCE, &artifact, &request)
+        .expect("assembled runtime client");
+    let client = via_backend
+        .artifacts
+        .artifact(ProductKind::RuntimeClient)
+        .expect("client artifact");
+    let code = client.code();
+    let map = oxc_sourcemap::SourceMap::from_json_string(
+        client
+            .runtime_source_map()
+            .expect("maps-enabled request must publish a runtime map"),
+    )
+    .expect("published runtime map decodes");
+    let lookup = map.generate_lookup_table();
+
+    // Every source row names the authored SFC — never a synthetic fragment
+    // placeholder — for both the script's and the template's contribution.
+    for source in map.get_sources() {
+        assert_eq!(
+            source,
+            "AssemblyMap.vue",
+            "sources={:?}",
+            map.get_sources().collect::<Vec<_>>()
+        );
+    }
+
+    // Script anchor: `count` inside `const count = 1`, authored line 1. The
+    // 🎉 earlier on that line makes the authored UTF-16 column 26.
+    let script_anchor = code
+        .find("const count = 1")
+        .expect("script anchor in output")
+        + "const ".len();
+    let position = utf16_line_col(code, script_anchor);
+    let token = token_at(&map, &lookup, position);
+    assert!(
+        token.get_source_id().is_some(),
+        "the authored script anchor must be mapped, not synthetic"
+    );
+    assert_eq!(
+        token.get_src_line(),
+        1,
+        "script anchor must map to its own authored line"
+    );
+    assert_eq!(
+        authored_text_at(ASSEMBLY_MAP_SOURCE, &token, "count".len()),
+        "count",
+        "mapped authored position {}:{} must resolve to the anchor text through UTF-16 columns",
+        token.get_src_line(),
+        token.get_src_col()
+    );
+
+    // Multiline control: the second authored script line keeps its own line.
+    let total_anchor = code.find("const total").expect("multiline script anchor") + "const ".len();
+    let position = utf16_line_col(code, total_anchor);
+    let token = token_at(&map, &lookup, position);
+    assert!(
+        token.get_source_id().is_some(),
+        "multiline script anchor must be mapped"
+    );
+    assert_eq!(token.get_src_line(), 2, "authored line 2 for `total`");
+    assert_eq!(
+        authored_text_at(ASSEMBLY_MAP_SOURCE, &token, "total".len()),
+        "total"
+    );
+
+    // Template anchors: `count` and `label` inside the render's setup
+    // addressing, authored line 5, after the authored 🎉 (UTF-16 col 12/24).
+    for (anchor, needle) in [("count", "$setup.count"), ("label", "$setup.label")] {
+        let byte_offset = code
+            .find(needle)
+            .unwrap_or_else(|| panic!("render must address {anchor} through $setup in:\n{code}"))
+            + "$setup.".len();
+        let position = utf16_line_col(code, byte_offset);
+        let token = token_at(&map, &lookup, position);
+        assert!(
+            token.get_source_id().is_some(),
+            "template anchor {anchor} must be mapped, not synthetic"
+        );
+        assert_eq!(
+            token.get_src_line(),
+            5,
+            "template anchor {anchor} must map to its own authored line"
+        );
+        assert_eq!(
+            authored_text_at(ASSEMBLY_MAP_SOURCE, &token, anchor.len()),
+            anchor,
+            "template anchor {anchor} mapped position {}:{} must resolve to the anchor text",
+            token.get_src_line(),
+            token.get_src_col()
+        );
+    }
+
+    // Generated-only bytes must not fabricate authored anchors: the
+    // helper-import preamble lines carry no mapped segment...
+    for (line_index, text) in code.lines().enumerate() {
+        if !(text.starts_with("import ") && text.ends_with("from \"vue\"")) {
+            continue;
+        }
+        let token = map.lookup_token(&lookup, line_index as u32, 0);
+        assert!(
+            token.is_none_or(|token| token.get_source_id().is_none()),
+            "generated import line {line_index} must stay unmapped"
+        );
+    }
+    // ...and the synthesized `__returned__` object's identifier copies must
+    // not claim the authored binding positions.
+    let returned_anchor =
+        code.find("const __returned__").expect("returned object") + "const __returned__ = { ".len();
+    let position = utf16_line_col(code, returned_anchor);
+    let token = map.lookup_token(&lookup, position.0, position.1);
+    assert!(
+        token.is_none_or(|token| token.get_source_id().is_none()),
+        "the generated `__returned__` object must not fabricate authored anchors"
+    );
+}
+
+/// Maps-disabled: the same typed request with the runtime map
+/// off publishes no map and emits byte-identical code — the map request is
+/// not allowed to change program behavior.
+#[test]
+fn assembled_runtime_client_without_map_keeps_equivalent_code_and_no_map() {
+    let artifact = registered_artifact("file:///assembly-map-off.vue", ASSEMBLY_MAP_SOURCE);
+    let mapped_request = runtime_request(
+        "AssemblyMap.vue",
+        vec![client_product(true, None)],
+        VueCompileRequest::default(),
+        false,
+    );
+    let unmapped_request = runtime_request(
+        "AssemblyMap.vue",
+        vec![client_product(false, None)],
+        VueCompileRequest::default(),
+        false,
+    );
+    let mapped = compile_via_backend(ASSEMBLY_MAP_SOURCE, &artifact, &mapped_request)
+        .expect("mapped compile");
+    let unmapped = compile_via_backend(ASSEMBLY_MAP_SOURCE, &artifact, &unmapped_request)
+        .expect("unmapped compile");
+    assert_eq!(
+        mapped
+            .artifacts
+            .artifact(ProductKind::RuntimeClient)
+            .expect("client")
+            .code(),
+        unmapped
+            .artifacts
+            .artifact(ProductKind::RuntimeClient)
+            .expect("client")
+            .code(),
+        "maps-disabled must emit equivalent code"
+    );
+    assert!(
+        unmapped
+            .artifacts
+            .artifact(ProductKind::RuntimeClient)
+            .expect("client")
+            .runtime_source_map()
+            .is_none(),
+        "maps-disabled must publish no runtime map"
+    );
+}
