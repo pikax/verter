@@ -7193,7 +7193,7 @@ impl Lowerer<'_> {
                     }
                 }
                 // A CALL POSITION with no structural arm (`new f()`,
-                // `` tag`…` ``, `f?.()`, `await f()`, `(0, f())`). The
+                // `` tag`…` ``, `f?.()`, `await f()`, `(0, new f())`). The
                 // fail-closed verdict is the CLASSIFIER's, taken on the
                 // expression FORM — not on whether the shallow pass
                 // happened to mint a `ReturnType<callee>` carrier the
