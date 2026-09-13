@@ -36,6 +36,125 @@ use crate::compile_request::ProductKind;
 pub use super::source_space::{FragmentRange, SourceSpaceKind};
 use super::source_unit::SourceUnitId;
 
+/// Canonical artifact lineage. Output bytes, input revisions and availability
+/// are neighbouring facts, so editing content does not rename an artifact.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ArtifactId(verter_identity::canonical::Canonical);
+
+impl ArtifactId {
+    fn mint(unit: &SourceUnitId, product: ProductKind, language: &str, name: &str) -> Self {
+        let mut e =
+            verter_identity::encoding::CanonicalEncoder::new("verter.compiler.artifact.lineage.v1");
+        e.field_bytes(1, unit.canonical_bytes());
+        e.field_str(2, product.wire_tag());
+        e.field_str(3, language);
+        e.field_str(4, name);
+        Self(verter_identity::canonical::Canonical::from_encoder(&e))
+    }
+
+    /// Full equality authority, also retained by terminal serialization.
+    pub fn canonical_bytes(&self) -> &[u8] {
+        self.0.bytes()
+    }
+}
+
+/// Exact input observation and producer contract, supplied by the owning
+/// compiler capability. Construction never resolves or loads these inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactProvenance {
+    pub input_basis: verter_identity::identity::InputBasisId,
+    pub producer: verter_identity::identity::ResultContractId,
+    pub inputs: std::collections::BTreeSet<SourceUnitId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ArtifactUnavailableReason {
+    Unsupported,
+    InvalidInput,
+    NotProduced,
+}
+
+/// Empty available content is distinct from unavailable content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactContent {
+    Available(String),
+    Unavailable(ArtifactUnavailableReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ArtifactRelationKind {
+    DependsOn,
+    CompanionOf,
+    DeclarationOf,
+}
+
+/// A directed, typed edge to another artifact in the same set.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ArtifactRelation {
+    pub kind: ArtifactRelationKind,
+    pub target: ArtifactId,
+}
+
+/// Unvalidated schema input. The identity fields are immutable; relations,
+/// maps, provenance and content are validated together by `CompileArtifactSet`.
+/// This record does not claim that content was compiled or published.
+#[derive(Debug, Clone)]
+pub struct CompileArtifact {
+    id: ArtifactId,
+    source_unit: SourceUnitId,
+    product: ProductKind,
+    language: verter_language::LanguageId,
+    name: String,
+    pub provenance: ArtifactProvenance,
+    pub content: ArtifactContent,
+    pub relations: std::collections::BTreeSet<ArtifactRelation>,
+    /// Absent families were not supplied. There is no implicit identity map.
+    pub maps: Vec<super::source_space::QualifiedArtifactMap>,
+}
+
+impl CompileArtifact {
+    pub fn new(
+        source_unit: SourceUnitId,
+        product: ProductKind,
+        language: verter_language::LanguageId,
+        name: impl Into<String>,
+        provenance: ArtifactProvenance,
+        content: ArtifactContent,
+    ) -> Self {
+        let name = name.into();
+        Self {
+            id: ArtifactId::mint(&source_unit, product, language.as_str(), &name),
+            source_unit,
+            product,
+            language,
+            name,
+            provenance,
+            content,
+            relations: Default::default(),
+            maps: Vec::new(),
+        }
+    }
+
+    pub fn id(&self) -> &ArtifactId {
+        &self.id
+    }
+    pub fn source_unit(&self) -> &SourceUnitId {
+        &self.source_unit
+    }
+    pub fn product(&self) -> ProductKind {
+        self.product
+    }
+    pub fn language(&self) -> &verter_language::LanguageId {
+        &self.language
+    }
+    /// Stable producer-owned slot name within a source unit and product.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 /// Opaque local identity for a fragment inside one assembly — assigned
 /// when a fragment is collected into a [`super::plan::ProductPlan`], not a
 /// cross-assembly stable identity ([`SourceUnitId`] is that).

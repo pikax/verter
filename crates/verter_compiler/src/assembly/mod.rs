@@ -13,6 +13,11 @@
 //! [`crate::compile_request::CompileRequest`] plans, [`compose`] splices a
 //! fragment into another fragment's declared hole, and [`publish`] is the
 //! sole atomic publication boundary.
+//!
+//! [`CompileArtifactSet`] is the immutable schema for already-produced
+//! artifacts, with canonical identities, typed relations, input provenance
+//! and qualified byte maps. Schema validation is independent of compilation
+//! and does not mint an [`ArtifactSet`] publication receipt.
 
 pub mod compose;
 pub mod fragment;
@@ -27,9 +32,10 @@ pub use compose::{
     SequencedOutput,
 };
 pub use fragment::{
-    DeclaredExport, DeclaredHelper, DeclaredImport, DeclaredImportKind, Fragment, FragmentDialect,
-    FragmentId, FragmentRefusal, FrameworkDomain, PlacementSlot, SfcExportPlacement,
-    SyntacticContract, ValidatedFragment,
+    ArtifactContent, ArtifactId, ArtifactProvenance, ArtifactRelation, ArtifactRelationKind,
+    ArtifactUnavailableReason, CompileArtifact, DeclaredExport, DeclaredHelper, DeclaredImport,
+    DeclaredImportKind, Fragment, FragmentDialect, FragmentId, FragmentRefusal, FrameworkDomain,
+    PlacementSlot, SfcExportPlacement, SyntacticContract, ValidatedFragment,
 };
 pub use plan::{PlannedArtifact, ProductPlan};
 // `publish` and `ArtifactContribution` are `pub(crate)` (see their own doc
@@ -37,10 +43,20 @@ pub use plan::{PlannedArtifact, ProductPlan};
 // (`vue_module::compose_main_module`, `standalone::StandaloneCompiler`)
 // reach them through `super::publish::{publish, ArtifactContribution}`
 // directly, not through this public re-export.
-pub use publish::{ArtifactSet, AssembledArtifact, AssemblyRefusal};
-pub use source_space::{AssembledOffset, FragmentOffset, FragmentRange, SourceSpaceKind};
-pub use source_unit::{ContentId, SourceId, SourceRevision, SourceUnit, SourceUnitId};
+pub use publish::{
+    ArtifactSchemaError, ArtifactSet, AssembledArtifact, AssemblyRefusal, CompileArtifactSet,
+};
+pub use source_space::{
+    ArtifactMapFamily, ArtifactMapSegment, AssembledOffset, FragmentOffset, FragmentRange,
+    QualifiedArtifactMap, SourceSpaceKind,
+};
+pub use source_unit::{
+    ArtifactSourceUnit, ContentId, SourceId, SourceRevision, SourceUnit, SourceUnitId,
+};
 pub use vue_module::{
     compose_main_module, ExtraFragment, SfcRewriteRefusal, VueMainAssemblyFailure,
     VueMainCompositionFailure, VueMainModuleRequest,
 };
+
+#[cfg(test)]
+mod artifact_schema_tests;
