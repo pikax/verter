@@ -73,14 +73,14 @@ use std::process::Command;
 // Regenerate ONLY when the pinned pipeline output legitimately changes (a later
 // perf block must prove this multiset is identical, or consciously re-pin it).
 //
-// Conscious re-pin: `error_map::map_tsc_position` now recovers the EXACT
-// authored column for diagnostics on verbatim-copied script lines (generated
-// line text == the map's `sourcesContent` line ⇒ both sides count UTF-16
-// columns over the same characters). Script-block diagnostics previously
-// degraded to their covering token's column (column 1 for the per-line
-// line-start tokens); the re-pinned columns are the engine's own anchors on
-// the authored lines. Diagnostics on lines the carrier does NOT copy verbatim
-// (the rewritten `ImportErrors.vue` import line) keep their token positions.
+// Script-block diagnostics on verbatim-copied lines pin the engine's EXACT
+// authored column: `error_map::map_tsc_position` returns the generated column
+// when the generated line text equals the map's `sourcesContent` line, so
+// both sides count UTF-16 columns over the same characters and the columns
+// below are the engine's own anchors on the authored lines. Diagnostics on
+// lines the carrier does NOT copy verbatim (the rewritten `ImportErrors.vue`
+// import line) keep their covering-token position (column 1 for the per-line
+// line-start tokens).
 #[rustfmt::skip]
 const EXPECTED: &[(&str, u32, u32, u32, usize, &str)] = &[
     ("src/ComposableErrors.vue", 11, 7, 2322, 1, "'number' is not assignable to type 'string'"),
