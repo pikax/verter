@@ -28,7 +28,7 @@ import { createRequire } from "node:module";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 
-import { SVELTE_DOMAIN } from "../../../../../../packages/framework-conformance-harness/src/domain-pin.mjs";
+import { SVELTE_DOMAIN } from "../src/domain-pin.mjs";
 
 // EXPECTED_SVELTE reads from the same single source of truth as
 // generate-official-case-manifests.mjs — see that file's comment for why

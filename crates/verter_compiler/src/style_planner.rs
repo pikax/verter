@@ -30,20 +30,59 @@ use crate::framework_common::{RuntimeOutputDescriptor, SourceMapFidelity};
 use oxc_sourcemap::{SourceMap, Token};
 
 /// Generate a Vue CSS variable name from a scope ID and authored expression.
+///
+/// The name is the identity of the custom property BOTH emitted sides agree
+/// on: the `<style>` block's `var(--NAME)` reference and the client
+/// `_useCssVars` registration (which registers it bare, because the runtime
+/// prepends `--` itself). It must therefore be spellable as a CSS custom
+/// property AND distinct per authored expression.
+///
+/// The encoding has two disjoint halves. An expression built solely from
+/// characters a custom property can carry verbatim (`[A-Za-z0-9-]`, in
+/// particular no `_`) keeps the plain `scope-expression` name. Every other
+/// expression — anything that folds, and anything containing `_` — also
+/// carries a digest of its authored text. The halves cannot meet: a digest
+/// name always contains `_`, a plain name never does, and two digest names
+/// only collide when their (different) authored texts share a sha256 digest.
+/// Folding alone is lossy (`obj.tone` and `obj+tone` both spell `obj_tone`),
+/// and gating the digest on folding alone still leaves a collision: the
+/// authored identifier `obj_tone_05eec45d` would spell exactly the name
+/// `obj.tone` digests to, and the second registration would be dropped as a
+/// duplicate. `_` therefore joins the digest half too.
 #[must_use]
 pub fn generate_var_name(scope_id: &str, expression: &str) -> String {
     let mut out = String::with_capacity(2 + scope_id.len() + 1 + expression.len());
     out.push_str("--");
     out.push_str(scope_id);
     out.push('-');
+    let mut digest_needed = false;
     for character in expression.chars() {
-        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+        if character.is_ascii_alphanumeric() || character == '-' {
             out.push(character);
         } else {
+            // `_` passes through unchanged but moves the expression into the
+            // digest half; every other character folds to `_` as before.
+            digest_needed = true;
             out.push('_');
         }
     }
+    if digest_needed {
+        out.push('_');
+        push_expression_digest(&mut out, expression);
+    }
     out
+}
+
+/// Append a short, stable hex digest of the authored expression.
+fn push_expression_digest(out: &mut String, expression: &str) {
+    let mut hasher = Sha256::new();
+    hasher.update(expression.as_bytes());
+    let digest = hasher.finalize();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for &byte in &digest[..4] {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
 }
 
 fn css_var_reference(var_name: &str) -> String {

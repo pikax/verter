@@ -3019,6 +3019,13 @@ mod bf2_full_axis_gate;
 #[cfg(feature = "bf2-authoritative")]
 mod nested_v_for_runtime_proof;
 
+/// CSS `v-bind()` client mount: VERTER's own assembled module and the
+/// official module for the same fixture, mounted side by side through the
+/// pinned client runtime, asserting the applied custom properties initially
+/// and across reactive updates. Child of this harness. Gated.
+#[cfg(feature = "bf2-authoritative")]
+mod vue_css_vars_client_mount;
+
 /// Svelte golden inventory + shipped `.svelte` route. Same manifest and
 /// digest helpers. Gated (oracle install).
 #[cfg(feature = "bf2-authoritative")]

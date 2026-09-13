@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 
-import { SVELTE_DOMAIN } from "../../../../../../packages/framework-conformance-harness/src/domain-pin.mjs";
+import { SVELTE_DOMAIN } from "../src/domain-pin.mjs";
 
 // EXPECTED_SVELTE reads from the SAME single source of truth as the rest of
 // the harness (domain-pin.mjs, which mirrors version-domain.md). This

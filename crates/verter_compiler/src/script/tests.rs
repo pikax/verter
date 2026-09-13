@@ -2658,3 +2658,254 @@ const props = withDefaults(defineProps<Props>(), {
         "inline default keys must remain in the typed props or defaults expr, got:\n{output}"
     );
 }
+
+// ── CSS `v-bind()` custom-property registration ────────────────
+//
+// Driven through the public compile route rather than `gen_script`, because
+// the contract spans BOTH emitted sides: the `<style>` block's
+// `var(--NAME)` reference and the client-registered `_useCssVars` key must
+// name the SAME custom property. The JS key is bare — the client runtime
+// prepends `--` itself when it applies the value — so baking `--` into the
+// registered key makes the runtime double-prepend it and the binding
+// silently never applies. Two different `v-bind()` expressions must also
+// never land on one custom property: the second would be dropped as a
+// duplicate and both CSS references would read the first one's value.
+mod css_variable_registration {
+    use oxc_allocator::Allocator;
+
+    use crate::compile::{VerterCompileResult, VueExecutionInputs, VueMacroSemanticInput};
+    use crate::compile_request::{
+        CompileProduct, CompileRequest, FrameworkCompileRequest, RuntimeProductRequest,
+        VueCompileRequest,
+    };
+
+    const SCOPE: &str = "sc1";
+
+    fn compile_sfc(style: &str, script_body: &str) -> VerterCompileResult {
+        let source = format!(
+            "<script setup>\nimport {{ ref }} from 'vue'\n{script_body}\n</script>\n\
+             <template><div class=\"x\">hi</div></template>\n\
+             <style scoped>{style}</style>"
+        );
+        let request = CompileRequest::new(
+            vec![CompileProduct::RuntimeClient(
+                RuntimeProductRequest::default(),
+            )],
+            FrameworkCompileRequest::Vue(VueCompileRequest::default()),
+            None,
+            None,
+            Some(SCOPE.to_string()),
+            false,
+            false,
+        )
+        .expect("a lone RuntimeClient product must construct");
+        let allocator = Allocator::new();
+        // Leak-free: the result owns its strings, the arena dies with the call.
+        crate::compile::compile(
+            &source,
+            &request,
+            &VueExecutionInputs::default(),
+            &VueMacroSemanticInput::Unavailable,
+            &allocator,
+        )
+        .expect("a plain RuntimeClient compile must not be refused")
+    }
+
+    /// Every `var(--NAME)` the emitted CSS references, in source order.
+    fn css_var_references(css: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut rest = css;
+        while let Some(at) = rest.find("var(--") {
+            let after = &rest[at + "var(".len()..];
+            let end = after.find(')').expect("a var() reference closes");
+            names.push(after[..end].to_string());
+            rest = &after[end..];
+        }
+        names
+    }
+
+    /// Every key the emitted `_useCssVars(...)` call registers, in source order.
+    fn registered_keys(script: &str) -> Vec<String> {
+        let Some(at) = script.find("_useCssVars(") else {
+            return Vec::new();
+        };
+        let body = &script[at..];
+        let end = body.find("}))").expect("the _useCssVars call closes");
+        body[..end]
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                let rest = trimmed.strip_prefix('"')?;
+                let close = rest.find('"')?;
+                // Only a `"key": (expr)` entry, never the call's own header.
+                rest[close + 1..]
+                    .trim_start()
+                    .starts_with(':')
+                    .then(|| rest[..close].to_string())
+            })
+            .collect()
+    }
+
+    /// The invariant both sides share, for any SFC: the CSS references and
+    /// the registered keys describe exactly the same custom properties, and
+    /// no registered key carries the `--` the runtime adds itself.
+    fn assert_sides_agree(result: &VerterCompileResult) -> Vec<String> {
+        let css = result
+            .styles
+            .first()
+            .map(|style| style.code.as_str())
+            .unwrap_or("");
+        let script = result
+            .script
+            .as_ref()
+            .map(|block| block.code.as_str())
+            .unwrap_or("");
+        let references = css_var_references(css);
+        let keys = registered_keys(script);
+
+        for key in &keys {
+            assert!(
+                !key.starts_with("--"),
+                "the registered key must be bare — the runtime prepends `--` itself: \
+                 {key:?}\nscript:\n{script}"
+            );
+        }
+        let mut referenced: Vec<String> = references.clone();
+        referenced.sort();
+        referenced.dedup();
+        let mut registered: Vec<String> = keys.iter().map(|key| format!("--{key}")).collect();
+        registered.sort();
+        registered.dedup();
+        assert_eq!(
+            referenced, registered,
+            "the CSS references and the registered custom properties must be the same set\n\
+             css:\n{css}\nscript:\n{script}"
+        );
+        references
+    }
+
+    #[test]
+    fn single_v_bind_registers_one_custom_property() {
+        let result = compile_sfc(".x { color: v-bind(color); }", "const color = ref('red')");
+        let references = assert_sides_agree(&result);
+        assert_eq!(references.len(), 1, "{references:?}");
+        let script = result.script.as_ref().expect("script emitted").code.clone();
+        assert!(
+            script.contains("(color.value)"),
+            "a ref must be read through `.value`: {script}"
+        );
+    }
+
+    #[test]
+    fn distinct_expressions_register_distinct_custom_properties() {
+        // `obj.tone` and `obj+tone` differ only in characters a CSS custom
+        // property cannot spell. Collapsing both onto one name drops the
+        // second registration and makes `background` silently read the
+        // `color` value.
+        let result = compile_sfc(
+            ".x { color: v-bind(obj.tone); background: v-bind('obj+tone'); }",
+            "const obj = ref({ tone: 'red' })\nconst tone = 1",
+        );
+        let references = assert_sides_agree(&result);
+        assert_eq!(
+            references.len(),
+            2,
+            "each expression owns its own custom property: {references:?}"
+        );
+        assert_ne!(references[0], references[1], "{references:?}");
+    }
+
+    #[test]
+    fn authored_identifier_matching_a_folded_name_stays_distinct() {
+        // The smallest collision the digest scheme must survive: one
+        // expression that folds (`obj.tone`) and a SECOND, authored
+        // identifier that literally spells the first one's full generated
+        // name. Deriving the twin from the first compile (instead of
+        // hardcoding today's digest) keeps the case the smallest regression
+        // for whatever encoding `generate_var_name` uses.
+        let folded = compile_sfc(
+            ".x { color: v-bind(obj.tone); }",
+            "const obj = ref({ tone: 'red' })",
+        );
+        let [folded_name] = assert_sides_agree(&folded)
+            .try_into()
+            .expect("the folded expression owns exactly one reference");
+        // Strip `--<scope>-`: the remainder is the authored twin, which must
+        // be a plain identifier (no folding of its own).
+        let twin = folded_name
+            .strip_prefix("--")
+            .and_then(|rest| rest.split_once('-'))
+            .map(|(_, expression)| expression)
+            .expect("the generated name is `--<scope>-<encoded>`")
+            .to_string();
+        assert!(
+            twin.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "the derived twin must be a fold-free identifier: {twin:?}"
+        );
+
+        let script_body = format!("const obj = ref({{ tone: 'red' }})\nconst {twin} = 'blue'");
+        let both = compile_sfc(
+            &format!(".x {{ color: v-bind(obj.tone); background: v-bind({twin}); }}"),
+            &script_body,
+        );
+        let references = assert_sides_agree(&both);
+        assert_eq!(
+            references.len(),
+            2,
+            "an authored identifier equal to a folded expression's full generated \
+             name must keep its own custom property: {references:?}"
+        );
+        assert_ne!(references[0], references[1], "{references:?}");
+    }
+
+    #[test]
+    fn repeated_expression_registers_one_custom_property() {
+        let result = compile_sfc(
+            ".x { color: v-bind(tone); } .y { border-color: v-bind(tone); }",
+            "const tone = ref('red')",
+        );
+        let references = assert_sides_agree(&result);
+        assert_eq!(references.len(), 2, "both declarations reference it");
+        assert_eq!(references[0], references[1], "and it is the same property");
+        let script = result.script.as_ref().expect("script emitted").code.clone();
+        assert_eq!(
+            registered_keys(&script).len(),
+            1,
+            "registered once, not twice: {script}"
+        );
+    }
+
+    #[test]
+    fn quoted_expression_names_the_same_property_as_the_bare_one() {
+        let quoted = compile_sfc(".x { color: v-bind('color'); }", "const color = ref('red')");
+        let bare = compile_sfc(".x { color: v-bind(color); }", "const color = ref('red')");
+        assert_eq!(
+            assert_sides_agree(&quoted),
+            assert_sides_agree(&bare),
+            "quoting the expression must not change the custom property it names"
+        );
+    }
+
+    #[test]
+    fn multiple_bindings_each_reach_their_own_property() {
+        let result = compile_sfc(
+            ".x { color: v-bind(color); font-size: v-bind(size); }",
+            "const color = ref('red')\nconst size = ref('12px')",
+        );
+        let references = assert_sides_agree(&result);
+        assert_eq!(references.len(), 2, "{references:?}");
+        assert_ne!(references[0], references[1], "{references:?}");
+    }
+
+    #[test]
+    fn literal_style_registers_nothing() {
+        let result = compile_sfc(".x { color: red; }", "const color = ref('red')");
+        let references = assert_sides_agree(&result);
+        assert!(references.is_empty(), "{references:?}");
+        let script = result.script.as_ref().expect("script emitted").code.clone();
+        assert!(
+            !script.contains("_useCssVars"),
+            "a literal style must not inject the CSS-vars runtime: {script}"
+        );
+    }
+}

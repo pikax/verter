@@ -65,7 +65,7 @@ describe("BF1/BF2 official-case-manifest evidence-package identity", () => {
 
     const corpusFingerprintBlobs = [
       ...gates.matchAll(
-        /corpus_fingerprint = "git-blob:([0-9a-f]{40}) \(docs\/arch\/refactor\/rev11\/evidence\/framework-conformance\/generate-official-case-manifests\.mjs\)/g,
+        /corpus_fingerprint = "git-blob:([0-9a-f]{40}) \(packages\/framework-conformance-harness\/evidence\/generate-official-case-manifests\.mjs\)/g,
       ),
     ].map((m) => m[1]);
     const commentGeneratorBlobs = [
