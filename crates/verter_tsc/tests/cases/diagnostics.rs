@@ -404,6 +404,33 @@ fn verter_tsc_diagnostics_e2e() {
     // The IDE path generates defineComponent() exports that TS resolves prop types from.
     assert_has_error(&diags, "OptionsApiConsumer.vue", 2322);
 
+    // PositionControls.vue — ECRV7: a source-backed script diagnostic keeps its
+    // EXACT authored file, line, and column through the checker's source-map
+    // conversion. The fixture's script follows its template (block offset: the
+    // authored full-SFC line differs from the generated and block-relative
+    // lines) and declares U+1D11E before each anchor (2 UTF-16 units / 4 UTF-8
+    // bytes / 1 codepoint — only a UTF-16 column lands on the anchor). The
+    // TS2345 pin at (20,40) fails if the remap degrades to the covering
+    // declarator anchor's column 19; a byte- or codepoint-counted column lands
+    // elsewhere again.
+    assert_min_errors(&diags, "PositionControls.vue", 2);
+    assert_error_at_named(
+        &diags,
+        "PositionControls.vue",
+        20,
+        17,
+        2322,
+        "Type 'number' is not assignable to type 'string'",
+    );
+    assert_error_at_named(
+        &diags,
+        "PositionControls.vue",
+        21,
+        40,
+        2345,
+        "Argument of type 'number' is not assignable to parameter of type 'string'",
+    );
+
     // ── Source map / span mapping validation ────────────────────────
 
     // No diagnostic should point to a .tsx temp file
@@ -448,10 +475,12 @@ fn verter_tsc_diagnostics_e2e() {
                                                                 // at their exact decl `(line, col)` AND by symbol name in the SAME run, so a
                                                                 // collapse to `(1,1)`, a wrong-line/column remap, or a wrong/missing symbol
                                                                 // all fail this gate (not just a "some TS6133 somewhere in the file" check).
-                                                                // `const unusedVar = ...` — used nowhere; decl maps to (14, 1).
-    assert_error_at_named(&diags, "ScriptSetupErrors.vue", 14, 1, 6133, "'unusedVar'");
-    // `const user = reactive<User>(...)` — never read after declaration; decl maps to (17, 1).
-    assert_error_at_named(&diags, "ScriptSetupErrors.vue", 17, 1, 6133, "'user'");
+                                                                // `const unusedVar = ...` — used nowhere; the declarator anchor maps to
+                                                                // (14, 7) — the exact `unusedVar` name column.
+    assert_error_at_named(&diags, "ScriptSetupErrors.vue", 14, 7, 6133, "'unusedVar'");
+    // `const user = reactive<User>(...)` — never read after declaration; the
+    // declarator anchor maps to (17, 7) — the exact `user` name column.
+    assert_error_at_named(&diags, "ScriptSetupErrors.vue", 17, 7, 6133, "'user'");
     assert_error_at(&diags, "ScriptSetupErrors.vue", 18, 2322); // reactive User.id
     assert_error_at(&diags, "ScriptSetupErrors.vue", 19, 2322); // reactive User.name
     assert_error_at(&diags, "ScriptSetupErrors.vue", 20, 2322); // reactive User.email
