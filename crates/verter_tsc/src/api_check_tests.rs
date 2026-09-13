@@ -641,3 +641,148 @@ fn config_filtering_drops_only_injected_companions_and_retains_real_and_global()
         "exactly the two injected-companion diagnostics are removed, nothing else"
     );
 }
+
+// ── Exact authored positions for source-backed script diagnostics ───────────
+//
+// The `--api` remap (`map_one` → `map_tsc_position`) must surface a
+// source-backed script diagnostic at its EXACT authored file, line, and
+// column — the script block is copied verbatim into the carrier and the
+// projection map's `sourcesContent` carries the authored text, so the authored
+// column is derivable, not guessable. Discriminating controls:
+// a non-BMP character before the anchor (UTF-16 vs byte/codepoint columns
+// disagree) and a block offset (the script follows `<template>`, so the
+// authored full-SFC line, the generated line, and a block-relative line are
+// three different numbers).
+
+/// Build a `SourceMapped` carrier whose content ends with an inline source map
+/// projecting generated line 0 onto `src_line` of the authored SFC text.
+fn verbatim_carrier(gen_line: &str, src_line: u32, authored_sfc: &str) -> OverlayFile {
+    use base64::prelude::{Engine, BASE64_STANDARD as B64};
+    // mappings: one 4-field token on generated line 0 at column 0 →
+    // source 0, line `src_line`, column 0. VLQ: [0, 0, src_line, 0]; a value
+    // v encodes as (v << 1) into 5-bit groups, so small lines stay one char.
+    let mut vlq = String::new();
+    for field in [0u32, 0, src_line, 0] {
+        let mut v = field << 1;
+        loop {
+            let digit = (v & 31) as usize;
+            v >>= 5;
+            if v == 0 {
+                vlq.push(B64_CHARS[digit] as char);
+                break;
+            }
+            vlq.push(B64_CHARS[digit | 32] as char);
+        }
+    }
+    let map_json = serde_json::json!({
+        "version": 3,
+        "file": "gen.tsx",
+        "sources": ["/proj/src/App.vue"],
+        "sourcesContent": [authored_sfc],
+        "names": [],
+        "mappings": vlq,
+    })
+    .to_string();
+    OverlayFile {
+        path: "/proj/App_ab12.vue.tsc.tsx".to_string(),
+        content: format!(
+            "{gen_line}\n//# sourceMappingURL=data:application/json;base64,{}\n",
+            B64.encode(map_json.as_bytes())
+        ),
+        remap: RemapKind::SourceMapped {
+            vue_path: "/proj/src/App.vue".to_string(),
+        },
+    }
+}
+
+const B64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// The authored SFC: `<script setup>` AFTER `<template>` (block offset), and
+/// the anchor line declares a non-BMP char (U+1D11E: 2 UTF-16 units / 4 UTF-8
+/// bytes / 1 codepoint) before the `7` initializer the diagnostic points at.
+const AUTHORED_SFC: &str = "<template>\n  <div/>\n</template>\n\
+<script setup lang=\"ts\">\nconst t = '\u{1D11E}', n: string = 7\n</script>\n";
+
+/// The UTF-16 (0-indexed) column of the `7` initializer inside the anchor line.
+fn anchor_utf16_col() -> u32 {
+    let line = "const t = '\u{1D11E}', n: string = 7";
+    let byte = line.rfind("= 7").expect("anchor pattern") + 2;
+    line[..byte].encode_utf16().count() as u32
+}
+
+#[test]
+fn sourcemapped_verbatim_line_keeps_exact_authored_line_and_utf16_column() {
+    // The carrier copies the script line VERBATIM as its generated line 0; the
+    // engine reports the TS2322 initializer anchor at its UTF-16 offset in the
+    // carrier content.
+    let gen_line = "const t = '\u{1D11E}', n: string = 7";
+    let files = vec![verbatim_carrier(gen_line, 4, AUTHORED_SFC)];
+    let lookup = lookup_of(&files);
+    let cache = cache_of(&files);
+
+    let pos = {
+        let prefix_bytes = files[0].content.rfind("= 7").expect("anchor") + 2;
+        files[0].content[..prefix_bytes].encode_utf16().count() as u32
+    };
+
+    let d = api_diag(
+        2322,
+        1,
+        "Type 'number' is not assignable to type 'string'.",
+        pos,
+        "/proj/App_ab12.vue.tsc.tsx",
+    );
+    let mapped = map_semantic(&d, &lookup, &cache).expect("the script diagnostic is surfaced");
+
+    assert_eq!(
+        mapped.file, "/proj/src/App.vue",
+        "exact authored FILE through the map's source entry"
+    );
+    assert_eq!(
+        mapped.line, 5,
+        "exact authored LINE in FULL-SFC coordinates (block offset: the script follows \
+         the template), not the generated line 1 and not a block-relative line"
+    );
+    assert_eq!(
+        mapped.col,
+        anchor_utf16_col() + 1,
+        "exact authored COLUMN in UTF-16 units — not the covering token's column 1, and \
+         not a byte- or codepoint-counted column (the non-BMP char before the anchor \
+         makes those disagree)"
+    );
+    assert_eq!(mapped.ts_code, 2322);
+}
+
+#[test]
+fn sourcemapped_non_verbatim_line_keeps_token_position_not_fabricated_column() {
+    // Control: the generated line TEXT differs from the authored line (a
+    // rewritten projection). The exact-column recovery must NOT fire — the
+    // diagnostic keeps the covering token's position and is never presented as
+    // a precise authored column it does not have.
+    let gen_line = "const t_rewritten = '\u{1D11E}', n: string = 7";
+    let files = vec![verbatim_carrier(gen_line, 4, AUTHORED_SFC)];
+    let lookup = lookup_of(&files);
+    let cache = cache_of(&files);
+
+    let prefix_bytes = files[0].content.rfind("= 7").expect("anchor") + 2;
+    let pos = files[0].content[..prefix_bytes].encode_utf16().count() as u32;
+    let d = api_diag(
+        2322,
+        1,
+        "Type 'number' is not assignable to type 'string'.",
+        pos,
+        "/proj/App_ab12.vue.tsc.tsx",
+    );
+    let mapped = map_semantic(&d, &lookup, &cache).expect("the diagnostic is surfaced");
+
+    assert_eq!(mapped.file, "/proj/src/App.vue");
+    assert_eq!(
+        mapped.line, 5,
+        "the authored LINE still comes from the covering token"
+    );
+    assert_eq!(
+        mapped.col, 1,
+        "a non-verbatim generated line keeps the covering token's column — no fabricated \
+         precise column"
+    );
+}

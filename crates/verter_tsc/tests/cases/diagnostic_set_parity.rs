@@ -10,7 +10,7 @@
 //!   - a CHANGED diagnostic (different code / line / col)     -> RED.
 //!
 //! Multiplicity is pinned (a `BTreeMap<key, count>`, not a `BTreeSet`), so the
-//! current 67 raw diagnostics are asserted without silently deduplicating any
+//! current 69 raw diagnostics are asserted without silently deduplicating any
 //! future same-key diagnostics.
 //!
 //! WHY THIS EXISTS (the parity oracle): the perf campaign (see
@@ -67,20 +67,29 @@ use std::process::Command;
 // Captured from the current `verter-tsc` run over
 // `crates/verter_tsc/tests/cases/fixtures/diagnostics/`. Tuple =
 // `(fixture_relative_path, line, col, ts_code, count, stable_message_substring)`.
-// `count` pins multiplicity (raw total = 67).
+// `count` pins multiplicity (raw total = 69).
 // The final entry is the whole-program non-root diagnostic in `src/nonRootBad.ts` (the
 // old per-root loop dropped it; the whole-program call surfaces it).
 // Regenerate ONLY when the pinned pipeline output legitimately changes (a later
 // perf block must prove this multiset is identical, or consciously re-pin it).
+//
+// Script-block diagnostics on verbatim-copied lines pin the engine's EXACT
+// authored column: `error_map::map_tsc_position` returns the generated column
+// when the generated line text equals the map's `sourcesContent` line, so
+// both sides count UTF-16 columns over the same characters and the columns
+// below are the engine's own anchors on the authored lines. Diagnostics on
+// lines the carrier does NOT copy verbatim (the rewritten `ImportErrors.vue`
+// import line) keep their covering-token position (column 1 for the per-line
+// line-start tokens).
 #[rustfmt::skip]
 const EXPECTED: &[(&str, u32, u32, u32, usize, &str)] = &[
-    ("src/ComposableErrors.vue", 11, 1, 2322, 1, "'number' is not assignable to type 'string'"),
-    ("src/ComposableErrors.vue", 11, 1, 6133, 1, "'bad' is declared but its value is never read"),
+    ("src/ComposableErrors.vue", 11, 7, 2322, 1, "'number' is not assignable to type 'string'"),
+    ("src/ComposableErrors.vue", 11, 7, 6133, 1, "'bad' is declared but its value is never read"),
     ("src/ComposableErrors.vue", 13, 1, 2322, 1, "'string' is not assignable to type 'number'"),
-    ("src/CrossComponentErrors.vue", 6, 1, 2322, 1, "'boolean' is not assignable to type 'number'"),
-    ("src/CrossComponentErrors.vue", 7, 1, 2322, 1, "'number' is not assignable to type 'string'"),
-    ("src/CrossComponentErrors.vue", 8, 1, 2322, 1, "'null' is not assignable to type 'string'"),
-    ("src/CrossComponentErrors.vue", 9, 1, 2322, 1, "'string' is not assignable to type 'number'"),
+    ("src/CrossComponentErrors.vue", 6, 3, 2322, 1, "'boolean' is not assignable to type 'number'"),
+    ("src/CrossComponentErrors.vue", 7, 3, 2322, 1, "'number' is not assignable to type 'string'"),
+    ("src/CrossComponentErrors.vue", 8, 3, 2322, 1, "'null' is not assignable to type 'string'"),
+    ("src/CrossComponentErrors.vue", 9, 3, 2322, 1, "'string' is not assignable to type 'number'"),
     ("src/CrossComponentErrors.vue", 13, 7, 2322, 1, "'\"unknown\"' is not assignable to type 'Status'"),
     ("src/CrossComponentErrors.vue", 16, 7, 2322, 1, "'number' is not assignable to type 'string'"),
     // CUSTOM-DIRECTIVE IDE PAYLOAD — these five tuples are the CARRIER-POSITION
@@ -115,67 +124,75 @@ const EXPECTED: &[(&str, u32, u32, u32, usize, &str)] = &[
     ("src/DirectiveErrors.vue", 18, 16, 2345, 1, "'\"badarg\"' is not assignable to parameter of type"),
     ("src/DirectiveErrors.vue", 19, 20, 2353, 1, "'badmod' does not exist in type"),
     ("src/DirectiveErrors.vue", 20, 19, 2353, 1, "does not exist in type"),
-    ("src/EmitErrors.vue", 8, 1, 2769, 1, "No overload matches this call"),
-    ("src/EmitErrors.vue", 10, 1, 2769, 1, "No overload matches this call"),
-    ("src/EmitErrors.vue", 12, 1, 2769, 1, "No overload matches this call"),
-    ("src/GenericErrors.vue", 6, 1, 2322, 1, "'string' is not assignable to type 'User[]'"),
-    ("src/GenericErrors.vue", 7, 1, 2322, 1, "'string' is not assignable to type 'number'"),
-    ("src/GenericErrors.vue", 8, 1, 2322, 1, "'boolean' is not assignable to type 'number'"),
-    ("src/GenericErrors.vue", 17, 7, 2353, 1, "and 'name' does not exist in type '{ id: number; }'"),
-    ("src/GenericInstanceErrors.vue", 5, 1, 2322, 1, "'string' is not assignable to type 'number'"),
-    ("src/GenericInstanceErrors.vue", 5, 1, 6133, 1, "'name' is declared but its value is never read"),
+    ("src/EmitErrors.vue", 8, 16, 2769, 1, "No overload matches this call"),
+    ("src/EmitErrors.vue", 10, 16, 2769, 1, "No overload matches this call"),
+    ("src/EmitErrors.vue", 12, 6, 2769, 1, "No overload matches this call"),
+    ("src/GenericErrors.vue", 6, 3, 2322, 1, "'string' is not assignable to type 'User[]'"),
+    ("src/GenericErrors.vue", 7, 3, 2322, 1, "'string' is not assignable to type 'number'"),
+    ("src/GenericErrors.vue", 8, 3, 2322, 1, "'boolean' is not assignable to type 'number'"),
+    ("src/GenericErrors.vue", 17, 27, 2353, 1, "and 'name' does not exist in type '{ id: number; }'"),
+    ("src/GenericInstanceErrors.vue", 5, 7, 2322, 1, "'string' is not assignable to type 'number'"),
+    ("src/GenericInstanceErrors.vue", 5, 7, 6133, 1, "'name' is declared but its value is never read"),
     ("src/ImportErrors.vue", 3, 1, 2305, 1, "has no exported member 'NonExistent'"),
     ("src/ImportErrors.vue", 3, 1, 6133, 1, "'NonExistent' is declared but its value is never read"),
-    ("src/ImportErrors.vue", 9, 1, 2322, 1, "'string' is not assignable to type 'number'"),
-    ("src/ImportErrors.vue", 10, 1, 2322, 1, "'number' is not assignable to type 'string'"),
-    ("src/ImportErrors.vue", 11, 1, 2322, 1, "'boolean' is not assignable to type 'string'"),
-    ("src/ImportErrors.vue", 12, 1, 2322, 1, "'string' is not assignable to type 'number'"),
+    ("src/ImportErrors.vue", 9, 3, 2322, 1, "'string' is not assignable to type 'number'"),
+    ("src/ImportErrors.vue", 10, 3, 2322, 1, "'number' is not assignable to type 'string'"),
+    ("src/ImportErrors.vue", 11, 3, 2322, 1, "'boolean' is not assignable to type 'string'"),
+    ("src/ImportErrors.vue", 12, 3, 2322, 1, "'string' is not assignable to type 'number'"),
     // Generated public-API stub diagnostics (hash + per-run temp dir stripped).
     // The line numbers include the attribute-fallthrough widening the
     // Options-API stub generator now emits (the three helper declarations plus
     // the widened `declare const` replacing the bare pass-through export), which
     // is why they sit five lines below the authored error.
     ("OptionsApiAdvanced.vue.ts", 30, 13, 2322, 1, "'number' is not assignable to type 'string'"),
-    ("src/OptionsApiAdvanced.vue", 26, 1, 2322, 1, "'number' is not assignable to type 'string'"),
+    ("src/OptionsApiAdvanced.vue", 26, 13, 2322, 1, "'number' is not assignable to type 'string'"),
     // The numeric prop on line 5 is valid. Vue slot-body isolation removes the
     // former foreign-React `children` diagnostic, leaving only the real bad value.
     ("src/OptionsApiConsumer.vue", 6, 24, 2322, 1, "'string' is not assignable to type 'number'"),
     ("OptionsApiErrors.vue.ts", 26, 13, 2322, 1, "'string' is not assignable to type 'number'"),
-    ("src/OptionsApiErrors.vue", 22, 1, 2322, 1, "'string' is not assignable to type 'number'"),
-    ("src/PropErrors.vue", 6, 1, 2322, 1, "'string' is not assignable to type 'number'"),
-    ("src/PropErrors.vue", 7, 1, 2322, 1, "'number' is not assignable to type 'string'"),
-    ("src/PropErrors.vue", 8, 1, 2322, 1, "'boolean' is not assignable to type 'string'"),
-    ("src/PropErrors.vue", 9, 1, 2322, 1, "'string' is not assignable to type 'number'"),
+    ("src/OptionsApiErrors.vue", 22, 13, 2322, 1, "'string' is not assignable to type 'number'"),
+    ("src/PropErrors.vue", 6, 3, 2322, 1, "'string' is not assignable to type 'number'"),
+    ("src/PropErrors.vue", 7, 3, 2322, 1, "'number' is not assignable to type 'string'"),
+    ("src/PropErrors.vue", 8, 3, 2322, 1, "'boolean' is not assignable to type 'string'"),
+    ("src/PropErrors.vue", 9, 3, 2322, 1, "'string' is not assignable to type 'number'"),
     ("src/PropErrors.vue", 13, 7, 2322, 1, "'string' is not assignable to type 'number'"),
     ("src/PropErrors.vue", 15, 7, 2322, 1, "'boolean' is not assignable to type 'string'"),
-    ("src/ReactivityErrors.vue", 6, 7, 2345, 1, "'number' is not assignable to parameter of type 'string[]'"),
-    ("src/ReactivityErrors.vue", 10, 1, 2322, 1, "'string' is not assignable to type 'number'"),
-    ("src/ReactivityErrors.vue", 11, 1, 2322, 1, "'number' is not assignable to type 'string'"),
-    ("src/ReactivityErrors.vue", 12, 1, 2322, 1, "'boolean' is not assignable to type 'string'"),
-    ("src/ReactivityErrors.vue", 13, 1, 2322, 1, "'string' is not assignable to type 'number'"),
-    ("src/ReactivityErrors.vue", 19, 1, 2322, 1, "'string[]' is not assignable to type 'number'"),
-    ("src/ReactivityErrors.vue", 19, 1, 6133, 1, "'bad' is declared but its value is never read"),
-    ("src/ScriptSetupErrors.vue", 6, 7, 2345, 1, "'string' is not assignable to parameter of type 'number'"),
-    ("src/ScriptSetupErrors.vue", 10, 1, 2322, 1, "'number' is not assignable to type 'string'"),
-    ("src/ScriptSetupErrors.vue", 14, 1, 6133, 1, "'unusedVar' is declared but its value is never read"),
-    ("src/ScriptSetupErrors.vue", 17, 1, 6133, 1, "'user' is declared but its value is never read"),
-    ("src/ScriptSetupErrors.vue", 18, 1, 2322, 1, "'string' is not assignable to type 'number'"),
-    ("src/ScriptSetupErrors.vue", 19, 1, 2322, 1, "'number' is not assignable to type 'string'"),
-    ("src/ScriptSetupErrors.vue", 20, 1, 2322, 1, "'boolean' is not assignable to type 'string'"),
-    ("src/ScriptSetupErrors.vue", 21, 1, 2322, 1, "'string' is not assignable to type 'number'"),
-    ("src/SlotErrors.vue", 10, 1, 2339, 1, "Property 'toFixed' does not exist on type 'boolean'"),
-    ("src/SlotErrors.vue", 11, 1, 2339, 1, "Property 'toLowerCase' does not exist on type 'number'"),
+    ("src/ReactivityErrors.vue", 6, 28, 2345, 1, "'number' is not assignable to parameter of type 'string[]'"),
+    ("src/ReactivityErrors.vue", 10, 3, 2322, 1, "'string' is not assignable to type 'number'"),
+    ("src/ReactivityErrors.vue", 11, 3, 2322, 1, "'number' is not assignable to type 'string'"),
+    ("src/ReactivityErrors.vue", 12, 3, 2322, 1, "'boolean' is not assignable to type 'string'"),
+    ("src/ReactivityErrors.vue", 13, 3, 2322, 1, "'string' is not assignable to type 'number'"),
+    ("src/ReactivityErrors.vue", 19, 9, 2322, 1, "'string[]' is not assignable to type 'number'"),
+    ("src/ReactivityErrors.vue", 19, 9, 6133, 1, "'bad' is declared but its value is never read"),
+    ("src/ScriptSetupErrors.vue", 6, 27, 2345, 1, "'string' is not assignable to parameter of type 'number'"),
+    ("src/ScriptSetupErrors.vue", 10, 3, 2322, 1, "'number' is not assignable to type 'string'"),
+    ("src/ScriptSetupErrors.vue", 14, 7, 6133, 1, "'unusedVar' is declared but its value is never read"),
+    ("src/ScriptSetupErrors.vue", 17, 7, 6133, 1, "'user' is declared but its value is never read"),
+    ("src/ScriptSetupErrors.vue", 18, 3, 2322, 1, "'string' is not assignable to type 'number'"),
+    ("src/ScriptSetupErrors.vue", 19, 3, 2322, 1, "'number' is not assignable to type 'string'"),
+    ("src/ScriptSetupErrors.vue", 20, 3, 2322, 1, "'boolean' is not assignable to type 'string'"),
+    ("src/ScriptSetupErrors.vue", 21, 3, 2322, 1, "'string' is not assignable to type 'number'"),
+    ("src/SlotErrors.vue", 10, 26, 2339, 1, "Property 'toFixed' does not exist on type 'boolean'"),
+    ("src/SlotErrors.vue", 11, 25, 2339, 1, "Property 'toLowerCase' does not exist on type 'number'"),
     ("src/TemplateExprErrors.vue", 7, 11, 2339, 1, "Property 'undefinedVar' does not exist"),
     ("src/TemplateExprErrors.vue", 9, 10, 2339, 1, "Property 'length' does not exist on type '42'"),
     ("src/TemplateExprErrors.vue", 11, 10, 2345, 1, "'string' is not assignable to parameter of type 'number'"),
     ("src/TemplateExprErrors.vue", 13, 10, 2362, 1, "left-hand side of an arithmetic operation must be of type"),
-    ("src/VModelErrors.vue", 5, 7, 2345, 1, "'number' is not assignable to parameter of type 'string'"),
-    ("src/VModelErrors.vue", 8, 7, 2345, 1, "'boolean' is not assignable to parameter of type 'number'"),
-    ("src/VModelErrors.vue", 11, 7, 2345, 1, "'string' is not assignable to parameter of type 'string[]'"),
+    ("src/VModelErrors.vue", 5, 28, 2345, 1, "'number' is not assignable to parameter of type 'string'"),
+    ("src/VModelErrors.vue", 8, 28, 2345, 1, "'boolean' is not assignable to parameter of type 'number'"),
+    ("src/VModelErrors.vue", 11, 27, 2345, 1, "'string' is not assignable to parameter of type 'string[]'"),
     // WithDefaults: the assignable-TO type is `InferDefault<LooseRequired<Props>, …>`
     // (vue-version-volatile), so pin only the fixture-stable assignable-FROM type.
-    ("src/WithDefaultsErrors.vue", 11, 1, 2322, 1, "'string' is not assignable to type"),
-    ("src/WithDefaultsErrors.vue", 12, 1, 2322, 1, "'number' is not assignable to type"),
+    ("src/WithDefaultsErrors.vue", 11, 3, 2322, 1, "'string' is not assignable to type"),
+    ("src/WithDefaultsErrors.vue", 12, 3, 2322, 1, "'number' is not assignable to type"),
+    // Position controls (see the fixture's header comment): the script
+    // follows the template (block offset) and each anchor line declares
+    // U+1D11E before the anchor, so these columns are only reachable through
+    // UTF-16 columns on full-SFC coordinates. The TS2345 argument anchor has
+    // no projection-map token of its own — without verbatim-line column
+    // recovery it degrades to the covering declarator anchor's column 19.
+    ("src/PositionControls.vue", 20, 17, 2322, 1, "Type 'number' is not assignable to type 'string'"),
+    ("src/PositionControls.vue", 21, 40, 2345, 1, "Argument of type 'number' is not assignable to parameter of type 'string'"),
     // WHOLE-PROGRAM (non-root) diagnostic: `NonRootImport.vue` imports a clean
     // symbol from `src/nonRootBad.ts`, which ALSO carries a real TS2322. This file
     // is NOT a synthetic-tsconfig root (it enters the program only transitively),
@@ -500,7 +517,7 @@ fn verter_tsc_diagnostic_set_parity() {
         .collect();
 
     // MULTISET equality over `(file, line, col, ts_code)` WITH per-key count. A
-    // A `BTreeSet` would dedup multiplicity; the count map pins the exact 67 raw
+    // A `BTreeSet` would dedup multiplicity; the count map pins the exact 69 raw
     // diagnostics and remains sensitive to any future same-key duplicates.
     type Key = (String, u32, u32, u32);
     let mut actual_counts: BTreeMap<Key, usize> = BTreeMap::new();
