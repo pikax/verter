@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::authority::Authority;
 use crate::disk;
 use crate::manifest::{Comparison, Framework, ProbeStateManifest};
-use crate::outcome::{Dimension, ProbeOutcomeClass, Terminal};
+use crate::outcome::{CaseObservation, Dimension, ProbeOutcomeClass, Terminal};
 use crate::request;
 use crate::runner::{self, MemoryBytes};
 #[cfg(feature = "external-corpus")]
@@ -520,18 +520,10 @@ impl ObservationArtifact {
                 "artifact_id does not match verter_commit/corpus_digest/workflow_run_id/run_attempt",
             ));
         }
-        if self.request_vue != request::REQUEST_VUE {
-            return Err(invalid("request_vue is not the canonical Vue template"));
-        }
-        if self.request_svelte != request::REQUEST_SVELTE {
-            return Err(invalid(
-                "request_svelte is not the canonical Svelte template",
-            ));
-        }
-        if self.template_digests.vue != request::template_digest(Framework::Vue) {
+        if request::template_digest_of(&self.request_vue) != self.template_digests.vue {
             return Err(invalid("template_digests.vue does not match request_vue"));
         }
-        if self.template_digests.svelte != request::template_digest(Framework::Svelte) {
+        if request::template_digest_of(&self.request_svelte) != self.template_digests.svelte {
             return Err(invalid(
                 "template_digests.svelte does not match request_svelte",
             ));
@@ -697,7 +689,11 @@ fn validate_row(
                 row.row_id
             ))
         })?;
-    let digest = request::request_digest(framework, relative);
+    let template = match framework {
+        Framework::Vue => artifact.request_vue.as_str(),
+        Framework::Svelte => artifact.request_svelte.as_str(),
+    };
+    let digest = request::request_digest_in(template, relative);
     if row.request_digest != digest {
         return Err(invalid(format!(
             "{}: request_digest does not match the substituted template",
@@ -716,7 +712,7 @@ fn validate_row(
     }
     let mut memory_presence: Option<bool> = None;
     for (index, sample) in row.samples.iter().enumerate() {
-        validate_sample(row, index, sample)?;
+        validate_sample(manifest, row, index, sample)?;
         if let Some(measurement) = &sample.measurement {
             let present = measurement.memory.is_some();
             match memory_presence {
@@ -743,6 +739,7 @@ fn validate_row(
 }
 
 fn validate_sample(
+    manifest: &ProbeStateManifest,
     row: &ObservationRow,
     index: usize,
     sample: &Sample,
@@ -809,24 +806,100 @@ fn validate_sample(
         }
     }
     if let Some(AbsenceReason::WorkerUnavailableAfterSample { failed_sample }) = sample.absence {
-        if usize::from(failed_sample) >= index {
+        validate_unrun_slot(row, index, sample, failed_sample, &at)?;
+        return Ok(());
+    }
+    let observation = CaseObservation::new(row.case_id.clone(), sample.terminals.clone())
+        .map_err(|error| invalid(format!("{at}: {error}")))?;
+    manifest
+        .check_applicability(&observation)
+        .map_err(|error| invalid(format!("{at}: {error}")))?;
+    validate_absence_phase(&at, sample)?;
+    Ok(())
+}
+
+fn validate_unrun_slot(
+    row: &ObservationRow,
+    index: usize,
+    sample: &Sample,
+    failed_sample: u8,
+    at: &str,
+) -> Result<(), ObserveError> {
+    let warmup_death = row.samples.iter().all(|candidate| {
+        matches!(
+            candidate.absence,
+            Some(AbsenceReason::WorkerUnavailableAfterSample { .. })
+        )
+    });
+    if warmup_death {
+        if failed_sample != 0 {
             return Err(invalid(format!(
-                "{at}: worker_unavailable_after_sample.failed_sample must name an earlier sample"
+                "{at}: warmup-death unrun slots record failed_sample 0"
             )));
         }
-        for dimension in Dimension::ALL {
-            match sample.terminals.get(&dimension) {
-                Some(Terminal::NotRun { blocked_by }) if *blocked_by != ProbeOutcomeClass::Pass => {
-                }
-                _ => {
-                    return Err(invalid(format!(
-                        "{at}: an unrun slot records NotRun on every dimension"
-                    )));
-                }
+    } else if usize::from(failed_sample) >= index {
+        return Err(invalid(format!(
+            "{at}: worker_unavailable_after_sample.failed_sample must name an earlier sample"
+        )));
+    }
+    for dimension in Dimension::ALL {
+        match sample.terminals.get(&dimension) {
+            Some(Terminal::NotRun { blocked_by }) if *blocked_by != ProbeOutcomeClass::Pass => {}
+            _ => {
+                return Err(invalid(format!(
+                    "{at}: an unrun slot records NotRun on every dimension"
+                )));
             }
         }
     }
     Ok(())
+}
+
+fn validate_absence_phase(at: &str, sample: &Sample) -> Result<(), ObserveError> {
+    match sample.absence {
+        None | Some(AbsenceReason::WorkerUnavailableAfterSample { .. }) => Ok(()),
+        Some(AbsenceReason::LoadFailed) => match sample.terminals.get(&Dimension::Route) {
+            Some(Terminal::Class { class, .. }) if class.is_failure() => Ok(()),
+            _ => Err(invalid(format!(
+                "{at}: load_failed requires a Route failure"
+            ))),
+        },
+        Some(AbsenceReason::CompileTerminated) => match sample.terminals.get(&Dimension::Compile) {
+            Some(Terminal::Class { class, .. }) if class.is_failure() => Ok(()),
+            _ => Err(invalid(format!(
+                "{at}: compile_terminated requires a Compile failure"
+            ))),
+        },
+        Some(AbsenceReason::ReferenceTerminated) => {
+            let has_reference = [Dimension::Structural, Dimension::Runtime, Dimension::Map]
+                .into_iter()
+                .any(|dimension| {
+                    matches!(
+                        sample.terminals.get(&dimension),
+                        Some(Terminal::Class {
+                            class: ProbeOutcomeClass::ReferenceFailure,
+                            ..
+                        })
+                    )
+                });
+            if has_reference {
+                Ok(())
+            } else {
+                Err(invalid(format!(
+                    "{at}: reference_terminated requires a reference_failure class"
+                )))
+            }
+        }
+        Some(AbsenceReason::DriverError) => match sample.terminals.get(&Dimension::Route) {
+            Some(Terminal::Class {
+                class: ProbeOutcomeClass::HarnessFailure,
+                ..
+            }) => Ok(()),
+            _ => Err(invalid(format!(
+                "{at}: driver_error requires Route harness_failure"
+            ))),
+        },
+    }
 }
 
 fn validate_eligibility(
@@ -1143,9 +1216,27 @@ fn gh_json(path: &str) -> Result<serde_json::Value, FetchError> {
 }
 
 fn gh_bytes(path: &str) -> Result<Vec<u8>, FetchError> {
-    let output = Command::new("gh")
+    let mut child = Command::new("gh")
         .args(["api", path])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| FetchError::transient(error.to_string()))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| FetchError::Aborted("gh api stdout missing".into()))?;
+    let bytes = match read_bounded(&mut stdout, MAX_COMPRESSED_BYTES) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    drop(stdout);
+    let output = child
+        .wait_with_output()
         .map_err(|error| FetchError::transient(error.to_string()))?;
     if !output.status.success() {
         return Err(FetchError::transient(format!(
@@ -1153,7 +1244,21 @@ fn gh_bytes(path: &str) -> Result<Vec<u8>, FetchError> {
             String::from_utf8_lossy(&output.stderr)
         )));
     }
-    Ok(output.stdout)
+    Ok(bytes)
+}
+
+fn read_bounded(reader: &mut impl Read, limit: u64) -> Result<Vec<u8>, FetchError> {
+    let mut limited = reader.take(limit.saturating_add(1));
+    let mut buf = Vec::new();
+    limited
+        .read_to_end(&mut buf)
+        .map_err(|error| FetchError::Aborted(error.to_string()))?;
+    if buf.len() as u64 > limit {
+        return Err(FetchError::Aborted(format!(
+            "read exceeds the {limit} byte ceiling"
+        )));
+    }
+    Ok(buf)
 }
 
 fn parse_list_page(value: &serde_json::Value) -> Result<ArtifactListPage, FetchError> {
@@ -1339,10 +1444,45 @@ pub fn extract_observations_json(bytes: &[u8]) -> Result<String, FetchError> {
             "archive exceeds the 256 MiB uncompressed ceiling".into(),
         ));
     }
-    let mut text = String::new();
-    file.read_to_string(&mut text)
+    extract_member_json(&mut file, MAX_UNCOMPRESSED_BYTES).map_err(|error| {
+        if error.to_string().contains("byte ceiling") {
+            FetchError::Aborted("archive exceeds the 256 MiB uncompressed ceiling".into())
+        } else {
+            error
+        }
+    })
+}
+
+#[cfg(test)]
+fn extract_observations_json_capped(
+    bytes: &[u8],
+    uncompressed_limit: u64,
+) -> Result<String, FetchError> {
+    if bytes.len() as u64 > MAX_COMPRESSED_BYTES {
+        return Err(FetchError::Aborted(
+            "archive exceeds the 64 MiB compressed ceiling".into(),
+        ));
+    }
+    let cursor = Cursor::new(bytes);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|error| FetchError::Aborted(error.to_string()))?;
+    if archive.len() != 1 {
+        return Err(FetchError::Aborted(
+            "archive must contain exactly one member named observations.json".into(),
+        ));
+    }
+    let mut file = archive
+        .by_index(0)
         .map_err(|error| FetchError::Aborted(error.to_string()))?;
-    Ok(text)
+    extract_member_json(&mut file, uncompressed_limit)
+}
+
+fn extract_member_json(
+    file: &mut impl Read,
+    uncompressed_limit: u64,
+) -> Result<String, FetchError> {
+    let bytes = read_bounded(file, uncompressed_limit)?;
+    String::from_utf8(bytes).map_err(|error| FetchError::Aborted(error.to_string()))
 }
 
 impl ObservationInventory {
@@ -1705,7 +1845,7 @@ fn observe_warm(
 ) -> Result<Vec<Sample>, ObserveError> {
     let (warmup, warmup_stop) = observe_one(child, lines, manifest, case, deadlines)?;
     if worker_dead(warmup_stop) {
-        return fill_remaining(Vec::new(), warmup, 0, WARM_SAMPLES as usize);
+        return Ok(unrun_slots(&warmup, 0, WARM_SAMPLES as usize));
     }
     let mut samples = Vec::with_capacity(WARM_SAMPLES as usize);
     for index in 0..WARM_SAMPLES {
@@ -1722,6 +1862,32 @@ fn observe_warm(
 #[cfg(feature = "external-corpus")]
 fn worker_dead(stop: Option<LaneStop>) -> bool {
     matches!(stop, Some(LaneStop::Process(_) | LaneStop::Harness))
+}
+
+#[cfg(any(test, feature = "external-corpus"))]
+fn unrun_slots(terminating: &Sample, failed_sample: u8, total: usize) -> Vec<Sample> {
+    let blocked_by = blocked_by_of(terminating);
+    (0..total)
+        .map(|_| Sample {
+            terminals: Dimension::ALL
+                .into_iter()
+                .map(|dimension| (dimension, Terminal::NotRun { blocked_by }))
+                .collect(),
+            measurement: None,
+            absence: Some(AbsenceReason::WorkerUnavailableAfterSample { failed_sample }),
+        })
+        .collect()
+}
+
+#[cfg(any(test, feature = "external-corpus"))]
+fn blocked_by_of(sample: &Sample) -> ProbeOutcomeClass {
+    match sample.absence {
+        Some(AbsenceReason::ReferenceTerminated) => ProbeOutcomeClass::ReferenceFailure,
+        _ => match sample.terminals.get(&Dimension::Route) {
+            Some(Terminal::Class { class, .. }) if *class != ProbeOutcomeClass::Pass => *class,
+            _ => ProbeOutcomeClass::HarnessFailure,
+        },
+    }
 }
 
 #[cfg(feature = "external-corpus")]
@@ -1744,17 +1910,6 @@ fn fill_remaining(
         });
     }
     Ok(samples)
-}
-
-#[cfg(feature = "external-corpus")]
-fn blocked_by_of(sample: &Sample) -> ProbeOutcomeClass {
-    match sample.absence {
-        Some(AbsenceReason::ReferenceTerminated) => ProbeOutcomeClass::ReferenceFailure,
-        _ => match sample.terminals.get(&Dimension::Route) {
-            Some(Terminal::Class { class, .. }) if *class != ProbeOutcomeClass::Pass => *class,
-            _ => ProbeOutcomeClass::HarnessFailure,
-        },
-    }
 }
 
 #[cfg(feature = "external-corpus")]
@@ -1837,5 +1992,76 @@ fn absence_of(
 impl From<RunError> for ObserveError {
     fn from(error: RunError) -> Self {
         invalid(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+
+    fn terminating_load_failure() -> Sample {
+        let mut terminals = BTreeMap::new();
+        terminals.insert(
+            Dimension::Route,
+            Terminal::Class {
+                class: ProbeOutcomeClass::HarnessFailure,
+                secondary: Vec::new(),
+                evidence: Vec::new(),
+            },
+        );
+        Sample {
+            terminals,
+            measurement: None,
+            absence: Some(AbsenceReason::LoadFailed),
+        }
+    }
+
+    #[test]
+    fn discarded_warmup_death_does_not_promote_the_warmup_sample() {
+        let warmup = terminating_load_failure();
+        let samples = unrun_slots(&warmup, 0, WARM_SAMPLES as usize);
+        assert_eq!(samples.len(), WARM_SAMPLES as usize);
+        assert!(samples.iter().all(|sample| {
+            matches!(
+                sample.absence,
+                Some(AbsenceReason::WorkerUnavailableAfterSample { failed_sample: 0 })
+            ) && sample.measurement.is_none()
+                && !matches!(sample.absence, Some(AbsenceReason::LoadFailed))
+        }));
+        assert!(samples
+            .iter()
+            .all(|sample| sample.absence != warmup.absence));
+    }
+
+    #[test]
+    fn read_bounded_stops_before_buffering_past_the_ceiling() {
+        let mut cursor = Cursor::new(vec![0u8; 64]);
+        let error = read_bounded(&mut cursor, 16).expect_err("oversize");
+        assert!(error.to_string().contains("byte ceiling"), "{error}");
+    }
+
+    #[test]
+    fn an_underreported_deflate_member_is_rejected_while_streaming() {
+        let payload = vec![b'a'; 4096];
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        writer
+            .start_file("observations.json", options)
+            .expect("start");
+        writer.write_all(&payload).expect("write");
+        let mut bytes = writer.finish().expect("finish").into_inner();
+        let ten = 10u32.to_le_bytes();
+        bytes[22..26].copy_from_slice(&ten);
+        if let Some(at) = bytes.windows(4).position(|window| window == b"PK\x01\x02") {
+            bytes[at + 24..at + 28].copy_from_slice(&ten);
+        }
+        let error = extract_observations_json_capped(&bytes, 64).expect_err("underreported");
+        assert!(
+            error.to_string().contains("byte ceiling") || error.to_string().contains("256 MiB"),
+            "{error}"
+        );
     }
 }

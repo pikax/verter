@@ -528,30 +528,40 @@ fn unavailable_after(failed_sample: u8, blocked_by: ProbeOutcomeClass) -> Sample
     }
 }
 
-/// Load failure on the first warm sample: typed absence, no measurement,
-/// remaining slots worker_unavailable.
-#[test]
-fn a_load_failure_mid_warm_validates_as_a_total_row() {
-    let mut artifact = valid_artifact();
-    let mut failed = crash_terminals();
-    failed.insert(
+fn load_failed_terminals() -> BTreeMap<Dimension, Terminal> {
+    let mut terminals = BTreeMap::new();
+    terminals.insert(
         Dimension::Route,
         class_term(ProbeOutcomeClass::HarnessFailure),
     );
-    failed.insert(
+    terminals.insert(
         Dimension::Compile,
-        not_run(ProbeOutcomeClass::HarnessFailure),
+        class_term(ProbeOutcomeClass::HarnessFailure),
     );
-    failed.insert(
+    terminals.insert(
         Dimension::Structural,
-        not_run(ProbeOutcomeClass::HarnessFailure),
+        class_term(ProbeOutcomeClass::HarnessFailure),
     );
-    failed.insert(
+    terminals.insert(
+        Dimension::Runtime,
+        na(NotApplicableReason::RuntimeExecutorAbsent),
+    );
+    terminals.insert(Dimension::Map, na(NotApplicableReason::MapValidatorAbsent));
+    terminals.insert(
         Dimension::Performance,
         class_term(ProbeOutcomeClass::HarnessFailure),
     );
+    terminals
+}
+
+/// Load failure on the first warm sample: typed absence, no measurement,
+/// remaining slots worker_unavailable. Route/Compile/Structural carry the
+/// CVO0-propagated harness_failure class, not NotRun (Compile admits it).
+#[test]
+fn a_load_failure_mid_warm_validates_as_a_total_row() {
+    let mut artifact = valid_artifact();
     let mut samples = vec![Sample {
-        terminals: failed,
+        terminals: load_failed_terminals(),
         measurement: None,
         absence: Some(AbsenceReason::LoadFailed),
     }];
@@ -658,6 +668,75 @@ fn a_reference_death_keeps_its_compile_measurement() {
         not_run(ProbeOutcomeClass::ReferenceFailure)
     );
     assert!(rest.measurement.is_none());
+}
+
+/// Discarded warmup death: every measured slot is unrun. The discarded
+/// invocation is not sample 0.
+#[test]
+fn a_discarded_warmup_death_validates_as_five_unrun_slots() {
+    let mut artifact = valid_artifact();
+    let samples = (0..WARM_SAMPLES)
+        .map(|_| unavailable_after(0, ProbeOutcomeClass::HarnessFailure))
+        .collect();
+    let row = artifact
+        .rows
+        .iter_mut()
+        .find(|row| row.row_id == format!("{VUE_CASE}@warm"))
+        .expect("warm");
+    row.samples = samples;
+    row.sample_count = WARM_SAMPLES as usize;
+    row.observed_outcome = observe::project_observed_outcome(&row.samples).expect("projectable");
+    artifact
+        .validate(&manifests())
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(artifact
+        .rows
+        .iter()
+        .find(|row| row.row_id == format!("{VUE_CASE}@warm"))
+        .unwrap()
+        .samples
+        .iter()
+        .all(|sample| {
+            matches!(
+                sample.absence,
+                Some(AbsenceReason::WorkerUnavailableAfterSample { failed_sample: 0 })
+            ) && sample.measurement.is_none()
+        }));
+}
+
+#[test]
+fn a_route_semantic_mismatch_is_rejected() {
+    let mut artifact = valid_artifact();
+    artifact.rows[0].samples[0].terminals.insert(
+        Dimension::Route,
+        class_term(ProbeOutcomeClass::SemanticMismatch),
+    );
+    artifact.rows[0].observed_outcome =
+        observe::project_observed_outcome(&artifact.rows[0].samples).expect("projectable");
+    reject(&artifact, "not admissible");
+}
+
+#[test]
+fn a_pass_under_a_failed_feeding_dimension_is_rejected() {
+    let mut artifact = valid_artifact();
+    artifact.rows[0].samples[0].terminals.insert(
+        Dimension::Compile,
+        class_term(ProbeOutcomeClass::ProductNotProduced),
+    );
+    artifact.rows[0].observed_outcome =
+        observe::project_observed_outcome(&artifact.rows[0].samples).expect("projectable");
+    reject(&artifact, "passes although its feeding dimension failed");
+}
+
+#[test]
+fn a_sample_that_ignores_manifest_inapplicability_is_rejected() {
+    let mut artifact = valid_artifact();
+    artifact.rows[0].samples[0]
+        .terminals
+        .insert(Dimension::Runtime, pass());
+    artifact.rows[0].observed_outcome =
+        observe::project_observed_outcome(&artifact.rows[0].samples).expect("projectable");
+    reject(&artifact, "not-applicable");
 }
 
 #[test]
@@ -1281,6 +1360,33 @@ fn a_post_cutoff_insert_that_shifts_a_page_does_not_change_membership() {
     assert!(source.scans.get() >= 2);
 }
 
+/// LISTING_RETRIES is three total attempts. One transient page failure is
+/// retried and the fetch still returns the full inventory.
+#[test]
+fn a_transient_listing_page_failure_retries_and_returns_the_full_inventory() {
+    let source = base_mock();
+    source.page_failures.set(1);
+    let dir = fetch_dir();
+    let inventory =
+        ObservationInventory::fetch_with(&source, dir.path()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(inventory.artifacts.len(), 1);
+    assert_eq!(inventory.retrieval_window.artifact_count, 1);
+}
+
+/// Three consecutive page failures exhaust the three-attempt budget and abort
+/// the whole fetch; a partial inventory is never returned.
+#[test]
+fn listing_page_failures_beyond_three_attempts_abort_the_fetch() {
+    let source = base_mock();
+    source.page_failures.set(3);
+    let dir = fetch_dir();
+    let error = ObservationInventory::fetch_with(&source, dir.path()).expect_err("exhausted");
+    assert!(
+        error.to_string().contains("transient page failure"),
+        "{error}"
+    );
+}
+
 /// Historical grid, digest, and pin stay valid after a re-pin of the live manifests.
 #[test]
 fn a_historical_artifact_validates_against_its_snapshots_and_fails_the_current_grid() {
@@ -1311,6 +1417,60 @@ fn a_historical_artifact_validates_against_its_snapshots_and_fails_the_current_g
             .contains("neither the smoke slice nor the inventory")
             || error.to_string().contains("corpus_revisions"),
         "{error}"
+    );
+}
+
+/// Embedded templates are checked against their own digests, not against
+/// today's compiled-in constants. A retired template still validates.
+#[test]
+fn a_historical_artifact_with_a_retired_template_still_validates() {
+    let mut artifact = valid_artifact();
+    let historical_vue =
+        request::REQUEST_VUE.replace("\"isProduction\":false", "\"isProduction\":true");
+    assert_ne!(historical_vue, request::REQUEST_VUE);
+    artifact.request_vue = historical_vue.clone();
+    artifact.template_digests.vue = request::template_digest_of(&historical_vue);
+    for row in &mut artifact.rows {
+        if let Some(relative) = row.case_id.strip_prefix("vue/") {
+            row.request_digest = request::request_digest_in(&historical_vue, relative);
+        }
+    }
+    artifact
+        .validate(&manifests())
+        .unwrap_or_else(|error| panic!("retired template must validate: {error}"));
+}
+
+#[test]
+fn an_embedded_template_digest_mismatch_is_still_rejected() {
+    let mut artifact = valid_artifact();
+    artifact.request_vue =
+        request::REQUEST_VUE.replace("\"isProduction\":false", "\"isProduction\":true");
+    reject(&artifact, "template_digests.vue does not match request_vue");
+}
+
+#[test]
+fn fetch_accepts_an_artifact_whose_embedded_template_differs_from_live_constants() {
+    let mut artifact = valid_artifact();
+    let historical_vue =
+        request::REQUEST_VUE.replace("\"isProduction\":false", "\"isProduction\":true");
+    artifact.request_vue = historical_vue.clone();
+    artifact.template_digests.vue = request::template_digest_of(&historical_vue);
+    for row in &mut artifact.rows {
+        if let Some(relative) = row.case_id.strip_prefix("vue/") {
+            row.request_digest = request::request_digest_in(&historical_vue, relative);
+        }
+    }
+    let mut source = base_mock();
+    source
+        .zips
+        .insert(10, zip_observations(&artifact.to_json()));
+    let dir = fetch_dir();
+    let inventory =
+        ObservationInventory::fetch_with(&source, dir.path()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(inventory.artifacts.len(), 1);
+    assert_ne!(
+        inventory.artifacts[0].artifact.request_vue,
+        request::REQUEST_VUE
     );
 }
 
@@ -1359,6 +1519,36 @@ fn the_driver_arms_memory_audit_in_enable_reset_call_snapshot_order_and_never_sa
         !text.contains("memoryAuditSites"),
         "the observation command must not call memoryAuditSites"
     );
+    assert!(
+        text.contains("host = new (loadNative().VerterHost)();"),
+        "VerterHost is a class; `new` must bind its constructor"
+    );
+    assert!(
+        !text.contains("host = new loadNative().VerterHost();"),
+        "unparenthesized `new loadNative().VerterHost()` calls the class without `new`"
+    );
+}
+
+#[test]
+fn new_binds_verter_host_only_when_parenthesized() {
+    let status = std::process::Command::new("node")
+        .arg("-e")
+        .arg(
+            r#"
+class VerterHost {}
+function loadNative() { return { VerterHost }; }
+let threw = false;
+try { new loadNative().VerterHost(); } catch (error) {
+  if (error instanceof TypeError) threw = true; else throw error;
+}
+if (!threw) throw new Error("unparenthesized new must not construct VerterHost");
+const host = new (loadNative().VerterHost)();
+if (!(host instanceof VerterHost)) throw new Error("parenthesized new must construct");
+"#,
+        )
+        .status()
+        .expect("node");
+    assert!(status.success(), "node constructor precedence check failed");
 }
 
 #[test]
@@ -1418,6 +1608,13 @@ fn observation_lane_emits_one_artifact() {
     assert!(path.is_file(), "{}", path.display());
     assert!(!artifact.artifact_id.is_empty());
     assert!(!artifact.rows.is_empty());
+    assert!(
+        artifact.rows.iter().any(|row| row
+            .samples
+            .iter()
+            .any(|sample| sample.measurement.is_some())),
+        "a live observation must record at least one compile measurement"
+    );
     for row in &artifact.rows {
         assert!(
             !row.comparison_eligible,

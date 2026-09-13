@@ -92,7 +92,7 @@ function loadNative() {
 /** Load the addon and construct one host for the whole process. */
 function ensureHost() {
   if (host) return host;
-  host = new loadNative().VerterHost();
+  host = new (loadNative().VerterHost)();
   return host;
 }
 
