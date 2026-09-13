@@ -89,6 +89,11 @@ jobs:
               - 'scripts/gen-svelte-goldens.mjs'
               - 'scripts/sccache-env.mjs'
               - 'scripts/sccache-env.test.mjs'
+              # Same-file pairing as sccache-env: the layout test guards its
+              # implementation and allowlist, so checker- or allowlist-only
+              # edits must still run test:scripts.
+              - 'scripts/check-integration-test-layout.mjs'
+              - 'scripts/integration-test-layout-allowlist.json'
               - 'scripts/check-integration-test-layout.test.mjs'
               - 'scripts/compiler-ci-lane-selftest.mjs'
               - 'scripts/provider-ci*.mjs'
