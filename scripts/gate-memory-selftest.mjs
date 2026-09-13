@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -309,6 +309,29 @@ if (IS_WINDOWS) {
   const killed = await runPowerShellSnapshot("Start-Sleep -Seconds 30", 1_500);
   assert.equal(killed.ok, false);
   assert.match(killed.detail, /1500ms/);
+} else {
+  // Exercise the raw-byte cap on POSIX with a test-owned executable standing in for PowerShell. The
+  // payload is ~66 MiB of two-byte UTF-8 characters but only ~33 million JavaScript characters, so a
+  // post-append string-length check would incorrectly accept it.
+  const fakePowerShellDir = mkdtempSync(join(tmpdir(), "verter-gate-fake-powershell-"));
+  const fakePowerShell = join(fakePowerShellDir, "powershell.exe");
+  const previousPath = process.env.PATH;
+  try {
+    writeFileSync(
+      fakePowerShell,
+      '#!/usr/bin/env node\nconst chunk = Buffer.from("é".repeat(1024 * 1024));\n' +
+        "for (let index = 0; index < 33; index += 1) process.stdout.write(chunk);\n",
+    );
+    chmodSync(fakePowerShell, 0o755);
+    process.env.PATH = `${fakePowerShellDir}:${previousPath || ""}`;
+    const oversized = await runPowerShellSnapshot("ignored by the test executable", 10_000);
+    assert.equal(oversized.ok, false);
+    assert.match(oversized.detail, /stdout exceeded 67108864 bytes/);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    rmSync(fakePowerShellDir, { recursive: true, force: true });
+  }
 }
 
 // The production Windows sampler resolves a PROMISE (a slow snapshot must slow sampling, not block the
@@ -338,6 +361,42 @@ try {
   assert.equal(asyncSampler.peakRssBytes, 16 * MiB);
 } finally {
   rmSync(asyncSamplerTargetDir, { recursive: true, force: true });
+}
+
+// Deadline and stall enforcement must keep running while an asynchronous native memory snapshot is in
+// flight. A load-bloated Windows CIM query can legitimately consume most of its 20s snapshot budget; it
+// must not extend either supervisor limit by serializing those checks behind the awaited sample.
+for (const [expectedReason, limits] of [
+  ["TIMEOUT", { deadlineMs: Date.now() + 200, stallMs: 30_000 }],
+  ["STALL", { deadlineMs: Date.now() + 30_000, stallMs: 200 }],
+]) {
+  const targetDir = mkdtempSync(join(tmpdir(), `verter-gate-memory-selftest-${expectedReason}-`));
+  try {
+    const startedAt = Date.now();
+    const result = await runContainedStep({
+      cmd: process.execPath,
+      args: ["-e", "setInterval(() => {}, 1000)"],
+      cwd: process.cwd(),
+      env: process.env,
+      phase: "test",
+      targetDir,
+      memoryLimitBytes: 1 * GiB,
+      memoryPollMs: 50,
+      memorySampler: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+        return { ok: true, rssBytes: 16 * MiB, processCount: 1 };
+      },
+      ...limits,
+    });
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(result.reason, expectedReason);
+    assert.ok(
+      elapsedMs < 1_200,
+      `${expectedReason} enforcement waited ${elapsedMs}ms for an asynchronous memory snapshot`,
+    );
+  } finally {
+    rmSync(targetDir, { recursive: true, force: true });
+  }
 }
 
 // MEMORY_KILL_GRACE_MS is the constant runContainedStep's reapNow uses for a MEMORY / MEMORY_MONITOR reap

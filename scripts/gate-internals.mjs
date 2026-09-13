@@ -3062,6 +3062,7 @@ export async function runPowerShellSnapshot(command, budgetMs) {
     let stdout = "";
     let stderr = "";
     let stdoutOversized = false;
+    let stdoutBytes = 0;
     // Mirrors the old spawnSync maxBuffer guard: refuse to buffer an unbounded snapshot stream.
     const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024;
     let budgetTimer;
@@ -3103,15 +3104,20 @@ export async function runPowerShellSnapshot(command, budgetMs) {
       Math.max(1, budgetMs),
     );
     child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-      if (stdout.length > MAX_SNAPSHOT_BYTES) {
+      if (stdoutOversized) return;
+      const chunkBytes = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk);
+      if (stdoutBytes + chunkBytes > MAX_SNAPSHOT_BYTES) {
         stdoutOversized = true;
+        child.stdout.destroy();
         try {
           child.kill();
         } catch {
           /* already exiting */
         }
+        return;
       }
+      stdoutBytes += chunkBytes;
+      stdout += chunk;
     });
     child.stderr.on("data", (chunk) => {
       stderr = (stderr + chunk).slice(0, 4096);
@@ -4148,8 +4154,43 @@ export function createGateRunSupervisor(options = {}) {
     );
   };
 
+  const enforceRuntimeLimits = async () => {
+    if (globalAbortReason) return true;
+    const registrations = [...forests.values()];
+    if (registrations.length === 0) return false;
+    const cur = now();
+
+    if (deadlineMs > 0 && cur >= deadlineMs) {
+      await abortAll("TIMEOUT");
+      return true;
+    }
+
+    if (stallMs > 0) {
+      const vector = [...active.values()]
+        .map((entry) => {
+          const artifact = entry.phase === "build" ? artifactSignatureFn(entry.targetDir) : "";
+          return `${entry.tokenId}:${entry.totalBytes}:${artifact}`;
+        })
+        .sort()
+        .join("|");
+      if (vector !== progressFingerprint) {
+        progressFingerprint = vector;
+        lastProgressMs = cur;
+      } else if (cur - lastProgressMs >= stallMs) {
+        await abortAll("STALL");
+        return true;
+      }
+    }
+    return false;
+  };
+
   const watchdogTick = async () => {
-    if (watchdogRunning) return;
+    // Timer callbacks continue enforcing absolute and progress limits while a prior asynchronous native
+    // memory snapshot is still in flight. `watchdogRunning` serializes snapshot processing only.
+    if (watchdogRunning) {
+      await enforceRuntimeLimits();
+      return;
+    }
     watchdogRunning = true;
     try {
       if (globalAbortReason) return;
@@ -4235,6 +4276,7 @@ export function createGateRunSupervisor(options = {}) {
             );
           }
           if ((sample.rssBytes || 0) >= memoryLimitBytes) {
+            if (globalAbortReason) return;
             err(
               `ABORTED — memory ceiling: aggregate active process-forest RSS ${formatMemorySize(
                 sample.rssBytes,
@@ -4248,7 +4290,7 @@ export function createGateRunSupervisor(options = {}) {
         } else {
           memorySampleFailures += 1;
           memorySampleFailureDetail = sample?.detail || "unknown sampler failure";
-          if (memorySampleFailures >= memorySampleFailureLimit) {
+          if (!globalAbortReason && memorySampleFailures >= memorySampleFailureLimit) {
             err(
               `ABORTED — memory safety monitor unavailable after ${memorySampleFailures} consecutive ` +
                 `samples (${memorySampleFailureDetail}); terminating every registered process tree rather ` +
@@ -4260,26 +4302,7 @@ export function createGateRunSupervisor(options = {}) {
         }
       }
 
-      if (deadlineMs > 0 && cur >= deadlineMs) {
-        await abortAll("TIMEOUT");
-        return;
-      }
-
-      if (stallMs > 0) {
-        const vector = [...active.values()]
-          .map((entry) => {
-            const artifact = entry.phase === "build" ? artifactSignatureFn(entry.targetDir) : "";
-            return `${entry.tokenId}:${entry.totalBytes}:${artifact}`;
-          })
-          .sort()
-          .join("|");
-        if (vector !== progressFingerprint) {
-          progressFingerprint = vector;
-          lastProgressMs = cur;
-        } else if (cur - lastProgressMs >= stallMs) {
-          await abortAll("STALL");
-        }
-      }
+      await enforceRuntimeLimits();
     } finally {
       watchdogRunning = false;
     }
