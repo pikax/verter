@@ -1744,6 +1744,65 @@ fn vshow_plus_vmodel_combined() {
     );
 }
 
+/// A runtime directive's `beforeUpdate`/`updated` hooks run only when a
+/// re-render revisits its element, and an element with no other dynamic
+/// binding is revisited only through `512 /* NEED_PATCH */` (it is what puts
+/// the element into its block's dynamic children). Without the flag the
+/// mount is correct and every later update is silently lost: a v-show
+/// element never hides, a checkbox computes from the mount-time array, a
+/// radio never unchecks.
+#[test]
+fn runtime_directive_elements_without_dynamic_props_need_patch() {
+    let cases = [
+        (
+            "<span v-show=\"visible\">body</span>",
+            "span",
+            "_vShow, $data.visible",
+        ),
+        (
+            "<input v-show=\"visible\" />",
+            "input",
+            "_vShow, $data.visible",
+        ),
+        (
+            "<input type=\"checkbox\" value=\"a\" v-model=\"picks\" />",
+            "input",
+            "_vModelCheckbox, $data.picks",
+        ),
+        (
+            "<input type=\"radio\" value=\"low\" v-model=\"tone\" />",
+            "input",
+            "_vModelRadio, $data.tone",
+        ),
+        (
+            "<select v-model=\"city\"><option value=\"york\">york</option></select>",
+            "select",
+            "_vModelSelect, $data.city",
+        ),
+    ];
+    for (element, tag, directive) in cases {
+        let code = gen_vdom_template(&format!(
+            "<template><div>{element}<b>{{{{ n }}}}</b></div></template>\n<script>\nexport default {{ data: () => ({{ visible: true, picks: [], tone: 'low', city: 'york', n: 0 }}) }}\n</script>"
+        ));
+        let open = format!("_withDirectives(_createElementVNode(\"{tag}\"");
+        let start = code
+            .find(&open)
+            .unwrap_or_else(|| panic!("{element}: no directive-wrapped {tag}, got:\n{code}"));
+        let wrapped = &code[start..];
+        let vnode_end = wrapped
+            .find("), [[")
+            .unwrap_or_else(|| panic!("{element}: unterminated directive vnode, got:\n{code}"));
+        assert!(
+            wrapped[..vnode_end].ends_with("512 /* NEED_PATCH */"),
+            "{element}: the directive-wrapped vnode must carry NEED_PATCH, got:\n{code}"
+        );
+        assert!(
+            wrapped[vnode_end..].starts_with(&format!("), [[{directive}")),
+            "{element}: expected the {directive} directive entry, got:\n{code}"
+        );
+    }
+}
+
 #[test]
 fn custom_directive_with_value_no_arg() {
     let code = gen_vdom_template(
