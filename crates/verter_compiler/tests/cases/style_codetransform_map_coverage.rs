@@ -498,7 +498,7 @@ fn registered_artifact(canonical: &str, source: &str) -> FrameworkParseArtifact 
 }
 
 /// The GENUINE option-off/on A/B proof, driven through the real public entry point the toggle
-/// actually reaches: `CarrierCompiler::compile_bundle`'s `RuntimeCompileOptions.source_map`
+/// actually reaches: `VueCarrierCompiler::compile_bundle`'s `RuntimeCompileOptions.source_map`
 /// field (`vue_bridge.rs`), with a SUPPLIED external style block (`<style src="...">`) — the
 /// only style shape `compile_bundle`'s own `opts.block_content.styles` override loop touches at
 /// all (an authored, non-`src` inline style compiles through a different internal path that

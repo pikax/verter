@@ -445,7 +445,8 @@ fn template_data_ingestion_is_registry_dispatched() {
     assert!(
         !compile_body.contains("compiler_for_carrier_language")
             && !compile_body.contains(".template_data("),
-        "compile_template_data must not dispatch through CarrierCompiler::template_data:\n\
+        "compile_template_data must not dispatch through a combined-compiler \
+         `template_data` route:\n\
          {compile_body}"
     );
 }
