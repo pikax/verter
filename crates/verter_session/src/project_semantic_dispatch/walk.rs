@@ -2514,28 +2514,32 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                         // says nothing about it.
                                         //
                                         // Second, the source's own key domain
-                                        // must be CLOSED. `project_known_key`
-                                        // decides membership against the explicit
-                                        // `members` list alone, so it answers
-                                        // `AbsentProven` for every key an INDEX
-                                        // SIGNATURE would supply: on
-                                        // `{ a: string; [k: string]: string }`
-                                        // the name `b` is not a member and is not
-                                        // absent either. An index signature makes
-                                        // the surface's key domain open, and an
-                                        // open domain never refutes a key — the
-                                        // same one-sidedness the primitive tier
-                                        // below documents. Missing members are
-                                        // positive evidence only.
+                                        // must be CLOSED
+                                        // (`SurfaceView::key_domain_is_closed`,
+                                        // which owns the full definition).
+                                        // `project_known_key` decides membership
+                                        // against the explicit `members` list and
+                                        // only against keys it can NAME, so its
+                                        // negative verdict is one-sided twice
+                                        // over: an INDEX SIGNATURE supplies keys
+                                        // that are on no member list at all (on
+                                        // `{ a: string; [k: string]: string }` the
+                                        // name `b` is neither a member nor
+                                        // absent), and an unfolded COMPUTED member
+                                        // key is a key the surface HAS but cannot
+                                        // name (`{ [E.A]: number }` answers
+                                        // `AbsentProven` for `"alpha"`, the very
+                                        // name it produces). Either leaves the
+                                        // domain open, and an open domain never
+                                        // refutes a key — the same one-sidedness
+                                        // the primitive tier below documents.
+                                        // Missing members are positive evidence
+                                        // only.
                                         //
                                         // Either way it stays `Undecided` and the
                                         // coarse path owns the answer.
-                                        let source_domain_is_closed = view
-                                            .index_signatures
-                                            .is_empty()
-                                            && !view.has_known_index_signature();
                                         return if homomorphic_over_source
-                                            && source_domain_is_closed
+                                            && view.key_domain_is_closed()
                                         {
                                             MappedKeyAdmission::AbsentProven
                                         } else {

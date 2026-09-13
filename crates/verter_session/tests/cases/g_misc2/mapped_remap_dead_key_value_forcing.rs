@@ -1650,3 +1650,108 @@ fn a_cancelled_mapped_key_loop_stops_forcing_values_on_both_rails() {
         );
     }
 }
+
+/// A source whose key domain is OPEN because one member's key is an
+/// unfolded COMPUTED expression rather than a statically known name.
+///
+/// `[E.A]` is a valid TypeScript computed member key (the enum member is
+/// a literal type), but it does not lower to a known `String` / `Number`
+/// / `UniqueSymbol` key — it stays an `AuthoredPropertyKey::Computed`
+/// node. The surface therefore HAS a key it cannot NAME.
+const COMPUTED_KEY_SOURCE_TS: &str = r#"
+export enum E { A = 'alpha' }
+
+export interface ComputedKeySource {
+  known: string;
+  [E.A]: number;
+}
+
+export type Boxed<V> = { boxed: V };
+
+export type ComputedKeyMapped = {
+  [K in keyof ComputedKeySource]: Boxed<ComputedKeySource[K]>
+};
+"#;
+
+/// DISCRIMINATOR (an unnameable source key leaves the mapped key domain
+/// OPEN): a mapped type over a source carrying an unfolded computed
+/// member key must keep its deferred carrier instead of publishing a
+/// surface enumerated from the nameable members alone.
+///
+/// Both key-enumeration routes into the mapped build keep only the keys
+/// they can NAME — the source surface's members
+/// (`AuthoredPropertyKey::as_known`, `None` for `Computed`) and `keyof`'s
+/// literal union over those same members. A member whose key is an
+/// unfolded computed expression is a key the surface HAS and cannot
+/// state, so what those routes enumerate is the key domain's nameable
+/// SUBSET, not the key domain. Publishing it turns an OPEN key domain
+/// into a closed one, and the mapped type then advertises a complete
+/// surface that silently omits a member: `ComputedKeyMapped` published
+/// `{ known }` alone, warm, for a source with two members.
+///
+/// The deferred `Mapped` carrier is the fail-closed answer the L1
+/// carrier-stop already prescribes for an open key domain — it is
+/// addressable and re-dispatches once the key becomes nameable, whereas
+/// the closed surface is terminal and wrong. The same fail-closed
+/// disposition `intern_keyspace_keys` already takes for a `UniqueSymbol`
+/// key it cannot lower to a literal leaf.
+///
+/// Scope: this pins the SURFACE. A single-key projection through such a
+/// mapper still refutes the demanded name, because the parse-domain
+/// member-presence admission substrate records only nameable members and
+/// reads their absence as a proof — a separate layer with its own owner.
+#[test]
+fn an_unnameable_source_key_keeps_the_mapped_type_deferred() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert(&host, COMPUTED_KEY_SOURCE_TS);
+
+    // Fixture invariant: the source really does carry a member whose key
+    // is unnameable, otherwise every assertion below is about an ordinary
+    // closed surface and discriminates nothing.
+    let source = project(
+        &host,
+        carrier(&host, "ComputedKeySource", ProjectionMode::Expanded),
+        Vec::new(),
+        ProjectionMode::Expanded,
+    );
+    let source_data = host
+        .project_type_store()
+        .semantic_graph()
+        .node_data(source)
+        .expect("the source projection must produce a node");
+    let (nameable, unnameable) = match source_data.as_ref() {
+        SemanticNodeData::Object(view) => view
+            .positive_members()
+            .iter()
+            .partition::<Vec<_>, _>(|m| m.key.as_known().is_some()),
+        other => panic!("the source must resolve to an Object surface; got {other:?}"),
+    };
+    assert_eq!(
+        (nameable.len(), unnameable.len()),
+        (1, 1),
+        "fixture invariant: the source must resolve to exactly one nameable member and one \
+         unfolded computed key. If `[E.A]` folded to a known key the domain is closed and this \
+         test discriminates nothing; if `known` vanished the fixture stopped resolving."
+    );
+
+    let mapped = project(
+        &host,
+        carrier(&host, "ComputedKeyMapped", ProjectionMode::Expanded),
+        Vec::new(),
+        ProjectionMode::Expanded,
+    );
+    let mapped_data = host
+        .project_type_store()
+        .semantic_graph()
+        .node_data(mapped)
+        .expect("the mapped projection must produce a node");
+    assert!(
+        matches!(mapped_data.as_ref(), SemanticNodeData::Mapped { .. }),
+        "a mapped type whose source carries an unnameable key must keep its deferred `Mapped` \
+         carrier: its key domain is OPEN, and the only surface either enumeration route can \
+         build is the nameable SUBSET of it. Publishing that subset advertises a COMPLETE \
+         mapped surface that silently omits the member the computed key produces — here \
+         `{{ known }}` for a two-member source, warm and terminal. Got {:?}",
+        mapped_data.as_ref()
+    );
+}

@@ -8049,59 +8049,83 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         && view.index_signatures.is_empty()
                         && view.keyspace.is_none()
             );
-        let keys: Vec<super::enumerate::KeyDomainKey> = if !source_members.is_empty() {
-            if self.uses_synthetic_mapped_key_names(&source_members) {
-                match self.key_literals_from_keyspace_node(mapper.key_space) {
-                    Some(keys) => keys,
-                    None => source_member_keys(&source_members),
+        // A public member whose key is an unfolded COMPUTED expression is
+        // a key the source HAS but cannot NAME. `source_member_keys`
+        // keeps only the keys it can name, so enumerating over such a
+        // surface yields the key domain's nameable SUBSET rather than the
+        // key domain — and every consumer downstream then reads a missing
+        // key as ABSENT rather than as unknown. On
+        // `{ known: string; [E.A]: number }` the mapped surface published
+        // `known` alone and `Mapped['alpha']` answered the key-absent
+        // sentinel for the very member the computed key produces, cleanly
+        // and warm.
+        //
+        // An unnameable key is therefore `KeyEnumeration::Unresolvable`:
+        // neither the source surface nor a keyspace derived from it
+        // enumerates the real key set, so the build falls through to the
+        // deferred `Mapped` shell below and re-dispatches once the key
+        // becomes nameable. This is the same fail-closed disposition
+        // `intern_keyspace_keys` already takes for a `UniqueSymbol` key it
+        // cannot lower to a literal leaf — preserve the typed surface
+        // rather than enumerate a domain that is missing members.
+        let source_keys_are_nameable = source_members
+            .iter()
+            .all(|member| member.key.as_known().is_some());
+        let keys: Vec<super::enumerate::KeyDomainKey> =
+            if !source_members.is_empty() && source_keys_are_nameable {
+                if self.uses_synthetic_mapped_key_names(&source_members) {
+                    match self.key_literals_from_keyspace_node(mapper.key_space) {
+                        Some(keys) => keys,
+                        None => source_member_keys(&source_members),
+                    }
+                } else {
+                    source_member_keys(&source_members)
                 }
+            } else if resolved_empty_homomorphic_source {
+                Vec::new()
+            } else if let Some(keys) = (source_keys_are_nameable
+                && !homomorphic_over_unprojected_source)
+                .then(|| self.key_literals_from_keyspace_node(mapper.key_space))
+                .flatten()
+            {
+                keys
             } else {
-                source_member_keys(&source_members)
-            }
-        } else if resolved_empty_homomorphic_source {
-            Vec::new()
-        } else if let Some(keys) = (!homomorphic_over_unprojected_source)
-            .then(|| self.key_literals_from_keyspace_node(mapper.key_space))
-            .flatten()
-        {
-            keys
-        } else {
-            // Change M: `KeyEnumeration::Unresolvable`. Neither the
-            // source surface nor the key space enumerate to concrete names.
-            // The canonical form is a deferred
-            // `SemanticNodeData::Mapped { source, mapper }` shell — callers
-            // can re-dispatch through `MappedType` once one of the inputs
-            // becomes enumerable. One `Normalize` edge captures the
-            // contribution set (`[source, key_space, value_expr]`); the
-            // `mapper.name_remap` field is preserved verbatim via the
-            // interned `mapper` key.
-            //
-            // This replaces the retired `Alias(KeyOf(source))` surrogate.
-            // The surrogate reinterpreted the mapped result AS its keyspace
-            // (a relation confusion), which no downstream consumer could
-            // safely navigate. `SemanticNodeData::Mapped` is the
-            // dispatch-native deferred form.
-            let node = graph.intern_node(SemanticNodeData::Mapped {
-                source,
-                mapper: mapper.clone(),
-            });
-            graph.record_origin_edge(
-                node,
-                OriginEdgeKind::Normalize,
-                Arc::from(contribution_nodes.clone().into_boxed_slice()),
-                OriginMeta::None,
-                Arc::clone(&fence),
-            );
-            let mut deferred_output =
-                crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-                    QueryResult::Value(node),
-                    fence,
-                ))
-                .with_observed_self_roots(observed_self_roots.clone());
-            deferred_output.result_is_partial = !mapped_partial_reasons.is_empty();
-            deferred_output.partial_reasons = mapped_partial_reasons;
-            return deferred_output;
-        };
+                // Change M: `KeyEnumeration::Unresolvable`. Neither the
+                // source surface nor the key space enumerate to concrete names.
+                // The canonical form is a deferred
+                // `SemanticNodeData::Mapped { source, mapper }` shell — callers
+                // can re-dispatch through `MappedType` once one of the inputs
+                // becomes enumerable. One `Normalize` edge captures the
+                // contribution set (`[source, key_space, value_expr]`); the
+                // `mapper.name_remap` field is preserved verbatim via the
+                // interned `mapper` key.
+                //
+                // This replaces the retired `Alias(KeyOf(source))` surrogate.
+                // The surrogate reinterpreted the mapped result AS its keyspace
+                // (a relation confusion), which no downstream consumer could
+                // safely navigate. `SemanticNodeData::Mapped` is the
+                // dispatch-native deferred form.
+                let node = graph.intern_node(SemanticNodeData::Mapped {
+                    source,
+                    mapper: mapper.clone(),
+                });
+                graph.record_origin_edge(
+                    node,
+                    OriginEdgeKind::Normalize,
+                    Arc::from(contribution_nodes.clone().into_boxed_slice()),
+                    OriginMeta::None,
+                    Arc::clone(&fence),
+                );
+                let mut deferred_output =
+                    crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                        QueryResult::Value(node),
+                        fence,
+                    ))
+                    .with_observed_self_roots(observed_self_roots.clone());
+                deferred_output.result_is_partial = !mapped_partial_reasons.is_empty();
+                deferred_output.partial_reasons = mapped_partial_reasons;
+                return deferred_output;
+            };
 
         // 2. Build member slots.
         //
