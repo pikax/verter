@@ -2230,4 +2230,80 @@ mod tests {
             );
         }
     }
+
+    /// A delivery fence answered `false` under the per-path lock delivers
+    /// NOTHING: no provider call, no delivered-surface ledger entry, and a
+    /// plain `Ok(false)` rather than an error. The same call with the fence
+    /// answering `true` delivers exactly as the unfenced verb does.
+    #[tokio::test]
+    async fn fenced_delivery_refused_under_the_lock_reaches_neither_provider_nor_ledger() {
+        let owner = tempfile::tempdir().expect("temporary owner");
+        let provider_path = owner.path().join("src/App.vue.tsx");
+        std::fs::create_dir_all(provider_path.parent().expect("provider parent"))
+            .expect("provider parent directory");
+        let provider_path = provider_path.to_string_lossy().into_owned();
+        let source = "const msg: string = 'fenced'\n";
+
+        let mock = MockTypeProvider::new();
+        let sync = ProjectSync::new_with_kind(
+            Arc::new(mock.clone()),
+            ProjectSyncMode::FullProject,
+            TypeProviderKind::Tsgo,
+        );
+
+        let refused = sync
+            .open_tsx_fenced(&provider_path, source, &|| false)
+            .await
+            .expect("a refused fence is a decision, not a provider error");
+        assert!(
+            !refused,
+            "the fence answered false: nothing may be delivered"
+        );
+        assert!(
+            mock.file_sync_calls().is_empty(),
+            "a refused delivery must not reach the provider: {:?}",
+            mock.file_sync_calls()
+        );
+        assert!(
+            sync.synced_tsx_content(&provider_path).is_none(),
+            "a refused delivery must not enter the delivered-surface ledger"
+        );
+
+        let delivered = sync
+            .open_tsx_fenced(&provider_path, source, &|| true)
+            .await
+            .expect("managed tsgo open succeeds");
+        assert!(delivered, "the fence answered true: the open is delivered");
+        assert!(
+            mock.file_sync_calls().iter().any(
+                |call| matches!(call, MockCall::OpenFile { path, .. } if path == &provider_path)
+            ),
+            "an admitted delivery opens the provider buffer: {:?}",
+            mock.file_sync_calls()
+        );
+        assert!(
+            sync.synced_tsx_content(&provider_path).is_some(),
+            "an admitted delivery enters the delivered-surface ledger"
+        );
+
+        // An update refused by the fence leaves the previously delivered bytes in place.
+        let updated = sync
+            .sync_tsx_fenced(&provider_path, "const msg: number = 1\n", &|| false)
+            .await
+            .expect("a refused update is a decision, not a provider error");
+        assert!(!updated);
+        assert!(
+            !mock
+                .file_sync_calls()
+                .iter()
+                .any(|call| matches!(call, MockCall::UpdateFile { .. })),
+            "a refused update must not reach the provider: {:?}",
+            mock.file_sync_calls()
+        );
+        assert!(
+            sync.delivered_provider_content(&provider_path, source)
+                .is_some(),
+            "the ledger still holds the admitted bytes"
+        );
+    }
 }

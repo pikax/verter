@@ -1726,19 +1726,31 @@ impl VerterLanguageServer {
             return;
         }
 
-        // Choose open_file vs update_file based on existing state
+        // Choose open_file vs update_file based on existing state. The same
+        // revision fence runs once more UNDER the provider's per-path delivery
+        // lock (`sync_tsx_fenced`): the two checks above cannot see a newer
+        // revision delivered while this repair waited for that lock.
+        let still_current =
+            || self.retained_ide_response_is_current(uri, compiled_revision.as_ref());
         let result = if ide_path_loaded {
             // Already known to provider — update. Interactive repair has no
             // wall-clock feature budget: client cancellation drops the future,
             // while the provider lifecycle watchdog owns genuine engine silence.
-            sync.sync_tsx(&ide_path, &ide.code).await
+            sync.sync_tsx_fenced(&ide_path, &ide.code, &still_current)
+                .await
         } else {
             // First time — open under the same cancellation/health contract.
-            sync.open_tsx(&ide_path, &ide.code).await
+            sync.open_tsx_fenced(&ide_path, &ide.code, &still_current)
+                .await
         };
 
         match result {
-            Ok(()) => {
+            Ok(false) => {
+                // The document moved while this repair waited for the delivery
+                // lock: the newer revision's own repair delivers its bytes.
+                self.needs_ide_sync.insert(canonical_id);
+            }
+            Ok(true) => {
                 // FENCE (pre-record): the provider sync awaited. The record
                 // resolves the carrier source from the LIVE open document, so an
                 // edit landing across that await would pin these bytes and this
