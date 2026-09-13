@@ -10,8 +10,7 @@
 //! `verter_session` (unnameable from compiler-side producers).
 //!
 //! On top of the carrier wrappers it owns the compiler-side carrier
-//! framework substrate: the [`CarrierCompiler`] trait (parse / IDE /
-//! runtime) and the immutable per-capability catalogs
+//! framework substrate: the immutable per-capability catalogs
 //! (`registered_carrier_projection::built_in_frontend_catalog` and
 //! friends) production selectors dispatch through.
 //! [`vue_bridge::VueCarrierCompiler`] exposes the equivalent typed
@@ -51,7 +50,7 @@ pub use capability::{
     ProductExecutionGrant, ProductExecutionGrants, ProjectionBackend, RuntimeCompilerBackend,
 };
 pub use carrier_compiler::{
-    CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
+    CarrierCompileOutcome, CompileUnsupported, IdeCompileOptions, IdeOutput,
     RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
     RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
     RuntimeMainModule, RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock,
