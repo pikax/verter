@@ -3040,31 +3040,135 @@ function parseProcessForestSnapshotWithExitRaces(parser, text, roots) {
   return changed ? parser(text, after) : first;
 }
 
+// Full-process-table native snapshots are the watchdog's per-tick RSS sample. The Windows CIM query
+// costs ~1.7-1.9s IDLE at ~660 processes on a 32-thread Windows 11 host, and a 12-job rustc build
+// (hundreds of extra processes, saturated cores) multiplies that. A tight per-snapshot cap turns that
+// load into "sampler unavailable": three consecutive kills aborted a HEALTHY cold gate (exit 123,
+// MEMORY_MONITOR) 483s into dev-archive with peak sampled RSS of 203 MiB against a 63.5 GiB ceiling —
+// the monitor punished the host for being busy, not unsafe. The budget must be load-tolerant so a
+// slow-but-completing snapshot is a SUCCESSFUL sample; the watchdog's consecutive-failure limit keeps
+// the fail-closed MEMORY_MONITOR abort for a sampler that is genuinely unavailable even at this budget.
+export const NATIVE_PROCESS_SNAPSHOT_BUDGET_MS = 20_000;
+
+// One asynchronous PowerShell execution with a kill-on-expiry budget. Async (never spawnSync) because
+// the RSS sampler runs once per watchdog tick for the whole gate: a snapshot bloated by load must slow
+// SAMPLING, not block the supervisor's event loop (child-stdout pumping, stall/deadline accounting) for
+// the snapshot's full duration.
+export async function runPowerShellSnapshot(command, budgetMs) {
+  return await new Promise((resolve) => {
+    let child;
+    let settled = false;
+    let timedOut = false;
+    let stdout = "";
+    let stderr = "";
+    let stdoutOversized = false;
+    let stdoutBytes = 0;
+    // Mirrors the old spawnSync maxBuffer guard: refuse to buffer an unbounded snapshot stream.
+    const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024;
+    let budgetTimer;
+    let forceTimer;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(budgetTimer);
+      clearTimeout(forceTimer);
+      resolve(result);
+    };
+    try {
+      child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
+        windowsHide: true,
+      });
+    } catch (error) {
+      finish({ ok: false, stdout: "", detail: error?.message || String(error) });
+      return;
+    }
+    budgetTimer = setTimeout(
+      () => {
+        timedOut = true;
+        try {
+          child.kill();
+        } catch {
+          /* already exiting */
+        }
+        // Belt-and-braces: if the kill itself never produces a close event, still resolve fail-closed.
+        forceTimer = setTimeout(
+          () =>
+            finish({
+              ok: false,
+              stdout,
+              detail: `PowerShell CIM snapshot exceeded the ${budgetMs}ms budget`,
+            }),
+          5_000,
+        );
+      },
+      Math.max(1, budgetMs),
+    );
+    child.stdout.on("data", (chunk) => {
+      if (stdoutOversized) return;
+      const chunkBytes = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk);
+      if (stdoutBytes + chunkBytes > MAX_SNAPSHOT_BYTES) {
+        stdoutOversized = true;
+        child.stdout.destroy();
+        try {
+          child.kill();
+        } catch {
+          /* already exiting */
+        }
+        return;
+      }
+      stdoutBytes += chunkBytes;
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr = (stderr + chunk).slice(0, 4096);
+    });
+    child.on("error", (error) => {
+      finish({ ok: false, stdout, detail: error?.message || String(error) });
+    });
+    child.on("close", (code) => {
+      if (timedOut) {
+        finish({
+          ok: false,
+          stdout,
+          detail: `PowerShell CIM snapshot exceeded the ${budgetMs}ms budget`,
+        });
+      } else if (stdoutOversized) {
+        finish({
+          ok: false,
+          stdout: "",
+          detail: `PowerShell CIM snapshot stdout exceeded ${MAX_SNAPSHOT_BYTES} bytes`,
+        });
+      } else if (code !== 0) {
+        finish({
+          ok: false,
+          stdout,
+          detail: `PowerShell CIM exited ${code}${stderr ? `: ${stderr.trim().slice(0, 512)}` : ""}`,
+        });
+      } else {
+        finish({ ok: true, stdout });
+      }
+    });
+  });
+}
+
 // Platform-native process-tree RSS snapshot. The production watchdog treats repeated inability to sample
 // as a memory-safety abort, so a missing/broken process inspector cannot silently disable the ceiling.
-export function sampleProcessForestRssBytes(roots) {
+// Resolves a promise on every platform so callers (the watchdog's thenable path, requestAbort's identity
+// recovery) can await uniformly.
+export async function sampleProcessForestRssBytes(roots) {
   if (!Array.isArray(roots) || roots.length === 0) {
     return { ok: true, rssBytes: 0, processCount: 0, perRoot: [], perLane: {} };
   }
   if (IS_WINDOWS) {
     const command =
       'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId)`t$($_.ParentProcessId)`t$($_.WorkingSetSize)`twin-start-ms:$([math]::Floor($_.CreationDate.ToUniversalTime().Ticks / 10000))" }';
-    const result = spawnSync(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-Command", command],
-      {
-        encoding: "utf8",
-        windowsHide: true,
-        timeout: 5_000,
-        maxBuffer: 64 * 1024 * 1024,
-      },
-    );
-    if (result.status !== 0 || result.error) {
+    const result = await runPowerShellSnapshot(command, NATIVE_PROCESS_SNAPSHOT_BUDGET_MS);
+    if (!result.ok) {
       return {
         ok: false,
         rssBytes: 0,
         processCount: 0,
-        detail: result.error ? result.error.message : `PowerShell CIM exited ${result.status}`,
+        detail: result.detail,
       };
     }
     return parseProcessForestSnapshotWithExitRaces(
@@ -3090,9 +3194,11 @@ export function sampleProcessForestRssBytes(roots) {
   return parseProcessForestSnapshotWithExitRaces(parsePosixProcessForestRss, result.stdout, roots);
 }
 
-export function sampleProcessTreeRssBytes(rootPid) {
+export async function sampleProcessTreeRssBytes(rootPid) {
   if (!rootPid) return { ok: false, rssBytes: 0, processCount: 0, detail: "child pid unavailable" };
-  const result = sampleProcessForestRssBytes([{ tokenId: 1, laneId: "single-step", pid: rootPid }]);
+  const result = await sampleProcessForestRssBytes([
+    { tokenId: 1, laneId: "single-step", pid: rootPid },
+  ]);
   return result.ok
     ? { ok: true, rssBytes: result.rssBytes, processCount: result.processCount }
     : { ok: false, rssBytes: 0, processCount: 0, detail: result.detail };
@@ -3575,13 +3681,16 @@ function processIdentitySnapshot() {
   if (IS_WINDOWS) {
     const command =
       'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId),$($_.ParentProcessId),win-start-ms:$([math]::Floor($_.CreationDate.ToUniversalTime().Ticks / 10000))" }';
+    // Teardown-time (per admitted step, never per tick), so the synchronous form is fine — but the SAME
+    // full-table CIM query needs the SAME load-tolerant budget, or a loaded host would fail every
+    // teardown verification snapshot and forfeit clean-teardown proof it could have obtained.
     const result = spawnSync(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-Command", command],
       {
         encoding: "utf8",
         windowsHide: true,
-        timeout: 5_000,
+        timeout: NATIVE_PROCESS_SNAPSHOT_BUDGET_MS,
         maxBuffer: 64 * 1024 * 1024,
       },
     );
@@ -3985,7 +4094,7 @@ export function createGateRunSupervisor(options = {}) {
     entry.abortPromise = (async () => {
       refuseUnpublishedTerminal(entry);
       if (entry.identityPending) {
-        const sample = sampleProcessForestRssBytes([
+        const sample = await sampleProcessForestRssBytes([
           {
             tokenId: entry.tokenId,
             laneId: entry.laneId,
@@ -4045,8 +4154,43 @@ export function createGateRunSupervisor(options = {}) {
     );
   };
 
+  const enforceRuntimeLimits = async () => {
+    if (globalAbortReason) return true;
+    const registrations = [...forests.values()];
+    if (registrations.length === 0) return false;
+    const cur = now();
+
+    if (deadlineMs > 0 && cur >= deadlineMs) {
+      await abortAll("TIMEOUT");
+      return true;
+    }
+
+    if (stallMs > 0) {
+      const vector = [...active.values()]
+        .map((entry) => {
+          const artifact = entry.phase === "build" ? artifactSignatureFn(entry.targetDir) : "";
+          return `${entry.tokenId}:${entry.totalBytes}:${artifact}`;
+        })
+        .sort()
+        .join("|");
+      if (vector !== progressFingerprint) {
+        progressFingerprint = vector;
+        lastProgressMs = cur;
+      } else if (cur - lastProgressMs >= stallMs) {
+        await abortAll("STALL");
+        return true;
+      }
+    }
+    return false;
+  };
+
   const watchdogTick = async () => {
-    if (watchdogRunning) return;
+    // Timer callbacks continue enforcing absolute and progress limits while a prior asynchronous native
+    // memory snapshot is still in flight. `watchdogRunning` serializes snapshot processing only.
+    if (watchdogRunning) {
+      await enforceRuntimeLimits();
+      return;
+    }
     watchdogRunning = true;
     try {
       if (globalAbortReason) return;
@@ -4132,6 +4276,7 @@ export function createGateRunSupervisor(options = {}) {
             );
           }
           if ((sample.rssBytes || 0) >= memoryLimitBytes) {
+            if (globalAbortReason) return;
             err(
               `ABORTED — memory ceiling: aggregate active process-forest RSS ${formatMemorySize(
                 sample.rssBytes,
@@ -4145,7 +4290,7 @@ export function createGateRunSupervisor(options = {}) {
         } else {
           memorySampleFailures += 1;
           memorySampleFailureDetail = sample?.detail || "unknown sampler failure";
-          if (memorySampleFailures >= memorySampleFailureLimit) {
+          if (!globalAbortReason && memorySampleFailures >= memorySampleFailureLimit) {
             err(
               `ABORTED — memory safety monitor unavailable after ${memorySampleFailures} consecutive ` +
                 `samples (${memorySampleFailureDetail}); terminating every registered process tree rather ` +
@@ -4157,26 +4302,7 @@ export function createGateRunSupervisor(options = {}) {
         }
       }
 
-      if (deadlineMs > 0 && cur >= deadlineMs) {
-        await abortAll("TIMEOUT");
-        return;
-      }
-
-      if (stallMs > 0) {
-        const vector = [...active.values()]
-          .map((entry) => {
-            const artifact = entry.phase === "build" ? artifactSignatureFn(entry.targetDir) : "";
-            return `${entry.tokenId}:${entry.totalBytes}:${artifact}`;
-          })
-          .sort()
-          .join("|");
-        if (vector !== progressFingerprint) {
-          progressFingerprint = vector;
-          lastProgressMs = cur;
-        } else if (cur - lastProgressMs >= stallMs) {
-          await abortAll("STALL");
-        }
-      }
+      await enforceRuntimeLimits();
     } finally {
       watchdogRunning = false;
     }
@@ -4507,9 +4633,10 @@ export async function runContainedStep(opts) {
   const sampleProcessForestRssFn =
     memorySampler === sampleProcessTreeRssBytes
       ? sampleProcessForestRssBytes
-      : (roots) => {
+      : async (roots) => {
           const root = roots[0];
-          const sample = memorySampler(root?.pid);
+          let sample = memorySampler(root?.pid);
+          if (sample && typeof sample.then === "function") sample = await sample;
           if (!sample?.ok) return sample;
           const perRoot = root
             ? [{ ...root, rssBytes: sample.rssBytes || 0, processCount: sample.processCount || 0 }]

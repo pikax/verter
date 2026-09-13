@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,6 +12,7 @@ import {
   GATE_BUILD_JOBS_8_MIN_MEMORY_LIMIT_BYTES,
   IS_WINDOWS,
   MEMORY_KILL_GRACE_MS,
+  NATIVE_PROCESS_SNAPSHOT_BUDGET_MS,
   buildCargoEnv,
   deriveGateResourceLimits,
   deriveGateLaneResourceSplit,
@@ -22,6 +23,7 @@ import {
   parseWindowsProcessForestRss,
   parseWindowsProcessTableRss,
   runContainedStep,
+  runPowerShellSnapshot,
 } from "./gate-internals.mjs";
 
 const MiB = 1024 ** 2;
@@ -276,6 +278,125 @@ try {
   assert.equal(mapStepReason(unavailable), EXIT_MEMORY);
 } finally {
   rmSync(targetDir, { recursive: true, force: true });
+}
+
+// Native full-process-table snapshot budget. The Windows watchdog sample runs the CIM query for EVERY
+// process once per tick for the whole gate; it costs ~1.7-1.9s IDLE at ~660 processes on a 32-thread
+// Windows 11 host, and a 12-job rustc build (hundreds of extra processes, saturated cores) multiplies
+// that. The original 5s cap turned that load into three consecutive "sampler unavailable" failures and
+// aborted a HEALTHY cold gate (exit 123, MEMORY_MONITOR) 483s into dev-archive with peak sampled RSS of
+// 203 MiB against a 63.5 GiB ceiling — the monitor punished the host for being busy, not unsafe. The
+// budget must stay load-tolerant; the consecutive-failure limit keeps the fail-closed MEMORY_MONITOR
+// abort for a sampler that is GENUINELY unavailable even at this budget.
+assert.ok(
+  NATIVE_PROCESS_SNAPSHOT_BUDGET_MS >= 15_000,
+  `NATIVE_PROCESS_SNAPSHOT_BUDGET_MS (${NATIVE_PROCESS_SNAPSHOT_BUDGET_MS}ms) must be load-tolerant: ` +
+    "the full-table CIM query costs ~1.9s idle at ~660 processes and was observed exceeding the old 5s " +
+    "cap three consecutive times under a 12-job rustc build, aborting a healthy gate",
+);
+
+if (IS_WINDOWS) {
+  // A snapshot slower than the OLD 5s spawnSync cap but inside the budget is a SUCCESSFUL sample, not a
+  // sampler failure: 6s of work must resolve ok. `Start-Sleep` stands in for a load-bloated CIM query.
+  const slow = await runPowerShellSnapshot(
+    'Start-Sleep -Milliseconds 6000; "1`t0`t4096`twin-start-ms:123"',
+    NATIVE_PROCESS_SNAPSHOT_BUDGET_MS,
+  );
+  assert.equal(slow.ok, true, `slow-but-completing snapshot must be ok: ${slow.detail ?? ""}`);
+  assert.match(slow.stdout, /1\t0\t4096\twin-start-ms:123/);
+
+  // The kill-on-expiry path must still fail CLOSED, with the budget named in the detail.
+  const killed = await runPowerShellSnapshot("Start-Sleep -Seconds 30", 1_500);
+  assert.equal(killed.ok, false);
+  assert.match(killed.detail, /1500ms/);
+} else {
+  // Exercise the raw-byte cap on POSIX with a test-owned executable standing in for PowerShell. The
+  // payload is ~66 MiB of two-byte UTF-8 characters but only ~33 million JavaScript characters, so a
+  // post-append string-length check would incorrectly accept it.
+  const fakePowerShellDir = mkdtempSync(join(tmpdir(), "verter-gate-fake-powershell-"));
+  const fakePowerShell = join(fakePowerShellDir, "powershell.exe");
+  const previousPath = process.env.PATH;
+  try {
+    writeFileSync(
+      fakePowerShell,
+      '#!/usr/bin/env node\nconst chunk = Buffer.from("é".repeat(1024 * 1024));\n' +
+        "for (let index = 0; index < 33; index += 1) process.stdout.write(chunk);\n",
+    );
+    chmodSync(fakePowerShell, 0o755);
+    process.env.PATH = `${fakePowerShellDir}:${previousPath || ""}`;
+    const oversized = await runPowerShellSnapshot("ignored by the test executable", 10_000);
+    assert.equal(oversized.ok, false);
+    assert.match(oversized.detail, /stdout exceeded 67108864 bytes/);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    rmSync(fakePowerShellDir, { recursive: true, force: true });
+  }
+}
+
+// The production Windows sampler resolves a PROMISE (a slow snapshot must slow sampling, not block the
+// supervisor's event loop), so the watchdog and the runContainedStep tree->forest wrapper must consume
+// thenable samples identically to sync ones — including per-root accounting, or an async sampler's RSS
+// would silently stop feeding peak bookkeeping.
+const asyncSamplerTargetDir = mkdtempSync(join(tmpdir(), "verter-gate-memory-selftest-async-"));
+try {
+  const asyncSampler = await runContainedStep({
+    cmd: process.execPath,
+    args: ["-e", "setTimeout(() => {}, 1200)"],
+    cwd: process.cwd(),
+    env: process.env,
+    phase: "test",
+    deadlineMs: Date.now() + 30_000,
+    stallMs: 30_000,
+    targetDir: asyncSamplerTargetDir,
+    memoryLimitBytes: 1 * GiB,
+    memoryPollMs: 50,
+    memorySampler: async (pid) => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return { ok: true, rssBytes: 16 * MiB, processCount: 1 };
+    },
+  });
+  assert.equal(asyncSampler.reason, "");
+  assert.equal(asyncSampler.code, 0);
+  assert.equal(asyncSampler.peakRssBytes, 16 * MiB);
+} finally {
+  rmSync(asyncSamplerTargetDir, { recursive: true, force: true });
+}
+
+// Deadline and stall enforcement must keep running while an asynchronous native memory snapshot is in
+// flight. A load-bloated Windows CIM query can legitimately consume most of its 20s snapshot budget; it
+// must not extend either supervisor limit by serializing those checks behind the awaited sample.
+for (const [expectedReason, limits] of [
+  ["TIMEOUT", { deadlineMs: Date.now() + 200, stallMs: 30_000 }],
+  ["STALL", { deadlineMs: Date.now() + 30_000, stallMs: 200 }],
+]) {
+  const targetDir = mkdtempSync(join(tmpdir(), `verter-gate-memory-selftest-${expectedReason}-`));
+  try {
+    const startedAt = Date.now();
+    const result = await runContainedStep({
+      cmd: process.execPath,
+      args: ["-e", "setInterval(() => {}, 1000)"],
+      cwd: process.cwd(),
+      env: process.env,
+      phase: "test",
+      targetDir,
+      memoryLimitBytes: 1 * GiB,
+      memoryPollMs: 50,
+      memorySampler: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+        return { ok: true, rssBytes: 16 * MiB, processCount: 1 };
+      },
+      ...limits,
+    });
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(result.reason, expectedReason);
+    assert.ok(
+      elapsedMs < 1_200,
+      `${expectedReason} enforcement waited ${elapsedMs}ms for an asynchronous memory snapshot`,
+    );
+  } finally {
+    rmSync(targetDir, { recursive: true, force: true });
+  }
 }
 
 // MEMORY_KILL_GRACE_MS is the constant runContainedStep's reapNow uses for a MEMORY / MEMORY_MONITOR reap

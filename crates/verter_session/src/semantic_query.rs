@@ -1628,7 +1628,7 @@ pub enum FlowReturnDegradation {
     ///
     /// One reason for the whole class of "this position has no modelled
     /// value": an unmodelled CALL form (`new f()`, `` tag`...` ``,
-    /// `f?.()`, `await f()`, `(0, f())`, `z = f()`, a leaf answer
+    /// `f?.()`, `await f()`, `(0, new f())`, `z = f()`, a leaf answer
     /// embedding an unreduced `ReturnType<callee>` carrier), and a name
     /// the frame's lexical authority resolved to a FUNCTION-LOCAL binding
     /// the flow content does not model (a destructuring element, a local
