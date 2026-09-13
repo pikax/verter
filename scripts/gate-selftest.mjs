@@ -9073,7 +9073,7 @@ fi
         : "";
     if (
       supervisorFactoryCount !== 1 ||
-      productionRunStepCount !== 8 ||
+      productionRunStepCount !== 9 ||
       gateSource.includes("await runContainedStep({") ||
       !gateSource.includes('ctx.supervisor.runStep("surface-1", {') ||
       !gateSource.includes('ctx.supervisor.runStep("shipped-cfg", {') ||
@@ -9083,7 +9083,7 @@ fi
         teardownSource.indexOf("mutex.release()")
     ) {
       fail(
-        `(GB18.10) production must construct exactly one supervisor, route all eight currently ` +
+        `(GB18.10) production must construct exactly one supervisor, route all nine currently ` +
           `sequential contained commands through it (including the wasm JS-boundary, Surface 1 and ` +
           `shipped lanes), and await its ` +
           `close before mutex release; factory=${supervisorFactoryCount} runStep=${productionRunStepCount}`,
