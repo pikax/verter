@@ -16,7 +16,7 @@ catalog**.
 
 Displaced as authority:
 
-- combined `CarrierCompiler` trait and the deleted `CarrierCompilerRegistry`
+- the deleted combined `CarrierCompiler` trait and `CarrierCompilerRegistry`
 - mixed framework/options buckets on one runtime option struct
 - tooling-only runtime stubs that pretend a missing compiler product exists
 - `CompileTarget` bitflags as compiler product/pipeline selector
@@ -32,9 +32,9 @@ declarations → `ProjectionBackend`; analysis facts →
 runtime backend; `publish` decoration → host integration. `style_planner` /
 `style_usage` / `css_vars` / Svelte CSS are displaced combined interpreters.
 
-The combined `CarrierCompiler` trait is a **temporary selector** only: it
-selects the live adapter row. It is not an authority. No new methods may be
-added to it.
+The combined `CarrierCompiler` trait is DELETED (with its registry). Do
+not reintroduce it — not even as a selector: the immutable per-capability
+catalog selects the live adapter row.
 
 ## Catalog (summary)
 

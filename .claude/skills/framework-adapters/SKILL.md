@@ -33,9 +33,9 @@ module map + contract reference behind it.
 | `verter_semantic/.../framework_facts.rs` | The syntax-capture half: `ScriptFactProvider` trait, closed `ScriptFactSyntaxGate`, candidate set, the zero-cost dispatcher param. |
 | `typeinfo/framework_surface/{executor,plan,results,graph_export,vue_exec}.rs` | The executor entry, the closed plan/result vocabulary, the first `SemanticTypeGraph` encoder, and the relocated Vue resolution delegates. |
 | `typeinfo/adapters/vue/adapter.rs` | `VueFrameworkAdapter` — plan/normalize only. |
-| `verter_compiler/src/framework_common/carrier_compiler.rs` | The `CarrierCompiler` trait (compiler-domain: `adapter_id`, `parse`, `eval_source`, `compile_ide`, `template_data`) + its neutral I/O vocabulary (`ParseOptions`, `IdeCompileOptions`, `IdeOutput`, `CompileUnsupported`, `TemplateFacts`). NO script-fact method — script facts go through the one `ScriptFactProvider` seam. |
+| `verter_compiler/src/framework_common/carrier_compiler.rs` | The trait-free framework-neutral carrier-compile I/O vocabulary: `IdeCompileOptions`, `IdeOutput`, `RuntimeCompileOptions`, `RuntimeCompileOutput`/`CarrierCompileOutcome`, `CompileUnsupported`, the `RuntimeOutputDescriptor` family, and the block-content inputs. The combined `CarrierCompiler` trait is DELETED — parse options live on `verter_language::ParseOptions`; eval-source + template facts belong to the `FrameworkSemanticAuthority` rows in `capability.rs`. NO script-fact entry — script facts go through the one `ScriptFactProvider` seam. |
 | `verter_compiler/src/framework_common/registered_carrier_projection.rs` | `project_registered_accepted` — the SOLE production entry: catalog frontend parse (`built_in_frontend_catalog`/`registered_frontend_for`), then registered geometry. The combined `CarrierCompilerRegistry` is DELETED — no runtime registry lookup remains anywhere in this path. |
-| `verter_compiler/src/framework_common/vue_bridge.rs` | `VueCarrierCompiler` — the reference `CarrierCompiler`, delegating call-for-call to `parse_sfc` + `compile_from_parsed`; ZERO edits to any Vue parser/codegen module. Also owns `open_vue_carrier`, the registered-projector opener installed on the Vue `CarrierLeg` (no capability token — the opener only ever opens a Vue-adapter artifact). |
+| `verter_compiler/src/framework_common/vue_bridge.rs` | `VueCarrierCompiler` — the reference typed carrier compiler (an INHERENT struct with `parse` / `compile_ide` / `compile_bundle`; no trait behind it), delegating call-for-call to `parse_sfc` + `compile_from_parsed`; ZERO edits to any Vue parser/codegen module. Also owns `open_vue_carrier`, the registered-projector opener installed on the Vue `CarrierLeg` (no capability token — the opener only ever opens a Vue-adapter artifact). |
 | `verter_compiler/src/framework_common/sourcemap_e2e_helpers.rs` | Reusable (test-only) framework IDE sourcemap-correctness assertions every carrier vertical re-runs against its own `compile_ide` output. |
 
 ## Descriptor + virtual-file naming column
@@ -227,78 +227,97 @@ registry owns the carrier ACCESS token + the semantic legs, the
 compiler-side immutable per-capability catalog (`built_in_frontend_catalog`
 and friends, dispatched through `project_registered_accepted`) owns the
 carrier COMPILER selection per adapter — the combined `CarrierCompilerRegistry`
-is deleted. `CarrierCompiler` is one trait every carrier framework
-implements, exposing EXACTLY four compiler-domain ops:
+is deleted. The combined `CarrierCompiler` trait is deleted too (CCA1T3):
+compiler authority is the FIVE typed capability interfaces in
+`framework_common/capability.rs`, each registered as an immutable catalog
+row keyed adapter × epoch × capability:
 
-- `parse(source, opts) -> Result<Arc<UnregisteredFrameworkParseArtifact>, SyntaxReject>`
-  — produce the framework-neutral artifact. Ordinary malformed input still
-  returns `Ok` (tokenizers collect diagnostics inline on the artifact's
-  mapped diagnostic channel); `Err(SyntaxReject)` is reserved for a request
-  the frontend cannot honor at all (an unsupported parse-option combination,
+- `CarrierFrontend` — `parse(source, opts) -> Result<ParseArtifact,
+  SyntaxReject>`: the framework-neutral parse (`ParseOptions` lives in
+  `verter_language`). Ordinary malformed input still returns `Ok`
+  (tokenizers collect diagnostics inline on the artifact's mapped
+  diagnostic channel); `Err(SyntaxReject)` is reserved for a request the
+  frontend cannot honor at all (an unsupported parse-option combination,
   or a non-recoverable construction failure) and is returned before any
   artifact is constructed.
-- `eval_source(source, artifact) -> Arc<str>` — the position-preserving
-  blank: script bytes at raw offsets, every other byte whitespace-blanked,
-  line terminators preserved; output length == input length.
-- `compile_ide(source, artifact, opts) -> Result<IdeOutput, CompileUnsupported>`
-  — the rendered TSX/JSX IDE artifact. The adapter's IDE codegen owns its
-  OWN `CodeTransform` (the single source of truth for generated-code
-  edits) and returns the rendered output verbatim — NO borrowed caller
-  `CodeTransform` (a shared one would be a second, coarse, non-authoritative
-  map). An unsupported `CompileTarget` bit → typed `CompileUnsupported`
-  (invariant 4), never a silent empty.
-- `template_data(source, artifact) -> TemplateFacts` — neutral template
-  facts (wraps `RawTemplateData`).
-- `compile_bundle(source, artifact, opts: &RuntimeCompileOptions, alloc) ->
-  Result<RuntimeCompileOutput, CompileUnsupported>` — the framework-neutral
-  RUNTIME bundle. The host owns the cached-parse validity decision and hands
-  over either the valid cached artifact or a fresh carrier parse of the merged
-  source; the carrier owns the typed downcast + native compile and returns a
-  NEUTRAL `RuntimeCompileOutput` (a `RuntimeMainModule` body + neutral
-  script/template/style/custom blocks + scope id + optional IDE `tsx` (when
-  `want_ide`) + optional template facts + neutral `diagnostics`). Vue uses
-  `VerterCompileResult` INTERNALLY then re-expresses it neutrally
-  (`vue_result_to_runtime_bundle`); it leaves `main.body_code = None` so the
-  host assembles the `_sfc_main` module from the block fields
-  (`assemble_vue_main_module`). A carrier that projects ONLY an IDE surface
-  (Svelte today) returns a bundle with no runtime surface
-  (`has_runtime_surface() == false`) carrying just the `tsx` — the host
-  populates `CachedTsx` and emits NO `Main` virtual node. Framework-PRIVATE
-  resolved inputs (Vue's `external_types` / `prop_constness` /
-  `style_v_bind_vars`) ride OPAQUELY on `RuntimeCompileOptions.framework_extras`
-  (`Arc<dyn Any>`, downcast to `vue_bridge::VueRuntimeCompileExtras`) so Vue's
-  eager type-surface output type never enters the cross-framework contract.
+- `FrameworkSemanticAuthority<FrameworkEpoch>` — `eval_source` (the
+  position-preserving blank: script bytes at raw offsets, every other byte
+  whitespace-blanked, line terminators preserved; output length == input
+  length) and `template_facts` (neutral template facts wrapping
+  `RawTemplateData`), both over an ALREADY-ADMITTED parse artifact — no
+  re-parse.
+- `ProjectionBackend` — `project_ide`: the rendered TSX/JSX IDE companion.
+  The adapter's IDE codegen owns its OWN `CodeTransform` (the single
+  source of truth for generated-code edits) and returns the rendered
+  output verbatim — NO borrowed caller `CodeTransform` (a shared one
+  would be a second, coarse, non-authoritative map). An unsupported
+  `CompileTarget` bit → typed `CompileUnsupported` (invariant 4), never a
+  silent empty.
+- `RuntimeCompilerBackend<FrameworkEpoch>` — `compile_runtime` (one
+  consume-once execution grant drives one runtime compile): the
+  framework-neutral RUNTIME emit, returned as the neutral
+  `RuntimeCompileOutput` (a `RuntimeMainModule` body + neutral
+  script/template/style/custom blocks + scope id + optional IDE `tsx`
+  (when `want_ide`) + optional template facts + neutral `diagnostics`) or
+  a typed refusal (`CarrierCompileOutcome::RuntimeSurfaceRefused` — never
+  a silent empty). Vue uses `VerterCompileResult` INTERNALLY then
+  re-expresses it neutrally (`vue_result_to_runtime_bundle`); it leaves
+  `main.body_code = None` so the host assembles the `_sfc_main` module
+  from the block fields (`assemble_vue_main_module`). A carrier that
+  projects ONLY an IDE surface (Svelte today) returns a bundle with no
+  runtime surface (`has_runtime_surface() == false`) carrying just the
+  `tsx` — the host populates `CachedTsx` and emits NO `Main` virtual node.
+  The compatible `VueCarrierCompiler::compile_bundle` inherent entry keeps
+  serving the registry route with the same neutral output.
+- `FrameworkHostIntegrationBackend<FrameworkEpoch, HostEpoch>` — the
+  host-composition leg: issues the ONE `CompileAdmission` (composing
+  parse + semantic admissions over an already-admitted artifact) for
+  host-backed multi-product and runtime-render demands; consume-once, one
+  issuance drives one execution.
 
-There is NO `analyze_script_facts` method — script-fact extraction for
-EVERY framework goes through the one `ScriptFactProvider` seam; the carrier
-compiler is parse / eval / IDE / template / runtime-bundle only.
+Framework-PRIVATE resolved inputs (Vue's macro DTO / prop-constness /
+style `v-bind()` usage facts) ride TYPED on
+`RuntimeCompileOptions.vue_facts` (`Option<VueExecutionInputs>` — the
+former `framework_extras: Arc<dyn Any>` opaque downcast channel is
+retired) so Vue's eager type-surface output type never enters the
+cross-framework contract.
 
-The host's carrier PARSE dispatch is rehoused through this registry: the
-`FileLanguage::Framework` branch in `host_executor::execute_source` routes
-EVERY carrier's parse through `parse::carrier_parse_snapshot` (which looks
-the adapter's `CarrierCompiler` up in the process-wide registry — Vue via
-`VueCarrierCompiler`) — a single dispatch path, no `is_vue` branch, no dual
-Vue direct-parse path. A carrier row whose adapter has no registered
-compiler is the typed unsupported-language state. `VueCarrierCompiler`
-delegates call-for-call to `parse_sfc` + `compile_from_parsed` with ZERO
-edits to any Vue parser/codegen module, so Vue compile output stays
-byte-identical pre/post the rehousing (pinned by
+There is NO script-fact capability — script-fact extraction for EVERY
+framework goes through the one `ScriptFactProvider` seam; the carrier
+compiler surface is parse / eval / IDE / template / runtime-bundle only.
+
+The host's carrier PARSE dispatch is rehoused through the catalog: every
+carrier parse routes through the immutable frontend catalog
+(`built_in_frontend_catalog` / `registered_frontend_for`, executed under
+`project_registered_accepted` — Vue through its `vue_carrier_frontend`
+row, Svelte through `svelte/carrier_frontend.rs`) — a single dispatch
+path, no `is_vue` branch, no dual Vue direct-parse path. A carrier row
+whose adapter has no registered catalog frontend is the typed
+unsupported-language state. `VueCarrierCompiler` delegates call-for-call
+to `parse_sfc` + `compile_from_parsed` with ZERO edits to any Vue
+parser/codegen module, so Vue compile output stays byte-identical
+pre/post the rehousing (pinned by
 `rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile`
 and the unchanged `ide_virtual_output_for_fixture_sfc_is_byte_stable` hash).
 
-The host's TEMPLATE-DATA ingestion is rehoused through this registry the
+The host's TEMPLATE-DATA ingestion is rehoused through the catalog the
 SAME way as the parse dispatch: `compute_template_analysis_if_missing`
 / `build_template_analysis` gate on `parse::file_language_has_template_data_compiler`
-(does the file's carrier row have a registered compiler?) — NOT a hardcoded
-`.vue` / `is_vue()` check — and extract through `parse::compile_template_data`,
-which dispatches to the file's `CarrierCompiler::template_data(source, artifact)`.
-Vue's bridge runs the META-target `compile_from_parsed` (for `referenced_bindings`
-/ constness), byte-identical to the retired Vue-only `compile_vue_template_data`;
-Svelte's walks the typed `ParsedSvelte` template tree. One registry-dispatched
-path, no dual path/shim. The populated `RawTemplateData.components` reaches the
-public `ComponentMetaBody.components` (`ComponentUsage`) — the same surface Vue
+(does the file's carrier row have a registered semantic-authority row?) — NOT a
+hardcoded `.vue` / `is_vue()` check — and extract through
+`parse::compile_template_data`, which is ONE semantic-catalog lookup
+(`template_facts_from_catalog`, keyed adapter × artifact epoch × Semantic,
+parse-key bound — catalog miss / mismatch is typed refusal, never empty
+success). Vue's semantic-authority row runs the META-target
+`compile_from_parsed` (for `referenced_bindings` / constness),
+byte-identical to the retired Vue-only `compile_vue_template_data`;
+Svelte's walks the typed `ParsedSvelte` template tree. One
+catalog-dispatched path, no dual path/shim, no combined-compiler
+fallback. The populated `RawTemplateData.components` reaches the public
+`ComponentMetaBody.components` (`ComponentUsage`) — the same surface Vue
 already published. Pinned by `template_data_ingestion_is_registry_dispatched`
-(no `.vue` / `is_vue()` gate on the template-data path) and the public E2E
+(no `.vue` / `is_vue()` gate on the template-data path, no combined-compiler
+`template_data` route) and the public E2E
 `svelte_component_meta_carries_template_usage_facts`.
 
 The Svelte `template_data` producer (`verter_compiler/src/svelte/template_facts.rs`)
@@ -627,6 +646,6 @@ extensions); the shared content builder is
 | `mcp_routing_has_no_hardcoded_vue_gate` | no hardcoded Vue gate in the `verter_mcp` tool surface: no executable `.vue`/`"vue"` GATE (`.is_vue(`, `.vue`-suffix classifiers, `.vue`/`"vue"` equality + `matches!`, bare `"vue"` language-id classifiers, a bare `"vue" =>` / `"vue" \| … =>` MATCH-ARM carrier gate, `.vue.ts/.tsx/.jsx` literals) in the carrier-NEUTRAL analysis tools — the scanner's ingestion gate routes through `path_is_carrier` so EVERY carrier extension is ingested — so `.svelte` reaches parity; outside the function-scoped Vue-intrinsic tool allowlist (Provide/Inject, migration targets, Pinia/Vuex store analysis, Vue-lifecycle SSR) / test / comment / `is_svelte()` |
 | `session_resolution_routing_has_no_hardcoded_vue_gate` | no hardcoded Vue gate in the `verter_session` resolution/routing trees (scan covers `resolver_core/` AND `host_resolve/` — the fallthrough/child-resolution gate, the frontier route-edge gate, and the file-classification helpers are carrier-generic): same banned `.vue`/`"vue"` GATE shapes, outside the FILE allowlist — Vue-MACRO-intrinsic `direct_macro.rs` and the HARD-BOUNDARY `virtual_file_pipeline.rs` (legacy Vue public-API renderer's `.vue` component-name strip) — plus test / comment / `is_svelte()` |
 | `framework_codegen_uses_code_transform` | the carrier-compiler IDE codegen path delegates to the CodeTransform-backed pipeline and never post-hoc string-munges built output (+ negative self-test) |
-| `carrier_descriptors_have_compilers` | every carrier-bearing session descriptor has a registered `CarrierCompiler` (Vue-through-the-bridge) |
+| `carrier_descriptors_have_compilers` | every carrier-bearing session descriptor has a registered frontend in the compiler-side immutable catalog (Vue-through-the-bridge) |
 | `framework_known_bug_ledger_bijection` | 1:1 between framework known-bug ledger entries and their `#[ignore]`d characterizing tests (empty ledger ⇒ trivially green; non-empty enforcement self-tested) |
 | `rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile` | the rehoused carrier parse dispatch drives Vue `compile()` byte-identical to the compiler's direct `compile()` |
