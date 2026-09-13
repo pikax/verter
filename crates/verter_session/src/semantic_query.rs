@@ -4151,6 +4151,39 @@ impl SurfaceView {
         self.has_index_signature
     }
 
+    /// Whether this surface's key domain is CLOSED — the members it lists
+    /// are exactly the keys it has, so a key absent from that list is
+    /// absent from the surface.
+    ///
+    /// This is the sole precondition under which
+    /// [`Self::project_known_key`]'s
+    /// [`SurfaceKeyProjection::AbsentProven`] may be read as a structural
+    /// PROOF of absence rather than as "not among the members I can
+    /// name". That predicate matches against the explicit member list and
+    /// only against keys it can NAME
+    /// ([`AuthoredPropertyKey::as_known`]), so two independent things
+    /// leave the domain OPEN and make its negative verdict one-sided:
+    ///
+    /// - an INDEX SIGNATURE supplies keys that are on no member list at
+    ///   all (`{ a: string; [k: string]: string }` neither has `b` as a
+    ///   member nor lacks it);
+    /// - a member whose key is an unfolded `Computed` expression is a key
+    ///   the surface HAS but cannot name, so the demanded name may be
+    ///   exactly the one it produces (`{ [E.A]: number }` answers
+    ///   `AbsentProven` for `"alpha"`).
+    ///
+    /// Positive projection (`Exact`) needs none of this: finding a member
+    /// by name is evidence in its own right no matter what the rest of
+    /// the surface carries.
+    pub fn key_domain_is_closed(&self) -> bool {
+        self.index_signatures.is_empty()
+            && !self.has_known_index_signature()
+            && self
+                .members
+                .iter()
+                .all(|member| member.key.as_known().is_some())
+    }
+
     pub(crate) fn with_positive_members(mut self, members: Arc<[SurfaceMember]>) -> Self {
         self.members = members;
         self

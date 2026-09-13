@@ -20,6 +20,8 @@ mod dispatch_cold_build_has_one_call_site;
 // fixture helper (no statics/atomics/OnceCell), so the per-entry scopes
 // stay disjoint and share no state. The "duplicate mod" the lint reports
 // is the intended layout, not an accident — keep the allow at every site.
+#[path = "g_misc2/generic_instantiation_identity_and_bounded_work.rs"]
+mod generic_instantiation_identity_and_bounded_work;
 #[allow(clippy::duplicate_mod)]
 #[path = "component_meta_audit/harness.rs"]
 mod harness;
@@ -29,6 +31,8 @@ mod host_store_view_validates_real;
 mod is_facts_irrelevant_eligibility;
 #[path = "g_misc2/macro_surface_no_breadth_walk_audit.rs"]
 mod macro_surface_no_breadth_walk_audit;
+#[path = "g_misc2/mapped_remap_dead_key_value_forcing.rs"]
+mod mapped_remap_dead_key_value_forcing;
 #[path = "g_misc2/module_augmentation.rs"]
 mod module_augmentation;
 #[path = "g_misc2/no_carrier_verdict_db.rs"]
