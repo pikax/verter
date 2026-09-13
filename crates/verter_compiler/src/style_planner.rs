@@ -30,20 +30,53 @@ use crate::framework_common::{RuntimeOutputDescriptor, SourceMapFidelity};
 use oxc_sourcemap::{SourceMap, Token};
 
 /// Generate a Vue CSS variable name from a scope ID and authored expression.
+///
+/// The name is the identity of the custom property BOTH emitted sides agree
+/// on: the `<style>` block's `var(--NAME)` reference and the client
+/// `_useCssVars` registration (which registers it bare, because the runtime
+/// prepends `--` itself). It must therefore be spellable as a CSS custom
+/// property AND distinct per authored expression.
+///
+/// Characters a custom property cannot carry fold to `_`, which on its own
+/// is lossy: `obj.tone` and `obj+tone` would both spell `obj_tone`, the
+/// second registration would be dropped as a duplicate of the first, and
+/// every reference in the stylesheet would silently read the first
+/// expression's value. A folded expression therefore also carries a digest
+/// of its authored text, so distinct expressions keep distinct properties.
+/// An expression that needs no folding keeps the plain `scope-expression`
+/// name.
 #[must_use]
 pub fn generate_var_name(scope_id: &str, expression: &str) -> String {
     let mut out = String::with_capacity(2 + scope_id.len() + 1 + expression.len());
     out.push_str("--");
     out.push_str(scope_id);
     out.push('-');
+    let mut folded = false;
     for character in expression.chars() {
         if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
             out.push(character);
         } else {
+            folded = true;
             out.push('_');
         }
     }
+    if folded {
+        out.push('_');
+        push_expression_digest(&mut out, expression);
+    }
     out
+}
+
+/// Append a short, stable hex digest of the authored expression.
+fn push_expression_digest(out: &mut String, expression: &str) {
+    let mut hasher = Sha256::new();
+    hasher.update(expression.as_bytes());
+    let digest = hasher.finalize();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for &byte in &digest[..4] {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
 }
 
 fn css_var_reference(var_name: &str) -> String {
