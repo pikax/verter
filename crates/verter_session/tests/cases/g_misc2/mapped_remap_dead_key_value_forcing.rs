@@ -1117,11 +1117,18 @@ fn project_result(
 /// mapped build's own cancellation checks (before key enumeration,
 /// before each key's remap substitution, before each key's value force)
 /// are NOT what this test isolates. Removing all three leaves it
-/// passing, because the enclosing query dispatch already abandons the
-/// mapped build on cancellation before its key loop can run away. Those
-/// checks are defence in depth for a build reached by a path that does
-/// not; this test pins the contract the chain must keep as a whole, and
-/// fails if any link in it stops short-circuiting.
+/// passing, because THIS fixture's remap dispatches a nested query per
+/// key and that query refuses a cancelled request on its own, stopping
+/// the loop before it can run away. This test pins the contract the
+/// chain must keep as a whole, and fails if any link in it stops
+/// short-circuiting.
+///
+/// The loop's OWN checks are load-bearing, and
+/// `a_cancelled_mapped_key_loop_stops_forcing_values_on_both_rails`
+/// isolates them: over a plain `[K in keyof Src]` mapper the remap
+/// decision dispatches nothing, so with those checks removed a request
+/// cancelled at its third substitution still forces all six keys'
+/// values on both publication rails.
 ///
 /// The inline-remap fixture is deliberate: a userland-helper remap fails
 /// the FIRST key closed through the deferred-carrier arm under
@@ -1537,104 +1544,109 @@ fn a_proven_absent_key_on_a_plain_mapper_misses_without_forcing_any_value() {
     );
 }
 
-/// REGRESSION BOUNDARY (cancelled mapped SHALLOW synthesis): the
-/// publication rail that synthesises a mapped surface for a `Shallow`
-/// demand must stop forcing key values once the request is cancelled.
+/// REGRESSION BOUNDARY (cancelled mapped key loop, BOTH publication
+/// rails): once the request is cancelled, a mapped evaluation must stop
+/// forcing key values rather than run its key domain out.
 ///
-/// The `Shallow` synthesiser and the `Expanded` build are twins — the
-/// same remap-then-value loop over the same enumerated key domain — but
-/// they are separate code, and the `Expanded` cancellation
-/// discriminator cannot see this one.
+/// The `Expanded` build (`build_mapped_type`) and the `Shallow`
+/// synthesiser are twins — the same remap-then-value loop over the same
+/// enumerated key domain — but they are separate code, so both are
+/// driven here.
 ///
-/// The fixture is deliberately a PLAIN `[K in keyof Src]` mapper, not
-/// one of this file's remapping fixtures. A remap written as a
-/// conditional dispatches a nested query per key, and that nested query
-/// refuses a cancelled request on its own — so a remapping fixture stops
-/// whether or not the key loop checks anything, and proves nothing about
-/// this loop. A plain mapper decides `Keep` outright with no dispatch,
-/// so the ONLY thing that can stop the loop is the loop's own
-/// cancellation check. Measured on this candidate without those checks:
-/// cancelling at the third substitution still forced all six keys'
-/// values, exactly the uninterrupted control's count.
+/// The fixture is deliberately a PLAIN `[K in keyof Src]` mapper rather
+/// than one of this file's remapping fixtures, and that choice is what
+/// makes the test isolate the loops' OWN cancellation checks. A remap
+/// written as a conditional dispatches a nested query per key, and that
+/// nested query refuses a cancelled request on its own — so a remapping
+/// fixture stops whether or not the loop checks anything (see the scope
+/// note on `a_cancelled_mapped_build_stops_substituting_keys`, which
+/// measures the end-to-end contract on exactly such a fixture). A plain
+/// mapper decides `Keep` outright with no dispatch, leaving the loop's
+/// own checks as the only thing that can stop it.
 ///
-/// Cancelled work is return-only, so the surface this loop could
-/// assemble from a stopped request must never be handed back as a
-/// complete answer.
+/// Measured with the per-key checks removed: cancelling at the third
+/// substitution still forced all six keys' values on BOTH rails —
+/// exactly the uninterrupted control's count.
+///
+/// Cancelled work is return-only, so neither rail may hand back the
+/// surface it could assemble from a stopped request.
 #[test]
-fn a_cancelled_shallow_mapped_synthesis_stops_forcing_key_values() {
+fn a_cancelled_mapped_key_loop_stops_forcing_values_on_both_rails() {
     use std::sync::atomic::Ordering;
 
-    // Control: the same Shallow synthesis, uninterrupted — the count the
-    // cancelled run must come in strictly under.
-    let control_host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
-    upsert(&control_host, PLAIN_MAPPED_TS);
-    let control_base = carrier(&control_host, "PlainMapped", ProjectionMode::Shallow);
-    let control_before = per_k_materializations(&control_host);
-    let control_result = project_result(&control_host, control_base, ProjectionMode::Shallow);
-    let control_forced = per_k_materializations(&control_host) - control_before;
-    assert!(
-        matches!(control_result, QueryResult::Value(_)),
-        "fixture invariant: the uninterrupted Shallow synthesis must succeed, otherwise the \
-         cancelled comparison below is not a comparison against a completed loop"
-    );
-    assert_eq!(
-        control_forced, 6,
-        "fixture invariant: the uninterrupted six-key Shallow synthesis must force one value \
-         per key, otherwise per-key forcing is not observable through this counter. Observed \
-         {control_forced}."
-    );
-
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
-    upsert(&host, PLAIN_MAPPED_TS);
-    let base = carrier(&host, "PlainMapped", ProjectionMode::Shallow);
-
-    let ctx = verter_session::request_context::RequestContext::new(
-        1,
-        Arc::from("/source.ts"),
-        false,
-        None,
-    );
-    let observer = Arc::new(CancelOnFirstSubstitution {
-        seen: std::sync::atomic::AtomicU64::new(0),
-        ctx: Arc::clone(&ctx),
-    });
-    let before = per_k_materializations(&host);
-    let result = {
-        let _request =
-            verter_session::request_context::RequestContextGuard::install(Arc::clone(&ctx));
-        // Installed AFTER the request guard so this observer, not the
-        // request context's own, owns the substrate slot.
-        let _obs = verter_audit::observer::install_observer(
-            Arc::clone(&observer) as Arc<dyn verter_audit::AuditObserver>
+    for mode in [ProjectionMode::Shallow, ProjectionMode::Expanded] {
+        // Control: the same evaluation, uninterrupted — the count the
+        // cancelled run must come in strictly under.
+        let control_host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        upsert(&control_host, PLAIN_MAPPED_TS);
+        let control_base = carrier(&control_host, "PlainMapped", mode);
+        let control_before = per_k_materializations(&control_host);
+        let control_result = project_result(&control_host, control_base, mode);
+        let control_forced = per_k_materializations(&control_host) - control_before;
+        assert!(
+            matches!(control_result, QueryResult::Value(_)),
+            "{mode:?}: fixture invariant — the uninterrupted evaluation must succeed, otherwise \
+             the cancelled comparison below is not a comparison against a completed loop"
         );
-        project_result(&host, base, ProjectionMode::Shallow)
-    };
-    let forced = per_k_materializations(&host) - before;
-    let seen = observer.seen.load(Ordering::SeqCst);
+        assert_eq!(
+            control_forced, 6,
+            "{mode:?}: fixture invariant — the uninterrupted six-key evaluation must force one \
+             value per key, otherwise per-key forcing is not observable through this counter. \
+             Observed {control_forced}."
+        );
 
-    assert!(
-        ctx.is_cancelled(),
-        "fixture invariant: the observer must actually have cancelled the request, otherwise \
-         this test measures an ordinary synthesis"
-    );
-    assert!(
-        forced < control_forced,
-        "a Shallow mapped synthesis cancelled partway through its key domain must force \
-         strictly fewer key values than the uninterrupted run: observed {forced} against a \
-         control of {control_forced}. Equal counts mean the key loop ran to the end of the \
-         domain after the request was told to stop."
-    );
-    assert!(
-        forced <= 3,
-        "cancellation is checked before key enumeration, before each key's remap substitution \
-         and before each key's value force, so a request cancelled at its third substitution \
-         must stop within one key of it. Observed {forced} value forcings after {seen} \
-         substitutions (control {control_forced})."
-    );
-    assert!(
-        !matches!(result, QueryResult::Value(_)),
-        "a cancelled Shallow mapped synthesis is return-only: the partial member set it \
-         assembled is not a complete surface and must never be handed back as one. Got \
-         {result:?}"
-    );
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        upsert(&host, PLAIN_MAPPED_TS);
+        let base = carrier(&host, "PlainMapped", mode);
+
+        let ctx = verter_session::request_context::RequestContext::new(
+            1,
+            Arc::from("/source.ts"),
+            false,
+            None,
+        );
+        let observer = Arc::new(CancelOnFirstSubstitution {
+            seen: std::sync::atomic::AtomicU64::new(0),
+            ctx: Arc::clone(&ctx),
+        });
+        let before = per_k_materializations(&host);
+        let result = {
+            let _request =
+                verter_session::request_context::RequestContextGuard::install(Arc::clone(&ctx));
+            // Installed AFTER the request guard so this observer, not the
+            // request context's own, owns the substrate slot.
+            let _obs = verter_audit::observer::install_observer(
+                Arc::clone(&observer) as Arc<dyn verter_audit::AuditObserver>
+            );
+            project_result(&host, base, mode)
+        };
+        let forced = per_k_materializations(&host) - before;
+        let seen = observer.seen.load(Ordering::SeqCst);
+
+        assert!(
+            ctx.is_cancelled(),
+            "{mode:?}: fixture invariant — the observer must actually have cancelled the \
+             request, otherwise this measures an ordinary evaluation"
+        );
+        assert!(
+            forced < control_forced,
+            "{mode:?}: a mapped evaluation cancelled partway through its key domain must force \
+             strictly fewer key values than the uninterrupted run: observed {forced} against a \
+             control of {control_forced}. Equal counts mean the key loop ran to the end of the \
+             domain after the request was told to stop."
+        );
+        assert!(
+            forced <= 3,
+            "{mode:?}: cancellation is checked before key enumeration, before each key's remap \
+             substitution and before each key's value force, so a request cancelled at its \
+             third substitution must stop within one key of it. Observed {forced} value \
+             forcings after {seen} substitutions (control {control_forced})."
+        );
+        assert!(
+            !matches!(result, QueryResult::Value(_)),
+            "{mode:?}: a cancelled mapped evaluation is return-only — the partial member set it \
+             assembled is not a complete surface and must never be handed back as one. Got \
+             {result:?}"
+        );
+    }
 }
