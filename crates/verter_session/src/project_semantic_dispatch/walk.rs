@@ -2454,6 +2454,20 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 }
                             };
                             // Tier 1: source surface is an enumerable Object.
+                            //
+                            // This tier reads the SOURCE's member list, so it is
+                            // sound only where the source's member names really
+                            // ARE the mapper's iteration keys — the homomorphic
+                            // `[K in keyof Src]` shape. A mapper whose key space
+                            // is INDEPENDENT of the source iterates its own key
+                            // set and produces a surface that is neither a subset
+                            // nor a superset of the source's members, so source
+                            // membership is evidence about the mapped surface in
+                            // NEITHER direction. Both verdicts below are therefore
+                            // gated on it; a non-homomorphic mapper falls through
+                            // to the key-space tiers, which consult the key space
+                            // itself.
+                            //
                             // Public-keyspace admission: `M[K]` mapped narrowing over
                             // a class admits only PUBLIC member names (a mapped type
                             // iterates `keyof`, which excludes protected/private).
@@ -2462,20 +2476,29 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             if let Some(SemanticNodeData::Object(view)) =
                                 self.graph().node_data(*source).as_deref()
                             {
+                                let homomorphic_over_source = matches!(
+                                    self.graph().node_data(mapper.key_space).as_deref(),
+                                    Some(SemanticNodeData::KeyOf { base }) if *base == *source
+                                );
                                 match view.project_known_key(&needle_key) {
                                     crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
-                                        // A NON-public member is refused, but its
-                                        // refusal is not a structural proof that
-                                        // the mapped surface lacks the name — the
-                                        // member exists, it is only excluded from
-                                        // `keyof`. Stay `Undecided` so the coarse
-                                        // path keeps owning that answer exactly as
-                                        // it does today.
-                                        return if member.visibility.is_public() {
-                                            MappedKeyAdmission::Admitted
-                                        } else {
-                                            MappedKeyAdmission::Undecided
-                                        };
+                                        // Admit only a PUBLIC member of a source the
+                                        // key space actually iterates. A non-public
+                                        // member is refused, but its refusal is not a
+                                        // structural proof that the mapped surface
+                                        // lacks the name — the member exists, it is
+                                        // only excluded from `keyof`. Likewise a
+                                        // member of a source the key space does not
+                                        // iterate says nothing either way. Both stay
+                                        // `Undecided`, so the coarse path keeps
+                                        // owning those answers exactly as it does
+                                        // today — admitting one would narrow to a
+                                        // member value the mapped type may not have.
+                                        if homomorphic_over_source && member.visibility.is_public()
+                                        {
+                                            return MappedKeyAdmission::Admitted;
+                                        }
+                                        return MappedKeyAdmission::Undecided;
                                     }
                                     crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
                                         // Absent from the SOURCE surface. That
@@ -2484,8 +2507,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                         //
                                         // First, the key domain must be derived
                                         // from the source — the homomorphic
-                                        // `[K in keyof Src]` shape. An
-                                        // independent key space (`[K in 1e21]`
+                                        // `[K in keyof Src]` shape checked above.
+                                        // An independent key space (`[K in 1e21]`
                                         // over an unrelated source) produces keys
                                         // the source never had, so a source miss
                                         // says nothing about it.
@@ -2507,10 +2530,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                         //
                                         // Either way it stays `Undecided` and the
                                         // coarse path owns the answer.
-                                        let homomorphic_over_source = matches!(
-                                            self.graph().node_data(mapper.key_space).as_deref(),
-                                            Some(SemanticNodeData::KeyOf { base }) if *base == *source
-                                        );
                                         let source_domain_is_closed = view
                                             .index_signatures
                                             .is_empty()
