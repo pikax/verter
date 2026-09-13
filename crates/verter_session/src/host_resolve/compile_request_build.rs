@@ -240,12 +240,22 @@ pub(crate) fn execute_bound_host_products(
                 .unwrap_or(
                     crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::RuntimeBindingNames,
                 );
-            let inputs = prepare_vue_execution_inputs(
+            let mut inputs = prepare_vue_execution_inputs(
                 host,
                 snapshot,
                 macro_demand,
                 SharedDependencyAxis::Restate,
             )?;
+            inputs.vue_main.hmr = match profile.hmr_strategy {
+                HmrStrategy::None => verter_compiler::compile_request::RuntimeHmrStrategy::None,
+                HmrStrategy::Vite => verter_compiler::compile_request::RuntimeHmrStrategy::Vite,
+                HmrStrategy::Webpack => {
+                    verter_compiler::compile_request::RuntimeHmrStrategy::Webpack
+                }
+            };
+            inputs.vue_main.is_production = profile.is_production;
+            inputs.vue_main.emit_ssr_module_registration = profile.emit_ssr_module_registration;
+            inputs.vue_main.ssr_module_id = profile.ssr_module_id.clone();
             let demand = vue_host_products_demand(
                 profile,
                 &snapshot.canonical_id,
@@ -405,10 +415,21 @@ fn prepare_vue_execution_inputs(
         runtime_inline_template_chunk: false,
         prepared_styles: snapshot.prepared_styles.clone(),
     };
+    let (style_specifiers, custom_specifiers) = crate::compile::vue_main_host_identifiers(
+        &snapshot.canonical_id,
+        snapshot.meta.style_langs.len(),
+        snapshot.meta.custom_types.len(),
+        &snapshot.meta,
+    );
     Ok(VueHostExecutionInputs {
         block_content: snapshot.block_content_inputs.clone(),
         vue_facts: Some(vue_facts),
         prepared_styles: snapshot.prepared_styles.clone(),
+        vue_main: verter_compiler::assembly::VueMainDecoration {
+            style_specifiers,
+            custom_specifiers,
+            ..verter_compiler::assembly::VueMainDecoration::default()
+        },
     })
 }
 
@@ -1304,6 +1325,9 @@ pub(crate) fn compile_unsupported_code(
         verter_compiler::framework_common::CompileUnsupported::ProductExecutionUngranted {
             ..
         } => "HOST_COMPILE_PRODUCT_EXECUTION_UNGRANTED",
+        verter_compiler::framework_common::CompileUnsupported::VueMainAssemblyFailed(_) => {
+            "HOST_MAIN_MODULE_ASSEMBLY_FAILED"
+        }
     }
 }
 

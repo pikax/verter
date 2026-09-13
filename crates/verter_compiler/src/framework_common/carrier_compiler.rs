@@ -344,6 +344,9 @@ pub enum CompileUnsupported {
         /// The demanded product whose execution grant was absent or wrong.
         product: crate::compile_request::ProductKind,
     },
+    /// Vue main-module assembly refused after the runtime blocks were
+    /// produced. No partial main body is published.
+    VueMainAssemblyFailed(String),
 }
 
 /// The registry-dispatched routes' grant mint: the
@@ -487,6 +490,9 @@ pub struct RuntimeCompileOptions {
     /// Host-retained parsed style IRs, one slot per style block in inventory
     /// order. Excluded from request/cache identity.
     pub prepared_styles: Vec<Option<crate::style_planner::PreparedStyleIr>>,
+    /// Host-owned identifiers and request axes for Vue main-module assembly.
+    /// Topology is compiler-owned; empty identifiers skip host virtual imports.
+    pub vue_main: crate::assembly::VueMainDecoration,
 }
 
 impl Default for RuntimeCompileOptions {
@@ -533,6 +539,7 @@ impl Default for RuntimeCompileOptions {
             inline: None,
             vue_facts: None,
             prepared_styles: Vec::new(),
+            vue_main: crate::assembly::VueMainDecoration::default(),
         }
     }
 }
@@ -636,21 +643,24 @@ pub struct RuntimeDiagnostic {
 
 /// The framework-OWNED ESM body the carrier emits for the runtime module.
 ///
-/// Vue's carrier currently produces NO standalone body here — the Vue
-/// `_sfc_main` shape is assembled host-side from the neutral block fields
-/// (host virtual-file concern: style/custom virtual imports + HMR), so Vue
-/// leaves `body_code` `None` and the host assembles. A framework whose
-/// runtime module is a single self-contained ESM (e.g. Svelte's official-shaped
-/// runtime output) returns `Some` here and the host emits it verbatim.
+/// Vue's runtime compiler now emits the assembled `_sfc_main` body here
+/// together with its CCA2A artifact set. A framework whose runtime module
+/// is a single self-contained ESM (e.g. Svelte's official-shaped runtime
+/// output) also returns `Some` here. `None` means there is no runtime
+/// surface to publish — the host must not reconstruct Vue topology from
+/// block fields.
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeMainModule {
     /// The framework-owned ESM body, when the carrier emits one directly.
-    /// `None` ⇒ the host assembles the main module from the block fields.
+    /// `None` ⇒ no runtime main to publish.
     pub body_code: Option<String>,
     /// Source map for `body_code` (empty when none / disabled).
     pub source_map: String,
     /// The language id of the produced body (`"js"` / `"ts"`), when known.
     pub lang: Option<String>,
+    /// CCA2A schema for the assembled Vue main, when this body was produced
+    /// by Vue main-module assembly. Svelte leaves this `None`.
+    pub artifacts: Option<crate::assembly::CompileArtifactSet>,
 }
 
 /// A framework-neutral compiled `<script>` block.
@@ -761,8 +771,8 @@ pub struct RuntimeCustomBlock {
 #[derive(Debug, Default)]
 pub struct RuntimeCompileOutput {
     /// The framework-owned main module (body / map / lang). `body_code`
-    /// `None` ⇒ the host assembles from the block fields (Vue) OR there is
-    /// no runtime surface (Svelte).
+    /// `None` ⇒ there is no runtime surface to publish. Vue emits an
+    /// assembled body; the host must not reconstruct topology from blocks.
     pub main: RuntimeMainModule,
     /// The compiled `<script>` block, when present.
     pub script: Option<RuntimeScriptBlock>,

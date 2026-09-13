@@ -54,8 +54,8 @@ pub use source_unit::{
     ArtifactSourceUnit, ContentId, SourceId, SourceRevision, SourceUnit, SourceUnitId,
 };
 pub use vue_module::{
-    compose_main_module, ExtraFragment, SfcRewriteRefusal, VueMainAssemblyFailure,
-    VueMainCompositionFailure, VueMainModuleRequest,
+    compose_main_module, vue_main_compile_artifacts, ExtraFragment, SfcRewriteRefusal,
+    VueMainAssemblyFailure, VueMainCompositionFailure, VueMainDecoration, VueMainModuleRequest,
 };
 
 #[cfg(test)]

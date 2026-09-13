@@ -275,6 +275,9 @@ pub struct VueHostExecutionInputs {
     pub vue_facts: Option<crate::compile::types::VueExecutionInputs>,
     /// Host-retained parsed style IRs in inventory order.
     pub prepared_styles: Vec<Option<crate::style_planner::PreparedStyleIr>>,
+    /// Host-owned Vue main identifiers and assembly axes. The compiler
+    /// owns topology; this carries only identifiers and request knobs.
+    pub vue_main: crate::assembly::VueMainDecoration,
 }
 
 /// Typed execution refusal. All-or-none: a refusal publishes no product.
@@ -784,6 +787,17 @@ fn derive_admitted_runtime_options(
         block_content: inputs.block_content.clone(),
         vue_facts: inputs.vue_facts.clone(),
         prepared_styles,
+        vue_main: {
+            let mut decoration = inputs.vue_main.clone();
+            decoration.is_production = request.is_production();
+            if request.hmr_strategy() != crate::compile_request::RuntimeHmrStrategy::None {
+                decoration.hmr = request.hmr_strategy();
+            }
+            if let Some(id) = request.ssr_module_id() {
+                decoration.ssr_module_id = Some(id.to_string());
+            }
+            decoration
+        },
         ..RuntimeCompileOptions::default()
     }
 }

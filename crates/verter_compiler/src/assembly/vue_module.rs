@@ -1,14 +1,12 @@
-//! Framework-neutral half of Vue main-module composition, shared by every
-//! caller that assembles a Vue `_sfc_main` runtime module from a
-//! [`RuntimeCompileOutput`] — `verter_session`'s host-decorated
-//! `assemble_vue_main_module` (style/custom-block virtual imports, HMR,
-//! `__file`, SSR-manifest wiring) and the borrowed one-shot
-//! [`super::super::standalone::StandaloneCompiler`] direct core alike. Host
-//! decoration rides in as [`ExtraFragment`] prelude/trailer content; this
-//! module owns everything else: the `__sfc__` → `_sfc_main` rewrite, script/
-//! template/style-import fragment minting, sequencing, and the final
-//! [`super::publish`] atomicity boundary. Never duplicated — a caller with no
-//! host decoration (the direct core) passes empty extra-fragment sets.
+//! Vue main-module composition owned by the Vue runtime compiler.
+//!
+//! One Vue request has one assembly authority: this module. It owns script/
+//! template contribution order, host-identifier topology (style/custom
+//! virtual imports, HMR, `__file`, SSR-manifest wiring), declared
+//! imports/exports, dialect, qualified maps, and CCA2A
+//! [`super::publish::CompileArtifactSet`] emission. Callers supply only
+//! host-owned identifiers through [`VueMainDecoration`]; they do not infer
+//! framework module topology or reconstruct it from block fields.
 
 use std::ops::Range;
 
@@ -16,17 +14,24 @@ use oxc_sourcemap::SourceMap;
 
 use super::compose::{assemble_sequence, ComposeRefusal};
 use super::fragment::{
+    ArtifactContent, ArtifactProvenance, ArtifactRelation, ArtifactRelationKind, CompileArtifact,
     DeclaredImport, DeclaredImportKind, Fragment, FragmentDialect, FragmentRefusal,
     FrameworkDomain, PlacementSlot, SfcExportPlacement, SyntacticContract, ValidatedFragment,
 };
 use super::plan::{PlannedArtifact, ProductPlan};
-use super::publish::{publish, ArtifactContribution, ArtifactSet, AssemblyRefusal};
-use super::source_space::SourceSpaceKind;
-use super::source_unit::source_unit_id;
+use super::publish::{
+    publish, ArtifactContribution, ArtifactSet, AssemblyRefusal, CompileArtifactSet,
+};
+use super::source_space::{ArtifactMapFamily, QualifiedArtifactMap, SourceSpaceKind};
+use super::source_unit::{
+    source_unit_id, ArtifactSourceUnit, ContentId, SourceId, SourceRevision, SourceUnit,
+};
 use crate::code_transform::CodeTransform;
 use crate::compile::format_import_specifier;
-use crate::compile_request::ProductKind;
+use crate::compile_request::{ProductKind, RuntimeHmrStrategy};
 use crate::framework_common::{RuntimeCompileOutput, TemplateRenderExport};
+use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
+use verter_identity::identity::{InputBasisId, ResultContractId};
 
 /// Every `binding_ranges` entry's own bytes must equal this literal — the
 /// identifier every runtime-emission site writes before host assembly
@@ -179,11 +184,10 @@ pub(crate) fn rewrite_script(
     Ok((rewritten, chained))
 }
 
-/// One host- or caller-owned decoration piece contributed to the composed
+/// One compiler-owned decoration piece contributed to the composed
 /// module's prelude (ahead of the script) or trailer (before the terminal
-/// `export default`) — style/custom-block virtual imports, HMR, `__file`,
-/// SSR-manifest wiring for `verter_session`'s host composer; empty for the
-/// direct one-shot core (no host state exists for a one-shot compile).
+/// `export default`). Built only from [`VueMainDecoration`]; callers never
+/// mint these to reconstruct topology.
 #[derive(Debug, Clone, Default)]
 pub struct ExtraFragment {
     pub role: &'static str,
@@ -191,10 +195,150 @@ pub struct ExtraFragment {
     pub imports: Vec<DeclaredImport>,
 }
 
-/// Everything [`compose_main_module`] needs beyond a caller's own
-/// decoration: the compiled blocks, the resolved dialect/product kind/
-/// runtime specifier, whether a map was requested, and every ALREADY-
-/// DECODED contributing map. Never raw source or a
+/// Host-owned identifiers and request axes the Vue assembler consumes.
+/// Topology (when to emit style/custom imports, HMR, `__file`, SSR
+/// registration, and in what order) is compiler-owned; this struct carries
+/// only the identifiers and knobs the host is allowed to supply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VueMainDecoration {
+    /// Dev-server tooling flavour gating `__file` and hot-accept.
+    pub hmr: RuntimeHmrStrategy,
+    /// Production build: no `__file`, no HMR acceptance.
+    pub is_production: bool,
+    /// Emit the Vite SSR-manifest module registration on an SSR assembly.
+    /// Defaults true — official `transformMain` emits it on every SSR
+    /// compile.
+    pub emit_ssr_module_registration: bool,
+    /// Manifest key form the SSR registration records; `canonical_id` is
+    /// the fallback.
+    pub ssr_module_id: Option<String>,
+    /// Host-rendered style virtual-file specifiers, in inventory order.
+    pub style_specifiers: Vec<String>,
+    /// Host-rendered custom-block virtual-file specifiers, in inventory
+    /// order.
+    pub custom_specifiers: Vec<String>,
+}
+
+impl Default for VueMainDecoration {
+    fn default() -> Self {
+        Self {
+            hmr: RuntimeHmrStrategy::None,
+            is_production: false,
+            emit_ssr_module_registration: true,
+            ssr_module_id: None,
+            style_specifiers: Vec::new(),
+            custom_specifiers: Vec::new(),
+        }
+    }
+}
+
+impl VueMainDecoration {
+    fn prelude(&self, compiled: &RuntimeCompileOutput) -> ExtraFragment {
+        use std::fmt::Write;
+        let mut prelude = String::new();
+        let mut imports: Vec<DeclaredImport> = Vec::new();
+        for id in self.style_specifiers.iter().take(compiled.styles.len()) {
+            let _ = writeln!(prelude, "import \"{id}\"");
+            imports.push(DeclaredImport {
+                specifier: id.clone(),
+                kind: DeclaredImportKind::SideEffect,
+            });
+        }
+        for (idx, id) in self
+            .custom_specifiers
+            .iter()
+            .take(compiled.custom_blocks.len())
+            .enumerate()
+        {
+            let block_name = format!("block{idx}");
+            let _ = writeln!(prelude, "import {block_name} from \"{id}\"");
+            imports.push(DeclaredImport {
+                specifier: id.clone(),
+                kind: DeclaredImportKind::Default(block_name),
+            });
+        }
+        if !prelude.is_empty() {
+            prelude.push('\n');
+        }
+        ExtraFragment {
+            role: "prelude",
+            code: prelude,
+            imports,
+        }
+    }
+
+    fn trailer(
+        &self,
+        compiled: &RuntimeCompileOutput,
+        canonical_id: &str,
+        runtime: &str,
+        ssr: bool,
+    ) -> ExtraFragment {
+        use std::fmt::Write;
+        let mut trailer = String::new();
+        let custom_count = self
+            .custom_specifiers
+            .len()
+            .min(compiled.custom_blocks.len());
+        for idx in 0..custom_count {
+            let _ = writeln!(
+                trailer,
+                "if (typeof block{idx} === 'function') block{idx}(_sfc_main)"
+            );
+        }
+
+        if !self.is_production && self.hmr != RuntimeHmrStrategy::None {
+            let _ = writeln!(trailer, "_sfc_main.__file = {:?}", canonical_id);
+        }
+
+        if !self.is_production && !ssr {
+            match self.hmr {
+                RuntimeHmrStrategy::Vite => {
+                    trailer.push_str("/* HMR(vite) */\n");
+                    trailer.push_str("if (import.meta.hot) { import.meta.hot.accept(() => {}) }\n");
+                }
+                RuntimeHmrStrategy::Webpack => {
+                    trailer.push_str("/* HMR(webpack) */\n");
+                    trailer.push_str("if (module.hot) { module.hot.accept(() => {}) }\n");
+                }
+                RuntimeHmrStrategy::None => {}
+            }
+        }
+
+        let mut imports: Vec<DeclaredImport> = Vec::new();
+        if ssr && self.emit_ssr_module_registration {
+            let _ = writeln!(
+                trailer,
+                "import {{ useSSRContext as __vite_useSSRContext }} from \"{runtime}\""
+            );
+            imports.push(DeclaredImport {
+                specifier: runtime.to_string(),
+                kind: DeclaredImportKind::Named(vec!["__vite_useSSRContext".to_string()]),
+            });
+            trailer.push_str("const _sfc_setup = _sfc_main.setup\n");
+            trailer.push_str("_sfc_main.setup = (props, ctx) => {\n");
+            trailer.push_str("  const ssrContext = __vite_useSSRContext()\n");
+            let registered_id = self.ssr_module_id.as_deref().unwrap_or(canonical_id);
+            let _ = writeln!(
+                trailer,
+                "  ;(ssrContext.modules || (ssrContext.modules = new Set())).add({:?})",
+                registered_id
+            );
+            trailer.push_str("  return _sfc_setup ? _sfc_setup(props, ctx) : undefined\n");
+            trailer.push_str("}\n");
+        }
+        ExtraFragment {
+            role: "trailer",
+            code: trailer,
+            imports,
+        }
+    }
+}
+
+/// Everything [`compose_main_module`] needs: the compiled blocks, the
+/// resolved dialect/product kind/runtime specifier, whether a map was
+/// requested, every ALREADY-DECODED contributing map, and host-owned
+/// identifiers. Never raw source or a
 /// [`crate::compile_request::CompileRequest`] — a caller builds this from
 /// its own already-produced [`RuntimeCompileOutput`] plus its own validated
 /// maps.
@@ -217,12 +361,8 @@ pub struct VueMainModuleRequest<'a> {
     /// passed through verbatim when the caller's own template map is
     /// already canonical, as for a same-crate direct compile).
     pub template_map_json: Option<String>,
-    /// Extra fragments placed in the module prelude, ahead of the script.
-    pub prelude_extra: Vec<ExtraFragment>,
-    /// Extra raw text appended to the trailer, before the terminal
-    /// `export default` statement. Declared imports these lines need ride
-    /// along per fragment.
-    pub trailer_extra: Vec<ExtraFragment>,
+    /// Host-owned identifiers and request axes. Topology is compiler-owned.
+    pub decoration: VueMainDecoration,
 }
 
 /// Every way [`compose_fragments`] can fail to compose a Main module's
@@ -403,9 +543,11 @@ pub(crate) fn compose_fragments(
         source_root,
         script_map,
         template_map_json,
-        prelude_extra,
-        trailer_extra,
+        decoration,
     } = request;
+    let ssr = planned_kind == ProductKind::RuntimeServer;
+    let prelude_extra = vec![decoration.prelude(compiled)];
+    let trailer_extra = vec![decoration.trailer(compiled, canonical_id, runtime, ssr)];
 
     let rewritten_script = compiled
         .script
@@ -634,8 +776,7 @@ pub(crate) fn compose_fragments(
 
 /// Compose AND publish a Main module in one call — the single-artifact
 /// convenience for a caller that only ever publishes the one artifact it
-/// composes (`verter_session`'s host-decorated `assemble_vue_main_module`).
-/// A caller publishing this artifact atomically alongside sibling
+/// composes. A caller publishing this artifact atomically alongside sibling
 /// contributions from the same request (the direct one-shot core) uses
 /// [`compose_fragments`] directly instead, so it can call [`publish`]
 /// exactly once over the FULL contribution set.
@@ -669,6 +810,143 @@ pub fn compose_main_module(
         runtime_source_map: want_maps.then_some(composed.source_map),
     };
     Ok(publish(&plan, vec![contribution])?)
+}
+
+struct VueAssemblyTag<'a>(&'a str);
+impl CanonicalEncode for VueAssemblyTag<'_> {
+    const DOMAIN_TAG: &'static str = "verter.compiler.vue.main.assembly.v1";
+    fn encode_fields(&self, e: &mut CanonicalEncoder) {
+        e.field_str(1, self.0);
+    }
+}
+
+/// CCA2A schema for one assembled Vue main artifact and its contributing
+/// script/template units. Relations are typed; maps are qualified by
+/// family. Construction performs no compile work.
+pub fn vue_main_compile_artifacts(
+    canonical_id: &str,
+    compiled: &RuntimeCompileOutput,
+    kind: ProductKind,
+    dialect: FragmentDialect,
+    code: &str,
+    runtime_source_map: Option<&str>,
+) -> Result<CompileArtifactSet, super::publish::ArtifactSchemaError> {
+    use std::collections::BTreeSet;
+
+    let source_id = SourceId::from_canonical(&VueAssemblyTag(canonical_id));
+    let revision = SourceRevision::from_canonical(&VueAssemblyTag("assembled"));
+    let mut source_units = Vec::new();
+    let mut inputs = BTreeSet::new();
+
+    let mut push_unit = |role: &str, bytes: &[u8]| {
+        let unit = SourceUnit::mint(
+            source_id.clone(),
+            revision.clone(),
+            role,
+            ContentId::from_content_bytes(bytes),
+        );
+        inputs.insert(unit.id().clone());
+        source_units.push(ArtifactSourceUnit {
+            source_span: verter_span::Span::new(0, bytes.len() as u32),
+            unit,
+        });
+    };
+    push_unit("main", canonical_id.as_bytes());
+    if let Some(script) = &compiled.script {
+        push_unit("script", script.code.as_bytes());
+    }
+    if let Some(template) = &compiled.template {
+        push_unit("template", template.code.as_bytes());
+    }
+
+    let producer = ResultContractId::from_canonical(&VueAssemblyTag("vue-runtime-main"));
+    let input_basis = InputBasisId::from_canonical(&VueAssemblyTag(canonical_id));
+    let mut artifacts = Vec::new();
+    let mut main = CompileArtifact::new(
+        source_units[0].unit.id().clone(),
+        kind,
+        dialect.schema_language(),
+        "main",
+        ArtifactProvenance {
+            input_basis: input_basis.clone(),
+            producer,
+            inputs: inputs.clone(),
+        },
+        ArtifactContent::Available(code.to_string()),
+    );
+    if compiled.script.is_some() {
+        let script_unit = source_units
+            .iter()
+            .find(|u| u.unit.logical_role() == "script")
+            .expect("script unit was pushed");
+        let script = CompileArtifact::new(
+            script_unit.unit.id().clone(),
+            kind,
+            dialect.schema_language(),
+            "script",
+            ArtifactProvenance {
+                input_basis: input_basis.clone(),
+                producer: ResultContractId::from_canonical(&VueAssemblyTag("vue-runtime-script")),
+                inputs: BTreeSet::from([script_unit.unit.id().clone()]),
+            },
+            ArtifactContent::Available(
+                compiled
+                    .script
+                    .as_ref()
+                    .map(|s| s.code.clone())
+                    .unwrap_or_default(),
+            ),
+        );
+        main.relations.insert(ArtifactRelation {
+            kind: ArtifactRelationKind::DependsOn,
+            target: script.id().clone(),
+        });
+        artifacts.push(script);
+    }
+    if compiled.template.is_some() {
+        let template_unit = source_units
+            .iter()
+            .find(|u| u.unit.logical_role() == "template")
+            .expect("template unit was pushed");
+        let template = CompileArtifact::new(
+            template_unit.unit.id().clone(),
+            kind,
+            dialect.schema_language(),
+            "template",
+            ArtifactProvenance {
+                input_basis: input_basis.clone(),
+                producer: ResultContractId::from_canonical(&VueAssemblyTag("vue-runtime-template")),
+                inputs: BTreeSet::from([template_unit.unit.id().clone()]),
+            },
+            ArtifactContent::Available(
+                compiled
+                    .template
+                    .as_ref()
+                    .map(|t| t.code.clone())
+                    .unwrap_or_default(),
+            ),
+        );
+        main.relations.insert(ArtifactRelation {
+            kind: ArtifactRelationKind::DependsOn,
+            target: template.id().clone(),
+        });
+        artifacts.push(template);
+    }
+    if runtime_source_map.is_some() {
+        let sources: BTreeSet<_> = inputs.clone();
+        if !sources.is_empty() {
+            main.maps.push(QualifiedArtifactMap {
+                family: ArtifactMapFamily::RuntimeSourceMap,
+                generated: main.id().clone(),
+                generated_content: ContentId::from_content_bytes(code.as_bytes()),
+                input_basis,
+                sources,
+                segments: Vec::new(),
+            });
+        }
+    }
+    artifacts.insert(0, main);
+    CompileArtifactSet::new(source_units, artifacts)
 }
 
 #[cfg(test)]
@@ -906,5 +1184,132 @@ mod tests {
             "the rewritten script has two lines, so no chained segment may remain on \
              line 2 — one that does means the removal never reached the map."
         );
+    }
+
+    fn assembled(
+        compiled: &RuntimeCompileOutput,
+        decoration: VueMainDecoration,
+        kind: ProductKind,
+    ) -> String {
+        let set = compose_main_module(VueMainModuleRequest {
+            canonical_id: "Comp.vue",
+            compiled,
+            dialect: FragmentDialect::JavaScript,
+            planned_kind: kind,
+            runtime: "vue",
+            want_maps: false,
+            source_root: None,
+            script_map: None,
+            template_map_json: None,
+            decoration,
+        })
+        .expect("assembly with maps disabled cannot fail");
+        set.artifact(kind)
+            .expect("publish returns the planned artifact")
+            .code()
+            .to_string()
+    }
+
+    fn empty_bundle() -> RuntimeCompileOutput {
+        RuntimeCompileOutput::default()
+    }
+
+    /// Host identifiers drive style/custom imports; the compiler owns the
+    /// import shape. Empty identifiers emit no host topology.
+    #[test]
+    fn decoration_emits_host_identifiers_and_skips_them_when_absent() {
+        use crate::framework_common::{
+            RuntimeCustomBlock, RuntimeOutputDescriptor, RuntimeStyleBlock, SourceMapFidelity,
+        };
+        let style = RuntimeStyleBlock {
+            code: ".x{}".to_string(),
+            source_map: None,
+            lang: Some("css".to_string()),
+            scope_hash: None,
+            has_global: false,
+            output_descriptor: RuntimeOutputDescriptor::generated(
+                ".x{}",
+                None,
+                &[("test:space", "test:artifact")],
+                SourceMapFidelity::Approximate,
+            ),
+        };
+        let compiled = RuntimeCompileOutput {
+            styles: vec![style],
+            custom_blocks: vec![RuntimeCustomBlock {
+                block_type: "i18n".to_string(),
+                content: "{}".to_string(),
+            }],
+            ..empty_bundle()
+        };
+        let bare = assembled(
+            &compiled,
+            VueMainDecoration::default(),
+            ProductKind::RuntimeClient,
+        );
+        assert!(
+            !bare.contains("import \""),
+            "empty host identifiers must not invent style/custom imports:\n{bare}"
+        );
+        let decorated = assembled(
+            &compiled,
+            VueMainDecoration {
+                style_specifiers: vec!["Comp.vue?vue&type=style&index=0&lang.css".to_string()],
+                custom_specifiers: vec!["Comp.vue?vue&type=i18n&index=0".to_string()],
+                ..VueMainDecoration::default()
+            },
+            ProductKind::RuntimeClient,
+        );
+        assert!(
+            decorated.contains("import \"Comp.vue?vue&type=style&index=0&lang.css\""),
+            "style specifier must appear as a side-effect import:\n{decorated}"
+        );
+        assert!(
+            decorated.contains("import block0 from \"Comp.vue?vue&type=i18n&index=0\""),
+            "custom specifier must appear as a default import:\n{decorated}"
+        );
+        assert!(
+            decorated.contains("if (typeof block0 === 'function') block0(_sfc_main)"),
+            "custom invocation is compiler-owned topology:\n{decorated}"
+        );
+    }
+
+    /// HMR / `__file` / SSR registration are compiler-owned, driven by
+    /// decoration axes — never reconstructed by scanning assembled bytes.
+    #[test]
+    fn decoration_owns_hmr_file_and_ssr_registration() {
+        let compiled = empty_bundle();
+        let vite = assembled(
+            &compiled,
+            VueMainDecoration {
+                hmr: RuntimeHmrStrategy::Vite,
+                ..VueMainDecoration::default()
+            },
+            ProductKind::RuntimeClient,
+        );
+        assert!(vite.contains("_sfc_main.__file = \"Comp.vue\""));
+        assert!(vite.contains("import.meta.hot"));
+        let ssr = assembled(
+            &compiled,
+            VueMainDecoration {
+                ssr_module_id: Some("src/Comp.vue".to_string()),
+                ..VueMainDecoration::default()
+            },
+            ProductKind::RuntimeServer,
+        );
+        assert!(ssr.contains("useSSRContext as __vite_useSSRContext"));
+        assert!(ssr.contains(".add(\"src/Comp.vue\")"));
+        assert!(!ssr.contains("import.meta.hot"));
+        let artifacts = vue_main_compile_artifacts(
+            "Comp.vue",
+            &compiled,
+            ProductKind::RuntimeClient,
+            FragmentDialect::JavaScript,
+            &vite,
+            None,
+        )
+        .expect("schema accepts the assembled main");
+        assert_eq!(artifacts.artifacts().len(), 1);
+        assert!(artifacts.artifacts().iter().any(|a| a.name() == "main"));
     }
 }

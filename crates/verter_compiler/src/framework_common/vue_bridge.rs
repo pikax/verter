@@ -19,11 +19,15 @@ use verter_span::Span;
 use verter_parser::parser::types::ParsedSfc;
 use verter_parser::types::NodeProp;
 
+use crate::assembly::{
+    compose_main_module, vue_main_compile_artifacts, FragmentDialect, VueMainAssemblyFailure,
+    VueMainModuleRequest,
+};
 use crate::compile::types::{VueExecutionInputs, VueMacroSemanticInput};
 use crate::compile::{compile_from_parsed, parse_sfc};
 use crate::compile_request::{
     CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest,
-    IdeProductRequest, VueBackendRequest, VueCompileRequest,
+    IdeProductRequest, ProductKind, VueBackendRequest, VueCompileRequest,
 };
 use crate::framework_common::carrier_compiler::{
     CarrierCompileOutcome, CompileUnsupported, IdeCompileOptions, IdeOutput, RuntimeCompileOptions,
@@ -32,6 +36,7 @@ use crate::framework_common::carrier_compiler::{
     SourceMapFidelity,
 };
 use crate::framework_common::FrameworkParseArtifact;
+use crate::parser::types::{sfc_script_dialect, SfcScriptDialect};
 use verter_language::ParseOptions;
 
 /// The concrete Vue carrier: the full parsed SFC behind the erasure
@@ -623,19 +628,30 @@ pub(crate) fn vue_carrier_bundle(
 
     // Vue emits a runtime surface or a genuine compile error; it never
     // fail-closes on an unsupported runtime surface the way Svelte does, so
-    // its outcome is always `Produced`.
-    Ok(CarrierCompileOutcome::Produced(
-        with_catalog_template_facts(
-            bundle,
-            artifact,
-            source,
-            opts.want_template_data,
-            opts.block_content
-                .template
-                .as_ref()
-                .map(|input| input.code.as_ref()),
-        ),
-    ))
+    // its outcome is always `Produced`. Assembly runs after diagnostic
+    // aggregation so an error-bearing compile is zero-work for Main and
+    // still publishes its diagnostics.
+    let mut bundle = with_catalog_template_facts(
+        bundle,
+        artifact,
+        source,
+        opts.want_template_data,
+        opts.block_content
+            .template
+            .as_ref()
+            .map(|input| input.code.as_ref()),
+    );
+    if opts.want_runtime && !bundle.has_errors() {
+        if let Err(failure) = emit_assembled_vue_main(&mut bundle, parsed, opts) {
+            bundle.diagnostics.push(RuntimeDiagnostic {
+                severity: crate::framework_common::RuntimeDiagnosticSeverity::Error,
+                code: "VUE_MAIN_ASSEMBLY_FAILED".to_string(),
+                message: failure.to_string(),
+                span: Span::new(0, source.len() as u32),
+            });
+        }
+    }
+    Ok(CarrierCompileOutcome::Produced(bundle))
 }
 
 fn vue_ide_only_request(
@@ -715,10 +731,110 @@ fn with_catalog_template_facts(
     bundle
 }
 
+/// Assemble the Vue `_sfc_main` runtime module behind the Vue runtime
+/// compiler: host identifiers ride in on `opts.vue_main`, topology is
+/// compiler-owned, and the CCA2A artifact set is attached to `bundle.main`.
+pub(crate) fn emit_assembled_vue_main(
+    bundle: &mut RuntimeCompileOutput,
+    parsed: &ParsedSfc,
+    opts: &RuntimeCompileOptions,
+) -> Result<(), VueMainAssemblyFailure> {
+    let planned_kind = if opts.ssr {
+        ProductKind::RuntimeServer
+    } else {
+        ProductKind::RuntimeClient
+    };
+    let dialect = bundle_vue_dialect(parsed, opts.force_js);
+    let runtime = opts.runtime_module_name.as_deref().unwrap_or("vue");
+    let canonical_id = opts.filename.as_deref().unwrap_or("");
+    let want_maps = opts.source_map;
+    let script_map = bundle
+        .script
+        .as_ref()
+        .map(|s| &s.source_map)
+        .filter(|map| !map.is_empty())
+        .map(|map| oxc_sourcemap::SourceMap::from_json_string(map))
+        .transpose()
+        .map_err(|_| {
+            VueMainAssemblyFailure::Composition(
+                crate::assembly::VueMainCompositionFailure::Composition(
+                    crate::assembly::ComposeRefusal::UncomposableMap,
+                ),
+            )
+        })?;
+    let template_map_json = bundle.template.as_ref().and_then(|template| {
+        template
+            .output_descriptor
+            .source_map
+            .raw_map
+            .as_deref()
+            .filter(|map| !map.is_empty())
+            .map(str::to_string)
+            .or_else(|| (!template.source_map.is_empty()).then(|| template.source_map.clone()))
+    });
+    let set = compose_main_module(VueMainModuleRequest {
+        canonical_id,
+        compiled: bundle,
+        dialect,
+        planned_kind,
+        runtime,
+        want_maps,
+        source_root: None,
+        script_map: script_map.as_ref(),
+        template_map_json,
+        decoration: opts.vue_main.clone(),
+    })?;
+    let artifact = set
+        .artifact(planned_kind)
+        .expect("publish returns exactly the one planned artifact kind");
+    let artifacts = vue_main_compile_artifacts(
+        canonical_id,
+        bundle,
+        planned_kind,
+        dialect,
+        artifact.code(),
+        artifact.runtime_source_map(),
+    )
+    .map_err(|err| {
+        VueMainAssemblyFailure::Publication(crate::assembly::AssemblyRefusal::FinalParseFailed {
+            kind: planned_kind,
+            reason: err.to_string(),
+        })
+    })?;
+    bundle.main.body_code = Some(artifact.code().to_string());
+    bundle.main.source_map = artifact
+        .runtime_source_map()
+        .unwrap_or_default()
+        .to_string();
+    bundle.main.lang = Some(dialect.lang_id().to_string());
+    bundle.main.artifacts = Some(artifacts);
+    Ok(())
+}
+
+fn bundle_vue_dialect(parsed: &ParsedSfc, force_js: bool) -> FragmentDialect {
+    let dialect = sfc_script_dialect(parsed.script_setup(), parsed.script());
+    if force_js {
+        if dialect.is_jsx() {
+            FragmentDialect::Jsx
+        } else {
+            FragmentDialect::JavaScript
+        }
+    } else {
+        match dialect {
+            SfcScriptDialect::JavaScript => FragmentDialect::JavaScript,
+            SfcScriptDialect::Jsx => FragmentDialect::Jsx,
+            SfcScriptDialect::TypeScript => FragmentDialect::TypeScript,
+            SfcScriptDialect::Tsx => FragmentDialect::Tsx,
+        }
+    }
+}
+
 /// Re-express a Vue [`VerterCompileResult`] as the framework-neutral
-/// [`RuntimeCompileOutput`]. Vue leaves `main.body_code` `None` — the host
-/// assembles the `_sfc_main` module from the neutral block fields (its
-/// virtual-file concern: style/custom virtual imports + HMR).
+/// [`RuntimeCompileOutput`]. Block fields are filled here; the assembled
+/// `_sfc_main` body is emitted by [`emit_assembled_vue_main`] on the
+/// runtime-bundle path. Direct conversion (conformance/tests) leaves
+/// `main.body_code` unset so the compiler-owned assemble adapter can run
+/// once with host identifiers.
 ///
 /// Public so conformance/test harnesses can drive the genuine
 /// compile → bundle → assemble pipeline without re-implementing the

@@ -1,10 +1,10 @@
 //! Main module assembly.
 
 use verter_compiler::assembly::{
-    compose_main_module, DeclaredImport, DeclaredImportKind, ExtraFragment, FragmentDialect,
-    VueMainCompositionFailure, VueMainModuleRequest,
+    compose_main_module, FragmentDialect, VueMainCompositionFailure, VueMainDecoration,
+    VueMainModuleRequest,
 };
-use verter_compiler::compile_request::ProductKind;
+use verter_compiler::compile_request::{ProductKind, RuntimeHmrStrategy};
 use verter_compiler::framework_common::RuntimeCompileOutput;
 
 use crate::id::render_ids;
@@ -160,31 +160,59 @@ fn resolve_main_dialect(meta: &FileMeta, profile: &VueMainAssemblyAxes) -> Fragm
 }
 
 fn dialect_lang_str(dialect: FragmentDialect) -> &'static str {
-    match dialect {
-        FragmentDialect::JavaScript => "js",
-        FragmentDialect::Jsx => "jsx",
-        FragmentDialect::TypeScript => "ts",
-        FragmentDialect::Tsx => "tsx",
-        FragmentDialect::Declaration => "dts",
+    dialect.lang_id()
+}
+
+fn hmr_strategy(strategy: HmrStrategy) -> RuntimeHmrStrategy {
+    match strategy {
+        HmrStrategy::None => RuntimeHmrStrategy::None,
+        HmrStrategy::Vite => RuntimeHmrStrategy::Vite,
+        HmrStrategy::Webpack => RuntimeHmrStrategy::Webpack,
     }
 }
 
-/// Assemble the Vue `_sfc_main` runtime module from the carrier's
-/// framework-neutral [`RuntimeCompileOutput`].
+/// Host-owned virtual-file identifiers for Vue main assembly. Topology
+/// (when and how they are imported) stays compiler-owned.
+pub(crate) fn vue_main_host_identifiers(
+    canonical_id: &str,
+    style_count: usize,
+    custom_count: usize,
+    meta: &FileMeta,
+) -> (Vec<String>, Vec<String>) {
+    let styles = (0..style_count)
+        .map(|idx| render_ids(canonical_id, &VirtualNodeKind::Style { index: idx }, meta).0)
+        .collect();
+    let customs = (0..custom_count)
+        .map(|idx| render_ids(canonical_id, &VirtualNodeKind::Custom { index: idx }, meta).0)
+        .collect();
+    (styles, customs)
+}
+
+pub(crate) fn vue_main_decoration_from_axes(
+    canonical_id: &str,
+    style_count: usize,
+    custom_count: usize,
+    meta: &FileMeta,
+    profile: &VueMainAssemblyAxes,
+) -> VueMainDecoration {
+    let (style_specifiers, custom_specifiers) =
+        vue_main_host_identifiers(canonical_id, style_count, custom_count, meta);
+    VueMainDecoration {
+        hmr: hmr_strategy(profile.hmr_strategy),
+        is_production: profile.is_production,
+        emit_ssr_module_registration: profile.emit_ssr_module_registration,
+        ssr_module_id: profile.ssr_module_id.clone(),
+        style_specifiers,
+        custom_specifiers,
+    }
+}
+
+/// Transport adapter for Vue `_sfc_main` assembly.
 ///
-/// Host owns virtual-file wiring (style / custom-block imports via
-/// [`render_ids`], HMR); the carrier owns the blocks. Same blocks
-/// produce byte-identical output.
-///
-/// The `__sfc__` → `_sfc_main` rewrite, script/template/import fragment
-/// minting, sequencing, and the final atomic-publication boundary are the
-/// SAME [`verter_compiler::assembly`] composer
-/// ([`compose_main_module`]/[`VueMainModuleRequest`]) the direct one-shot
-/// core shares — this function's own remaining job is exactly the HOST
-/// decoration: style/custom-block virtual imports, `__file`, HMR, and the
-/// Vite SSR-manifest registration, riding in as
-/// [`ExtraFragment`] prelude/trailer content, plus this crate's own hardened
-/// input-map validation ([`validate_inputs`]).
+/// Host supplies identifiers (`render_ids`) and request axes; the Vue
+/// compiler owns topology and emits the assembled artifact. Same blocks
+/// produce byte-identical output. Hidden host-side reconstruction of
+/// imports/HMR/SSR is not a fallback.
 ///
 /// # Errors
 ///
@@ -262,8 +290,6 @@ pub(crate) fn assemble_vue_main_module_with_axes(
     meta: &FileMeta,
     profile: &VueMainAssemblyAxes,
 ) -> Result<AssembledVueModule, VueMainAssemblyFailure> {
-    use std::fmt::Write;
-
     // Validation runs to completion BEFORE any composition work begins. When no
     // map was requested it does not run at all, and a fragment's non-empty map
     // string is ignored rather than composed unasked.
@@ -305,110 +331,6 @@ pub(crate) fn assemble_vue_main_module_with_axes(
         ProductKind::RuntimeClient
     };
 
-    // ── host decoration: style + custom-block virtual imports, ahead of
-    // the script ─────────────────────────────────────────────────────────
-    let mut prelude = String::new();
-    let mut prelude_imports: Vec<DeclaredImport> = Vec::new();
-    for idx in 0..compiled.styles.len() {
-        let (id, _) = render_ids(canonical_id, &VirtualNodeKind::Style { index: idx }, meta);
-        let _ = writeln!(prelude, "import \"{}\"", id);
-        prelude_imports.push(DeclaredImport {
-            specifier: id,
-            kind: DeclaredImportKind::SideEffect,
-        });
-    }
-    for idx in 0..compiled.custom_blocks.len() {
-        let (id, _) = render_ids(canonical_id, &VirtualNodeKind::Custom { index: idx }, meta);
-        let block_name = format!("block{}", idx);
-        let _ = writeln!(prelude, "import {} from \"{}\"", block_name, id);
-        prelude_imports.push(DeclaredImport {
-            specifier: id,
-            kind: DeclaredImportKind::Default(block_name),
-        });
-    }
-    if !compiled.styles.is_empty() || !compiled.custom_blocks.is_empty() {
-        prelude.push('\n');
-    }
-    let prelude_extra = vec![ExtraFragment {
-        role: "prelude",
-        code: prelude,
-        imports: prelude_imports,
-    }];
-
-    // ── host decoration: custom-block invocations, __file, HMR, SSR
-    // registration — before the shared composer's terminal
-    // `export default` ──────────────────────────────────────────────────
-    let mut trailer = String::new();
-    for idx in 0..compiled.custom_blocks.len() {
-        let _ = writeln!(
-            trailer,
-            "if (typeof block{} === 'function') block{}(_sfc_main)",
-            idx, idx
-        );
-    }
-
-    // Official `transformMain` gates `__file` on
-    // `devToolsEnabled || (devServer && !isProduction)`. `hmr_strategy:
-    // None` means no dev-server tooling, so skip `__file` as well as HMR.
-    if !profile.is_production && profile.hmr_strategy != HmrStrategy::None {
-        let _ = writeln!(trailer, "_sfc_main.__file = {:?}", canonical_id);
-    }
-
-    if !profile.is_production && !profile.ssr {
-        match profile.hmr_strategy {
-            HmrStrategy::Vite => {
-                trailer.push_str("/* HMR(vite) */\n");
-                trailer.push_str("if (import.meta.hot) { import.meta.hot.accept(() => {}) }\n");
-            }
-            HmrStrategy::Webpack => {
-                trailer.push_str("/* HMR(webpack) */\n");
-                trailer.push_str("if (module.hot) { module.hot.accept(() => {}) }\n");
-            }
-            HmrStrategy::None => {}
-        }
-    }
-
-    // Vite SSR asset collection: register this module id on the request's
-    // `ssrContext.modules` set (same shape as @vitejs/plugin-vue). Without
-    // this, Vite cannot collect CSS/JS deps for the SSR render tree. The
-    // registered id must match the ssr-manifest KEY FORM — root-relative
-    // under Vite — so the bundler-supplied `ssr_module_id` wins; the
-    // canonical id is only a fallback for callers whose manifest keys are
-    // canonical. Real `@vitejs/plugin-vue` `transformMain` emits this
-    // unconditionally on `ssr` (confirmed directly against its source —
-    // no dev-server gate, dev AND production both get it), so
-    // `emit_ssr_module_registration` defaults `true` and this is NOT
-    // gated on `hmr_strategy`/production the way `__file`/HMR are above —
-    // see the field's own doc comment for the one narrow exception.
-    let mut trailer_imports: Vec<DeclaredImport> = Vec::new();
-    if profile.ssr && profile.emit_ssr_module_registration {
-        let _ = writeln!(
-            trailer,
-            "import {{ useSSRContext as __vite_useSSRContext }} from \"{}\"",
-            runtime
-        );
-        trailer_imports.push(DeclaredImport {
-            specifier: runtime.to_string(),
-            kind: DeclaredImportKind::Named(vec!["__vite_useSSRContext".to_string()]),
-        });
-        trailer.push_str("const _sfc_setup = _sfc_main.setup\n");
-        trailer.push_str("_sfc_main.setup = (props, ctx) => {\n");
-        trailer.push_str("  const ssrContext = __vite_useSSRContext()\n");
-        let registered_id = profile.ssr_module_id.as_deref().unwrap_or(canonical_id);
-        let _ = writeln!(
-            trailer,
-            "  ;(ssrContext.modules || (ssrContext.modules = new Set())).add({:?})",
-            registered_id
-        );
-        trailer.push_str("  return _sfc_setup ? _sfc_setup(props, ctx) : undefined\n");
-        trailer.push_str("}\n");
-    }
-    let trailer_extra = vec![ExtraFragment {
-        role: "trailer",
-        code: trailer,
-        imports: trailer_imports,
-    }];
-
     let request = VueMainModuleRequest {
         canonical_id,
         compiled,
@@ -419,8 +341,13 @@ pub(crate) fn assemble_vue_main_module_with_axes(
         source_root: source_root.as_deref(),
         script_map: script_map.as_ref(),
         template_map_json,
-        prelude_extra,
-        trailer_extra,
+        decoration: vue_main_decoration_from_axes(
+            canonical_id,
+            compiled.styles.len(),
+            compiled.custom_blocks.len(),
+            meta,
+            profile,
+        ),
     };
     let set = compose_main_module(request)?;
     let artifact = set

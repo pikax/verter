@@ -64,3 +64,10 @@ fn custom_runtime_module_name_reaches_the_import_specifier() {
         compose_template_virtual_file(&block, Some("@vue/runtime-dom")).expect("composes");
     assert!(code.starts_with("import { openBlock as _openBlock } from \"@vue/runtime-dom\"\n"));
 }
+
+/// CCA2BV-AC1: planted host-side Vue topology reconstruction is refused.
+#[test]
+fn planted_host_vue_topology_reconstruction_is_refused() {
+    let snapshot = vue_main_reconstruction_diagnostics(4);
+    assert_eq!(snapshot.diagnostics[0].code, "HOST_VUE_MAIN_NOT_ASSEMBLED");
+}

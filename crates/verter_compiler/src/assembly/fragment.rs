@@ -213,6 +213,27 @@ pub enum FragmentDialect {
 }
 
 impl FragmentDialect {
+    /// The language id a published Vue main module reports for this dialect.
+    pub const fn lang_id(self) -> &'static str {
+        match self {
+            FragmentDialect::JavaScript => "js",
+            FragmentDialect::Jsx => "jsx",
+            FragmentDialect::TypeScript => "ts",
+            FragmentDialect::Tsx => "tsx",
+            FragmentDialect::Declaration => "dts",
+        }
+    }
+
+    /// Schema language for [`CompileArtifact`] identity.
+    pub fn schema_language(self) -> verter_language::LanguageId {
+        verter_language::LanguageId::new(match self {
+            FragmentDialect::JavaScript | FragmentDialect::Jsx => "javascript",
+            FragmentDialect::TypeScript | FragmentDialect::Tsx | FragmentDialect::Declaration => {
+                "typescript"
+            }
+        })
+    }
+
     /// The base [`SourceType`] this dialect parses under — module-ness
     /// (`with_module`) is layered on top per [`SyntacticContract`], since
     /// that axis is orthogonal to the dialect itself.
