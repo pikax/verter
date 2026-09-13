@@ -39,6 +39,15 @@
 //!    replacing a literal with a nested generic instantiation may not
 //!    cost additional instantiations or substitutions.
 //!
+//! 7. **Fresh and incremental answers agree across default and
+//!    constraint edits.** Editing a type parameter's declared default
+//!    changes what an argument-less position resolves to; editing its
+//!    constraint changes nothing, because a constraint bounds an
+//!    argument and never substitutes for it. Both must recompute to
+//!    exactly what a host that never saw the pre-edit source produces,
+//!    compared over RESOLVED values — member names are identical either
+//!    way, so a name comparison would see nothing at all.
+//!
 //! These sit alongside the mapped-side key-domain discriminators in
 //! `mapped_remap_dead_key_value_forcing`: that file pins which keys are
 //! forced, this one pins that the substitution each forced key applies
@@ -47,8 +56,8 @@
 use std::sync::Arc;
 
 use verter_session::semantic_query::{
-    PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
-    SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
+    IndexKey, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
+    SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
 };
 use verter_session::{for_tests, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::{PrimitiveName, TypeExpr};
@@ -601,5 +610,247 @@ fn an_unused_generic_argument_is_not_instantiated() {
     assert_eq!(
         deep_subs, shallow_subs,
         "likewise for substitutions: the dead argument must not be substituted. Observed          {shallow_subs} -> {deep_subs}."
+    );
+}
+
+/// `SOURCE_TS` with `Pair`'s DECLARED DEFAULT edited: `B = A` becomes
+/// `B = number`. `Pair<string>` supplies no second argument, so the
+/// default is the only thing deciding `second` — the published answer
+/// must change from `string` to `number`.
+const DEFAULT_EDITED_TS: &str = r#"
+export interface WideSource { a: string; b: number; c: boolean; }
+
+export type Boxed<V> = { boxed: V };
+
+export type Pair<A, B = number> = { first: A; second: B };
+
+export type Constrained<K extends keyof WideSource> = { picked: WideSource[K] };
+
+export type IdentityOpen<T> = { [K in keyof T]: T[K] };
+
+export type ComputedOpen<T> = { [K in keyof T]: Boxed<T[K]> };
+
+export type Deep<V> = { a: { b: { c: V } } };
+
+export type Ignore<A, B> = { only: A };
+"#;
+
+/// `SOURCE_TS` with `Constrained`'s CONSTRAINT EXPRESSION edited:
+/// `K extends keyof WideSource` becomes `K extends 'a' | 'b'`. A
+/// constraint is a BOUND, not a substitution source, so an argument the
+/// new bound still admits must resolve to exactly the same answer.
+const CONSTRAINT_EDITED_TS: &str = r#"
+export interface WideSource { a: string; b: number; c: boolean; }
+
+export type Boxed<V> = { boxed: V };
+
+export type Pair<A, B = A> = { first: A; second: B };
+
+export type Constrained<K extends 'a' | 'b'> = { picked: WideSource[K] };
+
+export type IdentityOpen<T> = { [K in keyof T]: T[K] };
+
+export type ComputedOpen<T> = { [K in keyof T]: Boxed<T[K]> };
+
+export type Deep<V> = { a: { b: { c: V } } };
+
+export type Ignore<A, B> = { only: A };
+"#;
+
+fn upsert_source(host: &Arc<VerterHost>, source: &str) {
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/source.ts".to_string()),
+        input_id: "/source.ts".to_string(),
+        source: Arc::from(source),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/source.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+}
+
+fn host_with(source: &str) -> Arc<VerterHost> {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_source(&host, source);
+    host
+}
+
+/// A cross-host-stable rendering of one value node. Semantic node ids are
+/// arena-local, so two hosts' answers can only be compared through the
+/// information a consumer actually reads off them.
+///
+/// A member value reached through a constrained parameter is published
+/// shallow — `WideSource['a']` is the ADDRESSABLE access, which renders
+/// identically whatever `a`'s type is — so it is resolved through the
+/// shared indexed-access query. Without that step the comparison would be
+/// about the carrier that addresses the value rather than the value, and
+/// blind to exactly the staleness this parity check exists to catch.
+fn value_shape(host: &Arc<VerterHost>, node: SemanticNodeId) -> String {
+    let graph = host.project_type_store().semantic_graph();
+    let Some(data) = graph.node_data(node) else {
+        return "<absent>".to_string();
+    };
+    match data.as_ref() {
+        SemanticNodeData::Object(view) => {
+            let mut inner: Vec<String> = view
+                .positive_members()
+                .iter()
+                .map(|m| {
+                    format!(
+                        "{}:{}",
+                        m.string_name().unwrap_or("<non-string>"),
+                        value_shape(host, m.value)
+                    )
+                })
+                .collect();
+            inner.sort();
+            format!("{{{}}}", inner.join(","))
+        }
+        SemanticNodeData::IndexedAccess {
+            object,
+            index: IndexKey::String(name),
+        } => {
+            let object = *object;
+            let name = Arc::clone(name);
+            drop(data);
+            match for_tests::dispatch_execute_type_node_for_tests(
+                host,
+                SemanticQueryKey::IndexedAccess {
+                    base: object,
+                    index: IndexKey::String(Arc::clone(&name)),
+                    mode: ProjectionMode::Expanded,
+                },
+            ) {
+                QueryResult::Value(SemanticQueryOutput { value, .. }) if value != node => {
+                    value_shape(host, value)
+                }
+                _ => format!("[{name}]"),
+            }
+        }
+        SemanticNodeData::Primitive(kind) => format!("{kind:?}"),
+        SemanticNodeData::Literal(literal) => format!("{literal:?}"),
+        SemanticNodeData::Opaque(_) => "<opaque>".to_string(),
+        SemanticNodeData::Mapped { .. } => "<mapped>".to_string(),
+        SemanticNodeData::InstantiationRef { .. } => "<instref>".to_string(),
+        _ => "<other>".to_string(),
+    }
+}
+
+/// Resolve `name<args>` and render its surface cross-host-stably,
+/// requiring the projection to COMPLETE. A degraded or partial result is
+/// not parity with a fresh run, it is an absent answer.
+fn instantiation_shape(host: &Arc<VerterHost>, name: &str, args: Vec<TypeExpr>) -> String {
+    let base = lower(host, &type_ref(name, args), ProjectionMode::Expanded);
+    let query = SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::new().into_boxed_slice()),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    };
+    match for_tests::dispatch_execute_type_node_for_tests(host, query) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value_shape(host, value),
+        other => panic!("the instantiation must complete, got {other:?}"),
+    }
+}
+
+/// DISCRIMINATOR (fresh/incremental parity across generic DEFAULT and
+/// CONSTRAINT edits): after an owner-file edit to a type parameter's
+/// declared default or constraint expression, the incrementally
+/// recomputed instantiation must equal what a host that never saw the
+/// pre-edit source computes — member for member, resolved VALUE for
+/// value.
+///
+/// The mapped-side parity discriminator covers the key-domain edit
+/// classes (dead key, demanded key, remap). These are the GENERIC-side
+/// classes, and they ride a different rail: a type argument's own
+/// lowering decides what the substitution environment carries, and a
+/// declared default is lowered at the declaration rather than supplied at
+/// the reference site.
+///
+/// The two cases pin opposite halves of the contract:
+///
+/// - editing the DEFAULT must CHANGE the answer, because `Pair<string>`
+///   supplies no second argument and the default is the only thing
+///   deciding `second`. Equality after the edit means a stale warm
+///   instantiation was served for an edit it depends on;
+/// - editing the CONSTRAINT must NOT change it, because a constraint
+///   bounds the argument and never substitutes for it. A change here is
+///   the aliasing failure where a constrained parameter collapses to its
+///   bound.
+///
+/// Both require incremental == fresh, over resolved values rather than
+/// member names: `Pair` publishes `first`/`second` whatever its default
+/// is, so a name comparison would see nothing at all.
+#[test]
+fn fresh_and_incremental_generic_instantiations_match_after_default_and_constraint_edits() {
+    // (label, edited source, alias, arguments, must the answer change)
+    let cases: [(&str, &str, &str, Vec<TypeExpr>, bool); 2] = [
+        (
+            "declared default edit",
+            DEFAULT_EDITED_TS,
+            "Pair",
+            vec![TypeExpr::primitive(PrimitiveName::String)],
+            true,
+        ),
+        (
+            "constraint expression edit",
+            CONSTRAINT_EDITED_TS,
+            "Constrained",
+            vec![TypeExpr::string_literal("a")],
+            false,
+        ),
+    ];
+
+    for (label, edited, name, args, must_change) in cases {
+        // Incremental: build the pre-edit answer, edit the owner file,
+        // rebuild on the same host.
+        let host = host_with(SOURCE_TS);
+        let before = instantiation_shape(&host, name, args.clone());
+        upsert_source(&host, edited);
+        let incremental = instantiation_shape(&host, name, args.clone());
+
+        // Fresh: a host that never saw the pre-edit source.
+        let fresh = host_with(edited);
+        let fresh_shape = instantiation_shape(&fresh, name, args.clone());
+
+        assert_eq!(
+            incremental, fresh_shape,
+            "{label}: the incrementally recomputed instantiation must equal what a host that \
+             never saw the pre-edit source computes. A difference means a warm entry survived \
+             an edit it depends on, or that recomputation diverged from a cold build."
+        );
+
+        if must_change {
+            assert_ne!(
+                incremental, before,
+                "{label}: this edit changes the instantiated answer, so the recomputed surface \
+                 must differ from the pre-edit one (before={before}). Equality means a stale \
+                 warm instantiation was served — and member NAMES alone would not have shown \
+                 it, since `first`/`second` are published either way."
+            );
+        } else {
+            assert_eq!(
+                incremental, before,
+                "{label}: a constraint bounds its parameter and never substitutes for it, so an \
+                 argument the edited bound still admits must resolve to the same answer. A \
+                 change means the parameter collapsed to its constraint."
+            );
+        }
+    }
+
+    // Sibling instantiations must stay distinct across a constraint edit.
+    // Collapsing a constrained parameter to its bound would make every
+    // admitted argument produce one shared answer — which the per-case
+    // comparison above cannot see, because each case fixes one argument.
+    let host = host_with(SOURCE_TS);
+    let _ = instantiation_shape(&host, "Constrained", vec![TypeExpr::string_literal("a")]);
+    let _ = instantiation_shape(&host, "Constrained", vec![TypeExpr::string_literal("b")]);
+    upsert_source(&host, CONSTRAINT_EDITED_TS);
+    let picked_a = instantiation_shape(&host, "Constrained", vec![TypeExpr::string_literal("a")]);
+    let picked_b = instantiation_shape(&host, "Constrained", vec![TypeExpr::string_literal("b")]);
+    assert_ne!(
+        picked_a, picked_b,
+        "after a constraint edit, two arguments the bound admits must still substitute \
+         independently: `WideSource['a']` is string and `WideSource['b']` is number. Equal \
+         answers mean the instantiations aliased each other or collapsed to the shared bound."
     );
 }

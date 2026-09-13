@@ -1206,6 +1206,28 @@ enum RemappedKeyNarrowing {
     ProvenAbsent,
 }
 
+/// Verdict of the path walker's mapped ITERATION-key admission for one
+/// demanded literal segment.
+///
+/// Three states, not two, because "not admitted" conflates two very
+/// different facts. A key domain that structurally PROVES the literal is
+/// not one of its keys has already answered the demand — the member is
+/// absent. A domain that simply could not decide has answered nothing,
+/// and the coarse whole-surface route must own the result. Collapsing
+/// them would either forge a miss for an undecidable domain or pay
+/// width-scaled value forcing for a decision already made.
+#[derive(Clone, Copy)]
+enum MappedKeyAdmission {
+    /// The key domain structurally contains the demanded literal.
+    Admitted,
+    /// The key domain is closed and structurally EXCLUDES the demanded
+    /// literal — absence is proven without consulting any value operand.
+    AbsentProven,
+    /// Membership could not be decided without enumeration. Not a
+    /// refutation: the caller must fall through, never forge a miss.
+    Undecided,
+}
+
 impl<'a, 'b> PathWalker<'a, 'b> {
     pub(super) fn new(
         dispatch: &'a ProjectSemanticDispatch<'b>,
@@ -2327,12 +2349,18 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // `build_mapped_type` folds duplicate produced names.
                     //
                     // Declines (falls through to the whole-surface
-                    // fallback) when the preimage is undecidable — open /
-                    // unknown key domain (the L1 carrier-stop stays
-                    // authoritative), unenumerable key space, or any
-                    // `DeferCarrier` remap — or when it is EMPTY, because
-                    // the coarse path owns the exact key-absent miss
-                    // semantics.
+                    // fallback) only when the preimage is UNDECIDABLE —
+                    // open / unknown key domain (the L1 carrier-stop
+                    // stays authoritative), unenumerable key space, or
+                    // any `DeferCarrier` remap.
+                    //
+                    // An EMPTY preimage is not a decline: over a closed
+                    // key domain it PROVES no iteration key produces the
+                    // demanded name, so the narrowing reports
+                    // `ProvenAbsent` and the walker publishes its
+                    // key-absent sentinel directly below — the same
+                    // answer the coarse path reaches, without forcing
+                    // any surviving key's value operand to get there.
                     if mapper.name_remap.is_some() {
                         let narrowing =
                             self.narrow_remapped_mapped_key(*source, mapper, literal_key.as_ref());
@@ -2399,88 +2427,162 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // bound) — fall back to the coarse path which
                     // produces a deferred shell re-dispatched once the
                     // domain becomes enumerable.
-                    let key_admitted: Option<bool> = literal_key.as_ref().map(|key| {
-                        // For Tier 1/2 enumerable lookups, both string
-                        // and numeric segments compare against textual
-                        // member names — TypeScript Object members are
-                        // string-keyed at the type level (numeric
-                        // indices coerce to their string form, so
-                        // `{ '1': X }[1]` matches member `"1"`).
-                        //
-                        // The numeric needle is the canonical
-                        // `js_number_to_string` spelling — the SAME
-                        // single canonicalizer the key-domain
-                        // enumeration and the non-emitting membership
-                        // predicate publish/compare with. The f64
-                        // `Display` form diverges in both exponent
-                        // regimes (`1e21` vs `"1e+21"`, `0.0000001` vs
-                        // `"1e-7"`) and would miss members published
-                        // under their canonical names.
-                        let needle_key = match key {
-                            LiteralKey::String(s) => {
-                                crate::semantic_query::PropertyKey::String(Arc::clone(s))
-                            }
-                            LiteralKey::Number(n) => {
-                                crate::semantic_query::PropertyKey::from_js_number(*n)
-                            }
-                        };
-                        // Tier 1: source surface is an enumerable Object.
-                        // Public-keyspace admission: `M[K]` mapped narrowing over
-                        // a class admits only PUBLIC member names (a mapped type
-                        // iterates `keyof`, which excludes protected/private).
-                        // A non-public member name is not an admissible key, so
-                        // it must not narrow to that member's value.
-                        if let Some(SemanticNodeData::Object(view)) =
-                            self.graph().node_data(*source).as_deref()
-                        {
-                            match view.project_known_key(&needle_key) {
-                                crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
-                                    return member.visibility.is_public();
+                    let key_admission: MappedKeyAdmission =
+                        literal_key.as_ref().map_or(MappedKeyAdmission::Undecided, |key| {
+                            // For Tier 1/2 enumerable lookups, both string
+                            // and numeric segments compare against textual
+                            // member names — TypeScript Object members are
+                            // string-keyed at the type level (numeric
+                            // indices coerce to their string form, so
+                            // `{ '1': X }[1]` matches member `"1"`).
+                            //
+                            // The numeric needle is the canonical
+                            // `js_number_to_string` spelling — the SAME
+                            // single canonicalizer the key-domain
+                            // enumeration and the non-emitting membership
+                            // predicate publish/compare with. The f64
+                            // `Display` form diverges in both exponent
+                            // regimes (`1e21` vs `"1e+21"`, `0.0000001` vs
+                            // `"1e-7"`) and would miss members published
+                            // under their canonical names.
+                            let needle_key = match key {
+                                LiteralKey::String(s) => {
+                                    crate::semantic_query::PropertyKey::String(Arc::clone(s))
                                 }
-                                crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
-                                    return false;
+                                LiteralKey::Number(n) => {
+                                    crate::semantic_query::PropertyKey::from_js_number(*n)
+                                }
+                            };
+                            // Tier 1: source surface is an enumerable Object.
+                            // Public-keyspace admission: `M[K]` mapped narrowing over
+                            // a class admits only PUBLIC member names (a mapped type
+                            // iterates `keyof`, which excludes protected/private).
+                            // A non-public member name is not an admissible key, so
+                            // it must not narrow to that member's value.
+                            if let Some(SemanticNodeData::Object(view)) =
+                                self.graph().node_data(*source).as_deref()
+                            {
+                                match view.project_known_key(&needle_key) {
+                                    crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
+                                        // A NON-public member is refused, but its
+                                        // refusal is not a structural proof that
+                                        // the mapped surface lacks the name — the
+                                        // member exists, it is only excluded from
+                                        // `keyof`. Stay `Undecided` so the coarse
+                                        // path keeps owning that answer exactly as
+                                        // it does today.
+                                        return if member.visibility.is_public() {
+                                            MappedKeyAdmission::Admitted
+                                        } else {
+                                            MappedKeyAdmission::Undecided
+                                        };
+                                    }
+                                    crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
+                                        // Absent from the SOURCE surface. That
+                                        // proves absence from the MAPPED surface
+                                        // only when the key domain is derived
+                                        // from the source — the homomorphic
+                                        // `[K in keyof Src]` shape. An
+                                        // independent key space (`[K in 1e21]`
+                                        // over an unrelated source) produces keys
+                                        // the source never had, so a source miss
+                                        // says nothing about it: stay `Undecided`
+                                        // and let the coarse path answer.
+                                        let homomorphic_over_source = matches!(
+                                            self.graph().node_data(mapper.key_space).as_deref(),
+                                            Some(SemanticNodeData::KeyOf { base }) if *base == *source
+                                        );
+                                        return if homomorphic_over_source {
+                                            MappedKeyAdmission::AbsentProven
+                                        } else {
+                                            MappedKeyAdmission::Undecided
+                                        };
+                                    }
                                 }
                             }
-                        }
-                        // Tier 2: **non-emitting** key-domain
-                        // membership predicate.
-                        //
-                        // The enumeration-based admission would call
-                        // `key_names_from_keyspace_node` here — which
-                        // routes through `evaluate_deferred_semantic_node`
-                        // and `key_names_from_base_node`, both
-                        // emitting one `ProjectMember` edge per
-                        // enumerated key (via the `build_key_of` /
-                        // `build_mapped_type` publication loop). That
-                        // would emit the entire keyspace just to test
-                        // membership of ONE segment.
-                        //
-                        // The non-emitting predicate decides admission
-                        // structurally without `evaluate_deferred_*`
-                        // and without `Instantiate` round-trips. When
-                        // it cannot decide (`None`), the walker falls
-                        // through to Tier 3 (primitive keyspace) or
-                        // accepts the unresolved carrier — NEVER
-                        // enumerating to prove membership.
-                        if let Some(admits) = self
-                            .dispatch
-                            .keyspace_admits_literal_non_emitting(
+                            // Tier 2: **non-emitting** key-domain
+                            // membership predicate.
+                            //
+                            // The enumeration-based admission would call
+                            // `key_names_from_keyspace_node` here — which
+                            // routes through `evaluate_deferred_semantic_node`
+                            // and `key_names_from_base_node`, both
+                            // emitting one `ProjectMember` edge per
+                            // enumerated key (via the `build_key_of` /
+                            // `build_mapped_type` publication loop). That
+                            // would emit the entire keyspace just to test
+                            // membership of ONE segment.
+                            //
+                            // The non-emitting predicate decides admission
+                            // structurally without `evaluate_deferred_*`
+                            // and without `Instantiate` round-trips. When
+                            // it cannot decide (`None`), the walker falls
+                            // through to Tier 3 (primitive keyspace) or
+                            // accepts the unresolved carrier — NEVER
+                            // enumerating to prove membership.
+                            if let Some(admits) = self
+                                .dispatch
+                                .keyspace_admits_literal_non_emitting(
+                                    mapper.key_space,
+                                    &needle_key,
+                                )
+                            {
+                                // Both verdicts are structural PROOFS (see the
+                                // predicate's soundness contract): `true` admits,
+                                // `false` refutes.
+                                return if admits {
+                                    MappedKeyAdmission::Admitted
+                                } else {
+                                    MappedKeyAdmission::AbsentProven
+                                };
+                            }
+                            // Tier 3: key_space is a non-enumerable
+                            // primitive whose domain admits the segment.
+                            //
+                            // This tier is one-sided. `true` proves the
+                            // primitive domain accepts the segment; `false`
+                            // is the catch-all for "the keyspace is not a
+                            // primitive at all", which is the tier failing to
+                            // APPLY, not a proof of absence. Only `true`
+                            // decides here — everything else stays
+                            // `Undecided` and keeps the coarse path's answer.
+                            if self.dispatch.primitive_keyspace_admits_segment(
                                 mapper.key_space,
-                                &needle_key,
-                            )
-                        {
-                            return admits;
-                        }
-                        // Tier 3: key_space is a non-enumerable
-                        // primitive whose domain admits the segment.
-                        self.dispatch.primitive_keyspace_admits_segment(
-                            mapper.key_space,
-                            segment_is_string_domain,
-                        )
-                    });
+                                segment_is_string_domain,
+                            ) {
+                                MappedKeyAdmission::Admitted
+                            } else {
+                                MappedKeyAdmission::Undecided
+                            }
+                        });
+                    // A CLOSED key domain that provably does not contain the
+                    // demanded literal has already answered the demand: the
+                    // member is absent, and the key-absent sentinel is the
+                    // answer whichever route reaches it. Publish it here.
+                    //
+                    // The coarse alternative resolves the WHOLE mapped
+                    // surface — forcing every SURVIVING key's value operand,
+                    // so the cost scales with the source's WIDTH — builds an
+                    // `Object`, and then projects the absent member off it to
+                    // reach the identical miss. That is the key-scaled
+                    // full-enumeration work a single-key projection must not
+                    // do, and none of it can change the answer.
+                    //
+                    // Gated on a NON-remapping mapper: under an `as` clause
+                    // the demanded segment is a PRODUCED name and this
+                    // admission decides ITERATION-key membership, which says
+                    // nothing about the produced surface. The remapping rail
+                    // proves its own absence through the preimage above
+                    // (`RemappedKeyNarrowing::ProvenAbsent`).
+                    if mapper.name_remap.is_none()
+                        && matches!(key_admission, MappedKeyAdmission::AbsentProven)
+                    {
+                        results.push(self.opaque_miss());
+                        return;
+                    }
                     let can_narrow = literal_key.is_some()
                         && mapper.name_remap.is_none()
-                        && matches!(key_admitted, Some(true));
+                        && matches!(key_admission, MappedKeyAdmission::Admitted);
                     if can_narrow {
                         let key = literal_key.expect("literal_key is_some checked above");
                         // Preserve string-vs-number literal kind through
@@ -2610,11 +2712,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     //   name lookup is not 1:1 to iteration key),
                     // - the next path segment is an unresolvable
                     //   TypeNode index, or
-                    // - the literal key is not admitted by the mapper's
-                    //   key domain (substituting a non-admissible key
-                    //   would forge a value type for a non-existent
+                    // - the key domain could not DECIDE the literal's
+                    //   membership (substituting an unadmitted key would
+                    //   forge a value type for a possibly non-existent
                     //   member; the coarse path produces the correct
-                    //   Object miss instead).
+                    //   Object miss instead). A domain that PROVED the
+                    //   literal absent never reaches here — it published
+                    //   the key-absent sentinel above.
                     let source = *source;
                     let mapper = mapper.clone();
                     let mapped_mode = self.mode();
@@ -4526,6 +4630,21 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         })
     }
 
+    /// Flag the walk partial + uncacheable because the request was
+    /// cancelled mid-flight.
+    ///
+    /// Cancelled work is RETURN-ONLY. Whatever the walk has assembled so
+    /// far was built against a request that has been told to stop, so it
+    /// is never a complete answer and must never warm a candidate a later
+    /// reader could take as one.
+    fn mark_cancelled_partial(&mut self) {
+        self.result_is_partial = true;
+        self.cache_suppress = true;
+        self.partial_reasons = self
+            .partial_reasons
+            .union(crate::semantic_query::PartialReasonSet::CANCELLED);
+    }
+
     /// Flag the read partial + uncacheable and record the explicit
     /// open-spread diagnostic — the shared honesty channel for every
     /// program root / arm that cannot materialise a closed surface.
@@ -5728,6 +5847,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         if !crate::semantic_query::may_reduce_operator(self.context) {
             return None;
         }
+        // Cancellation BEFORE key enumeration — the Shallow mirror of the
+        // `build_mapped_type` entry check. A cancelled request must not
+        // start enumerating a key domain, let alone force values for it.
+        if self.dispatch.ctx.is_cancelled() {
+            self.mark_cancelled_partial();
+            return None;
+        }
         // Route/mode-INDEPENDENT L1 (Shallow-By-Default), MAPPED-TYPE
         // family — the empty-path Shallow surface enumerator (the slot /
         // macro-object-surface route). A mapped type whose produced KEY
@@ -5966,6 +6092,19 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         let mut shared_value: Option<SemanticNodeId> = None;
         let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(keys.len());
         for key in keys.into_iter() {
+            // Cancellation before this key's remap substitution.
+            //
+            // Without it the loop is free to run to the end of the key
+            // domain after the request has been told to stop: the remap
+            // outcome for a mapper that needs no nested query (a plain
+            // `[K in keyof Src]` mapper decides `Keep` outright) cannot
+            // observe the cancellation, so every remaining key is
+            // substituted and its value forced for a result that can
+            // never be published.
+            if self.dispatch.ctx.is_cancelled() {
+                self.mark_cancelled_partial();
+                return None;
+            }
             // Key-domain decision BEFORE the value operand is forced —
             // the same ordering `build_mapped_type` uses at the Expanded
             // publication path. The `as <expr>` remap reads
@@ -5991,6 +6130,14 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     return None;
                 }
             };
+            // Cancellation before this key's value force — the remap has
+            // been decided, so this key survives, but forcing its value
+            // operand is the expensive half and a cancelled request has
+            // no use for the answer.
+            if self.dispatch.ctx.is_cancelled() {
+                self.mark_cancelled_partial();
+                return None;
+            }
             let member = {
                 let source_member = source_members.as_ref().and_then(|m| {
                     m.iter()

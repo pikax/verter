@@ -36,6 +36,20 @@
 //!    enter the traced read set — while the demanded key's value facts
 //!    and both keys' import-route facts must.
 //!
+//! 5. **Paying for a demand the key domain already answered.** A
+//!    demanded name a CLOSED key domain provably does not produce is
+//!    absent, and the key-absent sentinel is the answer whichever route
+//!    reaches it. Resolving the whole mapped surface first — forcing
+//!    every surviving key's value operand, so the cost scales with the
+//!    source's width — only arrives at the same miss. Proven on both the
+//!    remapping rail (preimage) and the plain rail (iteration-key
+//!    admission).
+//!
+//! 6. **Continuing to force key values after cancellation.** Cancelled
+//!    work is return-only, so both publication rails must stop within
+//!    one key of the cancellation rather than running the key domain out
+//!    and assembling a surface from degraded per-key results.
+//!
 //! Every leg also asserts the ANSWER, not just the counter or the read
 //! set: narrowing must return the same semantic surface/value that
 //! whole-surface evaluation produces, and a remap-dropped key must be
@@ -1420,4 +1434,207 @@ fn fresh_and_incremental_mapped_surfaces_match_after_dead_demanded_and_remap_edi
             );
         }
     }
+}
+
+/// The same six-key source behind a `Computed` mapper with NO `as`
+/// clause. The produced names ARE the iteration keys, so the key domain
+/// is closed and a demanded name that is not one of them is provably
+/// absent without consulting a single value operand.
+const PLAIN_MAPPED_TS: &str = r#"
+export interface WideSource {
+  a: string;
+  b: number;
+  c: boolean;
+  d: string[];
+  e: number[];
+  f: Record<string, string>;
+}
+
+export type Boxed<V> = { boxed: V };
+
+export type PlainMapped = {
+  [K in keyof WideSource]: Boxed<WideSource[K]>
+};
+"#;
+
+/// DISCRIMINATOR (proven-absent key on a NON-remapping mapper): a
+/// demanded literal the CLOSED key domain provably does not produce must
+/// miss without forcing any key's value operand.
+///
+/// This is the same invariant the remapping rail proves in
+/// `a_proven_absent_produced_name_misses_without_forcing_any_value`,
+/// stated for the plain rail: the mapper's key domain is `keyof
+/// WideSource`, the demanded name is not in it, and the answer is the
+/// key-absent sentinel whichever route reaches it. Answering through
+/// whole-surface `MappedType` resolution forces every SURVIVING key's
+/// value — six per-K materialisations here — to produce an `Object` the
+/// walker then projects the absent member off of, reaching the identical
+/// miss. Work that scales with the source's WIDTH to answer a demand
+/// already decided by the key domain is the full-enumeration regression
+/// this file exists to forbid.
+///
+/// The answer leg is what stops a "skip the work by skipping the
+/// semantics" implementation from passing: the demand must still produce
+/// the key-absent sentinel, and a PRESENT key on the same mapper must
+/// still resolve to its real value (otherwise proving absence could be
+/// implemented by proving everything absent).
+#[test]
+fn a_proven_absent_key_on_a_plain_mapper_misses_without_forcing_any_value() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert(&host, PLAIN_MAPPED_TS);
+    let base = carrier(&host, "PlainMapped", ProjectionMode::Expanded);
+
+    let before = per_k_materializations(&host);
+    let absent = project(
+        &host,
+        base,
+        vec![PathSegment::Member(PropertyKey::string_literal("nope"))],
+        ProjectionMode::Expanded,
+    );
+    let forced = per_k_materializations(&host) - before;
+
+    let absent_data = host
+        .project_type_store()
+        .semantic_graph()
+        .node_data(absent)
+        .expect("the absent-key answer must be a real node");
+    assert!(
+        matches!(absent_data.as_ref(), SemanticNodeData::Opaque(_)),
+        "a key the closed domain does not produce must answer with the walker's key-absent \
+         sentinel; got {:?}",
+        absent_data.as_ref()
+    );
+    drop(absent_data);
+
+    assert_eq!(
+        forced, 0,
+        "the key domain `keyof WideSource` proves `nope` absent before any value is demanded, \
+         so the miss must cost ZERO per-K value materialisations; observed {forced}. A count \
+         equal to the source width (6) means the demand fell through to whole-surface mapped \
+         resolution and forced every surviving key's value operand to reach the same miss."
+    );
+
+    // The absence proof must be a DECISION about this key, not a blanket
+    // refusal: a key the domain DOES produce still resolves to its value.
+    let present = project(
+        &host,
+        base,
+        vec![
+            PathSegment::Member(PropertyKey::string_literal("b")),
+            PathSegment::Member(PropertyKey::string_literal("boxed")),
+        ],
+        ProjectionMode::Expanded,
+    );
+    // The published member value is shallow by default — the addressable
+    // `WideSource['b']` access — so it is resolved through the shared
+    // indexed-access query, exactly as the parity renderer does.
+    assert_eq!(
+        value_shape(&host, present),
+        "Number",
+        "`PlainMapped['b']['boxed']` is `WideSource['b']` = number and must still resolve; got \
+         {}",
+        describe(&host, present)
+    );
+}
+
+/// REGRESSION BOUNDARY (cancelled mapped SHALLOW synthesis): the
+/// publication rail that synthesises a mapped surface for a `Shallow`
+/// demand must stop forcing key values once the request is cancelled.
+///
+/// The `Shallow` synthesiser and the `Expanded` build are twins — the
+/// same remap-then-value loop over the same enumerated key domain — but
+/// they are separate code, and the `Expanded` cancellation
+/// discriminator cannot see this one.
+///
+/// The fixture is deliberately a PLAIN `[K in keyof Src]` mapper, not
+/// one of this file's remapping fixtures. A remap written as a
+/// conditional dispatches a nested query per key, and that nested query
+/// refuses a cancelled request on its own — so a remapping fixture stops
+/// whether or not the key loop checks anything, and proves nothing about
+/// this loop. A plain mapper decides `Keep` outright with no dispatch,
+/// so the ONLY thing that can stop the loop is the loop's own
+/// cancellation check. Measured on this candidate without those checks:
+/// cancelling at the third substitution still forced all six keys'
+/// values, exactly the uninterrupted control's count.
+///
+/// Cancelled work is return-only, so the surface this loop could
+/// assemble from a stopped request must never be handed back as a
+/// complete answer.
+#[test]
+fn a_cancelled_shallow_mapped_synthesis_stops_forcing_key_values() {
+    use std::sync::atomic::Ordering;
+
+    // Control: the same Shallow synthesis, uninterrupted — the count the
+    // cancelled run must come in strictly under.
+    let control_host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert(&control_host, PLAIN_MAPPED_TS);
+    let control_base = carrier(&control_host, "PlainMapped", ProjectionMode::Shallow);
+    let control_before = per_k_materializations(&control_host);
+    let control_result = project_result(&control_host, control_base, ProjectionMode::Shallow);
+    let control_forced = per_k_materializations(&control_host) - control_before;
+    assert!(
+        matches!(control_result, QueryResult::Value(_)),
+        "fixture invariant: the uninterrupted Shallow synthesis must succeed, otherwise the \
+         cancelled comparison below is not a comparison against a completed loop"
+    );
+    assert_eq!(
+        control_forced, 6,
+        "fixture invariant: the uninterrupted six-key Shallow synthesis must force one value \
+         per key, otherwise per-key forcing is not observable through this counter. Observed \
+         {control_forced}."
+    );
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert(&host, PLAIN_MAPPED_TS);
+    let base = carrier(&host, "PlainMapped", ProjectionMode::Shallow);
+
+    let ctx = verter_session::request_context::RequestContext::new(
+        1,
+        Arc::from("/source.ts"),
+        false,
+        None,
+    );
+    let observer = Arc::new(CancelOnFirstSubstitution {
+        seen: std::sync::atomic::AtomicU64::new(0),
+        ctx: Arc::clone(&ctx),
+    });
+    let before = per_k_materializations(&host);
+    let result = {
+        let _request =
+            verter_session::request_context::RequestContextGuard::install(Arc::clone(&ctx));
+        // Installed AFTER the request guard so this observer, not the
+        // request context's own, owns the substrate slot.
+        let _obs = verter_audit::observer::install_observer(
+            Arc::clone(&observer) as Arc<dyn verter_audit::AuditObserver>
+        );
+        project_result(&host, base, ProjectionMode::Shallow)
+    };
+    let forced = per_k_materializations(&host) - before;
+    let seen = observer.seen.load(Ordering::SeqCst);
+
+    assert!(
+        ctx.is_cancelled(),
+        "fixture invariant: the observer must actually have cancelled the request, otherwise \
+         this test measures an ordinary synthesis"
+    );
+    assert!(
+        forced < control_forced,
+        "a Shallow mapped synthesis cancelled partway through its key domain must force \
+         strictly fewer key values than the uninterrupted run: observed {forced} against a \
+         control of {control_forced}. Equal counts mean the key loop ran to the end of the \
+         domain after the request was told to stop."
+    );
+    assert!(
+        forced <= 3,
+        "cancellation is checked before key enumeration, before each key's remap substitution \
+         and before each key's value force, so a request cancelled at its third substitution \
+         must stop within one key of it. Observed {forced} value forcings after {seen} \
+         substitutions (control {control_forced})."
+    );
+    assert!(
+        !matches!(result, QueryResult::Value(_)),
+        "a cancelled Shallow mapped synthesis is return-only: the partial member set it \
+         assembled is not a complete surface and must never be handed back as one. Got \
+         {result:?}"
+    );
 }
