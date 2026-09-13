@@ -120,7 +120,7 @@ schema = 2
 "CCA1T2S" = { status = "pending" }
 "CCA1T2V" = { status = "pending" }
 "CCA1T3" = { status = "pending" }
-"CCA1T4" = { status = "pending" }
+"CCA1T4" = { status = "cancelled", reason = "abandoned: live capability/session I/O cannot be deleted before migration; CCA2C owns staged handoff, CCA2D styles, CCA2E custom blocks, CCA2F facade closure, and CMP1 mixed request conversion. CCA1 must reconcile its terminal proof with this abandonment; cancellation is not DTO-absence evidence." }
 "CCA2" = { status = "pending" }
 "CCA2A" = { status = "pending" }
 "CCA2B" = { status = "pending" }
