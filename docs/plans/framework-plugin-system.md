@@ -18,11 +18,14 @@ engine, the CodeTransform source-map authority, and the shared-codebase invarian
 ## 1. Context (current state, de-staled per review)
 
 Framework support is **compile-time today**: the session `FrameworkAdapterRegistry`
-is built once at `host_construction.rs:186`; the compiler `CarrierCompilerRegistry`
-is a process-wide `OnceLock` (`crates/verter_session/src/parse.rs:134`); language/
-carrier-token rows are static in `crates/verter_language/src/registry.rs:152`. These
-are **three separate authorities** that all must become runtime-generation-scoped —
-replacing only the session registry strands a plugin's carrier before parse/codegen.
+is built once at `host_construction.rs:186`; the compiler's `ImmutableCapabilityCatalog`
+(`crates/verter_compiler/src/framework_common/catalog.rs`) is the sole immutable
+lookup authority over the five typed capabilities (`CarrierFrontend`,
+`FrameworkSemanticAuthority`, `ProjectionBackend`, `RuntimeCompilerBackend`,
+`FrameworkHostIntegrationBackend`); language/carrier-token rows are static in
+`crates/verter_language/src/registry.rs:152`. These are **three separate
+authorities** that all must become runtime-generation-scoped — replacing only the
+session registry strands a plugin's carrier before parse/codegen.
 
 Already in place (do NOT re-introduce/delete): `FrameworkAdapterId(Arc<str>)` exists
 (`verter_language/src/ids.rs`); the **request** wire already carries an open
