@@ -338,7 +338,10 @@ describe("realized closure from a disposable, scripts-disabled, network-denied i
       const profile = path.join(installDir, "deny-network.sb");
       writeFileSync(profile, "(version 1)\n(allow default)\n(deny network*)\n");
       const { file, prefix, execOptions } = npmInvocation();
-      execFileSync(file, [...prefix, ...npmArgs], { ...execOptions, cwd: installDir });
+      execFileSync("sandbox-exec", ["-f", profile, file, ...prefix, ...npmArgs], {
+        ...execOptions,
+        cwd: installDir,
+      });
     } else {
       // `execNpmSync` runs npm without the `npm.cmd` shim Node's
       // CVE-2024-27980 mitigation EINVALs on; the darwin branch needs the

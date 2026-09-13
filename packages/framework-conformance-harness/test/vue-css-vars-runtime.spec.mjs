@@ -17,7 +17,7 @@
 // `vue_css_vars_client_mount` runtime proof in the bf2-authoritative Rust
 // lane (`crates/verter_session/src/compile/map_equality_tests/`).
 
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 
 import { compileVueFixture } from "../src/invoke-vue-oracle.mjs";
 import { executeVueClientMount, cleanupScratch } from "../src/execute-vue-runtime.mjs";
@@ -58,6 +58,13 @@ function compileClient() {
   return result.code;
 }
 
+// The scratch directory is shared by every case in this worker, so cleanup is
+// file-scoped: a case that removed it on its way out could delete a module
+// another case was still importing.
+afterAll(() => {
+  cleanupScratch();
+});
+
 describe("CSS v-bind custom properties through the pinned official runtime", () => {
   it("sets every registered variable on the mounted element, with exactly one `--` prefix", async () => {
     const code = compileClient();
@@ -81,8 +88,7 @@ describe("CSS v-bind custom properties through the pinned official runtime", () 
     expect(Object.values(initial.customProperties).sort()).toEqual(["10px", "red"]);
     // The literal declaration in the same rule registers nothing.
     expect(Object.keys(initial.customProperties).length).toBe(2);
-    cleanupScratch();
-  });
+  }, 60_000); // jsdom + pinned-runtime import + a real mount; the 5s default flakes under parallel worker contention
 
   it("updates the custom properties when the bound values change", async () => {
     const code = compileClient();
@@ -105,8 +111,7 @@ describe("CSS v-bind custom properties through the pinned official runtime", () 
       ["blue", "22px"],
       ["green", "22px"],
     ]);
-    cleanupScratch();
-  });
+  }, 60_000); // jsdom + pinned-runtime import + a real mount; the 5s default flakes under parallel worker contention
 
   it("loses the binding when the registered key already carries `--` (negative control)", async () => {
     const code = compileClient();
@@ -128,6 +133,5 @@ describe("CSS v-bind custom properties through the pinned official runtime", () 
     // the value went to a name nothing can reference.
     expect(initial.customProperties[`--${firstKey}`]).toBeUndefined();
     expect(initial.customProperties[`----${firstKey}`]).toBe("red");
-    cleanupScratch();
-  });
+  }, 60_000); // jsdom + pinned-runtime import + a real mount; the 5s default flakes under parallel worker contention
 });
