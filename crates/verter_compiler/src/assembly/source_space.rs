@@ -23,6 +23,101 @@ use std::ops::Range;
 
 use super::fragment::FragmentId;
 
+/// Independent mapping products, never inferred from an output file suffix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ArtifactMapFamily {
+    SourceProjection,
+    RuntimeSourceMap,
+}
+
+/// One authored anchor in a qualified map. Generated coordinates deliberately
+/// use a different type from the absolute authored `Span`. Unmapped generated
+/// text has no segment and therefore cannot serialize as source geometry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactMapSegment {
+    pub generated: Range<u32>,
+    pub source_unit: super::source_unit::SourceUnitId,
+    pub source_span: verter_span::Span,
+}
+
+/// Byte-coordinate mapping data, qualified by an artifact destination and a
+/// nonempty set of authored input spaces. No raw or implicit-identity map is
+/// accepted. Protocol/V3 adapters own conversion to UTF-16 line/column geometry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualifiedArtifactMap {
+    pub family: ArtifactMapFamily,
+    pub generated: super::fragment::ArtifactId,
+    /// Exact destination bytes, separate from the artifact's stable lineage.
+    pub generated_content: super::source_unit::ContentId,
+    /// The same observed inputs that the mapped artifact was produced from.
+    pub input_basis: verter_identity::identity::InputBasisId,
+    pub sources: std::collections::BTreeSet<super::source_unit::SourceUnitId>,
+    pub segments: Vec<ArtifactMapSegment>,
+}
+
+impl QualifiedArtifactMap {
+    pub(crate) fn validate(
+        &mut self,
+        artifact: &super::fragment::ArtifactId,
+        content: &super::fragment::ArtifactContent,
+        provenance: &super::fragment::ArtifactProvenance,
+        generated_content: Option<&super::source_unit::ContentId>,
+        sources: &std::collections::BTreeMap<
+            super::source_unit::SourceUnitId,
+            super::source_unit::ArtifactSourceUnit,
+        >,
+    ) -> Result<(), super::publish::ArtifactSchemaError> {
+        use super::publish::ArtifactSchemaError as E;
+        if &self.generated != artifact {
+            return Err(E::WrongGeneratedSpace);
+        }
+        if self.sources.is_empty() {
+            return Err(E::UnqualifiedMap);
+        }
+        if !self.sources.is_subset(&provenance.inputs) {
+            return Err(E::MapSourceOutsideProvenance);
+        }
+        if self.input_basis != provenance.input_basis {
+            return Err(E::StaleMapInputBasis);
+        }
+        let super::fragment::ArtifactContent::Available(code) = content else {
+            return Err(E::UnavailableMappedContent);
+        };
+        if Some(&self.generated_content) != generated_content {
+            return Err(E::StaleGeneratedContent);
+        }
+        self.segments.sort_by(|a, b| {
+            (a.generated.start, a.generated.end).cmp(&(b.generated.start, b.generated.end))
+        });
+        let mut previous: Option<&Range<u32>> = None;
+        for segment in &self.segments {
+            if !self.sources.contains(&segment.source_unit) {
+                return Err(E::UnqualifiedMap);
+            }
+            let source = sources
+                .get(&segment.source_unit)
+                .ok_or(E::UnknownSourceUnit)?;
+            let span = segment.source_span;
+            if span.start > span.end
+                || span.start < source.source_span.start
+                || span.end > source.source_span.end
+            {
+                return Err(E::InvalidSourceRange);
+            }
+            let range = &segment.generated;
+            if code.get(range.start as usize..range.end as usize).is_none() {
+                return Err(E::InvalidGeneratedRange);
+            }
+            if previous.is_some_and(|p| p.end > range.start || p.start == range.start) {
+                return Err(E::OverlappingMappings);
+            }
+            previous = Some(range);
+        }
+        Ok(())
+    }
+}
+
 /// Which space a coordinate lives in — carried for diagnostics only; the
 /// typed wrappers below are the actual guard, not this tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -5,6 +5,15 @@
 use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 pub use verter_identity::identity::{ContentId, SourceId, SourceRevision, SourceUnitId};
 
+/// An authored input's registered extent in its source's absolute byte space.
+/// A block's content identity remains unit-local; its geometry is SFC-absolute.
+/// External units use their own source identity and absolute source extent.
+#[derive(Debug, Clone)]
+pub struct ArtifactSourceUnit {
+    pub unit: SourceUnit,
+    pub source_span: verter_span::Span,
+}
+
 /// A logical source unit: stable lineage, exact revision, exact content —
 /// the identity every [`super::fragment::Fragment`] is minted against.
 ///

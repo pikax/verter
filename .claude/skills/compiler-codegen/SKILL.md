@@ -149,6 +149,41 @@ Post-hoc string manipulation breaks sourcemap accuracy: `CodeTransform` generate
 
 The rule has NO scoped exceptions: the Svelte scoped-CSS renderer (`crates/verter_compiler/src/svelte/runtime/css/render.rs`) edits the original component source through the shared `CodeTransform`'s checked (`try_*`) operations -- whose insertion-affinity chunk model carries the `magic-string` semantics the official `svelte@5.56.10` `render_stylesheet` depends on (content-only `try_update` preserving the replaced range's first-chunk boundary insertions, left/right insertion affinity with per-affinity stacking, `try_remove` clearing interior insertions; pinned by `code_transform/edit_semantics_tests.rs`) -- and generates the css source map (`css.map`) from the SAME transform that built `css.code`. The guard `svelte_css_renderer_uses_code_transform` (`crates/verter_compiler/tests/`) asserts the renderer stays on the shared transform and bans any private edit buffer from the css matcher/render tree.
 
+## Compile artifact schema
+
+`assembly::CompileArtifactSet` owns the immutable terminal schema for
+already-produced compiler artifacts. Its constructor validates facts only;
+it does not parse, compile, assemble, or publish. `CompileArtifact` inputs are
+mutable builders, while a validated set exposes immutable accessors and is the
+only schema container implementing `Serialize`.
+
+Artifact lineage is the canonical tuple `(SourceUnitId, ProductKind, LanguageId,
+producer-owned slot name)`. Revision, source content, output availability, and
+provenance are neighbouring facts. Each artifact names its primary source unit,
+an `InputBasisId`, a producer `ResultContractId`, and all contributing units.
+Typed artifact relations must target another artifact in the same set. Duplicate
+artifact/source identities, missing references, and inconsistent revisions of
+one source fail closed. Empty available text differs from unavailable content.
+
+`ArtifactSourceUnit` binds each input to its registered SFC-absolute byte `Span`;
+external inputs carry their own source identity and absolute extent.
+`QualifiedArtifactMap` distinguishes source-projection and runtime-source-map
+families, names its generated artifact and nonempty input-space set, and carries
+the exact generated `ContentId` and observed `InputBasisId` so maps from older
+output bytes or inputs fail closed even when artifact lineage is unchanged.
+It carries typed generated ranges separately from authored `Span`s. Map sources
+must be part of artifact provenance; ranges must fit their spaces, generated endpoints
+must be UTF-8 boundaries, and ambiguous overlapping generated mappings fail.
+Unmapped generated text has no authored segment. An absent family is not an
+implicit identity map. These mappings describe authored anchors and do not
+assert byte-for-byte fidelity or interpolate between differently sized ranges.
+
+Terminal JSON uses schema version 1, explicit `utf8-bytes` coordinates,
+hex-encoded full canonical identities, sorted objects/sets and generated-order
+segments. JSON/V3/LSP adapters own UTF-16 conversion using source documents.
+The schema does not replace the live `ArtifactSet` publication boundary or
+`VerterCompileResult` routes.
+
 ## Multi-unit carrier lowering
 
 Runtime and IDE output blocks carry a `RuntimeOutputDescriptor` naming the generated destination space, emitted content artifact, declared input spaces, raw map, and honest `Exact`/`Approximate` fidelity. A separately lowered template receives `TemplateBindingMetadata` from its script pass (bindings, `has_script`, const props, and ref-bindable imports), matching Vue's official `bindingMetadata` mechanism.

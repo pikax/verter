@@ -8,6 +8,227 @@ use super::fragment::{DeclaredHelper, DeclaredImport, FragmentDialect, Validated
 use super::plan::ProductPlan;
 use crate::compile_request::ProductKind;
 
+/// A schema invariant failed; no partial `CompileArtifactSet` is returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactSchemaError {
+    DuplicateArtifact,
+    DuplicateSourceUnit,
+    ConflictingSourceRevision,
+    InvalidSourceSpan,
+    InvalidIdentity,
+    UnknownSourceUnit,
+    MissingPrimaryInput,
+    MissingRelationTarget,
+    SelfRelation,
+    DuplicateMapFamily,
+    UnqualifiedMap,
+    WrongGeneratedSpace,
+    StaleGeneratedContent,
+    StaleMapInputBasis,
+    MapSourceOutsideProvenance,
+    UnavailableMappedContent,
+    InvalidGeneratedRange,
+    InvalidSourceRange,
+    OverlappingMappings,
+}
+
+impl std::fmt::Display for ArtifactSchemaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid compile artifact schema: {self:?}")
+    }
+}
+impl std::error::Error for ArtifactSchemaError {}
+
+/// Immutable compiler-owned schema over already-produced facts. Creation
+/// validates references and coordinate qualification, and sorts set-valued
+/// data; it performs no parsing, lowering, code generation or publication.
+/// Only validated sets serialize. This is not an assembly/publication receipt.
+#[derive(Debug, Clone)]
+pub struct CompileArtifactSet {
+    source_units: std::collections::BTreeMap<
+        super::source_unit::SourceUnitId,
+        super::source_unit::ArtifactSourceUnit,
+    >,
+    artifacts: Vec<super::fragment::CompileArtifact>,
+}
+
+impl CompileArtifactSet {
+    pub fn new(
+        source_units: Vec<super::source_unit::ArtifactSourceUnit>,
+        mut artifacts: Vec<super::fragment::CompileArtifact>,
+    ) -> Result<Self, ArtifactSchemaError> {
+        use std::collections::{BTreeMap, BTreeSet};
+        use ArtifactSchemaError as E;
+        let mut sources = BTreeMap::new();
+        let mut revisions = BTreeMap::new();
+        for source in source_units {
+            if source.source_span.start > source.source_span.end {
+                return Err(E::InvalidSourceSpan);
+            }
+            if source.unit.logical_role().is_empty() {
+                return Err(E::InvalidIdentity);
+            }
+            if let Some(revision) = revisions.insert(
+                source.unit.source_id().clone(),
+                source.unit.revision().clone(),
+            ) {
+                if revision != *source.unit.revision() {
+                    return Err(E::ConflictingSourceRevision);
+                }
+            }
+            if sources.insert(source.unit.id().clone(), source).is_some() {
+                return Err(E::DuplicateSourceUnit);
+            }
+        }
+        artifacts.sort_by(|a, b| a.id().cmp(b.id()));
+        let ids: BTreeSet<_> = artifacts.iter().map(|a| a.id().clone()).collect();
+        if ids.len() != artifacts.len() {
+            return Err(E::DuplicateArtifact);
+        }
+        for artifact in &mut artifacts {
+            if artifact.name().is_empty() || artifact.language().as_str().is_empty() {
+                return Err(E::InvalidIdentity);
+            }
+            if !sources.contains_key(artifact.source_unit()) {
+                return Err(E::UnknownSourceUnit);
+            }
+            if !artifact.provenance.inputs.contains(artifact.source_unit()) {
+                return Err(E::MissingPrimaryInput);
+            }
+            if artifact
+                .provenance
+                .inputs
+                .iter()
+                .any(|id| !sources.contains_key(id))
+            {
+                return Err(E::UnknownSourceUnit);
+            }
+            for relation in &artifact.relations {
+                if &relation.target == artifact.id() {
+                    return Err(E::SelfRelation);
+                }
+                if !ids.contains(&relation.target) {
+                    return Err(E::MissingRelationTarget);
+                }
+            }
+            artifact.maps.sort_by_key(|map| map.family);
+            if artifact
+                .maps
+                .windows(2)
+                .any(|pair| pair[0].family == pair[1].family)
+            {
+                return Err(E::DuplicateMapFamily);
+            }
+            let id = artifact.id().clone();
+            // Hash once per mapped artifact, shared by its independent map
+            // families. This binds geometry to bytes without invoking a compiler.
+            let generated_content = match (&artifact.content, artifact.maps.is_empty()) {
+                (super::fragment::ArtifactContent::Available(code), false) => Some(
+                    super::source_unit::ContentId::from_content_bytes(code.as_bytes()),
+                ),
+                _ => None,
+            };
+            for map in &mut artifact.maps {
+                map.validate(
+                    &id,
+                    &artifact.content,
+                    &artifact.provenance,
+                    generated_content.as_ref(),
+                    &sources,
+                )?;
+            }
+        }
+        Ok(Self {
+            source_units: sources,
+            artifacts,
+        })
+    }
+
+    pub fn source_units(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &super::source_unit::ArtifactSourceUnit> {
+        self.source_units.values()
+    }
+
+    pub fn artifacts(&self) -> &[super::fragment::CompileArtifact] {
+        &self.artifacts
+    }
+
+    pub fn artifact(
+        &self,
+        id: &super::fragment::ArtifactId,
+    ) -> Option<&super::fragment::CompileArtifact> {
+        self.artifacts
+            .binary_search_by(|a| a.id().cmp(id))
+            .ok()
+            .map(|index| &self.artifacts[index])
+    }
+
+    /// Deterministic terminal JSON. Identities retain full canonical bytes as
+    /// hex, not digest-only equality or Debug text. Coordinates remain bytes;
+    /// a transport requiring UTF-16 must convert using its source documents.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+}
+
+impl serde::Serialize for CompileArtifactSet {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use super::fragment::ArtifactContent;
+        use serde_json::{json, Value};
+        let sources: Vec<_> = self
+            .source_units
+            .values()
+            .map(|s| {
+                json!({
+                    "id": hex::encode(s.unit.id().canonical_bytes()),
+                    "source": hex::encode(s.unit.source_id().canonical_bytes()),
+                    "revision": hex::encode(s.unit.revision().canonical_bytes()),
+                    "content": hex::encode(s.unit.content().canonical_bytes()),
+                    "role": s.unit.logical_role(), "sourceBytes": s.source_span,
+                })
+            })
+            .collect();
+        let artifacts: Vec<_> = self.artifacts.iter().map(|a| {
+            let content = match &a.content {
+                ArtifactContent::Available(text) => json!({"availability": "available", "text": text}),
+                ArtifactContent::Unavailable(reason) => json!({"availability": "unavailable", "reason": reason}),
+            };
+            let relations: Vec<_> = a.relations.iter().map(|r| json!({
+                "kind": r.kind, "target": hex::encode(r.target.canonical_bytes()),
+            })).collect();
+            let maps: Vec<_> = a.maps.iter().map(|m| {
+                let segments: Vec<Value> = m.segments.iter().map(|s| json!({
+                    "generatedBytes": {"start": s.generated.start, "end": s.generated.end},
+                    "sourceUnit": hex::encode(s.source_unit.canonical_bytes()), "sourceBytes": s.source_span,
+                })).collect();
+                json!({
+                    "family": m.family, "generated": hex::encode(m.generated.canonical_bytes()),
+                    "generatedContent": hex::encode(m.generated_content.canonical_bytes()),
+                    "inputBasis": hex::encode(m.input_basis.canonical_bytes()),
+                    "sources": m.sources.iter().map(|s| hex::encode(s.canonical_bytes())).collect::<Vec<_>>(),
+                    "segments": segments,
+                })
+            }).collect();
+            json!({
+                "id": hex::encode(a.id().canonical_bytes()), "sourceUnit": hex::encode(a.source_unit().canonical_bytes()),
+                "product": a.product().wire_tag(), "language": a.language().as_str(), "name": a.name(),
+                "provenance": {
+                    "inputBasis": hex::encode(a.provenance.input_basis.canonical_bytes()),
+                    "producer": hex::encode(a.provenance.producer.canonical_bytes()),
+                    "inputs": a.provenance.inputs.iter().map(|s| hex::encode(s.canonical_bytes())).collect::<Vec<_>>(),
+                },
+                "content": content, "relations": relations, "maps": maps,
+            })
+        }).collect();
+        let mut terminal = json!({"schemaVersion": 1, "coordinates": "utf8-bytes", "sourceUnits": sources, "artifacts": artifacts});
+        // Keep wire order stable even when another crate enables serde_json's
+        // preserve_order feature through Cargo feature unification.
+        terminal.sort_all_objects();
+        terminal.serialize(serializer)
+    }
+}
+
 /// One artifact's finished composition, reported by the caller (the
 /// framework-owned composer) together with the exact facts `publish` needs
 /// to verify atomicity — never re-derived by scanning `code`.
