@@ -89,6 +89,14 @@ pub enum LaneError {
         /// What the checkout holds.
         found: String,
     },
+    /// A case of a GENERATED corpus carries no digest in the manifest, so its
+    /// bytes could not be checked against anything.
+    CaseDigestMissing {
+        /// Whose corpus.
+        framework: Framework,
+        /// The case.
+        case_id: String,
+    },
     /// The lane could not be driven.
     Run(RunError),
     /// An observation could not be represented, or a cell could not be
@@ -144,6 +152,11 @@ impl fmt::Display for LaneError {
                 "{framework}: `{case_id}` digests to `{found}`, but the manifest ratified \
                  `{recorded}`; the corpus generator no longer produces the bytes this \
                  inventory was reviewed against"
+            ),
+            LaneError::CaseDigestMissing { framework, case_id } => write!(
+                f,
+                "{framework}: `{case_id}` carries no digest, but its corpus is generated, so \
+                 the revision pin says nothing about its bytes and it cannot be classified"
             ),
             LaneError::Run(error) => write!(f, "{error}"),
             LaneError::Observation(message) => f.write_str(message),
@@ -256,9 +269,10 @@ pub fn selection(manifest: &ProbeStateManifest, lane: Lane) -> Vec<String> {
 /// A corpus whose cases are COMMITTED upstream is already pinned by the
 /// revision check; one whose cases are GENERATED at that revision is not, so a
 /// per-case digest is the manifest's own record of the bytes it was reviewed
-/// against. A case the manifest digests must match; a case it does not is
-/// carried as read, which is what keeps the committed-corpus adapter from
-/// having to invent digests it has no need for.
+/// against. A case the manifest digests must match. An undigested case is
+/// refused before it is loaded when its corpus is generated, and carried as
+/// read when it is committed, which is what keeps the committed-corpus adapter
+/// from having to invent digests it has no need for.
 pub fn plan(
     manifest: &ProbeStateManifest,
     selected: &[String],
@@ -277,6 +291,12 @@ pub fn plan(
     selected
         .iter()
         .map(|case_id| {
+            if corpus.generated && !digests.contains_key(case_id.as_str()) {
+                return Err(LaneError::CaseDigestMissing {
+                    framework,
+                    case_id: case_id.clone(),
+                });
+            }
             let case = corpus
                 .load_case(case_id)
                 .map_err(|error| LaneError::Corpus { framework, error })?;

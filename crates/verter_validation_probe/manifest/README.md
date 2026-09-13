@@ -63,7 +63,8 @@ A corpus whose components are COMMITTED upstream is pinned by `external_revision
 GENERATES its components at that revision — `pikax/svelte-benchmarks` does — is not: the revision says which
 generator ran and nothing about what it wrote. Such a manifest carries a `digest` on every `[[inventory]]`
 row: the SHA-256 of the case's LF-normalized bytes, checked as the lane loads the case, so generator drift
-fails the lane instead of being classified as though it were the ratified corpus.
+fails the lane instead of being classified as though it were the ratified corpus. A generated-corpus case
+planned without a digest fails the lane before it is loaded.
 
 ## The smoke slice
 

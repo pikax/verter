@@ -25,4 +25,5 @@ pub const CORPUS: Corpus = Corpus {
     // The generator's own output root. Each corpus it writes is a directory
     // under it, so the whole generated set is one subtree walk.
     fixture_root: "fixtures",
+    generated: true,
 };

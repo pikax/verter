@@ -110,7 +110,7 @@ fn workload_lane_runs_every_pinned_slice_and_publishes_one_summary() {
 
     if lane == Lane::Smoke {
         assert!(
-            combined_smoke <= 2 * verter_validation_probe::MAX_SMOKE_CASES,
+            combined_smoke <= Framework::ALL.len() * verter_validation_probe::MAX_SMOKE_CASES,
             "the combined smoke inventory drove {combined_smoke} cases in one job",
         );
     }
@@ -374,6 +374,42 @@ fn a_case_whose_bytes_drift_from_its_digest_fails_the_lane() {
         error
             .to_string()
             .contains("the corpus generator no longer produces"),
+        "the lane refused for the wrong reason: {error}",
+    );
+}
+
+/// A generated-corpus case the manifest carries NO digest for fails the lane
+/// before it is loaded, rather than being classified from unverified bytes.
+///
+/// Manifest validation accepts an undigested row, because a committed corpus
+/// needs none. For a generated corpus that row would otherwise skip the
+/// comparison entirely, so the digest requirement has to hold where the case
+/// is planned, not only in a test over the committed file.
+#[test]
+fn a_generated_case_without_a_digest_fails_the_lane() {
+    let framework = Framework::Svelte;
+    let manifest = lane::load_manifest(framework).expect("the manifest is valid");
+    let case_id = manifest
+        .smoke
+        .first()
+        .expect("the smoke slice is non-empty")
+        .clone();
+
+    let mut undigested = manifest.clone();
+    let slot = undigested
+        .inventory
+        .iter_mut()
+        .find(|entry| entry.case_id == case_id)
+        .expect("the case is inventoried");
+    assert!(
+        slot.digest.take().is_some(),
+        "the case already carries no digest, so removing it proves nothing",
+    );
+
+    let error = lane::plan(&undigested, std::slice::from_ref(&case_id))
+        .expect_err("an undigested generated case must fail the lane");
+    assert!(
+        error.to_string().contains("carries no digest"),
         "the lane refused for the wrong reason: {error}",
     );
 }

@@ -21,4 +21,5 @@ pub const CORPUS: Corpus = Corpus {
     // whole provisioning step.
     directory: "vue-benchmarks",
     fixture_root: "tests/confirm/fixtures",
+    generated: false,
 };

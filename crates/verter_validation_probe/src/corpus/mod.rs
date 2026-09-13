@@ -152,6 +152,10 @@ pub struct Corpus {
     /// corpus (its harness, its lockfile, its results) is
     /// workload-irrelevant.
     pub fixture_root: &'static str,
+    /// Whether the corpus GENERATES its cases at the pinned revision rather
+    /// than committing them. The revision then pins only the generator, so
+    /// every case the lane plans must carry a manifest digest of its bytes.
+    pub generated: bool,
 }
 
 impl Corpus {
