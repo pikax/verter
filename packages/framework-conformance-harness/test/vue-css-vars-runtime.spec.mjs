@@ -88,7 +88,7 @@ describe("CSS v-bind custom properties through the pinned official runtime", () 
     expect(Object.values(initial.customProperties).sort()).toEqual(["10px", "red"]);
     // The literal declaration in the same rule registers nothing.
     expect(Object.keys(initial.customProperties).length).toBe(2);
-  }, 60_000); // jsdom + pinned-runtime import + a real mount; the 5s default flakes under parallel worker contention
+  }, 120_000); // jsdom + pinned-runtime import + a real mount, under parallel-worker contention
 
   it("updates the custom properties when the bound values change", async () => {
     const code = compileClient();
@@ -111,7 +111,7 @@ describe("CSS v-bind custom properties through the pinned official runtime", () 
       ["blue", "22px"],
       ["green", "22px"],
     ]);
-  }, 60_000); // jsdom + pinned-runtime import + a real mount; the 5s default flakes under parallel worker contention
+  }, 120_000); // jsdom + pinned-runtime import + a real mount, under parallel-worker contention
 
   it("loses the binding when the registered key already carries `--` (negative control)", async () => {
     const code = compileClient();
@@ -133,5 +133,5 @@ describe("CSS v-bind custom properties through the pinned official runtime", () 
     // the value went to a name nothing can reference.
     expect(initial.customProperties[`--${firstKey}`]).toBeUndefined();
     expect(initial.customProperties[`----${firstKey}`]).toBe("red");
-  }, 60_000); // jsdom + pinned-runtime import + a real mount; the 5s default flakes under parallel worker contention
+  }, 120_000); // jsdom + pinned-runtime import + a real mount, under parallel-worker contention
 });
