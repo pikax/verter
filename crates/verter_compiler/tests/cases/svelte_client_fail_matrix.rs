@@ -767,11 +767,14 @@ const FAIL_MATRIX: &[FailRow] = &[
     // HTML-tag-universe cover is the dedicated ELEMENT MATRIX in
     // `svelte_element_attr_boundary.rs`.)
     FailRow {
-        // `<select>`/`<option>` are now allowed bind hosts, so a STATIC `value` attr on
-        // `<option>` (the form-control setter family — 5c owns `bind:value`, not the
-        // static-`value` serializer) fails closed at the form-control attr gate.
+        // `<select>`/`<option>` are allowed bind hosts, and a VALUED static `value="a"`
+        // on an `<option>` is now the OPTION VALUE-CHANNEL (emitted as the init-only
+        // `option.value = option.__value = 'a'` write — see the positive lockstep
+        // fixture `bind_select_value_channel.client.mjs`). A VALUELESS `<option value>`
+        // stays the form-control deferral: official's valueless arm would write the odd
+        // `__value = true`, so it fails closed at the form-control attr gate.
         name: "select_option_static_value_attr",
-        source: "<script>let c = $state(0);</script>\n<select><option value=\"a\">A</option></select>\n<button onclick={() => c++}>{c}</button>\n",
+        source: "<script>let c = $state(0);</script>\n<select><option value>A</option></select>\n<button onclick={() => c++}>{c}</button>\n",
         code: "svelte-runtime-unsupported-dynamic-attribute",
     },
     FailRow {

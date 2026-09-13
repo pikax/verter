@@ -5762,13 +5762,15 @@ fn bind_value_bare_import_root_fails_closed_at_the_bind_lvalue_gate() {
 
 #[test]
 fn select_option_static_value_attr_fails_closed_at_the_form_control_gate() {
-    // `<select>`/`<option>` are now in the element allowlist (DOM-bind hosts), so the
-    // refusal MOVES to the static `value` attr on `<option>`: a static `value` is the
-    // form-control setter family (the DOM-bind backend emits `bind:value`, NOT the static-`value`
-    // serializer), so it fails closed via the `DynamicAttribute`/form-control channel.
-    // RED if the static `value` attr were silently serialized.
+    // `<select>`/`<option>` are in the element allowlist (DOM-bind hosts), and a
+    // static `value` on an `<option>` is the VALUE-CHANNEL surface — emitted as the
+    // official init-only `option.value = option.__value = 'A'` write (see
+    // `select_option_static_value_attr_emits_the_official_value_channel_write`).
+    // A VALUELESS `<option value>` is still the form-control deferral: official's
+    // valueless arm would write the odd `__value = true`, so Verter keeps failing
+    // closed through the `DynamicAttribute`/form-control channel instead.
     assert_fail_closed(
-        "<script>let c = $state(0);</script>\n<select><option value=\"a\">A</option></select>\n<button onclick={() => c++}>{c}</button>\n",
+        "<script>let c = $state(0);</script>\n<select><option value>A</option></select>\n<button onclick={() => c++}>{c}</button>\n",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "value"),
     );
 }
@@ -14274,6 +14276,132 @@ fn bind_function_pair_value_module_matches_the_committed_jsdom_smoke_fixture() {
     assert_jsdom_fixture_in_sync(
         "<script>\n\tlet value = $state(\"\");\n</script>\n<input bind:value={() => value, (next) => value = next} />\n<p>{value}</p>\n",
         "bind_function_pair_value.client.mjs",
+    );
+}
+
+#[test]
+fn bind_input_value_module_matches_the_committed_jsdom_smoke_fixture() {
+    // A plain `<input bind:value={v}>` with a NON-EMPTY initial signal plus a
+    // state-driving `clear` button — the fixture behind the update/cleanup smoke arm
+    // (initial value, typing, repeated typing, state→DOM to the EMPTY string, and
+    // unmount/remount freshness). `$.remove_input_defaults` prelude +
+    // `$.bind_value(input, get, set)` + the delegated `$.set(v, "")` click.
+    assert_jsdom_fixture_in_sync(
+        "<script>\n\tlet v = $state(\"init\");\n</script>\n<input bind:value={v} />\n<p>{v}</p>\n<button onclick={() => v = \"\"}>clear</button>\n",
+        "bind_input_value.client.mjs",
+    );
+}
+
+#[test]
+fn bind_select_value_channel_module_matches_the_committed_jsdom_smoke_fixture() {
+    // `<select bind:value>` whose options carry STATIC `value` attributes (including
+    // the EMPTY-string `value=""`) — the OPTION VALUE-CHANNEL: the skeleton bakes
+    // BARE `<option>`s and the emitter writes the init-only
+    // `option.value = option.__value = 'X'` at each option's walk position, closing
+    // the select region with `$.reset(select)`. The `clear` button drives the
+    // state→DOM arm (back to the empty-string option). Verified structurally
+    // identical to pinned-official svelte@5.56.10 output at authoring.
+    assert_jsdom_fixture_in_sync(
+        "<script>\n\tlet v = $state(\"a\");\n</script>\n<select bind:value={v}><option value=\"\">none</option><option value=\"a\">a</option><option value=\"b\">b</option></select>\n<p>{v}</p>\n<button onclick={() => v = \"\"}>clear</button>\n",
+        "bind_select_value_channel.client.mjs",
+    );
+}
+
+#[test]
+fn bind_checked_update_module_matches_the_committed_jsdom_smoke_fixture() {
+    // `<input type="checkbox" bind:checked>` plus a state-driving `toggle` button —
+    // the fixture behind the checked update/cleanup smoke arm (user toggles, repeated
+    // toggles, state→DOM to FALSE, unmount/remount freshness).
+    assert_jsdom_fixture_in_sync(
+        "<script>\n\tlet c = $state(false);\n</script>\n<input type=\"checkbox\" bind:checked={c} />\n<p>{c}</p>\n<button onclick={() => c = !c}>toggle</button>\n",
+        "bind_checked_update.client.mjs",
+    );
+}
+
+#[test]
+fn bind_pair_setter_module_matches_the_committed_jsdom_smoke_fixture() {
+    // A function-pair `bind:value` whose setter BLOCK forwards to a PROP callback
+    // before writing the signal — `$.bind_value(input, get, (next) => {
+    // $$props.onSet(next); $.set(v, next, true); })`. The injected `onSet` prop is
+    // the smoke's OBSERVABLE setter tap: exactly one call per input event (the
+    // duplicate-listener control) and ZERO calls after unmount (the stale-
+    // subscription control). Verified structurally identical to pinned-official
+    // svelte@5.56.10 output at authoring.
+    assert_jsdom_fixture_in_sync(
+        "<script>\n\tlet { onSet } = $props();\n\tlet v = $state(\"\");\n</script>\n<input bind:value={() => v, (next) => { onSet(next); v = next; }} />\n<p>{v}</p>\n",
+        "bind_pair_setter.client.mjs",
+    );
+}
+
+#[test]
+fn select_option_static_value_attr_emits_the_official_value_channel_write() {
+    // A static `value="X"` on an `<option>` is the official OPTION VALUE-CHANNEL
+    // (`needs_special_value_handling` in `RegularElement.js`): the attribute is
+    // SKIPPED in the baked skeleton and emitted instead as an init-only
+    // `option.value = option.__value = 'X'` write at the option's DOM-walk
+    // position (svelte@5.56.10 `build_element_special_value_attribute`,
+    // `evaluated.is_defined` → no `?? ''` for a string literal). The walk names
+    // each value-carrying option (`var option = $.child(select)` …) and closes
+    // with `$.reset(select)`. RED against the prior fail-closed
+    // `DynamicAttribute { name: "value" }` refusal.
+    let js = emit(
+        "<script>let v = $state(\"a\");</script>\n<select bind:value={v}><option value=\"\">none</option><option value=\"a\">a</option><option value=\"b\">b</option></select>\n<p>{v}</p>\n",
+        "App.svelte",
+    );
+    // The skeleton keeps the option ELEMENTS but strips the value attrs.
+    assert!(
+        js.contains("$.from_html(`<select><option>none</option><option>a</option><option>b</option></select>"),
+        "the option value attrs must be pulled out of the cloned skeleton:\n{js}"
+    );
+    assert!(
+        !js.contains("<option value"),
+        "no option value attr may stay baked:\n{js}"
+    );
+    // The per-option init-only value-channel writes at the walk positions.
+    assert!(
+        js.contains("var option = $.child(select);\n\toption.value = option.__value = '';"),
+        "the first option's value-channel write must follow its walk naming:\n{js}"
+    );
+    assert!(
+        js.contains(
+            "var option_1 = $.sibling(option);\n\toption_1.value = option_1.__value = 'a';"
+        ),
+        "the second option's value-channel write must follow its walk naming:\n{js}"
+    );
+    assert!(
+        js.contains(
+            "var option_2 = $.sibling(option_1);\n\toption_2.value = option_2.__value = 'b';"
+        ),
+        "the third option's value-channel write must follow its walk naming:\n{js}"
+    );
+    // The named-option walk closes the select region.
+    assert!(
+        js.contains("$.reset(select);"),
+        "the walked select region must reset:\n{js}"
+    );
+    // The bind itself is untouched.
+    assert!(
+        js.contains("$.bind_select_value(select, () => $.get(v), ($$value) => $.set(v, $$value))"),
+        "the select bind call must stay:\n{js}"
+    );
+}
+
+#[test]
+fn select_option_static_value_attr_without_bind_still_emits_the_value_channel() {
+    // The value-channel is TAG-KEYED in official (any `<option>` carrying a static
+    // `value`), not bind-gated — a bare `<select><option value="x">` bakes the bare
+    // option and writes the init-only `__value` channel exactly the same.
+    let js = emit(
+        "<select><option value=\"a\">A</option></select>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.from_html(`<select><option>A</option></select>`"),
+        "the skeleton keeps the option without the value attr:\n{js}"
+    );
+    assert!(
+        js.contains("option.value = option.__value = 'a';"),
+        "the init-only value-channel write must emit:\n{js}"
     );
 }
 
