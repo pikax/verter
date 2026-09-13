@@ -228,6 +228,61 @@ function customPropertiesOf(element) {
 }
 
 /**
+ * Mounts `moduleCode`'s default export as a CHILD of a host whose props are
+ * the reactive `initialProps`, then hands the live mount to `drive`. Owns the
+ * shared document, the global installation/restore, warning capture and
+ * unmount, so every observation style reads one identical mount.
+ *
+ * @returns {Promise<{ error: string|null, warnings: string[] }>}
+ */
+async function withClientMount(moduleCode, initialProps, drive) {
+  const runtimeHref = clientRuntimeHref();
+  const filePath = scratchModulePath(redirectVueImports(moduleCode, runtimeHref));
+
+  const warnings = [];
+  let error = null;
+  try {
+    const sharedDom = await ensureClientDom();
+    const restoreGlobals = installClientDomGlobals(sharedDom);
+    const originalWarn = console.warn;
+    console.warn = (...args) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    const container = sharedDom.window.document.createElement("div");
+    sharedDom.window.document.body.appendChild(container);
+    let app = null;
+    try {
+      const runtime = await import(runtimeHref);
+      const mod = await import(pathToFileURL(filePath).href);
+      const component = mod.default;
+      const props = runtime.reactive({ ...initialProps });
+      app = runtime.createApp({
+        render: () => runtime.h(component, { ...props }),
+      });
+      app.config.warnHandler = (message) => warnings.push(message);
+      app.mount(container);
+      await drive({ runtime, props, container, window: sharedDom.window });
+    } catch (mountError) {
+      error = String(mountError?.stack ?? mountError);
+    } finally {
+      if (app !== null) {
+        try {
+          app.unmount();
+        } catch {
+          // An unmount failure must not mask the observation above.
+        }
+      }
+      container.remove();
+      console.warn = originalWarn;
+      restoreGlobals();
+    }
+  } catch (loadError) {
+    error = String(loadError?.stack ?? loadError);
+  }
+  return { error, warnings };
+}
+
+/**
  * Mounts a compiled CLIENT (vdom-backend) module through the pinned
  * official runtime in jsdom and observes the mounted root element across a
  * sequence of prop states.
@@ -246,32 +301,11 @@ function customPropertiesOf(element) {
 export async function executeVueClientMount(moduleCode, options = {}) {
   const propSteps = options.propSteps ?? [{}];
   if (propSteps.length === 0) throw new Error("executeVueClientMount needs at least one prop step");
-  const runtimeHref = clientRuntimeHref();
-  const filePath = scratchModulePath(redirectVueImports(moduleCode, runtimeHref));
-
-  const warnings = [];
   const steps = [];
-  let error = null;
-  try {
-    const sharedDom = await ensureClientDom();
-    const restoreGlobals = installClientDomGlobals(sharedDom);
-    const originalWarn = console.warn;
-    console.warn = (...args) => {
-      warnings.push(args.map(String).join(" "));
-    };
-    const container = sharedDom.window.document.createElement("div");
-    sharedDom.window.document.body.appendChild(container);
-    let app = null;
-    try {
-      const runtime = await import(runtimeHref);
-      const mod = await import(pathToFileURL(filePath).href);
-      const component = mod.default;
-      const props = runtime.reactive({ ...propSteps[0] });
-      app = runtime.createApp({
-        render: () => runtime.h(component, { ...props }),
-      });
-      app.config.warnHandler = (message) => warnings.push(message);
-      app.mount(container);
+  const { error, warnings } = await withClientMount(
+    moduleCode,
+    propSteps[0],
+    async ({ runtime, props, container }) => {
       for (const [index, step] of propSteps.entries()) {
         if (index > 0) {
           for (const key of Object.keys(props)) delete props[key];
@@ -283,22 +317,127 @@ export async function executeVueClientMount(moduleCode, options = {}) {
           customProperties: customPropertiesOf(container.firstElementChild),
         });
       }
-    } catch (mountError) {
-      error = String(mountError?.stack ?? mountError);
-    } finally {
-      if (app !== null) {
-        try {
-          app.unmount();
-        } catch {
-          // An unmount failure must not mask the observation above.
-        }
+    },
+  );
+  return { ok: error === null, error, warnings, steps };
+}
+
+// ── Client interactions (runtime directive updates) ───────────────────
+//
+// A runtime directive (`v-show`, the native `v-model` family) applies its
+// value from the `beforeUpdate`/`updated` hooks the patcher runs only for a
+// VNode it actually revisits. Whether a re-render revisits the element is
+// decided by the compiled output (its patch flag decides block tracking), and
+// the failure is silent: the first render is right, the element simply stops
+// following its value afterwards. Only driving real updates observes it.
+
+function findInteractionTarget(container, selector) {
+  const element = container.querySelector(selector);
+  if (element === null) throw new Error(`interaction target ${selector} is not in the mounted DOM`);
+  return element;
+}
+
+/**
+ * Performs one user interaction with native event semantics: `click` runs
+ * the element's activation behaviour (a checkbox/radio toggles its own
+ * checkedness and dispatches `input` + `change` only when it changed), and
+ * `select` picks an existing option and dispatches `change`.
+ */
+function performInteraction(container, window, action) {
+  const element = findInteractionTarget(container, action.target);
+  switch (action.kind) {
+    case "click":
+      element.click();
+      return;
+    case "select":
+      element.value = action.value;
+      // An unknown option would silently select nothing and read as a
+      // no-op step instead of the interaction the case asked for.
+      if (element.value !== action.value) {
+        throw new Error(
+          `${action.target} has no option with value ${JSON.stringify(action.value)}`,
+        );
       }
-      container.remove();
-      console.warn = originalWarn;
-      restoreGlobals();
-    }
-  } catch (loadError) {
-    error = String(loadError?.stack ?? loadError);
+      element.dispatchEvent(new window.Event("change", { bubbles: true }));
+      return;
+    default:
+      throw new Error(`unknown interaction kind ${JSON.stringify(action.kind)}`);
   }
+}
+
+/**
+ * Mounts a compiled CLIENT (vdom-backend) module through the pinned official
+ * runtime in jsdom, performs `actions` in order, and observes the `observe`
+ * selectors after mount and after each action (each read after `nextTick`,
+ * so the re-render and its directive hooks have run).
+ *
+ * Per observed element and step: `node` is a stable identity (the same
+ * number across steps means the same DOM node, not a replacement),
+ * `display` the inline `style.display`, `checked`/`value` the live form
+ * state (`null` where the element has none), `text` its text content, and
+ * `attributeWrites` the attribute mutations the element received during that
+ * step — a step whose bound values did not change must write nothing.
+ *
+ * @param {string} moduleCode assembled module source (plain JS)
+ * @param {{ observe: string[], actions?: Array<{ kind: "click", target: string } |
+ *   { kind: "select", target: string, value: string }> }} options
+ * @returns {Promise<{ ok: boolean, error: string|null, warnings: string[],
+ *   steps: Array<{ html: string, elements: Record<string, null | { node: number,
+ *   display: string, checked: boolean|null, value: string|null, text: string,
+ *   attributeWrites: number }>}> }>}
+ */
+export async function executeVueClientInteractions(moduleCode, options) {
+  const { observe, actions = [] } = options;
+  if (!Array.isArray(observe) || observe.length === 0) {
+    throw new Error("executeVueClientInteractions needs at least one observed selector");
+  }
+  const steps = [];
+  const { error, warnings } = await withClientMount(
+    moduleCode,
+    {},
+    async ({ runtime, container, window }) => {
+      const identities = new WeakMap();
+      let nextIdentity = 0;
+      const identityOf = (node) => {
+        if (!identities.has(node)) identities.set(node, nextIdentity++);
+        return identities.get(node);
+      };
+      const records = [];
+      const observer = new window.MutationObserver((batch) => records.push(...batch));
+      observer.observe(container, { subtree: true, childList: true, attributes: true });
+      const snapshot = async () => {
+        await runtime.nextTick();
+        records.push(...observer.takeRecords());
+        const elements = {};
+        for (const selector of observe) {
+          const element = container.querySelector(selector);
+          elements[selector] =
+            element === null
+              ? null
+              : {
+                  node: identityOf(element),
+                  display: element.style.display,
+                  checked: typeof element.checked === "boolean" ? element.checked : null,
+                  value: typeof element.value === "string" ? element.value : null,
+                  text: element.textContent,
+                  attributeWrites: records.filter(
+                    (record) => record.type === "attributes" && record.target === element,
+                  ).length,
+                };
+        }
+        records.length = 0;
+        steps.push({ html: container.innerHTML, elements });
+      };
+      try {
+        await snapshot();
+        for (const action of actions) {
+          performInteraction(container, window, action);
+          await snapshot();
+        }
+      } finally {
+        observer.disconnect();
+      }
+    },
+  );
   return { ok: error === null, error, warnings, steps };
 }
