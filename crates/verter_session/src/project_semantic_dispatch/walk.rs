@@ -1191,6 +1191,21 @@ fn merge_declaration_surfaces_core(contributor_surfaces: &[ShallowSurface]) -> M
     }
 }
 
+/// Outcome of narrowing a REMAPPING mapped type to one demanded produced
+/// name — see [`PathWalker::narrow_remapped_mapped_key`].
+///
+/// `ProvenAbsent` is distinct from a decline (`None`): the closed key
+/// domain PROVED no iteration key produces the demanded name, so the
+/// walker publishes its key-absent sentinel directly instead of routing
+/// through whole-surface mapped resolution, which would force every
+/// surviving key's value operand only to reach the same miss.
+enum RemappedKeyNarrowing {
+    /// Exactly these producing keys' values, folded.
+    Value(SemanticNodeId),
+    /// The closed key domain produces no such name.
+    ProvenAbsent,
+}
+
 impl<'a, 'b> PathWalker<'a, 'b> {
     pub(super) fn new(
         dispatch: &'a ProjectSemanticDispatch<'b>,
@@ -2319,9 +2334,18 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // the coarse path owns the exact key-absent miss
                     // semantics.
                     if mapper.name_remap.is_some() {
-                        if let Some(narrowed) =
-                            self.narrow_remapped_mapped_key(*source, mapper, literal_key.as_ref())
-                        {
+                        let narrowing =
+                            self.narrow_remapped_mapped_key(*source, mapper, literal_key.as_ref());
+                        if matches!(narrowing, Some(RemappedKeyNarrowing::ProvenAbsent)) {
+                            // The closed key domain proved the demanded
+                            // produced name does not exist. Publish the
+                            // walker's key-absent sentinel — the SAME answer
+                            // the whole-surface route reaches — without
+                            // forcing any surviving key's value operand.
+                            results.push(self.opaque_miss());
+                            return;
+                        }
+                        if let Some(RemappedKeyNarrowing::Value(narrowed)) = narrowing {
                             let edge_kind = match next_segment.expect("literal_key implies a segment") {
                                 PathSegment::Member(_) => OriginEdgeKind::ProjectMember,
                                 PathSegment::Index(_) => OriginEdgeKind::ProjectIndex,
@@ -5588,22 +5612,31 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     /// UNION, the same fold `build_mapped_type` applies to duplicate
     /// produced names.
     ///
+    /// An EMPTY preimage over a CLOSED key domain is not a decline: the
+    /// domain PROVED the demanded produced name is absent, so the
+    /// narrowing answers [`RemappedKeyNarrowing::ProvenAbsent`] and the
+    /// caller publishes the walker's key-absent sentinel directly. That
+    /// is the same answer the whole-surface route produces for an absent
+    /// name — but the coarse route reaches it only after forcing every
+    /// SURVIVING key's value operand, which the proof already made
+    /// unnecessary.
+    ///
     /// Returns `None` — decline, take the whole-surface route — when
-    /// there is no literal segment, when the preimage is undecidable
-    /// (open key domain, unenumerable key space, undecidable remap),
-    /// when it is empty (the coarse path owns key-absent miss
-    /// semantics), or when a producing key has no substitutable literal.
-    /// Every decline is fail-closed: a narrowed answer is published only
-    /// when the preimage is fully decided. An `Identity` key whose
-    /// `IndexedAccess` does not close is NOT a decline — the preimage
-    /// proved the member exists, so it publishes the addressable
-    /// deferred carrier rather than the key-absent sentinel.
+    /// there is no literal segment, when the request is cancelled, or
+    /// when the preimage is undecidable (open key domain, unenumerable
+    /// key space, undecidable remap, or a producing key with no
+    /// substitutable literal). Every decline is fail-closed: a narrowed
+    /// answer is published only when the preimage is fully decided. An
+    /// `Identity` key whose `IndexedAccess` does not close is NOT a
+    /// decline — the preimage proved the member exists, so it publishes
+    /// the addressable deferred carrier rather than the key-absent
+    /// sentinel.
     fn narrow_remapped_mapped_key(
         &mut self,
         source: SemanticNodeId,
         mapper: &crate::semantic_query::MapperKey,
         literal_key: Option<&LiteralKey>,
-    ) -> Option<SemanticNodeId> {
+    ) -> Option<RemappedKeyNarrowing> {
         let demanded = match literal_key? {
             LiteralKey::String(text) => {
                 crate::semantic_query::PropertyKey::String(Arc::clone(text))
@@ -5619,10 +5652,16 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             .dispatch
             .mapped_iteration_keys_producing_name(source, mapper, &demanded, context)?;
         if iteration_keys.is_empty() {
-            return None;
+            // The closed key domain produced no such name. Absence is
+            // PROVEN, so no value operand is demanded at all.
+            return Some(RemappedKeyNarrowing::ProvenAbsent);
         }
         let mut folded: Option<SemanticNodeId> = None;
         for iteration_key in &iteration_keys {
+            // Cancellation before each selected-value force.
+            if self.dispatch.ctx.is_cancelled() {
+                return None;
+            }
             let literal = iteration_key.literal.as_ref()?;
             let key_arg = self
                 .graph()
@@ -5672,7 +5711,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     .intern_normalized_union_or_intersection(&[existing, value], true),
             });
         }
-        folded
+        folded.map(RemappedKeyNarrowing::Value)
     }
 
     fn synthesise_mapped_surface(
@@ -5919,17 +5958,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             && !self
                 .dispatch
                 .subtree_references_node(mapper.value_expr, mapper.parameter_node);
-        let shared_value: Option<SemanticNodeId> = if value_expr_is_k_independent {
-            Some(
-                self.dispatch
-                    .materialize_selected_key_mapped_value_k_independent(
-                        mapper,
-                        materialise_context,
-                    ),
-            )
-        } else {
-            None
-        };
+        // LAZY memo, not an eager hoist — the `build_mapped_type` mirror.
+        // The shared evaluation still runs at most once per mapped type,
+        // but it runs on the FIRST SURVIVING key's demand. When every key
+        // is remap-dropped the surface is empty, so the value operand is
+        // dead and must never be materialised.
+        let mut shared_value: Option<SemanticNodeId> = None;
         let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(keys.len());
         for key in keys.into_iter() {
             // Key-domain decision BEFORE the value operand is forced —
@@ -6034,8 +6068,20 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             index: IndexKey::from_known(key.key.clone()),
                         }),
                     }
-                } else if let Some(shared) = shared_value {
-                    shared
+                } else if value_expr_is_k_independent {
+                    // First SURVIVING key materialises the shared value;
+                    // later keys reuse it. Zero surviving keys ⇒ never
+                    // materialised at all.
+                    if shared_value.is_none() {
+                        shared_value = Some(
+                            self.dispatch
+                                .materialize_selected_key_mapped_value_k_independent(
+                                    mapper,
+                                    materialise_context,
+                                ),
+                        );
+                    }
+                    shared_value.expect("initialised immediately above")
                 } else {
                     let literal = key.literal.as_ref()?;
                     self.dispatch.materialize_selected_key_mapped_value(

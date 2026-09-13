@@ -32,6 +32,13 @@
 //!    identity; it must not materialise the value body to decide, and
 //!    must not run the relation engine.
 //!
+//! 6. **An unused type argument is a dead operand.** `Ignore<A, B>`
+//!    never mentions `B`, so the argument bound to `B` contributes
+//!    nothing to any surface reachable from the instantiation. Work
+//!    must therefore be independent of that argument's STRUCTURE:
+//!    replacing a literal with a nested generic instantiation may not
+//!    cost additional instantiations or substitutions.
+//!
 //! These sit alongside the mapped-side key-domain discriminators in
 //! `mapped_remap_dead_key_value_forcing`: that file pins which keys are
 //! forced, this one pins that the substitution each forced key applies
@@ -68,6 +75,10 @@ export type Constrained<K extends keyof WideSource> = { picked: WideSource[K] };
 export type IdentityOpen<T> = { [K in keyof T]: T[K] };
 
 export type ComputedOpen<T> = { [K in keyof T]: Boxed<T[K]> };
+
+export type Deep<V> = { a: { b: { c: V } } };
+
+export type Ignore<A, B> = { only: A };
 "#;
 
 fn new_host() -> Arc<VerterHost> {
@@ -516,5 +527,79 @@ fn one_generic_body_lowers_once_across_distinct_argument_environments() {
          exactly once — the body belongs to the declaration's content, and each environment \
          only re-substitutes it. Observed {lowered} lowerings, i.e. the body was re-lowered per \
          argument environment."
+    );
+}
+
+/// DISCRIMINATOR (dead generic argument): the argument bound to a type
+/// parameter the declaration body never mentions must not be
+/// instantiated.
+///
+/// `Ignore<A, B> = { only: A }` ignores `B` entirely. `Ignore<'x', 'y'>`
+/// and `Ignore<'x', Deep<'y'>>` therefore publish the SAME surface — the
+/// second merely hands a structurally deeper type to the dead parameter.
+/// Any extra instantiation or substitution the second demand performs is
+/// work for an operand no reachable surface consumes, and it scales with
+/// the dead argument's depth rather than with what was demanded.
+///
+/// Two hosts so each measurement is cold and attributable; the surface
+/// equality leg keeps the counter comparison honest (dropping the work by
+/// dropping the semantics would satisfy the counters alone).
+#[test]
+fn an_unused_generic_argument_is_not_instantiated() {
+    fn measure(argument: TypeExpr) -> (u64, u64, Vec<String>) {
+        let host = new_host();
+        let graph = host.project_type_store().semantic_graph();
+        let before = graph.stats_snapshot();
+        let surface = instantiate(
+            &host,
+            "Ignore",
+            vec![TypeExpr::string_literal("x".to_string()), argument],
+        );
+        let after = graph.stats_snapshot();
+        let names = match host
+            .project_type_store()
+            .semantic_graph()
+            .node_data(surface)
+            .as_deref()
+        {
+            Some(SemanticNodeData::Object(view)) => view
+                .positive_members()
+                .iter()
+                .filter_map(|m| m.string_name().map(str::to_string))
+                .collect(),
+            other => panic!("expected an Object surface, got {other:?}"),
+        };
+        (
+            after.instantiate_count - before.instantiate_count,
+            after.substitute_memo_misses - before.substitute_memo_misses,
+            names,
+        )
+    }
+
+    let (shallow_inst, shallow_subs, shallow_names) =
+        measure(TypeExpr::string_literal("y".to_string()));
+    let (deep_inst, deep_subs, deep_names) = measure(TypeExpr::Ref {
+        name: Arc::from("Deep"),
+        type_arguments: Arc::from(
+            vec![TypeExpr::string_literal("y".to_string())].into_boxed_slice(),
+        ),
+    });
+
+    assert_eq!(
+        shallow_names,
+        vec!["only".to_string()],
+        "fixture invariant: `Ignore` publishes exactly its one `only` member"
+    );
+    assert_eq!(
+        deep_names, shallow_names,
+        "a deeper argument bound to the UNUSED parameter cannot change the published surface"
+    );
+    assert_eq!(
+        deep_inst, shallow_inst,
+        "the argument bound to the unused parameter `B` is a DEAD operand: no surface          reachable from `Ignore<A, B>` consumes it, so replacing its literal with          `Deep<'y'>` must cost no additional instantiations. Observed {shallow_inst} ->          {deep_inst}; a difference means the reference site instantiated the dead argument          before any parameter usage demanded it, and the cost scales with the dead          argument's depth."
+    );
+    assert_eq!(
+        deep_subs, shallow_subs,
+        "likewise for substitutions: the dead argument must not be substituted. Observed          {shallow_subs} -> {deep_subs}."
     );
 }

@@ -7868,6 +7868,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         mapper: &crate::semantic_query::MapperKey,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        // Cancellation before any mapped work. A cancelled request
+        // never enumerates a key domain, never substitutes a remap, and
+        // never forces a value operand; the typed `Cancelled` output is
+        // `ReturnOnly` (cache-suppressed) so no partial per-key work can
+        // warm a whole-surface candidate.
+        if self.ctx.is_cancelled() {
+            return self.cancelled_build_output();
+        }
         // §22 fast-reject on the mapped SOURCE: over `any` ⇒ `any`; over
         // `never` ⇒ `{}`; over `error` ⇒ `error`; a direct mapping over
         // `unknown` is illegal ⇒ error. Runs before key-space enumeration.
@@ -8152,59 +8160,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // paths produce the same surface member value.
         let value_expr_is_k_independent = !value_is_identity
             && !self.subtree_references_node(mapper.value_expr, mapper.parameter_node);
-        let shared_value: Option<SemanticNodeId> = if value_expr_is_k_independent {
-            let evaluated = self
-                .evaluate_deferred_semantic_node_with_context(mapper.value_expr, context)
-                .into_active_query_build_node(self);
-            let resolved = match graph.node_data(evaluated).as_deref() {
-                Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                    let slot = self.type_slot_for(
-                        Arc::clone(&base.canonical_id),
-                        base.owner,
-                        Arc::clone(&base.decl_name),
-                    );
-                    let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
-                    let args = Arc::clone(args);
-                    let inst_read = self.execute_read(SemanticQueryKey::Instantiate(
-                        crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
-                    ));
-                    if inst_read.result_is_partial {
-                        mapped_partial_reasons =
-                            mapped_partial_reasons.union(inst_read.partial_reason_classes());
-                    }
-                    match inst_read.value {
-                        QueryResult::Value(id) => id,
-                        _ => evaluated,
-                    }
-                }
-                _ => evaluated,
-            };
-            let final_value = if matches!(
-                graph.node_data(resolved).as_deref(),
-                Some(SemanticNodeData::Opaque(_))
-            ) {
-                // Mirror the materialiser's `Opaque` fallback. For the
-                // K-independent case the substituted carrier IS
-                // `value_expr` itself (substitution is the identity),
-                // so reusing `value_expr` here matches the per-K
-                // materialiser exactly: the free binder cannot leak
-                // because there is no reference to leak in the first
-                // place.
-                mapper.value_expr
-            } else {
-                resolved
-            };
-            Some(final_value)
-        } else {
-            None
-        };
+        // LAZY memo, not an eager hoist. The shared evaluation still runs
+        // at most once per mapped type, but it runs on the FIRST
+        // SURVIVING key's demand rather than above the loop. A mapped type
+        // whose every key is remap-dropped
+        // (`{ [K in 'a' | 'b' as never]: Box<number> }`) publishes an EMPTY
+        // surface, so its value operand is dead; evaluating above the
+        // key-domain decision forced it anyway and re-introduced, once per
+        // mapped type, exactly the dead-operand work the per-key ordering
+        // removes. The evaluation itself is unchanged — see
+        // [`Self::evaluate_k_independent_mapped_value`].
+        let mut shared_value: Option<SemanticNodeId> = None;
         let mut produced: Vec<SurfaceMember> = Vec::with_capacity(keys.len());
         let mut project_member_edges: Vec<(SemanticNodeId, PropertyKey)> = Vec::new();
         // A key whose `as` remap fails closed (`DeferCarrier`) taints the whole
         // mapped type: it returns the deferred `Mapped` carrier rather than a
         // torn surface (set inside the loop, checked after).
         let mut remap_defers = false;
+        // A cancelled request abandons the key loop; the surface built so
+        // far is discarded rather than published torn.
+        let mut cancelled = false;
         for key in &keys {
+            // Cancellation before this key's remap substitution AND before
+            // its value force — the two per-key forcing points.
+            if self.ctx.is_cancelled() {
+                cancelled = true;
+                break;
+            }
             // Key-domain decision BEFORE the value operand is forced.
             //
             // The `as <expr>` remap is a KEY-DOMAIN operator: it decides
@@ -8282,6 +8264,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             //   `synthesise_mapped_surface` calls the same helper at the
             //   Published(Shallow) macro publication boundary so both
             //   paths converge on identical per-key semantics.
+            if self.ctx.is_cancelled() {
+                cancelled = true;
+                break;
+            }
             let value = if let (Some(source_member), true) = (source_member, value_is_identity) {
                 source_member.value
             } else if value_is_identity {
@@ -8308,8 +8294,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         index: IndexKey::from_known(key.key.clone()),
                     }),
                 }
-            } else if let Some(shared) = shared_value {
-                shared
+            } else if value_expr_is_k_independent {
+                // The first SURVIVING key materialises the shared value;
+                // every later key reuses it. Zero surviving keys ⇒ it is
+                // never evaluated at all.
+                if shared_value.is_none() {
+                    let (value, reasons) =
+                        self.evaluate_k_independent_mapped_value(mapper, context);
+                    mapped_partial_reasons = mapped_partial_reasons.union(reasons);
+                    shared_value = Some(value);
+                }
+                shared_value.expect("initialised immediately above")
             } else {
                 let Some(literal) = key.literal.as_ref() else {
                     remap_defers = true;
@@ -8389,6 +8384,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 });
                 project_member_edges.push((value, produced_name.clone()));
             }
+        }
+
+        // Cancelled mid-loop: return the typed `Cancelled` output rather
+        // than publishing the keys that happened to complete first.
+        if cancelled || self.ctx.is_cancelled() {
+            return self.cancelled_build_output();
         }
 
         // Fail closed: a key whose remap could not resolve to a finite key set
@@ -8968,6 +8969,71 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .into_active_query_build_node(self)
     }
 
+    /// Evaluate a mapped type's K-INDEPENDENT value expression once.
+    ///
+    /// When `mapper.value_expr` does not structurally reference the
+    /// mapper binder, the per-K substitution is the identity, so every
+    /// enumerated key's substituted carrier IS `value_expr` itself.
+    /// Both rails therefore evaluate it once and reuse the result for
+    /// every surviving key — but only on a surviving key's DEMAND: the
+    /// call sites hold this behind a lazy `Option`, so a mapped type
+    /// whose keys are all remap-dropped never evaluates it.
+    ///
+    /// The `InstantiationRef` redispatch and the `Opaque` fallback
+    /// mirror [`Self::materialize_mapped_member_value_for_key`] exactly,
+    /// so the hoisted result equals what the per-K materialiser would
+    /// have produced. Returns the value plus any partial-reason classes
+    /// the nested `Instantiate` read contributed, for the caller to
+    /// union into its own result taint.
+    fn evaluate_k_independent_mapped_value(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> (SemanticNodeId, crate::semantic_query::PartialReasonSet) {
+        let graph = self.graph();
+        let mut reasons = crate::semantic_query::PartialReasonSet::empty();
+        let evaluated = self
+            .evaluate_deferred_semantic_node_with_context(mapper.value_expr, context)
+            .into_active_query_build_node(self);
+        let resolved = match graph.node_data(evaluated).as_deref() {
+            Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                let slot = self.type_slot_for(
+                    Arc::clone(&base.canonical_id),
+                    base.owner,
+                    Arc::clone(&base.decl_name),
+                );
+                let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
+                let args = Arc::clone(args);
+                let inst_read = self.execute_read(SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
+                ));
+                if inst_read.result_is_partial {
+                    reasons = reasons.union(inst_read.partial_reason_classes());
+                }
+                match inst_read.value {
+                    QueryResult::Value(id) => id,
+                    _ => evaluated,
+                }
+            }
+            _ => evaluated,
+        };
+        let final_value = if matches!(
+            graph.node_data(resolved).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        ) {
+            // Mirror the materialiser's `Opaque` fallback. For the
+            // K-independent case the substituted carrier IS
+            // `value_expr` itself (substitution is the identity), so
+            // reusing `value_expr` here matches the per-K materialiser
+            // exactly: the free binder cannot leak because there is no
+            // reference to leak in the first place.
+            mapper.value_expr
+        } else {
+            resolved
+        };
+        (final_value, reasons)
+    }
+
     /// Key-domain PREIMAGE of one demanded PRODUCED name through a
     /// mapper's `as`-clause remap — the single-key entrance for a
     /// remapping mapped type.
@@ -9015,9 +9081,59 @@ impl<'a> ProjectSemanticDispatch<'a> {
         ) {
             return None;
         }
+        // Cancellation before key enumeration. A cancelled request must
+        // not start a domain walk it will discard; declining sends the
+        // caller to the coarse route, which fails closed at
+        // [`Self::build_mapped_type`]'s own entry check.
+        if self.ctx.is_cancelled() {
+            return None;
+        }
         let domain = self.key_literals_from_keyspace_node(mapper.key_space)?;
+        // DEMAND-DIRECTED admission for an IDENTITY remap.
+        //
+        // `as K` (the remap expression IS the mapper binder) is the one
+        // remap whose inverse is known without evaluating it: it maps
+        // every iteration key to itself, so the preimage of a demanded
+        // produced name is that same key. Decide it by MEMBERSHIP over
+        // the enumerated domain — zero substitutions into
+        // `name_remap`, zero deferred evaluations, zero `Instantiate`
+        // dispatches — instead of substituting and evaluating the remap
+        // once per domain key. This is what keeps a single-key demand
+        // through a wide identity-remapped mapper independent of source
+        // WIDTH rather than linear in it.
+        //
+        // A literal-less domain key stays undecidable exactly as the
+        // general classifier treats it
+        // ([`MappedKeyRemapOutcome::DeferCarrier`]), so the
+        // short-circuit and the general path decline on the same input.
+        if mapper.name_remap == Some(mapper.parameter_node) {
+            let mut matched: Vec<super::enumerate::KeyDomainKey> = Vec::new();
+            for key in domain {
+                key.literal.as_ref()?;
+                if key.key.element_access_collides(demanded) {
+                    matched.push(key);
+                }
+            }
+            return Some(matched);
+        }
+        // General (non-invertible) remap: `as Rename<K>` /
+        // `as K extends … ? … : never` / template-literal remaps have no
+        // closed-form inverse, so the preimage is computed by deciding
+        // the remap per iteration key. That decision is the KEY-DOMAIN
+        // work the mapped contract schedules BEFORE dead-ness begins: it
+        // reads `mapper.name_remap` only, so every non-producing key —
+        // including every remap-dropped key — is eliminated with zero
+        // value forcing, and the alternative (whole-surface resolution)
+        // performs this same remap decision AND forces every surviving
+        // key's value. Enumeration cannot stop at the first producer:
+        // several iteration keys may produce one surface name and their
+        // values union.
         let mut matched: Vec<super::enumerate::KeyDomainKey> = Vec::new();
         for key in domain {
+            // Cancellation before each remap substitution.
+            if self.ctx.is_cancelled() {
+                return None;
+            }
             let produces = match self.mapped_member_name_remap_outcome(mapper, &key, context) {
                 MappedKeyRemapOutcome::Keep(name) => name.element_access_collides(demanded),
                 MappedKeyRemapOutcome::Keys(names) => names
@@ -9141,7 +9257,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> super::walk::QueryBuildOutput {
         verter_audit::attribute_scope!(ConditionalReduce);
         if self.ctx.is_cancelled() {
-            return self.cancelled_conditional_output();
+            return self.cancelled_build_output();
         }
         if let Some(absorbed) = self.absorb_conditional(check, extends, distributive, |take_true| {
             self.apply_conditional_branch_pending(
@@ -9230,7 +9346,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         lower_branch: &mut dyn FnMut(bool) -> SemanticNodeId,
     ) -> super::walk::QueryBuildOutput {
         if self.ctx.is_cancelled() {
-            return self.cancelled_conditional_output();
+            return self.cancelled_build_output();
         }
         if let Some(output) =
             self.absorb_conditional(check, extends, distributive, &mut *lower_branch)
@@ -9246,7 +9362,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let (selection, infer) = self.conditional_branch_selection(check, extends);
         if self.ctx.is_cancelled() {
-            return self.cancelled_conditional_output();
+            return self.cancelled_build_output();
         }
         match selection {
             ConditionalBranchSelection::True | ConditionalBranchSelection::False => {
@@ -9256,7 +9372,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ConditionalBranchSelection::Deferred => {
                 let true_branch = lower_branch(true);
                 if self.ctx.is_cancelled() {
-                    return self.cancelled_conditional_output();
+                    return self.cancelled_build_output();
                 }
                 let false_branch = lower_branch(false);
                 self.conditional_query_output(SemanticQueryKey::Conditional {
@@ -9271,7 +9387,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    fn cancelled_conditional_output(&self) -> super::walk::QueryBuildOutput {
+    /// The one typed `Cancelled` build output — shared by every builder
+    /// that checks cancellation (conditional selection, mapped key
+    /// enumeration / per-key forcing, …). It is `ReturnOnly`:
+    /// `cache_suppress` keeps a cancelled result out of every warm
+    /// candidate, so partially forced per-key work can never warm a
+    /// complete family entry.
+    fn cancelled_build_output(&self) -> super::walk::QueryBuildOutput {
         let mut output = super::walk::QueryBuildOutput::from((
             QueryResult::Error(QueryError::Cancelled),
             self.project_generation_signature(),
@@ -9313,7 +9435,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut per_member = Vec::with_capacity(members.len());
         for &member in members.iter() {
             if self.ctx.is_cancelled() {
-                return Some(self.cancelled_conditional_output());
+                return Some(self.cancelled_build_output());
             }
             let member_output = reduce_member(member);
             output.cache_suppress |= member_output.cache_suppress;
@@ -9352,7 +9474,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         infer: Option<super::relation::RelationInferBindings>,
     ) -> super::walk::QueryBuildOutput {
         if self.ctx.is_cancelled() {
-            return self.cancelled_conditional_output();
+            return self.cancelled_build_output();
         }
         let graph = self.graph();
         let fence = self.project_generation_signature();
@@ -9378,7 +9500,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         if self.ctx.is_cancelled() {
-            return self.cancelled_conditional_output();
+            return self.cancelled_build_output();
         }
         let branch = match selection {
             ConditionalBranchSelection::True => {

@@ -279,6 +279,10 @@ verter_session = { path = ".", features = ["test-support", "attribution"] }
 verter_compiler = { path = "../verter_compiler", features = ["test-support"] }
 verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
 verter_type_expr = { workspace = true }
+# The integration-test binary is its own crate, so the observer substrate
+# must be a dev-dependency for tests that install an `AuditObserver`
+# (the deterministic mid-loop cancellation discriminators).
+verter_audit = { path = "../verter_audit" }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }

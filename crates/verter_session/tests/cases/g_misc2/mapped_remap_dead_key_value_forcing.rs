@@ -50,7 +50,7 @@ use std::sync::Arc;
 use verter_semantic::facts::FactKey;
 use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef};
 use verter_session::semantic_query::{
-    PathSegment, ProjectionMode, ProjectionReductionContext, PropertyKey, QueryResult,
+    IndexKey, PathSegment, ProjectionMode, ProjectionReductionContext, PropertyKey, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
 };
 use verter_session::{for_tests, HostConfig, UpsertRequest, VerterHost};
@@ -80,6 +80,30 @@ export type Kept<K> = K extends 'b' ? 'kept_b' : K extends 'e' ? 'kept_e' : neve
 
 export type Remapped = {
   [K in keyof WideSource as Kept<K>]: Boxed<WideSource[K]>
+};
+"#;
+
+/// The same six-key shape with the remap written INLINE rather than
+/// through a userland helper. Deciding an inline conditional remap needs
+/// no nested query, so a cancelled request does not fail the first key
+/// closed through the deferred-carrier arm — the key loop is the only
+/// thing that can stop it, which is what makes this fixture able to
+/// observe the loop's own cancellation checks.
+const INLINE_REMAP_TS: &str = r#"
+export interface WideSource {
+  a: string;
+  b: number;
+  c: boolean;
+  d: string[];
+  e: number[];
+  f: Record<string, string>;
+}
+
+export type Boxed<V> = { boxed: V };
+
+export type Remapped = {
+  [K in keyof WideSource as K extends 'b' ? 'kept_b' : K extends 'e' ? 'kept_e' : never]:
+    Boxed<WideSource[K]>
 };
 "#;
 
@@ -149,6 +173,45 @@ fn per_k_materializations(host: &Arc<VerterHost>) -> u64 {
         .mapped_per_k_materializations
 }
 
+fn instantiate_count(host: &Arc<VerterHost>) -> u64 {
+    host.project_type_store()
+        .semantic_graph()
+        .stats_snapshot()
+        .instantiate_count
+}
+
+fn substitute_misses(host: &Arc<VerterHost>) -> u64 {
+    host.project_type_store()
+        .semantic_graph()
+        .stats_snapshot()
+        .substitute_memo_misses
+}
+
+/// The value node bound to `member` on an evaluated object surface.
+fn member_value(host: &Arc<VerterHost>, surface: SemanticNodeId, member: &str) -> SemanticNodeId {
+    let graph = host.project_type_store().semantic_graph();
+    let data = graph
+        .node_data(surface)
+        .expect("surface node must have semantic data");
+    match data.as_ref() {
+        SemanticNodeData::Object(view) => {
+            view.positive_members()
+                .iter()
+                .find(|m| m.string_name() == Some(member))
+                .unwrap_or_else(|| panic!("member `{member}` must be published; got {view:?}"))
+                .value
+        }
+        other => panic!("expected an Object surface, got {other:?}"),
+    }
+}
+
+fn describe(host: &Arc<VerterHost>, node: SemanticNodeId) -> String {
+    format!(
+        "{:?}",
+        host.project_type_store().semantic_graph().node_data(node)
+    )
+}
+
 /// DISCRIMINATOR (dead-key forcing): a whole-surface evaluation of a
 /// six-key mapped type whose `as` remap drops four keys must materialise
 /// exactly the two SURVIVING keys' values.
@@ -192,7 +255,8 @@ fn remap_dropped_keys_do_not_force_their_value_operands() {
 
 /// DISCRIMINATOR (single-key demand through a remapping mapper): a
 /// `ProjectPath` for ONE produced name must force only the iteration key
-/// that produces it.
+/// that produces it, AND must return the same value the whole surface
+/// publishes under that name.
 ///
 /// The demanded name `kept_b` is a POST-remap name, so iteration-key
 /// admission cannot decide it. Inverting the remap over the key domain
@@ -201,38 +265,27 @@ fn remap_dropped_keys_do_not_force_their_value_operands() {
 /// whole-surface `MappedType` resolution forces BOTH survivors, so the
 /// counter reaches two.
 ///
-/// The value assertion pins the answer: single-key narrowing must return
-/// the same node the whole-surface surface publishes under that name.
+/// The ANSWER leg is what stops the counter leg from being satisfied by
+/// forcing the WRONG single key. `Boxed<WideSource['b']>` and
+/// `Boxed<WideSource['e']>` both publish exactly one member named
+/// `boxed` and both cost exactly one materialisation — a remap preimage
+/// that selected iteration key `e` for the demanded name `kept_b` would
+/// satisfy every shape-only assertion while returning `{ boxed: number[] }`
+/// instead of `{ boxed: number }`. So the narrowed node is compared
+/// against the whole-surface member value node computed on the SAME host
+/// (node ids are content-addressed within one arena, and cross-host ids
+/// are incomparable), and the `boxed` member's own value is pinned to
+/// `number`.
 #[test]
 fn single_key_demand_through_remapping_mapper_forces_only_the_producing_key() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert(&host, WIDE_REMAP_TS);
-
-    // Reference answer: whole-surface evaluation, then read the member.
-    let whole = project(
-        &host,
-        carrier(&host, "Remapped", ProjectionMode::Expanded),
-        Vec::new(),
-        ProjectionMode::Expanded,
-    );
-    let graph = host.project_type_store().semantic_graph();
-    let expected = match graph.node_data(whole).expect("surface must exist").as_ref() {
-        SemanticNodeData::Object(view) => {
-            view.positive_members()
-                .iter()
-                .find(|m| m.string_name() == Some("kept_b"))
-                .expect("`kept_b` must be published by the whole surface")
-                .value
-        }
-        other => panic!("expected an Object surface, got {other:?}"),
-    };
-
-    // Fresh host so the single-key demand is measured cold, without the
-    // whole-surface run's warm per-K results masking the counter.
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
-    upsert(&host, WIDE_REMAP_TS);
     let base = carrier(&host, "Remapped", ProjectionMode::Expanded);
 
+    // Measured window: the single-key demand is cold here — the
+    // whole-surface reference is computed AFTER it, on this same host, so
+    // no warm per-K result masks the counter and the two nodes remain
+    // comparable.
     let before = per_k_materializations(&host);
     let narrowed = project(
         &host,
@@ -242,9 +295,6 @@ fn single_key_demand_through_remapping_mapper_forces_only_the_producing_key() {
     );
     let forced = per_k_materializations(&host) - before;
 
-    // Same semantic answer as whole-surface-then-project. Both runs
-    // intern into the same content-addressed arena shape, so the
-    // narrowed value must carry the same member surface.
     let narrowed_data = host
         .project_type_store()
         .semantic_graph()
@@ -262,12 +312,7 @@ fn single_key_demand_through_remapping_mapper_forces_only_the_producing_key() {
          inline conditional decides. Got {:?}",
         narrowed_data.as_ref()
     );
-    assert_eq!(
-        member_names(&host, narrowed),
-        vec!["boxed".to_string()],
-        "`Remapped['kept_b']` is `Boxed<WideSource['b']>`, whose sole member is `boxed`"
-    );
-    let _ = expected;
+    drop(narrowed_data);
 
     assert_eq!(
         forced, 1,
@@ -275,6 +320,69 @@ fn single_key_demand_through_remapping_mapper_forces_only_the_producing_key() {
          that produces it; observed {forced} per-K materialisations. A count of 2 means the \
          demand fell through to whole-surface mapped resolution and forced the unrelated \
          survivor `e` as well; a count of 6 means it forced the dropped keys too."
+    );
+
+    // ANSWER leg — the same semantic answer as whole-surface-then-project.
+    let whole = project(
+        &host,
+        carrier(&host, "Remapped", ProjectionMode::Expanded),
+        Vec::new(),
+        ProjectionMode::Expanded,
+    );
+    let expected = {
+        let graph = host.project_type_store().semantic_graph();
+        let data = graph.node_data(whole).expect("surface must exist");
+        match data.as_ref() {
+            SemanticNodeData::Object(view) => {
+                view.positive_members()
+                    .iter()
+                    .find(|m| m.string_name() == Some("kept_b"))
+                    .expect("`kept_b` must be published by the whole surface")
+                    .value
+            }
+            other => panic!("expected an Object surface, got {other:?}"),
+        }
+    };
+    assert_eq!(
+        narrowed,
+        expected,
+        "single-key narrowing must return the SAME node the whole surface publishes under \
+         `kept_b`. Interning is content-addressed within one arena, so a differing node is a \
+         differing answer — the failure this catches is a remap preimage that selected the \
+         wrong producing iteration key: `Boxed<WideSource['e']>` has the same member NAME and \
+         the same one-materialisation cost as `Boxed<WideSource['b']>`. narrowed={} expected={}",
+        describe(&host, narrowed),
+        describe(&host, expected)
+    );
+
+    // Independent of node identity: the `boxed` member's own value must
+    // address SOURCE KEY `b`, never `e`. The published value is the
+    // addressable `WideSource['b']` access, so the producing iteration key
+    // is readable directly off it — exactly the fact a wrong-producer
+    // regression changes while leaving every member NAME and every counter
+    // identical.
+    let boxed_value = member_value(&host, narrowed, "boxed");
+    let indexed_key = match host
+        .project_type_store()
+        .semantic_graph()
+        .node_data(boxed_value)
+        .as_deref()
+    {
+        Some(SemanticNodeData::IndexedAccess {
+            index: IndexKey::String(name),
+            ..
+        }) => name.to_string(),
+        other => panic!(
+            "`Remapped['kept_b']`'s `boxed` member is `WideSource['b']`, an addressable \
+             indexed access; got {other:?}"
+        ),
+    };
+    assert_eq!(
+        indexed_key, "b",
+        "the demanded produced name `kept_b` is produced by iteration key `b`, so the value \
+         must address `WideSource['b']`. `e` here means the remap preimage selected the wrong \
+         producing key — a regression invisible to member names (`boxed` either way) and to \
+         the per-K counter (one materialisation either way)."
     );
 }
 
@@ -632,4 +740,684 @@ fn demanded_key_value_facts_are_traced_and_dead_key_value_facts_are_not() {
          `DeadValue['inner']` and lands its declaration facts in the read set, widening the \
          cache-validity rail with a dependency the answer does not have."
     );
+}
+
+/// DISCRIMINATOR (Shallow publication rail): the SAME dead-key ordering
+/// must hold on the empty-path Shallow surface synthesiser, not only on
+/// the Expanded publication rail.
+///
+/// The two rails build the mapped surface independently
+/// (build_mapped_type for Published(Expanded), the walker's
+/// synthesise_mapped_surface for Published(Shallow)), so an ordering fix
+/// on one of them is unguarded by every counter assertion that only ever
+/// drives Expanded. Published answers are INVARIANT under the reorder —
+/// the same two members are published either way — so only a work
+/// counter discriminates it.
+#[test]
+fn shallow_surface_remap_dropped_keys_do_not_force_their_value_operands() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert(&host, WIDE_REMAP_TS);
+
+    let base = carrier(&host, "Remapped", ProjectionMode::Shallow);
+
+    let before = per_k_materializations(&host);
+    let surface = project(&host, base, Vec::new(), ProjectionMode::Shallow);
+    let forced = per_k_materializations(&host) - before;
+
+    let mut names = member_names(&host, surface);
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["kept_b".to_string(), "kept_e".to_string()],
+        "the Shallow rail must publish the same two renamed members the Expanded rail does"
+    );
+    assert_eq!(
+        forced, 2,
+        "the Shallow surface synthesiser must decide each key's remap BEFORE forcing its \
+         value operand, exactly as the Expanded rail does: six keys, four remap-dropped, so \
+         exactly two per-K materialisations. Observed {forced}. A count of 6 means the Shallow \
+         rail forces every key's value and discards the dropped ones — the dead-operand work \
+         the ordering forbids, unguarded because every other counter test drives Expanded."
+    );
+}
+
+/// A mapped type whose remap drops EVERY key, over a value expression
+/// that costs a real instantiation. The produced surface is empty, so
+/// the value operand is dead for the whole mapped type — not merely per
+/// key.
+const ALL_DROPPED_TS: &str = r#"
+export type Boxed<V> = { boxed: V };
+
+export type AllDropped = { [K in 'a' | 'b' as never]: Boxed<number> };
+
+export type NoneDropped = { [K in 'a' | 'b']: Boxed<number> };
+"#;
+
+/// The same two mapped types over an INERT value expression. Pairing
+/// them with `ALL_DROPPED_TS` isolates the cost of the value operand
+/// from the fixed cost of resolving the alias and enumerating its key
+/// space, which is identical across the two fixtures.
+const ALL_DROPPED_INERT_VALUE_TS: &str = r#"
+export type Boxed<V> = { boxed: V };
+
+export type AllDropped = { [K in 'a' | 'b' as never]: number };
+
+export type NoneDropped = { [K in 'a' | 'b']: number };
+"#;
+
+/// DISCRIMINATOR (K-independent shared value): when every key is
+/// remap-dropped, the mapped type's shared value operand must not be
+/// materialised at all.
+///
+/// Boxed<number> does not reference the mapper binder, so both rails
+/// evaluate it ONCE and reuse it for every key instead of substituting
+/// per K. Evaluating it above the key loop makes that single evaluation
+/// unconditional — it runs even when the key-domain decision drops every
+/// key and publishes an empty surface. The per-K materialisation counter
+/// cannot see this: the shared evaluation is precisely the path that
+/// bypasses the per-K materialiser.
+///
+/// The NoneDropped control proves the fixture's value operand really
+/// does cost an instantiation, so the zero-delta assertion is about the
+/// ordering and not about an inert value expression.
+///
+/// Driven at the Shallow publication boundary, where the mapper's value
+/// expression is still an unresolved carrier when the mapped surface is
+/// built, so forcing it is observable. The Expanded publication rail
+/// holds the same ordering in the same shape, but a K-INDEPENDENT value
+/// operand is by definition substitution-free, so the enclosing
+/// declaration-body projection has already realised it before the mapped
+/// build runs — there, the shared evaluation is a memo hit either way and
+/// no counter can separate the two orderings.
+#[test]
+fn a_mapped_type_with_every_key_dropped_does_not_force_its_shared_value() {
+    // (instantiations, published member names) for `alias` in `source`.
+    // The carrier lowering sits OUTSIDE the measured window so the window
+    // contains the mapped BUILD, whose key-domain decision is the subject.
+    fn measure(source: &str, alias: &str, mode: ProjectionMode) -> (u64, Vec<String>) {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        upsert(&host, source);
+        let base = carrier(&host, alias, mode);
+        let before = instantiate_count(&host);
+        let surface = project(&host, base, Vec::new(), mode);
+        let cost = instantiate_count(&host) - before;
+        let mut names = member_names(&host, surface);
+        names.sort();
+        (cost, names)
+    }
+
+    {
+        // Driven at the Shallow publication boundary only — see the scope
+        // note on this test.
+        let mode = ProjectionMode::Shallow;
+        // Control: the SAME mapped shapes over an inert value expression.
+        // Subtracting it isolates the cost of the value operand from the
+        // fixed cost of resolving the alias and enumerating its key space.
+        let (inert_kept, inert_kept_names) =
+            measure(ALL_DROPPED_INERT_VALUE_TS, "NoneDropped", mode);
+        let (inert_dropped, inert_dropped_names) =
+            measure(ALL_DROPPED_INERT_VALUE_TS, "AllDropped", mode);
+        let (boxed_kept, boxed_kept_names) = measure(ALL_DROPPED_TS, "NoneDropped", mode);
+        let (boxed_dropped, boxed_dropped_names) = measure(ALL_DROPPED_TS, "AllDropped", mode);
+
+        assert_eq!(
+            inert_kept_names,
+            vec!["a".to_string(), "b".to_string()],
+            "fixture invariant ({mode:?}): the surviving-key control keeps both keys"
+        );
+        assert_eq!(
+            boxed_kept_names, inert_kept_names,
+            "fixture invariant ({mode:?}): the value expression does not change the key set"
+        );
+        assert!(
+            inert_dropped_names.is_empty() && boxed_dropped_names.is_empty(),
+            "a mapped type whose remap drops every key publishes an EMPTY surface ({mode:?}); \
+             got inert={inert_dropped_names:?} boxed={boxed_dropped_names:?}"
+        );
+        assert!(
+            boxed_kept > inert_kept,
+            "fixture invariant ({mode:?}): the boxed value operand must cost strictly more \
+             than the inert one when a key SURVIVES, otherwise the dead-key comparison below \
+             is vacuous. Observed inert={inert_kept} boxed={boxed_kept}."
+        );
+
+        assert_eq!(
+            boxed_dropped, inert_dropped,
+            "every key is remap-dropped, so the mapped type's shared value operand is dead for \
+             the whole type and must never be evaluated ({mode:?}). Replacing the inert value \
+             with one that costs an instantiation must therefore cost nothing: observed \
+             inert={inert_dropped} boxed={boxed_dropped}. A difference means the shared \
+             K-independent value is evaluated unconditionally, above the key-domain decision \
+             that drops every key."
+        );
+    }
+}
+
+/// DISCRIMINATOR (proven-absent produced name): demanding a produced
+/// name that a CLOSED key domain provably does not produce must answer
+/// the key-absent miss without forcing any surviving key's value.
+///
+/// Once the remap preimage is empty over a closed domain, absence is
+/// PROVEN — nothing further needs deciding. Declining to the
+/// whole-surface route instead reaches the same miss only after
+/// materialising every surviving key's value, which is the key-scaled
+/// work a single-key demand must not do.
+///
+/// The answer leg pins that the cheaper route did not change the
+/// semantics: the outcome must still be the miss sentinel, never a
+/// fabricated member and never a published surface.
+#[test]
+fn a_proven_absent_produced_name_misses_without_forcing_any_value() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert(&host, WIDE_REMAP_TS);
+    let base = carrier(&host, "Remapped", ProjectionMode::Expanded);
+
+    let before = per_k_materializations(&host);
+    let projected = project(
+        &host,
+        base,
+        vec![PathSegment::Member(PropertyKey::string_literal(
+            "never_produced",
+        ))],
+        ProjectionMode::Expanded,
+    );
+    let forced = per_k_materializations(&host) - before;
+
+    assert!(
+        matches!(
+            host.project_type_store()
+                .semantic_graph()
+                .node_data(projected)
+                .as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        ),
+        "the closed key domain produces only kept_b and kept_e, so never_produced must answer \
+         the key-absent sentinel — never a fabricated member value and never a published \
+         surface. Got {}",
+        describe(&host, projected)
+    );
+    assert_eq!(
+        forced, 0,
+        "absence proven from the key domain alone demands NO value operand; observed {forced} \
+         per-K materialisations. A count of 2 means the demand declined to whole-surface \
+         mapped resolution and forced both surviving keys' values to reach a miss the \
+         preimage had already proven."
+    );
+}
+
+/// A wide source behind an IDENTITY remap. The remap keeps every key
+/// under its own name, so the produced key set IS the iteration key set
+/// — but name_remap is set, so the demand still enters the remapping
+/// preimage path rather than plain iteration-key admission.
+const IDENTITY_REMAP_NARROW_TS: &str = r#"
+export interface Source { k0: string; k1: string; }
+
+export type Boxed<V> = { boxed: V };
+
+export type Remapped = { [K in keyof Source as K]: Boxed<Source[K]> };
+"#;
+
+const IDENTITY_REMAP_WIDE_TS: &str = r#"
+export interface Source {
+  k0: string; k1: string; k2: string; k3: string; k4: string; k5: string;
+  k6: string; k7: string; k8: string; k9: string; k10: string; k11: string;
+  k12: string; k13: string; k14: string; k15: string;
+}
+
+export type Boxed<V> = { boxed: V };
+
+export type Remapped = { [K in keyof Source as K]: Boxed<Source[K]> };
+"#;
+
+/// DISCRIMINATOR (single-key work is independent of source WIDTH): a
+/// single-key demand through an identity remap must cost the same
+/// whether the source has 2 keys or 16.
+///
+/// An identity remap is the one remap whose inverse is known
+/// structurally — it maps every key to itself — so the preimage of a
+/// demanded produced name is decidable by MEMBERSHIP over the enumerated
+/// domain. Substituting the binder into name_remap and evaluating it
+/// once per domain key instead makes a one-key demand linear in the
+/// source's width: the unrelated keys are decided, and paying to decide
+/// them is work the demand never asked for.
+///
+/// Both substitutions and per-K value materialisations are pinned,
+/// because a fix that moved the cost from one counter to the other would
+/// not be a fix. The answer leg keeps the comparison honest across the
+/// two different sources.
+#[test]
+fn single_key_demand_through_an_identity_remap_is_independent_of_source_width() {
+    fn measure(source: &str) -> (u64, u64, Vec<String>) {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        upsert(&host, source);
+        let base = carrier(&host, "Remapped", ProjectionMode::Expanded);
+        let subs_before = substitute_misses(&host);
+        let per_k_before = per_k_materializations(&host);
+        let narrowed = project(
+            &host,
+            base,
+            vec![PathSegment::Member(PropertyKey::string_literal("k1"))],
+            ProjectionMode::Expanded,
+        );
+        let subs = substitute_misses(&host) - subs_before;
+        let per_k = per_k_materializations(&host) - per_k_before;
+        (subs, per_k, member_names(&host, narrowed))
+    }
+
+    let (narrow_subs, narrow_per_k, narrow_names) = measure(IDENTITY_REMAP_NARROW_TS);
+    let (wide_subs, wide_per_k, wide_names) = measure(IDENTITY_REMAP_WIDE_TS);
+
+    assert_eq!(
+        narrow_names,
+        vec!["boxed".to_string()],
+        "fixture invariant: the narrowed value is a one-member box"
+    );
+    assert_eq!(
+        wide_names, narrow_names,
+        "widening the source cannot change the answer to a single-key demand"
+    );
+    assert_eq!(
+        wide_per_k, narrow_per_k,
+        "a single-key demand materialises only the producing key's value regardless of source \
+         width; observed {narrow_per_k} (2 keys) vs {wide_per_k} (16 keys)."
+    );
+    assert_eq!(
+        wide_subs, narrow_subs,
+        "an identity remap is invertible structurally, so resolving ONE demanded produced \
+         name must not substitute the binder once per source key: observed {narrow_subs} \
+         substitutions over a 2-key source vs {wide_subs} over a 16-key source. A difference \
+         means the preimage evaluates the remap across the whole domain, making a one-key \
+         demand linear in source width."
+    );
+}
+
+/// Audit observer that cancels the ACTIVE request the first time a
+/// top-level type-parameter substitution is issued, and counts every
+/// substitution the run performs.
+///
+/// The substitution counter is the mapped key loop's per-key forcing
+/// signal: every iteration key's remap decision substitutes the binder
+/// into the remap expression exactly once before anything else about
+/// that key is decided.
+const CANCEL_AT_SUBSTITUTION: u64 = 3;
+
+struct CancelOnFirstSubstitution {
+    seen: std::sync::atomic::AtomicU64,
+    ctx: Arc<verter_session::request_context::RequestContext>,
+}
+
+impl verter_audit::AuditObserver for CancelOnFirstSubstitution {
+    fn record_event(&self, event: verter_audit::AuditEvent) {
+        if matches!(event, verter_audit::AuditEvent::SubstituteTopLevelCall) {
+            let seen = self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if seen == CANCEL_AT_SUBSTITUTION {
+                self.ctx.cancel();
+            }
+        }
+    }
+}
+
+/// Counts substitutions without cancelling — the control that says how
+/// much work an UNINTERRUPTED build performs, so the cancelled run's
+/// count is compared against a measured quantity rather than a guess.
+struct CountSubstitutions {
+    seen: std::sync::atomic::AtomicU64,
+}
+
+impl verter_audit::AuditObserver for CountSubstitutions {
+    fn record_event(&self, event: verter_audit::AuditEvent) {
+        if matches!(event, verter_audit::AuditEvent::SubstituteTopLevelCall) {
+            self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+fn project_result(
+    host: &Arc<VerterHost>,
+    base: SemanticNodeId,
+    mode: ProjectionMode,
+) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
+    for_tests::dispatch_execute_type_node_for_tests(
+        host,
+        SemanticQueryKey::ProjectPath {
+            base,
+            path: Arc::from(Vec::new().into_boxed_slice()),
+            context: ProjectionReductionContext::published(mode),
+        },
+    )
+}
+
+/// REGRESSION BOUNDARY (cancelled mapped projection): once the request
+/// is cancelled, a mapped projection must stop substituting keys and
+/// must not hand back a published surface.
+///
+/// Two halves, both end-to-end rather than site-specific. WORK: the run
+/// stops within one key of the cancelling substitution instead of
+/// finishing the six-key loop — measured against an uncancelled control
+/// on an identical fresh host, so the bound is compared against observed
+/// work rather than a guessed constant. RESULT: a cancelled projection
+/// is return-only; a reader must not be handed a complete surface built
+/// from a request that was told to stop.
+///
+/// Scope note, so the evidence is not read as more than it is: the
+/// mapped build's own cancellation checks (before key enumeration,
+/// before each key's remap substitution, before each key's value force)
+/// are NOT what this test isolates. Removing all three leaves it
+/// passing, because the enclosing query dispatch already abandons the
+/// mapped build on cancellation before its key loop can run away. Those
+/// checks are defence in depth for a build reached by a path that does
+/// not; this test pins the contract the chain must keep as a whole, and
+/// fails if any link in it stops short-circuiting.
+///
+/// The inline-remap fixture is deliberate: a userland-helper remap fails
+/// the FIRST key closed through the deferred-carrier arm under
+/// cancellation, which bounds the loop for a reason unrelated to
+/// cancellation and would make the work bound vacuous.
+#[test]
+fn a_cancelled_mapped_build_stops_substituting_keys() {
+    use std::sync::atomic::Ordering;
+
+    // Control: the same build, uninterrupted. Carrier lowering sits
+    // outside the observed window on BOTH runs so the counts compare
+    // like for like.
+    let control_host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert(&control_host, INLINE_REMAP_TS);
+    let control_base = carrier(&control_host, "Remapped", ProjectionMode::Expanded);
+    let control_observer = Arc::new(CountSubstitutions {
+        seen: std::sync::atomic::AtomicU64::new(0),
+    });
+    let control_result = {
+        let _obs = verter_audit::observer::install_observer(
+            Arc::clone(&control_observer) as Arc<dyn verter_audit::AuditObserver>
+        );
+        project_result(&control_host, control_base, ProjectionMode::Expanded)
+    };
+    let control_seen = control_observer.seen.load(Ordering::SeqCst);
+    assert!(
+        matches!(control_result, QueryResult::Value(_)),
+        "fixture invariant: the uninterrupted build must succeed, otherwise the cancelled \
+         comparison below is not a comparison against a completed loop"
+    );
+    assert!(
+        control_seen >= 6,
+        "fixture invariant: the uninterrupted six-key build must issue at least one \
+         substitution per iteration key, otherwise the loop running to completion is not \
+         observable through this counter. Observed {control_seen}."
+    );
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert(&host, INLINE_REMAP_TS);
+    let base = carrier(&host, "Remapped", ProjectionMode::Expanded);
+
+    let ctx = verter_session::request_context::RequestContext::new(
+        1,
+        Arc::from("/source.ts"),
+        false,
+        None,
+    );
+    let observer = Arc::new(CancelOnFirstSubstitution {
+        seen: std::sync::atomic::AtomicU64::new(0),
+        ctx: Arc::clone(&ctx),
+    });
+    let result = {
+        let _request =
+            verter_session::request_context::RequestContextGuard::install(Arc::clone(&ctx));
+        // Installed AFTER the request guard so this observer, not the
+        // request context's own, owns the substrate slot.
+        let _obs = verter_audit::observer::install_observer(
+            Arc::clone(&observer) as Arc<dyn verter_audit::AuditObserver>
+        );
+        project_result(&host, base, ProjectionMode::Expanded)
+    };
+    let seen = observer.seen.load(Ordering::SeqCst);
+
+    assert!(
+        ctx.is_cancelled(),
+        "fixture invariant: the observer must actually have cancelled the request, otherwise \
+         this test measures an ordinary build"
+    );
+    assert!(
+        seen < control_seen,
+        "a request cancelled at its first substitution must perform strictly less \
+         substitution work than the uninterrupted build: observed {seen} against a control of \
+         {control_seen}. Equal counts mean the mapped key loop ran to completion and only \
+         then reported the cancellation — every key after the first was substituted, and \
+         possibly forced, for a result that can never be published."
+    );
+    assert!(
+        seen <= CANCEL_AT_SUBSTITUTION + 1,
+        "cancellation is checked before key enumeration, before each key's remap \
+         substitution, and before each key's value force, so the run must stop within one key \
+         of the cancelling substitution. Observed {seen} substitutions (control \
+         {control_seen})."
+    );
+    assert!(
+        !matches!(result, QueryResult::Value(_)),
+        "a cancelled mapped build is return-only: it must not hand back a complete published \
+         surface a later reader could take as the answer. Got {result:?}"
+    );
+}
+
+/// A cross-host-stable rendering of one published value node: the
+/// information a consumer reads off it, with no semantic-node ids (which
+/// are arena-local and therefore incomparable between two hosts).
+fn value_shape(host: &Arc<VerterHost>, node: SemanticNodeId) -> String {
+    let graph = host.project_type_store().semantic_graph();
+    let Some(data) = graph.node_data(node) else {
+        return "<absent>".to_string();
+    };
+    match data.as_ref() {
+        SemanticNodeData::Object(view) => {
+            let mut inner: Vec<String> = view
+                .positive_members()
+                .iter()
+                .map(|m| {
+                    format!(
+                        "{}:{}",
+                        m.string_name().unwrap_or("<non-string>"),
+                        value_shape(host, m.value)
+                    )
+                })
+                .collect();
+            inner.sort();
+            format!("{{{}}}", inner.join(","))
+        }
+        SemanticNodeData::IndexedAccess {
+            object,
+            index: IndexKey::String(name),
+        } => {
+            // A published member value is shallow by default: it is the
+            // ADDRESSABLE `Source['k']` access, which renders the same
+            // string whatever `k`'s type is. Resolve it through the shared
+            // indexed-access query so the comparison is about the VALUE,
+            // not about the carrier that addresses it — otherwise an edit
+            // to the demanded key's type is invisible, which is precisely
+            // the staleness this parity check exists to catch.
+            let object = *object;
+            let name = Arc::clone(name);
+            drop(data);
+            match for_tests::dispatch_execute_type_node_for_tests(
+                host,
+                SemanticQueryKey::IndexedAccess {
+                    base: object,
+                    index: IndexKey::String(Arc::clone(&name)),
+                    mode: ProjectionMode::Expanded,
+                },
+            ) {
+                QueryResult::Value(SemanticQueryOutput { value, .. }) if value != node => {
+                    value_shape(host, value)
+                }
+                _ => format!("[{name}]"),
+            }
+        }
+        SemanticNodeData::Primitive(kind) => format!("{kind:?}"),
+        SemanticNodeData::Literal(literal) => format!("{literal:?}"),
+        SemanticNodeData::Opaque(_) => "<opaque>".to_string(),
+        SemanticNodeData::Mapped { .. } => "<mapped>".to_string(),
+        SemanticNodeData::InstantiationRef { .. } => "<instref>".to_string(),
+        _ => "<other>".to_string(),
+    }
+}
+
+/// The published surface of `base` as sorted
+/// `(produced member name, RESOLVED inner value shape)` pairs.
+///
+/// The inner value is reached by PROJECTING `base[name]['boxed']` rather
+/// than by reading the published member node directly. A published mapped
+/// member value is shallow by default — `Boxed<WideSource['b']>`
+/// publishes the addressable `WideSource['b']` access, which renders the
+/// same string whatever `b`'s type is — so a carrier-level comparison
+/// would be blind to exactly the edit this parity check exists to catch.
+fn surface_shape(host: &Arc<VerterHost>, base: SemanticNodeId) -> Vec<(String, String)> {
+    let surface = project(host, base, Vec::new(), ProjectionMode::Expanded);
+    let mut names = member_names(host, surface);
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| {
+            let inner = project(
+                host,
+                base,
+                vec![
+                    PathSegment::Member(PropertyKey::string_literal(name.as_str())),
+                    PathSegment::Member(PropertyKey::string_literal("boxed")),
+                ],
+                ProjectionMode::Expanded,
+            );
+            let shape = value_shape(host, inner);
+            (name, shape)
+        })
+        .collect()
+}
+
+/// `WIDE_REMAP_TS` with the DEMANDED key's value type edited
+/// (`b: number` -> `b: boolean`). The edit must change the published
+/// surface, because `kept_b`'s value is derived from it.
+const WIDE_REMAP_DEMANDED_KEY_EDITED_TS: &str = r#"
+export interface WideSource {
+  a: string;
+  b: boolean;
+  c: boolean;
+  d: string[];
+  e: number[];
+  f: Record<string, string>;
+}
+
+export type Boxed<V> = { boxed: V };
+
+export type Kept<K> = K extends 'b' ? 'kept_b' : K extends 'e' ? 'kept_e' : never;
+
+export type Remapped = {
+  [K in keyof WideSource as Kept<K>]: Boxed<WideSource[K]>
+};
+"#;
+
+/// `WIDE_REMAP_TS` with the REMAP edited: `e` is dropped and `a` is kept
+/// under a new produced name. The edit changes the produced key set
+/// without touching any value type.
+const WIDE_REMAP_REMAP_EDITED_TS: &str = r#"
+export interface WideSource {
+  a: string;
+  b: number;
+  c: boolean;
+  d: string[];
+  e: number[];
+  f: Record<string, string>;
+}
+
+export type Boxed<V> = { boxed: V };
+
+export type Kept<K> = K extends 'b' ? 'kept_b' : K extends 'a' ? 'kept_a' : never;
+
+export type Remapped = {
+  [K in keyof WideSource as Kept<K>]: Boxed<WideSource[K]>
+};
+"#;
+
+/// DISCRIMINATOR (fresh/incremental parity over VALUES, not just names):
+/// after any edit, an incrementally recomputed mapped surface must equal
+/// what a host that never saw the pre-edit source computes — member for
+/// member, VALUE for value.
+///
+/// Member names alone cannot carry this. `Boxed<WideSource['b']>` names
+/// its member `boxed` whatever `b`'s type is, so editing the demanded
+/// key's value type leaves every published NAME identical while changing
+/// the answer. A stale warm entry served after that edit is exactly the
+/// failure a name comparison cannot see.
+///
+/// Three edit classes, each a different rail:
+/// - a DEAD key's value type: the surface must be UNCHANGED (the dropped
+///   key contributes no member and its value is not an operand);
+/// - the DEMANDED key's value type: the surface must CHANGE (else a
+///   stale value survived the edit);
+/// - the REMAP itself: the produced key SET must change.
+///
+/// Every case additionally requires incremental == fresh, and requires
+/// both runs to complete (a `Value` result, never a degraded partial).
+#[test]
+fn fresh_and_incremental_mapped_surfaces_match_after_dead_demanded_and_remap_edits() {
+    // (label, edited source, whether the surface must change)
+    let cases: [(&str, &str, bool); 3] = [
+        ("dead-key value edit", WIDE_REMAP_DEAD_KEY_EDITED_TS, false),
+        (
+            "demanded-key value edit",
+            WIDE_REMAP_DEMANDED_KEY_EDITED_TS,
+            true,
+        ),
+        ("remap edit", WIDE_REMAP_REMAP_EDITED_TS, true),
+    ];
+
+    for (label, edited, must_change) in cases {
+        // Incremental: build the pre-edit surface, edit, rebuild.
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        upsert(&host, WIDE_REMAP_TS);
+        let before = surface_shape(&host, carrier(&host, "Remapped", ProjectionMode::Expanded));
+        upsert(&host, edited);
+        let incremental_base = carrier(&host, "Remapped", ProjectionMode::Expanded);
+        assert!(
+            matches!(
+                project_result(&host, incremental_base, ProjectionMode::Expanded),
+                QueryResult::Value(_)
+            ),
+            "{label}: the incremental recomputation must COMPLETE — a degraded or partial \
+             result is not parity with a fresh run, it is an absent answer"
+        );
+        let incremental = surface_shape(&host, incremental_base);
+
+        // Fresh: a host that never saw the pre-edit source.
+        let fresh = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        upsert(&fresh, edited);
+        let fresh_base = carrier(&fresh, "Remapped", ProjectionMode::Expanded);
+        assert!(
+            matches!(
+                project_result(&fresh, fresh_base, ProjectionMode::Expanded),
+                QueryResult::Value(_)
+            ),
+            "{label}: the fresh computation must complete"
+        );
+        let fresh_shape = surface_shape(&fresh, fresh_base);
+
+        assert_eq!(
+            incremental, fresh_shape,
+            "{label}: the incrementally recomputed surface must equal what a host that never \
+             saw the pre-edit source computes — member names AND member values. A difference \
+             means a warm entry survived an edit it depends on."
+        );
+
+        if must_change {
+            assert_ne!(
+                incremental, before,
+                "{label}: this edit changes the mapped answer, so the recomputed surface must \
+                 differ from the pre-edit one. Equality means a stale warm surface was served \
+                 for an edit it depends on — and member NAMES alone would not have shown it. before={before:?}"
+            );
+        } else {
+            assert_eq!(
+                incremental, before,
+                "{label}: a remap-dropped key contributes no member and its value is not an \
+                 operand of the mapped answer, so editing it must leave the published surface \
+                 identical, values included."
+            );
+        }
+    }
 }

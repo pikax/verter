@@ -1111,7 +1111,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // dispatching dead args. The closure routes through the SAME
                 // structural lowering (typed-IR-only); the carrier-substituted
                 // args carry `Structural` provenance.
-                let arg_context = reduction_context.into_structural_provenance();
+                // Type ARGUMENTS lower as CARRIERS, never eagerly.
+                //
+                // An argument is an operand of the instantiation, and
+                // whether it is a LIVE operand is decided by the callee's
+                // body — a parameter the body never mentions consumes its
+                // argument nowhere. Lowering arguments in the caller's
+                // eager mode resolves every argument at the reference
+                // site, BEFORE any parameter usage is known, so the cost
+                // of `Ignore<A, B> = { only: A }` scales with the
+                // structure of the dead `B` argument.
+                //
+                // Demoting the argument mode to `Navigate` keeps each
+                // argument an addressable carrier (`DeclRef` /
+                // `InstantiationRef`); a LIVE argument is then forced by
+                // the ordinary forcing authority when the substituted
+                // body is evaluated under the caller's own context, and a
+                // DEAD argument is never forced at all. Identity is
+                // unaffected: distinct argument EXPRESSIONS still lower to
+                // distinct carriers, so distinct argument environments
+                // keep distinct instantiation identities — and the
+                // arguments now lower mode-independently, so the same
+                // reference reached from a `Navigate` and an `Expanded`
+                // demand populates ONE family slot instead of two.
+                let arg_context = reduction_context.into_structural_provenance().with_mode(
+                    match reduction_context.mode {
+                        crate::semantic_query::ProjectionMode::Expanded
+                        | crate::semantic_query::ProjectionMode::Identity => {
+                            crate::semantic_query::ProjectionMode::Navigate
+                        }
+                        other => other,
+                    },
+                );
                 self.resolve_bare_ref_head(&ctx, name, type_arguments.len(), || {
                     let arg_ids: Vec<SemanticNodeId> = type_arguments
                         .iter()
