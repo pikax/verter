@@ -19,15 +19,12 @@ use verter_span::Span;
 use verter_parser::parser::types::ParsedSfc;
 use verter_parser::types::NodeProp;
 
-use crate::assembly::{
-    compose_main_module, vue_main_compile_artifacts, FragmentDialect, VueMainAssemblyFailure,
-    VueMainModuleRequest,
-};
+use crate::assembly::{assemble_vue_runtime_main, VueRuntimeMainRequest};
 use crate::compile::types::{VueExecutionInputs, VueMacroSemanticInput};
 use crate::compile::{compile_from_parsed, parse_sfc};
 use crate::compile_request::{
     CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest,
-    IdeProductRequest, ProductKind, VueBackendRequest, VueCompileRequest,
+    IdeProductRequest, VueBackendRequest, VueCompileRequest,
 };
 use crate::framework_common::carrier_compiler::{
     CarrierCompileOutcome, CompileUnsupported, IdeCompileOptions, IdeOutput, RuntimeCompileOptions,
@@ -641,15 +638,9 @@ pub(crate) fn vue_carrier_bundle(
             .as_ref()
             .map(|input| input.code.as_ref()),
     );
-    if opts.want_runtime && !bundle.has_errors() {
-        if let Err(failure) = emit_assembled_vue_main(&mut bundle, parsed, opts) {
-            bundle.diagnostics.push(RuntimeDiagnostic {
-                severity: crate::framework_common::RuntimeDiagnosticSeverity::Error,
-                code: "VUE_MAIN_ASSEMBLY_FAILED".to_string(),
-                message: failure.to_string(),
-                span: Span::new(0, source.len() as u32),
-            });
-        }
+    if opts.want_main && !bundle.has_errors() {
+        emit_assembled_vue_main(&mut bundle, parsed, opts)
+            .map_err(|failure| CompileUnsupported::VueMainAssemblyFailed(failure.to_string()))?;
     }
     Ok(CarrierCompileOutcome::Produced(bundle))
 }
@@ -738,94 +729,39 @@ pub(crate) fn emit_assembled_vue_main(
     bundle: &mut RuntimeCompileOutput,
     parsed: &ParsedSfc,
     opts: &RuntimeCompileOptions,
-) -> Result<(), VueMainAssemblyFailure> {
-    let planned_kind = if opts.ssr {
-        ProductKind::RuntimeServer
-    } else {
-        ProductKind::RuntimeClient
-    };
-    let dialect = bundle_vue_dialect(parsed, opts.force_js);
+) -> Result<(), crate::assembly::VueMainAssemblyFailure> {
     let runtime = opts.runtime_module_name.as_deref().unwrap_or("vue");
     let canonical_id = opts.filename.as_deref().unwrap_or("");
-    let want_maps = opts.source_map;
-    let script_map = bundle
-        .script
-        .as_ref()
-        .map(|s| &s.source_map)
-        .filter(|map| !map.is_empty())
-        .map(|map| oxc_sourcemap::SourceMap::from_json_string(map))
-        .transpose()
-        .map_err(|_| {
-            VueMainAssemblyFailure::Composition(
-                crate::assembly::VueMainCompositionFailure::Composition(
-                    crate::assembly::ComposeRefusal::UncomposableMap,
-                ),
-            )
-        })?;
-    let template_map_json = bundle.template.as_ref().and_then(|template| {
-        template
-            .output_descriptor
-            .source_map
-            .raw_map
-            .as_deref()
-            .filter(|map| !map.is_empty())
-            .map(str::to_string)
-            .or_else(|| (!template.source_map.is_empty()).then(|| template.source_map.clone()))
-    });
-    let set = compose_main_module(VueMainModuleRequest {
+    let derived_lang = vue_script_lang_from_parsed(parsed);
+    let script_lang = opts.vue_script_lang.as_deref().or(derived_lang.as_deref());
+    let assembled = assemble_vue_runtime_main(VueRuntimeMainRequest {
         canonical_id,
         compiled: bundle,
-        dialect,
-        planned_kind,
+        script_lang,
+        has_script: opts.vue_has_script,
+        has_template: opts.vue_has_template,
+        force_js: opts.force_js,
+        source_map: opts.source_map,
         runtime,
-        want_maps,
-        source_root: None,
-        script_map: script_map.as_ref(),
-        template_map_json,
+        ssr: opts.ssr,
         decoration: opts.vue_main.clone(),
     })?;
-    let artifact = set
-        .artifact(planned_kind)
-        .expect("publish returns exactly the one planned artifact kind");
-    let artifacts = vue_main_compile_artifacts(
-        canonical_id,
-        bundle,
-        planned_kind,
-        dialect,
-        artifact.code(),
-        artifact.runtime_source_map(),
-    )
-    .map_err(|err| {
-        VueMainAssemblyFailure::Publication(crate::assembly::AssemblyRefusal::FinalParseFailed {
-            kind: planned_kind,
-            reason: err.to_string(),
-        })
-    })?;
-    bundle.main.body_code = Some(artifact.code().to_string());
-    bundle.main.source_map = artifact
-        .runtime_source_map()
-        .unwrap_or_default()
-        .to_string();
-    bundle.main.lang = Some(dialect.lang_id().to_string());
-    bundle.main.artifacts = Some(artifacts);
+    bundle.main.body_code = Some(assembled.code);
+    bundle.main.source_map = assembled.source_map.unwrap_or_default();
+    bundle.main.lang = Some(assembled.lang);
+    bundle.main.artifacts = Some(assembled.artifacts);
     Ok(())
 }
 
-fn bundle_vue_dialect(parsed: &ParsedSfc, force_js: bool) -> FragmentDialect {
-    let dialect = sfc_script_dialect(parsed.script_setup(), parsed.script());
-    if force_js {
-        if dialect.is_jsx() {
-            FragmentDialect::Jsx
-        } else {
-            FragmentDialect::JavaScript
-        }
-    } else {
-        match dialect {
-            SfcScriptDialect::JavaScript => FragmentDialect::JavaScript,
-            SfcScriptDialect::Jsx => FragmentDialect::Jsx,
-            SfcScriptDialect::TypeScript => FragmentDialect::TypeScript,
-            SfcScriptDialect::Tsx => FragmentDialect::Tsx,
-        }
+fn vue_script_lang_from_parsed(parsed: &ParsedSfc) -> Option<String> {
+    if parsed.script().is_none() && parsed.script_setup().is_none() {
+        return None;
+    }
+    match sfc_script_dialect(parsed.script_setup(), parsed.script()) {
+        SfcScriptDialect::JavaScript => Some("js".to_string()),
+        SfcScriptDialect::Jsx => Some("jsx".to_string()),
+        SfcScriptDialect::TypeScript => Some("ts".to_string()),
+        SfcScriptDialect::Tsx => Some("tsx".to_string()),
     }
 }
 
@@ -986,7 +922,8 @@ pub fn vue_result_to_runtime_bundle(
         .collect();
 
     RuntimeCompileOutput {
-        // Vue: host-assembled main module — no directly-emitted body.
+        // Vue: compiler-owned main module is assembled on the runtime-bundle
+        // path. Direct conversion leaves `main.body_code` unset.
         main: RuntimeMainModule::default(),
         script,
         template,
@@ -3291,5 +3228,72 @@ mod tests {
             1,
             "an admitted selected match must invoke the semantic producer exactly once"
         );
+    }
+
+    #[test]
+    fn style_only_demand_does_not_assemble_main() {
+        let source = "<style>.x{color:red}</style><template><div/></template>";
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        crate::assembly::reset_vue_main_assembly_count();
+        let bundle = VueCarrierCompiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions {
+                    want_runtime: true,
+                    want_main: false,
+                    filename: Some("StyleOnly.vue".to_string()),
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("STYLE-only runtime compile produces a bundle");
+        assert_eq!(
+            crate::assembly::vue_main_assembly_count(),
+            0,
+            "unrequested Main must be zero-work"
+        );
+        assert!(bundle.main.body_code.is_none());
+        assert!(bundle.main.artifacts.is_none());
+        crate::assembly::reset_vue_main_assembly_count();
+        let assembled = VueCarrierCompiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions {
+                    want_runtime: true,
+                    want_main: true,
+                    filename: Some("StyleOnly.vue".to_string()),
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("Main demand assembles");
+        assert_eq!(crate::assembly::vue_main_assembly_count(), 1);
+        assert!(assembled.main.body_code.is_some());
+        assert!(assembled.main.artifacts.is_some());
+    }
+
+    #[test]
+    fn template_only_main_lang_is_javascript() {
+        let source = "<template><div/></template>";
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let bundle = VueCarrierCompiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions {
+                    filename: Some("T.vue".to_string()),
+                    vue_has_script: false,
+                    vue_has_template: true,
+                    vue_script_lang: None,
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("template-only compiles");
+        assert_eq!(bundle.main.lang.as_deref(), Some("js"));
     }
 }

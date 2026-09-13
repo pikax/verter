@@ -2297,6 +2297,7 @@ fn compile_fixture(fixture: &str, axes: CompileAxes) -> RealCompile {
                 inline: axes.inline,
                 force_js: true,
                 force_vapor: axes.force_vapor,
+                want_main: false,
                 ..RuntimeCompileOptions::default()
             },
             &allocator,
@@ -2633,6 +2634,7 @@ fn filename_none_is_not_a_real_host_shape_and_the_carrier_defect_it_exposes_is_t
                 is_production: true,
                 inline: None, // resolves to `is_production` — the inline topology
                 force_js: true,
+                want_main: false,
                 ..RuntimeCompileOptions::default()
             },
             &allocator,

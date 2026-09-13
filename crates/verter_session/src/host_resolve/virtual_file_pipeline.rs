@@ -3132,6 +3132,7 @@ impl VerterHost {
         // in `profile_hash`, so the publication identity carries the
         // requested-product set — no cache is re-keyed for this.
         let want_runtime = profile.target.needs_runtime_module();
+        let want_main = profile.target.publishes_runtime_module();
         // IDE TSX is requested when the profile target carries the TSX bit.
         let want_ide = profile.target.needs_tsx();
         // Template facts are requested by the active analysis scope OR an
@@ -3199,6 +3200,7 @@ impl VerterHost {
             want_runtime,
             want_ide,
             want_template_data,
+            want_main,
             &alloc,
         ) {
             Ok(products) => products,
@@ -3541,23 +3543,14 @@ impl VerterHost {
                     vue_facts: Some(vue_facts),
                     prepared_styles: snapshot.prepared_styles.clone(),
                     vue_main: verter_compiler::assembly::VueMainDecoration {
-                        hmr: match profile.hmr_strategy {
-                            HmrStrategy::None => {
-                                verter_compiler::compile_request::RuntimeHmrStrategy::None
-                            }
-                            HmrStrategy::Vite => {
-                                verter_compiler::compile_request::RuntimeHmrStrategy::Vite
-                            }
-                            HmrStrategy::Webpack => {
-                                verter_compiler::compile_request::RuntimeHmrStrategy::Webpack
-                            }
-                        },
-                        is_production: profile.is_production,
-                        emit_ssr_module_registration: profile.emit_ssr_module_registration,
-                        ssr_module_id: profile.ssr_module_id.clone(),
                         style_specifiers,
                         custom_specifiers,
+                        ..verter_compiler::assembly::VueMainDecoration::default()
                     },
+                    want_main: true,
+                    has_script: snapshot.meta.has_script,
+                    has_template: snapshot.meta.has_template,
+                    script_lang: snapshot.meta.script_lang.clone(),
                 };
                 // A runtime-surface refusal is the absence of the render's
                 // whole subject (typed, same as the HostBacked route); every
@@ -3747,10 +3740,8 @@ pub(super) struct RuntimeNodePublication {
     pub(super) publish_style: bool,
     /// Module specifier the composed template node imports from.
     pub(super) runtime_module_name: Option<String>,
-    /// The axes the host-side Vue `Main` assembly reads. Its `force_js`
-    /// is also the fallback dialect for a carrier-emitted body that
-    /// declares no `lang` of its own — ONE statement of that axis, so a
-    /// caller cannot set the two halves of one decision differently.
+    /// Request axes used as the fallback dialect for a carrier-emitted
+    /// body that declares no `lang` of its own.
     pub(super) assembly: crate::compile::VueMainAssemblyAxes,
 }
 
@@ -3886,9 +3877,8 @@ pub(super) fn publish_runtime_nodes(
         }
 
         // Custom blocks have no target bit of their own. They ride with the
-        // runtime module: the host's `Main` assembly emits their virtual imports
-        // (Vue compiler-owned main assembly), so a `Custom` node with
-        // no `Main` would have no importer.
+        // runtime module: compiler-owned Vue main assembly emits their virtual
+        // imports, so a `Custom` node with no `Main` would have no importer.
         for (i, block) in compiled
             .custom_blocks
             .iter()

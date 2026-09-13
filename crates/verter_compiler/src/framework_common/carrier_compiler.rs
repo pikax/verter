@@ -493,6 +493,15 @@ pub struct RuntimeCompileOptions {
     /// Host-owned identifiers and request axes for Vue main-module assembly.
     /// Topology is compiler-owned; empty identifiers skip host virtual imports.
     pub vue_main: crate::assembly::VueMainDecoration,
+    /// Assemble and attach the Vue `_sfc_main` body. Independent of
+    /// [`want_runtime`]: STYLE-only runtime compilation does not publish Main.
+    pub want_main: bool,
+    /// Authored `<script>` inventory for map-required checks.
+    pub vue_has_script: bool,
+    /// Authored `<template>` inventory for map-required checks.
+    pub vue_has_template: bool,
+    /// Authored script lang (`"js"`/`"ts"`/`"jsx"`/`"tsx"`). `None` ⇒ JavaScript.
+    pub vue_script_lang: Option<String>,
 }
 
 impl Default for RuntimeCompileOptions {
@@ -540,6 +549,10 @@ impl Default for RuntimeCompileOptions {
             vue_facts: None,
             prepared_styles: Vec::new(),
             vue_main: crate::assembly::VueMainDecoration::default(),
+            want_main: true,
+            vue_has_script: true,
+            vue_has_template: true,
+            vue_script_lang: None,
         }
     }
 }

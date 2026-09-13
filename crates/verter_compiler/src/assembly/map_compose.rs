@@ -9,7 +9,7 @@
 //! multi-fragment [`super::map_input::DecodedFragmentMap`] needs lifting
 //! into an `oxc_sourcemap::SourceMap` before it can cross that boundary.
 
-use verter_compiler::oxc_sourcemap::{SourceMap, Token};
+use crate::oxc_sourcemap::{SourceMap, Token};
 
 use super::map_input::DecodedFragmentMap;
 
@@ -23,7 +23,7 @@ use super::map_input::DecodedFragmentMap;
 /// only the single canonical spelling this encoder emits may cross that
 /// boundary safely). Tables ride along untouched; only the segment
 /// sequence is what chaining acts on.
-pub(crate) fn to_source_map(map: &DecodedFragmentMap) -> SourceMap<'static> {
+pub fn to_source_map(map: &DecodedFragmentMap) -> SourceMap<'static> {
     use std::borrow::Cow;
 
     let tokens: Vec<Token> = map
@@ -78,7 +78,6 @@ pub(crate) fn to_source_map(map: &DecodedFragmentMap) -> SourceMap<'static> {
     source_map
 }
 
-#[cfg(test)]
 /// TEST-ONLY: derive an [`verter_compiler::assembly::SfcExportPlacement`]
 /// fact for a hand-authored fixture by literal-scanning it — mirroring what
 /// a real producer would have declared for that exact text. Legitimate here
@@ -91,9 +90,7 @@ pub(crate) fn to_source_map(map: &DecodedFragmentMap) -> SourceMap<'static> {
 /// simulating two is exercising the retired text-scan behaviour, not this
 /// fact-driven one, and is out of this helper's scope) and every literal
 /// `__sfc__` occurrence not already covered by it.
-pub(crate) fn literal_scan_placement_for_fixture(
-    code: &str,
-) -> Option<verter_compiler::assembly::SfcExportPlacement> {
+pub fn literal_scan_placement_for_fixture(code: &str) -> Option<super::SfcExportPlacement> {
     const SFC_BINDING: &str = "__sfc__";
     const EXPORT_STATEMENT_TEXT: &str = "export default __sfc__;\n";
 
@@ -114,7 +111,7 @@ pub(crate) fn literal_scan_placement_for_fixture(
     if binding_ranges.is_empty() && export_statement_range.is_none() {
         return None;
     }
-    Some(verter_compiler::assembly::SfcExportPlacement {
+    Some(super::SfcExportPlacement {
         binding_ranges,
         export_statement_range,
     })

@@ -98,6 +98,10 @@ pub struct VueHostMultiProductDemand {
     pub is_production: bool,
     /// Force JavaScript output.
     pub force_js: bool,
+    /// Dev-server tooling flavour for compiler-owned Main decoration.
+    pub hmr_strategy: crate::compile_request::RuntimeHmrStrategy,
+    /// SSR-manifest key form; `None` falls back to the canonical id.
+    pub ssr_module_id: Option<String>,
 }
 
 /// Runtime-render (render-only) demand: the backend constructs the
@@ -123,6 +127,10 @@ pub struct VueHostRuntimeRenderDemand {
     pub is_production: bool,
     /// Force JavaScript output.
     pub force_js: bool,
+    /// Dev-server tooling flavour for compiler-owned Main decoration.
+    pub hmr_strategy: crate::compile_request::RuntimeHmrStrategy,
+    /// SSR-manifest key form; `None` falls back to the canonical id.
+    pub ssr_module_id: Option<String>,
 }
 
 /// Typed issuance refusal. Never a fallback to another lane, framework,
@@ -267,7 +275,7 @@ fn execution_grants_for_request(request: &CompileRequest) -> ProductExecutionGra
 
 /// Execution inputs excluded from admission identity (host-selected block
 /// bytes and resolved Vue facts).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct VueHostExecutionInputs {
     /// Host-selected block bytes for supplied templates, scripts, styles.
     pub block_content: super::carrier_compiler::RuntimeBlockContentInputs,
@@ -278,6 +286,29 @@ pub struct VueHostExecutionInputs {
     /// Host-owned Vue main identifiers and assembly axes. The compiler
     /// owns topology; this carries only identifiers and request knobs.
     pub vue_main: crate::assembly::VueMainDecoration,
+    /// Assemble Main. False for STYLE-only runtime compilation.
+    pub want_main: bool,
+    /// Authored `<script>` inventory.
+    pub has_script: bool,
+    /// Authored `<template>` inventory.
+    pub has_template: bool,
+    /// Authored script lang; `None` when no script block exists.
+    pub script_lang: Option<String>,
+}
+
+impl Default for VueHostExecutionInputs {
+    fn default() -> Self {
+        Self {
+            block_content: Default::default(),
+            vue_facts: None,
+            prepared_styles: Vec::new(),
+            vue_main: Default::default(),
+            want_main: true,
+            has_script: true,
+            has_template: true,
+            script_lang: None,
+        }
+    }
 }
 
 /// Typed execution refusal. All-or-none: a refusal publishes no product.
@@ -362,10 +393,19 @@ impl VueHostCompiledProducts {
     pub fn diagnostics(&self) -> &[RuntimeDiagnostic] {
         &self.bundle.diagnostics
     }
+
+    /// Wrap an already-produced runtime bundle as an admitted product.
+    /// Test/harness constructor for publication-refusal coverage.
+    pub fn from_admitted_runtime_bundle(bundle: RuntimeCompileOutput, kind: ProductKind) -> Self {
+        Self {
+            admitted: vec![kind],
+            bundle,
+        }
+    }
 }
 
 /// Render-only handoff of one admitted runtime-render compile: the
-/// runtime bundle the host assembles into the `Main` virtual module. No
+/// runtime bundle whose compiler-owned Main the host publishes. No
 /// IDE or analysis payload exists on this handoff — a demanded
 /// template-fact companion contributes only its producer DIAGNOSTICS to
 /// the bundle's channel; the fact payload itself is never published here.
@@ -420,6 +460,8 @@ impl VueHostIntegrationBackend {
         component_id: Option<String>,
         is_production: bool,
         force_js: bool,
+        hmr_strategy: crate::compile_request::RuntimeHmrStrategy,
+        ssr_module_id: Option<String>,
         parse: VueParseAdmission,
         semantic: VueSemanticAdmission,
     ) -> Result<VueCompileAdmission, VueHostAdmissionRefusal> {
@@ -435,7 +477,8 @@ impl VueHostIntegrationBackend {
             is_production,
             force_js,
         )
-        .map_err(VueHostAdmissionRefusal::RequestConstructionRefused)?;
+        .map_err(VueHostAdmissionRefusal::RequestConstructionRefused)?
+        .with_host_assembly_axes(ssr_module_id, hmr_strategy);
         self.issue_admitted(demand, request, parse, semantic)
     }
 
@@ -636,6 +679,8 @@ impl FrameworkHostIntegrationBackend<VueSfcV3, NativeHostEpoch> for VueHostInteg
             demand.component_id,
             demand.is_production,
             demand.force_js,
+            demand.hmr_strategy,
+            demand.ssr_module_id,
             parse,
             semantic,
         )
@@ -682,6 +727,8 @@ impl FrameworkHostIntegrationBackend<VueSfcV3, NativeHostEpoch> for VueHostInteg
             demand.component_id,
             demand.is_production,
             demand.force_js,
+            demand.hmr_strategy,
+            demand.ssr_module_id,
             parse,
             semantic,
         )
@@ -787,15 +834,16 @@ fn derive_admitted_runtime_options(
         block_content: inputs.block_content.clone(),
         vue_facts: inputs.vue_facts.clone(),
         prepared_styles,
+        want_main: inputs.want_main && runtime.is_some(),
+        vue_has_script: inputs.has_script,
+        vue_has_template: inputs.has_template,
+        vue_script_lang: inputs.script_lang.clone(),
         vue_main: {
             let mut decoration = inputs.vue_main.clone();
             decoration.is_production = request.is_production();
-            if request.hmr_strategy() != crate::compile_request::RuntimeHmrStrategy::None {
-                decoration.hmr = request.hmr_strategy();
-            }
-            if let Some(id) = request.ssr_module_id() {
-                decoration.ssr_module_id = Some(id.to_string());
-            }
+            decoration.hmr = request.hmr_strategy();
+            decoration.ssr_module_id = request.ssr_module_id().map(str::to_string);
+            decoration.emit_ssr_module_registration = true;
             decoration
         },
         ..RuntimeCompileOptions::default()

@@ -20,7 +20,7 @@ use verter_compiler::framework_common::{
     RuntimeBlockContentInputs, RuntimeCompileOptions, RuntimeCompilerBackend, VueRuntimeBackend,
     VueRuntimeError, VueRuntimeExecutionFacts, VueRuntimeInputs, VueSfcV3,
 };
-use verter_compiler::standalone::{DirectExecutionInputs, StandaloneCompiler};
+use verter_compiler::standalone::{BatchCompileItem, DirectExecutionInputs, StandaloneCompiler};
 use verter_language::carrier_grammar::{
     CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
     FrameworkAdapterSemanticVersion,
@@ -2058,5 +2058,103 @@ fn assembled_runtime_client_without_map_keeps_equivalent_code_and_no_map() {
             .runtime_source_map()
             .is_none(),
         "maps-disabled must publish no runtime map"
+    );
+}
+
+#[test]
+fn direct_ssr_compile_does_not_emit_host_ssr_registration() {
+    let request = runtime_request(
+        "Comp.vue",
+        vec![server_product(false)],
+        VueCompileRequest {
+            ssr: true,
+            ..Default::default()
+        },
+        false,
+    );
+    let output = compile_via_standalone(SIMPLE, &request);
+    let code = output
+        .artifacts
+        .artifact(ProductKind::RuntimeServer)
+        .expect("server")
+        .code();
+    assert!(
+        !code.contains("__vite_useSSRContext"),
+        "direct SSR must stay undecorated:\n{code}"
+    );
+    assert!(
+        !code.contains("ssrContext.modules"),
+        "direct SSR must not wrap setup with host registration:\n{code}"
+    );
+
+    let (execution, macros) = standalone_vue_inputs();
+    let prepared = StandaloneCompiler.prepare(SIMPLE, &request);
+    let prepared_out = StandaloneCompiler
+        .compile_prepared(
+            SIMPLE,
+            &prepared,
+            &request,
+            DirectExecutionInputs::Vue {
+                execution: &execution,
+                macros: &macros,
+            },
+        )
+        .expect("prepared SSR compile");
+    let prepared_code = prepared_out
+        .artifacts
+        .artifact(ProductKind::RuntimeServer)
+        .expect("server")
+        .code();
+    assert!(
+        !prepared_code.contains("__vite_useSSRContext"),
+        "prepared SSR must stay undecorated"
+    );
+
+    let batch = StandaloneCompiler.compile_batch(&[BatchCompileItem {
+        source: SIMPLE,
+        request: &request,
+        inputs: DirectExecutionInputs::Vue {
+            execution: &execution,
+            macros: &macros,
+        },
+    }]);
+    let batch_code = batch.results[0]
+        .as_ref()
+        .expect("batch SSR")
+        .artifacts
+        .artifact(ProductKind::RuntimeServer)
+        .expect("server")
+        .code();
+    assert!(
+        !batch_code.contains("__vite_useSSRContext"),
+        "batch SSR must stay undecorated"
+    );
+}
+
+#[test]
+fn direct_dev_compile_does_not_emit_host_hmr_trailer() {
+    let request = runtime_request(
+        "Comp.vue",
+        vec![client_product(false, None)],
+        VueCompileRequest::default(),
+        false,
+    )
+    .with_host_assembly_axes(
+        None,
+        verter_compiler::compile_request::RuntimeHmrStrategy::Vite,
+    );
+    let output = compile_via_standalone(SIMPLE, &request);
+    let code = output
+        .artifacts
+        .artifact(ProductKind::RuntimeClient)
+        .expect("client")
+        .code();
+    assert!(
+        !code.contains("_sfc_main.__file"),
+        "direct compile must not emit host __file:\n{code}"
+    );
+    assert!(
+        !code.contains("import.meta.hot"),
+        "direct compile must not emit host HMR:\n{code}"
     );
 }

@@ -410,10 +410,10 @@ pub struct CompileRequest {
     component_id: Option<String>,
     is_production: bool,
     force_js: bool,
-    /// The `ssrContext.modules` manifest key form for the host Main
-    /// assembly; `None` falls back to the canonical id.
+    /// The `ssrContext.modules` manifest key form for compiler-owned Vue
+    /// Main assembly; `None` falls back to the canonical id.
     ssr_module_id: Option<String>,
-    /// Dev-server tooling flavour gating the host Main assembly's
+    /// Dev-server tooling flavour gating compiler-owned Vue Main
     /// `__file` and hot-accept trailer decoration.
     hmr_strategy: RuntimeHmrStrategy,
 }

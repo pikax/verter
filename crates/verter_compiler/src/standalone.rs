@@ -2937,18 +2937,17 @@ fn single_runtime_product_request(
     .map_err(DirectCompileError::Vue)
 }
 
-/// Compose one Vue runtime artifact (`RuntimeClient` or `RuntimeServer`)
-/// from an already-produced [`RuntimeCompileOutput`] through the SAME
-/// shared [`compose_fragments`] machinery `verter_session`'s host composer
-/// uses — no host decoration (empty prelude/trailer extras).
+/// Direct/standalone composition carries no host decoration: empty
+/// prelude/trailer extras. Host HMR / `__file` / SSR-registration axes
+/// are supplied only on the host-bundle assembly path.
 fn vue_main_decoration_from_request(
-    request: &CompileRequest,
+    _request: &CompileRequest,
 ) -> crate::assembly::VueMainDecoration {
     crate::assembly::VueMainDecoration {
-        hmr: request.hmr_strategy(),
-        is_production: request.is_production(),
-        emit_ssr_module_registration: true,
-        ssr_module_id: request.ssr_module_id().map(str::to_owned),
+        hmr: crate::compile_request::RuntimeHmrStrategy::None,
+        is_production: false,
+        emit_ssr_module_registration: false,
+        ssr_module_id: None,
         style_specifiers: Vec::new(),
         custom_specifiers: Vec::new(),
     }

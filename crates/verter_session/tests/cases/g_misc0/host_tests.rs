@@ -2492,6 +2492,122 @@ const x = 1
     );
 }
 
+#[test]
+fn template_only_sfc_main_lang_is_js() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = upsert_vue(&host, "/src/T.vue", "<template><div>hi</div></template>");
+    let result = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/src/T.vue".to_string()),
+            canonical_id: None,
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
+    assert_eq!(result.lang.as_deref(), Some("js"));
+}
+
+#[test]
+fn style_only_target_does_not_publish_main_and_succeeds() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = upsert_vue(
+        &host,
+        "/src/S.vue",
+        "<script setup>const x = 1</script><style>.x{color:red}</style><template><div/></template>",
+    );
+    verter_compiler::assembly::reset_vue_main_assembly_count();
+    let profile = CompileProfile {
+        target: CompileTarget::STYLE,
+        ..CompileProfile::default()
+    };
+    let style = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/S.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Style { index: 0 }),
+            compile_profile: profile.clone(),
+        })
+        .expect("STYLE-only must publish the style node");
+    assert!(!style.code.is_empty());
+    assert_eq!(
+        verter_compiler::assembly::vue_main_assembly_count(),
+        0,
+        "STYLE-only must not assemble Main"
+    );
+    let main = host.get_virtual_file(VirtualQuery {
+        raw_id: None,
+        canonical_id: Some("/src/S.vue".to_string()),
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile,
+    });
+    assert!(
+        matches!(main, Err(HostError::MissingVirtualNode { .. })),
+        "STYLE-only must not publish Main, got {main:?}"
+    );
+}
+
+#[test]
+fn vue_main_fresh_incremental_and_edit_revert_agree() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let src = r#"<script setup>
+const x = 1
+</script>
+<template><div>{{ x }}</div></template>"#;
+    let _ = upsert_vue(&host, "/src/Eq.vue", src);
+    let query = VirtualQuery {
+        raw_id: Some("/src/Eq.vue".to_string()),
+        canonical_id: None,
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile_dev(),
+    };
+    let fresh = host.get_virtual_file(query.clone()).unwrap();
+    let incremental = host.get_virtual_file(query.clone()).unwrap();
+    assert_eq!(fresh.code.as_ref(), incremental.code.as_ref());
+    let _ = upsert_vue(
+        &host,
+        "/src/Eq.vue",
+        r#"<script setup>
+const x = 2
+</script>
+<template><div>{{ x }}</div></template>"#,
+    );
+    let edited = host.get_virtual_file(query.clone()).unwrap();
+    assert_ne!(fresh.code.as_ref(), edited.code.as_ref());
+    let _ = upsert_vue(&host, "/src/Eq.vue", src);
+    let reverted = host.get_virtual_file(query).unwrap();
+    assert_eq!(fresh.code.as_ref(), reverted.code.as_ref());
+}
+
+#[test]
+fn explicit_no_hmr_request_does_not_emit_file_trailer() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = upsert_vue(
+        &host,
+        "/src/NoHmr.vue",
+        "<script setup>const x = 1</script><template><div>{{ x }}</div></template>",
+    );
+    let mut profile = profile_dev();
+    profile.hmr_strategy = HmrStrategy::None;
+    let result = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/src/NoHmr.vue".to_string()),
+            canonical_id: None,
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile,
+        })
+        .unwrap();
+    assert!(
+        !result.code.contains("_sfc_main.__file"),
+        "no-HMR request must not emit __file:\n{}",
+        result.code
+    );
+    assert!(
+        !result.code.contains("import.meta.hot"),
+        "no-HMR request must not emit HMR:\n{}",
+        result.code
+    );
+}
+
 /// @ai-generated - export type must be stripped from main module when force_js: true
 #[test]
 fn main_module_strips_export_type_when_force_js() {

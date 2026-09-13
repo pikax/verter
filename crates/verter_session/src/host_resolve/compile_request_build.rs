@@ -133,6 +133,8 @@ pub(crate) fn vue_host_products_demand(
         component_id: profile.component_id.clone(),
         is_production: profile.is_production,
         force_js: profile.force_js,
+        hmr_strategy: crate::compile::hmr_strategy(profile.hmr_strategy),
+        ssr_module_id: profile.ssr_module_id.clone(),
     }
 }
 
@@ -207,6 +209,7 @@ pub(crate) fn execute_bound_host_products(
     want_runtime: bool,
     want_ide: bool,
     want_template_data: bool,
+    want_main: bool,
     alloc: &oxc_allocator::Allocator,
 ) -> Result<BoundCompiledProducts, HostProductsFailure> {
     use super::native_host_binding::BoundNativeHostRequest;
@@ -246,16 +249,7 @@ pub(crate) fn execute_bound_host_products(
                 macro_demand,
                 SharedDependencyAxis::Restate,
             )?;
-            inputs.vue_main.hmr = match profile.hmr_strategy {
-                HmrStrategy::None => verter_compiler::compile_request::RuntimeHmrStrategy::None,
-                HmrStrategy::Vite => verter_compiler::compile_request::RuntimeHmrStrategy::Vite,
-                HmrStrategy::Webpack => {
-                    verter_compiler::compile_request::RuntimeHmrStrategy::Webpack
-                }
-            };
-            inputs.vue_main.is_production = profile.is_production;
-            inputs.vue_main.emit_ssr_module_registration = profile.emit_ssr_module_registration;
-            inputs.vue_main.ssr_module_id = profile.ssr_module_id.clone();
+            inputs.want_main = want_main;
             let demand = vue_host_products_demand(
                 profile,
                 &snapshot.canonical_id,
@@ -430,6 +424,10 @@ fn prepare_vue_execution_inputs(
             custom_specifiers,
             ..verter_compiler::assembly::VueMainDecoration::default()
         },
+        want_main: true,
+        has_script: snapshot.meta.has_script,
+        has_template: snapshot.meta.has_template,
+        script_lang: snapshot.meta.script_lang.clone(),
     })
 }
 
@@ -711,6 +709,8 @@ pub(crate) fn vue_runtime_render_demand(
         component_id: profile.component_id.clone(),
         is_production: profile.is_production,
         force_js: profile.force_js,
+        hmr_strategy: crate::compile::hmr_strategy(profile.hmr_strategy),
+        ssr_module_id: profile.ssr_module_id.clone(),
     }
 }
 
@@ -989,14 +989,20 @@ pub(crate) fn runtime_bundle_unsupported_diagnostics(
     source_len: u32,
     unsupported: &verter_compiler::framework_common::CompileUnsupported,
 ) -> DiagnosticsSnapshot {
-    DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
-        severity: HostSeverity::Error,
-        code: compile_unsupported_code(unsupported).to_string(),
-        message: format!(
+    let message = match unsupported {
+        verter_compiler::framework_common::CompileUnsupported::VueMainAssemblyFailed(reason) => {
+            reason.clone()
+        }
+        _ => format!(
             "carrier '{}' cannot produce a runtime bundle for '{}'",
             artifact.adapter_id().as_str(),
             canonical_id
         ),
+    };
+    DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+        severity: HostSeverity::Error,
+        code: compile_unsupported_code(unsupported).to_string(),
+        message,
         arguments: Vec::new(),
         span: verter_span::Span::new(0, source_len),
     }])
@@ -1334,6 +1340,18 @@ pub(crate) fn compile_unsupported_code(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vue_main_assembly_failure_keeps_the_stable_host_code() {
+        let unsupported =
+            verter_compiler::framework_common::CompileUnsupported::VueMainAssemblyFailed(
+                "the script fragment is authored and present but carries no source map".to_string(),
+            );
+        assert_eq!(
+            compile_unsupported_code(&unsupported),
+            "HOST_MAIN_MODULE_ASSEMBLY_FAILED"
+        );
+    }
 
     /// The profile-borne Svelte option axes (`css`, the custom-element
     /// `tag`/`shadow` descriptor axis, `compatibility`) survive

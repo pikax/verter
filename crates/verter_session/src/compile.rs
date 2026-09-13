@@ -1,18 +1,16 @@
 //! Main module assembly.
 
 use verter_compiler::assembly::{
-    compose_main_module, FragmentDialect, VueMainCompositionFailure, VueMainDecoration,
-    VueMainModuleRequest,
+    assemble_vue_runtime_main, VueMainCompositionFailure, VueMainDecoration, VueRuntimeMainRequest,
 };
-use verter_compiler::compile_request::{ProductKind, RuntimeHmrStrategy};
+use verter_compiler::compile_request::RuntimeHmrStrategy;
 use verter_compiler::framework_common::RuntimeCompileOutput;
 
 use crate::id::render_ids;
 use crate::types::{CompileProfile, FileMeta, HmrStrategy, VirtualNodeKind};
 
-mod map_compose;
-mod map_input;
-mod map_json;
+#[cfg(test)]
+pub(crate) use verter_compiler::assembly::{map_compose, map_input};
 
 #[cfg(test)]
 mod compile_tests;
@@ -21,10 +19,9 @@ mod map_equality_tests;
 #[cfg(test)]
 mod map_tests;
 
-pub use map_input::{AssembleMapFailure, MapFragment, UncomposableCode, UncomposableFamily};
-pub use verter_compiler::assembly::SfcRewriteRefusal;
-
-use map_input::{agree_source_root, validate_and_decode, DecodedFragmentMap};
+pub use verter_compiler::assembly::{
+    AssembleMapFailure, MapFragment, SfcRewriteRefusal, UncomposableCode, UncomposableFamily,
+};
 
 /// Assembled Vue runtime main module: code and map as one result.
 ///
@@ -95,6 +92,9 @@ impl From<AssembleMapFailure> for VueMainAssemblyFailure {
 impl From<verter_compiler::assembly::VueMainAssemblyFailure> for VueMainAssemblyFailure {
     fn from(failure: verter_compiler::assembly::VueMainAssemblyFailure) -> Self {
         match failure {
+            verter_compiler::assembly::VueMainAssemblyFailure::InputMap(failure) => {
+                Self::InputMap(failure)
+            }
             verter_compiler::assembly::VueMainAssemblyFailure::Composition(composition) => {
                 match composition {
                     VueMainCompositionFailure::InvalidSfcExportPlacement(reason) => {
@@ -131,39 +131,7 @@ impl std::fmt::Display for VueMainAssemblyFailure {
 
 impl std::error::Error for VueMainAssemblyFailure {}
 
-/// The exact language a Main module's fragments and final artifact are
-/// validated/parsed under — derived ONCE from the SAME inputs
-/// `virtual_file_pipeline.rs` used to independently (and redundantly)
-/// re-derive `main_lang` for both its Main-node paths, so this is the
-/// single authority both now read from [`AssembledVueModule::lang`]
-/// instead.
-fn resolve_main_dialect(meta: &FileMeta, profile: &VueMainAssemblyAxes) -> FragmentDialect {
-    let raw = meta.script_lang.as_deref().unwrap_or("js");
-    let is_tsx = raw.eq_ignore_ascii_case("tsx");
-    let is_jsx = is_tsx || raw.eq_ignore_ascii_case("jsx");
-    let is_ts = is_tsx || raw.eq_ignore_ascii_case("ts");
-    if profile.force_js {
-        if is_jsx {
-            FragmentDialect::Jsx
-        } else {
-            FragmentDialect::JavaScript
-        }
-    } else if is_tsx {
-        FragmentDialect::Tsx
-    } else if is_jsx {
-        FragmentDialect::Jsx
-    } else if is_ts {
-        FragmentDialect::TypeScript
-    } else {
-        FragmentDialect::JavaScript
-    }
-}
-
-fn dialect_lang_str(dialect: FragmentDialect) -> &'static str {
-    dialect.lang_id()
-}
-
-fn hmr_strategy(strategy: HmrStrategy) -> RuntimeHmrStrategy {
+pub(crate) fn hmr_strategy(strategy: HmrStrategy) -> RuntimeHmrStrategy {
     match strategy {
         HmrStrategy::None => RuntimeHmrStrategy::None,
         HmrStrategy::Vite => RuntimeHmrStrategy::Vite,
@@ -278,8 +246,8 @@ impl From<&CompileProfile> for VueMainAssemblyAxes {
     }
 }
 
-/// The one host-side `Main` assembly. [`assemble_vue_main_module`] is the
-/// compile-profile-stated spelling of this same call.
+/// Transport adapter: host identifiers plus authorship metadata. Semantic
+/// assembly (dialect, map validation, composition, CCA2A) is compiler-owned.
 ///
 /// # Errors
 ///
@@ -290,57 +258,17 @@ pub(crate) fn assemble_vue_main_module_with_axes(
     meta: &FileMeta,
     profile: &VueMainAssemblyAxes,
 ) -> Result<AssembledVueModule, VueMainAssemblyFailure> {
-    // Validation runs to completion BEFORE any composition work begins. When no
-    // map was requested it does not run at all, and a fragment's non-empty map
-    // string is ignored rather than composed unasked.
-    let inputs = if profile.source_map {
-        Some(validate_inputs(compiled, meta)?)
-    } else {
-        None
-    };
-    let want_maps = inputs.is_some();
-    let source_root = inputs
-        .as_ref()
-        .and_then(|inputs| inputs.source_root.clone());
-    // Decoded under this crate's own hardened multi-fragment validator
-    // (`validate_inputs`/`validate_and_decode` above) — host-authored/
-    // cross-tool maps need it; lifted into the typed wire form the shared
-    // composer's request consumes.
-    let script_map = inputs
-        .as_ref()
-        .and_then(|inputs| inputs.script.as_ref())
-        .map(map_compose::to_source_map);
-    // Re-encoded through this crate's own canonical-form encoder — never
-    // the template's raw as-authored map string — so a legitimate
-    // dual-spelling ignore list never crosses into `oxc_sourcemap`'s
-    // stricter decoder (see `ValidatedInputs`'s own doc).
-    let template_map_json: Option<String> = inputs
-        .as_ref()
-        .and_then(|inputs| inputs.template.as_ref())
-        .map(|map| map_compose::to_source_map(map).to_json_string());
-
-    // Derived ONCE, reused for every fragment's own dialect, the final
-    // artifact's dialect, and the returned `lang` — never a fixed
-    // permissive default and never re-derived a second time downstream.
-    let dialect = resolve_main_dialect(meta, profile);
     let runtime = profile.runtime_module_name.as_deref().unwrap_or("vue");
-
-    let planned_kind = if profile.ssr {
-        ProductKind::RuntimeServer
-    } else {
-        ProductKind::RuntimeClient
-    };
-
-    let request = VueMainModuleRequest {
+    let assembled = assemble_vue_runtime_main(VueRuntimeMainRequest {
         canonical_id,
         compiled,
-        dialect,
-        planned_kind,
+        script_lang: meta.script_lang.as_deref(),
+        has_script: meta.has_script,
+        has_template: meta.has_template,
+        force_js: profile.force_js,
+        source_map: profile.source_map,
         runtime,
-        want_maps,
-        source_root: source_root.as_deref(),
-        script_map: script_map.as_ref(),
-        template_map_json,
+        ssr: profile.ssr,
         decoration: vue_main_decoration_from_axes(
             canonical_id,
             compiled.styles.len(),
@@ -348,112 +276,10 @@ pub(crate) fn assemble_vue_main_module_with_axes(
             meta,
             profile,
         ),
-    };
-    let set = compose_main_module(request)?;
-    let artifact = set
-        .artifact(planned_kind)
-        .expect("publish returns exactly the one planned artifact kind");
-
+    })?;
     Ok(AssembledVueModule {
-        code: artifact.code().to_string(),
-        source_map: artifact.runtime_source_map().map(|s| s.to_string()),
-        lang: dialect_lang_str(dialect).to_string(),
-    })
-}
-
-/// The contributing maps, validated in the specified order. The template's
-/// own decoded map is validated here (decodability, index bounds, and its
-/// contribution to `source_root` agreement) and IS retained: assembly
-/// re-encodes it through this crate's OWN canonical-form encoder
-/// (`map_compose::to_source_map`) before sequencing, rather than passing
-/// the template's raw as-authored map string — `oxc_sourcemap`'s decoder
-/// rejects an otherwise-valid map declaring both accepted ignore-list
-/// spellings (a "duplicate field", stricter than `validate_and_decode`'s
-/// "both spellings, must agree" rule), so only the single-spelling
-/// canonical re-encoding may safely cross into `assemble_sequence`.
-struct ValidatedInputs {
-    script: Option<DecodedFragmentMap>,
-    template: Option<DecodedFragmentMap>,
-    source_root: Option<String>,
-}
-
-/// A fragment's map is REQUIRED iff the fragment is both AUTHORED and PRESENT.
-///
-/// Authorship comes from the pre-assembly authored-fragment inventory, never
-/// from the presence of a compiled block: a template-only cell whose compiler
-/// synthesised a script block is not missing a required map, it is synthetic
-/// sourceless code. Presence participates too, because the alternative would
-/// demand a map for a fragment that emits no bytes — the inline topology, where
-/// a template is authored but the render closure lives inside `setup()` and no
-/// template block exists.
-fn validate_inputs(
-    compiled: &RuntimeCompileOutput,
-    meta: &FileMeta,
-) -> Result<ValidatedInputs, AssembleMapFailure> {
-    let script_required = meta.has_script && compiled.script.is_some();
-    let template_required = meta.has_template && compiled.template.is_some();
-
-    if script_required
-        && compiled
-            .script
-            .as_ref()
-            .is_some_and(|script| script.source_map.is_empty())
-    {
-        return Err(AssembleMapFailure::MissingRequiredInputMap {
-            fragment: MapFragment::Script,
-        });
-    }
-    if template_required
-        && compiled
-            .template
-            .as_ref()
-            .is_some_and(|template| template.source_map.is_empty())
-    {
-        return Err(AssembleMapFailure::MissingRequiredInputMap {
-            fragment: MapFragment::Template,
-        });
-    }
-
-    // The per-map checks run to completion for the SCRIPT map first, then for
-    // the template: a malformed script map and a dangling-index template map
-    // report the script's outcome.
-    let script = match &compiled.script {
-        Some(script) if !script.source_map.is_empty() => Some(
-            validate_and_decode(&script.source_map, &script.code).map_err(|code| {
-                AssembleMapFailure::UncomposableInputMap {
-                    fragment: MapFragment::Script,
-                    code,
-                }
-            })?,
-        ),
-        _ => None,
-    };
-    let template = match &compiled.template {
-        Some(template) if !template.source_map.is_empty() => Some(
-            validate_and_decode(&template.source_map, &template.code).map_err(|code| {
-                AssembleMapFailure::UncomposableInputMap {
-                    fragment: MapFragment::Template,
-                    code,
-                }
-            })?,
-        ),
-        _ => None,
-    };
-
-    // The cross-map agreement runs over the contributing set at ANY
-    // cardinality, including exactly one and zero — it is not conditional on
-    // both fragments carrying maps, which is how a single-fragment compile
-    // would otherwise skip it.
-    let source_root = agree_source_root(
-        script
-            .iter()
-            .map(|map| (MapFragment::Script, map))
-            .chain(template.iter().map(|map| (MapFragment::Template, map))),
-    )?;
-
-    Ok(ValidatedInputs {
-        script,
-        template,
-        source_root,
+        code: assembled.code,
+        source_map: assembled.source_map,
+        lang: assembled.lang,
     })
 }
