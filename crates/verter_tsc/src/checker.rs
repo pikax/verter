@@ -5472,11 +5472,11 @@ import type { Foo } from './types'"#;
         assert_eq!(pos.line, 2, "should map to line 3 (0-indexed: 2) in .vue");
     }
 
-    /// ECRV7: a source-backed script diagnostic keeps its EXACT authored file,
+    /// A source-backed script diagnostic keeps its EXACT authored file,
     /// line, and column through the checker's source-map conversion — the
     /// column is not discarded to the covering token's column 1.
     ///
-    /// Discriminating controls, both required by the charter:
+    /// Discriminating controls:
     /// - **Block offset**: `<script setup>` comes AFTER `<template>`, so the
     ///   authored line (full-SFC coordinates), the generated carrier line, and
     ///   a block-relative line are three DIFFERENT numbers. Only the full-SFC
@@ -5492,9 +5492,9 @@ import type { Foo } from './types'"#;
     /// equals its authored text, both sides count UTF-16 columns over the same
     /// characters and the columns correspond 1:1.
     ///
-    /// RED before the fix: `map_tsc_position` returned only the covering
-    /// token's position — the line-start token every script line emits — so
-    /// the diagnostic degraded to authored column 1.
+    /// A token-only conversion cannot recover this column: the covering
+    /// token is the per-line line-start token every script line emits, so
+    /// it degrades the authored column to 1.
     #[test]
     fn generate_all_tsx_source_map_keeps_exact_authored_column_for_verbatim_script_lines() {
         let temp = tempfile::TempDir::new().unwrap();

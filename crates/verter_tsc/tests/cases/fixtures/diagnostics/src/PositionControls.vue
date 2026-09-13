@@ -2,7 +2,7 @@
   <div>{{ label }}</div>
 </template>
 <script setup lang="ts">
-// ECRV7 position controls (pins live in diagnostics.rs and
+// Position controls (pins live in diagnostics.rs and
 // diagnostic_set_parity.rs):
 // - Block offset: the script follows the template, so the authored full-SFC
 //   line differs from both the generated carrier line and a block-relative

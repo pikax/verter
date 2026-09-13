@@ -642,13 +642,13 @@ fn config_filtering_drops_only_injected_companions_and_retains_real_and_global()
     );
 }
 
-// ── ECRV7: exact authored positions for source-backed script diagnostics ────
+// ── Exact authored positions for source-backed script diagnostics ───────────
 //
 // The `--api` remap (`map_one` → `map_tsc_position`) must surface a
 // source-backed script diagnostic at its EXACT authored file, line, and
 // column — the script block is copied verbatim into the carrier and the
 // projection map's `sourcesContent` carries the authored text, so the authored
-// column is derivable, not guessable. The controls the charter requires:
+// column is derivable, not guessable. Discriminating controls:
 // a non-BMP character before the anchor (UTF-16 vs byte/codepoint columns
 // disagree) and a block offset (the script follows `<template>`, so the
 // authored full-SFC line, the generated line, and a block-relative line are

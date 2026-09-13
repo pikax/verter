@@ -404,13 +404,13 @@ fn verter_tsc_diagnostics_e2e() {
     // The IDE path generates defineComponent() exports that TS resolves prop types from.
     assert_has_error(&diags, "OptionsApiConsumer.vue", 2322);
 
-    // PositionControls.vue — ECRV7: a source-backed script diagnostic keeps its
+    // PositionControls.vue — a source-backed script diagnostic keeps its
     // EXACT authored file, line, and column through the checker's source-map
     // conversion. The fixture's script follows its template (block offset: the
     // authored full-SFC line differs from the generated and block-relative
     // lines) and declares U+1D11E before each anchor (2 UTF-16 units / 4 UTF-8
     // bytes / 1 codepoint — only a UTF-16 column lands on the anchor). The
-    // TS2345 pin at (20,40) fails if the remap degrades to the covering
+    // TS2345 pin at (21,40) fails if the remap degrades to the covering
     // declarator anchor's column 19; a byte- or codepoint-counted column lands
     // elsewhere again.
     assert_min_errors(&diags, "PositionControls.vue", 2);

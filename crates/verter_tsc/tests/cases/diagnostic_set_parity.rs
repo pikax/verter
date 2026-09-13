@@ -73,7 +73,7 @@ use std::process::Command;
 // Regenerate ONLY when the pinned pipeline output legitimately changes (a later
 // perf block must prove this multiset is identical, or consciously re-pin it).
 //
-// ECRV7 conscious re-pin: `error_map::map_tsc_position` now recovers the EXACT
+// Conscious re-pin: `error_map::map_tsc_position` now recovers the EXACT
 // authored column for diagnostics on verbatim-copied script lines (generated
 // line text == the map's `sourcesContent` line ⇒ both sides count UTF-16
 // columns over the same characters). Script-block diagnostics previously
@@ -185,7 +185,7 @@ const EXPECTED: &[(&str, u32, u32, u32, usize, &str)] = &[
     // (vue-version-volatile), so pin only the fixture-stable assignable-FROM type.
     ("src/WithDefaultsErrors.vue", 11, 3, 2322, 1, "'string' is not assignable to type"),
     ("src/WithDefaultsErrors.vue", 12, 3, 2322, 1, "'number' is not assignable to type"),
-    // ECRV7 position controls (see the fixture's header comment): the script
+    // Position controls (see the fixture's header comment): the script
     // follows the template (block offset) and each anchor line declares
     // U+1D11E before the anchor, so these columns are only reachable through
     // UTF-16 columns on full-SFC coordinates. The TS2345 argument anchor has
