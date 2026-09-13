@@ -29,9 +29,10 @@
 //! before it: a close governed by a non-`Decl` kind (`Api`/`Ide`/`Shadow`) serves a
 //! non-Decl arm and is safe; a close governed by `ProviderPathKind::Decl` (or
 //! reachable from a `Decl` classification with no nearer non-`Decl` kind) is the
-//! footgun. The single SAFE outside-owner shape is
-//! `provider_state::close_provider_paths`, whose `Decl` arm DELEGATES to
-//! `guarded_close` and whose only raw `close_dts` is on the non-`Decl` `Api` arm.
+//! footgun. Outside the owner, `provider_state::close_provider_paths` DELEGATES its
+//! `Decl` arm to `guarded_close` and hands every other kind to the generic
+//! stale-path close; the only outside-owner raw `close_dts` is that operation's
+//! `Api` arm, whose `NonDeclProviderPathKind` input cannot name a `Decl` path.
 //!
 //! The sanctioned delegation is the `guarded_close(` CALL ITSELF — and that call is
 //! not a raw `close_dts(`. A delegation grants NO blanket exemption to any other raw

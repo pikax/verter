@@ -82,9 +82,10 @@ pub fn non_decl_close_targets(
 ///
 /// This is the single implementation of the stale-close operation. Every caller
 /// that retires a store-backed provider surface — the background drain, the sync
-/// coordinator, the workspace scanner, and the server's own
-/// `close_provider_paths` — routes through it, so the forget/close/finalize
-/// ordering exists in exactly one place.
+/// coordinator, the workspace scanner, the server's own `close_provider_paths`,
+/// and the interactive IDE sync's post-commit close of a superseded IDE path —
+/// routes through it, so the forget/close/finalize ordering exists in exactly one
+/// place.
 ///
 /// Ordering and failure semantics (why the three steps cannot be reordered or
 /// split):
