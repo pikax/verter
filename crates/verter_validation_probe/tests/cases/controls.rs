@@ -328,6 +328,7 @@ fn compile_line(case_id: &str, entries: Vec<RouteEntry>) -> DriverLine {
         probe_id: case_id.to_string(),
         elapsed_ns: 1_000,
         entries,
+        memory: None,
     }
 }
 

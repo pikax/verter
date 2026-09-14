@@ -4,5 +4,6 @@ mod cases {
     mod contract;
     mod controls;
     mod lane_contract;
+    mod observe;
     mod workload_lane;
 }

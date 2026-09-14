@@ -210,6 +210,7 @@ fn compile_frame(case_id: &str, entries: Vec<RouteEntry>) -> DriverLine {
         probe_id: case_id.to_string(),
         elapsed_ns: 1_000,
         entries,
+        memory: None,
     }
 }
 
@@ -2056,8 +2057,13 @@ fn the_workflow_declares_exactly_one_probe_job() {
     }
     assert_eq!(
         jobs,
-        vec!["probe".to_string()],
+        vec!["probe".to_string(), "observe".to_string()],
         "the workflow declares {jobs:?}"
+    );
+    assert_eq!(
+        jobs.iter().filter(|job| *job == "probe").count(),
+        1,
+        "the workload lane is still exactly one probe job",
     );
 
     // The lane's disposition is a real exit, taken AFTER publication. Only the

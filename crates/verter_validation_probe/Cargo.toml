@@ -7,7 +7,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Test-only validation-probe contract: the closed probe outcome taxonomy with its causal precedence fold, the per-dimension case observation, the probe-state manifest with its expectation evaluator, and the table-driven external workload probe lane."
+description = "Test-only validation-probe contract: the closed probe outcome taxonomy with its causal precedence fold, the per-dimension case observation, the probe-state manifest with its expectation evaluator, the table-driven external workload probe lane, and the non-gating observation artifact schema."
 publish = false
 
 # Test and CI tooling only. No production crate may depend on this crate; the
@@ -30,6 +30,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 toml = "1.1"
+# Observation-inventory archives are GitHub Actions zips. Extraction is the
+# lane's one bounded hot path (count and size ceilings); the crate interprets
+# members, so the reader lives next to that contract rather than in `disk`.
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
 # The structural comparator and its canonicalizer. The lane decides equality
 # with the existing conformance comparator and writes nothing of its own; the
 # same canonicalizer is the product's parse-and-build validity check.
@@ -44,3 +48,4 @@ verter_vue_conformance = { path = "../verter_vue_conformance" }
 # `target/` path and break the moment the test binary runs from an extracted
 # archive, which is how the shared Rust test archive is executed.
 verter_test_support = { path = "../verter_test_support" }
+tempfile = "3.27"

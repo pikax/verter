@@ -24,6 +24,9 @@
 //! * [`lane`] — under `external-corpus` only: manifest in, summary out.
 //! * [`summary`] — the lane's one compact machine-readable summary and its
 //!   real-exit disposition.
+//! * [`observe`] — the non-gating observation artifact, its validator, and
+//!   bounded retrieval. The schema has no status, verdict, threshold, or
+//!   baseline field.
 //!
 //! Observation never implies acceptance: a manifest entry records evidence
 //! about Verter behaviour and never derives expected output from an external
@@ -37,6 +40,7 @@ pub mod evaluate;
 #[cfg(feature = "external-corpus")]
 pub mod lane;
 pub mod manifest;
+pub mod observe;
 pub mod outcome;
 pub mod request;
 pub mod runner;
@@ -50,9 +54,13 @@ pub use manifest::{
     Framework, ManifestError, ManifestViolation, ProbeEntry, ProbeStateManifest, Sha256, Sha40,
     Stratum, MAX_SMOKE_CASES,
 };
+pub use observe::{
+    AbsenceReason, ArtifactHeader, Measurement, MemoryPair, ObservationArtifact,
+    ObservationInventory, ObservationRow, Sample, SamplePlan,
+};
 pub use outcome::{
     CaseObservation, Dimension, DimensionInput, Evidence, EvidenceSource, InvalidObservation,
     NotApplicableReason, ProbeOutcomeClass, Terminal,
 };
-pub use runner::{classify_execution, ExecutionEvent, Phase, ProbeRun};
+pub use runner::{classify_execution, ExecutionEvent, MemoryBytes, Phase, ProbeRun};
 pub use summary::{Counters, Disposition, Lane, ObservedTerminal, Summary, SummaryError};

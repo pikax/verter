@@ -63,28 +63,45 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// SHA-256 of an embedded request template. Historical artifacts store their
+/// own template bytes; validators hash those bytes rather than today's
+/// compiled-in constants.
+pub fn template_digest_of(template: &str) -> String {
+    sha256_hex(template.as_bytes())
+}
+
 /// A framework's template digest, recorded once per summary and per
 /// observation artifact header.
 pub fn template_digest(framework: Framework) -> String {
-    sha256_hex(template_for(framework).as_bytes())
+    template_digest_of(template_for(framework))
 }
 
-/// The framework's template with `identity.filename` set to `relative_path`.
+/// `template` with `identity.filename` set to `relative_path`.
 ///
 /// The path is JSON-escaped rather than interpolated raw: a corpus path is
 /// upstream-controlled text, and a quote or backslash in one must produce an
 /// escaped string, never a request whose shape the corpus decided.
-pub fn substitute(framework: Framework, relative_path: &str) -> String {
-    template_for(framework).replace(
+pub fn substitute_in(template: &str, relative_path: &str) -> String {
+    template.replace(
         &json_string(FILENAME_PLACEHOLDER),
         &json_string(relative_path),
     )
 }
 
+/// The framework's template with `identity.filename` set to `relative_path`.
+pub fn substitute(framework: Framework, relative_path: &str) -> String {
+    substitute_in(template_for(framework), relative_path)
+}
+
+/// Digest of `template` after substituting `relative_path`.
+pub fn request_digest_in(template: &str, relative_path: &str) -> String {
+    sha256_hex(substitute_in(template, relative_path).as_bytes())
+}
+
 /// The digest of one case's substituted request, recorded on its summary row
 /// and every observation row.
 pub fn request_digest(framework: Framework, relative_path: &str) -> String {
-    sha256_hex(substitute(framework, relative_path).as_bytes())
+    request_digest_in(template_for(framework), relative_path)
 }
 
 /// `value` as a JSON string literal, including its quotes.
