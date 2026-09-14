@@ -574,7 +574,6 @@ pub(crate) struct ComposedFragments {
     pub fragments: Vec<ValidatedFragment>,
     pub code: String,
     pub source_map: String,
-    pub decoded_map: SourceMap<'static>,
     pub emitted_imports: Vec<DeclaredImport>,
 }
 
@@ -843,7 +842,6 @@ pub(crate) fn compose_fragments(
         fragments,
         code: sequenced.code,
         source_map: sequenced.source_map.to_json_string(),
-        decoded_map: sequenced.source_map,
         emitted_imports,
     })
 }
@@ -959,7 +957,6 @@ pub fn assemble_vue_runtime_main(
         dialect,
         Arc::clone(&code),
         source_map.as_deref(),
-        want_maps.then_some(&composed.decoded_map),
         &request.decoration,
         want_maps,
     )
@@ -1126,7 +1123,6 @@ pub fn vue_main_compile_artifacts(
     dialect: FragmentDialect,
     code: impl Into<Arc<str>>,
     runtime_source_map: Option<&str>,
-    decoded_runtime_map: Option<&SourceMap>,
     decoration: &VueMainDecoration,
     want_maps: bool,
 ) -> Result<CompileArtifactSet, super::publish::ArtifactSchemaError> {
@@ -1252,13 +1248,7 @@ pub fn vue_main_compile_artifacts(
                 generated_content: ContentId::from_content_bytes(code.as_bytes()),
                 input_basis,
                 sources: authored_ids,
-                segments: runtime_map_segments(
-                    map_json,
-                    decoded_runtime_map,
-                    &code,
-                    &source_units,
-                    &authored,
-                ),
+                segments: runtime_map_segments(map_json, code.as_ref(), &source_units, &authored),
             });
         }
     }
@@ -1359,21 +1349,12 @@ fn authored_unit_from_map(role: &str, map_json: &str) -> Option<AuthoredContribu
 
 fn runtime_map_segments(
     map_json: &str,
-    decoded_runtime_map: Option<&SourceMap>,
     generated: &str,
     source_units: &[ArtifactSourceUnit],
     authored: &[AuthoredContribution],
 ) -> Vec<ArtifactMapSegment> {
-    let decoded_owned;
-    let map = match decoded_runtime_map {
-        Some(map) => map,
-        None => match SourceMap::from_json_string(map_json) {
-            Ok(map) => {
-                decoded_owned = map;
-                &decoded_owned
-            }
-            Err(_) => return Vec::new(),
-        },
+    let Ok(map) = SourceMap::from_json_string(map_json) else {
+        return Vec::new();
     };
     if authored.is_empty() {
         return Vec::new();
@@ -1847,7 +1828,6 @@ mod tests {
             FragmentDialect::JavaScript,
             vite.as_str(),
             None,
-            None,
             &VueMainDecoration {
                 hmr: RuntimeHmrStrategy::Vite,
                 ..VueMainDecoration::default()
@@ -1875,7 +1855,6 @@ mod tests {
             FragmentDialect::JavaScript,
             code.as_str(),
             None,
-            None,
             &vite,
             false,
         )
@@ -1886,7 +1865,6 @@ mod tests {
             ProductKind::RuntimeClient,
             FragmentDialect::JavaScript,
             code.as_str(),
-            None,
             None,
             &none,
             false,
@@ -1900,7 +1878,6 @@ mod tests {
             FragmentDialect::JavaScript,
             edited.as_str(),
             None,
-            None,
             &vite,
             false,
         )
@@ -1911,7 +1888,6 @@ mod tests {
             ProductKind::RuntimeClient,
             FragmentDialect::JavaScript,
             code.as_str(),
-            None,
             None,
             &vite,
             false,
@@ -2014,7 +1990,6 @@ mod tests {
             FragmentDialect::JavaScript,
             generated,
             Some(script_map),
-            None,
             &VueMainDecoration::default(),
             true,
         )
@@ -2148,7 +2123,6 @@ mod tests {
             FragmentDialect::JavaScript,
             generated,
             Some(&composed),
-            None,
             &VueMainDecoration::default(),
             true,
         )
@@ -2212,7 +2186,6 @@ mod tests {
             ProductKind::RuntimeClient,
             FragmentDialect::JavaScript,
             huge.as_str(),
-            None,
             None,
             &VueMainDecoration::default(),
             false,

@@ -3803,15 +3803,17 @@ pub(super) fn publish_runtime_nodes(
     if let Some(compiled) = products.runtime_bundle() {
         if publish_runtime_module && compiled.has_runtime_surface() {
             let taken = take_compiler_vue_main(compiled, snapshot, policy.assembly.force_js)?;
-            let has_main_artifact = taken.artifacts.is_some_and(|set| {
-                set.artifacts()
-                    .iter()
-                    .any(|artifact| artifact.name() == "main")
-            });
-            if !has_main_artifact {
-                return Err(vue_main_reconstruction_diagnostics(
-                    snapshot.source.len() as u32
-                ));
+            if matches!(products, BoundCompiledProducts::Vue(_)) {
+                let has_main_artifact = taken.artifacts.is_some_and(|set| {
+                    set.artifacts()
+                        .iter()
+                        .any(|artifact| artifact.name() == "main")
+                });
+                if !has_main_artifact {
+                    return Err(vue_main_reconstruction_diagnostics(
+                        snapshot.source.len() as u32
+                    ));
+                }
             }
             outputs.insert(
                 VirtualNodeKind::Main,

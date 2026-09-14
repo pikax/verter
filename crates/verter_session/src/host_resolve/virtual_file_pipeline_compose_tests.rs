@@ -251,7 +251,6 @@ fn take_compiler_vue_main_preserves_artifact_relations() {
             FragmentDialect::JavaScript,
             generated,
             Some(script_map),
-            None,
             &VueMainDecoration::default(),
             true,
         )
