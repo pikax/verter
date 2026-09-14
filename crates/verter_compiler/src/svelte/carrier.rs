@@ -587,6 +587,174 @@ pub(crate) fn svelte_carrier_bundle(
     Ok(CarrierCompileOutcome::Produced(bundle))
 }
 
+/// Why a host-supplied style result was not bound to its `<style>` block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StyleContinuationBindRefusal {
+    /// No `<style>` block with a body sits at the result's inventory slot.
+    UnboundSlot { index: usize },
+    /// The block's `lang` names no dialect the compiler knows, so the stage
+    /// the tool consumed cannot be stated.
+    UnknownAuthoredDialect { extent: Span },
+    /// The host stated no authored basis for the result.
+    MissingBasis { extent: Span },
+    /// The continuation boundary refused the stated facts.
+    Refused {
+        extent: Span,
+        refusal: crate::style_planner::StyleContinuationRefusal,
+    },
+}
+
+impl StyleContinuationBindRefusal {
+    /// The carrier span the refusal reports against: the block's authored
+    /// extent, or the whole source for a slot with no block.
+    pub(crate) fn span(&self, source: &str) -> Span {
+        match self {
+            Self::UnboundSlot { .. } => Span::new(0, source.len() as u32),
+            Self::UnknownAuthoredDialect { extent }
+            | Self::MissingBasis { extent }
+            | Self::Refused { extent, .. } => *extent,
+        }
+    }
+}
+
+/// Bind each host-supplied completed preprocessing result to the `<style>`
+/// block at its inventory slot, admitting it through the stage-qualified
+/// continuation boundary.
+///
+/// The compiler mints the style unit's identity from the admitted parse —
+/// lineage from the request's canonical id, revision and content from the
+/// carrier bytes, extent from the parser-minted block span. The host states
+/// only what it alone knows: the produced bytes, their producer, and the
+/// content identity of the authored bytes the tool consumed. A result that
+/// describes other bytes than the block holds now is refused as stale, never
+/// compiled from the authored block instead. A request with no runtime
+/// product has no consumer, and absent input is zero work.
+pub(crate) fn bind_svelte_style_continuations(
+    artifact: &FrameworkParseArtifact,
+    request: &CompileRequest,
+    supplied: &[Option<crate::framework_common::svelte_host_integration::SvelteSuppliedStyle>],
+) -> Result<
+    Vec<Option<Arc<crate::style_planner::ExternalStyleContinuation>>>,
+    StyleContinuationBindRefusal,
+> {
+    use crate::assembly::source_unit::{carrier_revision, carrier_source_id};
+    use crate::assembly::{ArtifactProvenance, ContentId, SourceUnit};
+    use crate::compile_request::ProductKind;
+    use crate::style_planner::{ExternalStyleContinuation, StyleContinuationInput};
+    use verter_css_syntax::{CssDialect, PreprocessorIdentity, QualifiedStyleResult};
+    use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
+    use verter_identity::identity::{InputBasisId, ResultContractId};
+
+    /// The observation basis of one continuation: the authored bytes the
+    /// tool consumed.
+    struct ConsumedBasis<'a>(&'a ContentId);
+    impl CanonicalEncode for ConsumedBasis<'_> {
+        const DOMAIN_TAG: &'static str = "verter.compiler.svelte.style_continuation.basis.v1";
+        fn encode_fields(&self, e: &mut CanonicalEncoder) {
+            e.field_bytes(1, self.0.canonical_bytes());
+        }
+    }
+    /// The producer contract: external preprocessing by the named tool.
+    struct ExternalPreprocessing<'a>(&'a PreprocessorIdentity);
+    impl CanonicalEncode for ExternalPreprocessing<'_> {
+        const DOMAIN_TAG: &'static str = "verter.compiler.svelte.style_continuation.producer.v1";
+        fn encode_fields(&self, e: &mut CanonicalEncoder) {
+            match self.0 {
+                PreprocessorIdentity::Named(producer) => {
+                    e.field_str(1, producer.identity());
+                    e.field_str(2, producer.version().unwrap_or_default());
+                    e.field_str(3, producer.config_fingerprint().unwrap_or_default());
+                }
+                PreprocessorIdentity::Anonymous => {
+                    e.field_str(1, "");
+                }
+            }
+        }
+    }
+
+    if supplied.iter().all(Option::is_none) {
+        return Ok(Vec::new());
+    }
+    let Some(product) = request
+        .products()
+        .iter()
+        .map(CompileProduct::kind)
+        .find(|kind| {
+            matches!(
+                kind,
+                ProductKind::RuntimeClient | ProductKind::RuntimeServer
+            )
+        })
+    else {
+        return Ok(Vec::new());
+    };
+    // A foreign artifact is declined by the bundle orchestration itself.
+    let Some(carrier) = SvelteCarrierCompiler.svelte_carrier(artifact) else {
+        return Ok(Vec::new());
+    };
+    let parsed = carrier.parsed();
+    let source = artifact.carrier_source();
+    let source_id = carrier_source_id(request.filename().unwrap_or(""));
+    let revision = carrier_revision(source);
+
+    supplied
+        .iter()
+        .enumerate()
+        .map(|(index, slot)| {
+            let Some(supplied) = slot else {
+                return Ok(None);
+            };
+            let style = parsed.styles.get(index);
+            let (style, extent) = style
+                .and_then(|style| style.content.map(|extent| (style, extent)))
+                .ok_or(StyleContinuationBindRefusal::UnboundSlot { index })?;
+            let authored = source
+                .get(extent.start as usize..extent.end as usize)
+                .ok_or(StyleContinuationBindRefusal::UnboundSlot { index })?;
+            let authored_dialect = match style.lang.as_deref() {
+                None => Some(CssDialect::Css),
+                Some(lang) => CssDialect::from_lang(lang),
+            }
+            .ok_or(StyleContinuationBindRefusal::UnknownAuthoredDialect { extent })?;
+            let consumed_basis = supplied
+                .consumed_basis
+                .clone()
+                .ok_or(StyleContinuationBindRefusal::MissingBasis { extent })?;
+            let style_unit = SourceUnit::mint(
+                source_id.clone(),
+                revision.clone(),
+                format!("style:{index}"),
+                ContentId::from_content_bytes(authored.as_bytes()),
+            );
+            let provenance = ArtifactProvenance {
+                input_basis: InputBasisId::from_canonical(&ConsumedBasis(&consumed_basis)),
+                producer: ResultContractId::from_canonical(&ExternalPreprocessing(
+                    &supplied.producer,
+                )),
+                inputs: std::collections::BTreeSet::from([style_unit.id().clone()]),
+            };
+            ExternalStyleContinuation::admit(StyleContinuationInput {
+                authored_dialect,
+                style_unit,
+                authored_extent: extent,
+                consumed_basis,
+                provenance,
+                result: QualifiedStyleResult::preprocessed(
+                    supplied.producer.clone(),
+                    supplied.code.as_ref(),
+                    Vec::new(),
+                ),
+                // The host's raw map is not decoded here: no anchors is an
+                // absent map, never an implicit identity one.
+                anchors: Vec::new(),
+                product,
+            })
+            .map(|continuation| Some(Arc::new(continuation)))
+            .map_err(|refusal| StyleContinuationBindRefusal::Refused { extent, refusal })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1114,10 +1282,10 @@ mod tests {
     #[test]
     fn external_scoped_css_rides_the_bundle_with_demanded_map_and_has_global() {
         // §3.7: the external css artifact is `{ code, map, hash, has_global }`
-        // on `RuntimeCompileOutput.styles`. The EXISTING
+        // on `RuntimeCompileOutput.qualified_styles`. The EXISTING
         // `RuntimeCompileOptions.source_map` flag is the map demand — it
         // reaches the css RENDER through `compile_client`, and the produced
-        // map + the `:global` fact ride the neutral style block.
+        // map + the `:global` fact ride the stage-qualified style.
         let source = "<script>let c = $state(0);</script>\n<style>.r{color:red}\n:global(.x){margin:0}</style>\n<button class=\"r\" onclick={() => c++}>{c}</button>\n";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
@@ -1128,14 +1296,31 @@ mod tests {
         };
         let bundle = compile_bundle_expect_produced(source, &artifact, &opts, &alloc)
             .expect("svelte runtime bundle");
-        let style = bundle.styles.first().expect("an external style block");
+        assert!(
+            bundle.styles.is_empty(),
+            "Svelte css publishes only as a stage-qualified style"
+        );
+        let style = bundle
+            .qualified_styles
+            .first()
+            .expect("an external style block");
+        assert_eq!(
+            style.result.stage(),
+            verter_css_syntax::StyleStage::FrameworkRewritten,
+            "the published stylesheet is the framework rewrite's output"
+        );
+        assert_eq!(
+            style.consumed_stage,
+            verter_css_syntax::StyleStage::Authored,
+            "an authored block is what the rewrite consumed"
+        );
         assert!(
             style.scope_hash.is_some(),
             "the scoped block carries its hash"
         );
         assert!(
             style.has_global,
-            "`:global(.x)` css reaches RuntimeStyleBlock.has_global"
+            "`:global(.x)` css reaches the qualified style's has_global"
         );
         let map = style
             .source_map
@@ -1154,7 +1339,11 @@ mod tests {
         let bundle_off = compile_bundle_expect_produced(source, &artifact, &opts_off, &alloc)
             .expect("svelte runtime bundle");
         assert_eq!(
-            bundle_off.styles.first().expect("a style block").source_map,
+            bundle_off
+                .qualified_styles
+                .first()
+                .expect("a style block")
+                .source_map,
             None,
             "an undemanded css map stays None"
         );
@@ -1165,7 +1354,11 @@ mod tests {
         let bundle2 = compile_bundle_expect_produced(non_global, &artifact2, &opts, &alloc)
             .expect("svelte runtime bundle");
         assert!(
-            !bundle2.styles.first().expect("a style block").has_global,
+            !bundle2
+                .qualified_styles
+                .first()
+                .expect("a style block")
+                .has_global,
             "css without `:global` must not claim has_global"
         );
     }
@@ -1188,13 +1381,14 @@ mod tests {
         let bundle = compile_bundle_expect_produced(source, &artifact, &opts, &alloc)
             .expect("svelte runtime bundle");
         assert_eq!(
-            bundle.styles.len(),
+            bundle.qualified_styles.len(),
             1,
             "an existing (empty) style block publishes exactly ONE artifact"
         );
-        let style = &bundle.styles[0];
+        let style = &bundle.qualified_styles[0];
         assert_eq!(
-            style.code, "",
+            style.result.code(),
+            "",
             "the artifact's code is the official empty render"
         );
         assert!(!style.has_global, "an empty stylesheet has no `:global`");
@@ -1213,7 +1407,10 @@ mod tests {
         let bundle_none =
             compile_bundle_expect_produced(source_none, &artifact_none, &opts, &alloc)
                 .expect("svelte runtime bundle");
-        assert!(bundle_none.styles.is_empty(), "no style block, no artifact");
+        assert!(
+            bundle_none.qualified_styles.is_empty() && bundle_none.styles.is_empty(),
+            "no style block, no artifact"
+        );
     }
 
     #[test]

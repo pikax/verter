@@ -487,6 +487,11 @@ pub struct RuntimeCompileOptions {
     /// Host-retained parsed style IRs, one slot per style block in inventory
     /// order. Excluded from request/cache identity.
     pub prepared_styles: Vec<Option<crate::style_planner::PreparedStyleIr>>,
+    /// Admitted external preprocessing results, one slot per style block in
+    /// inventory order. A present slot is the ONLY bytes that block's
+    /// framework rewrite may consume: the authored block is never read in
+    /// its place. Excluded from request/cache identity.
+    pub style_continuations: Vec<Option<Arc<crate::style_planner::ExternalStyleContinuation>>>,
 }
 
 impl Default for RuntimeCompileOptions {
@@ -533,6 +538,7 @@ impl Default for RuntimeCompileOptions {
             inline: None,
             vue_facts: None,
             prepared_styles: Vec::new(),
+            style_continuations: Vec::new(),
         }
     }
 }
@@ -732,6 +738,45 @@ pub struct RuntimeStyleBlock {
     pub output_descriptor: RuntimeOutputDescriptor,
 }
 
+/// A compiled `<style>` output qualified by the stage identity of its bytes.
+///
+/// The stylesheet travels as a [`verter_css_syntax::QualifiedStyleResult`],
+/// so its stage, dialect, producer and diagnostics are facts of the value
+/// rather than assumptions a consumer makes about a bare string.
+/// [`Self::consumed_stage`] names the byte space the framework rewrite read:
+/// the carrier's own authored block, or an admitted external continuation's
+/// produced bytes — the space [`Self::source_map`] addresses and
+/// [`Self::output_descriptor`] declares.
+#[derive(Debug, Clone)]
+pub struct QualifiedRuntimeStyle {
+    /// The published stylesheet: framework-rewritten plain CSS.
+    pub result: verter_css_syntax::QualifiedStyleResult,
+    /// The stage of the bytes the framework rewrite consumed.
+    pub consumed_stage: verter_css_syntax::StyleStage,
+    /// Source map from [`Self::result`]'s bytes into the consumed space —
+    /// `Some` ONLY when the compile demanded maps.
+    pub source_map: Option<String>,
+    /// The scope hash the stylesheet's selectors are scoped under.
+    pub scope_hash: Option<String>,
+    /// Whether the stylesheet includes global css.
+    pub has_global: bool,
+    /// Qualified identity and source-map chain for this emitted unit.
+    pub output_descriptor: RuntimeOutputDescriptor,
+}
+
+impl QualifiedRuntimeStyle {
+    /// The `lang` spelling of the published bytes' dialect, read off the
+    /// result's own dialect through the one spelling authority.
+    #[must_use]
+    pub fn lang(&self) -> &'static str {
+        let dialect = self.result.dialect();
+        verter_css_syntax::CssDialect::LANG_SPELLINGS
+            .iter()
+            .find(|(_, spelled)| *spelled == dialect)
+            .map_or("css", |(spelling, _)| spelling)
+    }
+}
+
 /// A framework-neutral custom block (`<i18n>`, `<docs>`, …).
 #[derive(Debug, Clone)]
 pub struct RuntimeCustomBlock {
@@ -770,6 +815,9 @@ pub struct RuntimeCompileOutput {
     pub template: Option<RuntimeTemplateBlock>,
     /// Compiled `<style>` blocks in source order.
     pub styles: Vec<RuntimeStyleBlock>,
+    /// Stage-qualified compiled `<style>` outputs in source order. A carrier
+    /// publishes its styles here or in [`Self::styles`], never both.
+    pub qualified_styles: Vec<QualifiedRuntimeStyle>,
     /// Custom blocks in source order.
     pub custom_blocks: Vec<RuntimeCustomBlock>,
     /// The scope id (`data-v-xxxxxxxx`), empty when none.
@@ -811,6 +859,7 @@ impl RuntimeCompileOutput {
             || self.script.is_some()
             || self.template.is_some()
             || !self.styles.is_empty()
+            || !self.qualified_styles.is_empty()
             || !self.custom_blocks.is_empty()
     }
 

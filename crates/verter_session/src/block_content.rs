@@ -1268,6 +1268,43 @@ impl VerterHost {
         Ok(projection)
     }
 
+    /// Content identity of the authored bytes of the `index`-th `<style>`
+    /// block, read from `source` at the extent the owner's registered
+    /// inventory records for that block — the bytes a supplied preprocessing
+    /// result for the block was validated against.
+    ///
+    /// `None` when the owner, its registered structure or the slot is
+    /// absent, or the recorded extent does not address `source`; a caller
+    /// then has no basis to state and the result it would describe refuses.
+    pub(crate) fn registered_style_authored_content(
+        &self,
+        canonical_id: &str,
+        source: &str,
+        index: usize,
+    ) -> Option<verter_compiler::assembly::ContentId> {
+        let canonical = self.resolve_alias_or_canonical(canonical_id);
+        let owner = self.scheduler.try_get_source(&canonical)?;
+        let data = owner.downcast_data::<HostSourceData>()?;
+        let structure = data.structure.as_ref()?;
+        let extent = structure
+            .inventory()
+            .blocks()
+            .iter()
+            .filter_map(|block| match block {
+                CarrierBlock::Section {
+                    role: SectionRole::Style { .. },
+                    syntax,
+                    ..
+                } => Some(syntax.content_span),
+                _ => None,
+            })
+            .nth(index)?;
+        let authored = source.get(extent.start as usize..extent.end as usize)?;
+        Some(verter_compiler::assembly::ContentId::from_content_bytes(
+            authored.as_bytes(),
+        ))
+    }
+
     /// Capture the classifier bit and exact compiler projection as one
     /// stampable unit. Callers hold `block_content.admission_fence` while
     /// invoking this method, so owner/external publication and supplied

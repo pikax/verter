@@ -270,7 +270,7 @@ fn identity_corpus_actually_populates_the_map_and_diagnostic_digest_slots() {
         .filter(|f| {
             compiler
                 .compile(f.source, &f.request, f.inputs)
-                .is_ok_and(|out| !out.styles.is_empty())
+                .is_ok_and(|out| !out.styles.is_empty() || !out.qualified_styles.is_empty())
         })
         .count();
     assert!(

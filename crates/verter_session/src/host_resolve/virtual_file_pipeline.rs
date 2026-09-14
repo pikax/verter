@@ -20,9 +20,10 @@ use super::compile_request_build::{
 #[cfg(not(target_arch = "wasm32"))]
 use super::compile_request_build::{
     render_execution_error, request_construction_refused_diagnostics,
-    svelte_admission_refused_diagnostics, svelte_render_execution_refusal,
-    svelte_runtime_render_demand, vue_admission_refused_diagnostics, vue_render_execution_refusal,
-    vue_runtime_render_demand, BoundRenderedMain,
+    svelte_admission_refused_diagnostics, svelte_host_execution_inputs,
+    svelte_render_execution_refusal, svelte_runtime_render_demand,
+    vue_admission_refused_diagnostics, vue_render_execution_refusal, vue_runtime_render_demand,
+    BoundRenderedMain,
 };
 use super::native_host_binding::BoundNativeHostRequest;
 use super::vue_script_extract::template_converter_inputs;
@@ -3435,7 +3436,7 @@ impl VerterHost {
         style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
     ) -> Result<RenderOnlyMain, HostError> {
         use verter_compiler::framework_common::{
-            FrameworkHostIntegrationBackend as _, SvelteHostExecutionInputs, VueHostExecutionInputs,
+            FrameworkHostIntegrationBackend as _, VueHostExecutionInputs,
         };
 
         let diagnostics = snapshot.parse_diagnostics.clone();
@@ -3607,11 +3608,11 @@ impl VerterHost {
                         )));
                     }
                 };
-                let inputs = SvelteHostExecutionInputs {
-                    block_content: snapshot.block_content_inputs.clone(),
-                    css_hash_override: profile.svelte_css_hash_override.clone(),
-                    prepared_styles: snapshot.prepared_styles.clone(),
-                };
+                let inputs = svelte_host_execution_inputs(
+                    self,
+                    snapshot,
+                    profile.svelte_css_hash_override.clone(),
+                );
                 match backend.compile_runtime_render(admission, artifact, &inputs, &alloc) {
                     Ok(rendered) => BoundRenderedMain::Svelte(rendered),
                     Err(refusal) => {
@@ -3905,6 +3906,30 @@ pub(super) fn publish_runtime_nodes(
                     code: Arc::from(style.code.as_str()),
                     source_map: style_source_map,
                     lang: Some(style.lang.clone().unwrap_or_else(|| "css".to_string())),
+                    meta: VirtualMeta {
+                        style_index: Some(i),
+                        ..VirtualMeta::default()
+                    },
+                },
+            );
+        }
+
+        // Stage-qualified styles continue the same source-order index space;
+        // a carrier publishes into one of the two lists, never both.
+        let qualified_base = compiled.styles.len();
+        for (offset, style) in compiled
+            .qualified_styles
+            .iter()
+            .enumerate()
+            .filter(|_| publish_style)
+        {
+            let i = qualified_base + offset;
+            outputs.insert(
+                VirtualNodeKind::Style { index: i },
+                CachedVirtualFile {
+                    code: Arc::from(style.result.code()),
+                    source_map: style.source_map.as_deref().map(Arc::from),
+                    lang: Some(style.lang().to_string()),
                     meta: VirtualMeta {
                         style_index: Some(i),
                         ..VirtualMeta::default()

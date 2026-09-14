@@ -32,7 +32,8 @@
 use crate::types::*;
 use verter_compiler::framework_common::{
     SvelteHostExecutionInputs, SvelteHostMultiProductDemand, SvelteHostRuntimeRenderDemand,
-    VueHostExecutionInputs, VueHostMultiProductDemand, VueHostRuntimeRenderDemand,
+    SvelteSuppliedStyle, VueHostExecutionInputs, VueHostMultiProductDemand,
+    VueHostRuntimeRenderDemand,
 };
 
 /// The demanded product set shared by both framework constructors.
@@ -434,10 +435,46 @@ fn prepare_svelte_execution_inputs(
             &std::collections::BTreeSet::new(),
         );
     }
+    svelte_host_execution_inputs(host, snapshot, css_hash_override)
+}
+
+/// The Svelte execution inputs every host route hands the compiler.
+///
+/// A supplied style slot — a completed external preprocessing result the
+/// host admitted — is handed over ONCE, as the stage-qualified result the
+/// compiler binds to its block: the produced bytes, their producer, the
+/// host's parse of those bytes, and the content identity of the authored
+/// bytes the host validated the result against. The raw style slots never
+/// reach the Svelte compiler, so no stage can fall back to them.
+pub(crate) fn svelte_host_execution_inputs(
+    host: &crate::VerterHost,
+    snapshot: &CompileInput,
+    css_hash_override: Option<String>,
+) -> SvelteHostExecutionInputs {
+    let mut block_content = snapshot.block_content_inputs.clone();
+    let supplied_styles = std::mem::take(&mut block_content.styles)
+        .into_iter()
+        .enumerate()
+        .map(|(index, slot)| {
+            let input = slot?;
+            let producer = input.producer?;
+            Some(SvelteSuppliedStyle {
+                producer,
+                code: input.code,
+                parsed: input.parsed,
+                consumed_basis: host.registered_style_authored_content(
+                    &snapshot.canonical_id,
+                    &snapshot.source,
+                    index,
+                ),
+            })
+        })
+        .collect();
     SvelteHostExecutionInputs {
-        block_content: snapshot.block_content_inputs.clone(),
+        block_content,
         css_hash_override,
         prepared_styles: snapshot.prepared_styles.clone(),
+        supplied_styles,
     }
 }
 

@@ -875,6 +875,7 @@ pub fn vue_result_to_runtime_bundle(
         script,
         template,
         styles,
+        qualified_styles: Vec::new(),
         custom_blocks,
         scope_id: result.scope_id,
         tsx,

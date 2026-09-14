@@ -296,6 +296,11 @@ pub struct SvelteRuntimeOptions {
     pub custom_element_descriptor: Option<crate::svelte::parser::CustomElementDescriptor>,
     /// Host-retained parsed style IRs in inventory order.
     pub prepared_styles: Vec<Option<crate::style_planner::PreparedStyleIr>>,
+    /// The admitted external continuation for the component's top-level
+    /// `<style>`. When present its produced bytes are that block's body for
+    /// every stage — the authored block is never read in its place — and a
+    /// continuation not bound to the component's style block fails closed.
+    pub style_continuation: Option<std::sync::Arc<crate::style_planner::ExternalStyleContinuation>>,
 }
 
 /// A runtime-lowering diagnostic.

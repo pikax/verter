@@ -39,15 +39,40 @@ use rustc_hash::FxHashMap;
 use verter_css_syntax::{parse_style_ir, CssDialect, CssParseMode, CssSource, StyleSyntaxIr};
 use verter_span::Span;
 
+use crate::style_planner::ExternalStyleContinuation;
+
 /// Request-scoped admitted style IRs. Official-reject and analysis share this
 /// map so a style body is parsed once per compile, never via thread-local
 /// ambient admission.
+///
+/// It also carries the external continuation the host bound to the
+/// component's style block, if any. Every stage that reads a style body asks
+/// this value which bytes that body is, so the official-reject css probe, the
+/// scoping analysis, the matcher and the render all read the continuation's
+/// produced bytes — never the authored block the continuation replaces.
 #[derive(Default)]
 pub(super) struct AdmittedStyleIrs {
     irs: FxHashMap<(u32, u32), StyleSyntaxIr>,
+    continuation: Option<Arc<ExternalStyleContinuation>>,
 }
 
 impl AdmittedStyleIrs {
+    pub(super) fn with_continuation(continuation: Option<Arc<ExternalStyleContinuation>>) -> Self {
+        Self {
+            irs: FxHashMap::default(),
+            continuation,
+        }
+    }
+
+    /// The continuation bound to the style block whose authored body is at
+    /// `content`, when there is one.
+    fn continuation_for(&self, content: Span) -> Option<Arc<ExternalStyleContinuation>> {
+        self.continuation
+            .as_ref()
+            .filter(|continuation| continuation.authored_extent() == content)
+            .cloned()
+    }
+
     pub(super) fn insert_prepared(&mut self, content: Span, ir: StyleSyntaxIr) {
         self.irs.insert((content.start, content.end), ir);
     }
@@ -74,16 +99,21 @@ pub(super) fn seed_admitted_from_prepared(
         let Some(content) = style.content else {
             continue;
         };
-        let Some(css) = source.get(content.start as usize..content.end as usize) else {
+        // A prepared parse stands in only for the exact bytes this block's
+        // body is read from: the authored block, or the produced bytes of
+        // the continuation bound to it.
+        let continuation = admitted.continuation_for(content);
+        let (text, body) = style_body_bytes(source, content, continuation.as_deref());
+        let Some(css) = text.get(body.start as usize..body.end as usize) else {
             continue;
         };
         if prepared.ir().source().text() != css
-            || prepared.ir().source().origin() != content.start
+            || prepared.ir().source().origin() != body.start
             || prepared.ir().dialect() != CssDialect::Css
         {
             continue;
         }
-        admitted.insert_prepared(content, prepared.ir().clone());
+        admitted.insert_prepared(body, prepared.ir().clone());
     }
 }
 
@@ -95,18 +125,40 @@ pub(super) fn admit_style_body(
     content: Span,
     admitted: &mut AdmittedStyleIrs,
 ) -> Option<&'static str> {
-    if let Some(ir) = admitted.get(content) {
+    let continuation = admitted.continuation_for(content);
+    let (text, body) = style_body_bytes(source, content, continuation.as_deref());
+    if let Some(ir) = admitted.get(body) {
         return verter_css_syntax::svelte_reject_from_ir(ir);
     }
-    match verter_css_syntax::parse_style_body(source, content) {
+    match verter_css_syntax::parse_style_body(text, body) {
         Ok(ir) => {
             if let Some(code) = verter_css_syntax::svelte_reject_from_ir(&ir) {
                 return Some(code);
             }
-            admitted.insert_prepared(content, ir);
+            admitted.insert_prepared(body, ir);
             None
         }
         Err(_) => Some("css_expected_identifier"),
+    }
+}
+
+/// The bytes a style body is read from, and its extent within them: the
+/// carrier `source` at `content`, or — for a continued block — the
+/// continuation's produced bytes over their whole extent.
+fn style_body_bytes<'a>(
+    source: &'a str,
+    content: Span,
+    continuation: Option<&'a ExternalStyleContinuation>,
+) -> (&'a str, Span) {
+    match continuation {
+        Some(continuation) => {
+            let code = continuation.result().code();
+            // An extent the span type cannot hold stays unaddressable, and
+            // the caller's bounded read of it fails closed.
+            let end = u32::try_from(code.len()).unwrap_or(u32::MAX);
+            (code, Span::new(0, end))
+        }
+        None => (source, content),
     }
 }
 // `ComplexSelectorPart`/`StyleStatement` are read only by the alloc-probe
@@ -173,6 +225,9 @@ pub struct AnalyzedStyleBody {
     /// selector metadata side table; the matcher verdicts land later, in the
     /// completion stage).
     analysis: analyze::CssAnalysis,
+    /// The continuation whose produced bytes [`Self::tree`] was parsed from,
+    /// when the block was continued. Completion reads the same bytes.
+    continuation: Option<Arc<ExternalStyleContinuation>>,
 }
 
 /// The CSS-DOMAIN half of the plan build: parse the css body at `content`
@@ -194,19 +249,30 @@ pub(super) fn analyze_style_body_admitted(
     admitted: &mut AdmittedStyleIrs,
 ) -> Result<AnalyzedStyleBody, StylePlanFailure> {
     verter_audit::attribute_scope!(StyleAnalysis);
+    let continuation = admitted.continuation_for(content);
+    let (source, body) = style_body_bytes(source, content, continuation.as_deref());
+    // A failure inside a continuation's produced bytes has no authored
+    // position finer than the block it replaced.
+    let at_carrier = |span: Span| {
+        if continuation.is_some() {
+            content
+        } else {
+            span
+        }
+    };
     let css = source
-        .get(content.start as usize..content.end as usize)
+        .get(body.start as usize..body.end as usize)
         .ok_or(StylePlanFailure {
             class: StylePlanFailureClass::ParseAnalysis,
             code: "css_expected_identifier",
             span: content,
             construct: None,
         })?;
-    let tree = if let Some(admitted) = admitted.take(content) {
+    let tree = if let Some(admitted) = admitted.take(body) {
         admitted
     } else {
         let syntax_source =
-            CssSource::new(Arc::from(css), content.start).map_err(|_| StylePlanFailure {
+            CssSource::new(Arc::from(css), body.start).map_err(|_| StylePlanFailure {
                 class: StylePlanFailureClass::ParseAnalysis,
                 code: "css_expected_identifier",
                 span: content,
@@ -236,20 +302,24 @@ pub(super) fn analyze_style_body_admitted(
                 StylePlanFailure {
                     class: StylePlanFailureClass::SelectorUnprovable,
                     code: err.code,
-                    span: err.span,
+                    span: at_carrier(err.span),
                     construct: Some("untrusted-style-syntax-ir"),
                 }
             } else {
                 StylePlanFailure {
                     class: StylePlanFailureClass::ParseAnalysis,
                     code: err.code,
-                    span: err.span,
+                    span: at_carrier(err.span),
                     construct: None,
                 }
             }
         })?
         .into_analysis();
-    Ok(AnalyzedStyleBody { tree, analysis })
+    Ok(AnalyzedStyleBody {
+        tree,
+        analysis,
+        continuation,
+    })
 }
 
 // ── Allocation probe (test/`test-support`-only) ──
@@ -358,18 +428,33 @@ pub fn complete_style_scope_plan(
     ir: &SvelteRuntimeIr<'_>,
     want_source_map: bool,
 ) -> Result<ProvenStyleScopePlan, StylePlanFailure> {
-    let AnalyzedStyleBody { tree, mut analysis } = analyzed;
+    let AnalyzedStyleBody {
+        tree,
+        mut analysis,
+        continuation,
+    } = analyzed;
     verter_debug_assert_eq!(tree.dialect(), CssDialect::Css);
+    // The body was parsed from the continuation's produced bytes when the
+    // block was continued; the matcher and render read those same bytes,
+    // and a failure inside them reports against the block they replaced.
+    let continued_extent = continuation.as_deref().map(|c| c.authored_extent());
+    let source = continuation
+        .as_deref()
+        .map_or(source, |continuation| continuation.result().code());
+    let at_carrier = |span: Span| continued_extent.unwrap_or(span);
     let content = Span::new(tree.source().origin(), tree.source().end());
     let facts = matcher::match_stylesheet(source, &tree, &mut analysis, ir).map_err(|refusal| {
         StylePlanFailure {
             class: StylePlanFailureClass::SelectorUnprovable,
             code: "svelte-runtime-unsupported-style-selector",
-            span: refusal.span,
+            span: at_carrier(refusal.span),
             construct: Some(refusal.construct),
         }
     })?;
-    let css_text = css_body_text_for(source, content)?;
+    let css_text = css_body_text_for(source, content).map_err(|failure| StylePlanFailure {
+        span: at_carrier(failure.span),
+        ..failure
+    })?;
     // The scope class: a RESOLVED `cssHash` override (the user callback's result,
     // computed OUTSIDE the compiler and preserved byte-exact) REPLACES the default
     // `svelte-<hash>` derivation at this SINGLE construction point; absent, the
@@ -400,14 +485,14 @@ pub fn complete_style_scope_plan(
     .map_err(|err| StylePlanFailure {
         class: StylePlanFailureClass::RenderInvariant,
         code: "css_render_failed",
-        span: err.span,
+        span: at_carrier(err.span),
         construct: None,
     })?;
     Ok(ProvenStyleScopePlan {
         hash,
         css_code: render.code,
         source_map: render.source_map,
-        css_body_span: content,
+        css_body_span: continued_extent.unwrap_or(content),
         keyframes: analysis.keyframes,
         global_keyframes: analysis.global_keyframes,
         has_global: analysis.has_global,
@@ -426,7 +511,9 @@ pub(crate) fn style_selector_certainties_for_test(
     content: Span,
     ir: &SvelteRuntimeIr<'_>,
 ) -> Result<Vec<(Span, matcher::MatchCertainty)>, StylePlanFailure> {
-    let AnalyzedStyleBody { tree, mut analysis } = analyze_style_body(source, content)?;
+    let AnalyzedStyleBody {
+        tree, mut analysis, ..
+    } = analyze_style_body(source, content)?;
     matcher::match_stylesheet_certainties_for_test(source, &tree, &mut analysis, ir).map_err(
         |refusal| StylePlanFailure {
             class: StylePlanFailureClass::SelectorUnprovable,
