@@ -247,7 +247,7 @@ impl From<&CompileProfile> for VueMainAssemblyAxes {
 }
 
 /// Transport adapter: host identifiers plus authorship metadata. Semantic
-/// assembly (dialect, map validation, composition, CCA2A) is compiler-owned.
+/// assembly (dialect, map validation, composition, compile artifact set) is compiler-owned.
 ///
 /// # Errors
 ///

@@ -502,6 +502,9 @@ pub struct RuntimeCompileOptions {
     pub vue_has_template: bool,
     /// Authored script lang (`"js"`/`"ts"`/`"jsx"`/`"tsx"`). `None` ⇒ JavaScript.
     pub vue_script_lang: Option<String>,
+    /// Host canonical identity for `__file` and SSR registration fallback.
+    /// Distinct from [`Self::filename`].
+    pub vue_canonical_id: Option<String>,
 }
 
 impl Default for RuntimeCompileOptions {
@@ -549,12 +552,13 @@ impl Default for RuntimeCompileOptions {
             vue_facts: None,
             prepared_styles: Vec::new(),
             vue_main: crate::assembly::VueMainDecoration::default(),
-            // Unrequested Main is zero-work (CCA2BV-AC4). Host publication
+            // Unrequested Main is zero-work. Host publication
             // sets this when `publishes_runtime_module()` is true.
             want_main: false,
             vue_has_script: true,
             vue_has_template: true,
             vue_script_lang: None,
+            vue_canonical_id: None,
         }
     }
 }
@@ -659,7 +663,7 @@ pub struct RuntimeDiagnostic {
 /// The framework-OWNED ESM body the carrier emits for the runtime module.
 ///
 /// Vue's runtime compiler now emits the assembled `_sfc_main` body here
-/// together with its CCA2A artifact set. A framework whose runtime module
+/// together with its compile artifact set. A framework whose runtime module
 /// is a single self-contained ESM (e.g. Svelte's official-shaped runtime
 /// output) also returns `Some` here. `None` means there is no runtime
 /// surface to publish — the host must not reconstruct Vue topology from
@@ -673,8 +677,8 @@ pub struct RuntimeMainModule {
     pub source_map: String,
     /// The language id of the produced body (`"js"` / `"ts"`), when known.
     pub lang: Option<String>,
-    /// CCA2A schema for the assembled Vue main, when this body was produced
-    /// by Vue main-module assembly. Svelte leaves this `None`.
+    /// Compile-artifact schema for the assembled Vue main, when this body was
+    /// produced by Vue main-module assembly. Svelte leaves this `None`.
     pub artifacts: Option<crate::assembly::CompileArtifactSet>,
 }
 

@@ -135,6 +135,7 @@ pub(crate) fn vue_host_products_demand(
         force_js: profile.force_js,
         hmr_strategy: crate::compile::hmr_strategy(profile.hmr_strategy),
         ssr_module_id: profile.ssr_module_id.clone(),
+        emit_ssr_module_registration: profile.emit_ssr_module_registration,
     }
 }
 
@@ -419,11 +420,9 @@ fn prepare_vue_execution_inputs(
         block_content: snapshot.block_content_inputs.clone(),
         vue_facts: Some(vue_facts),
         prepared_styles: snapshot.prepared_styles.clone(),
-        vue_main: verter_compiler::assembly::VueMainDecoration {
-            style_specifiers,
-            custom_specifiers,
-            ..verter_compiler::assembly::VueMainDecoration::default()
-        },
+        canonical_id: snapshot.canonical_id.clone(),
+        style_specifiers,
+        custom_specifiers,
         want_main: true,
         has_script: snapshot.meta.has_script,
         has_template: snapshot.meta.has_template,
@@ -711,6 +710,7 @@ pub(crate) fn vue_runtime_render_demand(
         force_js: profile.force_js,
         hmr_strategy: crate::compile::hmr_strategy(profile.hmr_strategy),
         ssr_module_id: profile.ssr_module_id.clone(),
+        emit_ssr_module_registration: profile.emit_ssr_module_registration,
     }
 }
 

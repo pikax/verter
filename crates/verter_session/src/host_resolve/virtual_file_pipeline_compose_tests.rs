@@ -65,7 +65,7 @@ fn custom_runtime_module_name_reaches_the_import_specifier() {
     assert!(code.starts_with("import { openBlock as _openBlock } from \"@vue/runtime-dom\"\n"));
 }
 
-/// CCA2BV-AC1: planted host-side Vue topology reconstruction is refused.
+/// Planted host-side Vue topology reconstruction is refused.
 #[test]
 fn planted_host_vue_topology_reconstruction_is_refused() {
     use crate::host_resolve::compile_request_build::BoundCompiledProducts;
@@ -160,5 +160,101 @@ fn planted_host_vue_topology_reconstruction_is_refused() {
     assert_eq!(
         render_err.diagnostics[0].code,
         "HOST_VUE_MAIN_NOT_ASSEMBLED"
+    );
+}
+
+#[test]
+fn take_compiler_vue_main_preserves_artifact_relations() {
+    use crate::types::{CompileInput, FileMeta};
+    use std::sync::Arc;
+    use verter_compiler::assembly::{
+        vue_main_compile_artifacts, FragmentDialect, VueMainDecoration,
+    };
+    use verter_compiler::compile_request::ProductKind;
+    use verter_compiler::framework_common::{
+        RuntimeCompileOutput, RuntimeOutputDescriptor, RuntimeScriptBlock, SourceMapFidelity,
+    };
+
+    let script_map = r#"{"version":3,"sources":["Comp.vue"],"sourcesContent":["const n = 1\n"],"names":[],"mappings":"AAAA"}"#;
+    let mut bundle = RuntimeCompileOutput {
+        script: Some(RuntimeScriptBlock {
+            code: "const n = 1\n".to_string(),
+            source_map: script_map.to_string(),
+            setup: true,
+            output_descriptor: RuntimeOutputDescriptor::generated(
+                "const n = 1\n",
+                Some(script_map),
+                &[("test:space", "test:artifact")],
+                SourceMapFidelity::Approximate,
+            ),
+            generated_template_hole: None,
+            runtime_imports: Vec::new(),
+            sfc_export_placement: None,
+        }),
+        ..Default::default()
+    };
+    let generated = "const n = 1\nexport default n;\n";
+    bundle.main.body_code = Some(generated.to_string());
+    bundle.main.artifacts = Some(
+        vue_main_compile_artifacts(
+            "Comp.vue",
+            &bundle,
+            ProductKind::RuntimeClient,
+            FragmentDialect::JavaScript,
+            generated,
+            Some(script_map),
+            &VueMainDecoration::default(),
+            true,
+        )
+        .expect("schema accepts"),
+    );
+    let input = CompileInput {
+        canonical_id: "Comp.vue".to_string(),
+        source: Arc::<str>::from("<script>const n = 1</script>"),
+        whole_hash: [0; 16],
+        meta: FileMeta {
+            has_script: true,
+            has_template: false,
+            main_depends_on_styles: false,
+            has_scoped_style: false,
+            script_lang: None,
+            template_lang: None,
+            style_langs: Vec::new(),
+            custom_types: Vec::new(),
+            custom_langs: Vec::new(),
+        },
+        parse_diagnostics: crate::types::DiagnosticsSnapshot::default(),
+        src_blocks: Vec::new(),
+        external_requests: Vec::new(),
+        has_supplied_block_content: false,
+        block_content_inputs: Default::default(),
+        macro_type_deps: Vec::new(),
+        script_imports: Vec::new(),
+        script_macros: Vec::new(),
+        script_bindings: Vec::new(),
+        script_macro_usage: None,
+        script_vue_api_calls: Vec::new(),
+        framework_parse: None,
+        style_v_bind_vars: Vec::new(),
+        style_v_bind_usage_complete: true,
+        prepared_styles: Vec::new(),
+    };
+    let taken = take_compiler_vue_main(&bundle, &input, false).expect("body is present");
+    assert_eq!(taken.code, generated);
+    let set = taken
+        .artifacts
+        .expect("typed artifact set survives handoff");
+    assert!(set
+        .artifacts()
+        .iter()
+        .any(|artifact| artifact.name() == "script"));
+    let main = set
+        .artifacts()
+        .iter()
+        .find(|artifact| artifact.name() == "main")
+        .expect("main");
+    assert!(
+        !main.maps.is_empty(),
+        "qualified maps must survive the host handoff"
     );
 }

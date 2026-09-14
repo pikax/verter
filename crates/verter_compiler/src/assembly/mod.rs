@@ -58,11 +58,12 @@ pub use source_unit::{
     ArtifactSourceUnit, ContentId, SourceId, SourceRevision, SourceUnit, SourceUnitId,
 };
 pub use vue_module::{
-    assemble_vue_runtime_main, compose_main_module, reset_vue_main_assembly_count,
-    vue_main_assembly_count, vue_main_compile_artifacts, ExtraFragment, SfcRewriteRefusal,
-    VueMainAssemblyFailure, VueMainCompositionFailure, VueMainDecoration, VueMainModuleRequest,
-    VueRuntimeMainAssembled, VueRuntimeMainRequest,
+    assemble_vue_runtime_main, compose_main_module, vue_main_compile_artifacts, ExtraFragment,
+    SfcRewriteRefusal, VueMainAssemblyFailure, VueMainCompositionFailure, VueMainDecoration,
+    VueMainModuleRequest, VueRuntimeMainAssembled, VueRuntimeMainRequest,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use vue_module::{reset_vue_main_assembly_count, vue_main_assembly_count};
 
 #[cfg(test)]
 mod artifact_schema_tests;

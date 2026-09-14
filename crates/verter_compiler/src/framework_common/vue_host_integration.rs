@@ -84,7 +84,7 @@ static_assertions::assert_not_impl_any!(VueHostIntegrationBackend: Clone, Copy, 
 /// Host-backed multi-product demand: every requested product plus the
 /// typed Vue option attempt the backend turns into the one canonical
 /// request. Request construction is the backend's, not the caller's.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct VueHostMultiProductDemand {
     /// The requested product set (runtime, IDE companion, analysis, ...).
     pub products: Vec<CompileProduct>,
@@ -102,11 +102,29 @@ pub struct VueHostMultiProductDemand {
     pub hmr_strategy: crate::compile_request::RuntimeHmrStrategy,
     /// SSR-manifest key form; `None` falls back to the canonical id.
     pub ssr_module_id: Option<String>,
+    /// Emit the Vite SSR-manifest registration on an SSR assembly.
+    pub emit_ssr_module_registration: bool,
+}
+
+impl Default for VueHostMultiProductDemand {
+    fn default() -> Self {
+        Self {
+            products: Vec::new(),
+            vue_options: VueOptionAttempt::default(),
+            filename: None,
+            component_id: None,
+            is_production: false,
+            force_js: false,
+            hmr_strategy: crate::compile_request::RuntimeHmrStrategy::default(),
+            ssr_module_id: None,
+            emit_ssr_module_registration: true,
+        }
+    }
 }
 
 /// Runtime-render (render-only) demand: the backend constructs the
 /// runtime-only product set itself; no other product can ride along.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct VueHostRuntimeRenderDemand {
     /// Runtime product options for the rendered main module.
     pub runtime: RuntimeProductRequest,
@@ -131,6 +149,25 @@ pub struct VueHostRuntimeRenderDemand {
     pub hmr_strategy: crate::compile_request::RuntimeHmrStrategy,
     /// SSR-manifest key form; `None` falls back to the canonical id.
     pub ssr_module_id: Option<String>,
+    /// Emit the Vite SSR-manifest registration on an SSR assembly.
+    pub emit_ssr_module_registration: bool,
+}
+
+impl Default for VueHostRuntimeRenderDemand {
+    fn default() -> Self {
+        Self {
+            runtime: RuntimeProductRequest::default(),
+            template_fact_diagnostics: false,
+            vue_options: VueOptionAttempt::default(),
+            filename: None,
+            component_id: None,
+            is_production: false,
+            force_js: false,
+            hmr_strategy: crate::compile_request::RuntimeHmrStrategy::default(),
+            ssr_module_id: None,
+            emit_ssr_module_registration: true,
+        }
+    }
 }
 
 /// Typed issuance refusal. Never a fallback to another lane, framework,
@@ -283,9 +320,13 @@ pub struct VueHostExecutionInputs {
     pub vue_facts: Option<crate::compile::types::VueExecutionInputs>,
     /// Host-retained parsed style IRs in inventory order.
     pub prepared_styles: Vec<Option<crate::style_planner::PreparedStyleIr>>,
-    /// Host-owned Vue main identifiers and assembly axes. The compiler
-    /// owns topology; this carries only identifiers and request knobs.
-    pub vue_main: crate::assembly::VueMainDecoration,
+    /// Host canonical identity for `__file` and SSR registration fallback.
+    /// Distinct from the codegen filename.
+    pub canonical_id: String,
+    /// Host-rendered style virtual-file specifiers, in inventory order.
+    pub style_specifiers: Vec<String>,
+    /// Host-rendered custom-block virtual-file specifiers, in inventory order.
+    pub custom_specifiers: Vec<String>,
     /// Assemble Main. False for STYLE-only runtime compilation.
     pub want_main: bool,
     /// Authored `<script>` inventory.
@@ -302,7 +343,9 @@ impl Default for VueHostExecutionInputs {
             block_content: Default::default(),
             vue_facts: None,
             prepared_styles: Vec::new(),
-            vue_main: Default::default(),
+            canonical_id: String::new(),
+            style_specifiers: Vec::new(),
+            custom_specifiers: Vec::new(),
             want_main: false,
             has_script: true,
             has_template: true,
@@ -396,6 +439,7 @@ impl VueHostCompiledProducts {
 
     /// Wrap an already-produced runtime bundle as an admitted product.
     /// Test/harness constructor for publication-refusal coverage.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn from_admitted_runtime_bundle(bundle: RuntimeCompileOutput, kind: ProductKind) -> Self {
         Self {
             admitted: vec![kind],
@@ -462,6 +506,7 @@ impl VueHostIntegrationBackend {
         force_js: bool,
         hmr_strategy: crate::compile_request::RuntimeHmrStrategy,
         ssr_module_id: Option<String>,
+        emit_ssr_module_registration: bool,
         parse: VueParseAdmission,
         semantic: VueSemanticAdmission,
     ) -> Result<VueCompileAdmission, VueHostAdmissionRefusal> {
@@ -478,7 +523,7 @@ impl VueHostIntegrationBackend {
             force_js,
         )
         .map_err(VueHostAdmissionRefusal::RequestConstructionRefused)?
-        .with_host_assembly_axes(ssr_module_id, hmr_strategy);
+        .with_host_assembly_axes(ssr_module_id, hmr_strategy, emit_ssr_module_registration);
         self.issue_admitted(demand, request, parse, semantic)
     }
 
@@ -681,6 +726,7 @@ impl FrameworkHostIntegrationBackend<VueSfcV3, NativeHostEpoch> for VueHostInteg
             demand.force_js,
             demand.hmr_strategy,
             demand.ssr_module_id,
+            demand.emit_ssr_module_registration,
             parse,
             semantic,
         )
@@ -729,6 +775,7 @@ impl FrameworkHostIntegrationBackend<VueSfcV3, NativeHostEpoch> for VueHostInteg
             demand.force_js,
             demand.hmr_strategy,
             demand.ssr_module_id,
+            demand.emit_ssr_module_registration,
             parse,
             semantic,
         )
@@ -838,13 +885,14 @@ fn derive_admitted_runtime_options(
         vue_has_script: inputs.has_script,
         vue_has_template: inputs.has_template,
         vue_script_lang: inputs.script_lang.clone(),
-        vue_main: {
-            let mut decoration = inputs.vue_main.clone();
-            decoration.is_production = request.is_production();
-            decoration.hmr = request.hmr_strategy();
-            decoration.ssr_module_id = request.ssr_module_id().map(str::to_string);
-            decoration.emit_ssr_module_registration = true;
-            decoration
+        vue_canonical_id: (!inputs.canonical_id.is_empty()).then(|| inputs.canonical_id.clone()),
+        vue_main: crate::assembly::VueMainDecoration {
+            hmr: request.hmr_strategy(),
+            is_production: request.is_production(),
+            emit_ssr_module_registration: request.emit_ssr_module_registration(),
+            ssr_module_id: request.ssr_module_id().map(str::to_string),
+            style_specifiers: inputs.style_specifiers.clone(),
+            custom_specifiers: inputs.custom_specifiers.clone(),
         },
         ..RuntimeCompileOptions::default()
     }
@@ -1831,6 +1879,107 @@ mod tests {
             before + 1,
             "the backend entry is what increments the execution count"
         );
+    }
+
+    #[test]
+    fn compile_host_products_uses_canonical_id_and_profile_ssr_opt_out() {
+        let artifact = vue_artifact(SFC);
+        let alloc = oxc_allocator::Allocator::new();
+        let admission = VueHostIntegrationBackend::new()
+            .admit_host_products(
+                &artifact,
+                VueHostMultiProductDemand {
+                    products: vec![CompileProduct::RuntimeServer(RuntimeProductRequest {
+                        runtime_source_map: true,
+                        ..Default::default()
+                    })],
+                    filename: Some("Other.vue".to_string()),
+                    emit_ssr_module_registration: false,
+                    vue_options: VueOptionAttempt {
+                        ssr: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .expect("admits");
+        let products = VueHostIntegrationBackend::new()
+            .compile_host_products(
+                admission,
+                &artifact,
+                &VueHostExecutionInputs {
+                    canonical_id: "/src/Canonical.vue".to_string(),
+                    want_main: true,
+                    has_script: true,
+                    has_template: true,
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("compiles");
+        let bundle = products.runtime_server_bundle().expect("server runtime");
+        let body = bundle.main.body_code.as_deref().expect("assembled");
+        assert!(
+            !body.contains("__vite_useSSRContext"),
+            "profile opt-out must suppress SSR registration:\n{body}"
+        );
+        assert!(
+            !body.contains("Other.vue")
+                || body.contains("_sfc_main.__file = \"/src/Canonical.vue\""),
+            "canonical id must own host decoration identity:\n{body}"
+        );
+        let set = bundle.main.artifacts.as_ref().expect("artifact set");
+        assert!(
+            set.artifacts()
+                .iter()
+                .any(|artifact| artifact.name() == "main"),
+            "typed main artifact must survive host execution"
+        );
+    }
+
+    #[test]
+    fn compile_host_products_map_refusal_is_unsupported() {
+        use crate::assembly::{
+            assemble_vue_runtime_main, VueMainDecoration, VueRuntimeMainRequest,
+        };
+        use crate::framework_common::{
+            RuntimeOutputDescriptor, RuntimeScriptBlock, SourceMapFidelity,
+        };
+        let compiled = RuntimeCompileOutput {
+            script: Some(RuntimeScriptBlock {
+                code: "const n = 1\n".to_string(),
+                source_map: String::new(),
+                setup: true,
+                output_descriptor: RuntimeOutputDescriptor::generated(
+                    "const n = 1\n",
+                    None,
+                    &[("test:space", "test:artifact")],
+                    SourceMapFidelity::Approximate,
+                ),
+                generated_template_hole: None,
+                runtime_imports: Vec::new(),
+                sfc_export_placement: None,
+            }),
+            ..Default::default()
+        };
+        let refusal = assemble_vue_runtime_main(VueRuntimeMainRequest {
+            canonical_id: "Comp.vue",
+            compiled: &compiled,
+            script_lang: Some("ts"),
+            has_script: true,
+            has_template: false,
+            force_js: false,
+            source_map: true,
+            runtime: "vue",
+            ssr: false,
+            decoration: VueMainDecoration::default(),
+        })
+        .expect_err("empty script map must refuse assembly");
+        let unsupported = CompileUnsupported::VueMainAssemblyFailed(refusal.to_string());
+        assert!(matches!(
+            unsupported,
+            CompileUnsupported::VueMainAssemblyFailed(_)
+        ));
     }
 
     /// Per-leg source-map faithfulness: each admitted product's OWN map

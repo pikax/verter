@@ -25,10 +25,10 @@
 //! [`crate::compile_request::CompileRequest`]'s own doc). Vue's
 //! runtime-module composition (the `__sfc__` rewrite, script/template/
 //! import fragment minting, sequencing) is the SAME
-//! [`crate::assembly::vue_module`] machinery `verter_session`'s
-//! host-decorated `assemble_vue_main_module` shares — this route just
-//! supplies empty host-decoration extras (no host state exists for a
-//! one-shot compile). Svelte's client compile
+//! [`crate::assembly::vue_module`] machinery the session identifier/axes
+//! transport (`assemble_vue_main_module` → `assemble_vue_runtime_main`)
+//! uses — this route supplies empty decoration extras (no host state
+//! exists for a one-shot compile). Svelte's client compile
 //! ([`crate::svelte::runtime::compile_client`]) is likewise the SAME
 //! algorithm the host carrier drives.
 

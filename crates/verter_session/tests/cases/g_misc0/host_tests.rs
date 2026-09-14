@@ -2646,6 +2646,164 @@ fn explicit_no_hmr_request_does_not_emit_file_trailer() {
     );
 }
 
+#[test]
+fn host_main_uses_canonical_id_not_profile_filename() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/src/Canonical.vue";
+    let _ = upsert_vue(
+        &host,
+        canonical,
+        "<script setup>const x = 1</script><template><div>{{ x }}</div></template>",
+    );
+    let mut profile = profile_dev();
+    profile.filename = Some("Other.vue".to_string());
+    let result = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical.to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile,
+        })
+        .unwrap();
+    assert!(
+        result
+            .code
+            .contains("_sfc_main.__file = \"/src/Canonical.vue\""),
+        "__file must stay the canonical id, got:\n{}",
+        result.code
+    );
+    assert!(
+        !result.code.contains("Other.vue"),
+        "codegen filename override must not leak into Main bytes:\n{}",
+        result.code
+    );
+}
+
+#[test]
+fn host_ssr_registration_fallback_uses_canonical_id() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/src/Canonical.vue";
+    let _ = upsert_vue(
+        &host,
+        canonical,
+        "<script setup>const x = 1</script><template><div>{{ x }}</div></template>",
+    );
+    let mut profile = profile_dev();
+    profile.ssr = true;
+    profile.filename = Some("Other.vue".to_string());
+    profile.ssr_module_id = None;
+    let result = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical.to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile,
+        })
+        .unwrap();
+    assert!(
+        result.code.contains(".add(\"/src/Canonical.vue\")"),
+        "SSR fallback registration must use the canonical id, got:\n{}",
+        result.code
+    );
+}
+
+#[test]
+fn host_ssr_registration_opt_out_is_honored() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = upsert_vue(
+        &host,
+        "/src/SsrOff.vue",
+        "<script setup>const x = 1</script><template><div>{{ x }}</div></template>",
+    );
+    let mut profile = profile_dev();
+    profile.ssr = true;
+    profile.emit_ssr_module_registration = false;
+    let result = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/src/SsrOff.vue".to_string()),
+            canonical_id: None,
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile,
+        })
+        .unwrap();
+    assert!(
+        !result.code.contains("__vite_useSSRContext"),
+        "emit_ssr_module_registration=false must suppress useSSRContext:\n{}",
+        result.code
+    );
+    assert!(
+        !result.code.contains("ssrContext.modules"),
+        "emit_ssr_module_registration=false must suppress ssrContext.modules:\n{}",
+        result.code
+    );
+}
+
+#[test]
+fn compiler_assembly_map_refusal_does_not_publish_or_warm_main() {
+    use verter_compiler::assembly::{
+        assemble_vue_runtime_main, VueMainDecoration, VueRuntimeMainRequest,
+    };
+    use verter_compiler::framework_common::{
+        RuntimeCompileOutput, RuntimeOutputDescriptor, RuntimeScriptBlock, SourceMapFidelity,
+    };
+    let compiled = RuntimeCompileOutput {
+        script: Some(RuntimeScriptBlock {
+            code: "const n = 1\n".to_string(),
+            source_map: String::new(),
+            setup: true,
+            output_descriptor: RuntimeOutputDescriptor::generated(
+                "const n = 1\n",
+                None,
+                &[("test:space", "test:artifact")],
+                SourceMapFidelity::Approximate,
+            ),
+            generated_template_hole: None,
+            runtime_imports: Vec::new(),
+            sfc_export_placement: None,
+        }),
+        ..Default::default()
+    };
+    assemble_vue_runtime_main(VueRuntimeMainRequest {
+        canonical_id: "/src/Maps.vue",
+        compiled: &compiled,
+        script_lang: Some("js"),
+        has_script: true,
+        has_template: false,
+        force_js: false,
+        source_map: true,
+        runtime: "vue",
+        ssr: false,
+        decoration: VueMainDecoration::default(),
+    })
+    .expect_err("empty script map must refuse compiler assembly");
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = upsert_vue(
+        &host,
+        "/src/Maps.vue",
+        "<script setup>const n = 1</script><template><div>{{ n }}</div></template>",
+    );
+    let mut profile = profile_dev();
+    profile.source_map = true;
+    let query = VirtualQuery {
+        raw_id: Some("/src/Maps.vue".to_string()),
+        canonical_id: None,
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile,
+    };
+    let first = host.get_virtual_file(query.clone()).unwrap();
+    assert!(
+        !first.cache_hit,
+        "first maps-on Main read is a cold compile"
+    );
+    assert!(!first.code.is_empty());
+    let second = host.get_virtual_file(query).unwrap();
+    assert!(
+        second.cache_hit,
+        "a successful maps-on assembly may warm; a refusal must not"
+    );
+}
+
 /// @ai-generated - export type must be stripped from main module when force_js: true
 #[test]
 fn main_module_strips_export_type_when_force_js() {

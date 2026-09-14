@@ -724,14 +724,19 @@ fn with_catalog_template_facts(
 
 /// Assemble the Vue `_sfc_main` runtime module behind the Vue runtime
 /// compiler: host identifiers ride in on `opts.vue_main`, topology is
-/// compiler-owned, and the CCA2A artifact set is attached to `bundle.main`.
+/// compiler-owned, and the compile artifact set is attached to `bundle.main`.
 pub(crate) fn emit_assembled_vue_main(
     bundle: &mut RuntimeCompileOutput,
     parsed: &ParsedSfc,
     opts: &RuntimeCompileOptions,
 ) -> Result<(), crate::assembly::VueMainAssemblyFailure> {
     let runtime = opts.runtime_module_name.as_deref().unwrap_or("vue");
-    let canonical_id = opts.filename.as_deref().unwrap_or("");
+    let canonical_id = opts
+        .vue_canonical_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .or(opts.filename.as_deref())
+        .unwrap_or("");
     let derived_lang = vue_script_lang_from_parsed(parsed);
     let script_lang = opts.vue_script_lang.as_deref().or(derived_lang.as_deref());
     let assembled = assemble_vue_runtime_main(VueRuntimeMainRequest {
@@ -970,9 +975,6 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::sync::Mutex;
-
-    static ASSEMBLY_COUNT_LOCK: Mutex<()> = Mutex::new(());
     use verter_css_syntax::CssDialect;
     use verter_language::{ExternalLinkKind, ScriptRegionKind};
 
@@ -3235,9 +3237,6 @@ mod tests {
 
     #[test]
     fn style_only_demand_does_not_assemble_main() {
-        let _guard = ASSEMBLY_COUNT_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let source = "<style>.x{color:red}</style><template><div/></template>";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::new();
@@ -3283,9 +3282,6 @@ mod tests {
 
     #[test]
     fn template_only_main_lang_is_javascript() {
-        let _guard = ASSEMBLY_COUNT_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let source = "<template><div/></template>";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::new();
@@ -3305,5 +3301,69 @@ mod tests {
             )
             .expect("template-only compiles");
         assert_eq!(bundle.main.lang.as_deref(), Some("js"));
+    }
+
+    #[test]
+    fn demanded_main_with_maps_qualifies_authored_geometry() {
+        let source = "<script setup>const n = 1</script><template><div>{{ n }}</div></template>";
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let bundle = VueCarrierCompiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions {
+                    filename: Some("Comp.vue".to_string()),
+                    vue_canonical_id: Some("/src/Canonical.vue".to_string()),
+                    source_map: true,
+                    want_main: true,
+                    vue_has_script: true,
+                    vue_has_template: true,
+                    vue_main: crate::assembly::VueMainDecoration {
+                        hmr: crate::compile_request::RuntimeHmrStrategy::Vite,
+                        ..crate::assembly::VueMainDecoration::default()
+                    },
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("Main demand with maps produces a bundle");
+        let body = bundle.main.body_code.as_deref().expect("assembled body");
+        assert!(
+            body.contains("_sfc_main.__file = \"/src/Canonical.vue\""),
+            "host canonical id must drive __file, got:\n{body}"
+        );
+        let set = bundle.main.artifacts.as_ref().expect("artifact set");
+        let main = set
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.name() == "main")
+            .expect("main artifact");
+        let map = main
+            .maps
+            .iter()
+            .find(|map| map.family == crate::assembly::ArtifactMapFamily::RuntimeSourceMap)
+            .expect("runtime map");
+        let main_unit = set
+            .source_units()
+            .find(|unit| unit.unit.logical_role() == "main")
+            .expect("main unit")
+            .unit
+            .id()
+            .clone();
+        assert!(
+            map.segments
+                .iter()
+                .all(|segment| segment.source_unit != main_unit),
+            "qualified segments must not identity-map onto generated Main"
+        );
+        assert!(
+            !map.segments.is_empty()
+                || map.sources.iter().any(|id| {
+                    set.source_units()
+                        .any(|unit| unit.unit.id() == id && unit.unit.logical_role() != "main")
+                }),
+            "map must name authored inputs"
+        );
     }
 }

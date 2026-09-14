@@ -244,6 +244,7 @@ fn host_backed_multi_product_executes_exactly_the_admitted_population() {
         force_js: false,
         hmr_strategy: verter_compiler::compile_request::RuntimeHmrStrategy::None,
         ssr_module_id: None,
+        emit_ssr_module_registration: true,
     };
     let alloc = oxc_allocator::Allocator::new();
     let admission = backend

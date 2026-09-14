@@ -90,6 +90,7 @@ pub fn to_source_map(map: &DecodedFragmentMap) -> SourceMap<'static> {
 /// simulating two is exercising the retired text-scan behaviour, not this
 /// fact-driven one, and is out of this helper's scope) and every literal
 /// `__sfc__` occurrence not already covered by it.
+#[cfg(any(test, feature = "test-support"))]
 pub fn literal_scan_placement_for_fixture(code: &str) -> Option<super::SfcExportPlacement> {
     const SFC_BINDING: &str = "__sfc__";
     const EXPORT_STATEMENT_TEXT: &str = "export default __sfc__;\n";

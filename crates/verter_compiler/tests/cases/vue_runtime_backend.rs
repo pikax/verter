@@ -2142,6 +2142,7 @@ fn direct_dev_compile_does_not_emit_host_hmr_trailer() {
     .with_host_assembly_axes(
         None,
         verter_compiler::compile_request::RuntimeHmrStrategy::Vite,
+        true,
     );
     let output = compile_via_standalone(SIMPLE, &request);
     let code = output

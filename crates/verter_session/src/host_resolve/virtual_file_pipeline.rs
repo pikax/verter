@@ -34,34 +34,26 @@ use oxc_allocator::Allocator;
 use verter_compiler::compile::format_import_specifier;
 use verter_compiler::framework_common::{RuntimeDiagnosticSeverity, RuntimeTemplateBlock};
 
-/// Consume the compiler-owned Vue Main body. Artifacts are the CCA2A
-/// transport when present; `body_code` is the publication payload. A
-/// missing body is a planted-reconstruction refusal, never host composition.
-pub(super) fn take_compiler_vue_main(
-    compiled: &verter_compiler::framework_common::RuntimeCompileOutput,
+/// Compiler-owned Vue Main handoff: publication payload plus the typed
+/// artifact set. Callers must not reconstruct topology from block fields.
+#[derive(Debug)]
+pub(super) struct TakenCompilerVueMain<'a> {
+    pub code: &'a str,
+    pub source_map: &'a str,
+    pub lang: String,
+    pub artifacts: Option<&'a verter_compiler::assembly::CompileArtifactSet>,
+}
+
+/// Consume the compiler-owned Vue Main body. The compile artifact set is
+/// the typed transport when present; `body_code` is the publication payload.
+/// A missing body is a planted-reconstruction refusal, never host composition.
+pub(super) fn take_compiler_vue_main<'a>(
+    compiled: &'a verter_compiler::framework_common::RuntimeCompileOutput,
     snapshot: &CompileInput,
     force_js: bool,
-) -> Result<(String, Option<Arc<str>>, String), DiagnosticsSnapshot> {
-    match &compiled.main.body_code {
+) -> Result<TakenCompilerVueMain<'a>, DiagnosticsSnapshot> {
+    match compiled.main.body_code.as_deref() {
         Some(body) => {
-            let code = compiled
-                .main
-                .artifacts
-                .as_ref()
-                .and_then(|set| {
-                    set.artifacts()
-                        .iter()
-                        .find(|artifact| artifact.name() == "main")
-                })
-                .and_then(|artifact| match &artifact.content {
-                    verter_compiler::assembly::ArtifactContent::Available(content) => {
-                        Some(content.clone())
-                    }
-                    _ => None,
-                })
-                .unwrap_or_else(|| body.clone());
-            let source_map = (!compiled.main.source_map.is_empty())
-                .then(|| Arc::from(compiled.main.source_map.clone()));
             let lang = compiled.main.lang.clone().unwrap_or_else(|| {
                 if force_js {
                     "js".to_string()
@@ -74,7 +66,12 @@ pub(super) fn take_compiler_vue_main(
                         .to_string()
                 }
             });
-            Ok((code, source_map, lang))
+            Ok(TakenCompilerVueMain {
+                code: body,
+                source_map: compiled.main.source_map.as_str(),
+                lang,
+                artifacts: compiled.main.artifacts.as_ref(),
+            })
         }
         None => Err(vue_main_reconstruction_diagnostics(
             snapshot.source.len() as u32
@@ -3591,11 +3588,9 @@ impl VerterHost {
                     block_content: snapshot.block_content_inputs.clone(),
                     vue_facts: Some(vue_facts),
                     prepared_styles: snapshot.prepared_styles.clone(),
-                    vue_main: verter_compiler::assembly::VueMainDecoration {
-                        style_specifiers,
-                        custom_specifiers,
-                        ..verter_compiler::assembly::VueMainDecoration::default()
-                    },
+                    canonical_id: snapshot.canonical_id.clone(),
+                    style_specifiers,
+                    custom_specifiers,
                     want_main: true,
                     has_script: snapshot.meta.has_script,
                     has_template: snapshot.meta.has_template,
@@ -3732,13 +3727,12 @@ impl VerterHost {
                 canonical_id: snapshot.canonical_id.clone(),
             });
         }
-        let (main_code, main_source_map, main_lang) =
-            take_compiler_vue_main(compiled, snapshot, profile.force_js).map_err(fatal)?;
+        let taken = take_compiler_vue_main(compiled, snapshot, profile.force_js).map_err(fatal)?;
 
         Ok(RenderOnlyMain {
-            code: Arc::from(main_code),
-            source_map: main_source_map,
-            lang: Some(main_lang),
+            code: Arc::from(taken.code),
+            source_map: (!taken.source_map.is_empty()).then(|| Arc::from(taken.source_map)),
+            lang: Some(taken.lang),
             diagnostics: compile_diags
                 .diagnostics
                 .into_iter()
@@ -3807,14 +3801,18 @@ pub(super) fn publish_runtime_nodes(
     // for.
     if let Some(compiled) = products.runtime_bundle() {
         if publish_runtime_module && compiled.has_runtime_surface() {
-            let (main_code, main_source_map, main_lang) =
-                take_compiler_vue_main(compiled, snapshot, policy.assembly.force_js)?;
+            let taken = take_compiler_vue_main(compiled, snapshot, policy.assembly.force_js)?;
+            let _ = taken.artifacts.map(|set| {
+                set.artifacts()
+                    .iter()
+                    .any(|artifact| artifact.name() == "main")
+            });
             outputs.insert(
                 VirtualNodeKind::Main,
                 CachedVirtualFile {
-                    code: Arc::from(main_code),
-                    source_map: main_source_map,
-                    lang: Some(main_lang),
+                    code: Arc::from(taken.code),
+                    source_map: (!taken.source_map.is_empty()).then(|| Arc::from(taken.source_map)),
+                    lang: Some(taken.lang),
                     meta: VirtualMeta {
                         scope_id: if compiled.scope_id.is_empty() {
                             None
