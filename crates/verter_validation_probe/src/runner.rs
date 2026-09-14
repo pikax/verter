@@ -206,7 +206,7 @@ pub enum DriverLine {
         elapsed_ns: u64,
         /// The route's answer, one entry per requested entry, in order.
         entries: Vec<RouteEntry>,
-        /// Peak/live-bytes pair from the CPER0M memory audit, present only
+        /// Peak/live-bytes pair from the native memory audit, present only
         /// when the request line carried `observe.memory`.
         memory: Option<MemoryBytes>,
     },
@@ -226,7 +226,7 @@ pub enum DriverLine {
     },
 }
 
-/// The CPER0M-backed peak/live-bytes pair copied off a compile frame.
+/// The native memory audit's peak/live-bytes pair copied off a compile frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryBytes {

@@ -556,7 +556,7 @@ fn load_failed_terminals() -> BTreeMap<Dimension, Terminal> {
 
 /// Load failure on the first warm sample: typed absence, no measurement,
 /// remaining slots worker_unavailable. Route/Compile/Structural carry the
-/// CVO0-propagated harness_failure class, not NotRun (Compile admits it).
+/// propagated harness_failure class, not NotRun (Compile admits it).
 #[test]
 fn a_load_failure_mid_warm_validates_as_a_total_row() {
     let mut artifact = valid_artifact();
@@ -668,6 +668,80 @@ fn a_reference_death_keeps_its_compile_measurement() {
         not_run(ProbeOutcomeClass::ReferenceFailure)
     );
     assert!(rest.measurement.is_none());
+}
+
+/// Svelte has no structural comparator, so a reference-phase death keeps the
+/// compile measurement with every reference-bearing dimension NotApplicable.
+#[test]
+fn a_svelte_reference_death_validates_without_a_reference_failure_class() {
+    let mut artifact = valid_artifact();
+    let mut samples = vec![Sample {
+        terminals: svelte_pass(),
+        measurement: Some(Measurement {
+            elapsed_ns: 2_000,
+            memory: Some(MemoryPair {
+                peak_bytes: 8,
+                live_bytes: 4,
+            }),
+        }),
+        absence: Some(AbsenceReason::ReferenceTerminated),
+    }];
+    while samples.len() < WARM_SAMPLES as usize {
+        samples.push(unavailable_after(0, ProbeOutcomeClass::ReferenceFailure));
+    }
+    let row = artifact
+        .rows
+        .iter_mut()
+        .find(|row| row.row_id == format!("{SVELTE_CASE}@warm"))
+        .expect("warm");
+    row.samples = samples;
+    row.sample_count = WARM_SAMPLES as usize;
+    row.observed_outcome = observe::project_observed_outcome(&row.samples).expect("projectable");
+    artifact
+        .validate(&manifests())
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+/// A clean measured sample is not a termination; unrun slots may not cite it.
+#[test]
+fn a_phantom_unrun_anchor_on_a_clean_sample_is_rejected() {
+    let mut artifact = valid_artifact();
+    let mut samples = vec![measured(vue_pass())];
+    while samples.len() < WARM_SAMPLES as usize {
+        samples.push(unavailable_after(0, ProbeOutcomeClass::Crash));
+    }
+    let row = artifact
+        .rows
+        .iter_mut()
+        .find(|row| row.row_id == format!("{VUE_CASE}@warm"))
+        .expect("warm");
+    row.samples = samples;
+    row.sample_count = WARM_SAMPLES as usize;
+    row.observed_outcome = observe::project_observed_outcome(&row.samples).expect("projectable");
+    reject(&artifact, "terminating sample");
+}
+
+/// Unrun slots must copy the terminating sample's failed-dimension class.
+#[test]
+fn an_unrun_slot_with_a_mismatched_blocked_by_is_rejected() {
+    let mut artifact = valid_artifact();
+    let mut samples = vec![Sample {
+        terminals: load_failed_terminals(),
+        measurement: None,
+        absence: Some(AbsenceReason::LoadFailed),
+    }];
+    while samples.len() < WARM_SAMPLES as usize {
+        samples.push(unavailable_after(0, ProbeOutcomeClass::Crash));
+    }
+    let row = artifact
+        .rows
+        .iter_mut()
+        .find(|row| row.row_id == format!("{VUE_CASE}@warm"))
+        .expect("warm");
+    row.samples = samples;
+    row.sample_count = WARM_SAMPLES as usize;
+    row.observed_outcome = observe::project_observed_outcome(&row.samples).expect("projectable");
+    reject(&artifact, "blocked_by the terminating sample");
 }
 
 /// Discarded warmup death: every measured slot is unrun. The discarded
@@ -949,7 +1023,7 @@ fn zip_named(name: &str, body: &[u8]) -> Vec<u8> {
     let cursor = Cursor::new(Vec::new());
     let mut writer = zip::ZipWriter::new(cursor);
     let options =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     writer.start_file(name, options).expect("start");
     writer.write_all(body).expect("write");
     writer.finish().expect("finish").into_inner()
@@ -971,7 +1045,7 @@ fn an_archive_with_an_extra_member_is_rejected() {
     let cursor = Cursor::new(Vec::new());
     let mut writer = zip::ZipWriter::new(cursor);
     let options =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     writer.start_file("observations.json", options).expect("a");
     writer.write_all(b"{}").expect("a");
     writer.start_file("notes.txt", options).expect("b");
@@ -1310,10 +1384,27 @@ fn fetch_rejects_a_stale_file_reuploaded_under_a_newer_identity() {
     source.runs.insert(2, run2);
     source.zips.insert(12, zip);
     let dir = fetch_dir();
+    let error = ObservationInventory::fetch_with(&source, dir.path()).expect_err("stale");
+    assert!(error.to_string().contains("workflow_run_id"), "{error}");
+}
+
+#[test]
+fn fetch_rejects_duplicate_observation_identity_from_the_same_run() {
+    let mut source = base_mock();
+    let artifact = valid_artifact();
+    let zip = zip_observations(&artifact.to_json());
+    source.listed.borrow_mut().push(listed(
+        13,
+        &format!("{ARTIFACT_NAME_PREFIX}1-1-extra-1"),
+        "2026-09-13T11:30:00Z",
+        1,
+        100,
+    ));
+    source.zips.insert(13, zip);
+    let dir = fetch_dir();
     let error = ObservationInventory::fetch_with(&source, dir.path()).expect_err("duplicate");
     assert!(
-        error.to_string().contains("duplicate observation identity")
-            || error.to_string().contains("workflow_run_id"),
+        error.to_string().contains("duplicate observation identity"),
         "{error}"
     );
 }

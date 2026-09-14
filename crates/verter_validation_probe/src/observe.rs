@@ -1,8 +1,9 @@
 //! Non-gating benchmark observation artifacts.
 //!
-//! The schema records correctness-labeled timings and the CPER0M peak/live
-//! pair. It has no status, verdict, threshold, or baseline field: a
-//! performance gate is structurally unrepresentable. Selection throughput is
+//! The schema records correctness-labeled timings and the native memory
+//! audit's peak/live pair. It has no status, verdict, threshold, or baseline
+//! field: a performance gate is structurally unrepresentable. Selection
+//! throughput is
 //! a derived reading over named cold rows, never a stored number.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -831,20 +832,50 @@ fn validate_unrun_slot(
             Some(AbsenceReason::WorkerUnavailableAfterSample { .. })
         )
     });
-    if warmup_death {
+    let expected_blocked_by = if warmup_death {
         if failed_sample != 0 {
             return Err(invalid(format!(
                 "{at}: warmup-death unrun slots record failed_sample 0"
             )));
         }
-    } else if usize::from(failed_sample) >= index {
-        return Err(invalid(format!(
-            "{at}: worker_unavailable_after_sample.failed_sample must name an earlier sample"
-        )));
-    }
+        None
+    } else {
+        if usize::from(failed_sample) >= index {
+            return Err(invalid(format!(
+                "{at}: worker_unavailable_after_sample.failed_sample must name an earlier sample"
+            )));
+        }
+        let Some(anchor) = row.samples.get(usize::from(failed_sample)) else {
+            return Err(invalid(format!(
+                "{at}: worker_unavailable_after_sample.failed_sample must name an earlier sample"
+            )));
+        };
+        match anchor.absence {
+            Some(
+                AbsenceReason::LoadFailed
+                | AbsenceReason::CompileTerminated
+                | AbsenceReason::ReferenceTerminated
+                | AbsenceReason::DriverError,
+            ) => {}
+            _ => {
+                return Err(invalid(format!(
+                    "{at}: worker_unavailable_after_sample must name a terminating sample"
+                )));
+            }
+        }
+        Some(blocked_by_of(anchor))
+    };
     for dimension in Dimension::ALL {
         match sample.terminals.get(&dimension) {
-            Some(Terminal::NotRun { blocked_by }) if *blocked_by != ProbeOutcomeClass::Pass => {}
+            Some(Terminal::NotRun { blocked_by }) if *blocked_by != ProbeOutcomeClass::Pass => {
+                if let Some(expected) = expected_blocked_by {
+                    if *blocked_by != expected {
+                        return Err(invalid(format!(
+                            "{at}: an unrun slot records NotRun blocked_by the terminating sample"
+                        )));
+                    }
+                }
+            }
             _ => {
                 return Err(invalid(format!(
                     "{at}: an unrun slot records NotRun on every dimension"
@@ -871,22 +902,24 @@ fn validate_absence_phase(at: &str, sample: &Sample) -> Result<(), ObserveError>
             ))),
         },
         Some(AbsenceReason::ReferenceTerminated) => {
-            let has_reference = [Dimension::Structural, Dimension::Runtime, Dimension::Map]
-                .into_iter()
-                .any(|dimension| {
-                    matches!(
-                        sample.terminals.get(&dimension),
-                        Some(Terminal::Class {
-                            class: ProbeOutcomeClass::ReferenceFailure,
-                            ..
-                        })
-                    )
-                });
-            if has_reference {
+            let reference_dims = [Dimension::Structural, Dimension::Runtime, Dimension::Map];
+            let all_inapplicable = reference_dims.iter().all(|dimension| {
+                matches!(
+                    sample.terminals.get(dimension),
+                    Some(Terminal::NotApplicable { .. })
+                )
+            });
+            let terminating_failure = reference_dims.iter().any(|dimension| {
+                matches!(
+                    sample.terminals.get(dimension),
+                    Some(Terminal::Class { class, .. }) if class.is_failure()
+                )
+            });
+            if all_inapplicable || terminating_failure {
                 Ok(())
             } else {
                 Err(invalid(format!(
-                    "{at}: reference_terminated requires a reference_failure class"
+                    "{at}: reference_terminated requires a reference-phase failure or inapplicable comparators"
                 )))
             }
         }
@@ -1844,13 +1877,13 @@ fn observe_warm(
     deadlines: PhaseDeadlines,
 ) -> Result<Vec<Sample>, ObserveError> {
     let (warmup, warmup_stop) = observe_one(child, lines, manifest, case, deadlines)?;
-    if worker_dead(warmup_stop) {
+    if worker_dead(warmup_stop.as_ref()) {
         return Ok(unrun_slots(&warmup, 0, WARM_SAMPLES as usize));
     }
     let mut samples = Vec::with_capacity(WARM_SAMPLES as usize);
     for index in 0..WARM_SAMPLES {
         let (sample, stop) = observe_one(child, lines, manifest, case, deadlines)?;
-        let dead = worker_dead(stop);
+        let dead = worker_dead(stop.as_ref());
         if dead {
             return fill_remaining(samples, sample, index, WARM_SAMPLES as usize);
         }
@@ -1860,7 +1893,7 @@ fn observe_warm(
 }
 
 #[cfg(feature = "external-corpus")]
-fn worker_dead(stop: Option<LaneStop>) -> bool {
+fn worker_dead(stop: Option<&LaneStop>) -> bool {
     matches!(stop, Some(LaneStop::Process(_) | LaneStop::Harness))
 }
 
@@ -1879,7 +1912,6 @@ fn unrun_slots(terminating: &Sample, failed_sample: u8, total: usize) -> Vec<Sam
         .collect()
 }
 
-#[cfg(any(test, feature = "external-corpus"))]
 fn blocked_by_of(sample: &Sample) -> ProbeOutcomeClass {
     match sample.absence {
         Some(AbsenceReason::ReferenceTerminated) => ProbeOutcomeClass::ReferenceFailure,
@@ -1934,7 +1966,7 @@ fn observe_one(
             stop = Some(LaneStop::Harness);
         }
     }
-    let sample = sample_from_run(&run, manifest, stop.as_ref().and_then(LaneStop::process))?;
+    let sample = sample_from_run(&run, manifest, stop.as_ref())?;
     Ok((sample, stop))
 }
 
@@ -1942,8 +1974,9 @@ fn observe_one(
 fn sample_from_run(
     run: &ProbeRun,
     manifest: &ProbeStateManifest,
-    terminated: Option<ExecutionEvent>,
+    stop: Option<&LaneStop>,
 ) -> Result<Sample, ObserveError> {
+    let terminated = stop.and_then(LaneStop::process);
     let observation = run
         .finish(manifest, terminated)
         .into_iter()
@@ -1955,7 +1988,7 @@ fn sample_from_run(
         elapsed_ns,
         memory: run.memory().map(MemoryPair::from),
     });
-    let absence = absence_of(run, terminated, measurement.is_some());
+    let absence = absence_of(run, terminated, measurement.is_some(), worker_dead(stop));
     Ok(Sample {
         terminals,
         measurement,
@@ -1968,12 +2001,13 @@ fn absence_of(
     run: &ProbeRun,
     terminated: Option<ExecutionEvent>,
     measured: bool,
+    worker_stopped: bool,
 ) -> Option<AbsenceReason> {
-    if terminated.is_none() && measured {
-        return None;
-    }
     if measured {
-        return Some(AbsenceReason::ReferenceTerminated);
+        if terminated.is_some() || worker_stopped {
+            return Some(AbsenceReason::ReferenceTerminated);
+        }
+        return None;
     }
     match run.outcome_phase() {
         None | Some(Phase::Load) => {
@@ -2046,8 +2080,8 @@ mod tests {
         let payload = vec![b'a'; 4096];
         let cursor = Cursor::new(Vec::new());
         let mut writer = zip::ZipWriter::new(cursor);
-        let options =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
         writer
             .start_file("observations.json", options)
             .expect("start");

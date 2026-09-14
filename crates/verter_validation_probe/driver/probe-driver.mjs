@@ -254,7 +254,7 @@ function runProbe(probe, where) {
   emit({ probe_id, phase: "load" });
   const native = loadNative();
   // Enable once at driver start, only when this process is asked to observe.
-  // CVO1 never sends `observe`, so its runs never arm the audit.
+  // The workload probe lane never sends `observe`, so its runs never arm the audit.
   if (observeMemory && !memoryArmed) {
     native.memoryAuditEnable();
     memoryArmed = true;

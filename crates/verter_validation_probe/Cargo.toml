@@ -33,7 +33,7 @@ toml = "1.1"
 # Observation-inventory archives are GitHub Actions zips. Extraction is the
 # lane's one bounded hot path (count and size ceilings); the crate interprets
 # members, so the reader lives next to that contract rather than in `disk`.
-zip = { version = "0.6", default-features = false, features = ["deflate"] }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
 # The structural comparator and its canonicalizer. The lane decides equality
 # with the existing conformance comparator and writes nothing of its own; the
 # same canonicalizer is the product's parse-and-build validity check.
