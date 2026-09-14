@@ -7869,6 +7869,9 @@ defineProps<{ label: string }>()
 // @ai-generated - The hover-boundary demand entry to the synthetic-binding
 // deepen route: a live published carrier deepens to its authored member type;
 // a stale carrier fails closed to `None` (the caller keeps the refusal).
+// The fixture's binding value is an inline OBJECT: concrete LEAF values
+// publish their complete closed leaf facts (ECRV4), so the carrier — and
+// this deepen route — belongs to the richer shapes.
 #[test]
 fn deepen_synthetic_slot_binding_deepens_live_carrier_and_fails_closed_on_stale() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -7876,9 +7879,9 @@ fn deepen_synthetic_slot_binding_deepens_live_carrier_and_fails_closed_on_stale(
         &host,
         "/src/SlotCarrier.vue",
         r#"<script setup lang="ts">
-defineSlots<{ header(props: { title: string; count: number }): any }>()
+defineSlots<{ header(props: { meta: { label: string } }): any }>()
 </script>
-<template><slot name="header" title="hdr" :count="1" /></template>"#,
+<template><slot name="header" :meta="{ label: 'hdr' }" /></template>"#,
     );
 
     let projection = host
@@ -7894,21 +7897,22 @@ defineSlots<{ header(props: { title: string; count: number }): any }>()
         .iter()
         .find(|slot| slot.name.as_ref() == "header")
         .expect("header slot row");
-    let title = slot
+    let meta = slot
         .input
         .bindings
         .iter()
-        .find(|binding| binding.name.as_ref() == "title")
-        .expect("title binding row");
-    // Publication stays shallow-by-default: the published binding type IS the
-    // synthetic carrier (typed-IR variant match, never text).
+        .find(|binding| binding.name.as_ref() == "meta")
+        .expect("meta binding row");
+    // Publication stays shallow-by-default for richer shapes: the published
+    // binding type IS the synthetic carrier (typed-IR variant match, never
+    // text).
     let Some(verter_type_expr::TypeExpr::SyntheticSlotBinding(key)) =
-        title.ty.publication.materialized_type()
+        meta.ty.publication.materialized_type()
     else {
         panic!(
-            "the concrete-inline slot binding publishes the shallow synthetic carrier, got: {:?}",
-            title.ty.publication.materialized_type()
-        );
+            "the inline-object slot binding publishes the shallow synthetic carrier, got: {:?}",
+            meta.ty.publication.materialized_type()
+        )
     };
 
     // Terminal demand at the hover boundary: the carrier deepens through the
@@ -7923,10 +7927,24 @@ defineSlots<{ header(props: { title: string; count: number }): any }>()
         ),
         "the deepened view must not be the shallow carrier again"
     );
-    assert_eq!(
-        deepened,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
-        "the deepened `title` binding is its authored `string`"
+    let verter_type_expr::TypeExpr::Object(deepened_object) = &deepened else {
+        panic!("the deepened `meta` binding is its authored inline object; got {deepened:?}")
+    };
+    assert!(
+        deepened_object.properties.iter().any(|property| {
+            matches!(
+                property,
+                verter_type_expr::ObjectMember::Property(property)
+                    if property.string_name().expect("string-key fixture") == "label"
+                        && matches!(
+                            property.ty,
+                            verter_type_expr::TypeExpr::Primitive(
+                                verter_type_expr::PrimitiveName::String
+                            )
+                        )
+            )
+        }),
+        "the deepened `meta` object retains its label:string member; got {deepened_object:?}"
     );
 
     // The deepen's cache identity is the CONTENT-FREE `SyntheticBindingId`
@@ -7940,9 +7958,7 @@ defineSlots<{ header(props: { title: string; count: number }): any }>()
     });
     assert_eq!(
         host.deepen_synthetic_slot_binding("/src/SlotCarrier.vue", &same_identity_bogus_ordinal),
-        Some(verter_type_expr::TypeExpr::Primitive(
-            verter_type_expr::PrimitiveName::String
-        )),
+        Some(deepened.clone()),
         "the content-free identity serves the warm deepened entry regardless of the ordinal"
     );
 

@@ -601,10 +601,10 @@ defineSlots<Slots>()
 // An unresolvable carrier (lazy binding) must produce zero binding
 // rows; a resolvable inline carrier must produce a real binding row.
 // The discriminating contract: the graph-native synthesis publishes
-// the row as a shallow `SyntheticSlotBinding` carrier (never a leaked
-// synthetic `string` binding, never an eager expansion), and the
-// explicit terminal-demand walk deepens `default.row` to the concrete
-// `string` through the content-free synthetic-binding identity.
+// the row as its complete closed leaf fact (never a name-rendered
+// synthetic carrier, never an eager expansion), and the explicit
+// terminal-demand walk resolves `default.row` to the concrete
+// `string` through the publication source.
 //
 // TODO(follow-up): a multi-hop unresolvable carrier (e.g. `import type
 // { Slots } from './a'; export type { Slots } from './missing'`) would
@@ -656,10 +656,10 @@ defineSlots<{ default(props: { row: string }): any }>()
         "unresolvable carrier must publish zero bindings; observed={unresolvable_bindings:?}",
     );
 
-    // Resolvable: the `row` binding PUBLISHES the shallow first-class
-    // SyntheticSlotBinding carrier (shallow-by-default — a graph-native
-    // no-payload row never eagerly expands at publication). A naive
-    // synthesis that doesn't enter the inline arm would publish no
+    // Resolvable: the `row` binding PUBLISHES its complete closed leaf
+    // fact (shallow-by-default — a leaf is atomic, never an eager
+    // expansion; richer shapes keep the SyntheticSlotBinding carrier). A
+    // naive synthesis that doesn't enter the inline arm would publish no
     // binding row at all.
     let resolvable_bindings = slot_bindings(&resolvable_meta, "default");
     assert_eq!(
@@ -670,17 +670,16 @@ defineSlots<{ default(props: { row: string }): any }>()
     let row_binding = slot_binding(&resolvable_meta, "default", "row")
         .expect("default.row must exist on resolvable");
     let row_type = shallow_binding_type(&host, "/src/Resolvable.vue", row_binding);
-    let TypeExpr::SyntheticSlotBinding(carrier) = &row_type else {
-        panic!(
-            "resolvable inline `row` binding must publish the shallow \
-             SyntheticSlotBinding carrier; observed type_expr={row_type:?}",
-        );
-    };
-    assert_eq!(carrier.slot_name.as_deref(), Some("default"));
-    assert_eq!(carrier.binding_name.as_ref(), "row");
+    assert_eq!(
+        row_type,
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "resolvable inline `row: string` must publish the closed `string` \
+         leaf fact (never the name-rendered synthetic carrier); observed \
+         type_expr={row_type:?}",
+    );
     // Explicit deepening/demand: the terminal-demand walk resolves the
-    // carrier through the content-free synthetic-binding identity to the
-    // concrete inline annotation (`row: string`).
+    // published closed leaf source to the concrete inline annotation
+    // (`row: string`).
     let demanded = demand_binding_type(&host, "/src/Resolvable.vue", row_binding);
     assert!(
         matches!(
@@ -689,6 +688,234 @@ defineSlots<{ default(props: { row: string }): any }>()
         ),
         "explicit demand must materialize default.row to the concrete `string`; \
          observed {demanded:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test #5b — REGRESSION (ECRV4)
+// ---------------------------------------------------------------------------
+//
+// Concrete-inline slot-binding values publish their COMPLETE CLOSED LEAF
+// fact, never the name-rendered `SyntheticSlotBinding` carrier. The
+// observed defect (vue-benchmarks component-meta/slots): a
+// `default(props: { open: boolean })` binding reported `open` AS ITS TYPE
+// (the carrier renders its `bindingName` on the compat display) instead of
+// `boolean`; same for `footer(props: { id: number })`. A leaf fact is
+// atomic — publishing it is NOT an eager expansion (the bounded-carrier
+// invariant above still holds for richer shapes).
+//
+// Controls in the same fixture: a same-named binding under two different
+// slots keeps DISTINCT leaf facts (a cross-slot mixup that swapped them
+// fails), and a zero-binding slot stays empty.
+#[test]
+fn concrete_inline_slot_binding_leaf_types_publish_closed_facts() {
+    let host = build_test_host();
+    upsert_vue(
+        &host,
+        "/src/Card.vue",
+        r#"<script setup lang="ts">
+defineSlots<{
+  default(props: { open: boolean }): any
+  footer(props: { id: number }): any
+  value(props: { value: string }): any
+  other(props: { value: number }): any
+  bare(): any
+}>()
+</script>
+<template><slot :open="true" /></template>"#,
+    );
+
+    let meta = host
+        .get_component_meta("/src/Card.vue")
+        .expect("component meta");
+
+    let open_binding = slot_binding(&meta, "default", "open")
+        .expect("default.open binding must publish from the inline param surface");
+    let open_ty = shallow_binding_type(&host, "/src/Card.vue", open_binding);
+    assert_eq!(
+        open_ty,
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        "default.open must publish its complete closed leaf fact (`boolean`), not the \
+         name-rendered synthetic carrier; observed {open_ty:?}",
+    );
+
+    let id_binding = slot_binding(&meta, "footer", "id")
+        .expect("footer.id binding must publish from the inline param surface");
+    let id_ty = shallow_binding_type(&host, "/src/Card.vue", id_binding);
+    assert_eq!(
+        id_ty,
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        "footer.id must publish its complete closed leaf fact (`number`), not the \
+         name-rendered synthetic carrier; observed {id_ty:?}",
+    );
+
+    // Same-name, different slots, distinct types: a producer that keyed the
+    // published type off the binding NAME (the carrier's rendering) cannot
+    // keep these two apart.
+    let value_in_value = slot_binding(&meta, "value", "value")
+        .expect("value.value binding must publish from the inline param surface");
+    let value_in_other = slot_binding(&meta, "other", "value")
+        .expect("other.value binding must publish from the inline param surface");
+    assert_eq!(
+        shallow_binding_type(&host, "/src/Card.vue", value_in_value),
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "value.value must publish `string`",
+    );
+    assert_eq!(
+        shallow_binding_type(&host, "/src/Card.vue", value_in_other),
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        "other.value must publish `number` — a same-named binding in a different \
+         slot keeps its own distinct leaf fact",
+    );
+
+    // Empty-slot control: a slot whose signature has no params publishes no
+    // binding rows.
+    let bare = meta
+        .slots
+        .iter()
+        .find(|s| s.name == "bare")
+        .expect("bare slot must publish");
+    assert!(
+        bare.bindings.is_empty(),
+        "a zero-param slot publishes zero bindings; observed {:?}",
+        bare.bindings
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect::<Vec<_>>(),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test #5bb — REGRESSION (ECRV4)
+// ---------------------------------------------------------------------------
+//
+// Boundary control for the leaf-fact publication above: a binding whose
+// value is RICHER than a leaf (an inline nested payload object) keeps the
+// first-class `SyntheticSlotBinding` carrier — the shallow-by-default
+// identity, never an eager structural flattening — and the carrier's
+// identity names its OWN slot, so a cross-slot wiring mixup changes the
+// key.
+#[test]
+fn nested_payload_slot_binding_keeps_structured_carrier() {
+    let host = build_test_host();
+    upsert_vue(
+        &host,
+        "/src/Nested.vue",
+        r#"<script setup lang="ts">
+defineSlots<{
+  default(props: { meta: { deep: string } }): any
+  side(props: { meta: { count: number } }): any
+}>()
+</script>
+<template><slot :meta="{ deep: 'x' }" /></template>"#,
+    );
+
+    let meta = host
+        .get_component_meta("/src/Nested.vue")
+        .expect("component meta");
+    let binding = slot_binding(&meta, "default", "meta")
+        .expect("default.meta binding must publish from the inline param surface");
+    let binding_ty = shallow_binding_type(&host, "/src/Nested.vue", binding);
+    let TypeExpr::SyntheticSlotBinding(carrier) = &binding_ty else {
+        panic!(
+            "a nested inline-object binding keeps the structured synthetic carrier \
+             (no eager flattening); observed {binding_ty:?}",
+        );
+    };
+    assert_eq!(carrier.slot_name.as_deref(), Some("default"));
+    assert_eq!(carrier.binding_name.as_ref(), "meta");
+    // Demand still deepens the carrier to the authored object.
+    let demanded = demand_binding_type(&host, "/src/Nested.vue", binding);
+    let TypeExpr::Object(object) = &demanded else {
+        panic!("demand must deepen default.meta to its inline object; got {demanded:?}");
+    };
+    assert!(
+        object.properties.iter().any(|property| {
+            matches!(
+                property,
+                verter_type_expr::ObjectMember::Property(property)
+                    if property.string_name().expect("string-key fixture") == "deep"
+                        && matches!(
+                            property.ty,
+                            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+                        )
+            )
+        }),
+        "the deepened payload retains deep:string; got {object:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test #5c — REGRESSION (ECRV4)
+// ---------------------------------------------------------------------------
+//
+// Edit freshness for the closed leaf facts: editing ONE declared inline
+// binding type flips exactly that binding's published fact on the next
+// query (the whole-hash invalidation covers the owner's own edit); a
+// sibling slot's binding is not contaminated.
+#[test]
+fn concrete_inline_slot_binding_leaf_type_edit_isolated() {
+    let host = build_test_host();
+    upsert_vue(
+        &host,
+        "/src/Card.vue",
+        r#"<script setup lang="ts">
+defineSlots<{
+  default(props: { open: boolean }): any
+  footer(props: { id: number }): any
+}>()
+</script>
+<template><slot :open="true" /></template>"#,
+    );
+
+    let first = host
+        .get_component_meta("/src/Card.vue")
+        .expect("first meta");
+    let first_open = shallow_binding_type(
+        &host,
+        "/src/Card.vue",
+        slot_binding(&first, "default", "open").expect("default.open on first pass"),
+    );
+    assert_eq!(
+        first_open,
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+    );
+
+    // Edit ONE declared type: default.open boolean -> string.
+    upsert_vue(
+        &host,
+        "/src/Card.vue",
+        r#"<script setup lang="ts">
+defineSlots<{
+  default(props: { open: string }): any
+  footer(props: { id: number }): any
+}>()
+</script>
+<template><slot :open="true" /></template>"#,
+    );
+
+    let second = host
+        .get_component_meta("/src/Card.vue")
+        .expect("second meta");
+    let second_open = shallow_binding_type(
+        &host,
+        "/src/Card.vue",
+        slot_binding(&second, "default", "open").expect("default.open on second pass"),
+    );
+    assert_eq!(
+        second_open,
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "the edited declaration must surface on the next query; observed {second_open:?}",
+    );
+    let footer_id = shallow_binding_type(
+        &host,
+        "/src/Card.vue",
+        slot_binding(&second, "footer", "id").expect("footer.id on second pass"),
+    );
+    assert_eq!(
+        footer_id,
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        "the sibling slot's binding must not be contaminated by the edit",
     );
 }
 
@@ -1396,14 +1623,13 @@ defineSlots<Slots>()
 //
 // Parser-path metadata (`raw_type` from `AnalyzedSlotFieldBinding`)
 // must be merged with the graph-native binding type. The published
-// `default.x` row keeps the parser-side display `raw_type` AND the
-// shallow first-class `SyntheticSlotBinding` carrier as its typed
-// source (graph-native no-payload rows publish shallow-by-default);
-// the concrete `string` materializes ONLY through the explicit
-// terminal-demand walk. A naive synthesis that emitted the
-// parser-side `AnalyzedSlotFieldBinding` without walking the inline
-// `{ x: string }` annotation would publish no graph-native row (and
-// the demand below could never resolve `string`).
+// `default.x` row keeps NO authored evidence from the parser display
+// text (display without a locator is not evidence) and publishes the
+// graph-owned closed leaf fact for the inline `x: string` annotation.
+// A naive synthesis that emitted the parser-side
+// `AnalyzedSlotFieldBinding` without walking the inline `{ x: string }`
+// annotation would publish no graph-native row (and the demand below
+// could never resolve `string`).
 //
 // TODO(follow-up): once `SlotBindingSource` is exposed on
 // `SlotBindingAnalysis`, this test should additionally assert
@@ -1442,20 +1668,18 @@ defineSlots<{
             .evidence()
             .map(|evidence| evidence.text().to_string()),
     );
-    // The published typed source stays the shallow SyntheticSlotBinding
-    // carrier (shallow-by-default for graph-native no-payload rows).
+    // The published typed source is the graph-owned complete closed leaf
+    // fact for the inline annotation (a leaf is atomic — shallow by
+    // construction, never an expansion).
     let row_type = shallow_binding_type(&host, "/src/Comp.vue", row);
-    let TypeExpr::SyntheticSlotBinding(carrier) = &row_type else {
-        panic!(
-            "graph-native no-payload row must publish the shallow \
-             SyntheticSlotBinding carrier; observed type_expr={row_type:?}",
-        );
-    };
-    assert_eq!(carrier.slot_name.as_deref(), Some("default"));
-    assert_eq!(carrier.binding_name.as_ref(), "x");
-    // The concrete value materializes ONLY under explicit demand: the
-    // terminal-demand walk deepens through the content-free
-    // synthetic-binding identity to the inline `x: string` annotation.
+    assert_eq!(
+        row_type,
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "graph-native row for the inline `x: string` annotation publishes the \
+         closed `string` leaf fact; observed type_expr={row_type:?}",
+    );
+    // The explicit terminal-demand walk resolves the same concrete value
+    // through the published source.
     let demanded = demand_binding_type(&host, "/src/Comp.vue", row);
     assert!(
         matches!(

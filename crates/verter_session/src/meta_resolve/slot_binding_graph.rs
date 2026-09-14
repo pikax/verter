@@ -1492,6 +1492,34 @@ fn named_reference_carrier_source(
     None
 }
 
+/// The complete CLOSED leaf-fact publication source for a graph-native
+/// binding VALUE node: the ONE shared node→closed-fact projection
+/// (`Leaf` for a primitive / literal, `LeafUnion` for a union whose every
+/// member is a complete leaf). `None` for any richer shape (inline
+/// objects, open generics, symbolic carriers) — the caller keeps the
+/// first-class synthetic binding carrier for those, preserving the
+/// shallow-by-default publication invariant. Publishing a concrete leaf
+/// as the synthetic carrier instead would render the binding's own NAME
+/// as its type on every consumer surface.
+fn closed_leaf_fact_source(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    value_node: SemanticNodeId,
+) -> Option<verter_type_expr::facts::SemanticTypeSource> {
+    use verter_type_expr::facts::{ClosedTypeFact, FactOrLocator, SemanticTypeSource};
+    match dispatch.node_leaf_fact_or_union(value_node) {
+        Some(FactOrLocator::Leaf(leaf)) => {
+            Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(leaf)))
+        }
+        Some(FactOrLocator::LeafUnion(leaves)) => Some(SemanticTypeSource::Closed(
+            ClosedTypeFact::LeafUnion(leaves),
+        )),
+        // `node_leaf_fact_or_union` projects only the two leaf arms; a
+        // future escape arm (locator / leaf-object) must fail closed to
+        // the synthetic carrier, never publish a partial fact.
+        Some(_) | None => None,
+    }
+}
+
 fn closed_member_path_route_source(
     dispatch: &ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
@@ -2296,7 +2324,10 @@ pub(crate) fn publish_merged_bindings(
     //   1. CLOSED symbolic indexed-access route → `Closed(IndexedAccess)`
     //   2. ARGUMENT-BEARING named-reference use-site → `Authored(DeclBody)`
     //   3. NAMED reference head → shallow closed `Ref` carrier
-    //   4. OTHERWISE → first-class `SyntheticSlotBinding` carrier
+    //   4. COMPLETE CLOSED leaf / leaf-union value → `Closed(Leaf)` /
+    //      `Closed(LeafUnion)` (the shared node→closed-fact publication
+    //      policy; atomic, never an expansion)
+    //   5. OTHERWISE → first-class `SyntheticSlotBinding` carrier
     //
     // Deepening a synthetic row routes through the content-free
     // synthetic-binding identity (`ShapeCacheKey::synthetic_binding_whole`,
@@ -2397,6 +2428,19 @@ pub(crate) fn publish_merged_bindings(
                     // default), never the synthetic stand-in and never a
                     // flattened surface.
                     (named, true)
+                } else if let Some(closed) = closed_leaf_fact_source(dispatch, gb.value_node) {
+                    // A CONCRETE leaf / leaf-union value (`open: boolean`,
+                    // `id: number`, `"a" | "b"`) publishes its COMPLETE CLOSED
+                    // fact — the same shared node→closed-fact publication
+                    // policy the sealed expansion sinks use. A leaf is
+                    // atomic, so this is NOT an eager expansion; the
+                    // bounded-carrier invariant above still holds for richer
+                    // shapes. Publishing the synthetic carrier here instead
+                    // reports the binding's own NAME as its type (the
+                    // carrier's rendering) — the observed component-meta
+                    // regression where `default({open: boolean})` reported
+                    // `open` as the type of `open`.
+                    (closed, true)
                 } else {
                     let carrier = verter_type_expr::SyntheticCarrierKey {
                         scope_canonical_id: Arc::from(gb.owner_macro.owner.canonical_id.as_ref()),
