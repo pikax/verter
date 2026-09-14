@@ -2099,7 +2099,7 @@ impl SvelteRuntimeBackend {
                     bundle.qualified_styles.push(qualified_svelte_style(
                         source,
                         css,
-                        runtime_opts.style_continuation.as_deref(),
+                        runtime_opts.style_continuation.as_ref(),
                     ));
                 }
                 Ok(())
@@ -2617,7 +2617,7 @@ impl StandaloneCompiler {
                     styles.push(qualified_svelte_style(
                         source,
                         css,
-                        opts.style_continuation.as_deref(),
+                        opts.style_continuation.as_ref(),
                     ));
                 }
             }
@@ -3336,13 +3336,25 @@ fn hash_output_descriptor(hasher: &mut blake3::Hasher, descriptor: &RuntimeOutpu
 /// the one byte space the render consumed — the carrier source for an
 /// authored block, or the bound continuation's produced bytes. The css map,
 /// when demanded, addresses that same space.
+///
+/// A continued block declares the HOST-minted identity of the produced bytes,
+/// never a carrier space minted here over them. The host holds the
+/// produced-to-authored map under exactly those tokens, so declaring them is
+/// what keeps this map chain joinable back to the authored `.svelte` block;
+/// a locally minted space would address the same bytes under an identity
+/// nothing else in the host knows.
 fn qualified_svelte_style(
     source: &str,
     css: crate::svelte::runtime::client::ScopedCssArtifact,
-    continuation: Option<&crate::style_planner::ExternalStyleContinuation>,
+    continuation: Option<&crate::framework_common::carrier_compiler::BoundStyleContinuation>,
 ) -> QualifiedRuntimeStyle {
-    let consumed = continuation.map_or(source, |continuation| continuation.result().code());
-    let (space, artifact) = RuntimeOutputDescriptor::carrier_source(consumed);
+    let (space, artifact) = match continuation {
+        Some(bound) => (
+            bound.source_space_token.clone(),
+            bound.content_artifact_token.clone(),
+        ),
+        None => RuntimeOutputDescriptor::carrier_source(source),
+    };
     let output_descriptor = RuntimeOutputDescriptor::generated(
         &css.code,
         css.source_map.as_deref(),

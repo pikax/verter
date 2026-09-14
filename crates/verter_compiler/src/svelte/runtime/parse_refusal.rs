@@ -102,10 +102,10 @@ pub(super) fn parse_domain_gate(
         // A supplied result for a block this component does not have is
         // bound to nothing; it never silently goes unused.
         None => match &opts.style_continuation {
-            Some(continuation) => {
+            Some(bound) => {
                 return Err(UnsupportedSvelteRuntimeSurface::StyleCssAnalysis {
                     code: STYLE_CONTINUATION_UNBOUND,
-                    span: continuation.authored_extent(),
+                    span: bound.continuation.authored_extent(),
                 })
             }
             None => None,
@@ -163,11 +163,11 @@ fn prepare_style_surface(
     // One naming any other extent is refused, never set aside in favour of
     // the authored bytes.
     let continued = match &opts.style_continuation {
-        Some(continuation) if style.content == Some(continuation.authored_extent()) => true,
-        Some(continuation) => {
+        Some(bound) if style.content == Some(bound.continuation.authored_extent()) => true,
+        Some(bound) => {
             return Err(UnsupportedSvelteRuntimeSurface::StyleCssAnalysis {
                 code: STYLE_CONTINUATION_UNBOUND,
-                span: continuation.authored_extent(),
+                span: bound.continuation.authored_extent(),
             })
         }
         None => false,

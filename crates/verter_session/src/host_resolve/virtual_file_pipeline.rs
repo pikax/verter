@@ -3609,7 +3609,6 @@ impl VerterHost {
                     }
                 };
                 let inputs = svelte_host_execution_inputs(
-                    self,
                     snapshot,
                     profile.svelte_css_hash_override.clone(),
                 );

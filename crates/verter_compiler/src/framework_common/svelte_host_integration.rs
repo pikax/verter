@@ -295,16 +295,26 @@ pub struct SvelteHostExecutionInputs {
 /// block, carrying exactly the facts only the host can state.
 #[derive(Debug, Clone)]
 pub struct SvelteSuppliedStyle {
-    /// The tool that produced the bytes.
+    /// The tool that produced the bytes. A slot the host names no external
+    /// producer for is `Anonymous`: its bytes are still the block's only
+    /// body, so it continues the block like any other result rather than
+    /// being dropped back onto the authored block.
     pub producer: verter_css_syntax::PreprocessorIdentity,
     /// The produced plain-CSS bytes.
     pub code: Arc<str>,
+    /// Host-minted source space containing `code`.
+    pub source_space_token: String,
+    /// Host-minted identity of the exact produced byte artifact.
+    pub content_artifact_token: String,
     /// The host's retained parse of exactly these bytes, when admission
     /// produced one.
     pub parsed: Option<crate::style_planner::PreparedStyleIr>,
-    /// Content identity of the authored bytes the tool consumed, as the host
-    /// validated them. `None` when the host could not state it: such a result
-    /// is refused, never compiled from the authored block in its place.
+    /// Content identity of the authored bytes the tool consumed, observed by
+    /// the host under the same fence that selected `code` — not recomputed
+    /// from a later read of the carrier, which would bind a revision the host
+    /// never validated. `None` when the host could not state it: such a
+    /// result is refused, never compiled from the authored block in its
+    /// place.
     pub consumed_basis: Option<crate::assembly::ContentId>,
 }
 
@@ -758,7 +768,7 @@ impl FrameworkHostIntegrationBackend<SvelteSfc5, NativeHostEpoch> for SvelteHost
 fn derive_admitted_runtime_options(
     request: &CompileRequest,
     inputs: &SvelteHostExecutionInputs,
-    style_continuations: Vec<Option<Arc<crate::style_planner::ExternalStyleContinuation>>>,
+    style_continuations: Vec<Option<super::carrier_compiler::BoundStyleContinuation>>,
 ) -> RuntimeCompileOptions {
     use crate::compile_request::svelte::{
         SvelteFragmentsRequest, SvelteNamespaceRequest, SvelteRunesRequest,
@@ -1802,7 +1812,16 @@ mod tests {
     /// CSS, so any stage that reads the authored block instead of the
     /// produced bytes fails the compile.
     const SCSS_COMPONENT: &str = "<div class=\"card\">x</div>\n<style lang=\"scss\">$tone: red;\n.card { color: $tone; }</style>\n";
+    /// The same component with a plain-css block: it needs no continuation,
+    /// so its output declares the carrier source itself.
+    const CSS_COMPONENT: &str =
+        "<div class=\"card\">x</div>\n<style>.card { color: red; }</style>\n";
     const PRODUCED: &str = ".card { color: red; }";
+    /// The host-minted identity of the produced bytes. Opaque to the
+    /// compiler, so the tests state a recognisable value and assert the
+    /// published style declares exactly it.
+    const HOST_PRODUCED_SPACE: &str = "host-space:produced-css";
+    const HOST_PRODUCED_ARTIFACT: &str = "host-artifact:produced-css";
 
     fn authored_style_basis(source: &str) -> crate::assembly::ContentId {
         let parsed = crate::svelte::parse_svelte(source);
@@ -1824,6 +1843,8 @@ mod tests {
                     .expect("named producer"),
             ),
             code: Arc::from(PRODUCED),
+            source_space_token: HOST_PRODUCED_SPACE.to_string(),
+            content_artifact_token: HOST_PRODUCED_ARTIFACT.to_string(),
             parsed,
             consumed_basis,
         }
@@ -1895,6 +1916,61 @@ mod tests {
                 SvelteHostCompileRefusal::RuntimeSurfaceRefused { .. }
             ),
             "{refusal:?}"
+        );
+    }
+
+    /// A continued block's published output declares the HOST's identity for
+    /// the produced bytes it rendered from. Minting a carrier space over the
+    /// same bytes here would address them under an identity nothing else in
+    /// the host holds, so the host's produced-to-authored map chain could no
+    /// longer be joined to this one.
+    #[test]
+    fn a_continued_style_declares_the_hosts_produced_space_not_a_minted_one() {
+        use crate::framework_common::carrier_compiler::RuntimeOutputDescriptor;
+
+        let bundle = render_with_styles(
+            SCSS_COMPONENT,
+            vec![Some(supplied_style(
+                Some(authored_style_basis(SCSS_COMPONENT)),
+                None,
+            ))],
+        )
+        .expect("a continued block compiles");
+        let declared = &bundle
+            .qualified_styles
+            .first()
+            .expect("the scoped stylesheet")
+            .output_descriptor
+            .source_map
+            .declared_space_tokens;
+        assert_eq!(
+            declared.as_slice(),
+            &[HOST_PRODUCED_SPACE.to_string()],
+            "the continued css map declares the host's produced space"
+        );
+        let (minted, _) = RuntimeOutputDescriptor::carrier_source(PRODUCED);
+        assert_ne!(
+            declared.first().map(String::as_str),
+            Some(minted.as_str()),
+            "a space minted over the produced bytes is not an identity the host knows"
+        );
+
+        // An AUTHORED block has no host-supplied space: it still declares the
+        // carrier source it actually rendered from.
+        let authored =
+            render_with_styles(CSS_COMPONENT, Vec::new()).expect("an authored css block compiles");
+        let (carrier, _) = RuntimeOutputDescriptor::carrier_source(CSS_COMPONENT);
+        assert_eq!(
+            authored
+                .qualified_styles
+                .first()
+                .expect("the scoped stylesheet")
+                .output_descriptor
+                .source_map
+                .declared_space_tokens
+                .as_slice(),
+            &[carrier],
+            "an authored block declares its carrier source"
         );
     }
 

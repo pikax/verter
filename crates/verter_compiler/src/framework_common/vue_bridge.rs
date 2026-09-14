@@ -1281,6 +1281,7 @@ mod tests {
             source_space_token: format!("space:{lang}"),
             parsed: None,
             producer: None,
+            authored_basis: None,
         }
     }
 
@@ -1891,6 +1892,7 @@ mod tests {
                             source_space_token: "space:theme-css".to_string(),
                             parsed: None,
                             producer: None,
+                            authored_basis: None,
                         })],
                         ..Default::default()
                     },
@@ -1952,6 +1954,7 @@ mod tests {
                             source_space_token: "space:supplied-css".to_string(),
                             parsed,
                             producer: Some(supplied_producer()),
+                            authored_basis: None,
                         })],
                         ..Default::default()
                     },
@@ -2006,6 +2009,7 @@ mod tests {
                         source_space_token: "space:postcss".to_string(),
                         parsed: Some(prepared),
                         producer: Some(supplied_producer()),
+                        authored_basis: None,
                     })],
                     ..Default::default()
                 },
@@ -2047,6 +2051,7 @@ mod tests {
                             source_space_token: "space:theme-css".to_string(),
                             parsed: None,
                             producer: None,
+                            authored_basis: None,
                         })],
                         ..Default::default()
                     },
@@ -2149,6 +2154,7 @@ mod tests {
                             source_space_token: "space:theme-scss".to_string(),
                             parsed: Some(prepared),
                             producer: Some(supplied_producer()),
+                            authored_basis: None,
                         })],
                         ..Default::default()
                     },
@@ -2199,6 +2205,7 @@ mod tests {
                                 source_space_token: "space:a".to_string(),
                                 parsed: None,
                                 producer: Some(supplied_producer()),
+                                authored_basis: None,
                             }),
                             Some(RuntimeBlockContentInput {
                                 code: Arc::from(css),
@@ -2208,6 +2215,7 @@ mod tests {
                                 source_space_token: "space:b".to_string(),
                                 parsed: None,
                                 producer: Some(supplied_producer()),
+                                authored_basis: None,
                             }),
                         ],
                         ..Default::default()

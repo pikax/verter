@@ -1031,6 +1031,7 @@ impl VerterHost {
                 availability: BlockContentAvailability::Stale,
                 origin: None,
                 content: None,
+                authored_content: selected.authored_content,
                 content_class: selected.content_class,
                 lang: selected.lang,
                 block_token: selected.block_token,
@@ -1074,6 +1075,7 @@ impl VerterHost {
                         config_fingerprint: supplied.config_fingerprint,
                     }),
                     content: Some(supplied.code),
+                    authored_content: selected.authored_content,
                     content_class: selected.content_class,
                     lang: selected.lang,
                     block_token: selected.block_token,
@@ -1106,7 +1108,8 @@ impl VerterHost {
         Ok(BlockContentSnapshot {
             availability: selected.availability,
             origin: selected.authored_origin,
-            content: selected.authored_content,
+            content: selected.authored_content.clone(),
+            authored_content: selected.authored_content,
             content_class: selected.content_class,
             lang: selected.lang,
             block_token: selected.block_token,
@@ -1239,6 +1242,13 @@ impl VerterHost {
                 Some(BlockContentOrigin::InlineAuthored | BlockContentOrigin::NativeVfs { .. })
                 | None => None,
             };
+            // Stated from THIS fenced read, not re-sliced from the carrier
+            // later: a consumer that validates a selection against its
+            // authored input must see the bytes this selection was admitted
+            // against, whatever revision becomes live afterwards.
+            let authored_basis = snapshot.authored_content.as_deref().map(|authored| {
+                verter_compiler::assembly::ContentId::from_content_bytes(authored.as_bytes())
+            });
             let input = RuntimeBlockContentInput {
                 code,
                 source_map: snapshot.source_map,
@@ -1247,6 +1257,7 @@ impl VerterHost {
                 source_space_token: snapshot.source_space_token.to_string(),
                 parsed,
                 producer,
+                authored_basis,
             };
             match role {
                 SectionRole::TemplateHost => projection.template = Some(input),
@@ -1266,43 +1277,6 @@ impl VerterHost {
             }
         }
         Ok(projection)
-    }
-
-    /// Content identity of the authored bytes of the `index`-th `<style>`
-    /// block, read from `source` at the extent the owner's registered
-    /// inventory records for that block — the bytes a supplied preprocessing
-    /// result for the block was validated against.
-    ///
-    /// `None` when the owner, its registered structure or the slot is
-    /// absent, or the recorded extent does not address `source`; a caller
-    /// then has no basis to state and the result it would describe refuses.
-    pub(crate) fn registered_style_authored_content(
-        &self,
-        canonical_id: &str,
-        source: &str,
-        index: usize,
-    ) -> Option<verter_compiler::assembly::ContentId> {
-        let canonical = self.resolve_alias_or_canonical(canonical_id);
-        let owner = self.scheduler.try_get_source(&canonical)?;
-        let data = owner.downcast_data::<HostSourceData>()?;
-        let structure = data.structure.as_ref()?;
-        let extent = structure
-            .inventory()
-            .blocks()
-            .iter()
-            .filter_map(|block| match block {
-                CarrierBlock::Section {
-                    role: SectionRole::Style { .. },
-                    syntax,
-                    ..
-                } => Some(syntax.content_span),
-                _ => None,
-            })
-            .nth(index)?;
-        let authored = source.get(extent.start as usize..extent.end as usize)?;
-        Some(verter_compiler::assembly::ContentId::from_content_bytes(
-            authored.as_bytes(),
-        ))
     }
 
     /// Capture the classifier bit and exact compiler projection as one
@@ -2142,6 +2116,58 @@ mod tests {
         assert!(byte_bounded.supplied_bytes <= MAX_SUPPLIED_TOTAL_BYTES);
         assert_eq!(byte_bounded.supplied.len(), 4);
         assert_eq!(byte_bounded.supplied_order.len(), 4);
+    }
+
+    /// The compiler projection states, for a supplied style selection, the
+    /// AUTHORED bytes that selection was validated against — captured by the
+    /// same read that selected the produced bytes. A consumer that needs the
+    /// basis reads it here instead of re-slicing the carrier later, which
+    /// would state whatever revision is live by then rather than the one the
+    /// host admitted the result against.
+    #[test]
+    fn a_supplied_style_projection_states_the_authored_basis_it_was_validated_against() {
+        const AUTHORED: &str = "$tone: red;\n.card { color: $tone; }";
+        const PRODUCED: &str = ".card { color: red; }";
+        let source =
+            format!("<div class=\"card\">x</div>\n<style lang=\"scss\">{AUTHORED}</style>\n");
+
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let update = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: "/workspace/Card.svelte".to_string(),
+                source: Arc::from(source.as_str()),
+                file_language: verter_language::FileLanguage::svelte(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        let request = update.preprocessor_requests[0].clone();
+        let _admitted = host
+            .apply_block_overrides(BlockOverrideRequest {
+                canonical_id: update.canonical_id.clone(),
+                compile_profile: CompileProfile::default(),
+                overrides: vec![BlockOverrideEntry::supplied_for_test(&request, PRODUCED)],
+            })
+            .expect("the completed result is admitted");
+
+        let profile = CompileProfile::default();
+        let projection = host
+            .compiler_block_content_inputs(
+                &update.canonical_id,
+                SuppliedBlockScope::Profile(&profile),
+            )
+            .expect("the selection projects");
+        let style = projection.styles[0]
+            .as_ref()
+            .expect("the supplied style slot");
+        assert_eq!(style.code.as_ref(), PRODUCED, "the selected bytes");
+        assert_eq!(
+            style.authored_basis,
+            Some(verter_compiler::assembly::ContentId::from_content_bytes(
+                AUTHORED.as_bytes()
+            )),
+            "the basis names the authored block, not the produced bytes"
+        );
     }
 
     #[test]

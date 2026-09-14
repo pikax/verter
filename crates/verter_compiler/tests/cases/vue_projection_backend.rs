@@ -158,6 +158,7 @@ fn projected_template(code: &str) -> RuntimeBlockContentInput {
         source_space_token: "space:html".to_string(),
         parsed: None,
         producer: None,
+        authored_basis: None,
     }
 }
 

@@ -491,7 +491,28 @@ pub struct RuntimeCompileOptions {
     /// inventory order. A present slot is the ONLY bytes that block's
     /// framework rewrite may consume: the authored block is never read in
     /// its place. Excluded from request/cache identity.
-    pub style_continuations: Vec<Option<Arc<crate::style_planner::ExternalStyleContinuation>>>,
+    pub style_continuations: Vec<Option<BoundStyleContinuation>>,
+}
+
+/// One admitted external style continuation together with the host-minted
+/// identity of the produced bytes it carries.
+///
+/// The continuation owns stage, basis, provenance and map validity. The token
+/// pair is the block-content identity the HOST minted for exactly those
+/// produced bytes, and it exists because an output declared over a continued
+/// block must declare that identity rather than mint a space of its own: the
+/// host already holds the produced-to-authored map under these tokens, so
+/// declaring them is what lets the two map chains join. A compiler-minted
+/// carrier space over the same bytes would name a space nothing else knows.
+#[derive(Debug, Clone)]
+pub struct BoundStyleContinuation {
+    /// The admitted continuation — the sole authority for the produced bytes,
+    /// their stage and their basis.
+    pub continuation: Arc<crate::style_planner::ExternalStyleContinuation>,
+    /// Host-minted source space containing the produced bytes.
+    pub source_space_token: String,
+    /// Host-minted identity of the produced byte artifact (code plus any map).
+    pub content_artifact_token: String,
 }
 
 impl Default for RuntimeCompileOptions {
@@ -567,6 +588,17 @@ pub struct RuntimeBlockContentInput {
     /// claiming it made them itself. Only the host can answer this: the bytes
     /// look identical either way.
     pub producer: Option<verter_css_syntax::PreprocessorIdentity>,
+    /// Content identity of the AUTHORED bytes this selection was validated
+    /// against, observed by the host under the same fence that selected
+    /// `code`.
+    ///
+    /// For an external producer's output this is the input the tool
+    /// consumed, which `code` is NOT: the two are different byte spaces and
+    /// only the host can state the relationship between them. Recomputing it
+    /// from a later read of the carrier would bind a revision the host never
+    /// validated, so a consumer that needs a basis reads it here or refuses.
+    /// `None` when the host could not state one.
+    pub authored_basis: Option<crate::assembly::ContentId>,
 }
 
 /// Parser-local projection of validated block content. Ordering exists only at

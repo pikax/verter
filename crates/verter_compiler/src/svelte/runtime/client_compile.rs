@@ -140,8 +140,11 @@ pub fn compile_client<'a>(
     // `$foo` / `$$foo` reference, an invalid HTML placement) FIRST, so a genuinely
     // malformed component is rejected for being malformed — not later mis-attributed
     // to an unsupported feature, and never accepted as a divergent `Main`.
-    let mut admitted =
-        super::css::AdmittedStyleIrs::with_continuation(opts.style_continuation.clone());
+    let mut admitted = super::css::AdmittedStyleIrs::with_continuation(
+        opts.style_continuation
+            .as_ref()
+            .map(|bound| bound.continuation.clone()),
+    );
     super::css::seed_admitted_from_prepared(source, parsed, &opts.prepared_styles, &mut admitted);
     if let Some(rejection) = official_reject::official_reject_gate_with_admitted(
         source,

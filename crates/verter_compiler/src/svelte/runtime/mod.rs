@@ -300,7 +300,11 @@ pub struct SvelteRuntimeOptions {
     /// `<style>`. When present its produced bytes are that block's body for
     /// every stage — the authored block is never read in its place — and a
     /// continuation not bound to the component's style block fails closed.
-    pub style_continuation: Option<std::sync::Arc<crate::style_planner::ExternalStyleContinuation>>,
+    /// Carries the host-minted identity of the produced bytes alongside the
+    /// admitted continuation, so an output declared over this block declares
+    /// the host's space rather than minting one of its own.
+    pub style_continuation:
+        Option<crate::framework_common::carrier_compiler::BoundStyleContinuation>,
 }
 
 /// A runtime-lowering diagnostic.

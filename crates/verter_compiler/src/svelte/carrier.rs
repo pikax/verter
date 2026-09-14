@@ -634,7 +634,7 @@ pub(crate) fn bind_svelte_style_continuations(
     request: &CompileRequest,
     supplied: &[Option<crate::framework_common::svelte_host_integration::SvelteSuppliedStyle>],
 ) -> Result<
-    Vec<Option<Arc<crate::style_planner::ExternalStyleContinuation>>>,
+    Vec<Option<crate::framework_common::carrier_compiler::BoundStyleContinuation>>,
     StyleContinuationBindRefusal,
 > {
     use crate::assembly::source_unit::{carrier_revision, carrier_source_id};
@@ -745,11 +745,21 @@ pub(crate) fn bind_svelte_style_continuations(
                     Vec::new(),
                 ),
                 // The host's raw map is not decoded here: no anchors is an
-                // absent map, never an implicit identity one.
+                // absent map, never an implicit identity one. The chain back
+                // to the authored block stays joinable because the produced
+                // bytes keep the host's own space identity below.
                 anchors: Vec::new(),
                 product,
             })
-            .map(|continuation| Some(Arc::new(continuation)))
+            .map(|continuation| {
+                Some(
+                    crate::framework_common::carrier_compiler::BoundStyleContinuation {
+                        continuation: Arc::new(continuation),
+                        source_space_token: supplied.source_space_token.clone(),
+                        content_artifact_token: supplied.content_artifact_token.clone(),
+                    },
+                )
+            })
             .map_err(|refusal| StyleContinuationBindRefusal::Refused { extent, refusal })
         })
         .collect()
@@ -1781,6 +1791,7 @@ let count = $state(0);
             source_space_token: "space:html".to_string(),
             parsed: None,
             producer: None,
+            authored_basis: None,
         }
     }
 
