@@ -437,6 +437,149 @@ const height = ref('100px')
     }
   });
 
+  it("selects lint rules by registered carrier framework, not by a shared Vue rule set", () => {
+    // `valid-template-root` states a Vue requirement: an SFC's `<template>`
+    // block must contain at least one root element. A Svelte component has no
+    // `<template>` host at all, so its element list is legitimately empty and
+    // the Vue rule fires on every Svelte file. The public host must select
+    // rules by the REGISTERED carrier identity behind the file, so Vue-only
+    // rules never reach a Svelte carrier while Vue carriers are untouched.
+    const VUE_ONLY = "valid-template-root";
+    const host = new VerterHost();
+
+    // Svelte inputs: explicit `{@html}` content, text-only, and empty.
+    const svelteCases: Array<[string, string]> = [
+      ["HtmlBlock.svelte", '<script>let raw = "<b>x</b>";</script>\n{@html raw}\n'],
+      ["TextOnly.svelte", "just text\n"],
+      ["EmptyComponent.svelte", ""],
+    ];
+    for (const [inputId, source] of svelteCases) {
+      const upserted = host.upsert({ inputId, source, fileKind: "svelte" });
+      const rules = host.lint(upserted.canonicalId, null).map((d) => d.rule);
+      expect(rules, `${inputId} must not receive the Vue-only ${VUE_ONLY}`).not.toContain(VUE_ONLY);
+    }
+
+    // Vue dirty control: an empty `<template>` still reports the same rule,
+    // so the Svelte results above are carrier selection, not suppression.
+    const vueEmpty = host.upsert({
+      inputId: "EmptyTemplate.vue",
+      source: "<template></template>\n",
+      fileKind: "vue",
+    });
+    expect(host.lint(vueEmpty.canonicalId, null).map((d) => d.rule)).toContain(VUE_ONLY);
+
+    // Vue clean control: an element root does not report it.
+    const vueRoot = host.upsert({
+      inputId: "ElementRoot.vue",
+      source: "<template><div/></template>\n",
+      fileKind: "vue",
+    });
+    expect(host.lint(vueRoot.canonicalId, null).map((d) => d.rule)).not.toContain(VUE_ONLY);
+
+    // Real applicable lint work survives on BOTH carriers: `block-lang` reads
+    // a `<script>` section's `lang` attribute, which Vue and Svelte spell and
+    // mean identically, so it is carrier-neutral and still fires.
+    const svelteScript = host.upsert({
+      inputId: "PlainScript.svelte",
+      source: "<script>let a = 1;</script>\n<div>{a}</div>\n",
+      fileKind: "svelte",
+    });
+    expect(host.lint(svelteScript.canonicalId, null).map((d) => d.rule)).toContain("block-lang");
+    const vueScript = host.upsert({
+      inputId: "PlainScript.vue",
+      source: "<script setup>const a = 1;</script>\n<template><div>{{ a }}</div></template>\n",
+      fileKind: "vue",
+    });
+    expect(host.lint(vueScript.canonicalId, null).map((d) => d.rule)).toContain("block-lang");
+
+    // Alternating frameworks in ONE host must not leak a prior selection, and
+    // an update must re-select against the updated file's carrier.
+    const alternating = [
+      vueEmpty.canonicalId,
+      svelteScript.canonicalId,
+      vueEmpty.canonicalId,
+      vueRoot.canonicalId,
+      svelteScript.canonicalId,
+    ];
+    const expectVueOnly = [true, false, true, false, false];
+    alternating.forEach((canonicalId, index) => {
+      expect(
+        host
+          .lint(canonicalId, null)
+          .map((d) => d.rule)
+          .includes(VUE_ONLY),
+        `alternating read ${index} (${canonicalId}) must keep its own applicability`,
+      ).toBe(expectVueOnly[index]);
+    });
+
+    // Updating the Svelte file in place keeps Svelte applicability; updating
+    // the Vue file from clean to empty template re-reports the Vue rule.
+    const svelteUpdated = host.upsert({
+      inputId: "PlainScript.svelte",
+      source: '<script lang="ts">let a: number = 1;</script>\n<div>{a}</div>\n',
+      fileKind: "svelte",
+    });
+    expect(svelteUpdated.changed).toBe(true);
+    const svelteUpdatedRules = host.lint(svelteUpdated.canonicalId, null).map((d) => d.rule);
+    expect(svelteUpdatedRules).not.toContain(VUE_ONLY);
+    // `lang="ts"` satisfies the carrier-neutral rule, so it stops reporting —
+    // the rule really ran against the updated content.
+    expect(svelteUpdatedRules).not.toContain("block-lang");
+
+    const vueUpdated = host.upsert({
+      inputId: "ElementRoot.vue",
+      source: "<template></template>\n",
+      fileKind: "vue",
+    });
+    expect(vueUpdated.changed).toBe(true);
+    expect(host.lint(vueUpdated.canonicalId, null).map((d) => d.rule)).toContain(VUE_ONLY);
+
+    // Selection narrows which rules RUN; it never narrows what the host
+    // advertises. The Vue-only rule stays in the public metadata surface.
+    expect(host.getLintRuleMetadata().map((m) => m.name)).toContain(VUE_ONLY);
+
+    host.close();
+  });
+
+  it("keeps the script-rule selection for non-SFC script modules on the public lint route", () => {
+    // A non-SFC module (`.ts`/`.js` registered as `non_sfc`) owns no carrier
+    // structure, but its analysis snapshot carries the script facts —
+    // imports with their sources, Vue API calls, macros — that script rules
+    // read. Missing carrier structure is not another framework's carrier:
+    // such a module keeps the script-rule selection it has always had, so
+    // `prefer-import-from-vue` still reports an `@vue/reactivity` import in
+    // a composable/store module. Only a REGISTERED non-Vue carrier (Svelte)
+    // drops adapter-owned Vue rules.
+    const RULE = "prefer-import-from-vue";
+    const CONFIG = JSON.stringify({ preset: "all" });
+    const STORE_SOURCE = "import { ref } from '@vue/reactivity'\nexport const n = ref(1)\n";
+    const host = new VerterHost();
+
+    const store = host.upsert({
+      inputId: "store.ts",
+      fileKind: "non_sfc",
+      source: STORE_SOURCE,
+    });
+    expect(
+      host.lint(store.canonicalId, CONFIG).map((d) => d.rule),
+      "a non-SFC script module must keep its script rules",
+    ).toContain(RULE);
+
+    // Vue carrier control: the identical import inside a `.vue` SFC reports
+    // the same rule, so the non-SFC result is selection parity, not a leak.
+    const sfc = host.upsert({
+      inputId: "Store.vue",
+      fileKind: "vue",
+      source: `<script setup>\n${STORE_SOURCE}</script>\n<template><div>{{ n }}</div></template>\n`,
+    });
+    expect(
+      host.lint(sfc.canonicalId, CONFIG).map((d) => d.rule),
+      "the .vue control must report the same script rule",
+    ).toContain(RULE);
+
+    host.close();
+  });
+
   it("duplicate-attribute public lint-route proof: parse-attributed dirty case, clean control, update and fresh-host agreement", () => {
     // Public input-to-result proof for the advertised
     // `no-duplicate-attributes` rule. Verified against the native binary:

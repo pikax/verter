@@ -9,7 +9,7 @@
 use crate::block_facts::SfcBlockRole;
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
-use crate::rules::{FileContext, LintRule, RuleCategory};
+use crate::rules::{FileContext, LintRule, RuleApplicability, RuleCategory};
 
 pub struct BlockLang;
 
@@ -24,6 +24,14 @@ impl LintRule for BlockLang {
 
     fn default_severity(&self) -> Option<Severity> {
         Some(Severity::Warning)
+    }
+
+    /// Carrier-neutral: the fact this rule reads is a `<script>` section
+    /// carrying `lang="ts"`, which every registered carrier spells the same
+    /// way and means the same thing by. A Svelte `<script lang="ts">` is the
+    /// same TypeScript opt-in as a Vue one, so the advice holds unchanged.
+    fn applicability(&self) -> RuleApplicability {
+        RuleApplicability::CarrierNeutral
     }
 
     fn check_file(&self, file: &FileContext<'_>, ctx: &mut LintContext) {

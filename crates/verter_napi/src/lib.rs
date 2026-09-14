@@ -3302,6 +3302,29 @@ impl NapiVerterHost {
             .unwrap_or_default()
     }
 
+    /// Rule registry selected for a file's REGISTERED carrier identity — the
+    /// framework adapter that owns its committed parse artifact.
+    ///
+    /// Lint applicability is a framework question, so it is answered from the
+    /// registered artifact rather than from the request path: a filename says
+    /// nothing a caller cannot spell wrongly, and filtering emitted
+    /// diagnostics by name would suppress symptoms of running the wrong rules
+    /// instead of not running them. A file with no registered carrier
+    /// structure is a non-SFC script module (`.ts`/`.js`): it owns no carrier
+    /// another framework could own either, so it keeps the Vue script rules
+    /// such a module has always had — its lint facts are script facts, which
+    /// script rules read without a carrier structure. Only a REGISTERED
+    /// non-Vue carrier (Svelte) drops adapter-owned Vue rules.
+    fn carrier_rule_registry(&self, canonical_or_alias: &str) -> RuleRegistry {
+        let structure = self.inner.registered_file_structure(canonical_or_alias);
+        let default_script_owner = verter_session::FrameworkAdapterId::vue();
+        let carrier = structure
+            .as_ref()
+            .map(|s| s.artifact().adapter_id())
+            .unwrap_or(&default_script_owner);
+        RuleRegistry::for_carrier(Some(carrier))
+    }
+
     #[napi]
     pub fn lint(
         &self,
@@ -3320,7 +3343,10 @@ impl NapiVerterHost {
 
         let diagnostics = match analysis {
             Some(snapshot) => {
-                let linter = Linter::new(lint_config);
+                let linter = Linter::with_registry(
+                    lint_config,
+                    self.carrier_rule_registry(&canonical_or_alias),
+                );
                 let script = build_script_snapshot(&snapshot);
                 let blocks = self.registered_block_facts(&canonical_or_alias);
                 linter
@@ -3382,7 +3408,10 @@ impl NapiVerterHost {
             (Some(snapshot), Some(source)) => {
                 let byte_offset = utf16_to_byte_offset(source, offset);
                 let script = build_script_snapshot(&snapshot);
-                let linter = Linter::default();
+                let linter = Linter::with_registry(
+                    verter_diagnostics::LintConfig::default(),
+                    self.carrier_rule_registry(&canonical_or_alias),
+                );
                 let blocks = self.registered_block_facts(&canonical_or_alias);
                 let diag_set = linter.lint_with_source(
                     Some(&script),
