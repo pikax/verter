@@ -407,12 +407,13 @@ defineSlots<{
     expect(defaultSlot).toBeDefined();
   });
 
-  // ECRV4 regression: concrete-inline slot-binding types must survive the
+  // Regression: concrete-inline slot-binding types must survive the
   // native structured surface AND the compat display as their declared
-  // leaf types — not as the binding's own NAME (the synthetic carrier's
+  // types — not as the binding's own NAME (the synthetic carrier's
   // rendering). Observed defect (vue-benchmarks component-meta/slots):
   // `default({ open: boolean })` reported `open` as the type of `open`,
-  // and `footer({ id: number })` reported `id`.
+  // and `footer({ id: number })` reported `id`; a nested payload
+  // (`payload({ meta: { deep: string } })`) reported `meta`.
   it("publishes concrete slot binding leaf types through native and compat surfaces", async () => {
     const checker = await createRuntimeChecker("native-eval-slot-binding-leaf-types");
 
@@ -424,7 +425,9 @@ defineSlots<{
   footer(props: { id: number }): any
   value(props: { value: string }): any
   other(props: { value: number }): any
+  optional(props: { flag?: boolean }): any
   payload(props: { meta: { deep: string } }): any
+  deeper(props: { meta: { deep: { deeper: string } } }): any
   bare(): any
 }>()
 </script>
@@ -464,16 +467,35 @@ defineSlots<{
     // Empty-slot control.
     expect(nativeSlots.find((slot) => slot.name === "bare")!.bindings).toEqual([]);
 
-    // Nested-payload control: a binding richer than a leaf stays the
-    // STRUCTURED carrier (typed-IR identity naming its own slot/binding —
-    // a cross-slot mixup changes the key), never a flattened guess and
-    // never `unknown`.
+    // Optional-binding control: the declared `?` does not change the
+    // binding's published TYPE. (The binding row itself carries no
+    // optionality field today — the declared `?` is not yet surfaced on
+    // the public slot-binding surface; the type is.)
+    expect(
+      nativeSlots.find((slot) => slot.name === "optional")!.bindings.find((b) => b.name === "flag")!
+        .type,
+    ).toEqual({ kind: "primitive", name: "boolean" });
+
+    // Nested-payload: a payload object whose own members are all leaves
+    // publishes the bounded closed surface, so the declared member type
+    // survives — the binding's own name is never reported as its type.
     const nestedSlot = nativeSlots.find((slot) => slot.name === "payload");
     expect(nestedSlot).toBeDefined();
     expect(nestedSlot!.bindings.find((b) => b.name === "meta")!.type).toMatchObject({
+      kind: "object",
+      properties: [{ name: "deep", type: { kind: "primitive", name: "string" } }],
+    });
+
+    // Boundary control: a payload object with a NON-leaf member stays the
+    // STRUCTURED carrier (typed-IR identity naming its own slot/binding —
+    // a cross-slot mixup changes the key), never a flattened guess and
+    // never `unknown`.
+    const deeperSlot = nativeSlots.find((slot) => slot.name === "deeper");
+    expect(deeperSlot).toBeDefined();
+    expect(deeperSlot!.bindings.find((b) => b.name === "meta")!.type).toMatchObject({
       kind: "syntheticSlotBinding",
       surfaceKind: "slotBinding",
-      slotName: "payload",
+      slotName: "deeper",
       bindingName: "meta",
     });
 
@@ -486,6 +508,18 @@ defineSlots<{
     const compatFooter = meta.slots.find((slot) => slot.name === "footer");
     expect(compatFooter).toBeDefined();
     expect(compatFooter!.type).toBe("{ id: number; }");
+
+    // The nested payload renders its declared member type, never the
+    // binding name (`{ meta: meta; }` was the defect).
+    const compatPayload = meta.slots.find((slot) => slot.name === "payload");
+    expect(compatPayload).toBeDefined();
+    expect(compatPayload!.type).not.toContain("meta: meta");
+    expect(compatPayload!.type).toContain("deep: string");
+
+    // The optional binding's declared leaf type reaches the compat display.
+    const compatOptional = meta.slots.find((slot) => slot.name === "optional");
+    expect(compatOptional).toBeDefined();
+    expect(compatOptional!.type).toContain("flag: boolean");
   });
 
   it("evaluates defineModel types", async () => {

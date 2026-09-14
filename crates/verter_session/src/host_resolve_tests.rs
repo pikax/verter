@@ -7869,9 +7869,10 @@ defineProps<{ label: string }>()
 // @ai-generated - The hover-boundary demand entry to the synthetic-binding
 // deepen route: a live published carrier deepens to its authored member type;
 // a stale carrier fails closed to `None` (the caller keeps the refusal).
-// The fixture's binding value is an inline OBJECT: concrete LEAF values
-// publish their complete closed leaf facts (ECRV4), so the carrier — and
-// this deepen route — belongs to the richer shapes.
+// The fixture's binding value is an inline object whose own member is
+// ANOTHER object: concrete leaf values and bounded leaf-member payload
+// objects publish their complete closed facts, so the carrier — and this
+// deepen route — belongs to the strictly richer shapes.
 #[test]
 fn deepen_synthetic_slot_binding_deepens_live_carrier_and_fails_closed_on_stale() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -7879,9 +7880,9 @@ fn deepen_synthetic_slot_binding_deepens_live_carrier_and_fails_closed_on_stale(
         &host,
         "/src/SlotCarrier.vue",
         r#"<script setup lang="ts">
-defineSlots<{ header(props: { meta: { label: string } }): any }>()
+defineSlots<{ header(props: { meta: { label: { text: string } } }): any }>()
 </script>
-<template><slot name="header" :meta="{ label: 'hdr' }" /></template>"#,
+<template><slot name="header" :meta="{ label: { text: 'hdr' } }" /></template>"#,
     );
 
     let projection = host
@@ -7937,14 +7938,24 @@ defineSlots<{ header(props: { meta: { label: string } }): any }>()
                 verter_type_expr::ObjectMember::Property(property)
                     if property.string_name().expect("string-key fixture") == "label"
                         && matches!(
-                            property.ty,
-                            verter_type_expr::TypeExpr::Primitive(
-                                verter_type_expr::PrimitiveName::String
-                            )
+                            &property.ty,
+                            verter_type_expr::TypeExpr::Object(label)
+                                if label.properties.iter().any(|nested| matches!(
+                                    nested,
+                                    verter_type_expr::ObjectMember::Property(nested)
+                                        if nested.string_name().expect("string-key fixture")
+                                            == "text"
+                                            && matches!(
+                                                nested.ty,
+                                                verter_type_expr::TypeExpr::Primitive(
+                                                    verter_type_expr::PrimitiveName::String
+                                                )
+                                            )
+                                ))
                         )
             )
         }),
-        "the deepened `meta` object retains its label:string member; got {deepened_object:?}"
+        "the deepened `meta` object retains its nested label member; got {deepened_object:?}"
     );
 
     // The deepen's cache identity is the CONTENT-FREE `SyntheticBindingId`

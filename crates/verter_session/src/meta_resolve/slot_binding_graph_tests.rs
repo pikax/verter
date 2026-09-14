@@ -692,7 +692,7 @@ defineSlots<{ default(props: { row: string }): any }>()
 }
 
 // ---------------------------------------------------------------------------
-// Test #5b — REGRESSION (ECRV4)
+// Test #5b — REGRESSION
 // ---------------------------------------------------------------------------
 //
 // Concrete-inline slot-binding values publish their COMPLETE CLOSED LEAF
@@ -706,7 +706,8 @@ defineSlots<{ default(props: { row: string }): any }>()
 //
 // Controls in the same fixture: a same-named binding under two different
 // slots keeps DISTINCT leaf facts (a cross-slot mixup that swapped them
-// fails), and a zero-binding slot stays empty.
+// fails), an OPTIONAL binding still publishes its declared leaf, and a
+// zero-binding slot stays empty.
 #[test]
 fn concrete_inline_slot_binding_leaf_types_publish_closed_facts() {
     let host = build_test_host();
@@ -719,6 +720,7 @@ defineSlots<{
   footer(props: { id: number }): any
   value(props: { value: string }): any
   other(props: { value: number }): any
+  opt(props: { flag?: boolean }): any
   bare(): any
 }>()
 </script>
@@ -768,6 +770,17 @@ defineSlots<{
          slot keeps its own distinct leaf fact",
     );
 
+    // Optional-binding control: the declared `?` on the binding does not
+    // change the published TYPE — an optional binding publishes exactly the
+    // leaf fact a required one does. (The published binding ROW carries no
+    // optionality channel of its own today; the type is what survives.)
+    let flag_binding = slot_binding(&meta, "opt", "flag").expect("opt.flag binding must publish");
+    assert_eq!(
+        shallow_binding_type(&host, "/src/Card.vue", flag_binding),
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        "an optional binding publishes its declared leaf fact",
+    );
+
     // Empty-slot control: a slot whose signature has no params publishes no
     // binding rows.
     let bare = meta
@@ -786,17 +799,23 @@ defineSlots<{
 }
 
 // ---------------------------------------------------------------------------
-// Test #5bb — REGRESSION (ECRV4)
+// Test #5bb — REGRESSION
 // ---------------------------------------------------------------------------
 //
-// Boundary control for the leaf-fact publication above: a binding whose
-// value is RICHER than a leaf (an inline nested payload object) keeps the
-// first-class `SyntheticSlotBinding` carrier — the shallow-by-default
-// identity, never an eager structural flattening — and the carrier's
-// identity names its OWN slot, so a cross-slot wiring mixup changes the
-// key.
+// One level in from the leaf facts above: a binding whose value is an
+// inline payload object whose OWN members are all leaves publishes the
+// bounded closed surface, so the declared member types survive on the
+// public surfaces. Publishing the `SyntheticSlotBinding` carrier here
+// instead renders the binding's own NAME as its type on the compat
+// display (`{ meta: meta; }`) — the same name-as-type defect as the leaf
+// case, one level in.
+//
+// Controls in the same fixture: a same-named binding under a different
+// slot keeps its own distinct member types (a cross-slot mixup fails),
+// and an OPTIONAL payload member keeps its optionality on the published
+// surface.
 #[test]
-fn nested_payload_slot_binding_keeps_structured_carrier() {
+fn bounded_leaf_member_payload_slot_binding_publishes_closed_surface() {
     let host = build_test_host();
     upsert_vue(
         &host,
@@ -805,6 +824,7 @@ fn nested_payload_slot_binding_keeps_structured_carrier() {
 defineSlots<{
   default(props: { meta: { deep: string } }): any
   side(props: { meta: { count: number } }): any
+  flags(props: { meta: { on?: boolean } }): any
 }>()
 </script>
 <template><slot :meta="{ deep: 'x' }" /></template>"#,
@@ -813,19 +833,108 @@ defineSlots<{
     let meta = host
         .get_component_meta("/src/Nested.vue")
         .expect("component meta");
+
+    let leaf_member = |slot: &str, name: &str| -> verter_type_expr::ObjectProperty {
+        let binding = slot_binding(&meta, slot, "meta")
+            .unwrap_or_else(|| panic!("{slot}.meta binding must publish"));
+        let ty = shallow_binding_type(&host, "/src/Nested.vue", binding);
+        let TypeExpr::Object(object) = &ty else {
+            panic!(
+                "a payload object of leaf members publishes the bounded closed \
+                 surface, never the name-rendered carrier; observed {ty:?}",
+            );
+        };
+        object
+            .properties
+            .iter()
+            .find_map(|property| match property {
+                verter_type_expr::ObjectMember::Property(property)
+                    if property.string_name() == Some(name) =>
+                {
+                    Some(property.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("{slot}.meta must publish its `{name}` member; got {object:?}")
+            })
+    };
+
+    let deep = leaf_member("default", "deep");
+    assert_eq!(
+        deep.ty,
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "default.meta.deep must publish `string`; observed {:?}",
+        deep.ty,
+    );
+    assert!(!deep.optional, "a required member stays required");
+
+    // Same-named binding, different slot, different member: a producer
+    // keyed off the binding NAME cannot keep these apart.
+    let count = leaf_member("side", "count");
+    assert_eq!(
+        count.ty,
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        "side.meta.count must publish `number`; observed {:?}",
+        count.ty,
+    );
+
+    // Optional control: the declared `?` survives onto the published
+    // member, and the member type is still the declared leaf.
+    let on = leaf_member("flags", "on");
+    assert_eq!(
+        on.ty,
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        "flags.meta.on must publish `boolean`; observed {:?}",
+        on.ty,
+    );
+    assert!(
+        on.optional,
+        "an optional payload member must publish as optional; got {on:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test #5bc — REGRESSION
+// ---------------------------------------------------------------------------
+//
+// Boundary control for the two closed publication arms above: a binding
+// value richer than "an object of leaf members" — here a payload object
+// whose own member is ANOTHER object — keeps the first-class
+// `SyntheticSlotBinding` carrier (shallow-by-default; no eager structural
+// flattening), the carrier identity names its OWN slot, and the explicit
+// terminal demand still deepens it to the authored shape.
+#[test]
+fn deeply_nested_payload_slot_binding_keeps_structured_carrier() {
+    let host = build_test_host();
+    upsert_vue(
+        &host,
+        "/src/DeepNested.vue",
+        r#"<script setup lang="ts">
+defineSlots<{
+  default(props: { meta: { deep: { deeper: string } } }): any
+  side(props: { meta: { deep: { count: number } } }): any
+}>()
+</script>
+<template><slot :meta="{ deep: { deeper: 'x' } }" /></template>"#,
+    );
+
+    let meta = host
+        .get_component_meta("/src/DeepNested.vue")
+        .expect("component meta");
     let binding = slot_binding(&meta, "default", "meta")
         .expect("default.meta binding must publish from the inline param surface");
-    let binding_ty = shallow_binding_type(&host, "/src/Nested.vue", binding);
+    let binding_ty = shallow_binding_type(&host, "/src/DeepNested.vue", binding);
     let TypeExpr::SyntheticSlotBinding(carrier) = &binding_ty else {
         panic!(
-            "a nested inline-object binding keeps the structured synthetic carrier \
-             (no eager flattening); observed {binding_ty:?}",
+            "a payload object with a non-leaf member keeps the structured synthetic \
+             carrier (no eager flattening); observed {binding_ty:?}",
         );
     };
     assert_eq!(carrier.slot_name.as_deref(), Some("default"));
     assert_eq!(carrier.binding_name.as_ref(), "meta");
     // Demand still deepens the carrier to the authored object.
-    let demanded = demand_binding_type(&host, "/src/Nested.vue", binding);
+    let demanded = demand_binding_type(&host, "/src/DeepNested.vue", binding);
     let TypeExpr::Object(object) = &demanded else {
         panic!("demand must deepen default.meta to its inline object; got {demanded:?}");
     };
@@ -834,19 +943,30 @@ defineSlots<{
             matches!(
                 property,
                 verter_type_expr::ObjectMember::Property(property)
-                    if property.string_name().expect("string-key fixture") == "deep"
+                    if property.string_name() == Some("deep")
                         && matches!(
-                            property.ty,
-                            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+                            &property.ty,
+                            TypeExpr::Object(deep)
+                                if deep.properties.iter().any(|nested| matches!(
+                                    nested,
+                                    verter_type_expr::ObjectMember::Property(nested)
+                                        if nested.string_name() == Some("deeper")
+                                            && matches!(
+                                                nested.ty,
+                                                TypeExpr::Primitive(
+                                                    verter_type_expr::PrimitiveName::String
+                                                )
+                                            )
+                                ))
                         )
             )
         }),
-        "the deepened payload retains deep:string; got {object:?}"
+        "the deepened payload retains deep.deeper:string; got {object:?}"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Test #5c — REGRESSION (ECRV4)
+// Test #5c — REGRESSION
 // ---------------------------------------------------------------------------
 //
 // Edit freshness for the closed leaf facts: editing ONE declared inline
