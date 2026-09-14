@@ -1539,7 +1539,8 @@ fn closed_leaf_fact_source(
 /// object, a function, a tuple, an open generic, an argument-bearing
 /// instantiation), a method / call / construct signature, an index
 /// signature, a non-string (numeric / symbol / computed) key, a
-/// non-public member, and an empty surface (no member evidence to
+/// non-public member, a `readonly` member (the synthesized member fact
+/// carries no modifier), and an empty surface (no member evidence to
 /// publish). Deepening such a binding stays an explicit consumer demand.
 ///
 /// Publishing the synthetic carrier for the bounded case instead renders
@@ -1572,7 +1573,10 @@ fn closed_leaf_object_source(
     }
     let mut synthesized = Vec::with_capacity(members.len());
     for member in members {
+        // A `readonly` member has no slot on the synthesized member fact;
+        // publishing it would silently drop the modifier.
         if member.method_kind.is_some()
+            || member.readonly
             || member.visibility != verter_type_expr::MemberVisibility::Public
         {
             return None;

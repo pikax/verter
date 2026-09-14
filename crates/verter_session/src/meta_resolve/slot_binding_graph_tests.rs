@@ -914,6 +914,7 @@ fn deeply_nested_payload_slot_binding_keeps_structured_carrier() {
 defineSlots<{
   default(props: { meta: { deep: { deeper: string } } }): any
   side(props: { meta: { deep: { count: number } } }): any
+  ro(props: { meta: { readonly deep: string } }): any
 }>()
 </script>
 <template><slot :meta="{ deep: { deeper: 'x' } }" /></template>"#,
@@ -962,6 +963,39 @@ defineSlots<{
             )
         }),
         "the deepened payload retains deep.deeper:string; got {object:?}"
+    );
+
+    // A `readonly` payload member is not the bounded case either: the
+    // synthesized member fact has no modifier slot, so publishing it would
+    // silently drop `readonly`. The binding keeps the carrier, and demand
+    // deepens it to the authored `readonly` member.
+    let readonly_binding = slot_binding(&meta, "ro", "meta")
+        .expect("ro.meta binding must publish from the inline param surface");
+    let readonly_ty = shallow_binding_type(&host, "/src/DeepNested.vue", readonly_binding);
+    let TypeExpr::SyntheticSlotBinding(readonly_carrier) = &readonly_ty else {
+        panic!(
+            "a payload object with a readonly member keeps the structured synthetic \
+             carrier rather than publishing a fact without the modifier; observed \
+             {readonly_ty:?}",
+        );
+    };
+    assert_eq!(readonly_carrier.slot_name.as_deref(), Some("ro"));
+    let readonly_demanded = demand_binding_type(&host, "/src/DeepNested.vue", readonly_binding);
+    let TypeExpr::Object(readonly_object) = &readonly_demanded else {
+        panic!("demand must deepen ro.meta to its inline object; got {readonly_demanded:?}");
+    };
+    assert!(
+        readonly_object.properties.iter().any(|property| matches!(
+            property,
+            verter_type_expr::ObjectMember::Property(property)
+                if property.string_name() == Some("deep")
+                    && property.readonly
+                    && matches!(
+                        property.ty,
+                        TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+                    )
+        )),
+        "the deepened payload retains `readonly deep: string`; got {readonly_object:?}"
     );
 }
 
