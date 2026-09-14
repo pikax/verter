@@ -19,6 +19,7 @@ pub mod vue;
 use crate::context::LintContext;
 use crate::cross_file::CrossFileSnapshot;
 use crate::diagnostic::Severity;
+use verter_language::FrameworkAdapterId;
 use verter_semantic::analysis::template::{
     TemplateAnalysisSnapshot, TemplateBindingOccurrence, TemplateDirective, TemplateElement,
     VForDirective,
@@ -94,6 +95,47 @@ impl RuleCategory {
     }
 }
 
+/// The carrier dimension a lint rule's semantics are defined over.
+///
+/// Applicability is a property of the RULE, not of the caller. A rule that
+/// reads one framework's component model — its directives, its macros, its
+/// SFC block conventions — states nothing true about another framework's
+/// carrier, so running it there fabricates a diagnostic rather than omitting
+/// one. `valid-template-root` is the reference case: a Svelte component has
+/// no `<template>` host at all, so every Svelte file trivially satisfies the
+/// rule's "no root element" test and reports a Vue requirement that does not
+/// exist.
+///
+/// The adapter arm is keyed by the OPEN [`FrameworkAdapterId`] set, so a new
+/// framework vertical declares its own rules without a central enum edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleApplicability {
+    /// Defined by exactly one framework adapter's component model. Runs only
+    /// on carriers that adapter owns.
+    Adapter(FrameworkAdapterId),
+    /// Defined over carrier-neutral facts only — facts whose meaning is
+    /// identical on every registered carrier (a `<script>` block's `lang`
+    /// attribute, for instance). Runs everywhere.
+    CarrierNeutral,
+}
+
+impl RuleApplicability {
+    /// Whether a rule with this applicability may run on a carrier owned by
+    /// `carrier`.
+    ///
+    /// `carrier` is `None` when the caller holds no registered carrier
+    /// identity. Only carrier-neutral rules run then: with no registered
+    /// owner, asserting that some framework's component model applies is
+    /// exactly the misattribution this selector exists to prevent.
+    pub fn applies_to(&self, carrier: Option<&FrameworkAdapterId>) -> bool {
+        match (self, carrier) {
+            (Self::CarrierNeutral, _) => true,
+            (Self::Adapter(owner), Some(carrier)) => owner == carrier,
+            (Self::Adapter(_), None) => false,
+        }
+    }
+}
+
 /// Trait for lint rules. Implement only the hooks relevant to your rule.
 /// All hook methods are no-ops by default.
 pub trait LintRule: Send + Sync {
@@ -106,6 +148,19 @@ pub trait LintRule: Send + Sync {
     /// Return `Some(severity)` for rules that are on by default, or `None`
     /// for opt-in rules that must be explicitly enabled via `.verterrc.json`.
     fn default_severity(&self) -> Option<Severity>;
+
+    /// The carrier dimension this rule's semantics are defined over.
+    ///
+    /// Defaults to the Vue adapter because every built-in rule is authored
+    /// against Vue's component model. The default is deliberately the
+    /// NARROW one: a rule that says nothing about its applicability never
+    /// escapes onto another framework's carrier. A rule that reads only
+    /// carrier-neutral facts overrides with
+    /// [`RuleApplicability::CarrierNeutral`]; a rule written for another
+    /// framework names its own adapter.
+    fn applicability(&self) -> RuleApplicability {
+        RuleApplicability::Adapter(FrameworkAdapterId::vue())
+    }
 
     // ── Template hooks ──
 
@@ -167,6 +222,25 @@ impl RuleRegistry {
     /// Get all registered rules.
     pub fn rules(&self) -> &[Box<dyn LintRule>] {
         &self.rules
+    }
+
+    /// Create a registry holding the built-in rules applicable to a carrier
+    /// owned by `carrier`.
+    ///
+    /// Selection reads each rule's declared [`LintRule::applicability`]
+    /// against the REGISTERED carrier identity supplied by the caller — never
+    /// a filename classifier, and never a filter over emitted diagnostic
+    /// names. Rules the carrier's framework does not define are absent from
+    /// the registry, so they are never visited and never report.
+    ///
+    /// `carrier` is `None` when the caller has no registered carrier
+    /// structure; see [`RuleApplicability::applies_to`].
+    pub fn for_carrier(carrier: Option<&FrameworkAdapterId>) -> Self {
+        let mut registry = Self::builtin();
+        registry
+            .rules
+            .retain(|rule| rule.applicability().applies_to(carrier));
+        registry
     }
 
     /// Create a registry with all built-in rules.

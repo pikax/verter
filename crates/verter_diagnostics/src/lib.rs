@@ -49,7 +49,7 @@ pub use diagnostic::{
 };
 pub use diagnostic_set::DiagnosticSet;
 pub use linter::Linter;
-pub use rules::{FileContext, LintRule};
+pub use rules::{FileContext, LintRule, RuleApplicability, RuleRegistry};
 pub use visitor::LintVisitor;
 
 #[cfg(test)]

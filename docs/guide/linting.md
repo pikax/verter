@@ -17,6 +17,28 @@ By default, only **error-severity** diagnostics from the **Essential** preset ar
 
 See the [Configuration Reference](/configuration) for presets, per-rule overrides, and ESLint migration.
 
+## Framework Applicability
+
+Lint rules are selected for the framework that owns the file, read from the
+registered carrier the compiler parsed — not from the file extension.
+
+Nearly every built-in rule is defined against Vue's component model, so it only
+runs on Vue carriers. A Svelte component does not receive them: `{@html ...}`
+content, a text-only component, and an empty component are all normal Svelte
+shapes, and reporting Vue requirements such as `valid-template-root` or
+`enforce-style-attribute` against them would be a false diagnostic rather than a
+missing one.
+
+Rules whose facts mean the same thing on every carrier stay active everywhere.
+`block-lang` is one: a `<script lang="ts">` block is the same TypeScript opt-in
+in Svelte as it is in Vue, so the rule reports on both.
+
+Selection narrows which rules *run*, never what the engine advertises — the full
+rule set is still listed by the rule-metadata surface and the
+[Lint Rules Reference](/lint-rules). Svelte-specific rules are not yet
+implemented; a Vue rule no longer firing on a Svelte file does not mean an
+equivalent Svelte check has taken its place.
+
 ## Rule Categories
 
 Verter organizes rules into 12 categories. For the complete list of all ~186 rules with severity and auto-fix information, see the [Lint Rules Reference](/lint-rules).
