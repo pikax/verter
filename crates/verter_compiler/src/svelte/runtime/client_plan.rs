@@ -347,6 +347,11 @@ pub(super) struct SupportedClientIr<'a> {
     /// `input.value = input.__value = '<value>'` per input and declares the
     /// component-fn-scoped `const binding_group = []` when this is non-empty.
     pub(super) group_values: Vec<(NodeId, String)>,
+    /// The static `value` literal per `<option>` node — the OPTION VALUE-CHANNEL
+    /// source the emitter writes as the init-only `option.value = option.__value =
+    /// '<value>'` at the option's walk position (the static `value` is stripped
+    /// from the skeleton).
+    pub(super) option_values: Vec<(NodeId, String)>,
     /// The `bind:group` DYNAMIC/mixed `value={…}` per group-input node — the structured
     /// value + reactivity the emitter renders as the change-tracked `$.template_effect`
     /// update (reactive) or one-shot inline write (non-reactive), plus the group getter's
@@ -476,6 +481,7 @@ impl<'a> SupportedClientIr<'a> {
             event_shapes: classified.event_shapes.clone(),
             bind_shapes: classified.bind_shapes.clone(),
             group_values: classified.group_values.clone(),
+            option_values: classified.option_values.clone(),
             group_dynamic_values: Vec::new(),
             interpolations: Vec::new(),
             element_facts: classified.element_facts.clone(),

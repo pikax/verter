@@ -87,6 +87,11 @@ pub(super) struct ClassifiedClientSurface {
     /// emitter writes as `input.value = input.__value = 'X'` (the static `value` is
     /// stripped from the skeleton). Empty for a non-group component.
     pub(super) group_values: Vec<(NodeId, String)>,
+    /// The static `value` literal per `<option>` node — the OPTION VALUE-CHANNEL
+    /// source the emitter writes as the init-only `option.value = option.__value =
+    /// 'X'` at the option's walk position (the static `value` is stripped from the
+    /// skeleton). Empty for a component with no value-carrying options.
+    pub(super) option_values: Vec<(NodeId, String)>,
     /// The `bind:group` input nodes carrying a DYNAMIC/mixed `value={…}` — the plan reads
     /// each node's `value` attr from the IR and builds the structured `GroupDynamicValue`
     /// (the static-literal case stays in `group_values`). Empty for a non-group component or
@@ -421,6 +426,7 @@ impl ClientSyntaxSurface {
             event_shapes: facts.event_shapes,
             bind_shapes: facts.bind_shapes,
             group_values: facts.group_values,
+            option_values: facts.option_values,
             group_dynamic_value_nodes: facts.group_dynamic_value_nodes,
             dynamic_attr_shapes: facts.dynamic_attr_shapes,
             html_nodes: facts.html_nodes,
@@ -451,6 +457,8 @@ pub(super) struct SurfaceFacts {
     pub(super) bind_shapes: Vec<(NodeId, String, ClientBindShape)>,
     /// The `bind:group` value literal per group-input node.
     group_values: Vec<(NodeId, String)>,
+    /// The static `value` literal per `<option>` node (the value-channel source).
+    option_values: Vec<(NodeId, String)>,
     /// The `bind:group` input nodes carrying a DYNAMIC/mixed `value={…}`.
     group_dynamic_value_nodes: Vec<NodeId>,
     /// The accepted dynamic-attr / class / style shape per (node, attribute index).
@@ -1144,6 +1152,25 @@ fn classify_attr(
                     .map(|v| v.value.as_str().to_string())
                     .unwrap_or_default();
                 facts.borrow_mut().group_values.push((node_id, literal));
+                return Ok(());
+            }
+            // (a3b) A static `value="X"` on an `<option>` is the OPTION VALUE-CHANNEL
+            // (the official `needs_special_value_handling` tag rule — NOT bind-gated):
+            // official SKIPS the attribute in the baked skeleton and emits the
+            // init-only `option.value = option.__value = 'X'` write at the option's
+            // walk position (`build_element_special_value_attribute`; a string
+            // literal is `evaluated.is_defined`, so no `?? ''` coercion). Accept it
+            // as the value-channel fact; the serializer strips it from the skeleton
+            // and the emitter writes the `__value` channel. (A VALUELESS
+            // `<option value>` stays the form-control deferral and fails closed at
+            // (b) — official would write the odd `__value = true`, which no real
+            // component relies on.)
+            if name == "value" && element == SupportedHtmlElement::Option && value.is_some() {
+                let literal = value
+                    .as_ref()
+                    .map(|v| v.value.as_str().to_string())
+                    .unwrap_or_default();
+                facts.borrow_mut().option_values.push((node_id, literal));
                 return Ok(());
             }
             // (a4) A static `defaultValue` / `defaultChecked` CO-LOCATED with its MATCHING
