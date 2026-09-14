@@ -1178,7 +1178,7 @@ fn destructured_define_props_initializers_are_prop_defaults() {
 
 #[test]
 fn destructured_runtime_define_props_merges_option_and_initializer_defaults() {
-    let code = r#"const { a = 1, b } = defineProps({ a: Number, b: { type: String, default: 'b' }, c: String })"#;
+    let code = r#"const { a = 1, b, d = 'x' } = defineProps({ a: Number, b: { type: String, default: 'b' }, c: String, d: { type: String, default: 'd' } })"#;
     let macros = parse_macros(code);
     let dp = macros
         .iter()
@@ -1186,11 +1186,16 @@ fn destructured_runtime_define_props_merges_option_and_initializer_defaults() {
         .unwrap();
     let mut keys = dp.default_keys.clone();
     keys.sort();
-    assert_eq!(keys, vec!["a", "b"]);
+    assert_eq!(keys, vec!["a", "b", "d"]);
     let a = dp.default_values.iter().find(|d| d.key == "a").unwrap();
     assert_eq!(a.value, "1");
     let b = dp.default_values.iter().find(|d| d.key == "b").unwrap();
     assert_eq!(b.value, "'b'");
+    // Vue merges destructure defaults over the declaration
+    // (`mergeDefaults(decl, { d: 'x' })`), so the initializer wins a conflict.
+    let d: Vec<_> = dp.default_values.iter().filter(|d| d.key == "d").collect();
+    assert_eq!(d.len(), 1, "a conflicting key keeps a single default entry");
+    assert_eq!(d[0].value, "'x'");
 }
 
 #[test]

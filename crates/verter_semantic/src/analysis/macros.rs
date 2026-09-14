@@ -2575,8 +2575,10 @@ pub(crate) fn try_extract_macro_from_var_decl(
 /// Mirrors Vue's destructure contract: only a static identifier or string
 /// key whose value is `local = default` with an identifier `local` declares a
 /// default; the value carries the verbatim source text of the initializer,
-/// exactly like `withDefaults()` defaults. A key that already has an
-/// authored runtime `default:` keeps that single entry.
+/// exactly like `withDefaults()` defaults. Vue merges destructure defaults
+/// over the declaration (`mergeDefaults(decl, defaults)`), so an initializer
+/// replaces an authored runtime `default:` for the same key, which keeps a
+/// single entry.
 fn append_destructure_defaults(pattern: &ObjectPattern<'_>, source: &str, m: &mut AnalyzedMacro) {
     for prop in &pattern.properties {
         let BindingPattern::AssignmentPattern(assign) = &prop.value else {
@@ -2590,16 +2592,19 @@ fn append_destructure_defaults(pattern: &ObjectPattern<'_>, source: &str, m: &mu
             PropertyKey::StringLiteral(lit) => lit.value.to_string(),
             _ => continue,
         };
-        if m.default_keys.contains(&key) {
-            continue;
-        }
-        let value = default_value_source_text(&assign.right, source).unwrap_or_default();
-        m.default_values.push(AnalyzedDefaultValue {
+        let entry = AnalyzedDefaultValue {
             key: key.clone(),
-            value,
+            value: default_value_source_text(&assign.right, source).unwrap_or_default(),
             span: assign.right.span().into(),
-        });
-        m.default_keys.push(key);
+        };
+        if let Some(existing) = m.default_values.iter_mut().find(|d| d.key == key) {
+            *existing = entry;
+        } else {
+            m.default_values.push(entry);
+        }
+        if !m.default_keys.contains(&key) {
+            m.default_keys.push(key);
+        }
     }
 }
 
