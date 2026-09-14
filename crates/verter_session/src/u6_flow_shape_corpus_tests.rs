@@ -1942,6 +1942,50 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "N148_flow_mixed_same_literal_dedup_stays_pinned_at_member",
         "28ae02cbd19ada37efdb62716145a7439fd4c57fce4c95e76afc464552e50cb6",
     ),
+    (
+        "X26_switch_assertion_case_scope",
+        "a035d5a7ca9ff3106f1057ae8678e7f3b9c5a5ca1c4f8e84574b9c40c33d82c4",
+    ),
+    (
+        "X36_labeled_break_drops_arm_assertion",
+        "176de2cc44dab4a016e1f959c08b3dab3c2b42367d0b7a34e99bec80d37aa69b",
+    ),
+    (
+        "X39_try_catch_throw_point_join",
+        "c4ba93be6a64d0623e1611185e9b9b4993857d1ed313948755c78173fb0fc283",
+    ),
+    (
+        "X45_switch_fallthrough_case_narrows_by_chain_tests",
+        "fa98bb8cfe211a8b9222f5fc78b6f14203a8063351d1f6dbbb6573dfa528dd91",
+    ),
+    (
+        "X46_try_catch_template_throw_point",
+        "356ac397793235f19291f2b8c753351922d2ff62e096b696237ad5a9012c6641",
+    ),
+    (
+        "X47_try_catch_sequence_throw_point",
+        "45c888d2b714c93bd1c10a23f1846e8b01c5bf43223139bf6d857b923267570a",
+    ),
+    (
+        "X48_try_catch_if_guard_throw_point",
+        "04aae8b579f541b7921161c25dbf1a221058f0c9615cfc7dbaf04998197ee35f",
+    ),
+    (
+        "X49_try_catch_new_callee_throw_point",
+        "d246294ba4212cb5b8d6798941e6ed7207fcb5257074a11e0b719d78b1042a2a",
+    ),
+    (
+        "X55_finally_entry_joins_pending_return",
+        "a6df0726392860562e15dc03905b422d7c33bca188bb8375a4165b69421fcb4d",
+    ),
+    (
+        "N106_declared_intersection_keeps_literal",
+        "7ca51a9b39031321d9eb403c130e8d3d6b862886e33056002aa93c5b2cb7a457",
+    ),
+    (
+        "N115_member_intersection_call_stays_pinned",
+        "fcc30d7ea292ad2c5e12b0ab968cc3f9bcd0416e4ab600c0771dc083497d50d8",
+    ),
 ];
 
 // The suite
@@ -2865,6 +2909,7 @@ mod corpus_suite {
         use super::u6_flow_expect_tests::drive_expect_boundary;
         /// Deep-pinned rows whose `checker` text IS renderer syntax.
         const RENDER_COMPARABLE: &[&str] = &[
+            "N106_declared_intersection_keeps_literal",
             "X85_nested_closure_write_updates_captured_binding",
             "X87_read_only_let_capture_keeps_reaching_literal",
             "X106_triple_nested_closure_return",
@@ -3335,11 +3380,7 @@ mod corpus_suite {
             ),
             (
                 "N115_member_intersection_call_stays_pinned",
-                "the renderer spells the (KnownOwed-divergent) surface `{ a: {  } & \"x\" }` where the checker prints `{ a: \"x\"; }` — the checker reduces the intersection; the semantic divergence is held by the KnownOwed arm of the semantic test",
-            ),
-            (
-                "N106_declared_intersection_keeps_literal",
-                "the renderer spells the (KnownOwed-divergent) node `{  } & \"x\"` where the checker prints `\"x\"` — the checker reduces the intersection; the semantic divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ a: \"x\"; }`; the renderer spells the same surface `{ a: \"x\" }` — object members print without the trailing `;` terminator",
             ),
             (
                 "N120_membership_through_const_initializer",
@@ -4454,11 +4495,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member `label` Literal + member `n` Literal — deepening pins the exact literal value",
     ),
     (
-        "X23_switch_fallthrough_var",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
-    ),
-    (
         "X24_try_write_catch_read",
         Owner::U6ValueInference,
         "member `v` Union — deepening pins the exact constituent set",
@@ -4890,30 +4926,6 @@ const OPEN_DEBTS: &[&str] = &[
     "X105_closure_captures_narrowed_binding_in_guarded_arm",
     "X108_record_index_read_has_no_undefined",
     "X109_optional_index_read_through_optional_chain",
-    // ── SUBTYPE-REUNION: TypeScript's return-position reunion applies
-    //    subtype reduction (a subtype arm is absorbed into its supertype
-    //    peer); the canonical union keeps both constituents. Each row is
-    //    EXTENSIONALLY equal to the checker — the extra arm is redundant,
-    //    never wrong — so the surfaces stay clean and warm while parked
-    //    with the value-inference owner. Subtype absorption must NOT be
-    //    added to the canonical layer; the debt closes in the inference
-    //    layer that owns reunion.
-    "X26_switch_assertion_case_scope",
-    "X36_labeled_break_drops_arm_assertion",
-    "X39_try_catch_throw_point_join",
-    "X45_switch_fallthrough_case_narrows_by_chain_tests",
-    "X46_try_catch_template_throw_point",
-    "X47_try_catch_sequence_throw_point",
-    "X48_try_catch_if_guard_throw_point",
-    "X49_try_catch_new_callee_throw_point",
-    "X55_finally_entry_joins_pending_return",
-    // ── INTERSECTION-REDUCTION residue, the same extensional-equality
-    //    class: the checker reduces a literal intersected with the empty
-    //    object to the bare literal; the canonical intersection keeps
-    //    both constituents. Clean and warm; closes with the same
-    //    value-inference reduction work.
-    "N106_declared_intersection_keeps_literal",
-    "N115_member_intersection_call_stays_pinned",
 ];
 
 // Per-owner conformance — the merge go/no-go
@@ -4943,8 +4955,10 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // owner. D14 deepens five more rows into this owner's ledger: B03,
     // B04, and B10 (the `as const` readonly lost on spread-tainted
     // members — B10 moved here from the substrate owner with its debt
-    // class) and X10/X27 (union normal-form cross members).
-    (Owner::U6ValueInference, 94, 69, 22),
+    // class) and X10/X27 (union normal-form cross members). D9's
+    // return-position reunion then greens eleven of those parked rows,
+    // taking this owner from 69 matching to 80.
+    (Owner::U6ValueInference, 94, 80, 11),
     (Owner::U6LoopClosure, 6, 1, 2),
     (Owner::U6ContextualCore, 8, 7, 1),
     // B10's `as const` spread-modifier debt moved to the value-inference

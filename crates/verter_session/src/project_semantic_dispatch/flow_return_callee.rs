@@ -554,7 +554,10 @@ impl CallValue {
         ) {
             return SignatureCall::ReturnMiss;
         }
-        SignatureCall::Value(Self(clause.instantiate(dispatch, return_type, origin)))
+        SignatureCall::Value(Self(reduce_instantiated_return(
+            dispatch,
+            clause.instantiate(dispatch, return_type, origin),
+        )))
     }
 
     /// The call value of a callee SERVED as a flow position — the rail
@@ -566,7 +569,10 @@ impl CallValue {
         return_node: SemanticNodeId,
         origin: ReturnOrigin,
     ) -> Self {
-        Self(clause.instantiate(dispatch, return_node, origin))
+        Self(reduce_instantiated_return(
+            dispatch,
+            clause.instantiate(dispatch, return_node, origin),
+        ))
     }
 
     /// The call value of an already-RESOLVED call: the executor's
@@ -618,6 +624,87 @@ impl CallValue {
     /// The evaluated node, without consuming the value.
     pub(super) fn node(&self) -> SemanticNodeId {
         self.0
+    }
+}
+
+/// Reduce a callee's INSTANTIATED return the way the checker's
+/// `getIntersectionType` reduces the intersection it just built: an
+/// intersection that pairs the empty object type `{}` with a definitely
+/// non-nullish constituent drops the `{}` arm, so `andD("x")` for
+/// `andD<T>(x: T): T & {}` is the bare literal `"x"` and not `"x" & {}`.
+///
+/// The reduction belongs HERE, in the call value inference, and NOT in
+/// the canonical intersection algebra: an AUTHORED `T & {}` keeps both
+/// constituents, exactly as its source spells them. This site is the
+/// instantiation the checker performs at the call, which is the only
+/// place the two arms have already been combined into a concrete value.
+///
+/// `{}` absorbs nothing on its own — the rule needs a constituent that
+/// cannot be `null` or `undefined`, which a literal and a non-nullish
+/// primitive are BY SHAPE, with no relation question to ask. The surviving
+/// arms re-enter the canonical intersection, so a single survivor collapses
+/// to itself and nothing else about the composite is re-decided.
+fn reduce_instantiated_return(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> SemanticNodeId {
+    let graph = dispatch.graph();
+    let Some(SemanticNodeData::Intersection(members)) = graph.node_data(node).as_deref().cloned()
+    else {
+        return node;
+    };
+    let survivors: Vec<SemanticNodeId> = members
+        .iter()
+        .copied()
+        .filter(|arm| !is_empty_object_node(dispatch, *arm))
+        .collect();
+    if survivors.len() == members.len()
+        || survivors.is_empty()
+        || !survivors
+            .iter()
+            .any(|arm| is_definitely_non_nullish(dispatch, *arm))
+    {
+        return node;
+    }
+    dispatch.intern_normalized_union_or_intersection(&survivors, false)
+}
+
+/// Whether `node` is the empty object type `{}` — an object surface whose
+/// CLOSED key domain lists no member, call signature, construct signature
+/// or index signature.
+fn is_empty_object_node(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> bool {
+    matches!(
+        dispatch.graph().node_data(node).as_deref(),
+        Some(SemanticNodeData::Object(surface)) if surface.closed().is_empty()
+    )
+}
+
+/// Whether `node` is a type that can hold neither `null` nor `undefined`
+/// purely BY SHAPE: a literal, or one of the non-nullish primitives.
+///
+/// Deliberately conservative and exhaustive over
+/// [`PrimitiveKind`] — `any`, `unknown`, `void`, `null`, `undefined` and
+/// `never` all answer `false`, and every structured form answers `false`
+/// because this predicate is only ever asked to justify dropping a `{}`
+/// arm, where a wrong `true` would delete a real constraint.
+fn is_definitely_non_nullish(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> bool {
+    match dispatch.graph().node_data(node).as_deref() {
+        Some(SemanticNodeData::Literal(_)) => true,
+        Some(SemanticNodeData::Primitive(kind)) => match kind {
+            PrimitiveKind::String
+            | PrimitiveKind::Number
+            | PrimitiveKind::Boolean
+            | PrimitiveKind::BigInt
+            | PrimitiveKind::Symbol => true,
+            PrimitiveKind::Any
+            | PrimitiveKind::Unknown
+            | PrimitiveKind::Void
+            | PrimitiveKind::Null
+            | PrimitiveKind::Undefined
+            | PrimitiveKind::Never
+            | PrimitiveKind::Object => false,
+        },
+        _ => false,
     }
 }
 

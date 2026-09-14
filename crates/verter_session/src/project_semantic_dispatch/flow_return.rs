@@ -4087,7 +4087,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }),
             pending_statement_gap: None,
             conditional_arm_nesting: 0,
-            inference_only_path: false,
             call_fresh_literal_returns: Vec::new(),
             break_exits: Vec::new(),
             return_edges: Vec::new(),
@@ -4341,6 +4340,170 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Apply TypeScript's return-position SUBTYPE REDUCTION to a join's
+    /// arm list: an arm that is a strict subtype of a peer still standing
+    /// is absorbed into that peer.
+    ///
+    /// The traversal mirrors `tsc`'s `removeSubtypes` — walk the arms from
+    /// last to first and compare each against the arms that have SURVIVED
+    /// so far, so an already-absorbed arm never absorbs one of its own
+    /// peers — and the surviving arms keep their source order.
+    ///
+    /// Every judgement comes from the SHARED relation authority
+    /// ([`SemanticQueryKey::Relate`](crate::semantic_query::SemanticQueryKey::Relate)
+    /// through [`ProjectSemanticDispatch::execute_relate_pair`]); this
+    /// consumer decides nothing itself. Each ORDERED pair is asked at most
+    /// once per join (the `decided` memo).
+    ///
+    /// An admitted reduction the authority cannot finish abandons the
+    /// WHOLE reduction ([`ReunionReduction::Undecided`]): the caller keeps
+    /// every arm behind a typed relation gap rather than publishing a
+    /// partially-reduced list no single judgement supports.
+    fn reduce_return_arms_to_supertypes(&self, arms: &[SemanticNodeId]) -> ReunionReduction {
+        let mut kept: Vec<bool> = vec![true; arms.len()];
+        let mut decided: rustc_hash::FxHashMap<(SemanticNodeId, SemanticNodeId), bool> =
+            rustc_hash::FxHashMap::default();
+        for index in (0..arms.len()).rev() {
+            for other in 0..arms.len() {
+                if other == index || !kept[other] || arms[other] == arms[index] {
+                    continue;
+                }
+                match self.arm_is_strict_subtype(arms[index], arms[other], &mut decided) {
+                    StrictSubtype::Yes => {
+                        kept[index] = false;
+                        break;
+                    }
+                    StrictSubtype::No => {}
+                    StrictSubtype::Undecided => return ReunionReduction::Undecided,
+                }
+            }
+        }
+        ReunionReduction::Reduced(
+            arms.iter()
+                .enumerate()
+                .filter_map(|(index, arm)| kept[index].then_some(*arm))
+                .collect(),
+        )
+    }
+
+    /// Whether `arm` is a STRICT subtype of `peer`: assignable one way and
+    /// not the other, both judgements from the shared relation authority.
+    ///
+    /// The directions are asked in a FIXED order, and the order carries
+    /// the contract. `arm -> peer` decides whether the pair is a
+    /// reduction candidate AT ALL: a `NotAssignable` answer refutes
+    /// absorption outright, and an answer the authority does not give
+    /// means this pair never entered the reduction — exactly as it did
+    /// not before the reduction existed — so nothing is claimed about it
+    /// and nothing is degraded. Only an ADMITTED candidate goes on to the
+    /// reverse direction, where the authority separates a strict subtype
+    /// (absorbed) from a mutually-assignable twin (both kept); an
+    /// UNDECIDED reverse leaves that admitted reduction unfinished, which
+    /// is the one state the caller fails closed on.
+    fn arm_is_strict_subtype(
+        &self,
+        arm: SemanticNodeId,
+        peer: SemanticNodeId,
+        decided: &mut rustc_hash::FxHashMap<(SemanticNodeId, SemanticNodeId), bool>,
+    ) -> StrictSubtype {
+        if self.return_arms_have_disjoint_key_domains(arm, peer) {
+            return StrictSubtype::No;
+        }
+        if self.relation_answer(arm, peer, decided) != Some(true) {
+            return StrictSubtype::No;
+        }
+        match self.relation_answer(peer, arm, decided) {
+            // Mutually assignable: the same type to the authority, so
+            // neither arm is strictly below the other.
+            Some(true) => StrictSubtype::No,
+            Some(false) => StrictSubtype::Yes,
+            None => StrictSubtype::Undecided,
+        }
+    }
+
+    /// Whether two return arms are two PLAIN object surfaces listing
+    /// DIFFERENT keys — the shape the checker's own return reunion can
+    /// never put in a subtype relation.
+    ///
+    /// When a function returns object literals with different key sets,
+    /// the checker normalizes each arm with `key?: undefined` for every
+    /// key its siblings have and it does not: `if (n) { return { label, n } }
+    /// return { label }` prints
+    /// `{ label: string; n: number; } | { n?: undefined; label: string; }`.
+    /// A `n: number` member does not satisfy `n?: undefined`, and a
+    /// missing-or-`undefined` `n` does not satisfy `n: number`, so NEITHER
+    /// normalized arm is assignable to the other and both survive
+    /// reduction.
+    ///
+    /// The flow substrate publishes the un-normalized arms, so asking the
+    /// relation about THIS pair asks about types the checker never
+    /// compared — and `{ label, n }` is trivially assignable to
+    /// `{ label }`, which would delete the `n` member the checker
+    /// publishes. The pair is refused before the relation is consulted;
+    /// nothing is decided here that the relation would have decided.
+    ///
+    /// Scoped to surfaces whose key domain IS the member list: a call,
+    /// construct or index signature on either side makes "the keys it
+    /// lists" the wrong question, and those pairs go to the relation.
+    fn return_arms_have_disjoint_key_domains(
+        &self,
+        arm: SemanticNodeId,
+        peer: SemanticNodeId,
+    ) -> bool {
+        let graph = self.graph();
+        let (Some(arm_data), Some(peer_data)) = (graph.node_data(arm), graph.node_data(peer))
+        else {
+            return false;
+        };
+        let (SemanticNodeData::Object(arm_surface), SemanticNodeData::Object(peer_surface)) =
+            (&*arm_data, &*peer_data)
+        else {
+            return false;
+        };
+        if !is_plain_key_listing_surface(arm_surface) || !is_plain_key_listing_surface(peer_surface)
+        {
+            return false;
+        }
+        let arm_members = arm_surface.closed().complete_members();
+        let peer_members = peer_surface.closed().complete_members();
+        arm_members.len() != peer_members.len()
+            || !arm_members.iter().all(|member| {
+                // A COMPUTED key cannot be matched against the peer's
+                // list, so the pair is refused rather than compared on a
+                // key domain neither side can name.
+                member.key.cloned_known().is_some_and(|key| {
+                    matches!(
+                        peer_surface.project_known_key(&key),
+                        crate::semantic_query::SurfaceKeyProjection::Exact(_)
+                    )
+                })
+            })
+    }
+
+    /// One memoized assignability read from the shared relation authority.
+    /// `None` is the authority's own "no judgement" — undecided, a budget
+    /// cap, or a coinductive assumption — and is never cached as an
+    /// answer, because it is not one.
+    fn relation_answer(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        decided: &mut rustc_hash::FxHashMap<(SemanticNodeId, SemanticNodeId), bool>,
+    ) -> Option<bool> {
+        if let Some(known) = decided.get(&(source, target)) {
+            return Some(*known);
+        }
+        let answer = match self.execute_relate_pair(source, target) {
+            super::dispatch_txn::RelationStep::Assignable { .. } => true,
+            super::dispatch_txn::RelationStep::NotAssignable => false,
+            super::dispatch_txn::RelationStep::Unknown
+            | super::dispatch_txn::RelationStep::BudgetExceeded(_)
+            | super::dispatch_txn::RelationStep::Assumed(_) => return None,
+        };
+        decided.insert((source, target), answer);
+        Some(answer)
+    }
+
     /// The union arms of `node`, when it interned as a union — the
     /// `getAssignmentReducedType` gate (a NON-union declared type
     /// supplies its binding verbatim).
@@ -4415,7 +4578,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             })
             .collect();
         let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(contributors.len());
-        let mut inference_only: Vec<bool> = Vec::with_capacity(contributors.len());
         let mut all_fresh = true;
         for contribution in contributors {
             // Fold freshness over EVERY contributor, including the ones
@@ -4431,12 +4593,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // these two arms ARE the same type, and separating them would
             // emit `1 | 1`.
             all_fresh &= contribution.fresh_literal;
-            if let Some(index) = arms.iter().position(|node| *node == contribution.node) {
-                inference_only[index] &= contribution.inference_only;
+            if arms.contains(&contribution.node) {
                 continue;
             }
             arms.push(contribution.node);
-            inference_only.push(contribution.inference_only);
         }
         // A multi-arm join aggregates over EVALUATED constituents, exactly
         // as the checker's return aggregation does: an alias-instantiation
@@ -4505,19 +4665,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ));
             }
             arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
-            inference_only.push(false);
         }
         if observations.implicit_undefined() {
             arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
-            inference_only.push(false);
         }
         if can_fall_through.reaches_end(CompletionDischarge::ReturnJoin) {
             if arms.is_empty() {
                 arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void)));
-                inference_only.push(false);
             } else {
                 arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
-                inference_only.push(false);
             }
         } else if arms.is_empty() {
             if holds.is_empty() {
@@ -4534,38 +4690,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     crate::flow_slice_content::EmptyCompletion::Never => PrimitiveKind::Never,
                 };
                 arms.push(graph.intern_node(SemanticNodeData::Primitive(primitive)));
-                inference_only.push(false);
             } else {
                 return Err(FlowReturnFailure::EmptyCycle);
             }
         }
-        // A suffix reached only through the checker's return-inference view
-        // of an overridden break is not a second runtime path. Drop that
-        // synthetic contributor when an ordinary authored return already
-        // covers it; keep incomparable suffixes, which are precisely why the
-        // inference-only edge exists. Ordinary return contributors retain
-        // their established graph shape — this is not generic union
-        // dominance or assignment-time constituent selection.
-        if inference_only.iter().any(|flag| *flag) {
-            arms = arms
-                .iter()
-                .enumerate()
-                .filter_map(|(index, candidate)| {
-                    let covered = inference_only[index]
-                        && arms.iter().enumerate().any(|(other_index, other)| {
-                            !inference_only[other_index]
-                                && matches!(
-                                    self.execute_relate_pair(*candidate, *other),
-                                    super::dispatch_txn::RelationStep::Assignable { .. }
-                                )
-                                && matches!(
-                                    self.execute_relate_pair(*other, *candidate),
-                                    super::dispatch_txn::RelationStep::NotAssignable
-                                )
-                        });
-                    (!covered).then_some(*candidate)
-                })
-                .collect();
+        // TypeScript's return-position reunion applies SUBTYPE REDUCTION
+        // (`getUnionType(types, UnionReduction.Subtype)` in
+        // `getReturnTypeFromBody`): an arm that is a STRICT subtype of a
+        // surviving peer is absorbed into that peer, so `{ v: string }`
+        // beside `{ v: string | number }` leaves only the supertype. This
+        // subsumes the older narrow rule that dropped an overridden
+        // break's return-inference suffix when an ordinary authored
+        // return already covered it — the same strict-subtype judgement,
+        // asked of every arm instead of only the synthetic ones.
+        //
+        // The CANONICAL union deliberately keeps every constituent — a
+        // supertype arm never swallows a subtype arm there — so this
+        // reduction is the inference layer's, applied to the join's arm
+        // list before the canonical union interns it.
+        //
+        // Every pair is decided by the SHARED relation authority; the
+        // evaluator owns no subtype oracle of its own. An UNDECIDED
+        // reduction keeps every arm and records the typed relation gap,
+        // so a result that MIGHT be broader than the checker's is
+        // `ReturnOnly` rather than a guessed absorption promoted warm.
+        let mut degradation = degradation;
+        if arms.len() >= 2 {
+            match self.reduce_return_arms_to_supertypes(&arms) {
+                ReunionReduction::Reduced(reduced) => arms = reduced,
+                ReunionReduction::Undecided => {
+                    degradation.get_or_insert(FlowReturnDegradation::FlowGap(
+                        crate::semantic_query::FlowGap::NominalRelation,
+                    ));
+                }
+            }
         }
         let return_type = self.intern_normalized_union_or_intersection(&arms, true);
         Ok((
@@ -5261,9 +5419,6 @@ struct FlowEvaluator<'d, 'b> {
     /// block NEVER increments it — a block executes unconditionally, so a
     /// `var` it declares has exactly one reaching definition.
     conditional_arm_nesting: u32,
-    /// Whether the current path exists only for return inference after an
-    /// abrupt `finally` replaced the pending break at runtime.
-    inference_only_path: bool,
     /// COMPLETED calls in this frame that closed with fresh-preserved
     /// literal deposits, recorded by their authored call-site span — the
     /// call-SITE identity a consuming position matches against, never the
@@ -5422,6 +5577,43 @@ struct FlowExecutionWitness<'w> {
     products: &'w FlowProductStore,
 }
 
+/// Whether a surface's key domain IS the list of members it names: no
+/// call, construct or index signature widens it.
+fn is_plain_key_listing_surface(surface: &crate::semantic_query::SurfaceView) -> bool {
+    surface.call_signatures.is_empty()
+        && surface.construct_signatures.is_empty()
+        && surface.index_signatures.is_empty()
+        && !surface.has_known_index_signature()
+}
+
+/// One arm pair's strict-subtype judgement, as the shared relation
+/// authority answered it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrictSubtype {
+    /// The arm is strictly below the peer and is absorbed into it.
+    Yes,
+    /// The arm is not strictly below the peer.
+    No,
+    /// The authority left an admitted reduction open; no absorption may
+    /// be claimed.
+    Undecided,
+}
+
+/// The outcome of the return-position subtype reduction over one join's
+/// arm list.
+///
+/// Two states rather than an `Option<Vec<_>>`: "nothing was absorbed" and
+/// "the relation authority could not decide a pair" are the same arm list
+/// but NOT the same result — only the second one degrades the join.
+enum ReunionReduction {
+    /// The reduction completed; these are the surviving arms, in source
+    /// order.
+    Reduced(Vec<SemanticNodeId>),
+    /// A consulted pair had no decided judgement. No absorption is
+    /// claimed and the caller keeps every arm behind a typed gap.
+    Undecided,
+}
+
 /// One return-site contribution: the evaluated node plus whether it came
 /// from a FRESH literal source (a bare literal return argument, or a read
 /// of a widening-literal `const`). tsc widens a fresh literal return only
@@ -5433,9 +5625,6 @@ struct FlowContribution {
     node: SemanticNodeId,
     /// The contributor is a fresh (widening) literal source.
     fresh_literal: bool,
-    /// The contributor is reached only through an overridden break's
-    /// return-inference suffix edge.
-    inference_only: bool,
     /// The FRESH literal values this contribution carries into the join,
     /// at its own top level: the node itself for a bare-literal return,
     /// the membership's values for a widening-local read, a completed
@@ -5511,9 +5700,6 @@ struct FreshCallReturn {
 struct FlowLayerState {
     products: FlowProductStore,
     write_observation: FlowWriteObservation,
-    /// Whether this snapshot exists only for the return-inference suffix
-    /// of a break that an abrupt `finally` replaced at runtime.
-    inference_only_path: bool,
 }
 
 /// A mark in the narrowing overlay: the facts every subject held, plus how
@@ -6380,7 +6566,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return FlowLayerState {
                 products: FlowProductStore::join(&[&first.products], observation, self.dispatch),
                 write_observation: self.products.observe_writes(),
-                inference_only_path: first.inference_only_path,
             };
         }
         #[cfg(test)]
@@ -6425,7 +6610,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let joined = FlowLayerState {
             products: FlowProductStore::join(&products, observation, algebra),
             write_observation: self.products.observe_writes(),
-            inference_only_path: incoming.iter().all(|state| state.inference_only_path),
         };
         #[cfg(test)]
         if let Some(observed) = observed {
@@ -6911,14 +7095,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             incoming.push(FlowLayerState {
                 products: consequent.clone(),
                 write_observation: consequent.observe_writes(),
-                inference_only_path: self.inference_only_path,
             });
         }
         if alternate_falls {
             incoming.push(FlowLayerState {
                 products: alternate.clone(),
                 write_observation: entry.observe_writes(),
-                inference_only_path: self.inference_only_path,
             });
         }
         if incoming.is_empty() {
@@ -7056,14 +7238,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         FlowLayerState {
             products: self.products.clone(),
             write_observation: self.products.observe_writes(),
-            inference_only_path: self.inference_only_path,
         }
     }
 
     /// Restore a snapshot into the live state.
     fn restore_layer_state(&mut self, state: FlowLayerState) {
         self.products = state.products;
-        self.inference_only_path = state.inference_only_path;
     }
 
     /// Close ONE block scope over `state` (a snapshot, or the live layers
@@ -9858,7 +10038,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             Ok(Some(node)) => contributors.push(FlowContribution {
                                 node,
                                 fresh_literal: false,
-                                inference_only: self.inference_only_path,
                                 fresh_values: Vec::new(),
                             }),
                             Ok(None) => {}
@@ -9959,7 +10138,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 contributors.push(FlowContribution {
                                     node,
                                     fresh_literal,
-                                    inference_only: self.inference_only_path,
                                     fresh_values,
                                 });
                             }
@@ -10663,10 +10841,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                         })
                                     })
                                     .cloned()
-                                    .map(|mut exit| {
-                                        exit.state.inference_only_path = true;
-                                        exit
-                                    })
                                     .collect();
                                 let finally_breaks = self.break_exits.split_off(finally_break_base);
                                 self.break_exits.truncate(break_base);
@@ -11816,7 +11990,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 degradation: None,
                 pending_statement_gap: None,
                 conditional_arm_nesting: 0,
-                inference_only_path: false,
                 call_fresh_literal_returns: Vec::new(),
                 break_exits: Vec::new(),
                 return_edges: Vec::new(),

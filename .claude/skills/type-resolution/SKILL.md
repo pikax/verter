@@ -1232,6 +1232,62 @@ The classification mirrors the checker's BINDER (`createFlowCondition`) and is d
 
 Acceptance: `flow_return_loop_completion_tests` (four row tables, every expectation anchored against `tsc 7.0.2 --strict` via `--declaration --emitDeclarationOnly`), plus `a_loop_fixed_point_survives_an_edit_as_the_fresh_answer` — the two spellings differ by one `break`, and each is published on a host already warmed with the other and compared against a host that has only ever seen it, so a completion fact an edit failed to invalidate surfaces as a type difference rather than a stale count nobody reads — plus the catalog rows `flow_return_bl13_throw_only_declaration_is_void` and `flow_return_bl15_models_divergent_loop_as_void`.
 
+#### Return-Position Subtype Reunion
+
+The join that turns a body's return arms into one value applies TypeScript's
+return-position SUBTYPE REDUCTION (`getUnionType(types, UnionReduction.Subtype)`
+in `getReturnTypeFromBody`): an arm that is a strict subtype of a surviving peer
+is absorbed into that peer, so `{ c: string }` beside `{ c: string | number }`
+leaves only the supertype. The reduction lives in the flow evaluator's VALUE
+INFERENCE — `join_flow_return_contributors` →
+`reduce_return_arms_to_supertypes`, applied to the arm list before the canonical
+union interns it. It is deliberately NOT in the canonical algebra, where a
+supertype arm never swallows a subtype arm: the same two object nodes handed to
+`intern_normalized_union_or_intersection` still intern as a two-arm union.
+
+Every judgement comes from the SHARED relation authority
+(`SemanticQueryKey::Relate` through `execute_relate_pair`); the evaluator owns no
+subtype oracle, and `RelationKind::Subtype` / `StrictSubtype` are refused by the
+reducer, so "strict subtype" IS the pair `arm → peer` assignable and
+`peer → arm` not. The directions are asked in a FIXED order and the order is the
+contract: `arm → peer` decides whether the pair is a reduction candidate at all
+(a `NotAssignable` answer refutes absorption; an answer the authority does not
+give means the pair never entered the reduction, exactly as before the reduction
+existed), and only an ADMITTED candidate asks the reverse, where an UNDECIDED
+answer leaves that reduction unfinished — every arm survives, `FlowGap::NominalRelation`
+rides the result, and it is `ReturnOnly`. The traversal mirrors `tsc`'s
+`removeSubtypes` (last arm to first, compared against the arms still standing),
+surviving arms keep source order, and each ORDERED pair is asked at most once per
+join.
+
+One structural precondition runs BEFORE the relation: two plain object surfaces
+listing DIFFERENT keys are never a reduction pair. The checker's own union of
+object literals normalizes each arm with `key?: undefined` for a key its siblings
+have and it does not (`if (n) { return { label, n } } return { label }` prints
+`{ label: string; n: number; } | { n?: undefined; label: string; }`), so neither
+normalized arm is assignable to the other; the flow substrate publishes the
+un-normalized arms, where `{ label, n }` IS assignable to `{ label }` and
+absorbing it would delete the `n` member the checker publishes. The gate is scoped
+to surfaces whose key domain is the member list — a call, construct or index
+signature on either side goes to the relation.
+
+The call value carries a matching reduction on the intersection side: a callee's
+INSTANTIATED return that pairs the empty object type `{}` with a definitely
+non-nullish constituent drops the `{}` arm (`andD<T>(x: T): T & {}` called at
+`"x"` is `"x"`, not `"x" & {}`), in the one call sink
+(`flow_return_callee.rs` → `reduce_instantiated_return`) where the checker's
+`getIntersectionType` performs it. An AUTHORED `T & {}` keeps both constituents;
+"definitely non-nullish" is a node-SHAPE fact (a literal, or a non-nullish
+primitive), not a relation question.
+
+Acceptance: `flow_return_reunion_absorbs_a_subtype_arm_but_the_canonical_union_keeps_both`,
+`flow_return_reunion_keeps_the_surviving_arms_in_source_order`,
+`flow_return_reunion_undecided_reverse_relation_keeps_every_arm_and_never_warms`,
+`flow_return_reunion_asks_each_arm_pair_once_and_a_warm_replay_asks_nothing`,
+`flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object`, plus
+the checker-pinned corpus rows (`X26`, `X36`, `X39`, `X45`–`X49`, `X55`, `N106`,
+`N115`) in `u6_flow_shape_corpus_rows_tests.rs`.
+
 #### The Completion-Carrier Inventory
 
 A completion fact carries no degradation of its own, so a carrier that drops or inverts one publishes a WRONG answer that also WARMS — nothing downstream can tell a lost fall-through edge from a body that genuinely never completes. The defence is the closed inventory in `crates/verter_session/src/flow_completion_inventory.rs`, which makes an unlisted carrier unrepresentable rather than merely undocumented.

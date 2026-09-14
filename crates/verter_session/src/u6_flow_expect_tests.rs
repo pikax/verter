@@ -2422,14 +2422,15 @@ mod matrix_suite {
             script: "function makeProps(v: string | number) { if (typeof v === \"string\") { return () => v } return () => \"z\" as const }",
             checker: "() => string",
             outcome: CellOutcome::Value {
-                rendered: "Union(() => Union(string | number) | () => \"z\")",
+                rendered: "() => Union(string | number)",
                 degradation: Degr::FlowGap(FlowGap::ClosureCapture),
                 warm_replay: false,
             },
             gap: "the typeof guard established BEFORE closure creation does not narrow the \
-                  captured read (`string | number` where the checker preserves `string`), and \
-                  the contributor union is not subtype-collapsed to `() => string` — the G9 \
-                  class, wrong-and-warm; owner U6.LOOP_CLOSURE",
+                  captured read, so the guarded arm evaluates to `() => string | number` where \
+                  the checker preserves `string`. Return-position subtype reduction then \
+                  absorbs the `() => \"z\"` peer into it, so the collapse the checker performs \
+                  DOES happen — onto an over-broad arm; owner U6.LOOP_CLOSURE",
         },
         FixedCell {
             id: "iife_write_in_try_finally",
@@ -6374,13 +6375,14 @@ fn in_guard_presence_is_separate_from_value_undefined() {
             Degr::None,
             true,
         ),
+        // The guarded arm reads `string | number | undefined`, which makes
+        // the fall-through `{ v: number }` a strict subtype of it: the
+        // return-position reunion absorbs that peer, exactly as the
+        // checker's own subtype reduction does.
         (
             "mixed_optional_and_required_arms_union_their_reads",
             "type A = { k?: string }; type B = { k: number }\nfunction f(x: A | B) { if (\"k\" in x) { return { v: x.k } } return { v: 0 } }",
-            union2(
-                &obj_v(r#"{"kind":"union","types":[{"kind":"primitive","name":"string"},{"kind":"primitive","name":"number"},{"kind":"primitive","name":"undefined"}]}"#),
-                &obj_v(num),
-            ),
+            obj_v(r#"{"kind":"union","types":[{"kind":"primitive","name":"string"},{"kind":"primitive","name":"number"},{"kind":"primitive","name":"undefined"}]}"#),
             Degr::None,
             true,
         ),
