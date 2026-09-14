@@ -14,6 +14,7 @@ mod official_parse_manifest_guard;
 mod parse_diagnostic_determinism;
 mod projection_catalog;
 mod style_codetransform_map_coverage;
+mod style_continuation_boundary;
 mod style_declaration_list_routing;
 mod style_pipeline_ordering;
 mod style_stage_identity;
