@@ -1237,15 +1237,61 @@ pub(crate) fn empty_fact_signature() -> Arc<[FactVersionRef]> {
     Arc::from(Vec::<FactVersionRef>::new())
 }
 
+/// Maps a `(canonical, DepVersion)` fence accumulator into the
+/// `Arc<[FactVersionRef]>` form a fact-signature carrier holds (the
+/// owner-import-surface entry is the live consumer).
+///
+/// Per-version mapping (no generation dep is silently dropped — a
+/// dropped generation dep would let the warm-cache validator confirm
+/// a value rooted on a superseded project shape):
+///
+/// - `WholeHash` → `FileWholeHash` — the observed content version.
+/// - `ProjectGeneration` → `FactVersionRef::ProjectGeneration` — a
+///   project-shape change bumps the counter and rejects the entry; a
+///   pure file-content edit never bumps it, so this does not
+///   over-invalidate.
+/// - `RouteGeneration` → the whole function returns `None`. Route
+///   generation has no authoritative validating source (there is no
+///   production emitter and the fence validator treats it as
+///   always-valid), so an entry rooted on it could not detect a
+///   content edit to the route-observed file. A `None` result signals
+///   the value is not safely cacheable; the caller must not admit it.
+#[must_use]
+pub(crate) fn fact_signature_from_fence(
+    fence: &[(Arc<str>, crate::semantic_query::DepVersion)],
+) -> Option<Arc<[FactVersionRef]>> {
+    use crate::semantic_query::DepVersion;
+    let mut out: Vec<FactVersionRef> = Vec::with_capacity(fence.len());
+    for (canonical, version) in fence.iter() {
+        match version {
+            DepVersion::WholeHash(hash) => {
+                out.push(FactVersionRef::FileWholeHash {
+                    canonical_id: canonical.as_ref().to_string(),
+                    hash: *hash,
+                });
+            }
+            DepVersion::ProjectGeneration(generation) => {
+                out.push(FactVersionRef::ProjectGeneration {
+                    generation: *generation,
+                });
+            }
+            DepVersion::RouteGeneration(_) => {
+                // Route generation cannot be soundly rooted — refuse
+                // the whole signature rather than rooting an entry on a
+                // fact that cannot catch a content edit.
+                return None;
+            }
+        }
+    }
+    Some(Arc::from(out))
+}
+
 /// The pair a structural-carrier signature producer returns: the
 /// path-precise `FactVersionRef` signature plus the explicit self-root
-/// canonical set the warm-read validator checks **strictly**. Produced
-/// by `materialize_structure_read_set` (the `MaterializeStructureDb`
-/// carrier).
-/// `materialize_structure_read_set` returns
-/// `Result<StructuralCarrierReadSet, NonAdmissionReason>` so refusal
-/// modes (`SelfRootConflict`, `RouteGenerationDependency`) reach the
-/// caller verbatim; `ref_cycle_read_set` uses the same typed result for
+/// canonical set the warm-read validator checks **strictly**. A producer
+/// returns `Result<StructuralCarrierReadSet, NonAdmissionReason>` so
+/// refusal modes (`SelfRootConflict`, `RouteGenerationDependency`) reach
+/// the caller verbatim; `ref_cycle_read_set` uses the same typed result for
 /// torn roots, unresolved strict-world provenance, and completed-carrier
 /// overflow.
 pub(crate) type StructuralCarrierReadSet = (Arc<[FactVersionRef]>, Arc<[Arc<str>]>);

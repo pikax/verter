@@ -80,19 +80,8 @@ pub(crate) use dispatch_helpers::{
     project_expr_class_a_via_dispatch,
 };
 pub(crate) use graph_predicates::{
-    build_keys_union_node, component_meta_ref_resolves_to_package_node,
-    extract_route_root_identity_node, node_package_backed_object_like_root_with_fence,
+    build_keys_union_node, node_package_backed_object_like_root_with_fence,
     node_root_reaches_transitive_cycle_with_fence,
-};
-// / clippy cleanup — these graph-native predicates
-// have no non-test consumers in the landed tree but are exercised by
-// `meta_resolve_tests.rs` and other integration-test targets via
-// `crate::meta_resolve::*` paths. Gating with `#[cfg(test)]` keeps the
-// non-test build surface clean while preserving the test re-export
-// contract.
-#[cfg(test)]
-pub(crate) use graph_predicates::{
-    declaration_body_prefers_inline_materialization_node, type_node_has_package_backed_root,
 };
 // `jsdoc_resolve` source moved to
 // `host_manage/jsdoc_resolve.rs` (host-impl tier; the

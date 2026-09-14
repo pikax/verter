@@ -136,22 +136,6 @@ fn structural_carrier_producers_use_no_permissive_get_any() {
 
     let scanned = [
         Scanned {
-            file: "component_meta_materialize.rs",
-            signature: "fn materialize_structure_read_set(",
-        },
-        Scanned {
-            file: "component_meta_materialize.rs",
-            signature: "fn merge_traced_facts_into_materialize_carrier(",
-        },
-        Scanned {
-            file: "component_meta_materialize.rs",
-            signature: "fn finish_materialize_admission(",
-        },
-        Scanned {
-            file: "component_meta_materialize.rs",
-            signature: "fn base_node_origin_self_root(",
-        },
-        Scanned {
             file: "project_semantic_dispatch/cycle_gate.rs",
             signature: "pub(super) fn build_classify_materialization_cycle_gate(",
         },
@@ -276,11 +260,6 @@ fn get_any_scanner_discriminates() {
     );
 
     // Sanity: the scanned producers exist.
-    assert!(
-        read_session_source("component_meta_materialize.rs")
-            .contains("fn materialize_structure_read_set("),
-        "materialize_structure_read_set must be present",
-    );
     assert!(
         read_session_source("resolver_store.rs").contains("pub(crate) fn hash_route_surface("),
         "hash_route_surface must be present",

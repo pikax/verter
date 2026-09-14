@@ -687,9 +687,9 @@ impl MetaSession {
     /// - all N jobs route through
     ///   [`VerterHost::get_component_meta_via_view`] against the same
     ///   `&dyn SessionView`, so they share the host-owned admission
-    ///   caches (`MaterializeStructureDb`, `ComponentMetaResultDb`,
-    ///   `SemanticGraphStore`) — two files importing the same inner
-    ///   type collapse to a single materialiser admission, not N.
+    ///   caches (`ComponentMetaResultDb`, `SemanticGraphStore`,
+    ///   `ShapeCacheDb`) — two files importing the same inner type
+    ///   collapse to a single semantic-graph admission, not N.
     ///
     /// Per-id failures (budget overruns, alias errors) surface in the
     /// per-result `Result` slot; the batch does not abort on per-id

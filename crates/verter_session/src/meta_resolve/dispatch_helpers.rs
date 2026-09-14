@@ -14,16 +14,6 @@
 //! `TypeExpr` ONCE at the registered surface sink (the demand-bound
 //! publication adapters in `component_meta_query_engine::surface`).
 //!
-//! Class B helpers resolve a root symbol's surface through
-//! `dispatch.execute_read(Instantiate { base, args: [], context:
-//! InstantiateContext { projection_reduction, resolve_env_hash } })` with
-//! `context.projection_reduction.mode = Expanded`, where `base` is the
-//! env-bearing content-free `ResolvedDeclSlotIdentity` slot, the result
-//! node likewise materialised once at the surface sink. The slot
-//! carries the project-identity / type-env / lib-env dims and the
-//! resolve-env dim rides on `InstantiateContext`; the live whole-hash is
-//! re-sourced at value-compute via `ensure_indexed_ready_serve`, never in the key.
-//!
 //! The surface bridge helpers thread the caller's `ResolverContext` through
 //! dispatch and compose the surviving `pub(crate)` cycle-protected dispatch
 //! helpers (`dispatch_projected_surface_with_node`,
@@ -40,310 +30,147 @@ use std::sync::Arc;
 
 /// Realize a slot/macro member value to its underlying callable
 /// [`crate::semantic_query::SemanticNodeData::Signature`] node, if one
-/// exists, by normalizing through the carrier shells the
-/// `StructuralTransit(Navigate)` macro-publication path produces.
+/// exists.
 ///
-/// Under the Transit-Shallow Publication contract, a macro
-/// publication helper lowers its payload at
-/// `structural_transit_with_mode(Navigate)`. The published slot
-/// member's value is therefore NOT a fully-reduced `Function` —
-/// it may be:
-///   - a `Function` (the simple case);
-///   - an `Alias { inner }` (one-level alias wrap);
-///   - a `Conditional` that's decidable but didn't reduce because the
-///     publication context carrier-stopped operator reduction;
-///   - an `InstantiationRef { base, args }` carrier waiting for
-///     instantiation;
-///   - a `DeclRef { identity }` carrier waiting for declaration
-///     resolution.
+/// Under the Transit-Shallow Publication contract a macro publication
+/// helper lowers its payload at `structural_transit_with_mode(Navigate)`,
+/// so a published slot member's value is NOT a fully-reduced `Function`:
+/// it may be an `Alias`, a decidable-but-unreduced `Conditional`, an
+/// `InstantiationRef` / `DeclRef` carrier, a declaration placeholder, or
+/// a `Union` / `Intersection` of such carriers. Consumers (the
+/// graph-native slot binding extractor's `Function` match arm,
+/// `surface_member_to_expanded_field`'s classification, the slot
+/// projector) MUST normalize their input through this primitive BEFORE
+/// deciding "not a callable".
 ///
-/// Consumers (the graph-native slot binding extractor's `Function`
-/// match arm, `surface_member_to_expanded_field`'s classification,
-/// the slot projector) MUST normalize their input through this
-/// realization primitive BEFORE deciding "not a callable".
+/// This primitive owns NO evaluation of its own. The carrier shells are
+/// normalized by the one dispatch-owned structural-fact demand
+/// ([`ProjectSemanticDispatch::normalize_node_for_structural_fact_demand`]),
+/// which evaluates deferred shells and resolves residual `DeclRef` /
+/// `InstantiationRef` carriers through the shared `ResolveDecl` /
+/// `Instantiate` queries under the CALLER'S complete
+/// `ProjectionReductionContext` — the request owns the context; nothing
+/// here rebuilds, defaults, or narrows it. What remains is a pure
+/// classification of the normalized node:
 ///
-/// ## Realization steps (in order)
+/// - a CALL `Signature` → `Resolved(node)` (a construct signature is not
+///   invocable as a callback and is "not a callable");
+/// - a `Union` / `Intersection` → every arm is classified through this
+///   same primitive and the composite of realized arms is rebuilt (a
+///   non-callable arm is the complete negative answer; an unresolved arm
+///   makes the whole composite incomplete);
+/// - an unresolved `import("pkg").Name<…>` shell AT THE ROOT → classified
+///   AS-IS without being forced: the shared stable-carrier rule answers
+///   `Incomplete(MissingDependency)` for every import-type shell (a
+///   carrier-semantics stop, not an evaluation). The stop is root-only by
+///   design: the macro-surface replay identifies a callable occurrence by
+///   the member node the publication surface carried, and a ROOT shell
+///   resolved only on demand would replay as its resolved carrier. A shell
+///   reached THROUGH a local alias publishes the alias node as its subject,
+///   replays identically, and therefore normalizes through the shared
+///   demand like any other carrier (pinned at the public boundary by
+///   `svelte_alias_wrapped_import_type_snippet_prop_publishes_return`);
+/// - a residual `DeclRef` / `InstantiationRef` the demand stopped on
+///   (a no-progress fix-point) → `Incomplete(MissingDependency)`;
+/// - a demand that was operationally truncated or faulted → `Incomplete`
+///   with the demand's own typed reasons;
+/// - every other shape classifies through the shared
+///   [`stable_member_carrier_partiality`] rule: a genuinely non-callable
+///   resolved shape (Object, Primitive, Mapped, KeyOf, an undecidable
+///   `Conditional` shell, …) and a STABLE authored miss keep the complete
+///   `NoSurface` answer, while an OPERATIONAL failure (an import-backed
+///   unresolvable, a budget / cancellation / torn-state fault) is an
+///   `Incomplete` realization with its typed reason.
 ///
-/// 1. **`Function`** → return verbatim.
-/// 2. **`Alias { inner }`** → recurse on `inner` (one-hop alias unwrap).
-/// 3. **`Conditional`** → dispatch the conditional through the relation
-///    engine so a decidable conditional reduces to a single branch.
-///    The reduction is independent of the parent's
-///    `may_reduce_operator` gate (the relation engine has its own
-///    decidability check). Recurse on the reduced result.
-/// 4. **`InstantiationRef { base, args }`** → dispatch `Instantiate`
-///    under `structural_transit_with_mode(Navigate)` so the body's
-///    nested operators carrier-stop while `Conditional` reduction
-///    (which is what produces the Function for `T extends (props: P)
-///    => any ? F : ...`) still fires. Recurse on the body.
-/// 5. **`DeclRef { identity }`** → dispatch `ResolveDecl` to unwrap the
-///    identity, then recurse on the resolved body.
+/// **Diagnostic propagation**: the shared demand fans every sub-query's
+/// `dep_signature` into the active fact tracer and folds its partial /
+/// suppress signals, so the caller's cache-validity signature observes the
+/// same facts the realization depended on.
 ///
-/// Any other RESOLVED shape (Object, Primitive, Mapped, KeyOf, ...)
-/// returns `NoSurface` — the consumer's "not a function" arm fires as a
-/// COMPLETE negative answer. An UNRESOLVED carrier (an import miss, a
-/// failed `ResolveDecl` / `Instantiate`, a missing arena node, the depth
-/// fuse) is `Incomplete` with its typed reason — a failed realization is
-/// never spelled as "not callable".
-///
-/// **Cycle / depth safety**: bounded at depth 32 — generous enough for
-/// real-world carrier nesting (Alias → InstantiationRef → Conditional →
-/// Function is depth 4), tight enough to fail loudly on pathological
-/// graphs without consuming the test budget.
-///
-/// **Diagnostic propagation**: every sub-dispatch uses `execute_read`
-/// and fans the `dep_signature` into the active fact tracer so the
-/// caller's cache validity signature observes the same facts the
-/// realization depended on.
-#[allow(dead_code)]
+/// [`ProjectSemanticDispatch::normalize_node_for_structural_fact_demand`]:
+/// crate::project_semantic_dispatch::ProjectSemanticDispatch::normalize_node_for_structural_fact_demand
+/// [`stable_member_carrier_partiality`]:
+/// crate::typeinfo::surface_resolution::stable_member_carrier_partiality
 pub(crate) fn realize_callable_member(
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     node: crate::semantic_query::SemanticNodeId,
     context: crate::semantic_query::ProjectionReductionContext,
 ) -> crate::typeinfo::surface_resolution::SurfaceResolution<crate::semantic_query::SemanticNodeId> {
-    realize_callable_member_inner(dispatch, node, context, 0)
+    realize_callable_member_at(dispatch, node, context, 0)
 }
 
-#[allow(dead_code, clippy::only_used_in_recursion)]
-fn realize_callable_member_inner(
+/// Composite-nesting fuse for [`realize_callable_member`]. Only the
+/// `Union` / `Intersection` arm recursion counts against it — carrier
+/// normalization is bounded by the dispatch-owned demand itself.
+const CALLABLE_COMPOSITE_DEPTH_FUSE: u32 = 32;
+
+fn realize_callable_member_at(
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     node: crate::semantic_query::SemanticNodeId,
     context: crate::semantic_query::ProjectionReductionContext,
-    depth: u32,
+    composite_depth: u32,
 ) -> crate::typeinfo::surface_resolution::SurfaceResolution<crate::semantic_query::SemanticNodeId> {
-    use crate::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts;
-    use crate::semantic_query::{
-        PartialReason, ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey,
-        SemanticNodeData, SemanticQueryKey,
-    };
+    use crate::project_semantic_dispatch::StructuralFactDemandOutcome;
+    use crate::semantic_query::{PartialReason, SemanticNodeData, SignatureKind};
     use crate::typeinfo::surface_resolution::{NonEmptyReasons, SurfaceResolution};
 
-    if depth > 32 {
+    if composite_depth > CALLABLE_COMPOSITE_DEPTH_FUSE {
         return SurfaceResolution::incomplete(NonEmptyReasons::of(
             PartialReason::ProjectionWorkLimit,
         ));
     }
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
+    // Carrier-semantics stop (NO semantic evaluation), ROOT ONLY: an
+    // unresolved `import("pkg").Name<…>` shell at the root keeps its typed
+    // `Incomplete(MissingDependency)` answer (the shared stable-carrier rule
+    // classifies every import-type shell as an operational miss) without
+    // being forced. The macro-surface replay identifies a callable
+    // occurrence by the member node the publication surface carried; a
+    // root shell resolved only on demand would be replayed as its resolved
+    // carrier and no longer match the recorded occurrence. A shell behind a
+    // local alias publishes the alias node instead and normalizes below.
+    if let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) {
+        if let SemanticNodeData::ImportType(_) = data.as_ref() {
+            return match crate::typeinfo::surface_resolution::stable_member_carrier_partiality(
+                dispatch.ctx,
+                Some(data.as_ref()),
+            ) {
+                Some(reasons) => SurfaceResolution::incomplete(reasons),
+                None => SurfaceResolution::no_surface(),
+            };
+        }
+    }
+    let normalized = match dispatch.normalize_node_for_structural_fact_demand(node, context) {
+        StructuralFactDemandOutcome::Complete(node) => node,
+        StructuralFactDemandOutcome::Partial(reasons) => {
+            return SurfaceResolution::incomplete(
+                NonEmptyReasons::new(reasons)
+                    .unwrap_or_else(|| NonEmptyReasons::of(PartialReason::SemanticQueryFault)),
+            );
+        }
+    };
+    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, normalized)
+    else {
         return SurfaceResolution::incomplete(NonEmptyReasons::of(
             PartialReason::MissingSemanticNodeData,
         ));
     };
     match data.as_ref() {
-        // (1) A CALL signature — the realized callable. Return verbatim.
-        // A CONSTRUCT signature (`new (...) => R`) is not invocable as a
-        // callback and falls through to the non-callable arm below.
+        // A CALL signature — the realized callable. A CONSTRUCT signature
+        // (`new (...) => R`) is not invocable as a callback and falls
+        // through to the non-callable classification below.
         SemanticNodeData::Signature {
-            kind: crate::semantic_query::SignatureKind::Call,
+            kind: SignatureKind::Call,
             ..
-        } => SurfaceResolution::resolved(node),
+        } => SurfaceResolution::resolved(normalized),
 
-        // (2) Alias → recurse on inner.
-        SemanticNodeData::Alias(inner) => {
-            realize_callable_member_inner(dispatch, *inner, context, depth + 1)
-        }
-
-        // (3) Conditional — re-dispatch through the relation engine so
-        // a decidable conditional reduces to a single branch (the
-        // SemanticQueryKey::Conditional dispatch carries its own
-        // decidability gate independent of the parent's
-        // may_reduce_operator demand). The Conditional node stores
-        // structurally-normalised `true_branch` / `false_branch` ids;
-        // the `*_ref` companion fields hold the pre-normalisation
-        // carrier identities used for cache identity but are not
-        // needed here (the query key uses the normalised branches).
-        SemanticNodeData::Conditional {
-            check,
-            extends,
-            true_branch_ref,
-            false_branch_ref,
-            distributive,
-            pending,
-        } => {
-            let check = *check;
-            let extends = *extends;
-            let true_branch = *true_branch_ref;
-            let false_branch = *false_branch_ref;
-            let distributive = *distributive;
-            let pending = pending.clone();
-            drop(data);
-            let read = dispatch.execute_read(SemanticQueryKey::Conditional {
-                check,
-                extends,
-                true_branch,
-                false_branch,
-                distributive,
-                pending,
-            });
-            crate::request_context::observe_component_meta_read_suppress(&read);
-            emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
-            let reduced = match read.value {
-                QueryResult::Value(id) if id != node => id,
-                // A `Value(id) where id == node` means the dispatch
-                // returned the deferred Conditional shell unchanged
-                // (not decidable) — nothing further to realize; the
-                // undecided conditional is a complete "not a callable
-                // surface" answer.
-                QueryResult::Value(_) => return SurfaceResolution::no_surface(),
-                QueryResult::Recursive(_) => {
-                    return SurfaceResolution::incomplete(NonEmptyReasons::of(
-                        PartialReason::SamePathRecursion,
-                    ));
-                }
-                QueryResult::Error(error) => {
-                    return SurfaceResolution::incomplete(NonEmptyReasons::from_query_error(
-                        &error,
-                    ));
-                }
-            };
-            realize_callable_member_inner(dispatch, reduced, context, depth + 1)
-        }
-
-        // (4) InstantiationRef — instantiate under transit demand so
-        // the body's Mapped / KeyOf carriers stay shallow while
-        // Conditional reduction (which is what turns
-        // `ExtendSlotWithPlan<TPlan, K>` into a Function) fires.
-        SemanticNodeData::InstantiationRef { base, args } => {
-            let slot = dispatch.type_slot_for(
-                Arc::clone(&base.canonical_id),
-                base.owner,
-                Arc::clone(&base.decl_name),
-            );
-            let owner_canonical = Arc::clone(&base.canonical_id);
-            let args = Arc::clone(args);
-            drop(data);
-            let body_context =
-                ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
-            let read = dispatch.execute_read(SemanticQueryKey::Instantiate(
-                crate::semantic_query::InstantiateKey::new(
-                    slot,
-                    args,
-                    dispatch.instantiate_context_for(&owner_canonical, body_context),
-                ),
-            ));
-            crate::request_context::observe_component_meta_read_suppress(&read);
-            emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
-            let body = match read.value {
-                QueryResult::Value(id) => id,
-                QueryResult::Recursive(_) => {
-                    return SurfaceResolution::incomplete(NonEmptyReasons::of(
-                        PartialReason::SamePathRecursion,
-                    ));
-                }
-                QueryResult::Error(error) => {
-                    return SurfaceResolution::incomplete(NonEmptyReasons::from_query_error(
-                        &error,
-                    ));
-                }
-            };
-            realize_callable_member_inner(dispatch, body, context, depth + 1)
-        }
-
-        // (5) DeclRef — resolve the declaration, then recurse. The
-        // `whole_hash` on the DeclIdentity participates in DeclRef
-        // interning but the resolver picks the current artifact via
-        // `ScopeId { canonical_id, local_scope }` — the canonical
-        // ResolveDecl dispatch pattern from
-        // `project_semantic_dispatch::mod::resolve_decl_key`.
-        SemanticNodeData::DeclRef { identity } => {
-            let identity = identity.clone();
-            drop(data);
-            let read = dispatch.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                scope: crate::semantic_query::ScopeId {
-                    canonical_id: Arc::clone(&identity.canonical_id),
-                    owner: identity.owner,
-                    local_scope: None,
-                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
-                        identity.owner,
-                    ),
-                },
-                name: Arc::clone(&identity.decl_name),
-            }));
-            crate::request_context::observe_component_meta_read_suppress(&read);
-            emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
-            let resolved = match read.value {
-                QueryResult::Value(id) => id,
-                QueryResult::Recursive(_) => {
-                    return SurfaceResolution::incomplete(NonEmptyReasons::of(
-                        PartialReason::SamePathRecursion,
-                    ));
-                }
-                QueryResult::Error(error) => {
-                    return SurfaceResolution::incomplete(NonEmptyReasons::from_query_error(
-                        &error,
-                    ));
-                }
-            };
-            realize_callable_member_inner(dispatch, resolved, context, depth + 1)
-        }
-
-        // (5b) DeclPlaceholder — the shallow ResolveDecl of an alias / interface
-        // declaration returns this carrier rather than the eagerly-resolved
-        // body (a `type SlotA = (props) => any` resolves to
-        // `Opaque(DeclPlaceholder { name: "SlotA" })` under Navigate). Instantiate
-        // the placeholder to obtain the declaration body (the Function), then
-        // recurse. Without this arm a slot member typed as an ALIAS to a function
-        // (`default: SlotFn` / a `Union` / `Intersection` of such aliases) never
-        // realizes to a callable. Mirrors the `expand_empty_path_terminal`
-        // DeclPlaceholder expansion in the dispatch walker.
-        SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
-            canonical_id,
-            owner,
-            name,
-            whole_hash: _,
-        }) => {
-            let slot = dispatch.type_slot_for(Arc::clone(canonical_id), *owner, Arc::clone(name));
-            let owner_canonical = Arc::clone(canonical_id);
-            drop(data);
-            let read = dispatch.execute_read(SemanticQueryKey::Instantiate(
-                crate::semantic_query::InstantiateKey::new(
-                    slot,
-                    Arc::from(
-                        Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
-                    ),
-                    dispatch.instantiate_context_for(
-                        &owner_canonical,
-                        ProjectionReductionContext::structural_transit_with_mode(
-                            ProjectionMode::Navigate,
-                        ),
-                    ),
-                ),
-            ));
-            crate::request_context::observe_component_meta_read_suppress(&read);
-            emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
-            let body = match read.value {
-                QueryResult::Value(id) if id != node => id,
-                // `Value(id) where id == node` means the instantiate returned
-                // the placeholder unchanged: an UNRESOLVED declaration — an
-                // incomplete realization, never a silent "not callable".
-                QueryResult::Value(_) => {
-                    return SurfaceResolution::incomplete(NonEmptyReasons::of(
-                        PartialReason::MissingDependency,
-                    ));
-                }
-                QueryResult::Recursive(_) => {
-                    return SurfaceResolution::incomplete(NonEmptyReasons::of(
-                        PartialReason::SamePathRecursion,
-                    ));
-                }
-                QueryResult::Error(error) => {
-                    return SurfaceResolution::incomplete(NonEmptyReasons::from_query_error(
-                        &error,
-                    ));
-                }
-            };
-            realize_callable_member_inner(dispatch, body, context, depth + 1)
-        }
-
-        // (6) Union / Intersection — a composite of slot-callable arms
-        // (`default: SlotA | SlotB` raises to `Union(Ref(SlotA), Ref(SlotB))`;
-        // `(SlotA & SlotB)['default']` to an `Intersection`). Realize EACH arm
-        // to its callable Function and rebuild the composite of realized arms,
-        // so the node-domain slot reader (`CallableNodeView::
-        // slot_param_and_return_by_arm`) sees `Union(Function, Function)` /
-        // `Intersection(Function, Function)` rather than a composite of
-        // unresolved alias carriers. If ANY arm does not realize to a callable
-        // the whole composite is not slot-callable (`None`) — the slot
-        // normalizer then classifies the member non-slot.
+        // A composite of slot-callable arms (`default: SlotA | SlotB`
+        // raises to `Union(Ref(SlotA), Ref(SlotB))`; `(SlotA & SlotB)['default']`
+        // to an `Intersection`). Realize EACH arm and rebuild the composite
+        // of realized arms so the node-domain slot reader sees
+        // `Union(Function, Function)` / `Intersection(Function, Function)`
+        // rather than a composite of unresolved carriers. If ANY arm does
+        // not realize to a callable the whole composite is not
+        // slot-callable — the complete negative answer.
         composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
             let is_union = matches!(data.as_ref(), SemanticNodeData::Union(_));
             let members = composite.composite_members().expect("composite arm");
@@ -353,36 +180,36 @@ fn realize_callable_member_inner(
             let mut realized_arms: Vec<crate::semantic_query::SemanticNodeId> =
                 Vec::with_capacity(arms.len());
             for arm in arms.iter() {
-                let realized =
-                    match realize_callable_member_inner(dispatch, *arm, context, depth + 1) {
-                        SurfaceResolution::Resolved(id) | SurfaceResolution::OpenPresence(id) => {
-                            id.into_inner()
-                        }
-                        // A non-callable arm makes the whole composite not
-                        // slot-callable — the complete negative answer.
-                        SurfaceResolution::NoSurface(_) => return SurfaceResolution::no_surface(),
-                        // An UNRESOLVED arm makes the whole composite
-                        // incomplete with the arm's typed reason.
-                        incomplete @ SurfaceResolution::Incomplete(_) => return incomplete,
-                    };
+                let realized = match realize_callable_member_at(
+                    dispatch,
+                    *arm,
+                    context,
+                    composite_depth + 1,
+                ) {
+                    SurfaceResolution::Resolved(id) | SurfaceResolution::OpenPresence(id) => {
+                        id.into_inner()
+                    }
+                    SurfaceResolution::NoSurface(_) => return SurfaceResolution::no_surface(),
+                    incomplete @ SurfaceResolution::Incomplete(_) => return incomplete,
+                };
                 realized_arms.push(realized);
             }
             if realized_arms.is_empty() {
                 return SurfaceResolution::no_surface();
             }
-            // If realization left every arm unchanged, return the original node
-            // (avoid interning an identical composite).
+            // If realization left every arm unchanged, return the normalized
+            // node (avoid interning an identical composite).
             if realized_arms.iter().zip(arms.iter()).all(|(a, b)| a == b) {
-                return SurfaceResolution::resolved(node);
+                return SurfaceResolution::resolved(normalized);
             }
-            // Carrier-semantics dispatch on the original composite's
-            // at-rest origin category: realizing a canonical/authored
-            // composite is a DERIVED result and routes through the
-            // canonical authority (two alias arms realizing to the one
-            // Function collapse to it instead of `Union(f, f)`); an
-            // overload-ORDERED carrier — and, fail-closed, any
-            // intersection whose realized arms may carry call signatures
-            // — keeps its verbatim order- and arity-preserving rebuild.
+            // Carrier-semantics dispatch on the composite's at-rest origin
+            // category: realizing a canonical/authored composite is a
+            // DERIVED result and routes through the canonical authority
+            // (two alias arms realizing to the one Function collapse to it
+            // instead of `Union(f, f)`); an overload-ORDERED carrier — and,
+            // fail-closed, any intersection whose realized arms may carry
+            // call signatures — keeps its verbatim order- and
+            // arity-preserving rebuild.
             if dispatch.composite_rebuild_re_decides(category, &realized_arms, is_union) {
                 return SurfaceResolution::resolved(
                     dispatch.intern_normalized_union_or_intersection(&realized_arms, is_union),
@@ -408,14 +235,22 @@ fn realize_callable_member_inner(
             )
         }
 
+        // A residual carrier the shared demand stopped on without
+        // resolving it (a no-progress fix-point): an UNRESOLVED
+        // declaration is an incomplete realization, never a silent "not
+        // callable".
+        SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. } => {
+            SurfaceResolution::incomplete(NonEmptyReasons::of(PartialReason::MissingDependency))
+        }
+
         // Any other RESOLVED shape (Object, Primitive, Mapped, KeyOf,
         // IndexedAccess, TypeOf, TypeParam, Literal, Tuple, Array,
-        // TemplateLiteral) — genuinely not callable — and any STABLE
-        // authored-miss carrier (a `BareRef` mirror, an honest `Miss`) keep
-        // the complete negative answer. Only an OPERATIONAL failure
-        // (`ImportType` import-backed unresolvables, raw fallbacks, budget /
-        // cancellation / torn-state faults) is an INCOMPLETE realization
-        // with its typed reason.
+        // TemplateLiteral, an undecidable Conditional shell) — genuinely
+        // not callable — and any STABLE authored-miss carrier (a `BareRef`
+        // mirror, an honest `Miss`) keep the complete negative answer. Only
+        // an OPERATIONAL failure (`ImportType` import-backed unresolvables,
+        // raw fallbacks, budget / cancellation / torn-state faults) is an
+        // INCOMPLETE realization with its typed reason.
         other => match crate::typeinfo::surface_resolution::stable_member_carrier_partiality(
             dispatch.ctx,
             Some(other),
@@ -892,56 +727,4 @@ fn resolved_instantiation_head(
         }
     }
     None
-}
-
-#[cfg(test)]
-mod pick_demand_api_signature_tests {
-    //! Boundary-closure proof (compile-level ONLY): the routed-Pick member
-    //! surface is reached through the query-engine DEMAND API
-    //! `ComponentMetaQueryEngine::materialize_pick_member_surface`, which takes
-    //! a scope + root symbol + member keys and returns the materialised
-    //! `Option<TypeExpr>` — it accepts NO `SemanticNodeId` and exposes none.
-    //!
-    //! The Pick dispatch + node-core materialisation happen INTERNALLY inside
-    //! the demand API, so a forgeable `SemanticNodeId` never crosses the
-    //! query-engine boundary. The prior shape — a `pick_via_dispatch_pick_node`
-    //! helper that returned a bare `SemanticNodeId` for an out-of-subtree caller
-    //! to feed into `materialize_member_surface_node` — is GONE.
-    //!
-    //! Asserted at COMPILE LEVEL by coercing the demand API to a fn pointer
-    //! whose parameters are exactly `(scope, symbol, members, nested)` and whose
-    //! return is `Option<TypeExpr>`. The coercion type-checks only if the real
-    //! signature matches; a return of `Option<SemanticNodeId>` (the leaking
-    //! node-returning shape) would fail to unify here. This is the successor of
-    //! the §1a fence: no node crosses the boundary because the boundary API
-    //! resolves it internally.
-
-    #[test]
-    fn pick_demand_api_takes_no_node_and_returns_a_type_expr() {
-        // A monomorphic shim whose signature is the boundary contract:
-        // `(scope, symbol, members, nested) -> Option<TypeExpr>`, NO
-        // `SemanticNodeId` in or out. Binding the method to this shim
-        // type-checks only if the real demand-API signature matches; a
-        // node-returning `Option<SemanticNodeId>` shape (the leaking form)
-        // would fail to unify here. This is the successor of the §1a fence.
-        fn _proof(
-            engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-            scope: &str,
-            owner: verter_type_expr::TopLevelOwnerId,
-            symbol: &str,
-            members: &[String],
-            nested: bool,
-        ) -> Option<verter_type_expr::TypeExpr> {
-            engine.materialize_pick_member_surface(scope, owner, symbol, members, nested)
-        }
-        let _ = _proof
-            as fn(
-                &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-                &str,
-                verter_type_expr::TopLevelOwnerId,
-                &str,
-                &[String],
-                bool,
-            ) -> Option<verter_type_expr::TypeExpr>;
-    }
 }

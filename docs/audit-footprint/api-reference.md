@@ -83,16 +83,15 @@ Six `u64` counters (decimal-string serialized, `string` in TS) on
 
 | Field                              | Meaning                                                                            |
 | ---------------------------------- | ---------------------------------------------------------------------------------- |
-| `materialize_structure_calls`      | Total `materialize_component_meta_structure` invocations during the request.       |
-| `materialize_structure_cache_hits` | Subset satisfied by the materialiser's `MaterializeStructureDb` peek (warm cache). |
+| `materialize_structure_calls`      | Structural-materialiser invocations. No production producer exists; always `0`.    |
+| `materialize_structure_cache_hits` | Structural-materialiser warm hits. No production producer exists; always `0`.      |
 | `node_arena_lock_acquisitions`     | Lock acquisitions on the per-scope `NodeArena` dedup index.                        |
 | `family_map_lock_acquisitions`     | Lock acquisitions on the family-map dep-signature reverse index.                   |
 | `dep_signature_merges`             | Non-empty dispatch dependency signatures published into the request fact tracer.   |
 | `dep_signature_intern_hits`        | Warm-candidate dependency signatures reused from the store-owned weak interner.    |
 
-Cache hit rate: `materialize_structure_cache_hits /
-materialize_structure_calls` — should be `> 0` on warm/cold-seq
-passes (warm peek satisfies repeat lookups). `dep_signature_intern_hits`
+The two `materialize_structure_*` rows have no production producer and
+stay `0`; they remain on the payload as schema. `dep_signature_intern_hits`
 independently measures allocations avoided by the content-hash bucketed
 `Weak`-reference interner; it is not a subset of request-tracer merge events.
 
@@ -111,7 +110,7 @@ independently measures allocations avoided by the content-hash bucketed
 | `ColdBuild`            | Performed a cold build from source.                                                                                                                        |
 | `InflightAbortedRetry` | Retry loop after an in-flight slot was aborted.                                                                                                            |
 | `ColdAbortSwept`       | Cold entry reaped during generation reconciliation.                                                                                                        |
-| `Tainted`              | Path-dependent outcome (depth-fuse trip, scope-unloaded mid-compute, or `Recursive` sub-call). Non-cacheable; propagates as `MaterializeOutcome::Tainted`. |
+| `Tainted`              | Path-dependent outcome (depth-fuse trip, scope-unloaded mid-compute, or `Recursive` sub-call). Non-cacheable (schema only; no production emitter today). |
 
 ### Materialise-skip-reason enum
 

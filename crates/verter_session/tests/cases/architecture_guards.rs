@@ -2525,10 +2525,7 @@ mod resolver_context_seal {
             crate_root.join("meta_resolve"),
             crate_root.join("project_semantic_dispatch"),
         ];
-        let scope_files = [
-            crate_root.join("component_meta_caches.rs"),
-            crate_root.join("component_meta_materialize.rs"),
-        ];
+        let scope_files = [crate_root.join("component_meta_caches.rs")];
 
         let mut violations: Vec<Violation> = Vec::new();
         for root in &scope_roots {
@@ -2561,8 +2558,7 @@ fn no_concrete_verter_host_in_seal_scope() {
     // Phase 10a — un-ignored at commit 13 after the resolver-context
     // seal migration landed. Resolver-tier files
     // (`resolver_core/`, `meta_resolve/`, `project_semantic_dispatch/`,
-    // `component_meta_caches.rs`, `component_meta_materialize.rs`)
-    // must reach host state through `&dyn ResolverContext`, never
+    // `component_meta_caches.rs`) must reach host state through `&dyn ResolverContext`, never
     // through the concrete `VerterHost` type. Re-introduction of a
     // `VerterHost` reference in a seal-scope file fails this test.
     resolver_context_seal::run();
@@ -4774,9 +4770,6 @@ pub(crate) mod foundations_guards {
         // ─── B-C5 territory (separate ownership), kept `pub` ────────
         "pub mod component_meta_resolution_policy",
         // ─── crate-private modules (already non-public) ─────────────
-        // `tests/cases/g_misc0/cross_owner_materialise_reuse.rs` needs the key types
-        // (R7 cross-owner reuse).
-        "pub mod component_meta_materialize",
         // tests/cases/g_cache/cache_invariant_migration.rs — the W0.5 schema-bump
         // cohort fixture exercises `ComponentMetaResultDb::evict_if_schema_mismatch`.
         "pub mod component_meta_result_db",

@@ -13,12 +13,7 @@
 //! 3. **`batch_scheduler_submit_count_is_o1`** — `submit_count`
 //!    increases by exactly one per batch, independent of N. The
 //!    legacy per-job loop would increase by N.
-//! 4. **`batch_materialise_admissions_equal_unique_semantic_identities`**
-//!    — N owners sharing a single inner type produce the SAME
-//!    `MaterializeStructureDb::entry_count()` as a single-owner
-//!    baseline, not N× the baseline. Sharing collapses the per-owner
-//!    duplication via R7 cross-owner reuse.
-//! 5. **`batch_partial_failure_does_not_abort`** — an unresolvable
+//! 4. **`batch_partial_failure_does_not_abort`** — an unresolvable
 //!    canonical surfaces as a per-slot `None` (no analysis); the
 //!    other N-1 results succeed.
 //!
@@ -65,34 +60,6 @@ fn build_hermetic_project_with_files(files: &[(&str, &str)]) -> Arc<MetaProject>
             .unwrap_or_else(|err| panic!("upsert_base({canonical}) failed: {err:?}"));
     }
     project
-}
-
-const SHARED_TYPE_TS: &str = r#"
-export interface ChatMessageProps {
-  id: string;
-  body: string;
-  author: string;
-  timestamp: number;
-}
-"#;
-
-// Owners use `Pick<ChatMessageProps, ...>` so the materialiser
-// (`materialize_member_surface_expr` in `registry_decl.rs`) is driven
-// to populate `MaterializeStructureDb` for the cross-owner-shared
-// `ChatMessageProps` inner type. Without a Pick / Omit consumer the
-// `ChatMessageProps` ref stays shallow and the DB stays empty.
-fn owner_sfc(prop_name: &str) -> String {
-    format!(
-        r#"<script setup lang="ts">
-import type {{ ChatMessageProps }} from './chat-types'
-defineProps<{{
-  {prop_name}: ChatMessageProps;
-  picked: Pick<ChatMessageProps, 'id'>;
-}}>();
-</script>
-<template><div /></template>
-"#
-    )
 }
 
 fn simple_owner_sfc(prop_name: &str, prop_type: &str) -> String {
@@ -244,87 +211,6 @@ fn batch_scheduler_submit_count_is_o1() {
     );
 }
 
-/// **Test 4 — shared admissions: N owners over a shared inner type
-/// produce baseline-bounded `MaterializeStructureDb::entry_count()`.**
-///
-/// Drive `get_component_meta_batch` over N=5 owners that all consume
-/// the SAME inner type `ChatMessageProps` via
-/// `Pick<ChatMessageProps,'id'>`. The materialiser populates
-/// `MaterializeStructureDb` for the shared inner type. Under R7
-/// cross-owner reuse (the content-free `MaterializationCacheKey` carries
-/// NO consumer-scope dimension), N owners collapse to the same slot —
-/// the entry count after the batch is bounded by the single-owner
-/// baseline plus N, not N× baseline.
-#[test]
-fn batch_materialise_admissions_equal_unique_semantic_identities() {
-    let inbox = owner_sfc("inbox_msg");
-    let chat = owner_sfc("chat_msg");
-    let sidebar = owner_sfc("sidebar_msg");
-    let header = owner_sfc("header_msg");
-    let footer = owner_sfc("footer_msg");
-    let project = build_hermetic_project_with_files(&[
-        ("/src/chat-types.ts", SHARED_TYPE_TS),
-        ("/src/Inbox.vue", inbox.as_str()),
-        ("/src/Chat.vue", chat.as_str()),
-        ("/src/Sidebar.vue", sidebar.as_str()),
-        ("/src/Header.vue", header.as_str()),
-        ("/src/Footer.vue", footer.as_str()),
-    ]);
-    let session = project.open_session_batch().expect("batch session");
-
-    let host = project.host();
-    let db = host.project_type_store().materialize_structure_db();
-    let entry_count_before = db.entry_count();
-    eprintln!("[batch shared-admissions] entry_count_before={entry_count_before}");
-
-    let owners = vec![
-        "/src/Inbox.vue".to_string(),
-        "/src/Chat.vue".to_string(),
-        "/src/Sidebar.vue".to_string(),
-        "/src/Header.vue".to_string(),
-        "/src/Footer.vue".to_string(),
-    ];
-    let results = session
-        .get_component_meta_batch(&owners)
-        .expect("batch dispatch should complete");
-    assert_eq!(results.len(), owners.len(), "one result slot per owner");
-    for (i, slot) in results.iter().enumerate() {
-        let analysis = slot
-            .as_ref()
-            .unwrap_or_else(|err| panic!("owner {i} failed: {err:?}"))
-            .as_ref()
-            .unwrap_or_else(|| panic!("owner {i} returned None"));
-        assert!(
-            !analysis.props.is_empty(),
-            "owner {} must publish at least one prop",
-            owners[i]
-        );
-    }
-
-    let batch_entries = db.entry_count();
-    let baseline = single_owner_baseline_entries();
-    let n = owners.len();
-    let batch_delta = batch_entries - entry_count_before;
-    eprintln!(
-        "[batch shared-admissions] batch_entries={batch_entries}, \
-         batch_delta={batch_delta}, single_owner_baseline={baseline}, N={n}"
-    );
-    // R7 cross-owner reuse: N owners over a shared inner type collapse
-    // to a single `MaterializeStructureDb` slot per semantic identity.
-    // The upper bound `baseline + N` allows per-owner work for the
-    // owner-local prop bag, but disallows N× duplication of the inner
-    // type's slots.
-    assert!(
-        batch_entries <= baseline + n,
-        "R7 cross-owner reuse: N={n} owners over a shared inner type MUST \
-         produce entries bounded by single-owner baseline + N — sharing \
-         MUST collapse inner-type slots. \
-         got batch_entries={batch_entries}, baseline={baseline}, \
-         max permitted = baseline ({baseline}) + N ({n}) = {}",
-        baseline + n
-    );
-}
-
 /// **Test 5 — partial failure does not abort the batch.**
 ///
 /// A batch containing one unresolvable canonical (no matching file on
@@ -383,26 +269,4 @@ fn batch_partial_failure_does_not_abort() {
         real2_analysis.props.iter().any(|p| p.name == "b"),
         "real2 must carry prop `b`"
     );
-}
-
-/// Single-owner baseline: drive `get_component_meta` against ONE
-/// owner over the same shared inner type and record how many entries
-/// it produces in `MaterializeStructureDb`. The N-owner test above
-/// uses this to compute a per-slot upper bound for the cross-owner
-/// case.
-fn single_owner_baseline_entries() -> usize {
-    let solo = owner_sfc("solo_msg");
-    let project = build_hermetic_project_with_files(&[
-        ("/src/chat-types.ts", SHARED_TYPE_TS),
-        ("/src/Solo.vue", solo.as_str()),
-    ]);
-    let session = project.open_session().expect("interactive session");
-    let _ = session
-        .get_component_meta("/src/Solo.vue")
-        .expect("single-owner query should succeed");
-    project
-        .host()
-        .project_type_store()
-        .materialize_structure_db()
-        .entry_count()
 }

@@ -125,14 +125,9 @@ pub fn vfs_layer_from_workspace(layer: verter_workspace::audit_sink::VfsAuditLay
 /// wall-clock duration so the footprint miner can attribute the cost
 /// per envelope.
 ///
-/// The lane was previously empty: no production call site existed
-/// before the prepared-decl-bundle cold producers + the
-/// `materialize_component_meta_structure` entry point were wired to
-/// push materialisation records. That empty lane was a footprint
-/// blind spot — per-request cost attribution had no envelope per
-/// cold prepared-decl build, so a >5.9M-occurrence cold counter on
-/// ChatMessages.vue had no duration breakdown for investigators to
-/// consult.
+/// The prepared-decl-bundle cold producers push materialisation
+/// records here so per-request cost attribution has one envelope per
+/// cold prepared-decl build.
 #[inline]
 pub fn record_materialization(subject: MaterializationSubject, duration_ms: f64) {
     if let Some(acc) = crate::request_context::current_accumulator() {
@@ -914,78 +909,6 @@ pub fn merge_dep_signature_into_local_fence(
 ) {
     for entry in incoming {
         local_fence.push(entry.clone());
-    }
-}
-
-/// Translate a single legacy `(canonical, DepVersion)` fence entry
-/// into the equivalent fact-based
-/// [`FactVersionRef`](crate::resolver_core::FactVersionRef)
-/// observation and record it on the active fact-read tracer (if one
-/// is installed).
-///
-/// R24 contract — observations are silent when no tracer is on the
-/// caller's thread. The translation matches the sibling bridge
-/// [`crate::fact_signature_helpers::dep_signature_to_fact_signature`]:
-///
-/// - `DepVersion::WholeHash(h)` → `FactVersionRef::FileWholeHash`.
-/// - `DepVersion::ProjectGeneration(g)` →
-///   `FactVersionRef::ProjectGeneration` — the project-wide
-///   generation a sub-result depended on. An outer entry that
-///   observes this sub-result through the tracer must root the
-///   project generation so it rejects on a project-shape change;
-///   dropping it would lose that dependency.
-/// - `DepVersion::RouteGeneration(_)` has no `FactVersionRef` peer
-///   and no authoritative validating source — it is skipped (the
-///   fence-merge path continues to record it on the legacy
-///   `local_fence` for legacy-validator consumers).
-///
-/// Used by materialiser-tier cold computes alongside the existing
-/// `local_fence.push` so an observe-equipped cold compute records
-/// both legacy and fact-based signatures without duplicating the
-/// producer call.
-pub(crate) fn observe_fence_entry(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    canonical: &Arc<str>,
-    version: &crate::semantic_query::DepVersion,
-) {
-    use crate::resolver_core::FactVersionRef;
-    use crate::semantic_query::DepVersion;
-    match version {
-        DepVersion::WholeHash(hash) => {
-            ctx.observe(FactVersionRef::FileWholeHash {
-                canonical_id: canonical.as_ref().to_string(),
-                hash: *hash,
-            });
-        }
-        DepVersion::ProjectGeneration(generation) => {
-            ctx.observe(FactVersionRef::ProjectGeneration {
-                generation: *generation,
-            });
-        }
-        DepVersion::RouteGeneration(_) => {
-            // Route generation has no `FactVersionRef` peer; the
-            // legacy fence still records it for legacy-validator
-            // consumers.
-        }
-    }
-}
-
-/// Translate every entry of a legacy dep signature into fact-based
-/// observations on the active tracer (or no-op when none is
-/// installed).
-///
-/// Used by materialiser-tier cold computes after a
-/// `dispatch.execute_read(...)` consumes a sub-query — the
-/// caller's tracer inherits the callee's observed facts through
-/// per-entry translation. R24 zero-allocation guarantee on the
-/// no-tracer fast path: each `observe_fence_entry` call short-
-/// circuits to an inline `None` arm.
-pub(crate) fn observe_dep_signature(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    incoming: &[(Arc<str>, crate::semantic_query::DepVersion)],
-) {
-    for (canonical, version) in incoming {
-        observe_fence_entry(ctx, canonical, version);
     }
 }
 

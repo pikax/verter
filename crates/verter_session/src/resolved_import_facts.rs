@@ -418,10 +418,6 @@ impl ResolvedImportFactsDb {
     }
 
     /// Number of occupied slots. Used by tests + diagnostics.
-    ///
-    /// Mirrors the
-    /// [`MaterializeStructureDb::entry_count`](crate::component_meta_caches::MaterializeStructureDb::entry_count)
-    /// accessor for symmetric observability.
     #[must_use]
     pub fn entry_count(&self) -> usize {
         self.entries.len()

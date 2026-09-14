@@ -267,9 +267,6 @@ pub static DISPATCH_OPERATOR_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
 pub static MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_NS: AtomicU64 = AtomicU64::new(0);
 
-pub static MATERIALIZE_STRUCTURE_CALLS: AtomicU64 = AtomicU64::new(0);
-pub static MATERIALIZE_STRUCTURE_NS: AtomicU64 = AtomicU64::new(0);
-
 pub static RAISE_AND_REDUCE_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static RAISE_AND_REDUCE_NS: AtomicU64 = AtomicU64::new(0);
 
@@ -422,8 +419,6 @@ pub fn reset_all() {
     // Loop 8 — broadened materialize_ms counters.
     MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_CALLS.store(0, Ordering::Relaxed);
     MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_NS.store(0, Ordering::Relaxed);
-    MATERIALIZE_STRUCTURE_CALLS.store(0, Ordering::Relaxed);
-    MATERIALIZE_STRUCTURE_NS.store(0, Ordering::Relaxed);
     RAISE_AND_REDUCE_CALLS.store(0, Ordering::Relaxed);
     RAISE_AND_REDUCE_NS.store(0, Ordering::Relaxed);
     REDUCE_GRAPH_NODE_ITERATIVE_NS.store(0, Ordering::Relaxed);
@@ -474,8 +469,6 @@ pub fn dump_loop5_instrumentation_counters() -> String {
         MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_CALLS.load(Ordering::Relaxed);
     let materialize_type_expr_until_stable_ns =
         MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_NS.load(Ordering::Relaxed);
-    let materialize_structure_calls = MATERIALIZE_STRUCTURE_CALLS.load(Ordering::Relaxed);
-    let materialize_structure_ns = MATERIALIZE_STRUCTURE_NS.load(Ordering::Relaxed);
     let raise_and_reduce_calls = RAISE_AND_REDUCE_CALLS.load(Ordering::Relaxed);
     let raise_and_reduce_ns = RAISE_AND_REDUCE_NS.load(Ordering::Relaxed);
     let reduce_graph_node_iterative_ns = REDUCE_GRAPH_NODE_ITERATIVE_NS.load(Ordering::Relaxed);
@@ -536,8 +529,6 @@ pub fn dump_loop5_instrumentation_counters() -> String {
          \"DISPATCH_OPERATOR_TOTAL_NS\": {dispatch_operator_total_ns},\n  \
          \"MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_CALLS\": {materialize_type_expr_until_stable_calls},\n  \
          \"MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_NS\": {materialize_type_expr_until_stable_ns},\n  \
-         \"MATERIALIZE_STRUCTURE_CALLS\": {materialize_structure_calls},\n  \
-         \"MATERIALIZE_STRUCTURE_NS\": {materialize_structure_ns},\n  \
          \"RAISE_AND_REDUCE_CALLS\": {raise_and_reduce_calls},\n  \
          \"RAISE_AND_REDUCE_NS\": {raise_and_reduce_ns},\n  \
          \"REDUCE_GRAPH_NODE_ITERATIVE_NS\": {reduce_graph_node_iterative_ns},\n  \
@@ -776,8 +767,6 @@ mod tests {
             "DISPATCH_OPERATOR_KIND_NS",
             "MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_CALLS",
             "MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_NS",
-            "MATERIALIZE_STRUCTURE_CALLS",
-            "MATERIALIZE_STRUCTURE_NS",
             "RAISE_AND_REDUCE_CALLS",
             "RAISE_AND_REDUCE_NS",
             "REDUCE_GRAPH_NODE_ITERATIVE_NS",

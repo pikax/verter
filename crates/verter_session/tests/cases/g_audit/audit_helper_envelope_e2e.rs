@@ -21,8 +21,7 @@ use verter_session::component_meta_audit::{
 };
 use verter_session::host_manage::{
     push_structured_event, record_dep_signature_intern_hit, record_dep_signature_merge,
-    record_family_map_lock_acquisition, record_materialize_structure_cache_hit,
-    record_materialize_structure_call, record_node_arena_lock_acquisition,
+    record_family_map_lock_acquisition, record_node_arena_lock_acquisition,
 };
 use verter_session::request_context::{RequestContext, RequestContextGuard};
 
@@ -32,8 +31,6 @@ fn counters_no_op_without_request_context() {
     // assert by absence: the call returns; nothing panics; no global
     // state we can observe is touched. The assertion is that the
     // calls compile and return — exercising the fast-path branch.
-    record_materialize_structure_call();
-    record_materialize_structure_cache_hit();
     record_node_arena_lock_acquisition(std::time::Duration::ZERO);
     record_family_map_lock_acquisition(std::time::Duration::ZERO);
     record_dep_signature_merge();
@@ -48,9 +45,6 @@ fn counters_increment_under_request_context() {
     let ctx = RequestContext::new(101, Arc::from("/c.vue"), true, Some(Arc::clone(&acc)));
     let _g = RequestContextGuard::install(Arc::clone(&ctx));
 
-    record_materialize_structure_call();
-    record_materialize_structure_call();
-    record_materialize_structure_cache_hit();
     record_node_arena_lock_acquisition(std::time::Duration::ZERO);
     record_family_map_lock_acquisition(std::time::Duration::ZERO);
     record_dep_signature_merge();
@@ -58,15 +52,6 @@ fn counters_increment_under_request_context() {
     record_dep_signature_merge();
     record_dep_signature_intern_hit();
 
-    assert_eq!(
-        ctx.materialize_structure_calls.load(Ordering::Relaxed),
-        2,
-        "materialize_structure_calls must increment per call",
-    );
-    assert_eq!(
-        ctx.materialize_structure_cache_hits.load(Ordering::Relaxed),
-        1,
-    );
     assert_eq!(ctx.node_arena_lock_acquisitions.load(Ordering::Relaxed), 1);
     assert_eq!(ctx.family_map_lock_acquisitions.load(Ordering::Relaxed), 1);
     assert_eq!(ctx.dep_signature_merges.load(Ordering::Relaxed), 3);

@@ -224,33 +224,10 @@ warm-read validator decides how strictly that self-root is checked:
   self-root strictly via `validate_fact_signature_with_self_roots` /
   `ReadSetSignature::validate_with_self_roots`. `get_unvalidated` has no
   production warm-read caller (test/debug only).
-- The **structural carrier** — `materialize_structure_db`
-  — validates its self-root **strictly**. Each entry carries an explicit
-  `self_root_canonicals` set checked via `ReadSetSignature::validate_with_self_roots`
-  on every warm read AND post-compute revalidation. `MaterializeStructureDb`
-  self-roots on the materialise SUBJECT's declaration-origin file
-  (`materialize_subject_origin_self_root`): a route-shaped subject
-  (`Pick`/`Omit`/IndexedAccess carrier) self-roots on the EXTRACTED ROUTE
-  ROOT's file (e.g. `Shared` in `Pick<Shared,'id'>`, observed via
-  `authoritative_current_content_hash`) plus the traced read-set, while a
-  non-route subject self-roots on the `base` node's declaration-origin file
-  (`SemanticGraphStore::node_scope`'s `NodeScopeId::File`). The consumer
-  materialise scope is NEVER a self-root — a value's identity does not
-  depend on which consumer reached it (R7 cross-owner reuse); rooting a
-  route-shaped value on the first producer's wrapper file would falsely
-  reject every other owner's warm reuse. The content-free
-  DB cache key `MaterializationCacheKey` carries no consumer-scope dimension at
-  all; the SEPARATE per-thread recursion identity `MaterializeRuntimeKey`
-  excludes `scope_canonical_id` from its `Hash`/`PartialEq`. A non-route subject
-  whose base origin is `Global` (or a route-shaped subject whose extracted
-  root has no authoritative content hash) seeds no strict self-root —
-  validity then rides on the traced read-set alone; a root-less anonymous
-  subject keys no DB slot (uncached). The provenance-pure
-  producer `materialize_structure_read_set` leads the
-  carrier with one observed-hash `FileWholeHash` per self-root and merges the
-  traced fact set on top; a fence `RouteGeneration` dependency, or a fence
-  `WholeHash` that conflicts with an observed self-root, routes the value
-  through `ComputeAdmission::ReturnOnly` (valid result, no shared admission).
+- There is NO separate structural-materialiser store: the former
+  `MaterializeStructureDb` and its producer are deleted, and every structural
+  surface roots through the `SemanticGraphStore` memo / `ShapeCacheDb` rails
+  above.
   The **materialization cycle gate** — the retired `RefCycleResultDb`'s
   replacement — is the sealed `ClassifyMaterializationCycleGate`
   semantic-query family (`project_semantic_dispatch::cycle_gate`), NOT a
@@ -342,16 +319,15 @@ reintroduced host-side route memo.
   `ResolvedImportFacts`, typed-IR resolve, `MemberSemanticFactStore`,
   `MemberDisplayFactStore`, `ModuleAugmentationIndex`. Keys include
   `content_hash` or a derived parse-stable hash.
-- **Query-identity caches** — `RouteDb`, `MaterializeStructureDb`,
-  `SemanticGraphStore` query nodes, `ComponentMetaResultDb`.
+- **Query-identity caches** — `RouteDb`, `SemanticGraphStore` query nodes,
+  `ComponentMetaResultDb`.
   Keys exclude version hashes; concurrent variants coexist as candidates inside
   one slot.
 
 Version rooting for query-identity caches lives **inside the cached value**,
 never in the key. The rail per layer:
 
-- The structural carrier (`MaterializeStructureDb`), the
-  `SemanticGraphStore` family memo (`Instantiate` / `ResolveMacroPayload` query
+- The `SemanticGraphStore` family memo (`Instantiate` / `ResolveMacroPayload` query
   nodes), and `ShapeCacheDb` root via the candidate's `ReadSetSignature.facts` +
   `self_root_canonicals` + `validated_at_generation`, with the live whole-hash
   re-sourced at value-compute time (NOT carried in the key).
@@ -662,8 +638,6 @@ slots — the version state lives on each candidate's value-side carrier (per R6
 NOT in the key, so successive content edits co-locate as candidates in ONE slot
 rather than minting fresh top-level keys. The bounded caches:
 `ComponentMetaResultDb` (owner whole-hash candidate discriminant),
-`MaterializeStructureDb` (content-free
-`MaterializationCacheKey`; per-version state on the value's `self_root_canonicals`),
 the `SemanticGraphStore` family memo (which also carries the relation memo's
 entries under its `Relate` family — the retired dedicated `BudgetedRelationMemo`
 folded into the family substrate) + named-type index
@@ -680,7 +654,6 @@ these is retired). Two cooperating pieces, tuned per cache:
 - `GlobalRetentionBudget<K>` — a FIFO insertion-ordered total-size cap. A cache
   records each admitted entry's key from its write-side `post_publish` hook;
   the budget returns the oldest keys to evict once the count exceeds the cap.
-  `MaterializeStructureDb` caps at `MAX_ENTRIES` (2048);
   the `SemanticGraphStore` family / relation / named-type budgets use
   `DEFAULT_BUDGET_CAP` (4096); the `DerivationStore` bounds its edge-bucket
   count (`DERIVATION_EDGE_BUCKET_CAP` = 4096) and its signature-interning pool
@@ -736,11 +709,10 @@ loop), making its single-write-domain structural rather than
 "safe-by-construction". (The `SemanticGraphStore` relation memo rode the
 same pattern as the retired `BudgetedRelationMemo`; it is now rehomed into
 the family memo's `Relate` family, whose write domain is the single global
-`entries` lock — see `semantic_query_memo/mod.rs`.) The
-`MaterializeStructureDb`'s
-cooperative publish holds the `publish_fence` (the Db's `retention_gate`)
-across `entries.insert` + `post_publish`, and `post_publish` does
-`bump_live_counter` + `record_admission` together — so the map insert, the
+`entries` lock — see `semantic_query_memo/mod.rs`.) A budgeted
+`ReverseIndexedCandidateStore` publish holds the `publish_fence` (the store's
+`retention_gate`) across `entries.insert` + `post_publish`, and `post_publish`
+does `bump_live_counter` + `record_admission` together — so the map insert, the
 `live_counter` increment, and the budget admission are one fenced write-side
 step.
 
@@ -778,8 +750,8 @@ exactly ONE publisher per key and the map slot is always vacant at publish — n
 overwrite ever occurs and there is no publisher-vs-publisher to serialize. It
 therefore publishes through `publish_entry_insert_then_post_publish`:
 `map.insert` takes, mutates, and RELEASES the shard guard, then `post_publish`
-runs with NO shard guard held. This is REQUIRED, not merely permitted: the two
-budgeted unified consumers (`MaterializeStructureDb`) run a
+runs with NO shard guard held. This is REQUIRED, not merely permitted: a
+budgeted unified consumer (a `ReverseIndexedCandidateStore`) runs a
 FIFO `register_post_publish` → `evict_budget_victim` →
 `entries.remove_if(victim)` re-entry on the SAME map from inside `post_publish`.
 Were the unified path to hold the shard write guard across `post_publish` (the
@@ -1030,8 +1002,7 @@ key only when the cached value depends on lib data:
   `lib_env_hash`. A lib update does not change where `./theme` resolves.
 - `RouteDb` per-name and effective-set caches **DO** include `lib_env_hash`
   because module augmentations stitch into the effective surface.
-- Typed-IR resolve, `MaterializeStructureDb`,
-  `SemanticGraphStore`, `ComponentMetaResultDb` **DO** include `lib_env_hash`
+- Typed-IR resolve, `SemanticGraphStore`, `ComponentMetaResultDb` **DO** include `lib_env_hash`
   because semantic meaning depends on intrinsic types (`Array<T>`,
   `HTMLElement`, etc.).
 
@@ -1531,7 +1502,6 @@ composition table. Summary:
 | `BinderIdentityFactsStore` (family A, the binder-identity substrate) | Content-addressed | `canonical, parse_stable_hash, parse_env_hash` — the pre-reducer binder-identity substrate: per-file lexical scope tree with stable structural `BinderScopeId`s, env-free `DeclarationSlotSeed`s (exactly the four env-free fields of `ResolvedDeclSlotIdentity`; the env-bearing slot is derived ONLY at query-key construction via the `ProjectSemanticDispatch::finalize_slot_seed` choke point), and declaration-order / overload-group / augmentation-contribution provenance. Demand-produced from `IndexedReady` (no eager pass), value-side `ReadSetSignature` over eager parse-lane facts; negative name lookup stays `ReturnOnly` (no corpus-completeness store in this substrate). |
 | `RouteDb` per-name | Query-identity (multi-candidate) | `RouteNameKey { provider_canonical, exported_name, symbol_space, project_identity, resolve_env_hash, lib_env_hash, resolver_version }` (content-free; routes are resolve-domain so no `parse_env`/`type_env`, but `lib_env` enters — augmentations stitch the surface). Value-side `ValidatedFactCache` fact validation. |
 | `RouteDb` effective barrel surface | Query-identity (multi-candidate) | `BarrelSurfaceKey { barrel_canonical, project_identity, resolve_env_hash, lib_env_hash, resolver_version }`. Value-side `ValidatedFactCache` over `BarrelRouteSurface.fact_dep_signature`. |
-| `MaterializeStructureDb` | Query-identity (multi-candidate) | `MaterializationCacheKey { decl: ResolvedDeclSlotIdentity, projection_path: RouteDemand, scope_axis, projection_mode, normalized_type_args: Arc<[SemanticNodeId]>, resolve_env_hash }` — content-free canonical SUBJECT (the slot, NOT a graph-instance `SemanticNodeId`); `normalized_type_args` carries `SemanticNodeId`s exactly as `SemanticQueryKey::Instantiate.args`. The per-thread recursion identity is the SEPARATE `MaterializeRuntimeKey { base: SemanticNodeId, scope_axis, mode }` (NOT a cache key). Root-less anonymous subject ⇒ uncached. Value-side `ReadSetSignature.facts` + `self_root_canonicals` (base node's decl-origin file) + `validated_at_generation`. |
 | `ClassifyMaterializationCycleGate` (materialization cycle gate — the retired `RefCycleResultDb`'s replacement) | Semantic-query family over the `SemanticGraphStore` memo | `MaterializationCycleGateKey { root: ResolvedDeclSlotIdentity, parse_env_hash, resolve_env_hash }` — content-free (fixed empty-args / `StructuralTransit` / `Skeleton` axes; no generation, no `DeclIdentity`, no algorithm version). Only `Decided` admits; value-side observed self-roots (walk root + every visited decl's file) + live-generation gate. |
 | `SemanticGraphStore` query nodes | Query-identity (multi-candidate) | `SemanticQueryKey` slot identity (e.g. `Instantiate { base: ResolvedDeclSlotIdentity, args }`); the memo value version-roots on `ReadSetSignature.facts` + `self_root_canonicals`. |
 | `ShapeCacheDb` per-member slot | Generation/store-scoped graph-instance memo (NOT a durable content-free R6 query-identity key) | `ShapeCacheKey::surface_member_value_whole_with_context(scope, &SurfaceMember, context)` (`ShapeSubject::MemberValueNode`). Single-entry (not multi-candidate), not persistent, fact-validated + generation-gated. Warm reuse requires `validated_at_generation` + strict `ReadSetSignature` self-root validation over the exact `SurfaceMember.value` graph instance. |
@@ -1567,10 +1537,10 @@ The `ShapeCacheDb` per-member subject is the sealed `MemberShapeNodeSubject(Sema
 newtype keying the `ShapeSubject::MemberValueNode` arm — a generation/store-scoped
 graph-instance memo, NOT a durable content-free query-identity key (it carries a
 `SemanticNodeId`, which is precisely why it is sealed behind the newtype rather than
-exposed as a content-free key). Shape/materialize cache-key hygiene guards (all
+exposed as a content-free key). Shape cache-key hygiene guards (all
 RECORDED SOURCE SCANNERS — structural confinement is PRIMARY, the scanners are the
 bounded residual supplement). Only the TWO `SemanticNodeId`-keyed scanners
-(`no_unsanctioned_semantic_node_id_in_shape_or_materialize_key` +
+(`no_unsanctioned_semantic_node_id_in_shape_key` +
 `synthetic_carrier_explicit_deepen_routes_through_shape_cache_key`) become structural
 and are DELETED once the key-safety newtype substrate lands (newtype the env/content
 hashes + seal the `SemanticNodeId`/`value_node` tuple fields), see
@@ -1580,10 +1550,10 @@ newtyping hashes / sealing `SemanticNodeId` does not prevent reintroducing a pri
 `CarrierVerdictDb` / `carrier_verdicts` symbol — so it REMAINS a recorded scanner (or
 would need its own separate structural closure for retired-symbol absence).
 The three guards:
-`no_unsanctioned_semantic_node_id_in_shape_or_materialize_key`
+`no_unsanctioned_semantic_node_id_in_shape_key`
 (`crates/verter_session/tests/cases/g_cache/r6_r21_query_identity_keys.rs` — forbids the
-content/version field markers on the shape/materialize derived-`Hash` keys and pins the
-`SemanticNodeId` allow-list to exactly two positions); `no_carrier_verdict_db`
+content/version field markers on the shape derived-`Hash` keys and pins the
+`SemanticNodeId` allow-list to exactly one position, the sealed `MemberShapeNodeSubject` newtype); `no_carrier_verdict_db`
 (`crates/verter_session/tests/cases/g_misc2/no_carrier_verdict_db.rs` — retired-symbol
 absence); `synthetic_carrier_explicit_deepen_routes_through_shape_cache_key`
 (`crates/verter_session/tests/cases/g_misc2/synthetic_carrier_explicit_deepen_routes_through_shape_cache_key.rs`

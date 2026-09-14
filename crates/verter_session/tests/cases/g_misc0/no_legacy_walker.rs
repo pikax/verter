@@ -36,10 +36,10 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "WalkerVisitedNodes",
     "VisitedPushOutcome",
     // The legacy walker's `MaterializedMemberSurfaceDb`
-    // family has zero callers (the walker shim now delegates
-    // to `materialize_component_meta_structure` which publishes through
-    // `MaterializeStructureDb`). Re-introducing any of these names at a
-    // call site would re-wire the dead cache lane.
+    // family has zero callers (structural surfaces are produced by the
+    // one shared query route and reduced by the projector pipeline).
+    // Re-introducing any of these names at a call site would re-wire
+    // the dead cache lane.
     "MaterializedMemberSurfaceDb",
     "MaterializedMemberSurfaceEntry",
     "MaterializedMemberSurfaceKey",
@@ -94,10 +94,9 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "node_value_is_concrete_or_symbolic",
     "node_has_non_object_top_level_surface",
     // The temporary `engine.is_package_backed_decl` adapter is deleted.
-    // Production callers consume graph-native predicates that take a
-    // `DeclIdentity` directly via
-    // `component_meta_ref_resolves_to_package_node`, so the adapter has
-    // zero callers and is gone.
+    // Production callers consume the fact-fenced graph-native predicate
+    // `node_package_backed_object_like_root_with_fence`, so the adapter
+    // has zero callers and is gone.
     "is_package_backed_decl",
     // The temporary `typeexpr_root_reaches_transitive_cycle` adapter
     // (a TypeExpr→graph-native cycle bridge) is deleted. Production
@@ -763,9 +762,9 @@ fn preprocess(src: &str) -> String {
 /// Identifier-boundary matcher: a retired symbol matches ONLY when
 /// its occurrence is bounded by characters that can NOT extend an
 /// identifier (i.e., not [A-Za-z0-9_]). This prevents false
-/// positives like `component_meta_ref_resolves_to_package` matching
-/// the kept `_node` variant
-/// `component_meta_ref_resolves_to_package_node`.
+/// positives like `node_package_backed_object_like_root` matching
+/// the kept `_with_fence` variant
+/// `node_package_backed_object_like_root_with_fence`.
 fn line_contains_identifier(line: &str, ident: &str) -> bool {
     let bytes = line.as_bytes();
     let needle = ident.as_bytes();

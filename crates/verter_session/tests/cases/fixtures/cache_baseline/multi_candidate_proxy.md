@@ -1,5 +1,9 @@
 # Multi-candidate storage proxy — pre-change overlay serialisation
 
+> Recorded baseline. The tier-2 structural materialiser it describes (its
+> in-flight guard, cache and line references) has since been deleted; the
+> shared query route and projector pipeline own every structural surface.
+
 Stage-0 sub-task 2(b) — pre-Stage-5 commitment of how today's
 overlay machinery serialises concurrent sessions.
 

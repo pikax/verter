@@ -1,5 +1,9 @@
 # Cycle-safety failure-mode investigation
 
+> Recorded baseline. The tier-2 structural materialiser it describes (its
+> in-flight guard, cache and line references) has since been deleted; the
+> shared query route and projector pipeline own every structural surface.
+
 Stage-0 sub-task 2(a) — pre-Stage-3 commitment of the pre-change failure mode.
 
 The fact-based cache plan asks Stage 3 to land a stack-safe semantic

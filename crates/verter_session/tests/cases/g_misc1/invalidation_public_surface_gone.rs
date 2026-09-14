@@ -22,7 +22,7 @@
 //!
 //! Note: this guard is `VerterHost`-scoped. The many `pub fn
 //! invalidate_*` methods on cache types (`SemanticGraphStore`,
-//! `MaterializeStructureDb`, `MemberSemanticFactStore`, etc.) are
+//! `ShapeCacheDb`, `MemberSemanticFactStore`, etc.) are
 //! NOT in scope — those caches are internal substrate accessed
 //! through `ProjectTypeStore` and do not expose a top-level public
 //! surface to external callers.

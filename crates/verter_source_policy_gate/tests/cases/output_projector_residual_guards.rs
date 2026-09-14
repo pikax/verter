@@ -178,7 +178,6 @@ const OWNER_REL: &str = "src/project_semantic_dispatch/output_materialization.rs
 const SANCTIONED_OUTPUT_CAPS: &[&str] = &[
     "crate::meta_resolve::materialize::MetaResolveFieldTypesOutputCap",
     "crate::meta_resolve::projectors::MetaResolveProjectorsOutputCap",
-    "crate::resolver_core::component_meta_query_engine::MetaQueryRegistryOutputCap",
     "crate::resolver_core::component_meta_query_engine::MetaQuerySurfaceOutputCap",
     "crate::typeinfo::framework_surface::svelte_exec::TypeinfoSvelteSurfaceOutputCap",
     "crate::typeinfo::framework_surface::vue_exec::TypeinfoVueSurfaceOutputCap",
@@ -2056,10 +2055,6 @@ const KIND_B_BRIDGE_MODULES: &[&str] = &[
 /// Sorted by cap name so the comparison against the live registry is
 /// order-stable.
 const SANCTIONED_SINK_MODULES: &[(&str, &[&str])] = &[
-    (
-        "MetaQueryRegistryOutputCap",
-        &["crate :: resolver_core :: component_meta_query_engine :: registry_decl"],
-    ),
     (
         "MetaQuerySurfaceOutputCap",
         &["crate :: resolver_core :: component_meta_query_engine :: surface"],
@@ -6593,7 +6588,7 @@ fn cross_sink_raw_authority_violations(
         }
         // Module-private fn: unreachable cross-sink (Rust visibility confines it
         // to its own module), so it is NOT a cross-sink boundary. The node-input
-        // cores (`materialize_member_surface_node_core` /
+        // cores (
         // `projected_expanded_shape_from_node_core`) are exactly this: private
         // cores the demand APIs resolve through internally.
         if sig.module_private {
@@ -9085,11 +9080,10 @@ fn cross_sink_raw_authority_self_test_discriminates() {
         // `TypeExpr` output, but provably unreachable cross-sink (a bare `fn` /
         // `pub(self)` inherent core). MUST NOT fire: the demand APIs resolve the
         // node internally and the core never crosses the boundary. This is the
-        // `materialize_member_surface_node_core` /
         // `projected_expanded_shape_from_node_core` shape.
         mk_private(
             "crate::resolver_core::component_meta_query_engine::registry_decl",
-            "materialize_member_surface_node_core",
+            "projected_expanded_shape_from_node_core",
             &["SemanticNodeId"],
             &["TypeExpr"],
         ),
@@ -11843,10 +11837,11 @@ const NO_UNSAFE_SCOPE_PREFIXES: &[&str] = &[
     "crate::meta_resolve::projectors",
     "crate::typeinfo::framework_surface",
     "crate::resolver_core::component_meta_query_engine::surface",
-    // The query-engine `registry_decl` now hosts the member-surface node-core +
-    // the demand APIs (`materialize_pick_member_surface` /
-    // `project_expr_surface_shape`); a `transmute` here could fabricate a
-    // forgeable node past the demand-API seam, so the scoped ban covers it too.
+    // The query-engine `registry_decl` prepares declarations and resolves
+    // prepared targets; it owns no member-surface demand route, but the
+    // scoped `transmute` ban stays: the module still names
+    // `SemanticNodeId`s internally, so a `transmute` here could still
+    // fabricate a forgeable node.
     "crate::resolver_core::component_meta_query_engine::registry_decl",
 ];
 
@@ -12483,10 +12478,6 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     (
         "component_meta_query_engine/surface.rs",
         "materialize_route_projection_node",
-    ),
-    (
-        "component_meta_query_engine/registry_decl.rs",
-        "materialize_member_surface_node_core",
     ),
     (
         "meta_resolve/materialize/field_types.rs",

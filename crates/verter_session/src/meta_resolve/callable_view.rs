@@ -34,10 +34,11 @@ use crate::semantic_query::{
 };
 use crate::typeinfo::surface::TypeInfoSurface;
 
-/// Carrier / composite recursion fuse — mirrors [`realize_callable_member`]'s
-/// own depth-32 bound. Real carrier nesting is shallow (Alias → InstantiationRef
-/// → Conditional → Function is depth 4); the fuse fails loudly on pathological
-/// graphs without consuming the test budget.
+/// Composite (Union / Intersection arm) recursion fuse — mirrors
+/// [`realize_callable_member`]'s own composite-nesting bound. Real composite
+/// nesting is shallow; the fuse fails loudly on pathological graphs without
+/// consuming the test budget. Carrier-shell normalization itself is bounded
+/// by the dispatch-owned structural-fact demand, not by this fuse.
 const CALLABLE_VIEW_DEPTH_FUSE: u32 = 32;
 
 /// How to combine the RETURN types of a multi-arm slot callable. The first

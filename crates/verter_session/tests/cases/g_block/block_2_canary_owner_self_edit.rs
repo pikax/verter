@@ -15,7 +15,7 @@
 //! `get_component_meta` finds no candidate matching the new version —
 //! it cannot warm-hit the stale *result*. But the cold recompute the
 //! candidate-miss triggers walks the query-identity-keyed layer —
-//! `semantic_graph`, `declaration_lookup_db`, `materialize_structure_db`,
+//! `semantic_graph`, `declaration_lookup_db`,
 //! the prepared DBs — whose keys are `(owner_canonical, type_name, ...)`
 //! with NO owner whole-hash. Those entries physically survive an
 //! owner-self edit. The ONLY mechanism that can reject a stale
@@ -218,7 +218,7 @@ fn owner_self_edit_adding_local_prop_member_recomputes_component_meta() {
 /// slot bindings.
 ///
 /// Discrimination property: slot-binding synthesis routes through the
-/// `materialize_structure_db` / `semantic_graph` query-identity layer
+/// `semantic_graph` query-identity layer
 /// keyed by `(owner_canonical, ...)` without an owner whole-hash. The
 /// own-canonical drain is skipped, so a stale materialiser / graph
 /// entry survives the owner edit; only its self-version root lets lazy

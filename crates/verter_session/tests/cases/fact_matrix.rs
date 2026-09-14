@@ -32,16 +32,6 @@ mod app_config_proof_module_augmentation_index_shape;
 mod app_config_proof_observes_no_route_facts;
 
 // ── materialize_structure × * ───────────────────────────────────────
-#[path = "fact_matrix/materialize_structure_barrel_route.rs"]
-mod materialize_structure_barrel_route;
-#[path = "fact_matrix/materialize_structure_import_ref.rs"]
-mod materialize_structure_import_ref;
-#[path = "fact_matrix/materialize_structure_member.rs"]
-mod materialize_structure_member;
-#[path = "fact_matrix/materialize_structure_member_presence.rs"]
-mod materialize_structure_member_presence;
-#[path = "fact_matrix/materialize_structure_module_augmentation_index_shape.rs"]
-mod materialize_structure_module_augmentation_index_shape;
 
 // ── memo_entry × * ───────────────────────────────────────────────────
 #[path = "fact_matrix/memo_entry_barrel_route_dispatch.rs"]

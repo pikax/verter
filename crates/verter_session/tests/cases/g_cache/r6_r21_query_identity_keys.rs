@@ -1,10 +1,9 @@
-//! R6/R21 structural guards for four query-identity cache keys:
+//! R6/R21 structural guards for three query-identity cache keys:
 //!
 //! - [`ComponentMetaResultKey`] — final component-meta result.
 //! - `RouteNameKey` / `BarrelSurfaceKey` — RouteDb per-name + barrel
 //!   surface.
 //! - `MaterializationCycleGateKey` — materialization cycle gate.
-//! - `MaterializationCacheKey` — structural materialiser.
 //!
 //! Each is a **query-identity** cache key (R5): its slot identity is
 //! content-free, and per-value version rooting lives on the cached value
@@ -612,240 +611,21 @@ fn materialization_cycle_gate_key_slot_env_axes_discriminate() {
 }
 
 // ---------------------------------------------------------------------------
-// MaterializeStructureDb — MaterializationCacheKey
-// ---------------------------------------------------------------------------
-
-/// R6/R21 source guard: the `MaterializationCacheKey` struct body must be a
-/// content-free CANONICAL SUBJECT key. Its subject is the env-bearing
-/// `ResolvedDeclSlotIdentity` slot (carrying `project_identity` /
-/// `type_env_hash` / `lib_env_hash`), plus the extra `resolve_env_hash`
-/// the materialiser depends on (R21 — not carried by the slot), plus the
-/// policy axis (`scope_axis`), the `projection_mode`, and the typed
-/// `projection_path`. The graph-instance `base: SemanticNodeId` (the old
-/// `MaterializeStructureCacheKey` subject) is FORBIDDEN as the subject;
-/// `SemanticNodeId` may appear ONLY as `normalized_type_args`
-/// (instantiation args, exactly as the already-compliant
-/// `SemanticQueryKey::Instantiate { args: Arc<[SemanticNodeId]> }` keys
-/// them — the violation was a SemanticNodeId *subject*, never the args).
-/// No content/version hash on the key — freshness rides the value-side
-/// self-root signature.
-#[test]
-fn materialization_cache_key_is_content_free_subject_keyed() {
-    let source = read_file("crates/verter_session/src/component_meta_materialize.rs");
-    let body = extract_brace_block(&source, "pub struct MaterializationCacheKey {").expect(
-        "R6/R21 GUARD: could not locate `pub struct MaterializationCacheKey` body in \
-         component_meta_materialize.rs — the graph-instance `base: SemanticNodeId` key \
-         must be replaced by a content-free canonical subject key",
-    );
-    let required = &[
-        "ResolvedDeclSlotIdentity",
-        "resolve_env_hash",
-        "scope_axis",
-        "projection_mode",
-        "projection_path",
-    ];
-    // `base: SemanticNodeId` (the old graph-instance subject) is forbidden
-    // as the subject. `Arc<[SemanticNodeId]>` type-args do NOT match this
-    // marker, so the check does not false-trip on the compliant args field.
-    let forbidden: Vec<&str> = FORBIDDEN_KEY_MARKERS
-        .iter()
-        .copied()
-        .chain(std::iter::once("base: SemanticNodeId"))
-        .collect();
-    let violations = key_shape_violations(&body, required, &forbidden);
-    assert!(
-        violations.is_empty(),
-        "R6/R21 GUARD VIOLATION — `MaterializationCacheKey` must be a content-free \
-         canonical SUBJECT key (decl: ResolvedDeclSlotIdentity + resolve_env_hash + \
-         scope_axis + projection_mode + projection_path), NOT a graph-instance \
-         `base: SemanticNodeId`. Per-version rooting lives on the cached value's \
-         self-roots. Violations:\n  {}\nBody:\n{}",
-        violations.join("\n  "),
-        body
-    );
-}
-
-/// R6/R21 storage-type source guard: the `MaterializeStructureDb` store +
-/// inflight table must be keyed on the content-free
-/// `MaterializationCacheKey`, NOT the graph-instance recursion identity
-/// `MaterializeRuntimeKey` (which carries `base: SemanticNodeId`). The
-/// runtime key stays the per-thread recursion/depth identity; the cache
-/// keys on the canonical subject. The DB struct body must therefore
-/// reference `MaterializationCacheKey` and NOT key the store/inflight on
-/// `MaterializeRuntimeKey`.
-#[test]
-fn materialize_structure_db_is_keyed_on_canonical_subject_not_runtime_key() {
-    let source = read_file("crates/verter_session/src/component_meta_caches.rs");
-    let body = extract_brace_block(&source, "pub struct MaterializeStructureDb {").expect(
-        "R6/R21 GUARD: could not locate `pub struct MaterializeStructureDb` body in \
-         component_meta_caches.rs",
-    );
-    assert!(
-        body.contains("MaterializationCacheKey"),
-        "R6/R21 GUARD VIOLATION — `MaterializeStructureDb` must key its store/inflight on \
-         the content-free `MaterializationCacheKey`. Body:\n{}",
-        body
-    );
-    assert!(
-        !body.contains("MaterializeRuntimeKey") && !body.contains("MaterializeStructureCacheKey"),
-        "R6/R21 GUARD VIOLATION — `MaterializeStructureDb` keys its store/inflight on the \
-         graph-instance recursion key (`base: SemanticNodeId`). A query-identity cache key \
-         must be content-free — key on `MaterializationCacheKey` and root the content \
-         version on the cached value. Body:\n{}",
-        body
-    );
-}
-
-/// Runtime lock: `MaterializationCacheKey` is a content-free canonical
-/// SUBJECT key. An exhaustive destructure pins the field set (no
-/// `base: SemanticNodeId` subject, no content/version hash). Two keys
-/// with the SAME canonical subject co-locate (cross-owner reuse —
-/// the key has no consumer-scope dimension); the R21 env axes
-/// (`resolve_env_hash`, and the slot's `project_identity` /
-/// `type_env_hash` / `lib_env_hash`), the policy axis (`scope_axis`),
-/// the `projection_mode`, and the typed `projection_path` each
-/// discriminate (no over-share across distinct subjects/envs/projections).
-#[test]
-fn materialization_cache_key_is_content_free_and_env_discriminating() {
-    use verter_semantic::facts::registry::SymbolSpace;
-    use verter_session::component_meta_materialize::{
-        MaterializationCacheKey, MaterializationScope,
-    };
-    use verter_session::file_artifact_store::ProjectIdentity;
-    use verter_session::resolver_core::RouteDemand;
-    use verter_session::semantic_query::{ProjectionMode, ResolvedDeclSlotIdentity};
-
-    // `type_slot` carries the env-bearing, content-free subject identity:
-    // (canonical, name, project_identity, type_env_hash, lib_env_hash).
-    let slot = |project_identity: u32, type_env: [u8; 16], lib_env: [u8; 16]| {
-        ResolvedDeclSlotIdentity::type_slot(
-            Arc::from("/w/ChatMessageProps.ts"),
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("ChatMessageProps"),
-            project_identity,
-            type_env,
-            lib_env,
-        )
-    };
-
-    let base = MaterializationCacheKey {
-        decl: slot(1, [2u8; 16], [3u8; 16]),
-        projection_path: RouteDemand::Whole,
-        scope_axis: MaterializationScope::TopLevel,
-        projection_mode: ProjectionMode::Navigate,
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
-        resolve_env_hash: [4u8; 16],
-    };
-
-    // Exhaustive destructure — fails to COMPILE if a `base: SemanticNodeId`
-    // subject or a content/version field is added, or an axis removed.
-    let MaterializationCacheKey {
-        decl: _,
-        projection_path: _,
-        scope_axis: _,
-        projection_mode: _,
-        normalized_type_args: _,
-        resolve_env_hash: _,
-    } = &base;
-
-    // Cross-owner reuse: an IDENTICAL canonical subject (any consumer
-    // scope) is the SAME key — the key carries no scope dimension.
-    assert_eq!(
-        hash_of(&base),
-        hash_of(&base.clone()),
-        "an identical canonical subject must hash to the same slot (cross-owner reuse)",
-    );
-
-    // resolve_env_hash discriminates (R21 — not carried by the slot).
-    let mut resolve_variant = base.clone();
-    resolve_variant.resolve_env_hash = [99u8; 16];
-    assert_ne!(
-        hash_of(&base),
-        hash_of(&resolve_variant),
-        "resolve_env_hash must distinguish the MaterializationCacheKey slot",
-    );
-
-    // The slot's split env axes (project_identity / type_env / lib_env)
-    // each discriminate.
-    for variant_slot in [
-        slot(9, [2u8; 16], [3u8; 16]),
-        slot(1, [99u8; 16], [3u8; 16]),
-        slot(1, [2u8; 16], [99u8; 16]),
-    ] {
-        let mut variant = base.clone();
-        variant.decl = variant_slot;
-        assert_ne!(
-            hash_of(&base),
-            hash_of(&variant),
-            "each split env axis on the subject slot must distinguish the key",
-        );
-        // ProjectIdentity is a real dimension on the slot, not folded away.
-        let _ = ProjectIdentity([1u8; 16]);
-    }
-
-    // The policy axis, mode, and projection path each discriminate.
-    let mut axis_variant = base.clone();
-    axis_variant.scope_axis = MaterializationScope::Nested;
-    assert_ne!(
-        hash_of(&base),
-        hash_of(&axis_variant),
-        "scope_axis must discriminate"
-    );
-
-    let mut mode_variant = base.clone();
-    mode_variant.projection_mode = ProjectionMode::Expanded;
-    assert_ne!(
-        hash_of(&base),
-        hash_of(&mode_variant),
-        "projection_mode must discriminate"
-    );
-
-    let mut proj_variant = base.clone();
-    proj_variant.projection_path = RouteDemand::pick(vec!["id".to_string()]);
-    assert_ne!(
-        hash_of(&base),
-        hash_of(&proj_variant),
-        "distinct projection paths must not alias onto one slot",
-    );
-
-    // A different canonical subject (different decl name) discriminates —
-    // no over-share across semantically-distinct subjects.
-    let mut subject_variant = base.clone();
-    subject_variant.decl = ResolvedDeclSlotIdentity::type_slot(
-        Arc::from("/w/ChatMessageProps.ts"),
-        verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from("OtherProps"),
-        1,
-        [2u8; 16],
-        [3u8; 16],
-    );
-    assert_ne!(
-        hash_of(&base),
-        hash_of(&subject_variant),
-        "a different canonical subject must distinguish the key",
-    );
-
-    // `SymbolSpace` import touch — the slot's symbol_space is part of its
-    // identity (type-space vs value-space subjects never collide).
-    let _ = SymbolSpace::Type;
-}
-
-// ---------------------------------------------------------------------------
-// Shape / materialize key-hygiene scanner
+// Shape key-hygiene scanner
 //
-// `no_unsanctioned_semantic_node_id_in_shape_or_materialize_key` — scoped
-// cache-key-hygiene over the shape/materialize derived-`Hash` cache keys
-// (`ShapeCacheKey` + its `ShapeSubject` enum + `ShapeDemand`;
-// `MaterializationCacheKey`). It forbids the content/version field
-// types/markers and PINS the SemanticNodeId allow-list to EXACTLY TWO
-// positions.
+// `no_unsanctioned_semantic_node_id_in_shape_key` — scoped
+// cache-key-hygiene over the shape derived-`Hash` cache keys
+// (`ShapeCacheKey` + its `ShapeSubject` enum + `ShapeDemand`). It forbids
+// the content/version field types/markers and PINS the SemanticNodeId
+// allow-list to EXACTLY ONE position (the args-list allowance is exercised
+// by the predicate self-tests only).
 //
 // MECHANISM — RECORDED SOURCE SCANNER, NOT a structural assert.
 //
-//   scanner_invariant=shape_materialize_key_no_unsanctioned_semantic_node_id
+//   scanner_invariant=shape_key_no_unsanctioned_semantic_node_id
 //   scanner_justification=Rust has no negative/forbidden-field-type trait
 //     bound, so "forbid these field TYPES in a derived-Hash key while
-//     allowing exactly two SemanticNodeId positions" has no compiler /
+//     allowing exactly one SemanticNodeId position" has no compiler /
 //     structural mechanism; the raw Hash16/HashValue aliases cannot
 //     distinguish resolve_env_hash from whole_hash by type without a
 //     key-safety newtype substrate, which is out of scope for this work.
@@ -1427,7 +1207,7 @@ fn strip_leading_outer_attributes(segment: &str) -> &str {
 /// field name (`Some("normalized_type_args")` for the materialize key);
 /// `None` for the shape keys (which carry no args list at all). Returns
 /// the human-readable violations; empty == compliant.
-fn shape_materialize_key_violations(
+fn shape_key_violations(
     key_name: &str,
     body: &str,
     sanctioned_args_field: Option<&str>,
@@ -1480,7 +1260,7 @@ fn shape_materialize_key_violations(
         violations.push(format!(
             "`{key_name}`: {bare} unsanctioned BARE `SemanticNodeId` position(s) in the \
              key body — a shape/materialize key may carry a `SemanticNodeId` ONLY as \
-             `MaterializationCacheKey.normalized_type_args` (`Arc<[SemanticNodeId]>`) or \
+             a sanctioned `Arc<[SemanticNodeId]>` args list or \
              via the sealed `MemberShapeNodeSubject` newtype (which keeps the ordinal \
              module-private and does NOT spell `SemanticNodeId` in the body). A literal \
              `SemanticNodeId` subject/field re-opens the graph-instance ordinal key the \
@@ -1497,7 +1277,7 @@ fn shape_materialize_key_violations(
 /// well as line comments, and ACCEPT the two sanctioned positions.
 /// Without this discriminator the scanner below is a stub.
 #[test]
-fn shape_materialize_key_hygiene_predicate_discriminates() {
+fn shape_key_hygiene_predicate_discriminates() {
     // The materialize key permits EXACTLY ONE args list, under the exact
     // field name `normalized_type_args`; the shape keys permit none.
     const MAT_ARGS: Option<&str> = Some("normalized_type_args");
@@ -1506,7 +1286,7 @@ fn shape_materialize_key_hygiene_predicate_discriminates() {
     // (1) Each forbidden marker is independently flagged.
     for marker in SHAPE_MATERIALIZE_FORBIDDEN_MARKERS {
         let body = format!("pub scope: Arc<str>, pub bad: {marker},");
-        let v = shape_materialize_key_violations("FixtureKey", &body, NO_ARGS);
+        let v = shape_key_violations("FixtureKey", &body, NO_ARGS);
         assert!(
             v.iter().any(|m| m.contains(marker)),
             "predicate must flag forbidden marker `{marker}`; got {v:?}",
@@ -1515,7 +1295,7 @@ fn shape_materialize_key_hygiene_predicate_discriminates() {
 
     // (2) A bare `SemanticNodeId` subject/field is flagged.
     let bare_subject = "pub scope: Arc<str>, pub node: SemanticNodeId,";
-    let v = shape_materialize_key_violations("FixtureKey", bare_subject, NO_ARGS);
+    let v = shape_key_violations("FixtureKey", bare_subject, NO_ARGS);
     assert!(
         v.iter().any(|m| m.contains("BARE `SemanticNodeId`")),
         "predicate must flag a bare SemanticNodeId subject/field; got {v:?}",
@@ -1527,11 +1307,11 @@ fn shape_materialize_key_hygiene_predicate_discriminates() {
                      pub normalized_type_args: Arc<[SemanticNodeId]>, \
                      pub resolve_env_hash: HashValue,";
     assert!(
-        shape_materialize_key_violations("MaterializationCacheKey", args_body, MAT_ARGS).is_empty(),
+        shape_key_violations("ArgsListKey", args_body, MAT_ARGS).is_empty(),
         "predicate must ACCEPT the single sanctioned `normalized_type_args: \
          Arc<[SemanticNodeId]>` args list when one is allowed",
     );
-    let v = shape_materialize_key_violations("ShapeKeyShaped", args_body, NO_ARGS);
+    let v = shape_key_violations("ShapeKeyShaped", args_body, NO_ARGS);
     assert!(
         !v.is_empty(),
         "predicate must REJECT an args list on a body whose allow-list is empty",
@@ -1542,14 +1322,14 @@ fn shape_materialize_key_hygiene_predicate_discriminates() {
     //     ACCEPTED — no false-trip on the legitimate seal.
     let sealed_member = "pub scope: Arc<str>, pub node: MemberShapeNodeSubject,";
     assert!(
-        shape_materialize_key_violations("ShapeSubject", sealed_member, NO_ARGS).is_empty(),
+        shape_key_violations("ShapeSubject", sealed_member, NO_ARGS).is_empty(),
         "predicate must ACCEPT the sealed `MemberShapeNodeSubject` representation \
          (it does not spell `SemanticNodeId` in the body)",
     );
 
     // (5) A SECOND args position is flagged (exact, not open).
     let two_args = "pub a: Arc<[SemanticNodeId]>, pub b: Arc<[SemanticNodeId]>,";
-    let v = shape_materialize_key_violations("MaterializationCacheKey", two_args, MAT_ARGS);
+    let v = shape_key_violations("ArgsListKey", two_args, MAT_ARGS);
     assert!(
         v.iter()
             .any(|m| m.contains("UNSANCTIONED `Arc<[SemanticNodeId]>` args field")),
@@ -1562,7 +1342,7 @@ fn shape_materialize_key_hygiene_predicate_discriminates() {
     let clean = "pub decl: ResolvedDeclSlotIdentity, pub resolve_env_hash: HashValue, \
                  pub scope_axis: MaterializationScope,";
     assert!(
-        shape_materialize_key_violations("CleanKey", clean, MAT_ARGS).is_empty(),
+        shape_key_violations("CleanKey", clean, MAT_ARGS).is_empty(),
         "predicate must accept a clean content-free body",
     );
 
@@ -1578,7 +1358,7 @@ fn shape_materialize_key_hygiene_predicate_discriminates() {
     // proving a blanket ban over this operand would be a false positive,
     // which is exactly why the guard scopes to the shape/materialize keys.
     assert!(
-        !shape_materialize_key_violations(
+        !shape_key_violations(
             "InstantiateOperandAsIfShapeKey",
             instantiate_operand,
             NO_ARGS
@@ -1596,7 +1376,7 @@ fn shape_materialize_key_hygiene_predicate_discriminates() {
     let renamed_args = "pub decl: ResolvedDeclSlotIdentity, \
                         pub rogue_nodes: Arc<[SemanticNodeId]>, \
                         pub resolve_env_hash: HashValue,";
-    let v = shape_materialize_key_violations("MaterializationCacheKey", renamed_args, MAT_ARGS);
+    let v = shape_key_violations("ArgsListKey", renamed_args, MAT_ARGS);
     assert!(
         v.iter().any(
             |m| m.contains("UNSANCTIONED `Arc<[SemanticNodeId]>` args field")
@@ -1613,7 +1393,7 @@ fn shape_materialize_key_hygiene_predicate_discriminates() {
                           pub normalized_type_args: Arc<[SemanticNodeId]>, \
                           pub normalized_type_args: Arc<[SemanticNodeId]>, \
                           pub resolve_env_hash: HashValue,";
-    let v = shape_materialize_key_violations("MaterializationCacheKey", duplicate_args, MAT_ARGS);
+    let v = shape_key_violations("ArgsListKey", duplicate_args, MAT_ARGS);
     assert!(
         !v.is_empty(),
         "predicate must REJECT a DUPLICATE `normalized_type_args` field — the \
@@ -1628,8 +1408,7 @@ fn shape_materialize_key_hygiene_predicate_discriminates() {
                                /* whole_hash SemanticNodeId MemberShapeNodeSubject */ \
                                pub resolve_env_hash: HashValue,";
     assert!(
-        shape_materialize_key_violations("CleanKeyWithBlockComment", block_comment_decoy, MAT_ARGS)
-            .is_empty(),
+        shape_key_violations("CleanKeyWithBlockComment", block_comment_decoy, MAT_ARGS).is_empty(),
         "predicate must strip BLOCK comments: a `/* whole_hash ... */` decoy must not \
          trip the forbidden-marker scan",
     );
@@ -1637,25 +1416,22 @@ fn shape_materialize_key_hygiene_predicate_discriminates() {
 
 /// Scoped cache-key-hygiene guard (RECORDED SOURCE SCANNER — see the
 /// module-level record above; this is NOT structural enforcement). The
-/// shape/materialize derived-`Hash` cache keys — `ShapeCacheKey`, its
-/// `ShapeSubject` enum, `ShapeDemand`, and `MaterializationCacheKey` —
-/// must carry NONE of the forbidden content/version markers
+/// shape derived-`Hash` cache keys — `ShapeCacheKey`, its `ShapeSubject`
+/// enum, and `ShapeDemand` — must carry NONE of the forbidden content/version markers
 /// (`whole_hash` / `content_hash` / `parse_stable_hash` /
 /// `fact_dep_signature` / `project_config_hash` / `DeclIdentity` /
 /// `VersionedDeclIdentity` / `HotTypeRef` / `value_node`) and may carry a
-/// `SemanticNodeId` in EXACTLY TWO sanctioned positions:
-///   1. `MaterializationCacheKey.normalized_type_args` (an
-///      `Arc<[SemanticNodeId]>` instantiation-args list), and
-///   2. the sealed `MemberShapeNodeSubject` newtype keying
+/// `SemanticNodeId` in EXACTLY ONE sanctioned position:
+///   the sealed `MemberShapeNodeSubject` newtype keying
 ///      `ShapeSubject::MemberValueNode.node` (the newtype keeps the arena
 ///      ordinal module-private and spells `MemberShapeNodeSubject` in the
 ///      body, NOT `SemanticNodeId`).
 ///
-/// The allow-list is EXACT: a THIRD `SemanticNodeId` position (a bare
-/// subject/field, or a second args list) is REJECTED until explicitly
-/// added here.
+/// The allow-list is EXACT: a SECOND `SemanticNodeId` position (a bare
+/// subject/field, or an args list) is REJECTED until explicitly added
+/// here.
 ///
-/// SCOPE: shape/materialize keys ONLY. A blanket `SemanticNodeId` ban
+/// SCOPE: shape keys ONLY. A blanket `SemanticNodeId` ban
 /// would be unsound — it would flag the legitimate intra-graph operands
 /// (`SemanticQueryKey::Instantiate.args` / `ProjectMember.base` /
 /// `ProjectPath.base` / `ResolveOverloadSet.callee` / `IndexKey::Computed`),
@@ -1669,7 +1445,7 @@ fn shape_materialize_key_hygiene_predicate_discriminates() {
 const SANCTIONED_SHAPE_SUBJECT_VARIANTS: &[&str] = &["MemberValueNode", "SyntheticBinding"];
 
 #[test]
-fn no_unsanctioned_semantic_node_id_in_shape_or_materialize_key() {
+fn no_unsanctioned_semantic_node_id_in_shape_key() {
     // Strip ALL comments (line AND block) from the production sources
     // ONCE, up front, so every downstream brace/variant extraction
     // operates on comment-free text — a `/* ... */` (or `//`) comment
@@ -1677,9 +1453,6 @@ fn no_unsanctioned_semantic_node_id_in_shape_or_materialize_key() {
     // `MemberShapeNodeSubject` can never satisfy or trip a check.
     let caches = strip_comments(&read_file(
         "crates/verter_session/src/component_meta_caches.rs",
-    ));
-    let materialize = strip_comments(&read_file(
-        "crates/verter_session/src/component_meta_materialize.rs",
     ));
 
     // The production sources must be non-empty AND must actually contain
@@ -1690,7 +1463,7 @@ fn no_unsanctioned_semantic_node_id_in_shape_or_materialize_key() {
     // the failure mode is a precise "source did not contain X", not a
     // brace-walk panic).
     assert!(
-        !caches.trim().is_empty() && !materialize.trim().is_empty(),
+        !caches.trim().is_empty(),
         "key-hygiene GUARD: a production source read empty — the scan would be vacuous",
     );
     for (needle, src, file) in [
@@ -1709,11 +1482,6 @@ fn no_unsanctioned_semantic_node_id_in_shape_or_materialize_key() {
             &caches,
             "component_meta_caches.rs",
         ),
-        (
-            "pub struct MaterializationCacheKey {",
-            &materialize,
-            "component_meta_materialize.rs",
-        ),
     ] {
         assert!(
             src.contains(needle),
@@ -1723,7 +1491,7 @@ fn no_unsanctioned_semantic_node_id_in_shape_or_materialize_key() {
         );
     }
 
-    // The four shape/materialize derived-`Hash` cache-key bodies.
+    // The shape derived-`Hash` cache-key bodies.
     let shape_cache_key = extract_brace_block(&caches, "pub struct ShapeCacheKey {").expect(
         "key-hygiene GUARD: could not locate `pub struct ShapeCacheKey` body in \
          component_meta_caches.rs",
@@ -1732,11 +1500,6 @@ fn no_unsanctioned_semantic_node_id_in_shape_or_materialize_key() {
         "key-hygiene GUARD: could not locate `pub struct ShapeDemand` body in \
          component_meta_caches.rs",
     );
-    let materialization_key =
-        extract_brace_block(&materialize, "pub struct MaterializationCacheKey {").expect(
-            "key-hygiene GUARD: could not locate `pub struct MaterializationCacheKey` body in \
-             component_meta_materialize.rs",
-        );
     // Scope variant-arm extraction to the `ShapeSubject` enum body first, so
     // a variant needle cannot match an unrelated earlier site.
     let shape_subject_enum = extract_brace_block(&caches, "pub enum ShapeSubject {").expect(
@@ -1822,37 +1585,6 @@ fn no_unsanctioned_semantic_node_id_in_shape_or_materialize_key() {
         ],
     ));
     inventory_failures.extend(exact_field_inventory_failures(
-        "MaterializationCacheKey",
-        &materialization_key,
-        &[
-            ExpectedField {
-                name: "decl",
-                ty: None,
-            },
-            ExpectedField {
-                name: "projection_path",
-                ty: None,
-            },
-            ExpectedField {
-                name: "scope_axis",
-                ty: None,
-            },
-            ExpectedField {
-                name: "projection_mode",
-                ty: None,
-            },
-            // Type-critical: the ONLY sanctioned args-list position.
-            ExpectedField {
-                name: "normalized_type_args",
-                ty: Some("Arc<[SemanticNodeId]>"),
-            },
-            ExpectedField {
-                name: "resolve_env_hash",
-                ty: None,
-            },
-        ],
-    ));
-    inventory_failures.extend(exact_field_inventory_failures(
         "ShapeSubject::MemberValueNode",
         &member_value_arm,
         &[
@@ -1923,56 +1655,44 @@ fn no_unsanctioned_semantic_node_id_in_shape_or_materialize_key() {
     // `MemberValueNode.node` field. The newtype hides its inner
     // `SemanticNodeId` from the bare-`SemanticNodeId` scan, so a MISPLACED
     // wrapper — `ShapeDemand { decoy: MemberShapeNodeSubject, .. }` or
-    // `MaterializationCacheKey { rogue: MemberShapeNodeSubject, .. }` —
+    // `ShapeCacheKey { rogue: MemberShapeNodeSubject, .. }` —
     // would otherwise PASS. Count the newtype across EVERY scanned body and
     // assert the SINGLE occurrence is the member arm's `node` field. The
-    // `ShapeSubject` ENUM body already contains the member arm, so the four
-    // top-level bodies counted are ShapeCacheKey + ShapeDemand +
-    // MaterializationCacheKey + the whole ShapeSubject enum (which subsumes
-    // the three arms) — no double-counting of the member arm.
+    // `ShapeSubject` ENUM body already contains the member arm, so the three
+    // top-level bodies counted are ShapeCacheKey + ShapeDemand + the whole
+    // ShapeSubject enum (which subsumes the three arms) — no double-counting
+    // of the member arm.
     let member_subject_total = count_ident_tokens(&shape_cache_key, "MemberShapeNodeSubject")
         + count_ident_tokens(&shape_demand, "MemberShapeNodeSubject")
-        + count_ident_tokens(&materialization_key, "MemberShapeNodeSubject")
         + count_ident_tokens(&shape_subject_enum, "MemberShapeNodeSubject");
     assert_eq!(
         member_subject_total, 1,
         "key-hygiene GUARD (global newtype pin): the sealed `MemberShapeNodeSubject` newtype \
-         must appear EXACTLY ONCE across all scanned shape/materialize bodies — and that one \
+         must appear EXACTLY ONCE across all scanned shape bodies — and that one \
          occurrence is `ShapeSubject::MemberValueNode.node`. A second occurrence (a \
-         misplaced wrapper on `ShapeDemand` / `MaterializationCacheKey` etc.) hides a \
+         misplaced wrapper on `ShapeDemand` / `ShapeCacheKey` etc.) hides a \
          `SemanticNodeId` behind the newtype and \
          re-opens the graph-instance ordinal key the content-free identities removed \
          (R6). Found {member_subject_total} occurrence(s).",
     );
 
     let mut violations = Vec::new();
-    // Shape keys carry NO args list; the materialize key carries EXACTLY
-    // ONE sanctioned `Arc<[SemanticNodeId]>` args list, ONLY under the
-    // field name `normalized_type_args`.
-    violations.extend(shape_materialize_key_violations(
+    // Shape keys carry NO args list.
+    violations.extend(shape_key_violations(
         "ShapeCacheKey",
         &shape_cache_key,
         None,
     ));
-    violations.extend(shape_materialize_key_violations(
-        "ShapeDemand",
-        &shape_demand,
-        None,
-    ));
-    violations.extend(shape_materialize_key_violations(
+    violations.extend(shape_key_violations("ShapeDemand", &shape_demand, None));
+    violations.extend(shape_key_violations(
         "ShapeSubject::MemberValueNode",
         &member_value_arm,
         None,
     ));
-    violations.extend(shape_materialize_key_violations(
+    violations.extend(shape_key_violations(
         "ShapeSubject::SyntheticBinding",
         &synthetic_binding_arm,
         None,
-    ));
-    violations.extend(shape_materialize_key_violations(
-        "MaterializationCacheKey",
-        &materialization_key,
-        Some("normalized_type_args"),
     ));
 
     // ALSO scan the WHOLE `ShapeSubject` enum body with the
@@ -1983,35 +1703,19 @@ fn no_unsanctioned_semantic_node_id_in_shape_or_materialize_key() {
     // the whole enum body is 0 today — the only `SemanticNodeId` lives
     // inside the sealed `MemberShapeNodeSubject` newtype, which spells the
     // newtype name, not `SemanticNodeId`, in the enum body.
-    violations.extend(shape_materialize_key_violations(
+    violations.extend(shape_key_violations(
         "ShapeSubject (whole enum body)",
         &shape_subject_enum,
         None,
     ));
 
-    // The two sanctioned positions are PINNED: the materialize key carries
-    // exactly its one `normalized_type_args` `Arc<[SemanticNodeId]>` args
-    // list, and the `MemberValueNode` arm keys on the sealed
-    // `MemberShapeNodeSubject` newtype (asserted by field above). A future
-    // edit that drops either representation, or adds a third, trips here.
-    let materialization_fields = split_struct_fields(&materialization_key);
-    assert_eq!(
-        materialization_fields
-            .iter()
-            .filter(|(n, ty)| n == "normalized_type_args" && type_is_args_list(ty))
-            .count(),
-        1,
-        "key-hygiene GUARD: `MaterializationCacheKey` must carry EXACTLY ONE sanctioned \
-         `normalized_type_args: Arc<[SemanticNodeId]>` args position; the allow-list is exact",
-    );
-
     assert!(
         violations.is_empty(),
-        "key-hygiene GUARD VIOLATION — a shape/materialize derived-`Hash` cache key carries an \
+        "key-hygiene GUARD VIOLATION — a shape derived-`Hash` cache key carries an \
          unsanctioned content/version marker or an unsanctioned `SemanticNodeId` position. A \
-         shape/materialize key must be content-free; the ONLY sanctioned `SemanticNodeId` \
-         positions are `MaterializationCacheKey.normalized_type_args` (`Arc<[SemanticNodeId]>`) \
-         and the sealed `MemberShapeNodeSubject` newtype keying \
+         shape key must be content-free; the ONLY sanctioned `SemanticNodeId` \
+         position is \
+         the sealed `MemberShapeNodeSubject` newtype keying \
          `ShapeSubject::MemberValueNode.node`. This is a RECORDED SOURCE SCANNER \
          (per the binding neutral design ruling: a recorded scanner, not structural \
          enforcement). Violations:\n  {}",
@@ -2061,7 +1765,7 @@ fn shape_subject_closed_inventory_self_test() {
     // the rogue arm's bare `SemanticNodeId` directly (independent of the
     // closed-inventory assert) — `Other { node: SemanticNodeId }` carries a
     // bare `SemanticNodeId` token.
-    let v = shape_materialize_key_violations("ShapeSubject (rogue)", with_rogue_arm, None);
+    let v = shape_key_violations("ShapeSubject (rogue)", with_rogue_arm, None);
     assert!(
         v.iter().any(|m| m.contains("BARE `SemanticNodeId`")),
         "self-test: the whole-enum-body scan must flag the rogue 3rd arm's bare \
@@ -2072,8 +1776,7 @@ fn shape_subject_closed_inventory_self_test() {
     // (the only `SemanticNodeId` is hidden inside `MemberShapeNodeSubject`,
     // which spells the newtype name, not `SemanticNodeId`).
     assert!(
-        shape_materialize_key_violations("ShapeSubject (sanctioned)", sanctioned_enum, None)
-            .is_empty(),
+        shape_key_violations("ShapeSubject (sanctioned)", sanctioned_enum, None).is_empty(),
         "self-test: the sanctioned `ShapeSubject` enum body must be clean (the \
          `SemanticNodeId` is sealed behind `MemberShapeNodeSubject`)",
     );
@@ -2185,7 +1888,7 @@ fn member_arm_sealed_newtype_is_field_pinned_self_test() {
 fn member_shape_node_subject_global_single_occurrence_self_test() {
     // The legitimate shape: the newtype appears ONCE, in the member arm
     // (inside the whole `ShapeSubject` enum body), and nowhere in
-    // ShapeCacheKey / ShapeDemand / MaterializationCacheKey.
+    // ShapeCacheKey / ShapeDemand.
     let shape_cache_key = "subject: ShapeSubject, demand: ShapeDemand";
     let shape_demand = "path: Arc<[PathSegment]>, terminal_context: ProjectionReductionContext, \
                         key_filter: KeyFilter, surface: PublishedSurfaceKind";
@@ -2223,7 +1926,7 @@ fn member_shape_node_subject_global_single_occurrence_self_test() {
          must push the global count to 2 — the guard's `== 1` pin then rejects it; got {rogue_total}",
     );
 
-    // And a misplaced wrapper on `MaterializationCacheKey` / `ShapeCacheKey`
+    // And a misplaced wrapper on `ShapeDemand` / `ShapeCacheKey`
     // is equally caught — the count is summed over ALL the bodies.
     let rogue_mat = "decl: ResolvedDeclSlotIdentity, rogue: MemberShapeNodeSubject, \
                      normalized_type_args: Arc<[SemanticNodeId]>, resolve_env_hash: HashValue";
@@ -2234,7 +1937,7 @@ fn member_shape_node_subject_global_single_occurrence_self_test() {
     assert_eq!(
         rogue_mat_total, 2,
         "self-test (global newtype pin): a misplaced `MemberShapeNodeSubject` on \
-         `MaterializationCacheKey` must also push the global count to 2; got {rogue_mat_total}",
+         `ShapeDemand` must also push the global count to 2; got {rogue_mat_total}",
     );
 }
 
@@ -2295,11 +1998,7 @@ fn strip_visibility_only_strips_the_pub_token_self_test() {
     // The args-slot allow-list (pinned to the EXACT name `normalized_type_args`)
     // therefore REJECTS the rogue field: it carries an `Arc<[SemanticNodeId]>`
     // typed field whose name is NOT the sanctioned name.
-    let v = shape_materialize_key_violations(
-        "MaterializationCacheKey",
-        rogue_args_body,
-        Some("normalized_type_args"),
-    );
+    let v = shape_key_violations("ArgsListKey", rogue_args_body, Some("normalized_type_args"));
     assert!(
         v.iter().any(
             |m| m.contains("UNSANCTIONED `Arc<[SemanticNodeId]>` args field")
@@ -2337,7 +2036,7 @@ fn exact_field_inventory_discriminates_self_test() {
     let ok = "decl: ResolvedDeclSlotIdentity, normalized_type_args: Arc<[SemanticNodeId]>, \
               resolve_env_hash: HashValue";
     assert!(
-        exact_field_inventory_failures("MaterializationCacheKey", ok, mat_expected).is_empty(),
+        exact_field_inventory_failures("ArgsListKey", ok, mat_expected).is_empty(),
         "self-test (exact inventory): the exact inventory must accept the matching body",
     );
 
@@ -2346,7 +2045,7 @@ fn exact_field_inventory_discriminates_self_test() {
     //     also exercises the global newtype pin.
     let extra = "decl: ResolvedDeclSlotIdentity, normalized_type_args: Arc<[SemanticNodeId]>, \
                  resolve_env_hash: HashValue, rogue: MemberShapeNodeSubject";
-    let f = exact_field_inventory_failures("MaterializationCacheKey", extra, mat_expected);
+    let f = exact_field_inventory_failures("ArgsListKey", extra, mat_expected);
     assert!(
         f.iter().any(|m| m.contains("UNEXPECTED field `rogue`")),
         "self-test (exact inventory): an unexpected extra field must FAIL the exact inventory; got {f:?}",
@@ -2354,7 +2053,7 @@ fn exact_field_inventory_discriminates_self_test() {
 
     // (c) A MISSING expected field FAILS.
     let missing = "decl: ResolvedDeclSlotIdentity, resolve_env_hash: HashValue";
-    let f = exact_field_inventory_failures("MaterializationCacheKey", missing, mat_expected);
+    let f = exact_field_inventory_failures("ArgsListKey", missing, mat_expected);
     assert!(
         f.iter()
             .any(|m| m.contains("MISSING expected field `normalized_type_args`")),
@@ -2365,7 +2064,7 @@ fn exact_field_inventory_discriminates_self_test() {
     //     retyped to a bare `SemanticNodeId` subject).
     let wrong_type = "decl: ResolvedDeclSlotIdentity, normalized_type_args: SemanticNodeId, \
                       resolve_env_hash: HashValue";
-    let f = exact_field_inventory_failures("MaterializationCacheKey", wrong_type, mat_expected);
+    let f = exact_field_inventory_failures("ArgsListKey", wrong_type, mat_expected);
     assert!(
         f.iter()
             .any(|m| m.contains("`normalized_type_args`") && m.contains("Arc<[SemanticNodeId]>")),

@@ -596,11 +596,6 @@ impl VerterHost {
                 decl_lowering_policy.size.resolve(),
             )),
             compile_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
-            materialize_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
-            materialize_force_in_scope_partial: std::sync::atomic::AtomicBool::new(false),
-            materialize_force_mid_compute_generation_bump: std::sync::atomic::AtomicBool::new(
-                false,
-            ),
             relation_knobs: RelationHostKnobs::default(),
             #[cfg(any(test, feature = "test-support"))]
             augmentation_force_source_env_unobservable: std::sync::atomic::AtomicBool::new(false),
@@ -748,15 +743,13 @@ impl VerterHost {
     /// cache-discipline / read-once / terminal-mode-only-expansion
     /// invariants without going through the surface materialiser.
     ///
-    /// Visible to integration tests (no `#[cfg(test)]` gate) so
-    /// `tests/cases/g_misc0/cross_owner_materialise_reuse_production.rs` can drive
-    /// `materialize_surface` from N owner scopes and observe the
-    /// cross-owner reuse contract on the live
-    /// `MaterializeStructureDb`. The accessor's contract is
-    /// arch-guard / test-fixture; production resolver code MUST NOT
-    /// construct this dispatcher directly — it goes through the
-    /// component-meta resolver / engine. The accessor's existence is
-    /// a documented test-bridge, not a public-API stability promise.
+    /// Visible to integration tests (no `#[cfg(test)]` gate) so the
+    /// `tests/cases` dispatch suites can drive query dispatch from a
+    /// hermetic host. The accessor's contract is arch-guard /
+    /// test-fixture; production resolver code MUST NOT construct this
+    /// dispatcher directly — it goes through the component-meta
+    /// resolver / engine. The accessor's existence is a documented
+    /// test-bridge, not a public-API stability promise.
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn semantic_dispatch(

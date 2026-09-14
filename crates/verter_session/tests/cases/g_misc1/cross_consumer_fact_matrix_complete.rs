@@ -9,9 +9,8 @@
 //!
 //! `REQUIRED_CONSUMERS` is the union of:
 //!
-//! - the 4 caches wired under `fact_matrix/`
-//!   (`materialize_structure`, `memo_entry`,
-//!   `app_config_proof`, `owner_import_surface`); and
+//! - the 3 caches wired under `fact_matrix/`
+//!   (`memo_entry`, `app_config_proof`, `owner_import_surface`); and
 //! - the 5 caches wired in the top-level
 //!   slices (`compile_tier`, `component_meta`, `fallthrough`,
 //!   `route_surface`, `slot_binding_graph`).
@@ -68,7 +67,6 @@ use std::path::Path;
 
 const REQUIRED_CONSUMERS: &[&str] = &[
     // Caches in `fact_matrix/`.
-    "materialize_structure",
     "memo_entry",
     "app_config_proof",
     "owner_import_surface",
@@ -127,19 +125,19 @@ fn cross_consumer_matrix_completeness() {
 
 #[test]
 fn cross_consumer_matrix_grid_size_matches_expected() {
-    // Negative invariant: the grid is exactly 9 \u{00d7} 4 = 36 cells.
+    // Negative invariant: the grid is exactly 8 \u{00d7} 4 = 32 cells.
     // A regression that silently drops a consumer (e.g. removing
     // `slot_binding_graph` from REQUIRED_CONSUMERS to "make the test
     // pass" when a slice goes missing) would shrink the grid; this
-    // sibling guard catches that. The grid is 9 — the tenth slot was
-    // the retired `RefCycleResultDb`; its replacement (the
-    // `ClassifyMaterializationCycleGate` family) rides the
-    // `SemanticGraphStore` memo substrate already covered by
-    // `memo_entry`.
+    // sibling guard catches that. The grid is 8 — the retired
+    // `RefCycleResultDb` slot rides the `SemanticGraphStore` memo
+    // substrate already covered by `memo_entry` (its replacement is the
+    // `ClassifyMaterializationCycleGate` family), and the retired
+    // structural materialiser has no cache of its own any more.
     assert_eq!(
         REQUIRED_CONSUMERS.len(),
-        9,
-        "REQUIRED_CONSUMERS must list the 9 cache-bearing \
+        8,
+        "REQUIRED_CONSUMERS must list the 8 cache-bearing \
          consumers. Shrinking the \
          list bypasses the completeness guard."
     );
@@ -154,8 +152,8 @@ fn cross_consumer_matrix_grid_size_matches_expected() {
     );
     let cells = REQUIRED_CONSUMERS.len() * REQUIRED_FACT_KINDS.len();
     assert_eq!(
-        cells, 36,
-        "cross-consumer matrix size must be 9\u{00d7}4 = 36; \
+        cells, 32,
+        "cross-consumer matrix size must be 8\u{00d7}4 = 32; \
          observed {cells}. A regression that drops a consumer OR a \
          LIVE fact-kind reduces the grid below this floor."
     );

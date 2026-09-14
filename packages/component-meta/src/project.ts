@@ -212,7 +212,7 @@ export class ComponentMetaSession {
    * Batch surface for {@link getComponentMeta}. All `filePaths` resolve
    * under one shared overlay view and a single scheduler dispatch on
    * the native side; host-owned admission caches
-   * (`MaterializeStructureDb`, `ComponentMetaResultDb`,
+   * (`ShapeCacheDb`, `ComponentMetaResultDb`,
    * `SemanticGraphStore`) are shared across the batch.
    *
    * Returns one slot per input in input order — a fully-projected
