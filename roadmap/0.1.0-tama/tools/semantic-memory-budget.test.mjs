@@ -891,9 +891,7 @@ test("declaring a charged field non-retaining as well is refused", () => {
 
 test("a class claiming its charge is instrumented without a byte gauge is refused", () => {
   const catalog = freshCatalog();
-  const row = catalog.allocation_class.find(
-    (entry) => entry.id === "materialize_structure_candidates",
-  );
+  const row = catalog.allocation_class.find((entry) => entry.id === "shape_cache_entries");
   assert.equal(row.charge_observability, "proxy_instrumented", "pre-state: it is a proxy only");
   row.charge_observability = "charge_instrumented";
   row.gap = "none";
@@ -903,9 +901,7 @@ test("a class claiming its charge is instrumented without a byte gauge is refuse
 
 test("a class recorded uninstrumented while citing metric rows is refused", () => {
   const catalog = freshCatalog();
-  const row = catalog.allocation_class.find(
-    (entry) => entry.id === "materialize_structure_candidates",
-  );
+  const row = catalog.allocation_class.find((entry) => entry.id === "shape_cache_entries");
   assert.ok(row.metric_rows.length > 0, "pre-state: it cites a site");
   row.charge_observability = "uninstrumented";
   refusedBecause(validate(catalog), "cite none or record it as proxy_instrumented");

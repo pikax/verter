@@ -119,6 +119,20 @@ pub(super) fn any_item_needs_name(ir: &SvelteRuntimeIr, items: &[CleanItem]) -> 
     items.iter().any(|item| item_needs_name(ir, item, false))
 }
 
+/// Whether a STATIC-attribute element still needs a NAMED walk position because
+/// the emitter writes an init-only value-channel statement against its var. An
+/// `<option>` carrying a static `value="X"` gets the official
+/// `option.value = option.__value = 'X'` write at its walk position — the
+/// value-channel fact the plan carries (the attribute itself is NOT a dynamic
+/// surface; it is stripped from the cloned skeleton).
+fn element_needs_init_write(el: &super::ir::ElementIr) -> bool {
+    el.tag == "option"
+        && el
+            .attrs
+            .iter()
+            .any(|a| matches!(a, AttrIr::Static { name, value: Some(_) } if name == "value"))
+}
+
 /// Whether a node is dynamic or hosts a dynamic descendant.
 pub(super) fn node_or_descendant_dynamic(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
     match ir.node(node_id) {
@@ -164,6 +178,7 @@ pub(super) fn node_or_descendant_dynamic(ir: &SvelteRuntimeIr, node_id: NodeId) 
         ),
         IrNode::Element(el) => {
             el.attrs.iter().any(super::html::attr_is_dynamic_surface)
+                || element_needs_init_write(el)
                 || el
                     .children
                     .iter()

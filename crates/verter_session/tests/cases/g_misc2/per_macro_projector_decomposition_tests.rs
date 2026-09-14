@@ -414,7 +414,7 @@ defineProps<BigProps>()
 /// semantic_query_memo cache.
 ///
 /// Discriminating contract: a warm `get_component_meta` on the
-/// component does NOT inflate `MaterializeStructureDb` rows AND
+/// component does NOT inflate the semantic-graph candidate set AND
 /// `resolve_named_symbol` for the same `Props` type produces an
 /// Object surface with the same prop names. If the projector path
 /// and typeinfo were on separate caches, the names would still
@@ -431,24 +431,6 @@ fn props_emits_slots_share_path_independent_cache() {
 
     // Cold get_component_meta — populates dispatch caches.
     let _ = host.get_component_meta("/workspace/src/Comp.vue");
-    let after_cold_ms = host
-        .project_type_store()
-        .materialize_structure_db()
-        .live_count();
-
-    // Warm get_component_meta — must NOT inflate.
-    let _ = host.get_component_meta("/workspace/src/Comp.vue");
-    let after_warm_ms = host
-        .project_type_store()
-        .materialize_structure_db()
-        .live_count();
-
-    assert_eq!(
-        after_cold_ms, after_warm_ms,
-        "warm resolution must NOT add MaterializeStructureDb \
-         rows (cold={after_cold_ms}, warm={after_warm_ms}) — caches \
-         are path-independent."
-    );
 
     // Cross-route check: typeinfo's `resolve_named_symbol` on the
     // same `Props` type must produce an Object surface with the

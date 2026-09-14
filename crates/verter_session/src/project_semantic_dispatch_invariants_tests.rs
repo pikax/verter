@@ -2887,8 +2887,7 @@ fn migrate_owner_engine_project_expr_surface_as_type_expr_preserves_env() {
 /// surfaces immediately.
 ///
 /// Scans all sibling files in the `component_meta_query_engine/`
-/// folder (mod.rs + child modules) because
-/// `materialize_member_surface_expr` and the dispatch-routed helpers
+/// folder (mod.rs + child modules) because the dispatch-routed helpers
 /// may live in private child modules after the folder split.
 #[test]
 fn migrate_engine_lower_and_project_to_expanded_preserves_env() {
@@ -3181,20 +3180,18 @@ fn route_loop_callers_route_through_dispatch() {
 }
 
 /// Engine-method-absence invariant: `instantiate_local_generic_ref`
-/// is not a callsite of the meta-resolve family. Callers route
-/// through `dispatch.execute_type_node(SemanticQueryKey::Instantiate { .. })`.
-/// The check is a static-grep gate over the meta-resolve module
-/// family: NO `engine.instantiate_local_generic_ref(...)` callsite
-/// may appear.
+/// is not a callsite of the meta-resolve family. Callers reach
+/// instantiation only through the dispatch-owned demand primitives (the
+/// structural-fact demand resolves a residual `InstantiationRef` via the
+/// shared `Instantiate` query inside `project_semantic_dispatch`). The
+/// check is a static-grep gate over the meta-resolve module family: NO
+/// `engine.instantiate_local_generic_ref(...)` callsite may appear.
 #[test]
 fn instantiate_local_generic_ref_callers_route_through_dispatch() {
-    // `meta_resolve.rs` is the shell of a folder module; the body that
-    // carries the `instantiate_local_generic_ref` /
-    // `SemanticQueryKey::Instantiate` markers lives in
-    // `meta_resolve/dispatch_helpers.rs` — the
-    // `instantiate_local_generic_ref_via_dispatch` bridge helper.
-    // The test concatenates the relevant siblings before running the
-    // static-text grep predicates.
+    // `meta_resolve.rs` is the shell of a folder module; its dispatch
+    // helpers live in `meta_resolve/dispatch_helpers.rs`. The test
+    // concatenates the relevant siblings before running the static-text
+    // grep predicate.
     let shell_src = include_str!("meta_resolve.rs");
     let dispatch_helpers_src = include_str!("meta_resolve/dispatch_helpers.rs");
     let meta_src = format!("{shell_src}\n{dispatch_helpers_src}");
@@ -3205,12 +3202,13 @@ fn instantiate_local_generic_ref_callers_route_through_dispatch() {
         "meta_resolve.* must have 0 .instantiate_local_generic_ref( callsites; found {meta_callsites}",
     );
 
-    // Positive marker: callers route through dispatch's Instantiate
-    // family (the substitution-aware dispatch path).
+    // The meta-resolve family builds NO `Instantiate` key of its own
+    // either: instantiation is reached only through the dispatch-owned
+    // demand primitives, never by a consumer-built key.
     let instantiate_dispatch_calls = meta_src.matches("SemanticQueryKey::Instantiate").count();
-    assert!(
-        instantiate_dispatch_calls >= 1,
-        "meta_resolve.* must dispatch SemanticQueryKey::Instantiate; found {instantiate_dispatch_calls}",
+    assert_eq!(
+        instantiate_dispatch_calls, 0,
+        "meta_resolve.rs + meta_resolve/dispatch_helpers.rs must build no SemanticQueryKey::Instantiate of their own; found {instantiate_dispatch_calls}",
     );
 }
 

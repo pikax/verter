@@ -887,33 +887,9 @@ const STAGE4_CARRIER_INVENTORY: &[InventoryRow] = &[
             "src/meta_resolve/materialize/field_types.rs",
             "fn reduce_member_value_graph_native_with_context",
         )],
-        reason: "the ShapeSubject::MemberValueNode subject reduces an already-lowered node directly \
+        reason:
+            "the ShapeSubject::MemberValueNode subject reduces an already-lowered node directly \
                  through raise_and_reduce_with_context",
-    },
-    InventoryRow {
-        seam: "imported registry body / member surface",
-        status: SeamStatus::HandleNative,
-        witness: &[(
-            "src/resolver_core/component_meta_query_engine/registry_decl.rs",
-            "fn materialize_member_surface_node_core",
-        )],
-        reason: "the member-surface node-core reduces an already-lowered registry/member body \
-                 node through the dispatch; the TypeExpr arm lowers-then-delegates to it. The \
-                 node-core is module-private (a forgeable SemanticNodeId never crosses the \
-                 query-engine boundary); out-of-subtree production callers reach the surface \
-                 through the demand APIs (materialize_pick_member_surface / project_expr_surface_shape)",
-    },
-    InventoryRow {
-        seam: "owner collection body",
-        status: SeamStatus::HandleNative,
-        witness: &[(
-            "src/resolver_core/component_meta_query_engine/registry_decl.rs",
-            "fn materialize_member_surface_node_core",
-        )],
-        reason: "the owner-collection handle arm reduces a body node through the shared \
-                 member-surface node-core (owner-collection scope axis, nested = false) without \
-                 touching the TypeExpr-keyed OwnerCollectionDb; the thin owner-collection \
-                 pass-through wrapper folded into the node-core itself",
     },
     InventoryRow {
         seam: "registry symbolic-alias root classification",
@@ -1273,9 +1249,12 @@ fn g_b_self_test_inventory_is_well_formed_and_discriminating() {
         .iter()
         .filter(|r| r.status == SeamStatus::Stage5Deferred)
         .count();
+    // The registry-decl module owns no member-surface demand chain, so it
+    // contributes no seam rows; the two remaining HandleNative rows are
+    // the live seams.
     assert!(
-        handle_native >= 4,
-        "self-test: the inventory must enumerate every real session seam (>=4 HandleNative \
+        handle_native >= 2,
+        "self-test: the inventory must enumerate every real session seam (>=2 HandleNative \
          rows); got {handle_native}"
     );
     assert!(

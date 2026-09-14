@@ -1148,13 +1148,40 @@ async fn sync_file(
             if let Some(ide) = ide.as_ref() {
                 if let Some(ide_path) = committed_state.ide_path.clone() {
                     tracing::info!("sync_coordinator: TSX_SYNC_START {ide_path}");
+                    // DELIVERY FENCE: `ide.code` was compiled from the revision
+                    // `open_pin` names. The fence runs under the per-path delivery
+                    // lock, right before the provider write, so a tick that
+                    // compiled the PRE-edit source and then waited on the lock while
+                    // the interactive repair delivered the edit is refused instead
+                    // of overwriting the newer buffer (the record below was already
+                    // fenced; the provider write was not — `hover_secondary_files_tsgo`
+                    // then mapped fresh offsets onto stale tsgo bytes).
+                    let still_current = || {
+                        open_pin.is_none_or(|(pin_uri, revision)| {
+                            deps.documents
+                                .snapshot_identity_is_current(pin_uri, revision)
+                        })
+                    };
                     let result = if committed_state.ide_background_loaded {
-                        project_sync.sync_tsx(&ide_path, &ide.code).await
+                        project_sync
+                            .sync_tsx_fenced(&ide_path, &ide.code, &still_current)
+                            .await
                     } else {
-                        project_sync.open_tsx(&ide_path, &ide.code).await
+                        project_sync
+                            .open_tsx_fenced(&ide_path, &ide.code, &still_current)
+                            .await
                     };
                     match result {
-                        Ok(()) => {
+                        Ok(false) => {
+                            tracing::info!(
+                                "sync_coordinator: TSX_SYNC_SKIPPED {ide_path} — the document \
+                                 moved after this compile; the live revision is resynced"
+                            );
+                            deps.pending_snapshot_provider_sync
+                                .insert(canonical_id.to_string());
+                            return SyncFileOutcome::Retry;
+                        }
+                        Ok(true) => {
                             committed_state.set_background_loaded(ProviderPathKind::Ide, true);
                             synced_kinds.push(ProviderPathKind::Ide);
                             // Record a fresh generation pinning the EXACT IDE bytes

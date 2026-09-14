@@ -12,6 +12,13 @@
 //! of every required counter against the raw JSON. A summary missing a counter
 //! is refused rather than read as a zero — which is what keeps "the lane
 //! reported no regressions" from meaning "the lane forgot to count them".
+//!
+//! Both modes then require the document to carry a block for EVERY framework
+//! the lane covers. A summary that dropped one corpus is internally consistent
+//! about the corpus it kept: its counters recompute, its totals add up, and it
+//! would dispose clean having reported on half the workload. Refusing it here
+//! is what makes "one summary serves both corpora" a property of the artifact
+//! rather than a hope about the runner.
 
 use std::process::ExitCode;
 
@@ -51,6 +58,9 @@ fn main() -> ExitCode {
         Ok(summary) => summary,
         Err(error) => return fail(&format!("{}: {error}", path.display())),
     };
+    if let Err(error) = summary.require_every_framework() {
+        return fail(&format!("{}: {error}", path.display()));
+    }
 
     if markdown {
         print!("{}", summary.to_markdown());

@@ -5472,6 +5472,101 @@ import type { Foo } from './types'"#;
         assert_eq!(pos.line, 2, "should map to line 3 (0-indexed: 2) in .vue");
     }
 
+    /// A source-backed script diagnostic keeps its EXACT authored file,
+    /// line, and column through the checker's source-map conversion — the
+    /// column is not discarded to the covering token's column 1.
+    ///
+    /// Discriminating controls:
+    /// - **Block offset**: `<script setup>` comes AFTER `<template>`, so the
+    ///   authored line (full-SFC coordinates), the generated carrier line, and
+    ///   a block-relative line are three DIFFERENT numbers. Only the full-SFC
+    ///   authored line is correct.
+    /// - **Non-BMP before the anchor**: the authored line declares
+    ///   `const t = '𝄞', n: string = 7` — U+1D11E is 2 UTF-16 units / 4 UTF-8
+    ///   bytes / 1 codepoint, so a conversion that counts anything but UTF-16
+    ///   units lands on a different column for the `7` initializer.
+    ///
+    /// The generated carrier copies script lines VERBATIM, and the projection
+    /// map's `sourcesContent` carries the authored text, so the exact authored
+    /// column is derivable without guesswork: on a line whose generated text
+    /// equals its authored text, both sides count UTF-16 columns over the same
+    /// characters and the columns correspond 1:1.
+    ///
+    /// A token-only conversion cannot recover this column: the covering
+    /// token is the per-line line-start token every script line emits, so
+    /// it degrades the authored column to 1.
+    #[test]
+    fn generate_all_tsx_source_map_keeps_exact_authored_column_for_verbatim_script_lines() {
+        let temp = tempfile::TempDir::new().unwrap();
+        // 0-indexed authored lines: the anchor line is line 5 (full-SFC), NOT
+        // its generated carrier line and NOT line 1 of the script block.
+        let authored_line = "const t = '\u{1D11E}', n: string = 7";
+        let vue = concat!(
+            "<template>\n",
+            "  <div>{{ ok }}</div>\n",
+            "</template>\n",
+            "<script setup lang=\"ts\">\n",
+            "const ok = 1\n",
+            "const t = '\u{1D11E}', n: string = 7\n",
+            "</script>\n",
+        );
+        let vue_path = temp.path().join("Probe.vue");
+        fs::write(&vue_path, vue).unwrap();
+
+        let out_dir = temp.path().join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+
+        let host = upsert_host(std::slice::from_ref(&vue_path));
+        let results = generate_all_tsx(&host, std::slice::from_ref(&vue_path), &out_dir)
+            .expect("validation carrier infrastructure");
+        let (_vue, tsx_code, _tsx_path) = &results[0];
+
+        // A diagnostic anchored at the `7` initializer (the engine anchors
+        // TS2322 at the declarator, but positions arguments — TS2345 — and
+        // other anchors on lines like this one; the conversion is
+        // position-driven either way). Locate the anchor's generated position
+        // with UTF-16 arithmetic — the same encoding the engine reports in.
+        let gen_line_0 = tsx_code
+            .lines()
+            .position(|l| l == authored_line)
+            .expect("the verbatim script line is copied into the carrier");
+        let anchor_byte = authored_line
+            .rfind("= 7")
+            .expect("anchor pattern on the authored line")
+            + "= ".len();
+        let anchor_utf16_0 = authored_line[..anchor_byte].encode_utf16().count() as u32;
+        assert!(
+            anchor_utf16_0 > 1,
+            "fixture sanity: the anchor sits past column 1"
+        );
+        // A byte- or codepoint-counted column would disagree with the UTF-16
+        // column here — that disagreement is the point of the non-BMP control.
+        assert_ne!(
+            anchor_utf16_0, anchor_byte as u32,
+            "fixture sanity: UTF-16 and byte columns differ on this line"
+        );
+
+        let (source_name, pos) =
+            crate::error_map::map_tsc_position(tsx_code, gen_line_0 as u32 + 1, anchor_utf16_0 + 1)
+                .expect("source map lookup should succeed");
+
+        assert!(
+            source_name.contains("Probe.vue"),
+            "authored file must be the .vue source, got: {source_name}"
+        );
+        assert_eq!(
+            pos.line, 5,
+            "authored line is the FULL-SFC line (block offset), not the generated line \
+             ({}), not the script-block-relative line, not (1,1)",
+            gen_line_0,
+        );
+        assert_eq!(
+            pos.col, anchor_utf16_0,
+            "authored column must be the exact UTF-16 column of the anchor, not the \
+             covering line-start token's column 0"
+        );
+    }
+
     #[test]
     fn generate_all_tsx_reports_missing_source_as_infrastructure_failure() {
         let temp = tempfile::TempDir::new().unwrap();

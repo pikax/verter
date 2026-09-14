@@ -11,15 +11,14 @@
 //! sibling `registry_cache_producers` module: they share one admission
 //! discipline (a cacheability tracer scope bracketing the whole cold path) and
 //! are read together. This module keeps the reads that admit into NO shared
-//! cache, plus the output-capability-minting node-core.
+//! cache, plus the ctx/dispatch entry helpers.
 //!
 //! Visibility:
 //! - `pub fn resolve_direct_prepared_type_declaration`, `pub fn
 //!   resolve_direct_prepared_type_declaration_metadata`, `pub fn
 //!   resolve_final_prepared_type_target`, `pub fn named_decl_body` — all `pub`
 //!   on the engine, callable from outside the crate.
-//! - `pub(crate) fn materialize_member_surface_expr`,
-//!   `pub(crate) fn prepared_type_decl`, `pub(crate) fn ctx`,
+//! - `pub(crate) fn prepared_type_decl`, `pub(crate) fn ctx`,
 //!   `pub(crate) fn dispatch_routed_expr_surface_node` — crate-visible
 //!   helpers used by `meta_resolve` and other engine impl methods.
 //! - `pub(super) fn prepared_decl_authored_body_locator` — the ONE locator
@@ -37,7 +36,6 @@ use super::{
     empty_semantic_args, local_type_symbol_metadata_for_known_source, ComponentMetaQueryEngine,
     DirectPreparedDeclarationResolver, ResolvedTypeDeclaration,
 };
-use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
 use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
 use crate::resolver_core::RouteDemand;
@@ -45,19 +43,6 @@ use crate::semantic_query::{
     PathSegment, ProjectionMode, QueryResult, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
     SemanticQueryOutput,
 };
-
-crate::project_semantic_dispatch::output_materialization::define_output_capability! {
-    /// The component-meta query-engine REGISTRY-DECL materialiser's output-sink
-    /// capability. The registry-decl materialiser here holds this to
-    /// materialize a graph node into a sealed output carrier and unwrap it.
-    /// Its constructor is visible ONLY within
-    /// `crate::resolver_core::component_meta_query_engine::registry_decl` — NOT
-    /// the whole query-engine subtree — so no query-engine sibling can mint it
-    /// (planted `MetaQueryRegistryOutputCap::new` outside this leaf is
-    /// `E0624`).
-    pub(crate) struct MetaQueryRegistryOutputCap;
-    mint: pub(in crate::resolver_core::component_meta_query_engine::registry_decl)
-}
 
 impl<'a> ComponentMetaQueryEngine<'a> {
     pub fn resolve_direct_prepared_type_declaration(
@@ -111,172 +96,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             kind: metadata.kind,
             text: None,
         })
-    }
-
-    /// Graph-native member-surface materialiser. Lowers `expr` to a
-    /// `SemanticNodeId` via Navigate, then delegates to the shared
-    /// node-core [`Self::materialize_member_surface_node`].
-    ///
-    /// This is the `TypeExpr`-input arm of the member-surface seam: it
-    /// lowers ONCE through the single dispatch, then routes the lowered
-    /// node into the same core the handle-input arm uses. A consumer
-    /// that already holds a settled graph node (a [`HotTypeRef`]) skips
-    /// the lowering and calls `materialize_member_surface_node`
-    /// directly — both arms reduce the SAME node through the SAME
-    /// dispatch (read-compat, one resolver), never a reverse
-    /// materialize-then-re-lower bridge.
-    ///
-    /// [`HotTypeRef`]: crate::semantic_query::HotTypeRef
-    /// Demand-based member-surface API for a `Pick<Root, members…>` route.
-    ///
-    /// The OUT-OF-SUBTREE entry point for the routed-Pick member surface
-    /// (`host_manage::component_meta_methods`): the caller passes the
-    /// pre-resolution demand it already holds — a scope, the route ROOT
-    /// symbol, and the picked member keys — and this method resolves the
-    /// `Pick` node through the shared dispatch and materialises it via the
-    /// private [`Self::materialize_member_surface_node_core`] INTERNALLY.
-    /// No `SemanticNodeId` crosses the boundary: the forgeable node never
-    /// leaves the query-engine sink.
-    ///
-    /// The Pick resolution is the same single-dispatch path the
-    /// materialiser's Pick/Omit arm uses: lower the bare-`Ref` root at
-    /// `Navigate` (an intermediate hop), then `execute_pick` on the picked
-    /// keys at `Expanded` (the terminal demand). `None` on a recursive /
-    /// error Pick OR a node-core materialisation error — the caller then
-    /// falls through to its registry-candidate path.
-    ///
-    /// The fact-bearing registry path now publishes through
-    /// [`Self::materialize_pick_member_surface_candidate`] (which also carries the
-    /// object-surface fact); this bare-`TypeExpr` demand form is retained as the
-    /// boundary-contract surface the `dispatch_helpers` demand-API contract test
-    /// pins (`(scope, symbol, members, nested) -> Option<TypeExpr>`, no node leaks).
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn materialize_pick_member_surface(
-        &mut self,
-        scope_canonical_id: &str,
-        scope_owner: verter_type_expr::TopLevelOwnerId,
-        root_symbol: &str,
-        members: &[String],
-        nested_surface: bool,
-    ) -> Option<verter_type_expr::TypeExpr> {
-        use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-        use crate::semantic_query::{ProjectionMode, QueryResult};
-
-        let pick_node = {
-            let dispatch = ProjectSemanticDispatch::new(self.ctx);
-            let symbol_ref = verter_type_expr::TypeExpr::Ref {
-                name: std::sync::Arc::from(root_symbol),
-                type_arguments: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-            };
-            // Bare-Ref base for the Pick builtin is an intermediate hop;
-            // the Pick result is the terminal demand.
-            let base = dispatch.lower_type_expr_in_owner_scope_with_mode(
-                scope_canonical_id,
-                scope_owner,
-                &symbol_ref,
-                ProjectionMode::Navigate,
-            )?;
-            let members_arc: Vec<std::sync::Arc<str>> = members
-                .iter()
-                .map(|s| std::sync::Arc::from(s.as_str()))
-                .collect();
-            match dispatch.execute_pick(base, &members_arc, ProjectionMode::Expanded) {
-                QueryResult::Value(id) => id,
-                QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
-            }
-        };
-        self.materialize_member_surface_node_core(scope_canonical_id, pick_node, nested_surface)
-    }
-
-    /// PRIVATE node-core of the member-surface seam: materialise an
-    /// ALREADY-LOWERED graph node (`base`) through the single dispatch,
-    /// returning the same public surface the `TypeExpr` arm
-    /// ([`Self::materialize_member_surface_expr`]) produces for the
-    /// node it lowers `expr` to.
-    ///
-    /// This is the shared node-core the in-subtree arms route through. It
-    /// NEVER materialises `base` back to a `TypeExpr` to re-lower it — it
-    /// reduces the node directly. `None` signals a materialisation error
-    /// (the `TypeExpr` arm falls back to its input clone).
-    ///
-    /// MODULE-PRIVATE (a `SemanticNodeId` is forgeable in safe Rust, so
-    /// the node-input core is never exposed beyond the query-engine
-    /// subtree). Out-of-subtree callers reach the surface through a demand
-    /// API that resolves the node INTERNALLY — see
-    /// [`Self::materialize_pick_member_surface`].
-    fn materialize_member_surface_node_core(
-        &mut self,
-        scope_canonical_id: &str,
-        base: crate::semantic_query::SemanticNodeId,
-        nested_surface: bool,
-    ) -> Option<verter_type_expr::TypeExpr> {
-        let materialised_id =
-            self.materialize_member_surface_to_node(scope_canonical_id, base, nested_surface)?;
-        // Publication sink: materialize into a sealed carrier and unwrap via
-        // the query-engine output capability.
-        let dispatch = ProjectSemanticDispatch::new(self.ctx);
-        let cap = MetaQueryRegistryOutputCap::new(&dispatch);
-        cap.materialize_output_type_expr(materialised_id)
-            .map(|raised| raised.into_type_expr(&cap))
-    }
-
-    /// First-pass (`MaterializeStructureDb`) node: the producing
-    /// `SemanticNodeId` the member surface materialises to, BEFORE the raise
-    /// to a `TypeExpr`. The node-domain shared core of
-    /// [`Self::materialize_member_surface_node_core`] (which raises this node)
-    /// AND the registry member-surface stabiliser (which REDUCES this node
-    /// directly through the `ShapeCacheDb` member-node slot — the node-first
-    /// second pass that never pays the raise + re-lower round-trip).
-    pub(super) fn materialize_member_surface_to_node(
-        &mut self,
-        scope_canonical_id: &str,
-        base: crate::semantic_query::SemanticNodeId,
-        nested_surface: bool,
-    ) -> Option<crate::semantic_query::SemanticNodeId> {
-        use crate::component_meta_materialize::{
-            materialize_component_meta_structure, MaterializationScope, MaterializeOutcome,
-            MaterializeRuntimeKey,
-        };
-
-        // Publication demand per scope axis, shallow-by-default. The
-        // TOP-LEVEL registry-symbol surface materialises at `Shallow` —
-        // the interpretable one-level surface whose heritage arms merge
-        // into a single Object (member names + shallow carrier values),
-        // the same contract `dispatch_root_instantiated` reads — so a
-        // registry consumer re-resolving `interface Extended extends
-        // Base` sees the flattened key set, not the raw heritage
-        // intersection. NESTED member surfaces materialise at
-        // `Navigate`: member values stay carriers the consumer
-        // re-resolves on demand. Open carriers survive either mode
-        // through the shared L1 carrier-stop predicates (no
-        // registry-local pre-walk runs here).
-        let key = MaterializeRuntimeKey {
-            scope_canonical_id: std::sync::Arc::from(scope_canonical_id),
-            base,
-            scope_axis: if nested_surface {
-                MaterializationScope::Nested
-            } else {
-                MaterializationScope::TopLevel
-            },
-            mode: if nested_surface {
-                ProjectionMode::Navigate
-            } else {
-                ProjectionMode::Shallow
-            },
-        };
-        let read = materialize_component_meta_structure(self.ctx, key);
-        // Dual-emit dispatch facts into BOTH downstream channels so
-        // the legacy `state.fact_versions` curated signature and the
-        // outer `with_fact_tracer` scope both observe the
-        // materialiser's dep graph.
-        crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
-        match read.value {
-            MaterializeOutcome::Value(id)
-            | MaterializeOutcome::Miss(id)
-            | MaterializeOutcome::Recursive(id)
-            | MaterializeOutcome::Tainted(id) => Some(id),
-            MaterializeOutcome::Error(_) => None,
-        }
     }
 
     pub fn resolve_final_prepared_type_target(
@@ -830,7 +649,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     /// Route a `RouteDemand::Pick` / `RouteDemand::Omit` through the SHARED
     /// semantic builtin engine, exactly like the materialiser's Pick/Omit arm
-    /// (`component_meta_materialize.rs`): a two-step dispatch that (A)
+    /// (the shared query route): a two-step dispatch that (A)
     /// instantiates the route ROOT to a projectable body, then (B) instantiates
     /// the `Pick` / `Omit` builtin carrier on `[body, keys]` in the caller's
     /// publication mode. The builtin engine's public-keyspace gate

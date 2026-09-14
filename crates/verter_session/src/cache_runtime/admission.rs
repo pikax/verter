@@ -88,8 +88,8 @@ pub(crate) fn propagate_non_admission(reason: NonAdmissionReason) {
 ///
 /// A GENUINE partial (a budget exhaustion / fatal `QueryError` /
 /// same-path recursion / walker fatal) must NOT warm-replay as a complete
-/// result. Every result-cache admission path (`MaterializeStructureDb`,
-/// `ShapeCacheDb`, `ImportedRegistryDb`, `ResolvabilityDb`) routes its
+/// result. Every result-cache admission path (`ShapeCacheDb`,
+/// `ImportedRegistryDb`, `ResolvabilityDb`) routes its
 /// `Cacheable` decision through this one predicate so a future
 /// result-cache cannot silently forget the rule.
 ///
@@ -101,8 +101,8 @@ pub(crate) fn propagate_non_admission(reason: NonAdmissionReason) {
 /// does NOT OR-in any request-global / thread-local state. Each caller
 /// supplies the completeness scoped to the value/entry it is admitting:
 ///
-/// - The SHARED semantic-cache producers (`MaterializeStructureDb`) pass
-///   their PER-COLD-COMPUTE completeness
+/// - A SHARED semantic-cache producer passes its PER-COLD-COMPUTE
+///   completeness
 ///   ([`crate::request_context::current_cold_compute_completeness`]`.is_partial()`)
 ///   so each entry carries its OWN completeness — one consumer's partial
 ///   never poisons a sibling consumer's complete entry.

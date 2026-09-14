@@ -20,9 +20,9 @@
 //!    - `project_semantic_dispatch::cycle_gate_tests::cycle_gate_decided_stop_on_nuxt_dotpathkeys_shape`
 //!      verifies the sealed gate returns `Decided(Stop)`
 //!      on the canonical nuxt-ui DotPathKeys shape.
-//!    - `component_meta_materialize::tests::registry_route_extracts_actual_root_for_builtin_pick_over_recursive_helper`
-//!      verifies `extract_route_root_identity_node` recurses into
-//!      `args[0]` so the cycle guard sees the actual root identity.
+//!    - `meta_resolve_tests::node_predicates_tests::cycle_guard_roots_at_utility_source_type_argument`
+//!      verifies the cycle guard roots at a builtin utility's source
+//!      type argument, not the `__builtin__::Pick` wrapper.
 //!
 //! These integration tests guarantee the END-TO-END flow on real
 //! `.vue` fixtures (parsing → lowering → materialiser → type-expand

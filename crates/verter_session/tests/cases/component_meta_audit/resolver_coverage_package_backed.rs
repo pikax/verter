@@ -1,12 +1,9 @@
 //! Resolver coverage for package-backed type references: types coming
-//! from `node_modules` / declared package roots must enforce the
-//! `is_package_backed_ref` gate, refusing to descend into
-//! structurally-shallow function-property references at nested
-//! positions.
-//!
-//! Resolution routes through `materialize_component_meta_structure`,
-//! which enforces the `PackageRefTopLevel` and
-//! `FunctionPropertyAtNested` gates.
+//! from `node_modules` / declared package roots stay shallow at nested
+//! positions — the projector's package-backed root gate
+//! (`node_package_backed_object_like_root_with_fence`) refuses to
+//! descend into nested package-backed bodies and function-typed
+//! properties.
 //!
 //! The SFC is seated at `/ws/src/c.vue` so the unowned node_modules
 //! walk has parent directories to traverse (`/ws/src` → `/ws`),

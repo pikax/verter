@@ -34,11 +34,11 @@ TLS sink, and every test fixture key on this name).
 | `FallthroughInheritanceComputed`           | Fallthrough inheritance resolver result.                                                         |
 | `ResolveImportedTypeRoot`                  | Cross-file imported-type root resolution.                                                        |
 | `CurrentEvalState`                         | Eval-state checkpoint.                                                                           |
-| `MaterializeStructureEnter`                | Entry envelope for `materialize_component_meta_structure`.                                       |
-| `MaterializeStructureExit`                 | Exit envelope for `materialize_component_meta_structure`.                                        |
-| `MaterializeStructurePolicySkip`           | Materialiser policy gate rejected the input pre-dispatch.                                        |
-| `MaterializeStructureCycleDetected`        | Same-key materialiser re-entry on the in-flight stack.                                           |
-| `MaterializeStructureDepthFuseTripped`     | Materialiser depth fuse tripped (defensive hard cap).                                            |
+| `MaterializeStructureEnter`                | Structural-materialiser entry envelope (schema only; no production emitter).                     |
+| `MaterializeStructureExit`                 | Structural-materialiser exit envelope (schema only; no production emitter).                      |
+| `MaterializeStructurePolicySkip`           | Materialiser policy gate rejected the input (schema only; no production emitter).                |
+| `MaterializeStructureCycleDetected`        | Same-key materialiser re-entry (schema only; no production emitter).                             |
+| `MaterializeStructureDepthFuseTripped`     | Materialiser depth fuse tripped (schema only; no production emitter).                            |
 | `Custom { name, detail }`                  | Escape hatch for ad-hoc events.                                                                  |
 
 ## Event sites — where structured events fire
@@ -59,7 +59,7 @@ just component-meta:
 - **Cache layer hit/miss.** `record_cache_event(layer, hit)` on the
   `AuditObserver` populates `RequestStoreAudit::cache_layers` —
   every host-owned cache (`FileArtifactStore`,
-  `ComponentMetaResultDb`, `MaterializeStructureDb`,
+  `ComponentMetaResultDb`, `ShapeCacheDb`,
   `OwnerImportSurfaceDb`, `SemanticGraphStore`)
   routes through this hook.
 - **Lock acquisition.** `record_lock_acquisition(name, wait_ns)`
@@ -79,11 +79,11 @@ just component-meta:
 
 ## Materialiser-entry events
 
-The five `MaterializeStructure*` variants instrument the
-session-layer structural materialiser at
-[`crates/verter_session/src/component_meta_materialize.rs`](https://github.com/pikax/verter/blob/main/crates/verter_session/src/component_meta_materialize.rs).
-They are the audit-facing observability surface for the
-component-meta structural materialiser.
+The five `MaterializeStructure*` variants are the audit-facing schema
+for a session-layer structural materialiser. No production path emits
+them today — structural surfaces are produced by the shared query route
+and reduced by the projector pipeline — and the variants stay on the
+wire for compatibility pending a wire-contract retirement.
 
 ### `MaterializeStructureEnter { base, scope_axis, mode, depth }`
 
@@ -98,10 +98,12 @@ component-meta structural materialiser.
   `Expanded` / `Skeleton`).
 - `depth: u16` — materialiser stack depth post-increment.
 
-Fires on every `materialize_component_meta_structure` call, before
-the warm-peek check. **Audit consumer use case:** trace the
-materialiser's per-request work on a base-level shape; pair with
-the matching `Exit` event to bound durations.
+No production path emits this event today: the separate structural
+materialiser entry was deleted (published surfaces come from the shared
+query route reduced by the projector pipeline), and the variant stays on
+the wire schema for compatibility. **Audit consumer use case (when
+emitted):** trace per-request work on a base-level shape; pair with the
+matching `Exit` event to bound durations.
 
 ### `MaterializeStructureExit { base, scope_axis, mode, outcome, duration_ns }`
 
@@ -112,10 +114,10 @@ Same identity fields as `Enter` plus:
 - `duration_ns: u64` (decimal-string serialized) — wall-clock
   duration from `Enter` to `Exit`.
 
-Fires once per Enter, regardless of how the materialiser exited
+(No production emitter today — see the `Enter` note.) Fires, when emitted, once per Enter, regardless of how the materialiser exited
 (warm hit, cold build, policy skip, cycle, depth-fuse trip). The
 `Tainted` outcome carries the depth-fuse / scope-unloaded /
-recursive-sub-call signal upward — `MaterializeOutcome::Tainted`
+recursive-sub-call signal upward — the `Tainted` outcome
 is non-cacheable and propagates to the caller. **Audit consumer
 use case:** measure cache hit rate (`Hit` / `JoinedWait` vs
 `ColdBuild` / `Miss`) and isolate the non-cacheable `Tainted`
@@ -125,7 +127,7 @@ fraction.
 
 - `reason: MaterializeSkipReason` — see [api-reference.md](api-reference.md).
 
-Fires when the materialiser's policy table rejects an input
+(No production emitter today — see the `Enter` note.) Fires, when emitted, when the materialiser's policy table rejects an input
 before dispatch. The arms map 1:1 to the materialiser's
 pre-compute gates: `FunctionPropertyAtNested`,
 `GenericRefWithArgsTopLevel`, `PackageRefTopLevel`,
@@ -138,9 +140,9 @@ keep-function-bodies-symbolic invariant).
 
 ### `MaterializeStructureCycleDetected { base, scope_axis, mode, depth }`
 
-Fires when the materialiser's thread-local in-flight stack
+(No production emitter today — see the `Enter` note.) Fires, when emitted, when the materialiser's thread-local in-flight stack
 detects same-key re-entry. The materialiser returns
-`MaterializeOutcome::Recursive` (mapped to `Tainted` at the
+the `Recursive` outcome (mapped to `Tainted` at the
 session boundary), so caches do not warm with an in-progress
 result. **Audit consumer use case:** flag declaration graphs that
 self-reference through structural materialisation; absent in
@@ -148,7 +150,7 @@ healthy fixtures.
 
 ### `MaterializeStructureDepthFuseTripped { base, scope_axis, mode, depth }`
 
-Fires when the materialiser's defensive depth fuse trips (input
+(No production emitter today — see the `Enter` note.) Fires, when emitted, when the materialiser's defensive depth fuse trips (input
 depth exceeded the hard cap). Like `CycleDetected`, the result
 is `Tainted` and non-cacheable. **Audit consumer use case:** an
 event here in production indicates a runaway materialisation

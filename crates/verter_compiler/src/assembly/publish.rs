@@ -4,6 +4,7 @@
 //! carries a partial/publishable sibling artifact, and no artifact is
 //! returned that was not in [`ProductPlan`].
 
+use super::custom_block::{CustomBlockDescriptor, CustomBlockDescriptorError};
 use super::fragment::{DeclaredHelper, DeclaredImport, FragmentDialect, ValidatedFragment};
 use super::plan::ProductPlan;
 use crate::compile_request::ProductKind;
@@ -50,6 +51,7 @@ pub struct CompileArtifactSet {
         super::source_unit::ArtifactSourceUnit,
     >,
     artifacts: Vec<super::fragment::CompileArtifact>,
+    custom_blocks: Vec<CustomBlockDescriptor>,
 }
 
 impl CompileArtifactSet {
@@ -141,7 +143,47 @@ impl CompileArtifactSet {
         Ok(Self {
             source_units: sources,
             artifacts,
+            custom_blocks: Vec::new(),
         })
+    }
+
+    pub fn custom_blocks(&self) -> &[CustomBlockDescriptor] {
+        &self.custom_blocks
+    }
+
+    /// Attach validated descriptors with typed `attachedTo` relations.
+    /// Subsequent calls merge with already-attached descriptors and re-run
+    /// identity, order, overlap, and source checks across the combined set.
+    /// Stale, cancelled, partial, or source-mismatched descriptors fail closed.
+    pub fn attach_custom_blocks(
+        mut self,
+        descriptors: Vec<CustomBlockDescriptor>,
+    ) -> Result<Self, CustomBlockDescriptorError> {
+        let mut combined = std::mem::take(&mut self.custom_blocks);
+        combined.extend(descriptors);
+        self.custom_blocks = super::custom_block::validate_attachment(
+            &self.source_units,
+            &self.artifacts,
+            combined,
+        )?;
+        Ok(self)
+    }
+
+    /// Warm gate: the same fail-closed checks as attachment, including
+    /// set-level identity, order, overlap, and region-order rules against
+    /// already-attached descriptors. Independent of whether `descriptor` is
+    /// already stored on this set — an identical stored id is not treated as
+    /// a duplicate of itself.
+    pub fn warm_custom_block(
+        &self,
+        descriptor: &CustomBlockDescriptor,
+    ) -> Result<(), CustomBlockDescriptorError> {
+        super::custom_block::validate_warm(
+            &self.source_units,
+            &self.artifacts,
+            &self.custom_blocks,
+            descriptor,
+        )
     }
 
     pub fn source_units(
@@ -223,7 +265,51 @@ impl serde::Serialize for CompileArtifactSet {
                 "content": content, "relations": relations, "maps": maps,
             })
         }).collect();
-        let mut terminal = json!({"schemaVersion": 1, "coordinates": "utf8-bytes", "sourceUnits": sources, "artifacts": artifacts});
+        let custom_blocks: Vec<_> = self.custom_blocks.iter().map(|block| {
+            use super::custom_block::CustomBlockContent;
+            let content = match block.content() {
+                CustomBlockContent::Local { content, text } => json!({
+                    "availability": "local",
+                    "text": text,
+                    "content": hex::encode(content.canonical_bytes()),
+                }),
+                CustomBlockContent::SrcBacked => json!({"availability": "srcBacked"}),
+                CustomBlockContent::Empty => json!({"availability": "empty"}),
+                CustomBlockContent::Unavailable(reason) => {
+                    json!({"availability": "unavailable", "reason": reason})
+                }
+            };
+            json!({
+                "id": hex::encode(block.id().canonical_bytes()),
+                "sourceUnit": hex::encode(block.source_unit().canonical_bytes()),
+                "source": hex::encode(block.source_id().canonical_bytes()),
+                "revision": hex::encode(block.revision().canonical_bytes()),
+                "sourceContent": hex::encode(block.source_content().canonical_bytes()),
+                "role": block.role(),
+                "lang": block.lang(),
+                "src": block.src(),
+                "attributes": block.attributes().iter().map(|(name, value)| json!({"name": name, "value": value})).collect::<Vec<_>>(),
+                "sourceOrder": block.source_order(),
+                "region": block.region(),
+                "content": content,
+                "provenance": {
+                    "inputBasis": hex::encode(block.provenance().input_basis.canonical_bytes()),
+                    "producer": hex::encode(block.provenance().producer.canonical_bytes()),
+                    "inputs": block.provenance().inputs.iter().map(|s| hex::encode(s.canonical_bytes())).collect::<Vec<_>>(),
+                },
+                "relation": {
+                    "kind": "attachedTo",
+                    "target": hex::encode(block.attached_to().canonical_bytes()),
+                },
+                "lifecycle": match block.lifecycle() {
+                    super::custom_block::CustomBlockLifecycle::Complete => "complete",
+                    super::custom_block::CustomBlockLifecycle::Partial => "partial",
+                    super::custom_block::CustomBlockLifecycle::Cancelled => "cancelled",
+                    super::custom_block::CustomBlockLifecycle::Stale => "stale",
+                },
+            })
+        }).collect();
+        let mut terminal = json!({"schemaVersion": 1, "coordinates": "utf8-bytes", "sourceUnits": sources, "artifacts": artifacts, "customBlocks": custom_blocks});
         // Keep wire order stable even when another crate enables serde_json's
         // preserve_order feature through Cargo feature unification.
         terminal.sort_all_objects();

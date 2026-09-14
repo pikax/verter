@@ -129,7 +129,7 @@ schema = 2
 "CCA2C" = { status = "pending" }
 "CCA2D" = { status = "pending" }
 "CCA2D0" = { status = "pending" }
-"CCA2DS" = { status = "pending" }
+"CCA2DS" = { status = "implemented", commit_message = "feat(core): continue Svelte styles through the stage-qualified boundary", commit_date = "2026-09-14T19:00:00+01:00" }
 "CCA2DV" = { status = "pending" }
 "CCA2E" = { status = "pending" }
 "CCA2E0" = { status = "pending" }
@@ -168,8 +168,8 @@ schema = 2
 "CPF1" = { status = "pending" }
 "CVO0" = { status = "implemented", commit_message = "feat(*): add the validation-probe outcome taxonomy and probe-state manifest contract", commit_date = "2026-09-11T08:30:00+01:00", pull_request = 525 }
 "CVO1" = { status = "implemented", commit_message = "feat(*): add the pinned vue-benchmarks external workload probe lane", commit_date = "2026-09-12T11:30:00+01:00" }
-"CVO1S" = { status = "pending" }
-"CVO2" = { status = "pending" }
+"CVO1S" = { status = "implemented", commit_message = "feat(*): add the pinned svelte-benchmarks external workload probe lane", commit_date = "2026-09-13T19:30:00+01:00" }
+"CVO2" = { status = "implemented", commit_message = "feat(*): add non-gating CI benchmark observation artifacts", commit_date = "2026-09-13T21:00:00+01:00" }
 "CVO3" = { status = "implemented", commit_message = "test(*): add the false-green control set for the validation probe machinery", commit_date = "2026-09-12T17:30:00+01:00" }
 "CVO4" = { status = "pending" }
 "D1" = { status = "implemented", commit_message = "feat(session): add private hermetic flow completeness foundation", commit_date = "2026-08-29T20:05:00+01:00" }
@@ -185,7 +185,7 @@ schema = 2
 "D5" = { status = "implemented", commit_message = "feat(session): key closure capture obligations to the callback", commit_date = "2026-09-09T12:00:00+01:00", pull_request = 521 }
 "D6" = { status = "implemented", commit_message = "fix(session): close the flow-completion carrier set and end a divergent loop's normal path", commit_date = "2026-09-12T11:30:00+01:00", pull_request = 532 }
 "D7" = { status = "implemented", commit_message = "feat(session): surface a sequence's call-context value through the call rails", commit_date = "2026-09-13T00:15:00+01:00" }
-"D8" = { status = "pending" }
+"D8" = { status = "implemented", commit_message = "test(session): certify flow results retain selective operands as carriers forced only on demand", commit_date = "2026-09-14T21:30:00+01:00" }
 "DEM0" = { status = "pending" }
 "E1" = { status = "implemented", commit_message = "feat(typeinfo): resolve-symbol graph operation with bounded SemanticTypeGraph export", commit_date = "2026-09-05T01:30:00+01:00" }
 "E2" = { status = "pending" }
@@ -417,7 +417,7 @@ schema = 2
 "TE2" = { status = "implemented", commit_message = "fix(session): defer conditional branches until selection on te2-lowering-instantiation", commit_date = "2026-09-12T11:30:00+01:00" }
 "TE3" = { status = "implemented", commit_message = "feat(core): demand-selected projection precision at the operand forcing boundary", commit_date = "2026-09-05T12:00:00+01:00" }
 "TE4" = { status = "implemented", commit_message = "perf(session): decide mapped key remaps before forcing their value operands", commit_date = "2026-09-12T12:00:00+01:00" }
-"TE5" = { status = "pending" }
+"TE5" = { status = "implemented", commit_message = "refactor(session): delete the residual ad hoc selective-operator entrances", commit_date = "2026-09-13T16:30:00+01:00" }
 "TIF0" = { status = "pending" }
 "TIF1" = { status = "pending" }
 "UAI0" = { status = "pending" }

@@ -264,8 +264,8 @@ fn family_a_producers_call_new_fact_helpers() {
 /// (`DeclarationLookupDb` / `ResolvabilityDb` / `OwnerCollectionDb` /
 /// `ShapeCacheDb`) route their warm read through the SHARED
 /// `SingleEntryArtifactNode::validate` + `single_entry_peek` adapters,
-/// and the query-identity caches (`ImportedRegistryDb`,
-/// `MaterializeStructureDb`) route through `QueryCandidateNode::lookup_candidate`
+/// and the query-identity cache (`ImportedRegistryDb`) routes through
+/// `QueryCandidateNode::lookup_candidate`
 /// (plus the bespoke `ImportedRegistryDb::peek`). Each adapter body MUST
 /// carry exactly one strict warm-read validator + one bubble, so
 /// dropping the pair at any shared site flips the guard RED.
@@ -304,9 +304,8 @@ const ADAPTER_SITES: &[AdapterSiteSpec] = &[
         fn_sig: "fn single_entry_peek<K, V>(",
         impl_anchor: None,
     },
-    // The warm-hit candidate validator shared by the query-identity
-    // caches (ImportedRegistryDb / MaterializeStructureDb) through
-    // `QueryCandidateNode`.
+    // The warm-hit candidate validator the query-identity cache
+    // (ImportedRegistryDb) routes through via `QueryCandidateNode`.
     AdapterSiteSpec {
         name: "QueryCandidateNode::lookup_candidate",
         fn_sig: "fn lookup_candidate(\n        &self,\n        key: &Self::Key,",
@@ -396,13 +395,6 @@ const ROUTING_SITES: &[RoutingSiteSpec] = &[
         name: "ImportedRegistryDb",
         impl_anchor: "impl ImportedRegistryDb {",
         fn_sig: "fn get_or_compute_admit_in_scope<F>(",
-        node_type: "QueryCandidateNode",
-        store_field: "store: &self.store,",
-    },
-    RoutingSiteSpec {
-        name: "MaterializeStructureDb",
-        impl_anchor: "impl MaterializeStructureDb {",
-        fn_sig: "pub(crate) fn get_or_compute_admit<F>(",
         node_type: "QueryCandidateNode",
         store_field: "store: &self.store,",
     },

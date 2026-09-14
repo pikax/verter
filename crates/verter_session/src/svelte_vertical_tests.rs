@@ -2177,6 +2177,63 @@ fn svelte_inline_import_type_snippet_prop_resolves_typed_role() {
     );
 }
 
+/// An inline `import("svelte").Snippet<…>` shell reached THROUGH a local
+/// alias publishes the alias node as the slot's callable-occurrence subject,
+/// so the shared demand may resolve the shell behind it and the slot's
+/// structured return reaches the public contract. The DIRECT inline form
+/// stays a typed incomplete (no published return) — the root-only
+/// carrier stop the macro-surface replay identity currently requires.
+#[test]
+fn svelte_alias_wrapped_import_type_snippet_prop_publishes_return() {
+    let source = r#"<script lang="ts">
+  type Header = import("svelte").Snippet<[{ title: string }]>;
+  let { header, footer }: {
+    header?: Header;
+    footer?: import("svelte").Snippet<[{ note: string }]>;
+  } = $props();
+  void header; void footer;
+</script>
+<span />"#;
+    let host = workspace_host_with_svelte(
+        "/workspace/AliasWrappedImportType.svelte",
+        source,
+        &[
+            (
+                "/workspace/node_modules/svelte/package.json",
+                r#"{"name":"svelte","version":"5.56.10","types":"index.d.ts"}"#,
+            ),
+            (
+                "/workspace/node_modules/svelte/index.d.ts",
+                "export type Snippet<Params extends unknown[] = []> = \
+                 (...args: Params) => { rendered: true };\n",
+            ),
+        ],
+    );
+    upsert_svelte(&host, "/workspace/AliasWrappedImportType.svelte", source);
+
+    let (meta, _, _) = host
+        .get_component_meta_output("/workspace/AliasWrappedImportType.svelte")
+        .expect("component meta query succeeds")
+        .expect("component meta output")
+        .into_parts();
+    let slot = |name: &str| {
+        meta.slots
+            .iter()
+            .find(|slot| slot.name == name)
+            .unwrap_or_else(|| panic!("missing {name} slot"))
+    };
+    assert!(
+        slot("header").return_type.is_some(),
+        "the alias-wrapped snippet shell realizes through the shared demand and \
+         publishes its structured return"
+    );
+    assert!(
+        slot("footer").return_type.is_none(),
+        "the direct inline import-type shell stays a typed incomplete: no return is \
+         published (the root-only carrier stop)"
+    );
+}
+
 /// A `unique symbol` on the Svelte public declaration surface stays
 /// well-formed AND nominal: the DECLARING export emits the declaration
 /// spelling `unique symbol`, an imported reference keeps its nominal

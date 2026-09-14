@@ -2,17 +2,19 @@ name: Validation Probe
 
 # The external workload probe lane.
 #
-# Drives Verter against one PINNED third-party corpus through the normal public
-# compile request route, classifies every case with the probe outcome taxonomy,
-# and publishes one compact machine-readable summary.
+# Drives Verter against PINNED third-party corpora — one per first-class target
+# framework — through the normal public compile request route, classifies every
+# case with the probe outcome taxonomy, and publishes ONE compact
+# machine-readable summary carrying per-framework counters and their totals.
 #
 # The corpus is a WORKLOAD, never an oracle. A mismatch against the reference
 # compiler is evidence for the owning semantic node; it is never a verdict on
 # Verter and never a reason to change compiler behaviour from this lane.
 #
-# Exactly ONE probe job runs the whole slice. There is no per-fixture job and no
-# per-fixture test: which cases run, what they are expected to do, and who owns
-# that expectation are manifest data, and the runner is table-driven over it.
+# Exactly ONE probe job runs every slice. There is no per-fixture job, no
+# per-framework job, and no per-fixture test: which cases run, what they are
+# expected to do, and who owns that expectation are manifest data, `framework`
+# is a case attribute, and the runner is table-driven over both.
 #
 # The lane's disposition is a real exit, computed after publication: the summary
 # is uploaded and rendered FIRST, then `validation-probe-summary --dispose`
@@ -33,11 +35,14 @@ permissions:
   contents: read
 
 env:
-  # The pinned corpus. Recorded here AND in `manifest/vue.toml`; the lane
-  # checks the manifest inventory against the checkout in both directions, so
-  # the two cannot drift apart silently.
+  # The pinned corpora. Each revision is recorded here AND in its
+  # `manifest/<framework>.toml`; the lane checks each manifest's inventory
+  # against its checkout in both directions, so the two cannot drift apart
+  # silently.
   VUE_BENCHMARKS_REPO: pikax/vue-benchmarks
   VUE_BENCHMARKS_REVISION: 5ac27ef2df618855c5855adcd9487488e0b18f25
+  SVELTE_BENCHMARKS_REPO: pikax/svelte-benchmarks
+  SVELTE_BENCHMARKS_REVISION: e19c48b81ad24b75a6d4b81377b4a7ebc39a1900
 
 jobs:
   probe:
@@ -45,7 +50,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      # No job step pushes or fetches, and the corpus generator runs inside
+      # this workspace, so the root checkout keeps no token in its Git config.
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
@@ -77,8 +86,37 @@ jobs:
           path: .integration-tests/repos/vue-benchmarks
           persist-credentials: false
 
-      # The pull-request lane drives the manifest's bounded smoke slice; main
-      # and manual runs drive the complete ratified inventory.
+      # Checked out at its EXACT commit, for the same reason.
+      - name: Check out the pinned Svelte corpus
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SVELTE_BENCHMARKS_REPO }}
+          ref: ${{ env.SVELTE_BENCHMARKS_REVISION }}
+          path: .integration-tests/repos/svelte-benchmarks
+          persist-credentials: false
+
+      # That repository COMMITS no components: its corpus is written by its own
+      # deterministic generator. The generator runs ONCE, with the smallest
+      # invocation that still emits every one of its component families — its
+      # default also writes two thousand-file corpora and their byte-identical
+      # `-repeated` twins, which are a content-hash cache demo rather than
+      # additional workload evidence and would put a six-figure-line inventory
+      # in the tree.
+      #
+      # It is run directly rather than through the corpus's own `pnpm install
+      # && pnpm generate`: the generator imports nothing but Node builtins and
+      # its own `scripts/lib`, so its component bytes do not depend on that
+      # install, while running it would resolve a third-party dependency tree
+      # under a different pinned package manager inside this workspace. What
+      # the generator actually produced is not taken on trust either way — the
+      # manifest carries a SHA-256 per case and the lane refuses a case whose
+      # bytes are not the ratified ones.
+      - name: Generate the pinned Svelte corpus
+        working-directory: .integration-tests/repos/svelte-benchmarks
+        run: node scripts/generate.mjs --counts 50 --no-repeated
+
+      # The pull-request lane drives each manifest's bounded smoke slice; main
+      # and manual runs drive the complete ratified inventories.
       - name: Run the workload probe
         env:
           VALIDATION_PROBE_LANE: ${{ github.event_name == 'pull_request' && 'smoke' || 'main' }}
@@ -103,3 +141,67 @@ jobs:
       - name: Lane disposition
         if: always()
         run: cargo run -p verter_validation_probe --bin validation-probe-summary -- --dispose
+
+  # Non-gating observation lane. Records correctness-labeled timings as an
+  # Actions artifact. Nothing here thresholds, rebaselines, or disposes on a
+  # number: a missing file fails the job because the artifact was not produced,
+  # never because a timing missed a budget.
+  observe:
+    name: Observation artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: validation-probe-observe
+      - uses: taiki-e/install-action@nextest
+
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the native addon
+        run: pnpm --filter @verter/native build
+
+      - name: Check out the pinned Vue corpus
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.VUE_BENCHMARKS_REPO }}
+          ref: ${{ env.VUE_BENCHMARKS_REVISION }}
+          path: .integration-tests/repos/vue-benchmarks
+          persist-credentials: false
+
+      - name: Check out the pinned Svelte corpus
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SVELTE_BENCHMARKS_REPO }}
+          ref: ${{ env.SVELTE_BENCHMARKS_REVISION }}
+          path: .integration-tests/repos/svelte-benchmarks
+          persist-credentials: false
+
+      - name: Generate the pinned Svelte corpus
+        working-directory: .integration-tests/repos/svelte-benchmarks
+        run: node scripts/generate.mjs --counts 50 --no-repeated
+
+      - name: Capture observation artifacts
+        env:
+          VALIDATION_PROBE_LANE: ${{ github.event_name == 'pull_request' && 'smoke' || 'main' }}
+        run: cargo nextest run -p verter_validation_probe --features external-corpus -- observation_lane_emits_one_artifact
+
+      - name: Upload the observation artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-probe-observations-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/validation-probe/observations.json
+          if-no-files-found: error

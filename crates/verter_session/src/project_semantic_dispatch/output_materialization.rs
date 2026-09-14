@@ -313,18 +313,6 @@ mod projector {
     }
 
     impl sealed::Sealed
-        for crate::resolver_core::component_meta_query_engine::MetaQueryRegistryOutputCap<'_, '_>
-    {
-    }
-    impl OutputProjector
-        for crate::resolver_core::component_meta_query_engine::MetaQueryRegistryOutputCap<'_, '_>
-    {
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_> {
-            self.dispatch_for_projector()
-        }
-    }
-
-    impl sealed::Sealed
         for crate::resolver_core::component_meta_query_engine::MetaQuerySurfaceOutputCap<'_, '_>
     {
     }

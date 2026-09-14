@@ -86,7 +86,13 @@ fn serialize_element(
     // matcher marked this NodeId scoped (the shared per-element read of the ONE
     // scope-injection fact pair).
     let scope_hash = css.and_then(|facts| facts.hash_for(node));
-    serialize_static_attrs(&el.attrs, is_custom_element(el), scope_hash, html);
+    serialize_static_attrs(
+        &el.attrs,
+        is_custom_element(el),
+        el.tag == "option",
+        scope_hash,
+        html,
+    );
     if el.children.is_empty() && is_void_element(&el.tag) {
         html.push_str("/>");
         return;
@@ -183,6 +189,7 @@ fn is_sole_controlled(ir: &SvelteRuntimeIr, items: &[CleanItem]) -> bool {
 fn serialize_static_attrs(
     attrs: &[AttrIr],
     is_custom: bool,
+    is_option: bool,
     scope_hash: Option<&str>,
     html: &mut String,
 ) {
@@ -190,7 +197,7 @@ fn serialize_static_attrs(
     // `$.from_tree` objectifier reads too) into the cloned-HTML skeleton: ESCAPE-ONLY
     // (the value is already producer-decoded), a valueless attribute serializing as
     // `name=""`.
-    for attr in collect_static_attrs(attrs, is_custom, scope_hash) {
+    for attr in collect_static_attrs(attrs, is_custom, is_option, scope_hash) {
         html.push(' ');
         html.push_str(&attr.name);
         html.push_str("=\"");
@@ -221,12 +228,14 @@ struct CollectedAttr {
 /// the whole element to the runtime `$.attribute_effect` fold (no baked attribute); a
 /// static `class`/`style` whose element carries a `class:`/`style:` directive is pulled
 /// OUT (its base rides `$.set_class`/`$.set_style`); a `cannot_be_set_statically`
-/// attribute and a `bind:group` `value` are excluded; a custom element keeps ONLY `is`;
-/// an EMPTY `class=""` is dropped; the scope hash bakes into (or synthesizes) the
-/// `class` value. The value is stored RAW (decoded) — the caller escapes.
+/// attribute, a `bind:group` `value`, and an `<option>` value-channel `value` are
+/// excluded; a custom element keeps ONLY `is`; an EMPTY `class=""` is dropped; the
+/// scope hash bakes into (or synthesizes) the `class` value. The value is stored RAW
+/// (decoded) — the caller escapes.
 fn collect_static_attrs(
     attrs: &[AttrIr],
     is_custom: bool,
+    is_option: bool,
     scope_hash: Option<&str>,
 ) -> Vec<CollectedAttr> {
     // A SPREAD on the element switches its WHOLE attribute strategy to the single
@@ -273,6 +282,13 @@ fn collect_static_attrs(
             // A static `value` on a `bind:group` input is pulled out of the skeleton
             // (it becomes the runtime `__value` write).
             if name == "value" && has_group_bind {
+                continue;
+            }
+            // A static `value` on an `<option>` is the OPTION VALUE-CHANNEL (the
+            // official `needs_special_value_handling` tag rule): the skeleton bakes a
+            // BARE `<option>` and the emitter writes the init-only
+            // `option.value = option.__value = 'X'` at the option's walk position.
+            if name == "value" && is_option && value.is_some() {
                 continue;
             }
             // A "cannot be set statically" attribute (`autofocus` / `muted` /
@@ -499,7 +515,12 @@ fn objectify_element(
 ) -> String {
     let mut elements: Vec<Option<String>> = vec![Some(js_string_literal(&el.tag))];
     let scope_hash = css.and_then(|facts| facts.hash_for(node));
-    let collected = collect_static_attrs(&el.attrs, is_custom_element(el), scope_hash);
+    let collected = collect_static_attrs(
+        &el.attrs,
+        is_custom_element(el),
+        el.tag == "option",
+        scope_hash,
+    );
     let child_ctx = ctx.for_children_of(&el.tag);
     let child_items = clean_nodes(ir, &el.children, child_ctx);
     let strip_newline = el.tag == "pre" || el.tag == "textarea";

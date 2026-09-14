@@ -164,12 +164,48 @@ impl ProjectSync {
         lane: ProviderLane,
         verb: ProviderFileVerb,
     ) -> Result<(), TypeProviderError> {
+        self.publish_tsx_fenced(tsx_path, tsx_content, lane, verb, None)
+            .await
+            .map(|_| ())
+    }
+
+    /// [`Self::publish_tsx`] with a delivery fence: `fence` is evaluated UNDER
+    /// the per-path delivery lock, immediately before the provider write, and a
+    /// `false` answer delivers nothing and returns `Ok(false)`.
+    ///
+    /// The lock serializes every writer of one provider path (the interactive
+    /// repair and the debounced coordinator both deliver here), so a writer
+    /// that compiled an older document revision and then waited on the lock
+    /// while a newer revision was delivered is refused at the only point that
+    /// matters — the moment its bytes would overwrite the newer ones. A fence
+    /// checked before taking the lock cannot see that: the coordinator's
+    /// `hover_secondary_files_tsgo` flake was exactly a pre-edit compile
+    /// written to tsgo after the foreground repair had delivered the edit, so
+    /// the next hover mapped fresh offsets onto a stale buffer and fell back
+    /// to the Verter-only answer.
+    pub(super) async fn publish_tsx_fenced(
+        &self,
+        tsx_path: &str,
+        tsx_content: &str,
+        lane: ProviderLane,
+        verb: ProviderFileVerb,
+        fence: Option<&(dyn Fn() -> bool + Sync)>,
+    ) -> Result<bool, TypeProviderError> {
         if self.carrier_companion_open_suppressed() {
-            return Ok(());
+            return Ok(true);
         }
 
         let lock = self.virtual_verter_types_lock(tsx_path);
         let _guard = lock.lock().await;
+        if let Some(fence) = fence {
+            if !fence() {
+                tracing::debug!(
+                    "project_sync: not delivering {tsx_path} — its document revision moved \
+                     before the provider write"
+                );
+                return Ok(false);
+            }
+        }
         let prepared = self.prepare_tsx_surface(tsx_path, tsx_content)?;
         let virtual_path = prepared.virtual_verter_types_path.as_deref();
         let virtual_was_live =
@@ -186,14 +222,14 @@ impl ProjectSync {
         let result = self
             .publish_provider_file(tsx_path, prepared.prepared.content().as_ref(), lane, verb)
             .await;
-        if result.is_err() {
+        if let Err(error) = result {
             // A dependency created solely for a failed carrier publication has
             // no live consumer. Preserve an older overlay because the provider
             // may still serve the previous carrier that imports it.
             if virtual_path.is_some() && !virtual_was_live {
                 let _ = self.close_virtual_verter_types(tsx_path, lane).await;
             }
-            return result;
+            return Err(error);
         }
 
         self.record_delivered_carrier_surface(tsx_path, tsx_content, prepared.prepared);
@@ -204,7 +240,45 @@ impl ProjectSync {
         if virtual_path.is_none() {
             self.close_virtual_verter_types(tsx_path, lane).await?;
         }
-        Ok(())
+        Ok(true)
+    }
+
+    /// [`Self::sync_tsx`] guarded by a delivery fence evaluated under the
+    /// per-path delivery lock (see [`Self::publish_tsx_fenced`]). `Ok(false)`:
+    /// the fence refused and the provider received nothing.
+    pub(crate) async fn sync_tsx_fenced(
+        &self,
+        tsx_path: &str,
+        tsx_content: &str,
+        fence: &(dyn Fn() -> bool + Sync),
+    ) -> Result<bool, TypeProviderError> {
+        self.publish_tsx_fenced(
+            tsx_path,
+            tsx_content,
+            ProviderLane::Foreground,
+            ProviderFileVerb::Update,
+            Some(fence),
+        )
+        .await
+    }
+
+    /// [`Self::open_tsx`] guarded by a delivery fence evaluated under the
+    /// per-path delivery lock (see [`Self::publish_tsx_fenced`]). `Ok(false)`:
+    /// the fence refused and the provider received nothing.
+    pub(crate) async fn open_tsx_fenced(
+        &self,
+        tsx_path: &str,
+        tsx_content: &str,
+        fence: &(dyn Fn() -> bool + Sync),
+    ) -> Result<bool, TypeProviderError> {
+        self.publish_tsx_fenced(
+            tsx_path,
+            tsx_content,
+            ProviderLane::Foreground,
+            ProviderFileVerb::Open,
+            Some(fence),
+        )
+        .await
     }
 
     pub(super) async fn close_tsx_in_lane(

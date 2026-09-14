@@ -43,5 +43,4 @@ note: required by a bound in `verter_session::project_semantic_dispatch::output_
              verter_session::typeinfo::raise::TypeinfoRaiseOutputCap<'_, '_>
              verter_session::typeinfo::framework_surface::svelte_exec::TypeinfoSvelteSurfaceOutputCap<'_, '_>
              verter_session::typeinfo::framework_surface::vue_exec::TypeinfoVueSurfaceOutputCap<'_, '_>
-             verter_session::resolver_core::component_meta_query_engine::registry_decl::MetaQueryRegistryOutputCap<'_, '_>
              verter_session::resolver_core::component_meta_query_engine::surface::MetaQuerySurfaceOutputCap<'_, '_>

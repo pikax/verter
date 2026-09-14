@@ -1,11 +1,15 @@
 //! Demand-time display view for a child contract slot's synthetic-binding
 //! carriers — the hover-boundary half of shallow-by-default slot publication.
 //!
-//! The contract publishes concrete-inline slot-binding types as the shallow
+//! The contract publishes slot bindings richer than a complete closed leaf
+//! (inline objects, open generics, symbolic carriers) as the shallow
 //! [`TypeExpr::SyntheticSlotBinding`] carrier; rendering that carrier is a
-//! typed refusal. A slot-name hover is the consumer's explicit terminal
-//! demand, so the server deepens the RANK-MATCHED slot's carrier bindings —
-//! and only that slot's — through the one sanctioned session route
+//! typed refusal. A concrete leaf / leaf-union value publishes its closed
+//! fact directly (see `slot_binding_graph::publish_merged_bindings`), so
+//! this deepen route belongs to the richer shapes. A slot-name hover is the
+//! consumer's explicit terminal demand, so the server deepens the
+//! RANK-MATCHED slot's carrier bindings — and only that slot's — through
+//! the one sanctioned session route
 //! (`VerterHost::deepen_synthetic_slot_binding`) and threads the resolved
 //! views to the hover builder. Everything here is typed-IR: carrier
 //! extraction is a variant match, never display text, and a binding whose

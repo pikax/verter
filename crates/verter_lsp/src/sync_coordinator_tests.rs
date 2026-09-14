@@ -4976,3 +4976,114 @@ async fn an_open_plain_ts_importer_is_fenced_after_an_evict_and_reopen() {
         live_epoch(&documents, &parent_id)
     );
 }
+
+/// The debounced tick compiled revision A, then an edit to revision B landed
+/// before the provider write (the pause at [`test_hooks::block_after_ide_compile`]
+/// models the tick waiting on the per-path delivery lock while the interactive
+/// repair delivers B). The surface record was already fenced by the pin
+/// (`coordinator_direct_ide_sync_pin_is_captured_before_the_compile_not_after`);
+/// the provider WRITE was not, so tsgo received A's bytes after B's and the next
+/// hover mapped B's offsets onto A's buffer (`hover_secondary_files_tsgo`, five
+/// CI failures 2026-09-06..13, always the Verter-only fallback). The write is now
+/// fenced under the delivery lock: the tick delivers nothing, queues the live
+/// revision for resync, and asks to be retried.
+#[tokio::test(flavor = "multi_thread")]
+async fn coordinator_direct_ide_sync_does_not_deliver_a_compile_of_a_moved_revision() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    // Unique canonical id: the pause hook registry is keyed by it (see the pin test).
+    let canonical_id = "/workspace/src/DeliveryFenceDirectOpen.vue";
+    let uri: Uri = "file:///workspace/src/DeliveryFenceDirectOpen.vue"
+        .parse()
+        .expect("test uri");
+    const SOURCE_A: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-a'\n</script>\n\
+                             <template><div>{{ msg }}</div></template>\n";
+    const SOURCE_B: &str =
+        "<script setup lang=\"ts\">\nconst msg = 'revision-b-edited'\n</script>\n\
+                             <template><div>{{ msg }}</div></template>\n";
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: SOURCE_A.to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let vfs_workspace = Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+    ));
+    let provider_sync_states = Arc::new(DashMap::new());
+    let pending_snapshot_provider_sync = Arc::new(DashSet::new());
+
+    let deps = SyncCoordinatorDeps {
+        documents: Arc::clone(&documents),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::clone(&provider_sync_states),
+        vfs_workspace,
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    };
+
+    let ide_path = verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
+    let (arrived, release) = test_hooks::block_after_ide_compile(canonical_id);
+
+    let tick = sync_file(&deps, canonical_id, uri.as_str());
+    let edit = async {
+        arrived.notified().await;
+        let result = documents.did_change(&uri, 2, SOURCE_B);
+        assert!(
+            result.changed,
+            "the interleaved edit must really commit revision B"
+        );
+        release.notify_one();
+    };
+    let (outcome, ()) = futures_util::future::join(tick, edit).await;
+
+    let calls = provider.calls();
+    let writes: Vec<&MockCall> = calls
+        .iter()
+        .filter(|call| {
+            matches!(
+                call,
+                MockCall::OpenFile { path, .. }
+                    | MockCall::OpenFileBackground { path, .. }
+                    | MockCall::UpdateFile { path, .. }
+                    | MockCall::LoadFile { path, .. }
+                    if path == &ide_path
+            )
+        })
+        .collect();
+    assert!(
+        writes.is_empty(),
+        "a compile of revision A must not reach the provider once the document is at \
+         revision B — the write is fenced under the delivery lock, not just the record: {writes:?}"
+    );
+    assert!(
+        matches!(outcome, SyncFileOutcome::Retry),
+        "the refused tick asks to be retried so the live revision is delivered"
+    );
+    assert!(
+        pending_snapshot_provider_sync.contains(canonical_id),
+        "the refused tick queues the live revision for resync"
+    );
+    assert!(
+        documents
+            .provider_surfaces()
+            .current_snapshot(&ide_path)
+            .is_none(),
+        "nothing was delivered, so nothing is recorded"
+    );
+}

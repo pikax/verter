@@ -117,7 +117,7 @@ fn artifact_identity_separates_language_and_slot_and_serialization_preserves_eac
             .unwrap()
             .to_json()
             .unwrap(),
-        r#"{"artifacts":[],"coordinates":"utf8-bytes","schemaVersion":1,"sourceUnits":[]}"#
+        r#"{"artifacts":[],"coordinates":"utf8-bytes","customBlocks":[],"schemaVersion":1,"sourceUnits":[]}"#
     );
 }
 

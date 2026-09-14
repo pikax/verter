@@ -3,7 +3,7 @@
 //! Restricted host facade for resolver-tier code under the
 //! `crates/verter_session/src/{resolver_core, meta_resolve,
 //! project_semantic_dispatch}/` subtree, plus the two top-level files
-//! `component_meta_caches.rs` and `component_meta_materialize.rs`. Every
+//! `component_meta_caches.rs` and the projector pipeline. Every
 //! such file routes its host access through this trait; the
 //! `no_concrete_verter_host_in_seal_scope` architecture guard
 //! (`tests/cases/architecture_guards.rs`) enforces that the seal scope contains
@@ -98,9 +98,9 @@ mod sealed {
 /// (`meta_resolve/materialize/field_types.rs`) needs the scope's
 /// content version for two distinct consumers that MUST agree:
 ///
-/// 1. the `NodeScopeId::File { whole_hash }` the materialiser lowers
-///    the `TypeExpr` against — the lowered value's semantic identity;
-/// 2. the `MaterializeMemoDb` entry's fact-signature self-root — the
+/// 1. the `NodeScopeId::File { whole_hash }` the projector lowers the
+///    `TypeExpr` against — the lowered value's semantic identity;
+/// 2. the `ShapeCacheDb` entry's fact-signature self-root — the
 ///    view-correct shared-cache admission gate.
 ///
 /// Sourcing those from two separate oracles (`shallow_file_state` for
@@ -142,7 +142,7 @@ impl MaterializeScopeObservation {
 
 /// Restricted host facade for resolver-tier code (`resolver_core/*`,
 /// `meta_resolve/*` post-moves, `component_meta_caches.rs`,
-/// `component_meta_materialize.rs`, `project_semantic_dispatch/*`).
+/// `project_semantic_dispatch/*`).
 ///
 /// `ResolverContext` is the only way for seal-scope code to reach host
 /// state at runtime. Its only super-traits are private structural seals; it
@@ -337,7 +337,7 @@ pub(crate) trait ResolverContext: sealed::Sealed + sealed::RequestBoundSealed {
     /// candidate for an older content hash.
     ///
     /// Correctness-sensitive readers in the seal scope —
-    /// materialisation fence seeding (`component_meta_materialize.rs`)
+    /// materialisation fence seeding
     /// and the component-meta proof producers
     /// (`component_meta_caches.rs`) — MUST use this instead of the
     /// permissive `project_type_store().indexed().get_any(..)`. Seeding
@@ -718,8 +718,7 @@ pub(crate) trait ResolverContext: sealed::Sealed + sealed::RequestBoundSealed {
 
     /// Reach the concrete `VerterHost` underneath this context.
     ///
-    /// Used by Family B/C/D producers (`MaterializeStructureDb`,
-    /// `AppConfigNoOverrideProofDb`,
+    /// Used by Family B/C/D producers (`AppConfigNoOverrideProofDb`,
     /// `OwnerImportSurfaceDb`) to call
     /// [`crate::VerterHost::with_fact_tracer`] from inside their
     /// cooperative-admission cold-compute closures. The seal trait

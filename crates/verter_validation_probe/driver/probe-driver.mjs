@@ -41,7 +41,7 @@ const DRIVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(DRIVER_DIR, "..", "..", "..");
 const require = createRequire(import.meta.url);
 
-const PROBE_KEYS = new Set(["probe_id", "entries"]);
+const PROBE_KEYS = new Set(["probe_id", "entries", "observe"]);
 const ENTRY_KEYS = new Set(["canonicalId", "source", "request"]);
 
 function emit(line) {
@@ -62,6 +62,8 @@ function describe(error) {
 // ---------------------------------------------------------------------------
 
 let host = null;
+let nativeModule = null;
+let memoryArmed = false;
 
 // The addon is reached through the @verter/native PACKAGE — its own entry, as
 // its `exports` map declares it, never a `.node` artifact this driver names
@@ -73,20 +75,36 @@ let host = null;
 // bare module-not-found.
 const NATIVE_PACKAGE = path.join(REPO_ROOT, "packages", "native");
 
-/** Load the addon and construct one host for the whole process. */
-function ensureHost() {
-  if (host) return host;
-  let native;
+/** Load the addon package once. */
+function loadNative() {
+  if (nativeModule) return nativeModule;
   try {
-    native = require(NATIVE_PACKAGE);
+    nativeModule = require(NATIVE_PACKAGE);
   } catch (error) {
     throw new Error(
       `the @verter/native addon at ${NATIVE_PACKAGE} could not be loaded ` +
         `(build it with \`pnpm --filter @verter/native build\`): ${describe(error)}`,
     );
   }
-  host = new native.VerterHost();
+  return nativeModule;
+}
+
+/** Load the addon and construct one host for the whole process. */
+function ensureHost() {
+  if (host) return host;
+  host = new (loadNative().VerterHost)();
   return host;
+}
+
+/** Peak/live-bytes pair, omitted when the snapshot is missing or untrustworthy. */
+function memoryFrame(snapshot) {
+  if (snapshot === null || typeof snapshot !== "object") return undefined;
+  const peak = snapshot.peakLiveBytes;
+  const live = snapshot.liveBytes;
+  if (typeof peak !== "number" || typeof live !== "number") return undefined;
+  if (!Number.isInteger(peak) || !Number.isInteger(live)) return undefined;
+  if (peak < 0 || live < 0) return undefined;
+  return { peak_bytes: peak, live_bytes: live };
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +226,19 @@ function readProbe(line) {
       throw new Error("entry request identity.filename must be a non-empty string");
     }
   }
+  if (probe.observe !== undefined) {
+    if (
+      probe.observe === null ||
+      typeof probe.observe !== "object" ||
+      Array.isArray(probe.observe)
+    ) {
+      throw new Error("observe must be an object");
+    }
+    const keys = Object.keys(probe.observe);
+    if (keys.length !== 1 || keys[0] !== "memory" || typeof probe.observe.memory !== "boolean") {
+      throw new Error("observe must be { memory: boolean }");
+    }
+  }
   return probe;
 }
 
@@ -216,10 +247,18 @@ function readProbe(line) {
 // than where the driver's first step was.
 function runProbe(probe, where) {
   const { probe_id, entries } = probe;
+  const observeMemory = probe.observe?.memory === true;
 
   where.phase = "load";
   where.stage = "pre-native";
   emit({ probe_id, phase: "load" });
+  const native = loadNative();
+  // Enable once at driver start, only when this process is asked to observe.
+  // The workload probe lane never sends `observe`, so its runs never arm the audit.
+  if (observeMemory && !memoryArmed) {
+    native.memoryAuditEnable();
+    memoryArmed = true;
+  }
   ensureHost();
 
   where.phase = "compile";
@@ -237,13 +276,17 @@ function runProbe(probe, where) {
   }
 
   where.stage = "native";
+  if (observeMemory) native.memoryAuditResetHighWater();
   const started = process.hrtime.bigint();
   const answered = host.compileRequests(inputs);
   const elapsed_ns = Number(process.hrtime.bigint() - started);
+  const memory = observeMemory ? memoryFrame(native.memoryAuditSnapshot()) : undefined;
   where.stage = "post-native";
 
   try {
-    emit({ probe_id, frame: "compile", elapsed_ns, entries: answered });
+    const frame = { probe_id, frame: "compile", elapsed_ns, entries: answered };
+    if (memory !== undefined) frame.memory = memory;
+    emit(frame);
   } catch (error) {
     emit({ probe_id, error: describe(error), phase: "compile", stage: "post-native" });
     return;

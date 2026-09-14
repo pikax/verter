@@ -1836,6 +1836,8 @@ mod tests {
                     source_space_token: "space:ts".to_string(),
                     parsed: None,
                     producer: None,
+                    authored_basis: None,
+                    diagnostics: Vec::new(),
                 }),
                 ..Default::default()
             },

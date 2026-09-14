@@ -803,6 +803,8 @@ impl<'a> ClientEmitter<'a> {
             // With no named child the block above is empty, so the ops land right
             // after the element's own inits — the static-children form.
             self.emit_inline_render_ops(out, only);
+            // An `<option>`'s value-channel write closes the element's run.
+            self.emit_option_value_channel(out, only, region_var);
         }
     }
 
@@ -1036,6 +1038,9 @@ impl<'a> ClientEmitter<'a> {
                             // ops land right after the element's own inits — the
                             // static-children form.
                             self.emit_inline_render_ops(out, *node);
+                            // An `<option>`'s value-channel write closes the
+                            // element's own statement run.
+                            self.emit_option_value_channel(out, *node, &var);
                         }
                     }
                 }

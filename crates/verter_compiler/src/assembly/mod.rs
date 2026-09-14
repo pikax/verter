@@ -20,6 +20,7 @@
 //! and does not mint an [`ArtifactSet`] publication receipt.
 
 pub mod compose;
+pub mod custom_block;
 pub mod fragment;
 pub mod map_compose;
 pub mod map_input;
@@ -33,6 +34,10 @@ pub mod vue_module;
 pub use compose::{
     assemble_sequence, prepend_preamble, splice_into_hole, ComposeRefusal, ComposedOutput,
     SequencedOutput,
+};
+pub use custom_block::{
+    CustomBlockContent, CustomBlockDescriptor, CustomBlockDescriptorError, CustomBlockDescriptorId,
+    CustomBlockDescriptorRequest, CustomBlockLifecycle,
 };
 pub use fragment::{
     ArtifactContent, ArtifactId, ArtifactProvenance, ArtifactRelation, ArtifactRelationKind,
@@ -67,3 +72,5 @@ pub use vue_module::{reset_vue_main_assembly_count, vue_main_assembly_count};
 
 #[cfg(test)]
 mod artifact_schema_tests;
+#[cfg(test)]
+mod custom_block_tests;

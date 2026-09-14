@@ -464,7 +464,7 @@ fn route_surface_dep_edit_misses_warm_component_meta() {
 /// edited.
 ///
 /// Discrimination property: slot-binding synthesis walks the
-/// `materialize_structure_db` / `semantic_graph` query-identity layer
+/// `semantic_graph` query-identity layer
 /// and folds the carrier dep's parse facts into the published
 /// `ComponentMetaResultEntry` signature. The owner SFC itself is
 /// unchanged, so its result-cache candidate (keyed in the content-free

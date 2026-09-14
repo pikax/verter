@@ -1039,7 +1039,7 @@ impl StoreViewRead {
     /// [`Self::into_cold_seed_view`]. This escape hatch is NOT a
     /// warm-validation entry point — the static guard exempts only this
     /// single producer.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn into_owned_view(self) -> HostStoreView {
         match self {
             StoreViewRead::Current(current) => current.0,
@@ -4364,7 +4364,7 @@ impl VerterHost {
     /// accident. The static guard
     /// `resolver_store_view_returns_store_view_read` pins this signature.
     #[track_caller]
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn resolver_store_view(&self) -> StoreViewRead {
         HostStoreView::from_host_read(self)
     }

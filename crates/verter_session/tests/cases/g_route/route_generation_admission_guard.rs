@@ -273,9 +273,9 @@ struct Producer {
 }
 
 /// The full producer roster — explicit per-producer classification.
-fn producers() -> [Producer; 4] {
+fn producers() -> [Producer; 3] {
     [
-        // The 4 ENTRY PRODUCERS — each builds a shared-cache admission
+        // The 3 ENTRY PRODUCERS — each builds a shared-cache admission
         // carrier and MUST abort the whole entry on `RouteGeneration`.
         // The materialization cycle gate (`ClassifyMaterializationCycleGate`)
         // builds NO bespoke carrier: its admission carrier is assembled by
@@ -283,13 +283,8 @@ fn producers() -> [Producer; 4] {
         // the traced fact set + observed self-roots, the same rail every
         // other semantic family rides, so it is outside this roster.
         Producer {
-            file: "component_meta_materialize.rs",
-            signature: "pub fn fact_signature_from_fence(",
-            kind: ProducerKind::EntryProducer,
-        },
-        Producer {
-            file: "component_meta_materialize.rs",
-            signature: "fn materialize_structure_read_set(",
+            file: "fact_signature_helpers.rs",
+            signature: "pub(crate) fn fact_signature_from_fence(",
             kind: ProducerKind::EntryProducer,
         },
         Producer {
@@ -377,9 +372,8 @@ fn route_generation_scanner_discriminates() {
          RouteGeneration MUST be recognised as a whole-carrier refusal",
     );
     // A `return Err(NonAdmissionReason::RouteGenerationDependency)`
-    // whole-carrier refusal — the `Result`-returning producer shape
-    // used by `materialize_structure_read_set` to thread the typed
-    // reason back to the caller.
+    // whole-carrier refusal — the `Result`-returning producer shape that
+    // threads the typed reason back to the caller.
     let return_err_typed =
         "fn p() { for v in fence { match v { DepVersion::RouteGeneration(_) => { return Err(NonAdmissionReason::RouteGenerationDependency); } _ => {} } } Ok(out) }";
     assert!(
@@ -609,9 +603,9 @@ fn route_generation_scanner_discriminates() {
 
     // Sanity: the scanned producers exist.
     assert!(
-        read_session_source("component_meta_materialize.rs")
-            .contains("pub fn fact_signature_from_fence("),
-        "fact_signature_from_fence must be present in component_meta_materialize.rs",
+        read_session_source("fact_signature_helpers.rs")
+            .contains("pub(crate) fn fact_signature_from_fence("),
+        "fact_signature_from_fence must be present in fact_signature_helpers.rs",
     );
     assert!(
         read_session_source("fact_signature_helpers.rs")

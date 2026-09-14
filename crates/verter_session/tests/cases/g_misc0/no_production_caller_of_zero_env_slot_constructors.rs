@@ -40,7 +40,7 @@
 //!   typeinfo_tests;`).
 //! - Exclude `#[cfg(test)]` blocks inside an otherwise-production file
 //!   (the in-crate `#[cfg(test)] mod tests { … }` callers in
-//!   `component_meta_materialize.rs` / `loop5_instrumentation.rs` live
+//!   `loop5_instrumentation.rs` live
 //!   under `#[cfg(test)]` and are excluded by this window).
 //! - Exclude `impl Default` bodies.
 //! - Exclude `semantic_query.rs`'s OWN constructor definitions (the

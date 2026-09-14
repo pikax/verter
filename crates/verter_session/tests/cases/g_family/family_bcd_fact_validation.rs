@@ -4,7 +4,6 @@
 //! cache-validity oracle.
 //!
 //! Family B:
-//!   - `MaterializeStructureEntry` (component_meta_materialize)
 //!   - the retired `RefCycleEntry` (transitive cycle BFS results)
 //!   - `MemoEntry` (semantic_query_memo)
 //!
@@ -77,14 +76,10 @@ fn assert_struct_carries_fact_carrier(src: &str, ty: &str) {
     );
 }
 
-/// Family B: MaterializeStructureEntry + MemoEntry
-/// each carry the `read_set_signature` fact carrier as their sole
-/// cache-validity rail. Source-grep arch guard.
+/// Family B: `MemoEntry` carries the `read_set_signature` fact carrier as
+/// its sole cache-validity rail. Source-grep arch guard.
 #[test]
 fn family_b_entries_carry_fact_carrier() {
-    let cache = read_session_source("component_meta_caches.rs");
-    assert_struct_carries_fact_carrier(&cache, "MaterializeStructureEntry");
-
     let memo = read_session_source("semantic_query_memo/family.rs");
     assert_struct_carries_fact_carrier(&memo, "MemoEntry");
 }
@@ -127,15 +122,15 @@ fn family_d_app_config_proof_entry_uses_fact_signature_only() {
     );
 }
 
-/// The `fact_signature_from_fence` materialiser helper exists and
-/// converts a `[(Arc<str>, DepVersion)]` slice into an
-/// `Arc<[FactVersionRef]>` for the Family B/C/D entry constructors.
+/// The `fact_signature_from_fence` helper exists and converts a
+/// `[(Arc<str>, DepVersion)]` slice into an `Arc<[FactVersionRef]>` for
+/// the Family B/C/D entry constructors.
 #[test]
 fn fact_signature_from_fence_helper_exists() {
-    let src = read_session_source("component_meta_materialize.rs");
+    let src = read_session_source("fact_signature_helpers.rs");
     assert!(
-        src.contains("pub fn fact_signature_from_fence("),
-        "component_meta_materialize must expose `fact_signature_from_fence(fence: &[(Arc<str>, \
-         DepVersion)]) -> Arc<[FactVersionRef]>` for the Family B/C/D producers."
+        src.contains("pub(crate) fn fact_signature_from_fence("),
+        "fact_signature_helpers must expose `fact_signature_from_fence(fence: &[(Arc<str>, \
+         DepVersion)]) -> Option<Arc<[FactVersionRef]>>` for the Family B/C/D producers."
     );
 }

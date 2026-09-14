@@ -2,7 +2,7 @@
 //! `lib_env_hash` field.
 //!
 //! Per R21 / the Cache Architecture rule: `ResolvedImportFacts` does NOT
-//! include `lib_env_hash`; `RouteDb`, typed-IR resolve, `MaterializeStructureDb`,
+//! include `lib_env_hash`; `RouteDb`, typed-IR resolve, `SemanticGraphStore`,
 //! `SemanticGraphStore`, `ComponentMetaResultDb` DO
 //! include `lib_env_hash`. This guard locks the scoping decision so a
 //! future refactor cannot silently add `lib_env_hash` to `ResolvedImportFactsKey`
@@ -98,7 +98,7 @@ fn resolved_import_facts_structs_do_not_carry_lib_env_hash_field() {
             !body.contains("lib_env_hash"),
             "R21 scoping rule: `{name}` MUST NOT carry a `lib_env_hash` field. \
              ResolvedImportFacts captures base syntactic resolution; lib data lives in \
-             `RouteDb`, typed-IR resolve, `MaterializeStructureDb`, etc. \
+             `RouteDb`, typed-IR resolve, `SemanticGraphStore`, etc. \
              Found the token `lib_env_hash` inside `{name}`'s struct body.",
         );
     }

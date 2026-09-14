@@ -229,6 +229,7 @@ fn digest_of(
     crate::standalone::direct_compile_output_digest(&crate::standalone::DirectCompileOutput {
         artifacts: publish(&plan, vec![contribution]).expect("publish"),
         styles: Vec::new(),
+        qualified_styles: Vec::new(),
         diagnostics,
     })
 }
@@ -374,6 +375,7 @@ impl DigestFixture {
         crate::standalone::direct_compile_output_digest(&crate::standalone::DirectCompileOutput {
             artifacts: publish(&plan, vec![contribution]).expect("publish"),
             styles: self.styles.clone(),
+            qualified_styles: Vec::new(),
             diagnostics: self.diagnostics.clone(),
         })
     }

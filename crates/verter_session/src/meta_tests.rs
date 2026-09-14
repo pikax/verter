@@ -29262,34 +29262,26 @@ const cond = true
         .iter()
         .position(|b| b.name == "row")
         .expect("second.row binding");
-    // Binding rows publish the shallow SyntheticSlotBinding carrier (the
-    // re-resolvable binding identity — shallow-by-default); the carrier key
-    // names BOTH the owning slot and the binding, so a cross-slot collapse
-    // of the repeated `row` name or a positional swap changes the key.
-    match lanes.slot_bindings[default_idx][default_row]
-        .materialized_type()
-        .expect("published type")
-    {
-        TypeExpr::SyntheticSlotBinding(key) => {
-            assert_eq!(key.slot_name.as_deref(), Some("default"));
-            assert_eq!(key.binding_name.as_ref(), "row");
-        }
-        other => panic!("default.row publishes its own binding carrier; got {other:?}"),
-    }
-    match lanes.slot_bindings[second_idx][second_row]
-        .materialized_type()
-        .expect("published type")
-    {
-        TypeExpr::SyntheticSlotBinding(key) => {
-            assert_eq!(
-                key.slot_name.as_deref(),
-                Some("second"),
-                "second.row keeps ITS OWN slot's carrier — the repeated name never                  collapses across slots"
-            );
-            assert_eq!(key.binding_name.as_ref(), "row");
-        }
-        other => panic!("second.row publishes its own binding carrier; got {other:?}"),
-    }
+    // Binding rows publish their complete closed leaf facts: the repeated
+    // `row` name under two slots keeps each slot's OWN declared type —
+    // `default(props: { row: string })` vs `second(props: { row: boolean })`
+    // — so a cross-slot collapse of the repeated name or a positional swap
+    // moves `string` onto the boolean row and fails.
+    assert_eq!(
+        lanes.slot_bindings[default_idx][default_row]
+            .materialized_type()
+            .expect("published type"),
+        &TypeExpr::Primitive(PrimitiveName::String),
+        "default.row publishes its own slot's declared `string` leaf fact"
+    );
+    assert_eq!(
+        lanes.slot_bindings[second_idx][second_row]
+            .materialized_type()
+            .expect("published type"),
+        &TypeExpr::Primitive(PrimitiveName::Boolean),
+        "second.row keeps ITS OWN slot's declared `boolean` leaf fact — the \
+         repeated name never collapses across slots"
+    );
     assert_eq!(
         published_type(
             lanes.slot_returns[default_idx]

@@ -939,6 +939,7 @@ pub fn vue_result_to_runtime_bundle(
         script,
         template,
         styles,
+        qualified_styles: Vec::new(),
         custom_blocks,
         scope_id: result.scope_id,
         tsx,
@@ -1344,6 +1345,8 @@ mod tests {
             source_space_token: format!("space:{lang}"),
             parsed: None,
             producer: None,
+            authored_basis: None,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -1954,6 +1957,8 @@ mod tests {
                             source_space_token: "space:theme-css".to_string(),
                             parsed: None,
                             producer: None,
+                            authored_basis: None,
+                            diagnostics: Vec::new(),
                         })],
                         ..Default::default()
                     },
@@ -2015,6 +2020,8 @@ mod tests {
                             source_space_token: "space:supplied-css".to_string(),
                             parsed,
                             producer: Some(supplied_producer()),
+                            authored_basis: None,
+                            diagnostics: Vec::new(),
                         })],
                         ..Default::default()
                     },
@@ -2069,6 +2076,8 @@ mod tests {
                         source_space_token: "space:postcss".to_string(),
                         parsed: Some(prepared),
                         producer: Some(supplied_producer()),
+                        authored_basis: None,
+                        diagnostics: Vec::new(),
                     })],
                     ..Default::default()
                 },
@@ -2110,6 +2119,8 @@ mod tests {
                             source_space_token: "space:theme-css".to_string(),
                             parsed: None,
                             producer: None,
+                            authored_basis: None,
+                            diagnostics: Vec::new(),
                         })],
                         ..Default::default()
                     },
@@ -2212,6 +2223,8 @@ mod tests {
                             source_space_token: "space:theme-scss".to_string(),
                             parsed: Some(prepared),
                             producer: Some(supplied_producer()),
+                            authored_basis: None,
+                            diagnostics: Vec::new(),
                         })],
                         ..Default::default()
                     },
@@ -2262,6 +2275,8 @@ mod tests {
                                 source_space_token: "space:a".to_string(),
                                 parsed: None,
                                 producer: Some(supplied_producer()),
+                                authored_basis: None,
+                                diagnostics: Vec::new(),
                             }),
                             Some(RuntimeBlockContentInput {
                                 code: Arc::from(css),
@@ -2271,6 +2286,8 @@ mod tests {
                                 source_space_token: "space:b".to_string(),
                                 parsed: None,
                                 producer: Some(supplied_producer()),
+                                authored_basis: None,
+                                diagnostics: Vec::new(),
                             }),
                         ],
                         ..Default::default()

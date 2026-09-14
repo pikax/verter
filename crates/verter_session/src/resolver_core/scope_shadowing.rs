@@ -3,9 +3,8 @@
 //! Captures, once per resolver context, the set of bare type names the
 //! owner scope already declares. The dispatch fast-path
 //! ([`crate::project_semantic_dispatch::lower::ProjectSemanticDispatch::shallow_lower_type_expr`])
-//! and the materialise-path identity gate
-//! ([`crate::meta_resolve::extract_route_root_identity_node`] callers)
-//! both consult `is_shadowing_lib(name)` before routing through the
+//! and the graph-native root-identity predicates
+//! (`meta_resolve::graph_predicates`) both consult `is_shadowing_lib(name)` before routing through the
 //! ambient-lib `__builtin__` fast-path. When `true`, the userland
 //! declaration wins and the `__builtin__` route is suppressed —
 //! preserving the plan's "user shadowing wins" rule across BOTH

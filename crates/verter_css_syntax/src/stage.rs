@@ -63,23 +63,44 @@ impl StyleStage {
 /// instead of guessing.
 ///
 /// The field always names the space the position is IN, never the authority
-/// that reported it. There is no authority or severity axis here because every
-/// style diagnostic this crate's consumers can produce today is one thing: a
-/// framework rewrite refusing, which is an error. A closed taxonomy whose only
-/// other members name routes that do not exist would assert a generality the
-/// pipeline does not have; the route that adds one adds it with its producer.
+/// that reported it. A diagnostic also carries its [`StyleDiagnosticSeverity`]:
+/// a framework rewrite refusing is an error, while an external preprocessor
+/// reports warnings and notes alongside its errors, and a consumer that read
+/// every carried diagnostic as an error would misreport those.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StyleDiagnostic {
     stage: StyleStage,
+    severity: StyleDiagnosticSeverity,
     message: Arc<str>,
     span: Option<Span>,
 }
 
+/// How serious a [`StyleDiagnostic`] is, as the reporting authority stated it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StyleDiagnosticSeverity {
+    Error,
+    Warning,
+    Info,
+}
+
 impl StyleDiagnostic {
+    /// An error-severity diagnostic.
     #[must_use]
     pub fn new(stage: StyleStage, message: impl Into<Arc<str>>, span: Option<Span>) -> Self {
+        Self::with_severity(stage, StyleDiagnosticSeverity::Error, message, span)
+    }
+
+    /// A diagnostic at the severity its reporting authority stated.
+    #[must_use]
+    pub fn with_severity(
+        stage: StyleStage,
+        severity: StyleDiagnosticSeverity,
+        message: impl Into<Arc<str>>,
+        span: Option<Span>,
+    ) -> Self {
         Self {
             stage,
+            severity,
             message: message.into(),
             span,
         }
@@ -88,6 +109,11 @@ impl StyleDiagnostic {
     #[must_use]
     pub const fn stage(&self) -> StyleStage {
         self.stage
+    }
+
+    #[must_use]
+    pub const fn severity(&self) -> StyleDiagnosticSeverity {
+        self.severity
     }
 
     #[must_use]

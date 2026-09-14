@@ -134,8 +134,8 @@ impl<'a> ClientEmitter<'a> {
     /// runtime routing: `$.remove_input_defaults(var)` for an `<input>` value/checked/
     /// group bind, `$.remove_textarea_child(var)` for a `<textarea bind:value>`,
     /// followed (for a `bind:group` input carrying a `value="X"`) by the per-input
-    /// `var.value = var.__value = 'X'` group-value write — the official emission order.
-    /// No-op when the element has no bind prelude / group value.
+    /// `var.value = var.__value = 'X'` group-value write — the official emission
+    /// order. No-op when the element has no bind prelude / group value.
     pub(super) fn emit_bind_prelude(
         &self,
         out: &mut super::output::SvelteRuntimeOutput,
@@ -199,6 +199,34 @@ impl<'a> ClientEmitter<'a> {
                     ));
                 }
             }
+        }
+    }
+
+    /// Emit the `<option>` VALUE-CHANNEL write `var.value = var.__value = 'X'` — the
+    /// official init-only write for a static `value` on an `<option>`
+    /// (`needs_special_value_handling` → `build_element_special_value_attribute`).
+    /// Official pushes it LAST in the element's own statement run: after the
+    /// init-domain attribute writes, the child block and the inline render ops, so
+    /// callers invoke this after [`Self::emit_inline_render_ops`]. The literal is the
+    /// classifier's recorded value-channel fact for THIS node, single-quoted (the
+    /// official esrap quote form for the static literal). No-op for any other node.
+    pub(super) fn emit_option_value_channel(
+        &self,
+        out: &mut super::output::SvelteRuntimeOutput,
+        node: NodeId,
+        region_var: &str,
+    ) {
+        if let Some((_, literal)) = self
+            .plan()
+            .build
+            .option_values
+            .iter()
+            .find(|(n, _)| *n == node)
+        {
+            out.push_str(&format!(
+                "\t{region_var}.value = {region_var}.__value = {};\n",
+                super::client_codegen_helpers::js_single_quoted(literal)
+            ));
         }
     }
 

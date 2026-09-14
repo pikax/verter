@@ -935,11 +935,6 @@ pub struct ProjectTypeStore {
     /// per-hop path-precise demands narrow naturally.
     /// See [`crate::component_meta_caches::ShapeCacheDb`].
     shape_cache_db: ShapeCacheDb,
-    /// Cache for the structural
-    /// materialiser. Sole authoritative host-owned materialiser cache.
-    /// The canonical removed-symbol list lives in
-    /// `tests/cases/g_misc0/no_legacy_walker.rs::RETIRED_SYMBOLS`.
-    materialize_structure_db: crate::component_meta_caches::MaterializeStructureDb,
     /// Issue #6 — host-owned proof cache for the ComponentConfig
     /// theme variant fast path. Keyed by
     /// `(app_config_decl_canonical_id, component_key_literal)`. An
@@ -1101,10 +1096,6 @@ impl ProjectTypeStore {
             OwnerCollectionDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
         let shape_cache_db =
             ShapeCacheDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
-        let materialize_structure_db =
-            crate::component_meta_caches::MaterializeStructureDb::with_counter(Arc::clone(
-                &counters.component_meta_cache_live,
-            ));
         let app_config_no_override_proof =
             crate::app_config_proof_db::AppConfigNoOverrideProofDb::with_counter(Arc::clone(
                 &counters.component_meta_cache_live,
@@ -1124,7 +1115,6 @@ impl ProjectTypeStore {
             resolvability_db,
             owner_collection_db,
             shape_cache_db,
-            materialize_structure_db,
             app_config_no_override_proof,
             compile_cache_db: CompileCacheDb::new(),
             compile_output_pure_content: crate::cache_runtime::CompileOutputNodePureContent::new(),
@@ -1328,16 +1318,6 @@ impl ProjectTypeStore {
         &self.shape_cache_db
     }
 
-    /// For the structural-materialiser
-    /// final-result cache. Sole authoritative materialiser cache; the
-    /// canonical removed-symbol list lives in
-    /// `tests/cases/g_misc0/no_legacy_walker.rs::RETIRED_SYMBOLS`.
-    pub fn materialize_structure_db(
-        &self,
-    ) -> &crate::component_meta_caches::MaterializeStructureDb {
-        &self.materialize_structure_db
-    }
-
     /// Resolve-domain authoritative store for resolved import /
     /// re-export bindings + per-specifier resolutions. Keyed by
     /// `(canonical, content_hash, parse_env_hash, resolve_env_hash,
@@ -1468,10 +1448,6 @@ impl ProjectTypeStore {
         // eviction cascade. Replaces the previously-split
         // `materialize_memo_db` + `member_shape_cache_db`.
         self.shape_cache_db.invalidate_canonical(canonical_id);
-        // Reverse-index drain on the
-        // structural-materialiser cache (sole materialiser cache).
-        self.materialize_structure_db
-            .invalidate_for_canonical(canonical_id);
         // Issue #6 / drop any AppConfigNoOverrideProof entry
         // whose dep_signature references this canonical or whose
         // app_config_decl_canonical_id IS this canonical.
@@ -1536,8 +1512,6 @@ impl ProjectTypeStore {
         self.resolvability_db.invalidate_canonical(canonical_id);
         self.owner_collection_db.invalidate_canonical(canonical_id);
         self.shape_cache_db.invalidate_canonical(canonical_id);
-        self.materialize_structure_db
-            .invalidate_for_canonical(canonical_id);
         self.app_config_no_override_proof
             .invalidate_canonical(canonical_id);
         self.semantic_db.lock().invalidate(canonical_id);
@@ -1709,7 +1683,6 @@ impl ProjectTypeStore {
         // invalidation cascade. Replaces `materialize_memo_db` +
         // `member_shape_cache_db`.
         self.shape_cache_db.invalidate_all();
-        self.materialize_structure_db.invalidate_all();
         // Issue #6 / project-shape change invalidates every
         // proof entry; the proof's dep signature includes routes and
         // workspace-level interface-merging state.
@@ -1773,7 +1746,6 @@ pub const PROJECT_TYPE_STORE_DB_INVENTORY: &[&str] = &[
     "resolvability_db",
     "owner_collection_db",
     "shape_cache_db",
-    "materialize_structure_db",
     "app_config_no_override_proof",
     "compile_cache_db",
     // D48 split: source-content-domain and dep-closure-domain siblings
@@ -1808,7 +1780,6 @@ impl ProjectTypeStore {
             &self.resolvability_db,
             &self.owner_collection_db,
             &self.shape_cache_db,
-            &self.materialize_structure_db,
             &self.app_config_no_override_proof,
             &self.compile_cache_db,
             // Source-content-domain and dep-closure-domain siblings of
@@ -1878,10 +1849,6 @@ impl ProjectTypeStore {
                 .invalidate_canonical_for(canonical_id),
         );
         total = total.saturating_add(self.shape_cache_db.invalidate_canonical_for(canonical_id));
-        total = total.saturating_add(
-            self.materialize_structure_db
-                .invalidate_canonical_for(canonical_id),
-        );
         total = total.saturating_add(
             self.app_config_no_override_proof
                 .invalidate_canonical_for(canonical_id),

@@ -32,7 +32,8 @@
 use crate::types::*;
 use verter_compiler::framework_common::{
     SvelteHostExecutionInputs, SvelteHostMultiProductDemand, SvelteHostRuntimeRenderDemand,
-    VueHostExecutionInputs, VueHostMultiProductDemand, VueHostRuntimeRenderDemand,
+    SvelteSuppliedStyle, VueHostExecutionInputs, VueHostMultiProductDemand,
+    VueHostRuntimeRenderDemand,
 };
 
 /// The demanded product set shared by both framework constructors.
@@ -453,10 +454,71 @@ fn prepare_svelte_execution_inputs(
             &std::collections::BTreeSet::new(),
         );
     }
+    svelte_host_execution_inputs(snapshot, css_hash_override)
+}
+
+/// The Svelte execution inputs every host route hands the compiler.
+///
+/// A supplied style slot — a completed external preprocessing result the
+/// host admitted — is handed over ONCE, as the stage-qualified result the
+/// compiler binds to its block: the produced bytes, their producer, the
+/// host-minted identity of those bytes, the host's produced-to-authored map
+/// of them, the host's parse of them, and the
+/// content identity of the authored bytes the selection was validated
+/// against. Every one of those facts is read off the projection the
+/// block-content capture fence stamped, so the compiler binds the revision
+/// the host actually validated rather than whatever is live when it runs.
+///
+/// The raw style slots never reach the Svelte compiler, so no stage can fall
+/// back to them. That holds for EVERY present slot, including one the host
+/// names no external producer for (a carrier-own or `src`-external
+/// selection): it continues its block anonymously and is refused if it
+/// cannot, rather than being dropped back onto the authored block silently.
+pub(crate) fn svelte_host_execution_inputs(
+    snapshot: &CompileInput,
+    css_hash_override: Option<String>,
+) -> SvelteHostExecutionInputs {
+    let mut block_content = snapshot.block_content_inputs.clone();
+    let supplied_styles = std::mem::take(&mut block_content.styles)
+        .into_iter()
+        .map(|slot| slot.map(svelte_supplied_style))
+        .collect();
     SvelteHostExecutionInputs {
-        block_content: snapshot.block_content_inputs.clone(),
+        block_content,
         css_hash_override,
         prepared_styles: snapshot.prepared_styles.clone(),
+        supplied_styles,
+    }
+}
+
+/// One selected style slot, as the stage-qualified result the compiler binds
+/// to its block.
+///
+/// EVERY present slot maps. A slot the host names no external producer for
+/// is still a selection the host made and validated, so it continues its
+/// block as an anonymous result: the compiler then binds it, or refuses.
+/// Discarding it would leave the compiler no result for a block that has
+/// one and let the authored bytes be compiled in its place — silently, and
+/// exactly the fallback this boundary exists to prevent.
+///
+/// `consumed_basis` is taken from the slot rather than recomputed, because
+/// only the projection states the authored bytes THIS selection was
+/// validated against; re-reading the carrier would state whatever revision
+/// is live by then.
+fn svelte_supplied_style(
+    input: verter_compiler::framework_common::RuntimeBlockContentInput,
+) -> SvelteSuppliedStyle {
+    SvelteSuppliedStyle {
+        producer: input
+            .producer
+            .unwrap_or(verter_compiler::style_planner::PreprocessorIdentity::Anonymous),
+        code: input.code,
+        source_space_token: input.source_space_token,
+        content_artifact_token: input.content_artifact_token,
+        source_map: input.source_map,
+        diagnostics: input.diagnostics,
+        parsed: input.parsed,
+        consumed_basis: input.authored_basis,
     }
 }
 
@@ -1341,6 +1403,9 @@ pub(crate) fn compile_unsupported_code(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_compiler::assembly::ContentId;
+    use verter_compiler::framework_common::RuntimeBlockContentInput;
+    use verter_compiler::style_planner::{ExternalStyleProducer, PreprocessorIdentity};
 
     #[test]
     fn vue_main_assembly_failure_keeps_the_stable_host_code() {
@@ -1441,6 +1506,83 @@ mod tests {
         assert!(
             !snapshot.diagnostics[0].message.is_empty(),
             "typed assembly reason must reach the host diagnostic"
+        );
+    }
+
+    const AUTHORED: &str = "$tone: red;\n.card { color: $tone; }";
+    const PRODUCED: &str = ".card { color: red; }";
+
+    fn selected_style(producer: Option<PreprocessorIdentity>) -> RuntimeBlockContentInput {
+        RuntimeBlockContentInput {
+            code: std::sync::Arc::from(PRODUCED),
+            source_map: None,
+            lang: "css".to_string(),
+            content_artifact_token: "host-artifact:produced".to_string(),
+            source_space_token: "host-space:produced".to_string(),
+            parsed: None,
+            producer,
+            authored_basis: Some(ContentId::from_content_bytes(AUTHORED.as_bytes())),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    /// A selected style slot reaches the compiler with the basis the
+    /// PROJECTION states — the authored bytes this selection was validated
+    /// against, not the produced bytes it carries and not a value re-derived
+    /// from whatever the carrier holds later.
+    #[test]
+    fn a_selected_style_carries_its_projections_authored_basis() {
+        const HOST_MAP: &str =
+            r#"{"version":3,"sources":["Card.scss"],"names":[],"mappings":"AACA"}"#;
+        let reported = vec![verter_css_syntax::StyleDiagnostic::with_severity(
+            verter_css_syntax::StyleStage::Authored,
+            verter_css_syntax::StyleDiagnosticSeverity::Warning,
+            "deprecated division",
+            None,
+        )];
+        let supplied = svelte_supplied_style(RuntimeBlockContentInput {
+            source_map: Some(std::sync::Arc::from(HOST_MAP)),
+            diagnostics: reported.clone(),
+            ..selected_style(Some(PreprocessorIdentity::Named(
+                ExternalStyleProducer::new("sass", Some("1.77.0"), None).expect("named producer"),
+            )))
+        });
+        assert_eq!(
+            supplied.source_map.as_deref(),
+            Some(HOST_MAP),
+            "the host's produced-to-authored map reaches the compiler with its bytes"
+        );
+        assert_eq!(
+            supplied.diagnostics, reported,
+            "the tool's diagnostics reach the compiler with its bytes"
+        );
+        assert_eq!(supplied.code.as_ref(), PRODUCED);
+        assert_eq!(
+            supplied.consumed_basis,
+            Some(ContentId::from_content_bytes(AUTHORED.as_bytes())),
+            "the basis names the authored bytes the selection was validated against"
+        );
+        assert_ne!(
+            supplied.consumed_basis,
+            Some(ContentId::from_content_bytes(PRODUCED.as_bytes())),
+            "the produced bytes are not their own basis"
+        );
+        assert_eq!(supplied.source_space_token, "host-space:produced");
+        assert_eq!(supplied.content_artifact_token, "host-artifact:produced");
+    }
+
+    /// A slot the host names no external producer for still continues its
+    /// block, anonymously. Dropping it would hand the compiler no result for
+    /// a block that has one, and the authored bytes would be compiled in its
+    /// place with no diagnostic.
+    #[test]
+    fn a_producerless_selected_style_continues_its_block_anonymously() {
+        let supplied = svelte_supplied_style(selected_style(None));
+        assert_eq!(supplied.producer, PreprocessorIdentity::Anonymous);
+        assert_eq!(supplied.code.as_ref(), PRODUCED);
+        assert_eq!(
+            supplied.consumed_basis,
+            Some(ContentId::from_content_bytes(AUTHORED.as_bytes())),
         );
     }
 

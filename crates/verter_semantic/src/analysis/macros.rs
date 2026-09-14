@@ -2552,13 +2552,58 @@ pub(crate) fn try_extract_macro_from_var_decl(
         } else {
             None
         };
-        if let Some(m) =
+        if let Some(mut m) =
             try_extract_macro(init, binding_name, source, comments, owner, binding_index)
         {
             if m.kind == AnalyzedMacroKind::WithDefaults {
                 try_extract_inner_macro(init, macros, source, comments, owner, binding_index);
             }
+            if m.kind == AnalyzedMacroKind::DefineProps {
+                if let BindingPattern::ObjectPattern(pattern) = &decl.id {
+                    append_destructure_defaults(pattern, source, &mut m);
+                }
+            }
             macros.push(m);
+        }
+    }
+}
+
+/// Record the reactive props destructure initializers of
+/// `const { count = 1, label: text = 'x' } = defineProps(...)` as prop
+/// defaults, keyed by the destructured PROP name (never the local alias).
+///
+/// Mirrors Vue's destructure contract: only a static identifier or string
+/// key whose value is `local = default` with an identifier `local` declares a
+/// default; the value carries the verbatim source text of the initializer,
+/// exactly like `withDefaults()` defaults. Vue merges destructure defaults
+/// over the declaration (`mergeDefaults(decl, defaults)`), so an initializer
+/// replaces an authored runtime `default:` for the same key, which keeps a
+/// single entry.
+fn append_destructure_defaults(pattern: &ObjectPattern<'_>, source: &str, m: &mut AnalyzedMacro) {
+    for prop in &pattern.properties {
+        let BindingPattern::AssignmentPattern(assign) = &prop.value else {
+            continue;
+        };
+        if !matches!(assign.left, BindingPattern::BindingIdentifier(_)) {
+            continue;
+        }
+        let key = match &prop.key {
+            PropertyKey::StaticIdentifier(id) => id.name.to_string(),
+            PropertyKey::StringLiteral(lit) => lit.value.to_string(),
+            _ => continue,
+        };
+        let entry = AnalyzedDefaultValue {
+            key: key.clone(),
+            value: default_value_source_text(&assign.right, source).unwrap_or_default(),
+            span: assign.right.span().into(),
+        };
+        if let Some(existing) = m.default_values.iter_mut().find(|d| d.key == key) {
+            *existing = entry;
+        } else {
+            m.default_values.push(entry);
+        }
+        if !m.default_keys.contains(&key) {
+            m.default_keys.push(key);
         }
     }
 }

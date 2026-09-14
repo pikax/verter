@@ -13,7 +13,7 @@
 //! > `Pick<Foo, "bar">` — materialises ONLY the `bar` member of Foo.
 //! > Other Foo properties stay shallow (path-precise).
 //!
-//! The materialiser cache (`MaterializeStructureDb`) and the
+//! The structural-materialisation counters and the
 //! per-request `materialize_structure_calls` audit counter are the
 //! authoritative substrates for this property. A regression that
 //! over-materialises (eager-expands all Foo members) would either:

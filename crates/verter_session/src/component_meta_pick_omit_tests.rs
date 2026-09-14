@@ -1502,9 +1502,7 @@ fn consumer_indexed_access_through_symbolic_omit_works() {
 // a budget-tripped partial in one consumer must not poison a
 // genuinely-COMPLETE sibling's warm entry through a request-wide sticky
 // suppress. That decoupling is pinned by the unit-level per-cold-compute
-// completeness tests in `component_meta_materialize.rs`
-// (`complete_materialize_admits_despite_outer_request_sticky`,
-// `genuine_in_scope_partial_refused_materialize_structure_admission`) and
+// completeness tests in `component_meta_no_cache_promotion_tests.rs` and
 // `component_meta_caches_tests.rs`
 // (`shape_cache_db_admits_value_complete_shape_regardless_of_request_sticky`).
 //

@@ -1381,7 +1381,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
     // (`Primitive(String)`), `cache_suppress = true`, `result_is_partial =
     // false`. These mirror exactly what `finalise_traced_build_output`
     // emits for the Overflow / unrootable-`None` / ReturnOnly arms and what
-    // the two `component_meta_materialize.rs` ReturnOnly arms emit.
+    // a structural cold-compute's ReturnOnly arms emit.
     let benign_shapes: [(&str, CacheRead<QueryResult<SemanticNodeId>>); 3] = [
         (
             "signature-overflow",

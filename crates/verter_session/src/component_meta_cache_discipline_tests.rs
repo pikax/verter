@@ -23,7 +23,7 @@ use crate::semantic_query::{
 use crate::types::HostConfig;
 use crate::VerterHost;
 
-/// Hermetic host for §5.D.1 cache-discipline probes. No upserts —
+/// Hermetic host for the cache-discipline probes. No upserts —
 /// the dispatcher executes against an empty graph and produces
 /// `Opaque(Miss)` results that are still cached per family/slot, so
 /// the cold/warm split is measurable without a full file fixture.
@@ -48,52 +48,6 @@ fn intern_empty_object(host: &VerterHost) -> SemanticNodeId {
             keyspace: None,
             has_index_signature: false,
         }))
-}
-
-/// Upsert a file exporting `type {name} = { a: number }` and intern a
-/// `DeclRef` to it with a `NodeScopeId::File` origin — a DECL-ROOTED
-/// `base` the materialiser canonicalises (via
-/// [`derive_materialization_subject`](crate::component_meta_materialize::derive_materialization_subject))
-/// to `slot(canonical, name)` and publishes a warm
-/// `MaterializeStructureDb` entry for. An anonymous `Object` base keys no
-/// DB slot (it computes uncached), so it can no longer drive the
-/// entry-count invariant — use this decl-rooted fixture instead.
-fn intern_decl_ref_base(host: &VerterHost, canonical: &str, name: &str) -> SemanticNodeId {
-    use crate::semantic_query::{DeclIdentity, NodeScopeId};
-    use crate::UpsertRequest;
-    let _ = host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: canonical.to_string(),
-        source: Arc::from(format!("export type {name} = {{ a: number }};\n")),
-        file_language: verter_language::LanguageRegistry::global()
-            .classify_static(canonical)
-            .static_resolution(),
-        aliases: Vec::new(),
-    });
-    host.ensure_indexed_ready(canonical)
-        .expect("decl-ref base fixture: canonical IndexedReady materialises");
-    let whole_hash = host
-        .shallow_file_state(canonical)
-        .map(|s| s.whole_hash)
-        .expect("decl-ref base fixture: canonical must be tracked with a whole hash");
-    host.project_type_store()
-        .semantic_graph()
-        .intern_node_with_scope(
-            SemanticNodeData::DeclRef {
-                identity: DeclIdentity {
-                    canonical_id: Arc::from(canonical),
-                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    whole_hash,
-                    decl_name: Arc::from(name),
-                },
-            },
-            NodeScopeId::File {
-                canonical_id: Arc::from(canonical),
-                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                whole_hash,
-                local_scope: None,
-            },
-        )
 }
 
 /// Upsert a minimal `defineProps` SFC at `canonical` and build the
@@ -135,7 +89,7 @@ fn tracked_macro_owner(
     )
 }
 
-/// 5b §5.D.1 — `ResolveMacroPayload` repeated identical keys: cold
+/// `ResolveMacroPayload` repeated identical keys: cold
 /// once, warm N-1 times. Negative assertion against an unrelated
 /// `ResolveMacroPayload` proves the warm hits are key-specific.
 ///
@@ -221,93 +175,18 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
     );
 }
 
-/// `materialize_surface` dispatch helper: repeated identical
-/// `MaterializeRuntimeKey`s — which canonicalise to ONE content-free
-/// `MaterializationCacheKey` subject — increment the live-entry counter
-/// EXACTLY once across N calls (the warm peek path returns the cached
-/// entry on every subsequent call).
+/// The builtin Pick utility `Instantiate` family: cold once, warm N-1.
+/// The canonical key is `Instantiate { base: pick slot, args, context }`
+/// constructed directly — there is no wrapper entrance; every utility
+/// route constructs the shared family key itself.
 #[test]
-fn cache_discipline_materialize_surface_repeated_keys_warm() {
-    use crate::component_meta_materialize::{MaterializationScope, MaterializeRuntimeKey};
-
-    let host = build_test_host();
-    // A DECL-ROOTED `base` (a `DeclRef` to `/props.ts:Props`) — the
-    // materialiser canonicalises it to `slot(/props.ts, Props)` and
-    // publishes a warm `MaterializeStructureDb` entry. (An anonymous
-    // `Object` base now keys no DB slot — it computes uncached — so it
-    // can no longer drive the cold-once / warm-N-1 entry-count invariant.)
-    let base = intern_decl_ref_base(&host, "/props.ts", "Props");
-    let key = MaterializeRuntimeKey {
-        scope_canonical_id: Arc::from("/props.ts"),
-        base,
-        scope_axis: MaterializationScope::TopLevel,
-        mode: ProjectionMode::Expanded,
-    };
-
-    // Drive a baseline call so any setup-time admission is paid up
-    // front; the deltas measured below should reflect repeated
-    // identical-key dispatch only.
-    let dispatch = host.semantic_dispatch();
-    let baseline_live = host
-        .project_type_store()
-        .materialize_structure_db()
-        .live_count();
-    let _ = dispatch.materialize_surface(key.clone());
-    let after_first_live = host
-        .project_type_store()
-        .materialize_structure_db()
-        .live_count();
-
-    const N: usize = 8;
-    for _ in 0..(N - 1) {
-        let _ = dispatch.materialize_surface(key.clone());
-    }
-    let after_n_live = host
-        .project_type_store()
-        .materialize_structure_db()
-        .live_count();
-
-    // Cold path published exactly one entry across the full run.
-    assert_eq!(
-        after_n_live - baseline_live,
-        after_first_live - baseline_live,
-        "live entry count must NOT grow across repeated identical materialize_surface calls (baseline={baseline_live}, after_first={after_first_live}, after_n={after_n_live})"
-    );
-
-    // Cross-owner reuse (R7): a different `scope_canonical_id`
-    // alone does NOT make the key distinct (it is in neither the
-    // recursion key nor the canonical `MaterializationCacheKey`). Use a
-    // different `scope_axis` (a policy axis the canonical key DOES carry)
-    // to force a distinct cache entry.
-    let distinct_key = MaterializeRuntimeKey {
-        scope_canonical_id: Arc::from("/other.vue"),
-        base,
-        scope_axis: MaterializationScope::Nested,
-        mode: ProjectionMode::Expanded,
-    };
-    let _ = dispatch.materialize_surface(distinct_key);
-    let after_unrelated_live = host
-        .project_type_store()
-        .materialize_structure_db()
-        .live_count();
-    assert!(
-        after_unrelated_live > after_n_live,
-        "distinct (scope_axis) cold key must publish a fresh live entry (after_n={after_n_live}, after_unrelated={after_unrelated_live})"
-    );
-}
-
-/// 5b §5.D.1 — `execute_pick` repeated identical keys: cold once,
-/// warm N-1. The underlying dispatch is `Instantiate { base: pick slot,
-/// args, context }` so we probe the counter against that key.
-#[test]
-fn cache_discipline_execute_pick_repeated_keys_warm() {
+fn cache_discipline_builtin_pick_instantiate_repeated_keys_warm() {
     let host = build_test_host();
     let base = intern_empty_object(&host);
     let members: Vec<Arc<str>> = vec![Arc::from("a"), Arc::from("b")];
     let mode = ProjectionMode::Expanded;
 
-    // Construct the same Instantiate key shape execute_pick uses
-    // internally so we can read the cold/warm counters for it.
+    // The canonical builtin Pick key shape, constructed directly.
     let key_set = host
         .semantic_dispatch()
         .intern_string_literal_union(&members);
@@ -327,19 +206,19 @@ fn cache_discipline_execute_pick_repeated_keys_warm() {
     const N: usize = 8;
     let dispatch = host.semantic_dispatch();
     for _ in 0..N {
-        let _ = dispatch.execute_pick(base, &members, mode);
+        let _ = dispatch.execute_type_node(probe_key.clone());
     }
 
     let cold = counter.family_cold(&probe_key) - baseline_cold;
     let warm = counter.family_warm(&probe_key) - baseline_warm;
     assert_eq!(
         cold, 1,
-        "execute_pick cold path should fire ONCE for repeated identical key (got {cold})"
+        "builtin Pick Instantiate cold path should fire ONCE for repeated identical key (got {cold})"
     );
     assert_eq!(
         warm,
         N - 1,
-        "execute_pick warm path should fire N-1 times for repeated identical key (got {warm})"
+        "builtin Pick Instantiate warm path should fire N-1 times for repeated identical key (got {warm})"
     );
 
     // Negative assertion: a different members set produces a
@@ -358,19 +237,18 @@ fn cache_discipline_execute_pick_repeated_keys_warm() {
             ),
         ));
     let unrelated_baseline_cold = counter.family_cold(&unrelated_probe);
-    let _ = dispatch.execute_pick(base, &unrelated_members, mode);
+    let _ = dispatch.execute_type_node(unrelated_probe.clone());
     let unrelated_cold = counter.family_cold(&unrelated_probe) - unrelated_baseline_cold;
     assert_eq!(
         unrelated_cold, 1,
-        "unrelated execute_pick cold key should still cold-fire (got {unrelated_cold})"
+        "unrelated builtin Pick cold key should still cold-fire (got {unrelated_cold})"
     );
 }
 
-/// 5b §5.D.1 — `execute_omit` repeated identical keys: cold once,
-/// warm N-1. Mirrors `execute_pick` shape. Underlying dispatch is
-/// `Instantiate { omit_decl, ... }`.
+/// The builtin Omit utility `Instantiate` family: cold once,
+/// warm N-1. Mirrors the Pick test shape.
 #[test]
-fn cache_discipline_execute_omit_repeated_keys_warm() {
+fn cache_discipline_builtin_omit_instantiate_repeated_keys_warm() {
     let host = build_test_host();
     let base = intern_empty_object(&host);
     let members: Vec<Arc<str>> = vec![Arc::from("x"), Arc::from("y")];
@@ -395,19 +273,19 @@ fn cache_discipline_execute_omit_repeated_keys_warm() {
     const N: usize = 8;
     let dispatch = host.semantic_dispatch();
     for _ in 0..N {
-        let _ = dispatch.execute_omit(base, &members, mode);
+        let _ = dispatch.execute_type_node(probe_key.clone());
     }
 
     let cold = counter.family_cold(&probe_key) - baseline_cold;
     let warm = counter.family_warm(&probe_key) - baseline_warm;
     assert_eq!(
         cold, 1,
-        "execute_omit cold path should fire ONCE for repeated identical key (got {cold})"
+        "builtin Omit Instantiate cold path should fire ONCE for repeated identical key (got {cold})"
     );
     assert_eq!(
         warm,
         N - 1,
-        "execute_omit warm path should fire N-1 times for repeated identical key (got {warm})"
+        "builtin Omit Instantiate warm path should fire N-1 times for repeated identical key (got {warm})"
     );
 
     // Negative assertion: distinct members set still cold-fires.
@@ -425,15 +303,15 @@ fn cache_discipline_execute_omit_repeated_keys_warm() {
             ),
         ));
     let unrelated_baseline_cold = counter.family_cold(&unrelated_probe);
-    let _ = dispatch.execute_omit(base, &unrelated_members, mode);
+    let _ = dispatch.execute_type_node(unrelated_probe.clone());
     let unrelated_cold = counter.family_cold(&unrelated_probe) - unrelated_baseline_cold;
     assert_eq!(
         unrelated_cold, 1,
-        "unrelated execute_omit cold key should still cold-fire (got {unrelated_cold})"
+        "unrelated builtin Omit cold key should still cold-fire (got {unrelated_cold})"
     );
 }
 
-/// 5b §5.D.1 — `execute_read` repeated identical keys: cold once, warm N-1.
+/// `execute_read` repeated identical keys: cold once, warm N-1.
 /// The Kind-B sink adapters gate on `execute_read(key)` (the node read the
 /// former `execute_to_type_expr` wrapped), so the counter probe targets the
 /// dispatch key directly.
@@ -486,5 +364,149 @@ fn cache_discipline_execute_read_repeated_keys_warm() {
     assert_eq!(
         unrelated_cold, 1,
         "unrelated execute_read cold key should still cold-fire (got {unrelated_cold})"
+    );
+}
+
+/// Upsert a tracked file at `canonical` with the language the registry
+/// classifies for that path.
+fn upsert_tracked(host: &VerterHost, canonical: &str, source: &str) {
+    use crate::UpsertRequest;
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: canonical.to_string(),
+            source: Arc::from(source),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(canonical)
+                .static_resolution(),
+            aliases: Vec::new(),
+        })
+        .expect("fixture upsert succeeds");
+}
+
+/// Cross-owner reuse on the shared route: N owner SFCs that each project
+/// `Pick<Shared, 'id'>` from ONE shared declaration file resolve that
+/// declaration through the same content-free slot keys — the cycle-gate
+/// classification and the Skeleton-transit instantiation of `Shared` are
+/// published as ONE candidate each by the first owner, and every later
+/// owner serves them warm without a further cold dispatch. A route that
+/// keyed the shared declaration on the consuming owner, or forked a
+/// per-owner evaluator, would cold-dispatch once per owner and publish N
+/// candidates. The per-owner prop assertion keeps the reuse assertion honest:
+/// every owner really did project the shared declaration.
+#[test]
+fn cross_owner_shared_declaration_resolves_once_across_owners() {
+    use crate::semantic_query::{DeclIdentity, InstantiateKey, ProjectionReductionContext};
+    use crate::types::DependencyResolution;
+
+    let host = build_test_host();
+    let shared = "/cross_owner/shared.ts";
+    upsert_tracked(
+        &host,
+        shared,
+        "export interface Shared { id: string; label: string }\n",
+    );
+    const N: usize = 4;
+    let owners: Vec<String> = (0..N)
+        .map(|i| format!("/cross_owner/Owner{i}.vue"))
+        .collect();
+    for owner in &owners {
+        upsert_tracked(
+            &host,
+            owner,
+            "<script setup lang=\"ts\">\nimport type { Shared } from './shared'\n\
+             defineProps<{ value: Pick<Shared, 'id'> }>()\n</script>\n\
+             <template><div /></template>\n",
+        );
+        host.set_import_dependencies(
+            owner,
+            vec![DependencyResolution {
+                specifier: "./shared".to_string(),
+                resolved_canonical_id: Some(shared.to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+    }
+
+    // A `.ts` module's top-level declarations are owned by the module owner.
+    let owner_id = verter_type_expr::TopLevelOwnerId::module(0);
+    let dispatch = host.semantic_dispatch();
+    let shared_slot = || dispatch.type_slot_for(Arc::from(shared), owner_id, Arc::from("Shared"));
+    // The two shared-declaration keys the `Pick` projection dispatches: the
+    // cycle-gate classification of `Shared` and its Skeleton-transit
+    // instantiation (the gate's own body demand).
+    let gate_key = dispatch.materialization_cycle_gate_key_for(&DeclIdentity {
+        canonical_id: Arc::from(shared),
+        owner: owner_id,
+        whole_hash: host
+            .shallow_file_state(shared)
+            .map(|state| state.whole_hash)
+            .expect("the shared declaration file is tracked"),
+        decl_name: Arc::from("Shared"),
+    });
+    let skeleton_key = SemanticQueryKey::Instantiate(InstantiateKey::new(
+        shared_slot(),
+        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        dispatch.instantiate_context_for(
+            shared,
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Skeleton),
+        ),
+    ));
+    let counter = DispatchCounter;
+    let candidates = |key: &SemanticQueryKey| {
+        host.project_type_store()
+            .semantic_graph()
+            .slot_candidate_count_for_tests(key)
+    };
+    let resolve = |owner: &str| {
+        let meta = host
+            .get_component_meta(owner)
+            .unwrap_or_else(|| panic!("{owner} publishes component meta"));
+        assert!(
+            meta.props.iter().any(|prop| prop.name == "value"),
+            "{owner} must publish the `value` prop projected from the shared declaration"
+        );
+    };
+
+    // The first owner performs the shared declaration's cold work and
+    // publishes exactly one candidate per key.
+    resolve(&owners[0]);
+    let gate_cold_after_first = counter.family_cold(&gate_key);
+    let skeleton_cold_after_first = counter.family_cold(&skeleton_key);
+    assert!(
+        gate_cold_after_first >= 1 && skeleton_cold_after_first >= 1,
+        "control: the first owner cold-dispatches the shared declaration's keys \
+         (gate cold={gate_cold_after_first}, skeleton cold={skeleton_cold_after_first})"
+    );
+    assert_eq!(
+        (candidates(&gate_key), candidates(&skeleton_key)),
+        (1, 1),
+        "the first owner publishes exactly one candidate per shared-declaration key"
+    );
+    let gate_warm_after_first = counter.family_warm(&gate_key);
+
+    // Every later owner reuses those candidates: no further cold dispatch,
+    // no candidate growth, and the gate serves warm.
+    for owner in &owners[1..] {
+        resolve(owner);
+    }
+    assert_eq!(
+        counter.family_cold(&gate_key),
+        gate_cold_after_first,
+        "no owner after the first cold-dispatches the shared cycle-gate key"
+    );
+    assert_eq!(
+        counter.family_cold(&skeleton_key),
+        skeleton_cold_after_first,
+        "no owner after the first cold-dispatches the shared Skeleton instantiation"
+    );
+    assert_eq!(
+        (candidates(&gate_key), candidates(&skeleton_key)),
+        (1, 1),
+        "{N} owners share one candidate per shared-declaration key — never N per-owner entries"
+    );
+    assert!(
+        counter.family_warm(&gate_key) - gate_warm_after_first >= N - 1,
+        "each later owner serves the shared cycle-gate classification warm"
     );
 }

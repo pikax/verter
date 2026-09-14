@@ -29,7 +29,7 @@
 // Included by `diff_oracle_tests.rs` via `include!`.
 
 #[rustfmt::skip]
-const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 97] = [
+const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 96] = [
     // (`generated/001_root_component.svelte` — a standalone root `<Component>` — converged
     // with the component vertical: its `HelperSet` + `DecodedText` rows were removed.)
     // The `<svelte:element>` CLIENT emission converged in 5f-b (the comment-anchor +
@@ -400,12 +400,12 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 97] = [
         root_cause: "Y14 -> 5a (class/style-merge layer): a class:/style: directive is merged with the element's class/style attribute into ONE setter (and the style:|important array-wrapped value shape) — the 5a class/style-merge layer owns it",
         summary: "official attr-parts [CandAttrPart { helper: \"set_style\", attr: \"style\", chunks: [\"expr\", \"directive\"] }] != Verter [CandAttrPart { helper: \"set_style\", attr: \"style\", chunks: [\"directive\"] }]",
     },
-    DivergenceRow {
-        fixture: "generated/145_ws_datalist.svelte",
-        axis: DiffAxis::StaticHtml,
-        root_cause: "Y17 -> 5a (option/datalist-value layer): an <option>/<datalist> value is a non-static DOM property (option.value), not a plain static attribute — the 5a option/datalist-value layer owns it",
-        summary: "official static-html [\"<datalist><option></option></datalist>\"] != Verter [\"<datalist><option value=\\\"a\\\"></option></datalist>\"]",
-    },
+    // NOTE: the sibling `static_html` divergence row for 145_ws_datalist was RETIRED —
+    // the option VALUE-CHANNEL implementation (a static `value` on an `<option>` is
+    // stripped from the baked skeleton and emitted as the init-only
+    // `option.value = option.__value = 'X'` write) made Verter's static-html MATCH
+    // official on that axis. The node-paths row below is still real (the plan-level
+    // projection does not name the option node).
     DivergenceRow {
         fixture: "generated/145_ws_datalist.svelte",
         axis: DiffAxis::NodePaths,

@@ -14,6 +14,7 @@
  * stub.
  */
 
+import type { FunctionType, ObjectProperty, ObjectType, TypeDescriptor } from "@verter/type-ir";
 import { describe, expect, it } from "vitest";
 
 import { TypeInfoSession } from "../src/index.js";
@@ -178,5 +179,167 @@ describe("TypeInfoSession.resolveSymbol", () => {
     // Audit record always emits.
     expect(result.auditRecord).toBeDefined();
     session.host.close();
+  });
+});
+
+/**
+ * A Svelte component's callback props, read through the SAME public
+ * named-symbol query.
+ *
+ * Callback signatures are TYPE information, so they are obtained by
+ * resolving the component's named `Props` / `Handler` declarations —
+ * NOT by reading a type field off a structural framework-surface
+ * member (that response carries names / requiredness / defaults only).
+ *
+ * REGRESSION — discriminates the real typed-IR resolution from a
+ * name-shaped guess: `onlabel: string` is `on`-prefixed but NOT
+ * callable, and `onSelect: Handler` is an alias whose body is NOT
+ * inlined into the published surface.
+ */
+
+const SVELTE_CALLBACKS = `<script lang="ts">
+type Handler = (id: string) => void;
+interface Props {
+  onMove: (x: number, y: number) => void;
+  onToggle?: (on?: boolean) => void;
+  onSelect: Handler;
+  onlabel: string;
+  label: string;
+}
+let { onMove, onToggle, onSelect, onlabel, label = "untitled" }: Props = $props();
+</script>
+<div>{label}</div>
+`;
+
+/** Narrow to an object descriptor, failing loudly on any other kind. */
+function expectObject(type: TypeDescriptor | undefined): ObjectType {
+  expect(type?.kind).toBe("object");
+  if (type?.kind !== "object") {
+    throw new Error(`expected an object descriptor, got ${String(type?.kind)}`);
+  }
+  return type;
+}
+
+/** Look a published property up by name, failing loudly when absent. */
+function propertyNamed(object: ObjectType, name: string): ObjectProperty {
+  const found = object.properties.find((p) => p.name === name);
+  expect(found, `property ${name} is missing from the published surface`).toBeDefined();
+  return found!;
+}
+
+/** Narrow to a function descriptor, failing loudly on any other kind. */
+function expectFunction(type: TypeDescriptor): FunctionType {
+  expect(type.kind).toBe("function");
+  if (type.kind !== "function") {
+    throw new Error(`expected a function descriptor, got ${type.kind}`);
+  }
+  return type;
+}
+
+/** Resolve `Props` in a freshly-upserted Svelte component. */
+function resolveProps(session: TypeInfoSession, canonicalId: string, source: string): ObjectType {
+  session.host.upsert({ inputId: canonicalId, source });
+  return expectObject(session.resolveSymbol(canonicalId, "Props", { mode: "expanded" }).type);
+}
+
+describe("TypeInfoSession.resolveSymbol — Svelte callback props", () => {
+  it("publishes each callback member's parameter and return descriptors, never inferring them from the member name", () => {
+    const session = new TypeInfoSession({ root: "/fixtures" });
+    const props = resolveProps(session, "/fixtures/Callbacks.svelte", SVELTE_CALLBACKS);
+
+    const onMove = expectFunction(propertyNamed(props, "onMove").type);
+    expect(onMove.parameters.map((p) => p.name)).toEqual(["x", "y"]);
+    expect(onMove.parameters.map((p) => p.type)).toEqual([
+      { kind: "primitive", name: "number" },
+      { kind: "primitive", name: "number" },
+    ]);
+    expect(onMove.returnType).toEqual({ kind: "primitive", name: "void" });
+
+    // The `on` prefix is NOT what makes a member callable: `onlabel` is a
+    // plain string and must stay a primitive descriptor.
+    expect(propertyNamed(props, "onlabel").type).toEqual({ kind: "primitive", name: "string" });
+
+    session.host.close();
+  });
+
+  it("keeps an optional PROPERTY distinct from an optional PARAMETER", () => {
+    const session = new TypeInfoSession({ root: "/fixtures" });
+    const props = resolveProps(session, "/fixtures/Optionality.svelte", SVELTE_CALLBACKS);
+
+    // `onToggle?` — optional property whose single parameter is ALSO optional.
+    const onToggle = propertyNamed(props, "onToggle");
+    expect(onToggle.optional).toBe(true);
+    const onToggleFn = expectFunction(onToggle.type);
+    expect(onToggleFn.parameters).toHaveLength(1);
+    expect(onToggleFn.parameters[0]!.name).toBe("on");
+    expect(onToggleFn.parameters[0]!.optional).toBe(true);
+    expect(onToggleFn.parameters[0]!.type).toEqual({ kind: "primitive", name: "boolean" });
+
+    // `onMove` — required property whose parameters are ALL required. The two
+    // optionality axes never bleed into each other.
+    const onMove = propertyNamed(props, "onMove");
+    expect(onMove.optional).toBe(false);
+    expect(expectFunction(onMove.type).parameters.map((p) => p.optional)).toEqual([false, false]);
+
+    // Noncallable control: a required plain property, neither axis set.
+    const label = propertyNamed(props, "label");
+    expect(label.optional).toBe(false);
+    expect(label.type).toEqual({ kind: "primitive", name: "string" });
+
+    session.host.close();
+  });
+
+  it("publishes an aliased callback member as a shallow ref, resolvable to its full signature by a separate query", () => {
+    // Shallow-by-default: the published `onSelect` member is the bare
+    // `Handler` REF — the alias body is never inlined, so the shallow member
+    // is never advertised as a complete signature. A consumer that wants the
+    // signature re-resolves the alias through the same named-symbol query.
+    const session = new TypeInfoSession({ root: "/fixtures" });
+    const canonicalId = "/fixtures/Alias.svelte";
+    const props = resolveProps(session, canonicalId, SVELTE_CALLBACKS);
+
+    expect(propertyNamed(props, "onSelect").type).toEqual({
+      kind: "ref",
+      name: "Handler",
+      typeArguments: [],
+    });
+
+    const handler = expectFunction(
+      session.resolveSymbol(canonicalId, "Handler", { mode: "expanded" }).type!,
+    );
+    expect(handler.parameters.map((p) => [p.name, p.type, p.optional])).toEqual([
+      ["id", { kind: "primitive", name: "string" }, false],
+    ]);
+    expect(handler.returnType).toEqual({ kind: "primitive", name: "void" });
+
+    session.host.close();
+  });
+
+  it("re-resolves an edited signature in the SAME host identically to a fresh host", () => {
+    const canonicalId = "/fixtures/Edited.svelte";
+    const edited = SVELTE_CALLBACKS.replace(
+      "onMove: (x: number, y: number) => void;",
+      "onMove: (x: number, y: number, z: number) => boolean;",
+    );
+    expect(edited).not.toBe(SVELTE_CALLBACKS);
+
+    const live = new TypeInfoSession({ root: "/fixtures" });
+    const before = expectFunction(
+      propertyNamed(resolveProps(live, canonicalId, SVELTE_CALLBACKS), "onMove").type,
+    );
+    expect(before.parameters).toHaveLength(2);
+    const afterEdit = propertyNamed(resolveProps(live, canonicalId, edited), "onMove");
+    live.host.close();
+
+    const cold = new TypeInfoSession({ root: "/fixtures" });
+    const fresh = propertyNamed(resolveProps(cold, canonicalId, edited), "onMove");
+    cold.host.close();
+
+    // The edit is observed (not a stale cached signature) AND the warm result
+    // is byte-identical to the cold one.
+    const afterEditFn = expectFunction(afterEdit.type);
+    expect(afterEditFn.parameters.map((p) => p.name)).toEqual(["x", "y", "z"]);
+    expect(afterEditFn.returnType).toEqual({ kind: "primitive", name: "boolean" });
+    expect(afterEdit).toEqual(fresh);
   });
 });

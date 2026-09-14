@@ -3,9 +3,9 @@
 //! structure read from the retained `EvalEnv` inventory, and a divergence
 //! between them fails the assertion.
 //!
-//! The materialized structure produced at the output boundary
-//! (`MaterializeStructureDb` → `MaterializeOutcome::Value(SemanticNodeId)`) is
-//! reached publicly through `get_component_meta(canonical).props[i].type_expr`.
+//! The materialized structure produced at the output boundary (the projector
+//! pipeline's reduction of the shared query route's result) is reached
+//! publicly through `get_component_meta(canonical).props[i].type_expr`.
 //! A `defineProps<Props>` where `Props<T = Item> { items?: T[] }` and `Item {
 //! id: string }` materialises `items.type_expr` to a NESTED structure
 //! `Array { element: Object({ id: string }) }` — a genuine materialised shape,
@@ -24,12 +24,10 @@
 //! missing/renamed/retyped member) fails the `assert_eq!` against the
 //! retained-inventory `Item` surface.
 //!
-//! HONESTY FLAG — `MaterializeStructureDb` has NO test-callable query: its
-//! producer (`materialize_component_meta_structure`) takes a
-//! `&dyn ResolverContext`, so a test cannot call it directly. The materialized
-//! shape is therefore reached ONLY through `get_component_meta` props, and the
-//! oracle is read from the retained `EvalEnv` inventory — NOT a second
-//! materialize call, and NOT a second dispatch resolve.
+//! The materialized shape is reached ONLY through `get_component_meta` props
+//! (there is no separately callable materialiser), and the oracle is read from
+//! the retained `EvalEnv` inventory — NOT a second materialize call, and NOT a
+//! second dispatch resolve.
 
 #![cfg(not(target_arch = "wasm32"))]
 

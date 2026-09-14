@@ -509,6 +509,36 @@ pub struct RuntimeCompileOptions {
     /// maps-on demand refuses as [`CompileUnsupported::VueMainAssemblyFailed`].
     #[cfg(any(test, feature = "test-support"))]
     pub drop_required_script_map: bool,
+    /// Admitted external preprocessing results, one slot per style block in
+    /// inventory order. A present slot is the ONLY bytes that block's
+    /// framework rewrite may consume: the authored block is never read in
+    /// its place. Excluded from request/cache identity.
+    pub style_continuations: Vec<Option<BoundStyleContinuation>>,
+}
+
+/// One admitted external style continuation together with the host-minted
+/// identity of the produced bytes it carries.
+///
+/// The continuation owns stage, basis, provenance and map validity. The token
+/// pair is the block-content identity the HOST minted for exactly those
+/// produced bytes, and it exists because an output declared over a continued
+/// block must declare that identity rather than mint a space of its own: the
+/// host already holds the produced-to-authored map under these tokens, so
+/// declaring them is what lets the two map chains join. A compiler-minted
+/// carrier space over the same bytes would name a space nothing else knows.
+#[derive(Debug, Clone)]
+pub struct BoundStyleContinuation {
+    /// The admitted continuation — the sole authority for the produced bytes,
+    /// their stage and their basis.
+    pub continuation: Arc<crate::style_planner::ExternalStyleContinuation>,
+    /// Host-minted source space containing the produced bytes.
+    pub source_space_token: String,
+    /// Host-minted identity of the produced byte artifact (code plus any map).
+    pub content_artifact_token: String,
+    /// The host-admitted produced-to-authored map. An output rendered from
+    /// the produced bytes publishes its map chained through this one; without
+    /// it that output has no honest map to publish.
+    pub source_map: Option<Arc<str>>,
 }
 
 impl Default for RuntimeCompileOptions {
@@ -565,6 +595,7 @@ impl Default for RuntimeCompileOptions {
             vue_canonical_id: None,
             #[cfg(any(test, feature = "test-support"))]
             drop_required_script_map: false,
+            style_continuations: Vec::new(),
         }
     }
 }
@@ -593,6 +624,20 @@ pub struct RuntimeBlockContentInput {
     /// claiming it made them itself. Only the host can answer this: the bytes
     /// look identical either way.
     pub producer: Option<verter_css_syntax::PreprocessorIdentity>,
+    /// Content identity of the AUTHORED bytes this selection was validated
+    /// against, observed by the host under the same fence that selected
+    /// `code`.
+    ///
+    /// For an external producer's output this is the input the tool
+    /// consumed, which `code` is NOT: the two are different byte spaces and
+    /// only the host can state the relationship between them. Recomputing it
+    /// from a later read of the carrier would bind a revision the host never
+    /// validated, so a consumer that needs a basis reads it here or refuses.
+    /// `None` when the host could not state one.
+    pub authored_basis: Option<crate::assembly::ContentId>,
+    /// Diagnostics the external producer reported for these bytes, in
+    /// production order. Empty for the carrier's own content.
+    pub diagnostics: Vec<verter_css_syntax::StyleDiagnostic>,
 }
 
 /// Parser-local projection of validated block content. Ordering exists only at
@@ -768,6 +813,45 @@ pub struct RuntimeStyleBlock {
     pub output_descriptor: RuntimeOutputDescriptor,
 }
 
+/// A compiled `<style>` output qualified by the stage identity of its bytes.
+///
+/// The stylesheet travels as a [`verter_css_syntax::QualifiedStyleResult`],
+/// so its stage, dialect, producer and diagnostics are facts of the value
+/// rather than assumptions a consumer makes about a bare string.
+/// [`Self::consumed_stage`] names the byte space the framework rewrite read:
+/// the carrier's own authored block, or an admitted external continuation's
+/// produced bytes — the space [`Self::source_map`] addresses and
+/// [`Self::output_descriptor`] declares.
+#[derive(Debug, Clone)]
+pub struct QualifiedRuntimeStyle {
+    /// The published stylesheet: framework-rewritten plain CSS.
+    pub result: verter_css_syntax::QualifiedStyleResult,
+    /// The stage of the bytes the framework rewrite consumed.
+    pub consumed_stage: verter_css_syntax::StyleStage,
+    /// Source map from [`Self::result`]'s bytes into the consumed space —
+    /// `Some` ONLY when the compile demanded maps.
+    pub source_map: Option<String>,
+    /// The scope hash the stylesheet's selectors are scoped under.
+    pub scope_hash: Option<String>,
+    /// Whether the stylesheet includes global css.
+    pub has_global: bool,
+    /// Qualified identity and source-map chain for this emitted unit.
+    pub output_descriptor: RuntimeOutputDescriptor,
+}
+
+impl QualifiedRuntimeStyle {
+    /// The `lang` spelling of the published bytes' dialect, read off the
+    /// result's own dialect through the one spelling authority.
+    #[must_use]
+    pub fn lang(&self) -> &'static str {
+        let dialect = self.result.dialect();
+        verter_css_syntax::CssDialect::LANG_SPELLINGS
+            .iter()
+            .find(|(_, spelled)| *spelled == dialect)
+            .map_or("css", |(spelling, _)| spelling)
+    }
+}
+
 /// A framework-neutral custom block (`<i18n>`, `<docs>`, …).
 #[derive(Debug, Clone)]
 pub struct RuntimeCustomBlock {
@@ -806,6 +890,9 @@ pub struct RuntimeCompileOutput {
     pub template: Option<RuntimeTemplateBlock>,
     /// Compiled `<style>` blocks in source order.
     pub styles: Vec<RuntimeStyleBlock>,
+    /// Stage-qualified compiled `<style>` outputs in source order. A carrier
+    /// publishes its styles here or in [`Self::styles`], never both.
+    pub qualified_styles: Vec<QualifiedRuntimeStyle>,
     /// Custom blocks in source order.
     pub custom_blocks: Vec<RuntimeCustomBlock>,
     /// The scope id (`data-v-xxxxxxxx`), empty when none.
@@ -847,6 +934,7 @@ impl RuntimeCompileOutput {
             || self.script.is_some()
             || self.template.is_some()
             || !self.styles.is_empty()
+            || !self.qualified_styles.is_empty()
             || !self.custom_blocks.is_empty()
     }
 

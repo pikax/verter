@@ -608,8 +608,8 @@ pub struct HostConfig {
     /// at the constructor-time value.
     ///
     /// Constructor-time per §0.6.5: callers may NOT mutate this on
-    /// an existing host. Default: `MAX_DEPTH` (the
-    /// `component_meta_materialize` cap).
+    /// an existing host. Default: `MAX_DEPTH` (the shared structural
+    /// depth-fuse cap on `project_semantic_dispatch`).
     pub depth_budget: usize,
     /// Projection-operation budget for path-projection / dispatch
     /// traversals (request-scoped fuse state
@@ -1266,7 +1266,7 @@ impl Default for HostConfig {
             audit_timing_capture: false,
             max_derivation_edges: 10_000,
             audit_caps: verter_audit::AuditCaps::default(),
-            depth_budget: crate::component_meta_materialize::MAX_DEPTH,
+            depth_budget: crate::project_semantic_dispatch::MAX_DEPTH,
             projection_op_budget: 2000,
             eviction_policy: EvictionPolicyConfig::default(),
             lsp_method_timeouts: LspMethodTimeoutsConfig::default(),
@@ -2226,6 +2226,14 @@ pub struct BlockContentSnapshot {
     pub availability: BlockContentAvailability,
     pub origin: Option<BlockContentOrigin>,
     pub content: Option<Arc<str>>,
+    /// The AUTHORED bytes this selection was validated against, as the same
+    /// read that produced `content` observed them.
+    ///
+    /// For supplied content this is the input the producing tool consumed,
+    /// which `content` is NOT. It is retained rather than left to be
+    /// re-sliced from the carrier later because a later read addresses
+    /// whatever revision is live then, not the one this selection validated.
+    pub authored_content: Option<Arc<str>>,
     pub content_class: BlockContentClass,
     pub lang: String,
     pub block_token: crate::carrier_publication_store::ArtifactBlockToken,
@@ -4079,10 +4087,9 @@ pub struct MetaProvenance {
     /// Count of `observe_fact_signature` fan-out calls emitted from
     /// `meta_resolve::dep_signature::emit_dispatch_dep_signature_facts`
     /// — the helper invoked by dispatch reads that
-    /// have no result cache of their own (three projector sites,
-    /// `materialize_component_meta_type_expr_until_stable_full`,
-    /// `node_root_reaches_transitive_cycle_with_fence`, and
-    /// `materialize_member_surface_expr`). The helper bumps this
+    /// have no result cache of their own (the projector sites,
+    /// `materialize_component_meta_type_expr_until_stable_full` and
+    /// `node_root_reaches_transitive_cycle_with_fence`). The helper bumps this
     /// counter on every `observe_fact_signature` call.
     pub dispatch_dep_signature_fact_tracer_emissions: std::sync::atomic::AtomicU64,
     pub indexed_ready_scheduler_snapshot_reuse: std::sync::atomic::AtomicU64,
@@ -4237,11 +4244,14 @@ pub struct MetaProvenance {
     //   were therefore NOT admitted to the warm cache (caller
     //   cold-recomputes on next request).
     //
-    // Caches: `MaterializeStructureDb`,
-    // `MemoEntry`, `AppConfigNoOverrideProofDb`, `OwnerImportSurfaceDb`.
-    /// `install_fact_tracer` wrap count for `MaterializeStructureDb`.
+    // Caches: `MemoEntry`, `AppConfigNoOverrideProofDb`, `OwnerImportSurfaceDb`.
+    /// Structural-materialiser `install_fact_tracer` wrap count. No
+    /// production producer bumps it; the field stays on the public stats
+    /// snapshot as a zero-valued row.
     pub materialize_structure_fact_tracer_installs: std::sync::atomic::AtomicU64,
-    /// `install_fact_tracer` overflow-refusal count for `MaterializeStructureDb`.
+    /// Structural-materialiser overflow-refusal count. No production
+    /// producer bumps it; the field stays on the public stats snapshot as
+    /// a zero-valued row.
     pub materialize_structure_overflow_refusals: std::sync::atomic::AtomicU64,
     /// `install_fact_tracer` wrap count for `MemoEntry` (semantic
     /// query memo cold builds).
@@ -4800,10 +4810,9 @@ pub struct MetaProvenanceSnapshot {
     /// Per-call count of `observe_fact_signature` fan-outs emitted
     /// from the six dispatch-read sites that route through
     /// `meta_resolve::dep_signature::emit_dispatch_dep_signature_facts`
-    /// (three projector sites,
-    /// `materialize_component_meta_type_expr_until_stable_full`,
-    /// `node_root_reaches_transitive_cycle_with_fence`, and
-    /// `materialize_member_surface_expr`). Used by behavioural tests
+    /// (the projector sites,
+    /// `materialize_component_meta_type_expr_until_stable_full` and
+    /// `node_root_reaches_transitive_cycle_with_fence`). Used by behavioural tests
     /// to discriminate the fact-tracer path from the legacy
     /// request-tracer path.
     pub dispatch_dep_signature_fact_tracer_emissions: u64,
@@ -4841,9 +4850,11 @@ pub struct MetaProvenanceSnapshot {
     pub node_arena_pushes_per_discriminant: [u64; SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT],
 
     // ── Family B/C/D producer-install observability ───────────
-    /// `install_fact_tracer` wrap count for `MaterializeStructureDb`.
+    /// Structural-materialiser `install_fact_tracer` wrap count (always
+    /// zero: no production producer).
     pub materialize_structure_fact_tracer_installs: u64,
-    /// `install_fact_tracer` overflow-refusal count for `MaterializeStructureDb`.
+    /// Structural-materialiser overflow-refusal count (always zero: no
+    /// production producer).
     pub materialize_structure_overflow_refusals: u64,
     /// `install_fact_tracer` wrap count for `MemoEntry`.
     pub memo_entry_fact_tracer_installs: u64,

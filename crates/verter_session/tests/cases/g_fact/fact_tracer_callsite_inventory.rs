@@ -261,7 +261,7 @@ fn fact_tracer_install_sites_inventory() {
     // Lower bound: the scanner must find at least one site. Today the
     // tracer is installed by at least the component-meta BFS cold path
     // (`component_meta_caches.rs`), the materialiser cold path
-    // (`component_meta_materialize.rs`), the prepared-decl cold path
+    // (the projector route), the prepared-decl cold path
     // (`host_manage/prepared_decl.rs`), and the dispatch builder
     // (`project_semantic_dispatch/mod.rs`).
     //

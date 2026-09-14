@@ -139,7 +139,6 @@ pub mod component_meta_host;
 mod component_meta_indexed_access_early_out_tests;
 #[cfg(test)]
 mod component_meta_invalidation_tests;
-pub mod component_meta_materialize;
 #[cfg(test)]
 mod component_meta_no_cache_promotion_tests;
 #[cfg(test)]
@@ -741,37 +740,6 @@ pub struct VerterHost {
     /// compute as a relaxed atomic load (~1 ns) on a path that already
     /// takes locks, so the cost is in the noise.
     pub(crate) compile_force_overflow_observations: std::sync::atomic::AtomicUsize,
-    /// Per-host test-injection knob for the materialiser's cold-compute
-    /// path — the structural-materialise analogue of
-    /// [`Self::compile_force_overflow_observations`]. When set to `N >
-    /// 0`, the cold-compute closure observes `N` synthetic
-    /// `FileWholeHash` facts onto the active tracer, forcing the
-    /// `materialize_structure_overflow_refusals` admission-refusal path.
-    /// Armed/cleared by
-    /// [`crate::for_tests::MaterializeForceOverflowGuard`].
-    pub(crate) materialize_force_overflow_observations: std::sync::atomic::AtomicUsize,
-    /// Per-host test-injection knob that forces a GENUINE in-scope
-    /// PARTIAL inside the materialiser's cold compute. When non-zero,
-    /// the cold-compute closure folds a partial into the active
-    /// [`crate::request_context::ColdComputeCompletenessScope`] via the
-    /// EXACT production rail a budget-tripped child read uses
-    /// ([`crate::request_context::mark_request_result_partial`]),
-    /// so the per-cold-compute completeness goes `Partial` and the
-    /// `MaterializeStructureDb` admission gate
-    /// (`refuse_result_cache_admission_if_partial`) must refuse the
-    /// entry. This is NOT a side channel: it drives the same fold a
-    /// real budget trip drives, mirroring production. Armed/cleared by
-    /// [`crate::for_tests::MaterializeForceInScopePartialGuard`].
-    pub(crate) materialize_force_in_scope_partial: std::sync::atomic::AtomicBool,
-    /// Per-host test-injection knob modelling a project-shape mutation
-    /// landing INSIDE the materialiser's cold window: when armed, the
-    /// next `materialize_component_meta_structure` cold compute bumps
-    /// the project generation once (a REAL bump through
-    /// `ProjectTypeStore::bump_project_generation`), so the runtime's
-    /// post-compute revalidation gate rejects the freshly-built entry —
-    /// the exact production admission-refusal path, with a
-    /// deterministic trigger. Self-disarms after one fire.
-    pub(crate) materialize_force_mid_compute_generation_bump: std::sync::atomic::AtomicBool,
     /// Per-host relation-engine knobs: the overflow / budget test-injection
     /// triggers plus the strict-family relax bits — see
     /// [`crate::host_construction::RelationHostKnobs`].

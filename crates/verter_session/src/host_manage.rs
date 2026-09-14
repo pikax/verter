@@ -398,50 +398,6 @@ pub fn push_cache_drained_at_upsert(layer: &'static str, canonical_id: &str) {
 // one `Relaxed` `fetch_add` when present. The hot-path counters never
 // take a lock and never allocate.
 
-/// Bump `materialize_structure_calls` on the current request's
-/// context. No-op without a context.
-pub fn record_materialize_structure_call() {
-    if let Some(ctx) = crate::request_context::current_request_context() {
-        ctx.materialize_structure_calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-/// Bump `materialize_structure_cache_hits` on the current request's
-/// context. No-op without a context.
-pub fn record_materialize_structure_cache_hit() {
-    if let Some(ctx) = crate::request_context::current_request_context() {
-        ctx.materialize_structure_cache_hits
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-/// Emit a `MaterializeStructurePolicySkip` event
-/// into the active audit accumulator. No-op when no request context
-/// or accumulator is installed.
-///
-/// `base` is the input semantic node id; `scope_axis` is the
-/// materialiser axis at the point the gate fired; `reason` identifies
-/// which policy arm bailed. The audit framework's footprint miner
-/// reads these events to attribute kept-symbolic shapes to specific
-/// policy decisions.
-pub(crate) fn emit_policy_skip(
-    base: crate::semantic_query::SemanticNodeId,
-    scope_axis: crate::component_meta_materialize::MaterializationScope,
-    reason: crate::component_meta_audit::MaterializeSkipReason,
-) {
-    if crate::request_context::current_accumulator().is_some() {
-        let base_str: std::sync::Arc<str> = std::sync::Arc::from(format!("Node#{}", base.0));
-        push_structured_event(
-            crate::component_meta_audit::StructuredAuditEvent::MaterializeStructurePolicySkip {
-                base: base_str,
-                scope_axis: scope_axis.into(),
-                reason,
-            },
-        );
-    }
-}
-
 /// Bump `node_arena_lock_acquisitions` on the current request's
 /// context AND feed the `WaitAudit` cross-cache aggregates with the
 /// observed lock-acquire wait. No-op without a context. The `wait`

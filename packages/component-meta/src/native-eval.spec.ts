@@ -407,6 +407,121 @@ defineSlots<{
     expect(defaultSlot).toBeDefined();
   });
 
+  // Regression: concrete-inline slot-binding types must survive the
+  // native structured surface AND the compat display as their declared
+  // types — not as the binding's own NAME (the synthetic carrier's
+  // rendering). Observed defect (vue-benchmarks component-meta/slots):
+  // `default({ open: boolean })` reported `open` as the type of `open`,
+  // and `footer({ id: number })` reported `id`; a nested payload
+  // (`payload({ meta: { deep: string } })`) reported `meta`.
+  it("publishes concrete slot binding leaf types through native and compat surfaces", async () => {
+    const checker = await createRuntimeChecker("native-eval-slot-binding-leaf-types");
+
+    checker.updateFile(
+      "Card.vue",
+      `<script setup lang="ts">
+defineSlots<{
+  default(props: { open: boolean }): any
+  footer(props: { id: number }): any
+  value(props: { value: string }): any
+  other(props: { value: number }): any
+  optional(props: { flag?: boolean }): any
+  payload(props: { meta: { deep: string } }): any
+  deeper(props: { meta: { deep: { deeper: string } } }): any
+  bare(): any
+}>()
+</script>
+<template><slot :open="true" /></template>`,
+    );
+
+    await settleNativeProject();
+
+    const meta = await checker.getComponentMeta("Card.vue");
+
+    // Native structured surface: the descriptor IS the declared primitive.
+    const nativeSlots = meta._verter!.slots;
+    const nativeDefault = nativeSlots.find((slot) => slot.name === "default");
+    expect(nativeDefault).toBeDefined();
+    expect(nativeDefault!.bindings.find((b) => b.name === "open")!.type).toEqual({
+      kind: "primitive",
+      name: "boolean",
+    });
+
+    const nativeFooter = nativeSlots.find((slot) => slot.name === "footer");
+    expect(nativeFooter).toBeDefined();
+    expect(nativeFooter!.bindings.find((b) => b.name === "id")!.type).toEqual({
+      kind: "primitive",
+      name: "number",
+    });
+
+    // Same-named binding under different slots keeps its own distinct type.
+    expect(
+      nativeSlots.find((slot) => slot.name === "value")!.bindings.find((b) => b.name === "value")!
+        .type,
+    ).toEqual({ kind: "primitive", name: "string" });
+    expect(
+      nativeSlots.find((slot) => slot.name === "other")!.bindings.find((b) => b.name === "value")!
+        .type,
+    ).toEqual({ kind: "primitive", name: "number" });
+
+    // Empty-slot control.
+    expect(nativeSlots.find((slot) => slot.name === "bare")!.bindings).toEqual([]);
+
+    // Optional-binding control: the declared `?` does not change the
+    // binding's published TYPE. (The binding row itself carries no
+    // optionality field today — the declared `?` is not yet surfaced on
+    // the public slot-binding surface; the type is.)
+    expect(
+      nativeSlots.find((slot) => slot.name === "optional")!.bindings.find((b) => b.name === "flag")!
+        .type,
+    ).toEqual({ kind: "primitive", name: "boolean" });
+
+    // Nested-payload: a payload object whose own members are all leaves
+    // publishes the bounded closed surface, so the declared member type
+    // survives — the binding's own name is never reported as its type.
+    const nestedSlot = nativeSlots.find((slot) => slot.name === "payload");
+    expect(nestedSlot).toBeDefined();
+    expect(nestedSlot!.bindings.find((b) => b.name === "meta")!.type).toMatchObject({
+      kind: "object",
+      properties: [{ name: "deep", type: { kind: "primitive", name: "string" } }],
+    });
+
+    // Boundary control: a payload object with a NON-leaf member stays the
+    // STRUCTURED carrier (typed-IR identity naming its own slot/binding —
+    // a cross-slot mixup changes the key), never a flattened guess and
+    // never `unknown`.
+    const deeperSlot = nativeSlots.find((slot) => slot.name === "deeper");
+    expect(deeperSlot).toBeDefined();
+    expect(deeperSlot!.bindings.find((b) => b.name === "meta")!.type).toMatchObject({
+      kind: "syntheticSlotBinding",
+      surfaceKind: "slotBinding",
+      slotName: "deeper",
+      bindingName: "meta",
+    });
+
+    // Compat (Volar-interop) display: the slot type string renders the
+    // declared leaf types, never the binding's own name.
+    const compatDefault = meta.slots.find((slot) => slot.name === "default");
+    expect(compatDefault).toBeDefined();
+    expect(compatDefault!.type).toBe("{ open: boolean; }");
+
+    const compatFooter = meta.slots.find((slot) => slot.name === "footer");
+    expect(compatFooter).toBeDefined();
+    expect(compatFooter!.type).toBe("{ id: number; }");
+
+    // The nested payload renders its declared member type, never the
+    // binding name (`{ meta: meta; }` was the defect).
+    const compatPayload = meta.slots.find((slot) => slot.name === "payload");
+    expect(compatPayload).toBeDefined();
+    expect(compatPayload!.type).not.toContain("meta: meta");
+    expect(compatPayload!.type).toContain("deep: string");
+
+    // The optional binding's declared leaf type reaches the compat display.
+    const compatOptional = meta.slots.find((slot) => slot.name === "optional");
+    expect(compatOptional).toBeDefined();
+    expect(compatOptional!.type).toContain("flag: boolean");
+  });
+
   it("evaluates defineModel types", async () => {
     const checker = await createRuntimeChecker("native-eval-model");
 
@@ -495,6 +610,85 @@ const flag = defineModel('flag', { default: false })
     for (const prop of [nativeModel!, nativeRequired!, nativeDefaulted!]) {
       expect(prop.type.kind).not.toBe("union");
     }
+  });
+
+  it("publishes reactive props destructure defaults and reflects initializer edits like a fresh query", async () => {
+    const source = (initializers: { count: string; verbose: string }) => `<script setup lang="ts">
+const { count${initializers.count}, verbose${initializers.verbose}, zero = 0, empty = '', label: text = 'hi', title, note } = defineProps<{
+  count?: number
+  verbose?: boolean
+  zero?: number
+  empty?: string
+  label?: string
+  title: string
+  note?: string
+}>()
+</script>
+<template><div>{{ count }} {{ verbose }} {{ zero }} {{ empty }} {{ text }} {{ title }} {{ note }}</div></template>`;
+    const checker = await createRuntimeChecker("native-eval-destructure-defaults");
+    const defaultsOf = (meta: Awaited<ReturnType<typeof checker.getComponentMeta>>) =>
+      meta
+        ._verter!.props.map((p) => ({
+          name: p.name,
+          required: p.required,
+          hasDefault: p.hasDefault,
+          default: p.default,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+    checker.updateFile("Destructured.vue", source({ count: " = 1", verbose: " = false" }));
+    await settleNativeProject();
+    const meta = await checker.getComponentMeta("Destructured.vue");
+
+    // Prop identity: the destructure alias `text` never replaces `label`.
+    expect(meta.props.map((p) => p.name).sort()).toEqual(
+      ["count", "empty", "label", "note", "title", "verbose", "zero"].sort(),
+    );
+
+    // Native surface: falsy defaults keep both presence and verbatim value;
+    // uninitialized members stay distinguishable by requiredness.
+    expect(defaultsOf(meta)).toEqual([
+      { name: "count", required: false, hasDefault: true, default: "1" },
+      { name: "empty", required: false, hasDefault: true, default: "''" },
+      { name: "label", required: false, hasDefault: true, default: "'hi'" },
+      { name: "note", required: false, hasDefault: false, default: undefined },
+      { name: "title", required: true, hasDefault: false, default: undefined },
+      { name: "verbose", required: false, hasDefault: true, default: "false" },
+      { name: "zero", required: false, hasDefault: true, default: "0" },
+    ]);
+
+    // Compat surface threads the same defaults.
+    const compatDefault = (name: string) => meta.props.find((p) => p.name === name)!.default;
+    expect(compatDefault("count")).toBe("1");
+    expect(compatDefault("verbose")).toBe("false");
+    expect(compatDefault("zero")).toBe("0");
+    expect(compatDefault("empty")).toBe('""');
+    expect(compatDefault("label")).toBe('"hi"');
+    expect(compatDefault("title")).toBeUndefined();
+    expect(compatDefault("note")).toBeUndefined();
+
+    // Same-session edit: change one initializer and remove another.
+    const edited = source({ count: " = 2", verbose: "" });
+    checker.updateFile("Destructured.vue", edited);
+    await settleNativeProject();
+    const editedDefaults = defaultsOf(await checker.getComponentMeta("Destructured.vue"));
+    expect(editedDefaults.find((p) => p.name === "count")).toEqual({
+      name: "count",
+      required: false,
+      hasDefault: true,
+      default: "2",
+    });
+    expect(editedDefaults.find((p) => p.name === "verbose")).toEqual({
+      name: "verbose",
+      required: false,
+      hasDefault: false,
+      default: undefined,
+    });
+
+    const fresh = await createRuntimeChecker("native-eval-destructure-defaults-fresh");
+    fresh.updateFile("Destructured.vue", edited);
+    await settleNativeProject();
+    expect(editedDefaults).toEqual(defaultsOf(await fresh.getComponentMeta("Destructured.vue")));
   });
 
   // The native evaluator RESOLVES chained indexed access under explicit
