@@ -14405,6 +14405,40 @@ fn select_option_static_value_attr_without_bind_still_emits_the_value_channel() 
     );
 }
 
+#[test]
+fn option_value_channel_write_follows_the_elements_own_init_writes() {
+    // Official `RegularElement.js` pushes `build_element_special_value_attribute`
+    // LAST in the element's statement run — after its init-domain attribute writes
+    // (`$.autofocus`, a `class:` directive's `$.set_class`) and after its child
+    // block — so an `<option>` that carries one of those writes emits the
+    // value-channel write after it, not ahead of it.
+    for (source, init_write) in [
+        (
+            "<select><option autofocus value=\"a\">a</option></select>\n",
+            "\t$.autofocus(option, true);\n",
+        ),
+        (
+            "<script>let x = $state(true);</script>\n<select><option value=\"a\" class:hi={x}>a</option></select>\n",
+            "\t$.set_class(option, 1, '', null, {}, { hi: x });\n",
+        ),
+    ] {
+        let js = emit(source, "App.svelte");
+        let init_at = js
+            .find(init_write)
+            .unwrap_or_else(|| panic!("the option's init write must emit:\n{js}"));
+        let value_at = js
+            .find("\toption.value = option.__value = 'a';\n")
+            .unwrap_or_else(|| panic!("the option value-channel write must emit:\n{js}"));
+        let reset_at = js
+            .find("\t$.reset(select);\n")
+            .unwrap_or_else(|| panic!("the walked select region must reset:\n{js}"));
+        assert!(
+            init_at < value_at && value_at < reset_at,
+            "the value-channel write must close the option's own statement run:\n{js}"
+        );
+    }
+}
+
 // ── Additional surface gates (R1, R4, R5, R7, R8) ──────────────────────────────
 
 #[test]
