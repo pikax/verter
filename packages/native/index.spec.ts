@@ -541,6 +541,45 @@ const height = ref('100px')
     host.close();
   });
 
+  it("keeps the script-rule selection for non-SFC script modules on the public lint route", () => {
+    // A non-SFC module (`.ts`/`.js` registered as `non_sfc`) owns no carrier
+    // structure, but its analysis snapshot carries the script facts —
+    // imports with their sources, Vue API calls, macros — that script rules
+    // read. Missing carrier structure is not another framework's carrier:
+    // such a module keeps the script-rule selection it has always had, so
+    // `prefer-import-from-vue` still reports an `@vue/reactivity` import in
+    // a composable/store module. Only a REGISTERED non-Vue carrier (Svelte)
+    // drops adapter-owned Vue rules.
+    const RULE = "prefer-import-from-vue";
+    const CONFIG = JSON.stringify({ preset: "all" });
+    const STORE_SOURCE = "import { ref } from '@vue/reactivity'\nexport const n = ref(1)\n";
+    const host = new VerterHost();
+
+    const store = host.upsert({
+      inputId: "store.ts",
+      fileKind: "non_sfc",
+      source: STORE_SOURCE,
+    });
+    expect(
+      host.lint(store.canonicalId, CONFIG).map((d) => d.rule),
+      "a non-SFC script module must keep its script rules",
+    ).toContain(RULE);
+
+    // Vue carrier control: the identical import inside a `.vue` SFC reports
+    // the same rule, so the non-SFC result is selection parity, not a leak.
+    const sfc = host.upsert({
+      inputId: "Store.vue",
+      fileKind: "vue",
+      source: `<script setup>\n${STORE_SOURCE}</script>\n<template><div>{{ n }}</div></template>\n`,
+    });
+    expect(
+      host.lint(sfc.canonicalId, CONFIG).map((d) => d.rule),
+      "the .vue control must report the same script rule",
+    ).toContain(RULE);
+
+    host.close();
+  });
+
   it("duplicate-attribute public lint-route proof: parse-attributed dirty case, clean control, update and fresh-host agreement", () => {
     // Public input-to-result proof for the advertised
     // `no-duplicate-attributes` rule. Verified against the native binary:

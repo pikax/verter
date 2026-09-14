@@ -33,6 +33,13 @@ Rules whose facts mean the same thing on every carrier stay active everywhere.
 `block-lang` is one: a `<script lang="ts">` block is the same TypeScript opt-in
 in Svelte as it is in Vue, so the rule reports on both.
 
+A non-SFC script module (a `.ts`/`.js` file tracked for imports, exports, and
+types — composables, stores, plain modules) is not a carrier at all: it owns no
+carrier structure for another framework to own either, so it keeps the full
+script-rule selection such files have always had. `prefer-import-from-vue`
+reports an `import from '@vue/reactivity'` in a `store.ts` exactly as it does
+inside a `.vue` SFC.
+
 Selection narrows which rules *run*, never what the engine advertises — the full
 rule set is still listed by the rule-metadata surface and the
 [Lint Rules Reference](/lint-rules). Svelte-specific rules are not yet

@@ -3309,12 +3309,20 @@ impl NapiVerterHost {
     /// registered artifact rather than from the request path: a filename says
     /// nothing a caller cannot spell wrongly, and filtering emitted
     /// diagnostics by name would suppress symptoms of running the wrong rules
-    /// instead of not running them. `None` (no registered structure) selects
-    /// only carrier-neutral rules — fail closed, matching
-    /// [`Self::registered_block_facts`].
+    /// instead of not running them. A file with no registered carrier
+    /// structure is a non-SFC script module (`.ts`/`.js`): it owns no carrier
+    /// another framework could own either, so it keeps the Vue script rules
+    /// such a module has always had — its lint facts are script facts, which
+    /// script rules read without a carrier structure. Only a REGISTERED
+    /// non-Vue carrier (Svelte) drops adapter-owned Vue rules.
     fn carrier_rule_registry(&self, canonical_or_alias: &str) -> RuleRegistry {
         let structure = self.inner.registered_file_structure(canonical_or_alias);
-        RuleRegistry::for_carrier(structure.as_ref().map(|s| s.artifact().adapter_id()))
+        let default_script_owner = verter_session::FrameworkAdapterId::vue();
+        let carrier = structure
+            .as_ref()
+            .map(|s| s.artifact().adapter_id())
+            .unwrap_or(&default_script_owner);
+        RuleRegistry::for_carrier(Some(carrier))
     }
 
     #[napi]
