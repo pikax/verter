@@ -271,14 +271,122 @@ fn a_diagnostic_addressing_an_uncarried_stage_is_refused() {
         "no rewrite has run, so a rewritten-space position resolves to nothing"
     );
 
-    // The two spaces a continuation DOES carry are both accepted.
+    // The two spaces a continuation DOES carry are both accepted, up to and
+    // including their last byte, and a positionless diagnostic is too.
     let unit = style_unit("Comp.vue", "style:0");
-    let mut carried = input(unit);
+    let mut carried = input(unit.clone());
     carried.result = completed(vec![
         StyleDiagnostic::new(StyleStage::Authored, "in", Some(Span::new(0, 1))),
         StyleDiagnostic::new(StyleStage::Preprocessed, "out", Some(Span::new(0, 1))),
+        StyleDiagnostic::new(
+            StyleStage::Authored,
+            "whole block",
+            Some(Span::new(0, AUTHORED.len() as u32)),
+        ),
+        StyleDiagnostic::new(
+            StyleStage::Preprocessed,
+            "whole output",
+            Some(Span::new(0, PRODUCED.len() as u32)),
+        ),
+        StyleDiagnostic::new(StyleStage::Preprocessed, "somewhere", None),
     ]);
-    assert_eq!(admit(carried).diagnostics().len(), 2);
+    assert_eq!(admit(carried).diagnostics().len(), 5);
+
+    // A carried stage's position must still resolve inside that stage's bytes.
+    let unresolvable = |diagnostic: StyleDiagnostic| {
+        let mut supplied = input(unit.clone());
+        supplied.result = completed(vec![diagnostic]);
+        refusal(supplied)
+    };
+    assert_eq!(
+        unresolvable(StyleDiagnostic::new(
+            StyleStage::Preprocessed,
+            "past the output",
+            Some(Span::new(0, PRODUCED.len() as u32 + 1)),
+        )),
+        StyleContinuationRefusal::UnqualifiedDiagnostic,
+        "a produced-space position past the produced bytes addresses nothing"
+    );
+    assert_eq!(
+        unresolvable(StyleDiagnostic::new(
+            StyleStage::Authored,
+            "past the block",
+            Some(Span::new(0, AUTHORED.len() as u32 + 1)),
+        )),
+        StyleContinuationRefusal::UnqualifiedDiagnostic,
+        "an authored position past the block addresses nothing"
+    );
+    assert_eq!(
+        unresolvable(StyleDiagnostic::new(
+            StyleStage::Authored,
+            "carrier-absolute",
+            Some(AUTHORED_EXTENT),
+        )),
+        StyleContinuationRefusal::UnqualifiedDiagnostic,
+        "authored diagnostic spans are block-relative; a carrier-absolute one \
+         is a second convention the boundary does not carry"
+    );
+    assert_eq!(
+        unresolvable(StyleDiagnostic::new(
+            StyleStage::Preprocessed,
+            "inverted",
+            Some(Span::new(2, 1)),
+        )),
+        StyleContinuationRefusal::UnqualifiedDiagnostic
+    );
+}
+
+#[test]
+fn overlapping_anchors_are_refused_at_admission_not_by_the_schema() {
+    let unit = style_unit("Comp.vue", "style:0");
+    let anchor = |generated: std::ops::Range<u32>, source: Span| ArtifactMapSegment {
+        generated,
+        source_unit: unit.id().clone(),
+        source_span: source,
+    };
+    let start = AUTHORED_EXTENT.start;
+    let with_anchors = |anchors: Vec<ArtifactMapSegment>| {
+        let mut supplied = input(unit.clone());
+        supplied.anchors = anchors;
+        supplied
+    };
+
+    assert_eq!(
+        refusal(with_anchors(vec![
+            anchor(0..1, Span::new(start, start + 1)),
+            anchor(0..1, Span::new(start + 1, start + 2)),
+        ])),
+        StyleContinuationRefusal::UnqualifiedMap,
+        "two anchors cannot both own one generated range"
+    );
+    assert_eq!(
+        refusal(with_anchors(vec![
+            anchor(2..5, Span::new(start + 2, start + 5)),
+            anchor(0..3, Span::new(start, start + 3)),
+        ])),
+        StyleContinuationRefusal::UnqualifiedMap,
+        "overlap is judged over generated order, not supply order"
+    );
+    assert_eq!(
+        refusal(with_anchors(vec![
+            anchor(0..1, Span::new(start, start + 1)),
+            anchor(0..0, Span::new(start + 1, start + 1)),
+        ])),
+        StyleContinuationRefusal::UnqualifiedMap,
+        "an empty range sharing another anchor's start is still two claims on one position"
+    );
+
+    // Adjacent ranges are not overlapping. Admission keeps the supplied order,
+    // and what it admits the schema accepts.
+    let supplied = vec![
+        anchor(2..4, Span::new(start + 2, start + 4)),
+        anchor(0..2, Span::new(start, start + 2)),
+    ];
+    let continuation = admit(with_anchors(supplied.clone()));
+    assert_eq!(continuation.anchors(), supplied.as_slice());
+    let set = describe_style_continuations(vec![continuation], Vec::new())
+        .expect("an admitted map is a valid map");
+    assert_eq!(set.artifacts()[0].maps[0].segments.len(), 2);
 }
 
 #[test]
