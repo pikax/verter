@@ -62,6 +62,7 @@ mod style_dialect_admission;
 mod style_native_analysis_preprocessor_boundary;
 mod svelte_jsx_shim_freshness;
 mod svelte_rune_module_guards;
+mod svelte_style_continuation;
 mod svelte_typecheck_gate;
 mod ts_compat_single_spec;
 mod typeinfo_ignored_test_manifest;

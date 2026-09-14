@@ -72,7 +72,9 @@ pub(crate) mod u6_flow_expect_tests;
 
 #[path = "flow_gap_retraction_tests.rs"]
 mod flow_gap_retraction_tests;
-use self::u6_flow_expect_tests::{Boundary, Expect, ExpectedNode, Lit};
+use self::u6_flow_expect_tests::{
+    Boundary, Expect, ExpectedNode, ExpectedSpreadArm, ExpectedSpreadMember, Lit,
+};
 
 // Row vocabulary
 
@@ -1113,14 +1115,6 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "3ad9839b4051425accfd869e7414c75a56b798c9a9e66901fca444583151b9cb",
     ),
     (
-        "B03_as_const_call",
-        "0c6c96908cd1fd03ecde940f14c1d72ef317a12842f2a0d11d5411e8db90eebf",
-    ),
-    (
-        "B04_as_const_spread_only",
-        "e56087c67a873bbeed1842b47bc7fda4189bed7d5d327447084d73a24a4b430b",
-    ),
-    (
         "B05_satisfies_object",
         "ce1fe7fb18011f8f6b005f043d99849dd54574c7e743b943280db5346919c674",
     ),
@@ -1139,10 +1133,6 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "B09_numeric_key_ident",
         "11944c4c0aaa48a63a2c6828de3b8f5b924dda5229f16550138529221680b94d",
-    ),
-    (
-        "B10_as_const_ident",
-        "c6bf05a6989852f0195adc0c13a71f73964a60c0d7cbb9f601936785c9b99275",
     ),
     (
         "C01_intersection_clean",
@@ -1259,10 +1249,6 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "H01_generic_callee_spread",
         "4d9180489cf02f0db202f9358ee0fa74542d53590c7c58dad23630d5f5e80f15",
-    ),
-    (
-        "H02_union_spread_source",
-        "06297105fab2f3af96383561d9afc77910297d9a90af842aeeb2417919fe26a2",
     ),
     (
         "H03_self_recursive_helper",
@@ -1421,10 +1407,6 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "338375339d6dcdedd10c9764ecdcac896b9ca3700c5f5f8e472b92e3dd142a6b",
     ),
     (
-        "X10_destructured_default_conditional",
-        "0287338e681f2a3272daa33188661401def01c8e02ad17bd1b71fa2b5d95f2eb",
-    ),
-    (
         "X11_class_static_method_return",
         "062c14da3e3b4da3b0a3df5dd891a821ccaca1dc35f47a032ee002892a36b084",
     ),
@@ -1451,10 +1433,6 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "X25_try_assertion_catch_scope",
         "095993c48c8f8979211c6c00984ccb8b4a8516d601f2e1fea448eafaaffb6ad8",
-    ),
-    (
-        "X27_finally_fallthrough_break_override",
-        "d2288851e3a19b88563f2253ed7722f95191df0682650547e190f8dd3b58013c",
     ),
     (
         "X28_destructured_default_undefined",
@@ -3456,6 +3434,68 @@ mod corpus_suite {
                 "N138_instanceof_matching_union_subject_loses_warm_only",
                 "checker prints `{ v: K | KSub; } | { v: number; }`; the renderer spells the same node `Union({ v: Union(DeclRef(K) | DeclRef(KSub)) } | { v: number })` — union, reference, and member-terminator spellings differ",
             ),
+            (
+                // ── D14 deep pins ───────────────────────────────────────────
+                // The comparer's composed-surface semantics live in
+                // `checker_syntax`; the renderer prints the raw
+                // construction-plan discriminant, so every
+                // ObjectSpreadProgram-rooted row is byte-incomparable
+                // while remaining semantically compared.
+                "A15_method_member",
+                "checker prints `{ label: string; m(): number; }`; the renderer prints the raw construction-plan discriminant `ObjectSpreadProgram` — the semantic comparison composes the program through the public spread-projection consumer",
+            ),
+            (
+                "B03_as_const_call",
+                "checker prints `{ readonly label: string; readonly n: 1; }`; the renderer prints `ObjectSpreadProgram`; the composed surface carries `readonly: false` on the spread-tainted `label` — the KnownOwed divergence itself",
+            ),
+            (
+                "B04_as_const_spread_only",
+                "checker prints `{ readonly label: string; }`; the renderer prints `ObjectSpreadProgram`; the composed surface carries `readonly: false` — the KnownOwed divergence itself",
+            ),
+            (
+                "B10_as_const_ident",
+                "checker prints `{ readonly label: string; readonly n: 1; }`; the renderer prints `ObjectSpreadProgram`; the composed surface carries `readonly: false` on the spread-tainted `label` — the KnownOwed divergence itself",
+            ),
+            (
+                "E03_spread_array",
+                "checker prints the whole `Array` prototype surface with the `... 37 more ...` elision; the renderer prints `ObjectSpreadProgram`",
+            ),
+            (
+                "E04_spread_optional_chain",
+                "checker prints `{ label?: string | undefined; }`; the renderer spells the unmodelled-position marker `Opaque(UnmodeledPosition)` — print syntax AND semantics differ; the FailsClosed divergence is held by the semantic test",
+            ),
+            (
+                "H02_union_spread_source",
+                "checker prints `{ label: string; n?: undefined; m: number; } | { label?: undefined; n: number; m: number; }`; the renderer prints `ObjectSpreadProgram` — the composed alternatives omit the normal-form cross members the KnownOwed arm pins",
+            ),
+            (
+                "X10_destructured_default_conditional",
+                "checker prints `{ label: string; n: number; } | { n?: undefined; label: string; }`; the renderer spells the same union `Union({ label: string, n: number } | { label: string })` — union spelling, member terminators, and the normal-form `n?: undefined` cross member differ",
+            ),
+            (
+                "X14_accessor_pair",
+                "checker prints `{ get g(): string; set g(v: string | number); n: number; }`; the renderer spells the duplicate-member surface `{ g: () => string, g: (Union(string | number)) => void, n: number }` — accessor spelling and member terminators differ",
+            ),
+            (
+                "X18_async_return",
+                "checker prints `Promise<{ label: string; }>`; the renderer spells the unwrapped inner object `{ label: string }` — the async-wrapper divergence the KnownOwed arm pins",
+            ),
+            (
+                "X19_generator_yield",
+                "checker prints `Generator<{ label: string; }, void, unknown>`; the renderer spells the flow surface `void` — print syntax AND semantics differ; the KnownOwed divergence is held by the semantic test",
+            ),
+            (
+                "X27_finally_fallthrough_break_override",
+                "checker prints `{ one: number; s?: undefined; } | { one?: undefined; s: string; }`; the renderer spells the same union `Union({ one: number } | { s: string })` — union spelling, member terminators, and the normal-form cross members differ",
+            ),
+            (
+                "CC03_as_const_plain_return",
+                "checker prints `{ readonly label: \"x\"; readonly n: 1; }`; the renderer spells the same surface `{ label: \"x\", n: 1 }` — the `readonly` modifiers and member terminators differ; semantic equality holds and is compared",
+            ),
+            (
+                "N88_in_unknown_key_keeps_subject_as_typed_superset",
+                "checker prints `{ v: number | (({ a: number; } | { b: string; }) & Record<\"c\", unknown>); }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(number | { a: number } | { b: string }) }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+            ),
         ];
         let mut failures = Vec::new();
         for row in CORPUS {
@@ -4390,11 +4430,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member `mode` Union — deepening pins the exact constituent set",
     ),
     (
-        "CC03_as_const_plain_return",
-        Owner::U6ContextualCore,
-        "member `label` Literal + member `n` Literal — deepening pins the exact literal value",
-    ),
-    (
         "CC04_as_const_member",
         Owner::U6ContextualCore,
         "member `label` Literal — deepening pins the exact literal value",
@@ -4455,16 +4490,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member `v` Union — deepening pins the exact constituent set",
     ),
     (
-        "X10_destructured_default_conditional",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
-    ),
-    (
-        "X14_accessor_pair",
-        Owner::U6FlowReturnSubstrate,
-        "member `g` Other — a function value; deepening pins the signature (params + return)",
-    ),
-    (
         "X21_satisfies_plain_return",
         Owner::U6ValueInference,
         "member `label` Literal + member `n` Literal — deepening pins the exact literal value",
@@ -4478,11 +4503,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "X25_try_assertion_catch_scope",
         Owner::U6ValueInference,
         "member `caught` Union — deepening pins the exact constituent set",
-    ),
-    (
-        "X27_finally_fallthrough_break_override",
-        Owner::U6ValueInference,
-        "root Union — deepening pins the exact constituent set",
     ),
     (
         "X29_write_annotated_union_write_widens",
@@ -4720,13 +4740,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         Owner::U6ValueInference,
         "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
     ),
-    (
-        "N88_in_unknown_key_keeps_subject_as_typed_superset",
-        Owner::U6NarrowLattice,
-        "member Union — the recorded checker answer carries `Record<\"c\", unknown>` generic \
-         syntax the checker-syntax comparer cannot parse yet, so a deep pin cannot be \
-         cross-validated; deepen when the comparer grows generic-argument support",
-    ),
 ];
 
 /// Burn-down ceiling of [`SHALLOW_PINNED_ROWS`]. Lower freely as rows
@@ -4742,7 +4755,7 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
 /// rejects), or a recorded CHECKER text the deep-pin comparer cannot yet
 /// parse. Each ledger entry records which class it is in.
 #[cfg(test)]
-const SHALLOW_PINNED_ROWS_CEILING: usize = 71;
+const SHALLOW_PINNED_ROWS_CEILING: usize = 66;
 
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
@@ -4767,6 +4780,21 @@ const OPEN_DEBTS: &[&str] = &[
     "E01_spread_any",
     "E02_spread_index_signature",
     "E03_spread_array",
+    // ── `as const` SPREAD MODIFIER LOSS (D14 deep pins) ─────────────────
+    // The enclosing `as const` reaches the fresh members but is lost on
+    // the spread-tainted members; the full-depth pins flip when the
+    // spread composition applies the modifier.
+    "B03_as_const_call",
+    "B04_as_const_spread_only",
+    "B10_as_const_ident",
+    // ── UNION NORMAL-FORM CROSS MEMBERS (D14 deep pins) ────────────────
+    // The checker's union-of-objects arms carry `x?: undefined` cross
+    // members the published arms omit (extensionally equal); the
+    // full-depth pins flip when the composed/published unions grow the
+    // normal-form members.
+    "H02_union_spread_source",
+    "X10_destructured_default_conditional",
+    "X27_finally_fallthrough_break_override",
     // ── NARROWING ────────────────────────────────────────────────────
     // The narrowing blocks landed: every seeded narrowing row now matches
     // the checker except N09_narrow_then_write, whose remaining debt is
@@ -4919,10 +4947,23 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 3, 1, 2),
     (Owner::U2MappedTemplate, 4, 1, 2),
     (Owner::U6CallResolve, 33, 32, 1),
-    (Owner::U6ValueInference, 93, 84, 6),
+    // Nine switch-, try/catch- and reunion-family rows are parked as the
+    // SUBTYPE-REUNION class: TypeScript's return-position reunion applies
+    // subtype reduction and absorbs a subtype arm into its supertype; the
+    // canonical union keeps every constituent. Extensionally equal, so
+    // the rows stay clean and warm while parked with the value-inference
+    // owner. D14 deepens five more rows into this owner's ledger: B03,
+    // B04, and B10 (the `as const` readonly lost on spread-tainted
+    // members — B10 moved here from the substrate owner with its debt
+    // class) and X10/X27 (union normal-form cross members). D9's
+    // return-position reunion then greens eleven of those parked rows,
+    // taking this owner from 69 matching to 80.
+    (Owner::U6ValueInference, 94, 80, 11),
     (Owner::U6LoopClosure, 6, 1, 2),
     (Owner::U6ContextualCore, 8, 7, 1),
-    (Owner::U6FlowReturnSubstrate, 63, 47, 3),
+    // B10's `as const` spread-modifier debt moved to the value-inference
+    // owner with its B03/B04 class, so the substrate total drops by one.
+    (Owner::U6FlowReturnSubstrate, 62, 46, 3),
     (Owner::U6NarrowTypeof, 48, 28, 20),
     // The `instanceof` arm rule: derived-arm selection with nullish
     // stripping and the whole-subject intersection fallback are exact;
@@ -4937,7 +4978,11 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U6NarrowSubstitution, 12, 6, 6),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     (Owner::SharedTypeResolution, 14, 9, 3),
-    (Owner::SharedCompilePipeline, 8, 1, 7),
+    // H02's D14 deep pin re-labelled the row KnownOwed: the checker's
+    // union normal form carries `?: undefined` cross members the composed
+    // spread alternatives omit (extensionally equal), so matching drops
+    // to zero and every row here is parked.
+    (Owner::SharedCompilePipeline, 8, 0, 8),
     (Owner::FrameworkOnly, 7, 5, 0),
 ];
 
@@ -5060,6 +5105,10 @@ const UNASSIGNED_PARKED_ROWS: &[&str] = &[
     "E02_spread_index_signature",
     "E03_spread_array",
     "E05_scalar_flow_answer_keeps_tsx_surface",
+    // H02's D14 deep pin re-labelled the row KnownOwed under this owner:
+    // the checker's union normal form carries `?: undefined` cross
+    // members the composed spread alternatives omit.
+    "H02_union_spread_source",
     // The generator-return shape: the macro lane's rejection is correct, the
     // TSX lane fault is not.
     "X19_generator_yield",

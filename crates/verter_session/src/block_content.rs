@@ -4,7 +4,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
-use verter_compiler::style_planner::{ExternalStyleProducer, PreprocessorIdentity};
+use verter_compiler::style_planner::{
+    ExternalStyleProducer, PreprocessorIdentity, StyleDiagnostic, StyleDiagnosticSeverity,
+    StyleStage,
+};
 use verter_language::parse_artifact::carrier_inventory::{
     AttributeValue, CarrierAttribute, CarrierBlock, SectionRole, SourceSlice, StyleDialect,
     TaggedSyntax,
@@ -100,6 +103,27 @@ pub(crate) fn style_producer_of(
         config_fingerprint,
     )
     .map_or(PreprocessorIdentity::Anonymous, PreprocessorIdentity::Named)
+}
+
+/// The style vocabulary's view of one diagnostic an external tool reported.
+///
+/// A tool reports against the bytes it CONSUMED, so the diagnostic addresses
+/// the authored stage. Its line/column are in the tool's own input
+/// coordinates, which this host carries but never maps: turning them into a
+/// block span would be a guess, so the position is recorded absent rather
+/// than fabricated. Severity is kept as the tool stated it.
+pub(crate) fn style_diagnostic_of(diagnostic: &PreprocessorDiagnostic) -> StyleDiagnostic {
+    let severity = match diagnostic.severity {
+        HostSeverity::Error => StyleDiagnosticSeverity::Error,
+        HostSeverity::Warning => StyleDiagnosticSeverity::Warning,
+        HostSeverity::Info => StyleDiagnosticSeverity::Info,
+    };
+    StyleDiagnostic::with_severity(
+        StyleStage::Authored,
+        severity,
+        diagnostic.message.as_str(),
+        None,
+    )
 }
 
 impl SuppliedContentArtifact {
@@ -1031,6 +1055,7 @@ impl VerterHost {
                 availability: BlockContentAvailability::Stale,
                 origin: None,
                 content: None,
+                authored_content: selected.authored_content,
                 content_class: selected.content_class,
                 lang: selected.lang,
                 block_token: selected.block_token,
@@ -1074,6 +1099,7 @@ impl VerterHost {
                         config_fingerprint: supplied.config_fingerprint,
                     }),
                     content: Some(supplied.code),
+                    authored_content: selected.authored_content,
                     content_class: selected.content_class,
                     lang: selected.lang,
                     block_token: selected.block_token,
@@ -1106,7 +1132,8 @@ impl VerterHost {
         Ok(BlockContentSnapshot {
             availability: selected.availability,
             origin: selected.authored_origin,
-            content: selected.authored_content,
+            content: selected.authored_content.clone(),
+            authored_content: selected.authored_content,
             content_class: selected.content_class,
             lang: selected.lang,
             block_token: selected.block_token,
@@ -1225,20 +1252,31 @@ impl VerterHost {
                 snapshot.lang.clone()
             };
             let parsed = snapshot.parsed_style.clone();
-            let producer = match &snapshot.origin {
+            let (producer, diagnostics) = match &snapshot.origin {
                 Some(BlockContentOrigin::SuppliedValidated {
                     processor_identity,
                     processor_version,
                     config_fingerprint,
+                    diagnostics,
                     ..
-                }) => Some(style_producer_of(
-                    processor_identity,
-                    processor_version,
-                    config_fingerprint.as_ref().map(|token| token.as_str()),
-                )),
+                }) => (
+                    Some(style_producer_of(
+                        processor_identity,
+                        processor_version,
+                        config_fingerprint.as_ref().map(|token| token.as_str()),
+                    )),
+                    diagnostics.iter().map(style_diagnostic_of).collect(),
+                ),
                 Some(BlockContentOrigin::InlineAuthored | BlockContentOrigin::NativeVfs { .. })
-                | None => None,
+                | None => (None, Vec::new()),
             };
+            // Stated from THIS fenced read, not re-sliced from the carrier
+            // later: a consumer that validates a selection against its
+            // authored input must see the bytes this selection was admitted
+            // against, whatever revision becomes live afterwards.
+            let authored_basis = snapshot.authored_content.as_deref().map(|authored| {
+                verter_compiler::assembly::ContentId::from_content_bytes(authored.as_bytes())
+            });
             let input = RuntimeBlockContentInput {
                 code,
                 source_map: snapshot.source_map,
@@ -1247,6 +1285,8 @@ impl VerterHost {
                 source_space_token: snapshot.source_space_token.to_string(),
                 parsed,
                 producer,
+                authored_basis,
+                diagnostics,
             };
             match role {
                 SectionRole::TemplateHost => projection.template = Some(input),
@@ -2105,6 +2145,75 @@ mod tests {
         assert!(byte_bounded.supplied_bytes <= MAX_SUPPLIED_TOTAL_BYTES);
         assert_eq!(byte_bounded.supplied.len(), 4);
         assert_eq!(byte_bounded.supplied_order.len(), 4);
+    }
+
+    /// The compiler projection states, for a supplied style selection, the
+    /// AUTHORED bytes that selection was validated against — captured by the
+    /// same read that selected the produced bytes. A consumer that needs the
+    /// basis reads it here instead of re-slicing the carrier later, which
+    /// would state whatever revision is live by then rather than the one the
+    /// host admitted the result against.
+    #[test]
+    fn a_supplied_style_projection_states_the_authored_basis_it_was_validated_against() {
+        const AUTHORED: &str = "$tone: red;\n.card { color: $tone; }";
+        const PRODUCED: &str = ".card { color: red; }";
+        let source =
+            format!("<div class=\"card\">x</div>\n<style lang=\"scss\">{AUTHORED}</style>\n");
+
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let update = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: "/workspace/Card.svelte".to_string(),
+                source: Arc::from(source.as_str()),
+                file_language: verter_language::FileLanguage::svelte(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        let request = update.preprocessor_requests[0].clone();
+        let mut entry = BlockOverrideEntry::supplied_for_test(&request, PRODUCED);
+        entry.diagnostics = vec![PreprocessorDiagnostic {
+            severity: HostSeverity::Warning,
+            message: "deprecated division".to_string(),
+            line: Some(2),
+            column: Some(4),
+        }];
+        let _admitted = host
+            .apply_block_overrides(BlockOverrideRequest {
+                canonical_id: update.canonical_id.clone(),
+                compile_profile: CompileProfile::default(),
+                overrides: vec![entry],
+            })
+            .expect("the completed result is admitted");
+
+        let profile = CompileProfile::default();
+        let projection = host
+            .compiler_block_content_inputs(
+                &update.canonical_id,
+                SuppliedBlockScope::Profile(&profile),
+            )
+            .expect("the selection projects");
+        let style = projection.styles[0]
+            .as_ref()
+            .expect("the supplied style slot");
+        assert_eq!(style.code.as_ref(), PRODUCED, "the selected bytes");
+        assert_eq!(
+            style.authored_basis,
+            Some(verter_compiler::assembly::ContentId::from_content_bytes(
+                AUTHORED.as_bytes()
+            )),
+            "the basis names the authored block, not the produced bytes"
+        );
+        assert_eq!(
+            style.diagnostics,
+            [StyleDiagnostic::with_severity(
+                StyleStage::Authored,
+                StyleDiagnosticSeverity::Warning,
+                "deprecated division",
+                None,
+            )],
+            "the tool's diagnostics project with the bytes they describe, at their stated severity"
+        );
     }
 
     #[test]

@@ -265,18 +265,22 @@ fn identity_corpus_actually_populates_the_map_and_diagnostic_digest_slots() {
     // of its own: a fixture swap that left no fixture publishing a style would
     // silently make the four-route style comparison compare nothing, which is
     // the exact failure mode the two checks above exist to prevent.
-    let styled = fixtures
+    // The legacy and stage-qualified style lists are separate digest
+    // sections, so each needs its own populated fixture: one list being
+    // non-empty says nothing about whether the other is compared.
+    let outputs: Vec<_> = fixtures
         .iter()
-        .filter(|f| {
-            compiler
-                .compile(f.source, &f.request, f.inputs)
-                .is_ok_and(|out| !out.styles.is_empty())
-        })
-        .count();
+        .filter_map(|f| compiler.compile(f.source, &f.request, f.inputs).ok())
+        .collect();
     assert!(
-        styled > 0,
-        "at least one corpus fixture must publish a style block, or the digest's style \
-         section is compared vacuously on every route"
+        outputs.iter().any(|out| !out.styles.is_empty()),
+        "at least one corpus fixture must publish a legacy style block, or the digest's \
+         style section is compared vacuously on every route"
+    );
+    assert!(
+        outputs.iter().any(|out| !out.qualified_styles.is_empty()),
+        "at least one corpus fixture must publish a stage-qualified style, or the digest's \
+         qualified-style section is compared vacuously on every route"
     );
 }
 

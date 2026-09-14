@@ -39,15 +39,15 @@ implements, patches, or ships production compiler behavior.
 - **Parser-backed cosmetic normalizer** (`src/normalize.mjs`): re-parses
   generated code to an ESTree AST and produces a position-free canonical
   form. Whitespace, quote spelling, and redundant parentheses are free
-  consequences of AST-level comparison. **Identifiers are structural — no
-  alpha-renaming**: the pinned official compilers emit no explicit
-  private-generated provenance marker, so no binding is ever renamed away
-  (a candidate spelling any binding differently from the official output is
-  a structural difference). Tool-consumed comments (`/*#__PURE__*/`-class
-  annotations, license/preserve, sourceMappingURL/sourceURL, TS directives,
-  triple-slash references, JSDoc) are classified, preserved, and attached
-  to the node they precede — deleting, mutating, or relocating one is a
-  structural difference; plain prose comments stay cosmetic.
+  consequences of AST-level comparison. The canonical form itself spells
+  every identifier verbatim — it is what the golden records' normalized
+  digests are taken over; local-name tolerance is applied at comparison
+  time (next bullet), so committed goldens never need regenerating for it.
+  Tool-consumed comments (`/*#__PURE__*/`-class annotations,
+  license/preserve, sourceMappingURL/sourceURL, TS directives, triple-slash
+  references, JSDoc) are classified, preserved, and attached to the node
+  they precede — deleting, mutating, or relocating one is a structural
+  difference; plain prose comments stay cosmetic.
 - **Structural comparator** (`src/compare.mjs`): parse validity; FULL
   linking-surface validation against the real installed pinned packages
   (named/default/namespace/side-effect imports, module-load failure,
@@ -60,6 +60,31 @@ implements, patches, or ships production compiler behavior.
   none of which the normalizer can override. Every axis reports ran/skipped
   status, and the opt-in AUTHORITATIVE mode turns any skipped axis into a
   hard failure.
+- **Local-binding matching** (`matchLocalBindings` in `src/compare.mjs`):
+  before canonicalization, each side's identifiers are resolved on that
+  side's own ECMAScript module scope chain, and every occurrence of a
+  module-local binding is respelled `#localN` in traversal order. A
+  candidate that names its locals differently from the official output —
+  authored or compiler-generated, import aliases included — therefore
+  compares equivalent, while a rename that re-binds a use to another
+  declaration (shadow capture) still diverges. Names stay verbatim when they
+  are observable or not local: exported names, imported names and module
+  paths, property keys (a shorthand `{ a }` equals `{ a: a }`),
+  function/class names and bindings that name an anonymous function
+  (`Function.prototype.name`), every name in a module with a direct `eval`,
+  and free globals. Unmodelled syntax disables matching for that module
+  (fail closed). Engine error-message text and `Function.prototype.toString`
+  are not treated as name observations.
+- **Behaviour reported apart from similarity**: `compareArtifacts` reports
+  `behavior` (runtime `pass`/`fail` from executing both arms through a
+  supplied pinned-runtime executor — SSR render, or update/cleanup steps via
+  `executeVueClientInteractions`; `unrun` when no executor is supplied, even
+  if the modules are structurally equivalent) separately from `fidelity`
+  (`equivalent`/`divergent`/`unrun` output similarity). A structural
+  divergence never alters `behavior`. `verdict`/`reasons` stay the all-axis
+  aggregate, so any failing axis — runtime, structural, parse, link,
+  diagnostics or mapping — still fails it; `checkCandidate` keeps executing
+  its runtime axis itself and reports it under `axes.runtime`.
 - **Authored-source mapping oracle** (`src/mapping-oracle.mjs`): validates a
   candidate's source map against the CANDIDATE's own generated code and the
   authored SFC fixture read from disk. No golden map, and no
