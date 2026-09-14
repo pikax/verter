@@ -970,6 +970,9 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::Mutex;
+
+    static ASSEMBLY_COUNT_LOCK: Mutex<()> = Mutex::new(());
     use verter_css_syntax::CssDialect;
     use verter_language::{ExternalLinkKind, ScriptRegionKind};
 
@@ -3232,6 +3235,9 @@ mod tests {
 
     #[test]
     fn style_only_demand_does_not_assemble_main() {
+        let _guard = ASSEMBLY_COUNT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let source = "<style>.x{color:red}</style><template><div/></template>";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::new();
@@ -3277,6 +3283,9 @@ mod tests {
 
     #[test]
     fn template_only_main_lang_is_javascript() {
+        let _guard = ASSEMBLY_COUNT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let source = "<template><div/></template>";
         let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::new();
@@ -3286,6 +3295,7 @@ mod tests {
                 &artifact,
                 &RuntimeCompileOptions {
                     filename: Some("T.vue".to_string()),
+                    want_main: true,
                     vue_has_script: false,
                     vue_has_template: true,
                     vue_script_lang: None,

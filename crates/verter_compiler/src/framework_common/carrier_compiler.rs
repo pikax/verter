@@ -549,7 +549,9 @@ impl Default for RuntimeCompileOptions {
             vue_facts: None,
             prepared_styles: Vec::new(),
             vue_main: crate::assembly::VueMainDecoration::default(),
-            want_main: true,
+            // Unrequested Main is zero-work (CCA2BV-AC4). Host publication
+            // sets this when `publishes_runtime_module()` is true.
+            want_main: false,
             vue_has_script: true,
             vue_has_template: true,
             vue_script_lang: None,

@@ -303,7 +303,7 @@ impl Default for VueHostExecutionInputs {
             vue_facts: None,
             prepared_styles: Vec::new(),
             vue_main: Default::default(),
-            want_main: true,
+            want_main: false,
             has_script: true,
             has_template: true,
             script_lang: None,
