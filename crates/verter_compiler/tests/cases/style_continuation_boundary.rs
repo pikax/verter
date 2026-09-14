@@ -479,6 +479,63 @@ fn two_continuations_cannot_claim_one_style_unit() {
 }
 
 #[test]
+fn a_companion_no_continuation_observes_is_refused() {
+    let unit = style_unit("Comp.vue", "style:0");
+    let script = style_unit("Comp.vue", "script");
+    let script_extent = Span::new(0, 20);
+    let companion = || ArtifactSourceUnit {
+        unit: script.clone(),
+        source_span: script_extent,
+    };
+
+    // Nothing in the continuation's provenance names the script unit, so the
+    // schema resolves no reference to it and it would enter the set's declared
+    // source space unrelated to anything in it.
+    assert_eq!(
+        describe_style_continuations(vec![admit(input(unit.clone()))], vec![companion()])
+            .expect_err("an unobserved companion is refused"),
+        StyleContinuationRefusal::UnobservedCompanion
+    );
+
+    // The same companion, once a continuation actually observes it, is the
+    // case the parameter exists for: the schema needs it to resolve that
+    // input, and it contributes no artifact of its own.
+    let mut observes_script = input(unit.clone());
+    observes_script
+        .provenance
+        .inputs
+        .insert(script.id().clone());
+    let set = describe_style_continuations(vec![admit(observes_script)], vec![companion()])
+        .expect("an observed companion is declared");
+    assert_eq!(
+        set.artifacts().len(),
+        1,
+        "a companion contributes no artifact"
+    );
+    let declared: BTreeSet<_> = set.source_units().map(|s| s.unit.id().clone()).collect();
+    assert_eq!(
+        declared,
+        BTreeSet::from([unit.id().clone(), script.id().clone()]),
+        "both the continued style unit and its observed companion are declared"
+    );
+
+    // Without the companion the schema cannot resolve the input the
+    // continuation declares, which is why the parameter is not optional.
+    let mut observes_script = input(unit);
+    observes_script
+        .provenance
+        .inputs
+        .insert(script.id().clone());
+    assert_eq!(
+        describe_style_continuations(vec![admit(observes_script)], Vec::new())
+            .expect_err("an unresolvable provenance input is refused"),
+        StyleContinuationRefusal::Schema(
+            verter_compiler::assembly::ArtifactSchemaError::UnknownSourceUnit
+        )
+    );
+}
+
+#[test]
 fn sibling_style_blocks_are_companions_and_the_description_is_order_independent() {
     let first = style_unit("Comp.vue", "style:0");
     let second = style_unit("Comp.vue", "style:1");

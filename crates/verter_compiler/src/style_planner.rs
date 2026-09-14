@@ -3725,6 +3725,13 @@ pub enum StyleContinuationRefusal {
     /// A companion source unit reuses a continuation's style-unit identity —
     /// two different declarations of one identity.
     SourceAliasing,
+    /// A companion source unit that no admitted continuation's provenance
+    /// observes. Companions exist so the schema can resolve the inputs the
+    /// continuations declare; one that appears in no `provenance.inputs`
+    /// contributes no artifact and is referenced by nothing, so admitting it
+    /// would publish an unrelated source unit inside this set's declared
+    /// source space.
+    UnobservedCompanion,
     /// The artifact schema rejected the derived set. Carried through rather
     /// than restated, so the schema stays the single authority for the
     /// invariants it owns.
@@ -3760,6 +3767,17 @@ pub struct StyleContinuationInput {
     /// observed them. Checked against the style unit's own content identity.
     pub consumed_basis: crate::assembly::ContentId,
     /// Observed inputs and producer contract for the completed run.
+    ///
+    /// Only `inputs` is checked here, and only for the one relation this
+    /// boundary can judge: that the producer observed the style unit it
+    /// claims to have consumed. `producer` and `input_basis` are carried
+    /// declarations — [`crate::assembly::ArtifactProvenance`] defines them as
+    /// supplied by the owning compiler capability and never resolved, and
+    /// this boundary owns no registry of producer contracts and no way to
+    /// re-derive an observation basis, so it can neither confirm nor deny
+    /// them. Taking a caller-supplied "expected" copy of each would compare
+    /// one caller's two declarations of the same fact and prove nothing.
+    /// Whoever mints these values remains their authority.
     pub provenance: crate::assembly::ArtifactProvenance,
     /// The completed, stage-qualified result the style owner produced.
     pub result: QualifiedStyleResult,
@@ -3774,10 +3792,17 @@ pub struct StyleContinuationInput {
 /// together with the identity that makes its bytes addressable.
 ///
 /// Immutable, and constructible only through [`Self::admit`], so a value of
-/// this type is a proof that the stage, producer, basis, provenance, diagnostic
-/// positions and map qualification (each anchor, and the anchor set's
-/// non-overlap) were all checked. It holds no production call site: the route
-/// that consumes it arrives with its own owner.
+/// this type is a proof of exactly these facts, and of no others: the result
+/// completed at [`StyleStage::Preprocessed`] under an external producer; every
+/// carried diagnostic resolves inside a space this value carries; the consumed
+/// basis is the style unit's own content identity; the producer's observed
+/// inputs include that style unit; the authored extent is well-formed; and
+/// every map anchor names that unit, lands inside both the authored extent and
+/// the produced bytes, and does not overlap or share a start with another
+/// anchor. Provenance facts the compiler cannot re-derive — `producer` and
+/// `input_basis` — are carried, not checked; see
+/// [`StyleContinuationInput::provenance`]. It holds no production call site:
+/// the route that consumes it arrives with its own owner.
 ///
 /// Diagnostics stay HERE rather than being folded into the produced
 /// [`crate::assembly::CompileArtifact`]. The artifact schema has no diagnostic
@@ -3977,6 +4002,8 @@ impl ExternalStyleContinuation {
 /// `companions` are source units the continuations' provenance already
 /// observes (a shared theme sheet, the carrier's script unit) and which the
 /// schema must therefore be able to resolve; they contribute no artifact.
+/// That is a requirement, not a description of the expected caller: a
+/// companion no continuation observes is refused rather than declared.
 ///
 /// Two continuations of the same carrier source are recorded as
 /// [`crate::assembly::ArtifactRelationKind::CompanionOf`] peers, which is what
@@ -4001,9 +4028,20 @@ pub fn describe_style_continuations(
         }
         source_units.push(continuation.source_unit());
     }
+    // A companion is only ever needed because some continuation's provenance
+    // names it, so the set of names is exactly what the continuations already
+    // declared. Aliasing is judged first: reusing a continuation's identity is
+    // a wrong declaration of an observed unit, not an unobserved one.
+    let observed: std::collections::BTreeSet<_> = continuations
+        .iter()
+        .flat_map(|continuation| continuation.provenance().inputs.iter())
+        .collect();
     for companion in companions {
         if claimed.contains(companion.unit.id()) {
             return Err(R::SourceAliasing);
+        }
+        if !observed.contains(companion.unit.id()) {
+            return Err(R::UnobservedCompanion);
         }
         source_units.push(companion);
     }
