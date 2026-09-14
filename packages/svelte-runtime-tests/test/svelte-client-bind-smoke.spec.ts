@@ -14,7 +14,7 @@
 //   - `<details bind:open>`    — the `toggle` event updates the `<p>`;
 //   - radio `bind:group`       — selecting a radio updates the `<p>` to its `value`.
 //
-// The update/cleanup arm (ECRS3) extends the family with repeated updates,
+// The update/cleanup arm extends the family with repeated updates,
 // state→DOM writes, meaningful EMPTY/FALSE values, and unmount/remount controls:
 //   - `<input bind:value>`          — typing twice, programmatic clearing to `""`,
 //                                     post-unmount dispatch safety, remount freshness;
