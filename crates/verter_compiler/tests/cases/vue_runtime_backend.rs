@@ -215,6 +215,8 @@ fn selected_style(code: &str) -> RuntimeBlockContentInput {
         source_space_token: "space:theme-css".to_string(),
         parsed: None,
         producer: None,
+        authored_basis: None,
+        diagnostics: Vec::new(),
     }
 }
 
@@ -231,6 +233,8 @@ fn selected_template_with_map(code: &str, source_map: Option<&str>) -> RuntimeBl
         source_space_token: "space:html".to_string(),
         parsed: None,
         producer: None,
+        authored_basis: None,
+        diagnostics: Vec::new(),
     }
 }
 
@@ -243,6 +247,8 @@ fn selected_style_with_map(code: &str, source_map: Option<&str>) -> RuntimeBlock
         source_space_token: "space:theme-css".to_string(),
         parsed: None,
         producer: None,
+        authored_basis: None,
+        diagnostics: Vec::new(),
     }
 }
 
@@ -1782,6 +1788,8 @@ fn selected_script(code: &str, lang: &str) -> RuntimeBlockContentInput {
         source_space_token: format!("space:{lang}"),
         parsed: None,
         producer: None,
+        authored_basis: None,
+        diagnostics: Vec::new(),
     }
 }
 

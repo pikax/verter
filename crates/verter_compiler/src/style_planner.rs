@@ -11,8 +11,8 @@ use verter_css_syntax::{
     css_identifier_eq_ignore_ascii_case, parse_style_ir, CombinatorKind, ComplexSelector,
     ComplexSelectorPart, ComponentValue, ComponentValueTree, CssDialect, CssParseMode, CssSource,
     QualifiedStyleResult, SelectorComponent, SelectorComponentKind, SelectorList, SelectorPseudo,
-    StyleCompleteness, StyleDeclaration, StyleDiagnostic, StyleDirective, StyleStage,
-    StyleStatement, StyleSyntaxIr, TokenKind, UnknownStatement, UnknownStatementKind,
+    StyleCompleteness, StyleDeclaration, StyleDirective, StyleStatement, StyleSyntaxIr, TokenKind,
+    UnknownStatement, UnknownStatementKind,
 };
 
 /// The witness a caller-preprocessed style block enters the compiler through,
@@ -21,7 +21,8 @@ use verter_css_syntax::{
 /// Re-exported so the admitting host names the compiler's own entry vocabulary
 /// instead of taking a direct dependency on the syntax crate for these types.
 pub use verter_css_syntax::{
-    ExternalStyleProducer, PreprocessedStyle, PreprocessorIdentity, StyleProducer,
+    ExternalStyleProducer, PreprocessedStyle, PreprocessorIdentity, StyleDiagnostic,
+    StyleDiagnosticSeverity, StyleProducer, StyleStage,
 };
 use verter_span::Span;
 

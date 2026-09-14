@@ -132,6 +132,38 @@ pub(crate) enum ExpectedNode {
     /// The typed unmodelled-position marker
     /// (`Opaque(QueryError::UnmodeledPosition)`).
     OpaqueUnmodeledPosition,
+    /// `SemanticNodeData::ObjectSpreadProgram` compared through the
+    /// SAME public spread-projection consumer the audited boundary
+    /// projects through (`project_object_spread_for_consumer`,
+    /// `Surface` selector): the formula's alternatives as an
+    /// order-insensitive EXACT SET of arms, each arm an exact member
+    /// set compared on name, presence, `readonly`, method kind, and
+    /// value. Introduced with the D14 deep pins; controlled by
+    /// `spread_program_expectations_match_composed_arms`.
+    SpreadObject(&'static [ExpectedSpreadArm]),
+}
+
+/// One member of an expected composed spread arm ([`ExpectedNode::SpreadObject`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ExpectedSpreadMember {
+    pub(crate) name: &'static str,
+    /// `true` ↔ `PositiveKeyPresence::Optional`.
+    pub(crate) optional: bool,
+    pub(crate) readonly: bool,
+    /// `None` ↔ a plain property; `Some(_)` ↔ the member's method kind.
+    pub(crate) kind: Option<verter_type_expr::ObjectMethodKind>,
+    pub(crate) value: ExpectedNode,
+}
+
+/// One expected composed arm of an object-spread program: the public
+/// spread-projection formula must carry an alternative with exactly
+/// this member set, whose domain is CLOSED exactly when `closed_domain`
+/// is `true` (an open arm keeps its residual operand — the residual is
+/// part of the pin).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ExpectedSpreadArm {
+    pub(crate) closed_domain: bool,
+    pub(crate) members: &'static [ExpectedSpreadMember],
 }
 
 /// Recursion bound for matching (cycle safety).
@@ -287,8 +319,130 @@ pub(crate) fn node_matches(
             ExpectedNode::OpaqueUnmodeledPosition,
             SemanticNodeData::Opaque(QueryError::UnmodeledPosition),
         ) => true,
+        // A live spread PROGRAM raises through the same public
+        // spread-projection consumer the audited boundary projects
+        // through; the expectation pins the composed arms exactly.
+        (ExpectedNode::SpreadObject(arms), SemanticNodeData::ObjectSpreadProgram(_)) => {
+            match dispatch.project_object_spread_for_consumer(
+                node,
+                crate::semantic_query::ObjectProjectionSelector::Surface,
+                crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Expanded,
+                ),
+            ) {
+                crate::semantic_query::QueryResult::Value(formula) => {
+                    spread_arms_match(dispatch, arms, formula.alternatives(), depth)
+                }
+                _ => false,
+            }
+        }
         _ => false,
     }
+}
+
+/// Exact-set comparison of [`ExpectedNode::SpreadObject`] arms against
+/// the spread-projection formula's alternatives: injective claiming,
+/// each arm compared on its closed-domain witness and its exact member
+/// set (name, presence, `readonly`, method kind, value). A fact whose
+/// facets or value are `Indeterminate` matches nothing.
+fn spread_arms_match(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    arms: &[ExpectedSpreadArm],
+    alternatives: &[crate::semantic_query::ObjectProjectionAlternative],
+    depth: usize,
+) -> bool {
+    if arms.len() != alternatives.len() {
+        return false;
+    }
+    fn arm_matches(
+        dispatch: &ProjectSemanticDispatch<'_>,
+        alternative: &crate::semantic_query::ObjectProjectionAlternative,
+        expected: &ExpectedSpreadArm,
+        depth: usize,
+    ) -> bool {
+        if alternative.closed().is_some() != expected.closed_domain {
+            return false;
+        }
+        let mut facts: Vec<&crate::semantic_query::PositiveKeyFact> = Vec::new();
+        alternative.positive().visit(|fact| facts.push(fact));
+        if facts.len() != expected.members.len() {
+            return false;
+        }
+        fn assign(
+            dispatch: &ProjectSemanticDispatch<'_>,
+            facts: &[&crate::semantic_query::PositiveKeyFact],
+            members: &[ExpectedSpreadMember],
+            used: &mut [bool],
+            index: usize,
+            depth: usize,
+        ) -> bool {
+            if index == members.len() {
+                return true;
+            }
+            let member = &members[index];
+            for (slot, fact) in facts.iter().enumerate() {
+                let (optional, readonly, kind, value) =
+                    match (fact.presence(), fact.facets(), fact.value()) {
+                        (
+                            presence,
+                            crate::semantic_query::ProjectionEvidence::Proven(facets),
+                            crate::semantic_query::ProjectionEvidence::Proven(value),
+                        ) => (
+                            matches!(
+                                presence,
+                                crate::semantic_query::PositiveKeyPresence::Optional
+                            ),
+                            facets.readonly(),
+                            facets.method_kind(),
+                            *value,
+                        ),
+                        // Indeterminate facets or value make the fact
+                        // unmatchable — never guessed.
+                        _ => continue,
+                    };
+                if !used[slot]
+                    && fact.key().as_string() == Some(member.name)
+                    && optional == member.optional
+                    && readonly == member.readonly
+                    && kind == member.kind
+                    && node_matches(dispatch, value, &member.value, depth + 1)
+                {
+                    used[slot] = true;
+                    if assign(dispatch, facts, members, used, index + 1, depth) {
+                        return true;
+                    }
+                    used[slot] = false;
+                }
+            }
+            false
+        }
+        let mut used = vec![false; facts.len()];
+        assign(dispatch, &facts, expected.members, &mut used, 0, depth)
+    }
+    fn assign_arms(
+        dispatch: &ProjectSemanticDispatch<'_>,
+        alternatives: &[crate::semantic_query::ObjectProjectionAlternative],
+        arms: &[ExpectedSpreadArm],
+        used: &mut [bool],
+        index: usize,
+        depth: usize,
+    ) -> bool {
+        if index == arms.len() {
+            return true;
+        }
+        for (slot, alternative) in alternatives.iter().enumerate() {
+            if !used[slot] && arm_matches(dispatch, alternative, &arms[index], depth) {
+                used[slot] = true;
+                if assign_arms(dispatch, alternatives, arms, used, index + 1, depth) {
+                    return true;
+                }
+                used[slot] = false;
+            }
+        }
+        false
+    }
+    let mut used = vec![false; alternatives.len()];
+    assign_arms(dispatch, alternatives, arms, &mut used, 0, depth)
 }
 
 /// Render a graph node recursively, compactly, for dump mode and failure
@@ -864,17 +1018,28 @@ pub(crate) fn check_boundary_refusal(
 /// `RENDER_INCOMPARABLE` exempts presentation bytes only, never
 /// semantic equality.
 ///
-/// Grammar: string/number literals, primitives, bare names, `A | B`,
-/// `A & B`, `T[]` (mutable arrays only), `{ name: T; }`,
-/// `(p: T, …) => T`. Unsupported text is a loud parse error — never a
-/// silent exemption.
+/// Grammar: string/number literals, primitives, bare and dotted names
+/// (`Intl.DateTimeFormatOptions`), `A | B`, `A & B`, `T[]` (mutable
+/// arrays only), `Name<T, …>` generic arguments, objects whose members
+/// are properties (`name: T` with `readonly` / `?` modifiers), methods
+/// (`name(p: T, …): R`), accessors (`get name(): R`, `set name(p: T);`)
+/// and the `... N more ...` print elision, plus `(p: T, …) => T`.
+/// Unsupported text is a loud parse error — never a silent exemption.
 ///
 /// Unions are order-insensitive exact sets; intersections are source-
-/// ordered; objects are exact member sets; a function print is a Call
-/// signature only (`new (…) => T` never satisfies it). Parameter names
-/// are ignored; types and arity are exact. A reference name matches a
-/// resolved `DeclRef` only — `BareRef` / `TypeParam` reach `_ => false`
-/// (fail-closed). Re-add those arms only with a control.
+/// ordered; objects are exact member sets compared on name, modifiers,
+/// method kind, and value; a function print is a Call signature only
+/// (`new (…) => T` never satisfies it). Parameter names are ignored;
+/// types and arity are exact. A reference name matches a resolved
+/// `DeclRef` only — `BareRef` / `TypeParam` reach `_ => false`
+/// (fail-closed). Generic-argument references, accessor prints, and
+/// elided-member markers PARSE but match NOTHING (fail-closed; see the
+/// variant docs) — re-add those arms only with a control. A live
+/// object-spread program is compared through the SAME public
+/// spread-projection consumer the boundary raises through
+/// (`project_object_spread_for_consumer`, `Surface` selector): a
+/// printed object matches a single-alternative formula, a printed
+/// union the exact alternative set.
 pub(crate) mod checker_syntax {
     use super::*;
 
@@ -886,14 +1051,61 @@ pub(crate) mod checker_syntax {
         BoolLit(bool),
         Primitive(PrimitiveKind),
         Ref(String),
+        /// `Name<T, …>`. Parses; matches NOTHING: no deep row measures
+        /// an `InstantiationRef` a generic print could compare against,
+        /// so an acceptance arm would be unexercised vocabulary.
+        /// Reintroduce it only with a row + control.
+        GenericRef {
+            name: String,
+            args: Vec<CheckerType>,
+        },
         Union(Vec<CheckerType>),
         Array(Box<CheckerType>),
         Intersection(Vec<CheckerType>),
-        Object(Vec<(String, CheckerType)>),
+        Object(Vec<CheckerMember>),
         Function {
             params: Vec<CheckerType>,
             ret: Box<CheckerType>,
         },
+    }
+
+    /// One printed object member.
+    #[derive(Clone, Debug, PartialEq)]
+    pub(crate) enum CheckerMember {
+        /// `name: T`, carrying the printed `readonly` and `?` modifiers.
+        /// Matches a live member with method kind `None`, the exact
+        /// name, the exact modifiers, and the recursively equal value.
+        Property {
+            name: String,
+            optional: bool,
+            readonly: bool,
+            ty: CheckerType,
+        },
+        /// `name(p: T, …): R`. Matches a live member with method kind
+        /// `Method` whose signature node equals the printed function
+        /// (ordered exact parameters, exact return).
+        Method {
+            name: String,
+            optional: bool,
+            params: Vec<CheckerType>,
+            ret: Box<CheckerType>,
+        },
+        /// `get name(): R`. Parses; matches NOTHING — see [`Self::Set`].
+        Get { name: String, ret: Box<CheckerType> },
+        /// `set name(v: T);`. Parses; matches NOTHING: the checker's
+        /// `get`/`set` pair denotes ONE property with paired accessors,
+        /// while the live surface carries the pair as TWO independent
+        /// members (X14's duplicate-key defect), so no canonical member
+        /// mapping exists today. Reintroduce accessor acceptance only
+        /// with a row + control.
+        Set {
+            name: String,
+            params: Vec<CheckerType>,
+        },
+        /// `... N more ...` — the checker's print elision. Parses;
+        /// matches NOTHING: elided members cannot prove exact set
+        /// equality. Reintroduce only with a row + control.
+        ElidedMore(usize),
     }
 
     /// Parse a checker print into its typed form. Strict: trailing
@@ -974,15 +1186,38 @@ pub(crate) mod checker_syntax {
         }
 
         /// Postfix `[]` binds tighter than `&` / `|` in the checker's
-        /// print (`string[]`, `(A | B)[]`). `readonly T[]` is not
-        /// modelled — it fails the identifier lookup loudly.
+        /// print (`string[]`, `(A | B)[]`). Generic arguments
+        /// (`Promise<T>`) bind to the preceding bare reference.
+        /// `readonly T[]` is not modelled — it fails the identifier
+        /// lookup loudly.
         fn postfix(&mut self) -> Result<CheckerType, String> {
             let mut inner = self.atom()?;
             loop {
                 self.skip_ws();
-                if self.rest().starts_with("[]") {
+                let rest = self.rest();
+                if rest.starts_with("[]") {
                     self.pos += 2;
                     inner = CheckerType::Array(Box::new(inner));
+                } else if rest.starts_with('<') {
+                    // A `<` in a checker print is always a generic
+                    // argument list on the preceding reference.
+                    let name = match inner {
+                        CheckerType::Ref(name) => name,
+                        other => {
+                            return Err(format!(
+                                "generic arguments on a non-reference form (`{other:?}` in \
+                                 `{}`) are not modelled",
+                                self.text
+                            ));
+                        }
+                    };
+                    self.pos += 1;
+                    let mut args = vec![self.union()?];
+                    while self.eat(',') {
+                        args.push(self.union()?);
+                    }
+                    self.expect('>')?;
+                    inner = CheckerType::GenericRef { name, args };
                 } else {
                     return Ok(inner);
                 }
@@ -1051,7 +1286,25 @@ pub(crate) mod checker_syntax {
                     Ok(CheckerType::NumberLit(value))
                 }
                 _ => {
-                    let name = self.ident()?;
+                    let mut name = self.ident()?;
+                    // A dotted reference print (`Intl.NumberFormatOptions`)
+                    // carries its qualification inside the name.
+                    loop {
+                        self.skip_ws();
+                        let rest = self.rest();
+                        if rest.starts_with('.')
+                            && rest[1..]
+                                .chars()
+                                .next()
+                                .is_some_and(|c: char| c.is_ascii_alphanumeric())
+                        {
+                            self.pos += 1;
+                            name.push('.');
+                            name.push_str(&self.ident()?);
+                        } else {
+                            break;
+                        }
+                    }
                     Ok(match name.as_str() {
                         "string" => CheckerType::Primitive(PrimitiveKind::String),
                         "number" => CheckerType::Primitive(PrimitiveKind::Number),
@@ -1080,45 +1333,193 @@ pub(crate) mod checker_syntax {
                 if self.eat('}') {
                     return Ok(CheckerType::Object(members));
                 }
-                let name = self.ident()?;
-                if self.eat('?') {
-                    return Err(format!(
-                        "optional members are not modelled (`{}`) — add the optionality \
-                         comparison rule WITH a control when a deep row needs it",
-                        self.text
-                    ));
+                self.skip_ws();
+                if self.rest().starts_with("...") {
+                    members.push(self.elided_more()?);
+                    continue;
                 }
-                self.expect(':')?;
-                let value = self.union()?;
+                let before_readonly = self.pos;
+                let readonly = if self.eat_keyword("readonly") {
+                    // `readonly: T` names a member; the modifier is
+                    // real only when another name follows it.
+                    let after_keyword = self.pos;
+                    self.skip_ws();
+                    let name_follows = self.ident().is_ok();
+                    self.pos = after_keyword;
+                    if name_follows {
+                        true
+                    } else {
+                        self.pos = before_readonly;
+                        false
+                    }
+                } else {
+                    false
+                };
+                // `get`/`set` start an accessor ONLY when a member name
+                // and a parameter list follow; a member NAMED `get`
+                // reads `get: T` instead, so a failed lookahead
+                // backtracks to the keyword as the name.
+                let before_keyword = self.pos;
+                let accessor = if self.eat_keyword("get") || self.eat_keyword("set") {
+                    let get = self.text[self.pos - 3..].starts_with("get");
+                    self.skip_ws();
+                    let save_name = self.pos;
+                    let name_parsed = self.ident().is_ok();
+                    self.skip_ws();
+                    if name_parsed && self.rest().starts_with('(') {
+                        self.pos = save_name;
+                        Some(if get { Accessor::Get } else { Accessor::Set })
+                    } else {
+                        self.pos = before_keyword;
+                        None
+                    }
+                } else {
+                    None
+                };
+                let name = self.ident()?;
+                let optional = self.eat('?');
+                self.skip_ws();
+                if accessor.is_some() || self.rest().starts_with('(') {
+                    // Method (`name(p: T, …): R`) or accessor signature.
+                    if readonly {
+                        return Err(format!(
+                            "a `readonly` modifier on a non-property member is not modelled \
+                             (`{}`)",
+                            self.text
+                        ));
+                    }
+                    self.expect('(')?;
+                    let params = self.param_list()?;
+                    match accessor {
+                        Some(Accessor::Get) => {
+                            if optional {
+                                return Err(format!(
+                                    "an optional getter is not modelled (`{}`)",
+                                    self.text
+                                ));
+                            }
+                            self.expect(':')?;
+                            let ret = self.union()?;
+                            members.push(CheckerMember::Get {
+                                name,
+                                ret: Box::new(ret),
+                            });
+                        }
+                        Some(Accessor::Set) => {
+                            if optional {
+                                return Err(format!(
+                                    "an optional setter is not modelled (`{}`)",
+                                    self.text
+                                ));
+                            }
+                            members.push(CheckerMember::Set { name, params });
+                        }
+                        None => {
+                            self.expect(':')?;
+                            let ret = self.union()?;
+                            members.push(CheckerMember::Method {
+                                name,
+                                optional,
+                                params,
+                                ret: Box::new(ret),
+                            });
+                        }
+                    }
+                } else {
+                    self.expect(':')?;
+                    let value = self.union()?;
+                    members.push(CheckerMember::Property {
+                        name,
+                        optional,
+                        readonly,
+                        ty: value,
+                    });
+                }
                 self.expect(';')?;
-                members.push((name, value));
             }
+        }
+
+        fn elided_more(&mut self) -> Result<CheckerMember, String> {
+            // Positioned at the leading `...` of `... N more ...;`.
+            self.pos += 3;
+            self.skip_ws();
+            let rest = self.rest();
+            let end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            if end == 0 {
+                return Err(format!(
+                    "expected the elided-member count at byte {} of `{}`",
+                    self.pos, self.text
+                ));
+            }
+            let count: usize = rest[..end].parse().map_err(|err| {
+                format!("malformed elided-member count `{}`: {err}", &rest[..end])
+            })?;
+            self.pos += end;
+            self.skip_ws();
+            if !self.rest().starts_with("more") {
+                return Err(format!(
+                    "expected `more` at byte {} of `{}`",
+                    self.pos, self.text
+                ));
+            }
+            self.pos += 4;
+            self.skip_ws();
+            if !self.rest().starts_with("...") {
+                return Err(format!(
+                    "expected the trailing `...` of the elision at byte {} of `{}`",
+                    self.pos, self.text
+                ));
+            }
+            self.pos += 3;
+            self.expect(';')?;
+            Ok(CheckerMember::ElidedMore(count))
+        }
+
+        /// Consume `keyword` only when a member-name boundary follows —
+        /// `readonlyx: T` names a member, not the modifier.
+        fn eat_keyword(&mut self, keyword: &str) -> bool {
+            self.skip_ws();
+            if let Some(after) = self.rest().strip_prefix(keyword) {
+                if after.is_empty()
+                    || !after
+                        .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+                {
+                    self.pos += keyword.len();
+                    return true;
+                }
+            }
+            false
+        }
+
+        /// One `(p: T, q?: U, …)` list — the closing `)` included. The
+        /// opening `(` is already consumed. Parameter names and printed
+        /// optionality are print artifacts; only types and arity are
+        /// compared.
+        fn param_list(&mut self) -> Result<Vec<CheckerType>, String> {
+            let mut params = Vec::new();
+            self.skip_ws();
+            if self.eat(')') {
+                return Ok(params);
+            }
+            loop {
+                let _name = self.ident()?;
+                let _optional = self.eat('?');
+                self.expect(':')?;
+                params.push(self.union()?);
+                if self.eat(',') {
+                    continue;
+                }
+                self.expect(')')?;
+                break;
+            }
+            Ok(params)
         }
 
         fn function(&mut self) -> Result<CheckerType, String> {
             self.expect('(')?;
-            let mut params = Vec::new();
-            self.skip_ws();
-            if !self.eat(')') {
-                loop {
-                    // Parameter NAMES are print artifacts; only the type
-                    // is compared.
-                    let _name = self.ident()?;
-                    if self.eat('?') {
-                        return Err(format!(
-                            "optional parameters are not modelled (`{}`)",
-                            self.text
-                        ));
-                    }
-                    self.expect(':')?;
-                    params.push(self.union()?);
-                    if self.eat(',') {
-                        continue;
-                    }
-                    self.expect(')')?;
-                    break;
-                }
-            }
+            let params = self.param_list()?;
             self.skip_ws();
             if !self.rest().starts_with("=>") {
                 return Err(format!(
@@ -1132,6 +1533,61 @@ pub(crate) mod checker_syntax {
                 params,
                 ret: Box::new(ret),
             })
+        }
+    }
+
+    /// Accessor keyword of a printed member.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Accessor {
+        Get,
+        Set,
+    }
+
+    /// One live object member, unified across the two carriers the
+    /// comparer reads: a closed `Object` surface member and a
+    /// spread-projection positive fact. Facets that a fact carries only
+    /// as `Indeterminate` make the member unmatchable.
+    struct LiveMember<'a> {
+        name: Option<&'a str>,
+        optional: bool,
+        readonly: bool,
+        method_kind: Option<verter_type_expr::ObjectMethodKind>,
+        value: Option<SemanticNodeId>,
+    }
+
+    impl<'a> LiveMember<'a> {
+        fn from_surface_member(member: &'a crate::semantic_query::SurfaceMember) -> LiveMember<'a> {
+            LiveMember {
+                name: member.key.as_string(),
+                optional: member.optional,
+                readonly: member.readonly,
+                method_kind: member.method_kind,
+                value: Some(member.value),
+            }
+        }
+
+        fn from_fact(fact: &'a crate::semantic_query::PositiveKeyFact) -> LiveMember<'a> {
+            let (optional, readonly, method_kind, value) =
+                match (fact.presence(), fact.facets(), fact.value()) {
+                    (
+                        crate::semantic_query::PositiveKeyPresence::Optional,
+                        crate::semantic_query::ProjectionEvidence::Proven(facets),
+                        crate::semantic_query::ProjectionEvidence::Proven(value),
+                    ) => (true, facets.readonly(), facets.method_kind(), Some(*value)),
+                    (
+                        crate::semantic_query::PositiveKeyPresence::Required,
+                        crate::semantic_query::ProjectionEvidence::Proven(facets),
+                        crate::semantic_query::ProjectionEvidence::Proven(value),
+                    ) => (false, facets.readonly(), facets.method_kind(), Some(*value)),
+                    _ => (false, false, None, None),
+                };
+            LiveMember {
+                name: fact.key().as_string(),
+                optional,
+                readonly,
+                method_kind,
+                value,
+            }
         }
     }
 
@@ -1210,23 +1666,17 @@ pub(crate) mod checker_syntax {
                         .all(|(member, arm)| matches_node(dispatch, *member, arm, depth + 1))
             }
             (CheckerType::Object(exp), SemanticNodeData::Object(surface)) => {
-                let members = surface.positive_members();
-                if members.len() != exp.len() {
-                    return false;
-                }
-                let mut used = vec![false; members.len()];
-                exp.iter().all(|(name, value)| {
-                    members.iter().enumerate().any(|(slot, member)| {
-                        if used[slot]
-                            || member.key.as_string() != Some(name.as_str())
-                            || !matches_node(dispatch, member.value, value, depth + 1)
-                        {
-                            return false;
-                        }
-                        used[slot] = true;
-                        true
-                    })
-                })
+                let members: Vec<LiveMember<'_>> = surface
+                    .positive_members()
+                    .iter()
+                    .map(LiveMember::from_surface_member)
+                    .collect();
+                object_members_match(dispatch, &members, exp, depth)
+            }
+            // A live spread PROGRAM is compared through the same public
+            // spread-projection consumer the boundary raises through.
+            (expected, SemanticNodeData::ObjectSpreadProgram(_)) => {
+                spread_formula_matches(dispatch, node, expected, depth)
             }
             (
                 CheckerType::Function { params, ret },
@@ -1236,19 +1686,231 @@ pub(crate) mod checker_syntax {
                     return_type,
                     ..
                 },
-            ) => {
-                // A function print is a Call signature. Construct
-                // (`new (…) => T`) must never satisfy it.
-                *kind == SignatureKind::Call
-                    && got_params.len() == params.len()
-                    && got_params
-                        .iter()
-                        .zip(params.iter())
-                        .all(|(param, exp)| matches_node(dispatch, param.ty, exp, depth + 1))
-                    && matches_node(dispatch, *return_type, ret, depth + 1)
+            ) => function_matches(
+                dispatch,
+                *kind,
+                got_params,
+                *return_type,
+                params,
+                ret,
+                depth,
+            ),
+            _ => false,
+        }
+    }
+
+    /// The shared signature clause: a function print is a Call
+    /// signature. Construct (`new (…) => T`) must never satisfy it.
+    /// Arity is exact; parameter types are ordered.
+    fn function_matches(
+        dispatch: &ProjectSemanticDispatch<'_>,
+        kind: SignatureKind,
+        got_params: &[crate::semantic_query::FunctionParam],
+        return_type: SemanticNodeId,
+        params: &[CheckerType],
+        ret: &CheckerType,
+        depth: usize,
+    ) -> bool {
+        kind == SignatureKind::Call
+            && got_params.len() == params.len()
+            && got_params
+                .iter()
+                .zip(params.iter())
+                .all(|(param, exp)| matches_node(dispatch, param.ty, exp, depth + 1))
+            && matches_node(dispatch, return_type, ret, depth + 1)
+    }
+
+    /// Whether one live member satisfies one printed member. Accessor
+    /// and elided prints match nothing (see [`CheckerMember`]).
+    fn member_matches(
+        dispatch: &ProjectSemanticDispatch<'_>,
+        member: &LiveMember<'_>,
+        expected: &CheckerMember,
+        depth: usize,
+    ) -> bool {
+        match expected {
+            CheckerMember::Property {
+                name,
+                optional,
+                readonly,
+                ty,
+            } => {
+                member.name == Some(name.as_str())
+                    && member.optional == *optional
+                    && member.readonly == *readonly
+                    && member.method_kind.is_none()
+                    && member
+                        .value
+                        .is_some_and(|value| matches_node(dispatch, value, ty, depth + 1))
+            }
+            CheckerMember::Method {
+                name,
+                optional,
+                params,
+                ret,
+            } => {
+                // A method print requires a METHOD-kinded member whose
+                // signature equals the printed function.
+                member.name == Some(name.as_str())
+                    && member.optional == *optional
+                    && member.method_kind == Some(verter_type_expr::ObjectMethodKind::Method)
+                    && member.value.is_some_and(|value| {
+                        let Some(data) = dispatch.graph().node_data(value) else {
+                            return false;
+                        };
+                        let SemanticNodeData::Signature {
+                            kind,
+                            params: got_params,
+                            return_type,
+                            ..
+                        } = data.as_ref()
+                        else {
+                            return false;
+                        };
+                        function_matches(
+                            dispatch,
+                            *kind,
+                            got_params,
+                            *return_type,
+                            params,
+                            ret,
+                            depth,
+                        )
+                    })
+            }
+            // The accessor pair and the elided marker have no canonical
+            // live mapping — fail closed, deliberately.
+            CheckerMember::Get { .. }
+            | CheckerMember::Set { .. }
+            | CheckerMember::ElidedMore(_) => false,
+        }
+    }
+
+    /// Exact member-set equality with injective claiming (duplicate
+    /// printed names claim distinct live members), mirroring the union
+    /// set rule.
+    fn object_members_match(
+        dispatch: &ProjectSemanticDispatch<'_>,
+        members: &[LiveMember<'_>],
+        exp: &[CheckerMember],
+        depth: usize,
+    ) -> bool {
+        if members.len() != exp.len() {
+            return false;
+        }
+        fn assign(
+            dispatch: &ProjectSemanticDispatch<'_>,
+            members: &[LiveMember<'_>],
+            exp: &[CheckerMember],
+            used: &mut [bool],
+            index: usize,
+            depth: usize,
+        ) -> bool {
+            if index == exp.len() {
+                return true;
+            }
+            for (slot, member) in members.iter().enumerate() {
+                if !used[slot] && member_matches(dispatch, member, &exp[index], depth) {
+                    used[slot] = true;
+                    if assign(dispatch, members, exp, used, index + 1, depth) {
+                        return true;
+                    }
+                    used[slot] = false;
+                }
+            }
+            false
+        }
+        let mut used = vec![false; members.len()];
+        assign(dispatch, members, exp, &mut used, 0, depth)
+    }
+
+    /// Compare a printed type against a live object-spread program by
+    /// raising the program through the SAME public spread-projection
+    /// consumer the audited boundary projects through: a printed object
+    /// matches a single-alternative formula; a printed union matches
+    /// the exact alternative set (every constituent an object). Every
+    /// other printed form against a spread program is a cross-variant
+    /// pair and fails closed.
+    fn spread_formula_matches(
+        dispatch: &ProjectSemanticDispatch<'_>,
+        node: SemanticNodeId,
+        expected: &CheckerType,
+        depth: usize,
+    ) -> bool {
+        use crate::semantic_query::ObjectProjectionAlternative;
+        let formula = match dispatch.project_object_spread_for_consumer(
+            node,
+            crate::semantic_query::ObjectProjectionSelector::Surface,
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Expanded,
+            ),
+        ) {
+            crate::semantic_query::QueryResult::Value(formula) => formula,
+            _ => return false,
+        };
+        let arms = formula.alternatives();
+        match expected {
+            CheckerType::Object(members) => {
+                arms.len() == 1
+                    && object_members_match(dispatch, &arm_live_members(&arms[0]), members, depth)
+            }
+            CheckerType::Union(constituents) => {
+                // Every constituent must be an object print; the
+                // alternatives are matched as an exact set.
+                let printed: Option<Vec<&Vec<CheckerMember>>> = constituents
+                    .iter()
+                    .map(|c| match c {
+                        CheckerType::Object(members) => Some(members),
+                        _ => None,
+                    })
+                    .collect();
+                let Some(printed) = printed else {
+                    return false;
+                };
+                if arms.len() != printed.len() {
+                    return false;
+                }
+                fn assign(
+                    dispatch: &ProjectSemanticDispatch<'_>,
+                    arms: &[ObjectProjectionAlternative],
+                    printed: &[&Vec<CheckerMember>],
+                    used: &mut [bool],
+                    index: usize,
+                    depth: usize,
+                ) -> bool {
+                    if index == printed.len() {
+                        return true;
+                    }
+                    for (slot, arm) in arms.iter().enumerate() {
+                        let members = arm_live_members(arm);
+                        if !used[slot]
+                            && object_members_match(dispatch, &members, printed[index], depth)
+                        {
+                            used[slot] = true;
+                            if assign(dispatch, arms, printed, used, index + 1, depth) {
+                                return true;
+                            }
+                            used[slot] = false;
+                        }
+                    }
+                    false
+                }
+                let mut used = vec![false; arms.len()];
+                assign(dispatch, arms, &printed, &mut used, 0, depth)
             }
             _ => false,
         }
+    }
+
+    /// The positive facts of one spread alternative as live members.
+    fn arm_live_members(
+        arm: &crate::semantic_query::ObjectProjectionAlternative,
+    ) -> Vec<LiveMember<'_>> {
+        let mut members = Vec::new();
+        arm.positive().visit(|fact| {
+            members.push(LiveMember::from_fact(fact));
+        });
+        members
     }
 }
 
@@ -2953,6 +3615,408 @@ mod expectation_controls {
                      was deleted as unexercised; reintroduce it only with a row + control \
                      (measured {})",
                     render_node(dispatch, node, 0)
+                );
+            },
+        );
+    }
+
+    /// CONTROL — the D14 checker-print grammar extensions PARSE their
+    /// real corpus spellings and stay STRICT: malformed variants and
+    /// trailing input are loud parse errors (the parser's own rule —
+    /// never exempt silently), one negative leg per new construct.
+    #[test]
+    fn extended_checker_prints_parse_strictly() {
+        use super::checker_syntax;
+        for text in [
+            "{ label: string; m(): number; }",
+            "{ get g(): string; set g(v: string | number); n: number; }",
+            "{ readonly label: string; readonly n: 1; }",
+            "{ label?: string | undefined; }",
+            "Promise<{ label: string; }>",
+            "Generator<{ label: string; }, void, unknown>",
+            "{ v: number | (({ a: number; } | { b: string; }) & Record<\"c\", unknown>); }",
+            "{ label: string; n?: undefined; m: number; } | { label?: undefined; n: number; \
+             m: number; }",
+            // A member NAMED `get`/`set`/`readonly` is a property — the
+            // accessor/modifier lookahead backtracks to the name.
+            "{ get: string; set: number; readonly: boolean; }",
+            // The E03 print: methods with parameters, optional
+            // parameters, dotted references, and the elision marker.
+            "{ toString(): string; toLocaleString(locales: string | string[], options?: \
+             Intl.NumberFormatOptions & Intl.DateTimeFormatOptions): string; ... 37 more \
+             ...; n: number; }",
+        ] {
+            assert!(
+                checker_syntax::parse(text).is_ok(),
+            "the real corpus spelling `{text}` must PARSE into the typed checker-syntax form — \
+             an unparseable deep-pinned checker is an unverified semantic claim"
+            );
+        }
+        // One strict NEGATIVE leg per new construct: malformed input is
+        // a loud error, and trailing input is never silently consumed.
+        for text in [
+            // method: missing return annotation / trailing input
+            "{ m(number; }",
+            "{ m(): number; } trailing",
+            // accessor: setter with a return / trailing input
+            "{ set g(v: string): void; }",
+            "{ get g(): string; } trailing",
+            // readonly modifier: missing colon
+            "{ readonly n 1; }",
+            // optional member: modifier without a type
+            "{ n?; }",
+            // generic arguments: unclosed / empty
+            "Promise<string",
+            "Promise<>",
+            // elision: no count / missing trailing ellipsis
+            "{ ... more ...; }",
+            "{ ... 3 more; }",
+            // dotted reference: dangling qualification
+            "{ a: Intl.; }",
+            // optional parameter: modifier without a type
+            "{ m(a?:): string; }",
+        ] {
+            assert!(
+                checker_syntax::parse(text).is_err(),
+                "malformed or trailing checker print `{text}` must be a LOUD parse error — the \
+             strict trailing-input rule is preserved for every new construct"
+            );
+        }
+    }
+
+    /// CONTROL — the D14 comparison clauses, verdict-directed on LIVE
+    /// nodes: method-kind, `readonly`, member optionality, accessor
+    /// fail-closure, generic-reference fail-closure, elision
+    /// fail-closure, and the spread-formula arms.
+    #[test]
+    fn extended_checker_prints_compare_deliberately() {
+        let accepts =
+            |dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, text: &str| -> bool {
+                let parsed = super::checker_syntax::parse(text)
+                    .unwrap_or_else(|err| panic!("`{text}` must parse: {err}"));
+                super::checker_syntax::matches_node(dispatch, node, &parsed, 0)
+            };
+        // Method members and the spread formula on A15's program.
+        with_flow_node(
+            "function base() { return { label: \"x\" } }\nfunction makeProps() { return { \
+             ...base(), m() { return 1 } } }",
+            "makeProps",
+            |dispatch, node| {
+                assert!(
+                    accepts(dispatch, node, "{ label: string; m(): number; }"),
+                    "precondition: the composed spread surface accepts its own checker print \
+                     (measured {})",
+                    render_node(dispatch, node, 0)
+                );
+                assert!(
+                    !accepts(dispatch, node, "{ label: string; m: () => number; }"),
+                    "a method member spelled as a PROPERTY must be rejected — the \
+                     method-kind clause"
+                );
+                assert!(
+                    !accepts(dispatch, node, "{ readonly label: string; m(): number; }"),
+                    "a `readonly` modifier the composed fact does not carry must be rejected — \
+                     the readonly clause"
+                );
+                assert!(
+                    !accepts(dispatch, node, "{ label: string; ... 1 more ...; }"),
+                    "an ELIDED print must match NOTHING — elided members cannot prove exact \
+                     set equality"
+                );
+            },
+        );
+        // The `readonly` clause on B03's program — the recorded
+        // KnownOwed divergence is exactly this clause.
+        with_flow_node(
+            "function base() { return { label: \"x\" } }\nfunction makeProps() { return { \
+             ...base(), n: 1 } as const }",
+            "makeProps",
+            |dispatch, node| {
+                assert!(
+                    accepts(dispatch, node, "{ label: string; readonly n: 1; }"),
+                    "precondition: the composed facts accept their exact print (label is NOT \
+                     readonly, n IS) — measured {}",
+                    render_node(dispatch, node, 0)
+                );
+                assert!(
+                    !accepts(dispatch, node, "{ readonly label: string; readonly n: 1; }"),
+                    "the `as const` readonly the spread-tainted member loses must be REJECTED — \
+                     this is B03's recorded divergence, so a match here means the surface was \
+                     repaired and the row needs re-pinning"
+                );
+            },
+        );
+        // Member optionality, positive and negative, on a live optional
+        // member.
+        with_flow_node(
+            "function makeProps(o: { n?: number }) { return o }",
+            "makeProps",
+            |dispatch, node| {
+                assert!(
+                    accepts(dispatch, node, "{ n?: number; }"),
+                    "precondition: the optional member accepts its own print (measured {})",
+                    render_node(dispatch, node, 0)
+                );
+                assert!(
+                    !accepts(dispatch, node, "{ n: number; }"),
+                    "a REQUIRED print against an OPTIONAL live member must be rejected — the \
+                     optionality clause"
+                );
+            },
+        );
+        // Accessor prints and accessor-kinded live members on X14's
+        // program: BOTH spellings fail — the accessor arm is
+        // deliberately absent.
+        with_flow_node(
+            "function makeProps() { return { get g(): string { return \"s\" }, set g(v: string \
+             | number) { }, n: 2 } }",
+            "makeProps",
+            |dispatch, node| {
+                assert!(
+                    !accepts(
+                        dispatch,
+                        node,
+                        "{ get g(): string; set g(v: string | number); n: number; }"
+                    ),
+                    "an ACCESSOR print must match NOTHING — the checker's paired accessor is \
+                     one property; the live surface carries the pair as two independent \
+                     members and no canonical mapping exists (measured {})",
+                    render_node(dispatch, node, 0)
+                );
+                assert!(
+                    !accepts(
+                        dispatch,
+                        node,
+                        "{ g: () => string; g: (v: string | number) => void; n: number; }"
+                    ),
+                    "a PROPERTY print against the accessor-kinded live members must be \
+                     rejected — the property clause demands method kind `None`"
+                );
+            },
+        );
+        // Spread-formula UNION arms on H02's program.
+        with_flow_node(
+            "function base(f: boolean) { return f ? { label: \"x\" } : { n: 1 } }\nfunction \
+             makeProps() { return { ...base(true), m: 2 } }",
+            "makeProps",
+            |dispatch, node| {
+                assert!(
+                    accepts(
+                        dispatch,
+                        node,
+                        "{ label: string; m: number; } | { m: number; n: number; }"
+                    ),
+                    "precondition: the two composed alternatives accept their exact union \
+                     print (measured {})",
+                    render_node(dispatch, node, 0)
+                );
+                assert!(
+                    accepts(
+                        dispatch,
+                        node,
+                        "{ m: number; n: number; } | { label: string; m: number; }"
+                    ),
+                    "the alternative set is ORDER-INSENSITIVE"
+                );
+                assert!(
+                    !accepts(dispatch, node, "{ label: string; m: number; }"),
+                    "a SINGLE-object print against a two-alternative formula must be rejected \
+                     — the alternative-count clause"
+                );
+                assert!(
+                    !accepts(
+                        dispatch,
+                        node,
+                        "{ label: string; m: number; } | { m: number; }"
+                    ),
+                    "a SUBSET arm must be rejected — alternatives compare as exact member sets"
+                );
+                assert!(
+                    !accepts(
+                        dispatch,
+                        node,
+                        "{ label: string; n?: undefined; m: number; } | { label?: undefined; \
+                         n: number; m: number; }"
+                    ),
+                    "H02's recorded checker (with the normal-form `?: undefined` cross \
+                     members) must be REJECTED — that divergence is the KnownOwed pin itself"
+                );
+            },
+        );
+        // Generic-argument references fail closed on X18's program.
+        with_flow_node(
+            "async function makeProps() { return { label: \"x\" } }",
+            "makeProps",
+            |dispatch, node| {
+                assert!(
+                    !accepts(dispatch, node, "Promise<{ label: string; }>"),
+                    "a GENERIC-ARGUMENT reference print must match NOTHING — no acceptance arm \
+                     is modelled (measured {})",
+                    render_node(dispatch, node, 0)
+                );
+            },
+        );
+    }
+
+    /// CONTROL — [`ExpectedNode::SpreadObject`]: the composed arms of a
+    /// live spread program, compared on the closed-domain witness and
+    /// the exact member set (name, presence, `readonly`, method kind,
+    /// value), with a negative leg per clause.
+    #[test]
+    fn spread_program_expectations_match_composed_arms() {
+        const LABEL: ExpectedSpreadMember = ExpectedSpreadMember {
+            name: "label",
+            optional: false,
+            readonly: false,
+            kind: None,
+            value: ExpectedNode::Primitive(PrimitiveKind::String),
+        };
+        const M_METHOD: ExpectedSpreadMember = ExpectedSpreadMember {
+            name: "m",
+            optional: false,
+            readonly: false,
+            kind: Some(verter_type_expr::ObjectMethodKind::Method),
+            value: ExpectedNode::Signature {
+                params: &[],
+                ret: &ExpectedNode::Primitive(PrimitiveKind::Number),
+            },
+        };
+        const A15_CLOSED: ExpectedSpreadArm = ExpectedSpreadArm {
+            closed_domain: true,
+            members: &[LABEL, M_METHOD],
+        };
+        with_flow_node(
+            "function base() { return { label: \"x\" } }\nfunction makeProps() { return { \
+             ...base(), m() { return 1 } } }",
+            "makeProps",
+            |dispatch, node| {
+                assert!(
+                    check_node(dispatch, node, &ExpectedNode::SpreadObject(&[A15_CLOSED]))
+                        .is_empty(),
+                    "precondition: the composed closed arm satisfies its pin (measured {})",
+                    render_node(dispatch, node, 0)
+                );
+                const OPEN_ARM: &[ExpectedSpreadArm] = &[ExpectedSpreadArm {
+                    closed_domain: false,
+                    members: &[LABEL, M_METHOD],
+                }];
+                assert!(
+                    !check_node(dispatch, node, &ExpectedNode::SpreadObject(OPEN_ARM)).is_empty(),
+                    "an OPEN-domain expectation against a CLOSED alternative must fail — the \
+                     closed-domain witness clause"
+                );
+                const WRONG_KIND: &[ExpectedSpreadArm] = &[ExpectedSpreadArm {
+                    closed_domain: true,
+                    members: &[
+                        LABEL,
+                        ExpectedSpreadMember {
+                            name: "m",
+                            optional: false,
+                            readonly: false,
+                            kind: None,
+                            value: ExpectedNode::Primitive(PrimitiveKind::Number),
+                        },
+                    ],
+                }];
+                assert!(
+                    !check_node(dispatch, node, &ExpectedNode::SpreadObject(WRONG_KIND)).is_empty(),
+                    "a member pinned as a PROPERTY where the fact carries a METHOD kind must \
+                     fail — the method-kind clause"
+                );
+                const DROPPED: &[ExpectedSpreadArm] = &[ExpectedSpreadArm {
+                    closed_domain: true,
+                    members: &[LABEL],
+                }];
+                assert!(
+                    !check_node(dispatch, node, &ExpectedNode::SpreadObject(DROPPED)).is_empty(),
+                    "a DROPPED member must fail — the member-set clause"
+                );
+            },
+        );
+        // An OPEN arm (E03: the array spread leaves the domain open
+        // with a residual) pins its positive facts exactly.
+        const N_PROP: ExpectedSpreadMember = ExpectedSpreadMember {
+            name: "n",
+            optional: false,
+            readonly: false,
+            kind: None,
+            value: ExpectedNode::Primitive(PrimitiveKind::Number),
+        };
+        const E03_OPEN: &[ExpectedSpreadArm] = &[ExpectedSpreadArm {
+            closed_domain: false,
+            members: &[N_PROP],
+        }];
+        const E03_CLOSED: &[ExpectedSpreadArm] = &[ExpectedSpreadArm {
+            closed_domain: true,
+            members: &[N_PROP],
+        }];
+        with_flow_node(
+            "function makeProps() { return { ...[1, 2], n: 1 } }",
+            "makeProps",
+            |dispatch, node| {
+                assert!(
+                    check_node(dispatch, node, &ExpectedNode::SpreadObject(E03_OPEN)).is_empty(),
+                    "precondition: the open arm pins its exact positive facts (measured {})",
+                    render_node(dispatch, node, 0)
+                );
+                assert!(
+                    !check_node(dispatch, node, &ExpectedNode::SpreadObject(E03_CLOSED)).is_empty(),
+                    "a CLOSED-domain expectation against an OPEN alternative must fail — the \
+                     residual operand is part of the pin"
+                );
+            },
+        );
+        // The alternative SET on H02's program.
+        const M_NUM: ExpectedSpreadMember = ExpectedSpreadMember {
+            name: "m",
+            optional: false,
+            readonly: false,
+            kind: None,
+            value: ExpectedNode::Primitive(PrimitiveKind::Number),
+        };
+        const N_NUM: ExpectedSpreadMember = ExpectedSpreadMember {
+            name: "n",
+            optional: false,
+            readonly: false,
+            kind: None,
+            value: ExpectedNode::Primitive(PrimitiveKind::Number),
+        };
+        const H02_ARMS: &[ExpectedSpreadArm] = &[
+            ExpectedSpreadArm {
+                closed_domain: true,
+                members: &[LABEL, M_NUM],
+            },
+            ExpectedSpreadArm {
+                closed_domain: true,
+                members: &[M_NUM, N_NUM],
+            },
+        ];
+        with_flow_node(
+            "function base(f: boolean) { return f ? { label: \"x\" } : { n: 1 } }\nfunction \
+             makeProps() { return { ...base(true), m: 2 } }",
+            "makeProps",
+            |dispatch, node| {
+                assert!(
+                    check_node(dispatch, node, &ExpectedNode::SpreadObject(H02_ARMS)).is_empty(),
+                    "precondition: the two composed arms satisfy their set pin in this order \
+                     (measured {})",
+                    render_node(dispatch, node, 0)
+                );
+                const SWAPPED: &[ExpectedSpreadArm] = &[H02_ARMS[1], H02_ARMS[0]];
+                assert!(
+                    check_node(dispatch, node, &ExpectedNode::SpreadObject(SWAPPED)).is_empty(),
+                    "the arm set is ORDER-INSENSITIVE"
+                );
+                const SINGLE: &[ExpectedSpreadArm] = &[H02_ARMS[0]];
+                assert!(
+                    !check_node(dispatch, node, &ExpectedNode::SpreadObject(SINGLE)).is_empty(),
+                    "a SINGLE-arm expectation against two alternatives must fail — the arm-set \
+                     clause"
+                );
+                const DUPLICATE: &[ExpectedSpreadArm] = &[H02_ARMS[0], H02_ARMS[0]];
+                assert!(
+                    !check_node(dispatch, node, &ExpectedNode::SpreadObject(DUPLICATE)).is_empty(),
+                    "DUPLICATE arms must claim DISTINCT alternatives — injectivity"
                 );
             },
         );

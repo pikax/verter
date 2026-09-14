@@ -244,15 +244,32 @@ fn assert_runtime_parity(via_backend: &DirectCompileOutput, via_standalone: &Dir
         assert_eq!(backend.dialect(), standalone.dialect());
     }
     assert_eq!(via_backend.diagnostics, via_standalone.diagnostics);
-    assert_eq!(via_backend.styles.len(), via_standalone.styles.len());
-    for (backend_style, standalone_style) in
-        via_backend.styles.iter().zip(via_standalone.styles.iter())
+    assert!(
+        via_backend.styles.is_empty() && via_standalone.styles.is_empty(),
+        "Svelte css publishes only as a stage-qualified style"
+    );
+    assert_eq!(
+        via_backend.qualified_styles.len(),
+        via_standalone.qualified_styles.len()
+    );
+    for (backend_style, standalone_style) in via_backend
+        .qualified_styles
+        .iter()
+        .zip(via_standalone.qualified_styles.iter())
     {
-        assert_eq!(backend_style.code, standalone_style.code);
+        assert_eq!(backend_style.result, standalone_style.result);
+        assert_eq!(
+            backend_style.consumed_stage,
+            standalone_style.consumed_stage
+        );
         assert_eq!(backend_style.source_map, standalone_style.source_map);
-        assert_eq!(backend_style.lang, standalone_style.lang);
+        assert_eq!(backend_style.lang(), standalone_style.lang());
         assert_eq!(backend_style.scope_hash, standalone_style.scope_hash);
         assert_eq!(backend_style.has_global, standalone_style.has_global);
+        assert_eq!(
+            backend_style.output_descriptor,
+            standalone_style.output_descriptor
+        );
     }
 }
 
@@ -409,11 +426,11 @@ fn css_hash_override_is_preserved_and_does_not_hide_an_absent_override() {
         "an explicit css hash override must change the published client"
     );
     assert_eq!(
-        via_override.styles[0].scope_hash.as_deref(),
+        via_override.qualified_styles[0].scope_hash.as_deref(),
         Some("zzoverride1")
     );
     assert_ne!(
-        via_absent.styles[0].scope_hash.as_deref(),
+        via_absent.qualified_styles[0].scope_hash.as_deref(),
         Some("zzoverride1")
     );
     assert_runtime_parity(
@@ -923,9 +940,9 @@ fn injected_css_request_inlines_styles_and_publishes_no_external_artifact() {
         "injected css must emit append_styles:\n{js}"
     );
     assert!(
-        output.styles.is_empty(),
+        output.qualified_styles.is_empty() && output.styles.is_empty(),
         "injected css must not publish an external style artifact, got {:?}",
-        output.styles
+        output.qualified_styles
     );
 }
 
@@ -943,7 +960,7 @@ fn external_css_request_retains_the_external_style_artifact() {
         "external css must not inline append_styles:\n{js}"
     );
     assert_eq!(
-        output.styles.len(),
+        output.qualified_styles.len(),
         1,
         "external css must publish the style artifact"
     );
@@ -964,7 +981,7 @@ fn omitted_css_request_stays_external_without_custom_element_or_inline_injected(
         "omitted css must stay external:\n{js}"
     );
     assert_eq!(
-        output.styles.len(),
+        output.qualified_styles.len(),
         1,
         "omitted css must publish the external style artifact"
     );

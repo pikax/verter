@@ -140,7 +140,11 @@ pub fn compile_client<'a>(
     // `$foo` / `$$foo` reference, an invalid HTML placement) FIRST, so a genuinely
     // malformed component is rejected for being malformed — not later mis-attributed
     // to an unsupported feature, and never accepted as a divergent `Main`.
-    let mut admitted = super::css::AdmittedStyleIrs::default();
+    let mut admitted = super::css::AdmittedStyleIrs::with_continuation(
+        opts.style_continuation
+            .as_ref()
+            .map(|bound| bound.continuation.clone()),
+    );
     super::css::seed_admitted_from_prepared(source, parsed, &opts.prepared_styles, &mut admitted);
     if let Some(rejection) = official_reject::official_reject_gate_with_admitted(
         source,
@@ -286,6 +290,14 @@ pub fn compile_client<'a>(
                 code: style.css_code.clone(),
                 source_map: style.source_map.clone(),
                 has_global: style.has_global,
+                // The parse-domain gate admitted a plan only for a
+                // continuation bound to this block, so its presence names
+                // the consumed space exactly.
+                consumed_stage: if opts.style_continuation.is_some() {
+                    verter_css_syntax::StyleStage::Preprocessed
+                } else {
+                    verter_css_syntax::StyleStage::Authored
+                },
             };
             match style.mode {
                 // An EXTERNAL artifact publishes whenever the style block

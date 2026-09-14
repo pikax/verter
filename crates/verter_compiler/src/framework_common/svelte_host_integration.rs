@@ -284,7 +284,52 @@ pub struct SvelteHostExecutionInputs {
     pub css_hash_override: Option<String>,
     /// Host-retained parsed style IRs in inventory order.
     pub prepared_styles: Vec<Option<crate::style_planner::PreparedStyleIr>>,
+    /// Host-admitted completed external preprocessing results, one slot per
+    /// style block in inventory order. Each present slot is bound to its
+    /// block through the stage-qualified continuation boundary before
+    /// execution; a result that cannot be bound refuses the compile.
+    pub supplied_styles: Vec<Option<SvelteSuppliedStyle>>,
 }
+
+/// One host-admitted, completed external preprocessing result for a style
+/// block, carrying exactly the facts only the host can state.
+#[derive(Debug, Clone)]
+pub struct SvelteSuppliedStyle {
+    /// The tool that produced the bytes. A slot the host names no external
+    /// producer for is `Anonymous`: its bytes are still the block's only
+    /// body, so it continues the block like any other result rather than
+    /// being dropped back onto the authored block.
+    pub producer: verter_css_syntax::PreprocessorIdentity,
+    /// The produced plain-CSS bytes.
+    pub code: Arc<str>,
+    /// Host-minted source space containing `code`.
+    pub source_space_token: String,
+    /// Host-minted identity of the exact produced byte artifact.
+    pub content_artifact_token: String,
+    /// The host-admitted map from `code` back to the authored bytes the tool
+    /// consumed. It is the only way a position in the produced bytes reaches
+    /// the authored block, so a continued block's published css map is
+    /// chained through it, or published absent when there is none.
+    pub source_map: Option<Arc<str>>,
+    /// Diagnostics the producing tool reported, in production order. They
+    /// ride the continuation's result and the published style, never
+    /// dropped at this boundary.
+    pub diagnostics: Vec<verter_css_syntax::StyleDiagnostic>,
+    /// The host's retained parse of exactly these bytes, when admission
+    /// produced one.
+    pub parsed: Option<crate::style_planner::PreparedStyleIr>,
+    /// Content identity of the authored bytes the tool consumed, observed by
+    /// the host under the same fence that selected `code` — not recomputed
+    /// from a later read of the carrier, which would bind a revision the host
+    /// never validated. `None` when the host could not state it: such a
+    /// result is refused, never compiled from the authored block in its
+    /// place.
+    pub consumed_basis: Option<crate::assembly::ContentId>,
+}
+
+/// The refusal code for a supplied style result that could not be bound to
+/// its block as a stage-qualified continuation.
+const STYLE_CONTINUATION_REFUSED: &str = "svelte-runtime-style-continuation-refused";
 
 /// Typed execution refusal. All-or-none: a refusal publishes no product.
 #[derive(Debug)]
@@ -598,7 +643,21 @@ impl SvelteHostIntegrationBackend {
             return Err(SvelteHostCompileRefusal::AdmissionParseMismatch);
         }
         let source = artifact.carrier_source();
-        let opts = derive_admitted_runtime_options(&admission.request, inputs);
+        // Bound before any product runs: a supplied result that does not
+        // describe its block refuses the whole compile, so nothing publishes
+        // or warms from it.
+        let continuations = crate::svelte::carrier::bind_svelte_style_continuations(
+            artifact,
+            &admission.request,
+            &inputs.supplied_styles,
+        )
+        .map_err(|refusal| SvelteHostCompileRefusal::RuntimeSurfaceRefused {
+            diagnostic_code: STYLE_CONTINUATION_REFUSED.to_string(),
+            message: format!("supplied style result cannot continue its block: {refusal:?}"),
+            span: refusal.span(source),
+            diagnostics: Vec::new(),
+        })?;
+        let opts = derive_admitted_runtime_options(&admission.request, inputs, continuations);
         let grants = execution_grants_for_request(&admission.request);
         drop(admission);
         match svelte_carrier_bundle(source, artifact, &opts, alloc, grants) {
@@ -718,6 +777,7 @@ impl FrameworkHostIntegrationBackend<SvelteSfc5, NativeHostEpoch> for SvelteHost
 fn derive_admitted_runtime_options(
     request: &CompileRequest,
     inputs: &SvelteHostExecutionInputs,
+    style_continuations: Vec<Option<super::carrier_compiler::BoundStyleContinuation>>,
 ) -> RuntimeCompileOptions {
     use crate::compile_request::svelte::{
         SvelteFragmentsRequest, SvelteNamespaceRequest, SvelteRunesRequest,
@@ -741,14 +801,22 @@ fn derive_admitted_runtime_options(
         .any(|p| matches!(p, CompileProduct::RuntimeServer(_)));
     let svelte = request.svelte();
 
+    // A continued block's body is its continuation's produced bytes, so the
+    // only parse that can stand in for it is the host's parse of exactly
+    // those bytes; the runtime still verifies it against them before reuse.
     let mut prepared_styles = inputs.prepared_styles.clone();
-    for (index, slot) in inputs.block_content.styles.iter().enumerate() {
-        if let Some(parsed) = slot.as_ref().and_then(|input| input.parsed.clone()) {
-            if prepared_styles.len() <= index {
-                prepared_styles.resize(index + 1, None);
-            }
-            prepared_styles[index] = Some(parsed);
+    for (index, continuation) in style_continuations.iter().enumerate() {
+        if continuation.is_none() {
+            continue;
         }
+        if prepared_styles.len() <= index {
+            prepared_styles.resize(index + 1, None);
+        }
+        prepared_styles[index] = inputs
+            .supplied_styles
+            .get(index)
+            .and_then(Option::as_ref)
+            .and_then(|supplied| supplied.parsed.clone());
     }
 
     RuntimeCompileOptions {
@@ -801,6 +869,7 @@ fn derive_admitted_runtime_options(
         embed_ambient_types: ide.is_some_and(|i| i.embed_ambient_types),
         block_content: inputs.block_content.clone(),
         prepared_styles,
+        style_continuations,
         ..RuntimeCompileOptions::default()
     }
 }
@@ -1406,9 +1475,13 @@ mod tests {
             "the self-contained Main module comes from the one population"
         );
         assert!(
-            !bundle.styles.is_empty(),
+            !bundle.qualified_styles.is_empty(),
             "the scoped-css side-product rides the SAME population — no \
              second compile produced it"
+        );
+        assert!(
+            bundle.styles.is_empty(),
+            "Svelte css publishes only as a stage-qualified style"
         );
         assert!(
             products.runtime_server_bundle().is_none(),
@@ -1733,13 +1806,414 @@ mod tests {
             .expect("produces");
         let style = rendered
             .runtime_bundle()
-            .styles
+            .qualified_styles
             .first()
             .expect("the scoped style side-product");
         assert!(
-            style.code.contains("verter-override-1"),
+            style.result.code().contains("verter-override-1"),
             "the resolved cssHash override is the scope class, got: {}",
-            style.code
+            style.result.code()
+        );
+    }
+
+    /// A block authored in a preprocessor dialect, and the plain CSS its
+    /// preprocessor produced. The authored top-level `$tone: red;` is not
+    /// CSS, so any stage that reads the authored block instead of the
+    /// produced bytes fails the compile.
+    const SCSS_COMPONENT: &str = "<div class=\"card\">x</div>\n<style lang=\"scss\">$tone: red;\n.card { color: $tone; }</style>\n";
+    /// The same component with a plain-css block: it needs no continuation,
+    /// so its output declares the carrier source itself.
+    const CSS_COMPONENT: &str =
+        "<div class=\"card\">x</div>\n<style>.card { color: red; }</style>\n";
+    const PRODUCED: &str = ".card { color: red; }";
+    /// The host-minted identity of the produced bytes. Opaque to the
+    /// compiler, so the tests state a recognisable value and assert the
+    /// published style declares exactly it.
+    const HOST_PRODUCED_SPACE: &str = "host-space:produced-css";
+    const HOST_PRODUCED_ARTIFACT: &str = "host-artifact:produced-css";
+
+    fn authored_style_basis(source: &str) -> crate::assembly::ContentId {
+        let parsed = crate::svelte::parse_svelte(source);
+        let content = parsed.styles[0]
+            .content
+            .expect("the style block has a body");
+        crate::assembly::ContentId::from_content_bytes(
+            &source.as_bytes()[content.start as usize..content.end as usize],
+        )
+    }
+
+    fn supplied_style(
+        consumed_basis: Option<crate::assembly::ContentId>,
+        parsed: Option<crate::style_planner::PreparedStyleIr>,
+    ) -> SvelteSuppliedStyle {
+        SvelteSuppliedStyle {
+            producer: verter_css_syntax::PreprocessorIdentity::Named(
+                verter_css_syntax::ExternalStyleProducer::new("sass", Some("1.77.0"), None)
+                    .expect("named producer"),
+            ),
+            code: Arc::from(PRODUCED),
+            source_space_token: HOST_PRODUCED_SPACE.to_string(),
+            content_artifact_token: HOST_PRODUCED_ARTIFACT.to_string(),
+            source_map: None,
+            diagnostics: Vec::new(),
+            parsed,
+            consumed_basis,
+        }
+    }
+
+    /// The diagnostics the producing tool reported survive the continuation
+    /// boundary: they ride the published stylesheet in production order, at
+    /// their stated severity and in the space each names, rather than being
+    /// replaced by an empty list when the result is bound.
+    #[test]
+    fn a_continued_style_publishes_its_producers_diagnostics() {
+        use verter_css_syntax::{StyleDiagnostic, StyleDiagnosticSeverity, StyleStage};
+
+        let reported = vec![
+            StyleDiagnostic::with_severity(
+                StyleStage::Authored,
+                StyleDiagnosticSeverity::Warning,
+                "deprecated division",
+                None,
+            ),
+            StyleDiagnostic::new(
+                StyleStage::Preprocessed,
+                "suspicious selector",
+                Some(verter_span::Span::new(0, 5)),
+            ),
+        ];
+        let supplied = SvelteSuppliedStyle {
+            diagnostics: reported.clone(),
+            ..supplied_style(Some(authored_style_basis(SCSS_COMPONENT)), None)
+        };
+        let bundle = render_with_styles(SCSS_COMPONENT, vec![Some(supplied)])
+            .expect("a continued block compiles");
+        let style = bundle
+            .qualified_styles
+            .first()
+            .expect("the scoped stylesheet");
+        assert_eq!(
+            style.result.diagnostics(),
+            reported.as_slice(),
+            "the producer's diagnostics reach the published style"
+        );
+
+        let authored =
+            render_with_styles(CSS_COMPONENT, Vec::new()).expect("an authored css block compiles");
+        assert!(
+            authored.qualified_styles[0].result.diagnostics().is_empty(),
+            "an authored block has no producer to report"
+        );
+    }
+
+    fn render_with_styles(
+        source: &str,
+        supplied_styles: Vec<Option<SvelteSuppliedStyle>>,
+    ) -> Result<RuntimeCompileOutput, SvelteHostCompileRefusal> {
+        render_with_styles_for(
+            source,
+            SvelteHostRuntimeRenderDemand::default(),
+            supplied_styles,
+        )
+    }
+
+    fn render_with_styles_for(
+        source: &str,
+        demand: SvelteHostRuntimeRenderDemand,
+        supplied_styles: Vec<Option<SvelteSuppliedStyle>>,
+    ) -> Result<RuntimeCompileOutput, SvelteHostCompileRefusal> {
+        let artifact = svelte_artifact(source);
+        let admission = SvelteHostIntegrationBackend::new()
+            .admit_runtime_render(&artifact, demand)
+            .expect("admits");
+        let alloc = oxc_allocator::Allocator::new();
+        SvelteHostIntegrationBackend::new()
+            .compile_runtime_render(
+                admission,
+                &artifact,
+                &SvelteHostExecutionInputs {
+                    supplied_styles,
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .map(|rendered| rendered.bundle)
+    }
+
+    #[test]
+    fn a_supplied_style_result_is_the_only_body_its_block_scopes() {
+        use verter_css_syntax::StyleStage;
+
+        let bundle = render_with_styles(
+            SCSS_COMPONENT,
+            vec![Some(supplied_style(
+                Some(authored_style_basis(SCSS_COMPONENT)),
+                None,
+            ))],
+        )
+        .expect("a continued block compiles");
+        assert!(bundle.styles.is_empty(), "no unqualified style publishes");
+        let style = bundle
+            .qualified_styles
+            .first()
+            .expect("the scoped stylesheet");
+        let css = style.result.code();
+        assert!(
+            css.contains(".card.svelte-") && css.contains("color: red"),
+            "the produced bytes are the scoped body: {css}"
+        );
+        assert!(
+            !css.contains("$tone"),
+            "the authored block is never scoped in its result's place: {css}"
+        );
+        assert_eq!(style.consumed_stage, StyleStage::Preprocessed);
+        assert_eq!(style.result.stage(), StyleStage::FrameworkRewritten);
+        let hash = style.scope_hash.as_deref().expect("scoped by class");
+        let main = bundle.main.body_code.as_deref().expect("the main module");
+        assert!(
+            main.contains(&format!("card {hash}")),
+            "the markup carries the continued stylesheet's scope class: {main}"
+        );
+
+        // Without its result the authored block never enters scoping.
+        let refusal = render_with_styles(SCSS_COMPONENT, Vec::new())
+            .expect_err("an authored preprocessor dialect cannot be scoped");
+        assert!(
+            matches!(
+                refusal,
+                SvelteHostCompileRefusal::RuntimeSurfaceRefused { .. }
+            ),
+            "{refusal:?}"
+        );
+    }
+
+    /// A continued block's published output declares the HOST's identity for
+    /// the produced bytes it rendered from. Minting a carrier space over the
+    /// same bytes here would address them under an identity nothing else in
+    /// the host holds, so the host's produced-to-authored map chain could no
+    /// longer be joined to this one.
+    #[test]
+    fn a_continued_style_declares_the_hosts_produced_space_not_a_minted_one() {
+        use crate::framework_common::carrier_compiler::RuntimeOutputDescriptor;
+
+        let bundle = render_with_styles(
+            SCSS_COMPONENT,
+            vec![Some(supplied_style(
+                Some(authored_style_basis(SCSS_COMPONENT)),
+                None,
+            ))],
+        )
+        .expect("a continued block compiles");
+        let declared = &bundle
+            .qualified_styles
+            .first()
+            .expect("the scoped stylesheet")
+            .output_descriptor
+            .source_map
+            .declared_space_tokens;
+        assert_eq!(
+            declared.as_slice(),
+            &[HOST_PRODUCED_SPACE.to_string()],
+            "the continued css map declares the host's produced space"
+        );
+        let (minted, _) = RuntimeOutputDescriptor::carrier_source(PRODUCED);
+        assert_ne!(
+            declared.first().map(String::as_str),
+            Some(minted.as_str()),
+            "a space minted over the produced bytes is not an identity the host knows"
+        );
+
+        // An AUTHORED block has no host-supplied space: it still declares the
+        // carrier source it actually rendered from.
+        let authored =
+            render_with_styles(CSS_COMPONENT, Vec::new()).expect("an authored css block compiles");
+        let (carrier, _) = RuntimeOutputDescriptor::carrier_source(CSS_COMPONENT);
+        assert_eq!(
+            authored
+                .qualified_styles
+                .first()
+                .expect("the scoped stylesheet")
+                .output_descriptor
+                .source_map
+                .declared_space_tokens
+                .as_slice(),
+            &[carrier],
+            "an authored block declares its carrier source"
+        );
+    }
+
+    /// A continued block's css map reaches the AUTHORED block through the
+    /// host's produced-to-authored map. The bare render map addresses the
+    /// produced bytes under the carrier's name, so publishing it would label
+    /// preprocessor-output positions as `.svelte` ones; with no host map there
+    /// is no honest map, and none publishes.
+    #[test]
+    fn a_continued_style_map_is_chained_through_the_hosts_produced_to_authored_map() {
+        use oxc_sourcemap::{SourceMap, SourceMapBuilder};
+
+        const AUTHORED_BODY: &str = "$tone: red;\n.card { color: $tone; }";
+        // The produced `.card` (line 0, column 0) was made from authored
+        // line 1, column 0.
+        let host_map = {
+            let mut builder = SourceMapBuilder::default();
+            let id = builder.add_source_and_content("Card.scss", AUTHORED_BODY);
+            builder.add_token(0, 0, 1, 0, Some(id), None);
+            builder.into_sourcemap().to_json_string()
+        };
+        let demand = || SvelteHostRuntimeRenderDemand {
+            runtime: RuntimeProductRequest {
+                runtime_source_map: true,
+                ..Default::default()
+            },
+            filename: Some("Card.svelte".to_string()),
+            ..Default::default()
+        };
+        let continued = |source_map: Option<&str>| {
+            let supplied = SvelteSuppliedStyle {
+                source_map: source_map.map(Arc::from),
+                ..supplied_style(Some(authored_style_basis(SCSS_COMPONENT)), None)
+            };
+            render_with_styles_for(SCSS_COMPONENT, demand(), vec![Some(supplied)])
+                .expect("a continued block compiles")
+        };
+        let sources = |json: &str| -> Vec<String> {
+            SourceMap::from_json_string(json)
+                .expect("a published map is valid")
+                .get_sources()
+                .map(str::to_string)
+                .collect()
+        };
+
+        let bundle = continued(Some(&host_map));
+        let style = bundle
+            .qualified_styles
+            .first()
+            .expect("the scoped stylesheet");
+        let json = style
+            .source_map
+            .as_deref()
+            .expect("a demanded map is chained through the host's");
+        assert_eq!(
+            sources(json),
+            ["Card.scss"],
+            "the chained map names the authored source, not the carrier: {json}"
+        );
+        let css = style.result.code();
+        let offset = css.find(".card").expect("the rendered selector");
+        let line = css[..offset].matches('\n').count() as u32;
+        let column = (offset - css[..offset].rfind('\n').map_or(0, |at| at + 1)) as u32;
+        let map = SourceMap::from_json_string(json).expect("a published map is valid");
+        let table = map.generate_lookup_table();
+        let token = map
+            .lookup_token(&table, line, column)
+            .expect("the rendered selector is mapped");
+        assert_eq!(
+            (token.get_src_line(), token.get_src_col()),
+            (1, 0),
+            "the rendered selector resolves to its authored position"
+        );
+
+        let unmapped = continued(None);
+        assert!(
+            unmapped
+                .qualified_styles
+                .first()
+                .expect("the scoped stylesheet")
+                .source_map
+                .is_none(),
+            "without the host's map a continued block publishes no map, never the bare render map"
+        );
+
+        // Control: the demand is live, and an authored block's own render
+        // map is published naming its carrier.
+        let authored = render_with_styles_for(CSS_COMPONENT, demand(), Vec::new())
+            .expect("an authored css block compiles");
+        let authored_map = authored
+            .qualified_styles
+            .first()
+            .expect("the scoped stylesheet")
+            .source_map
+            .as_deref()
+            .expect("an authored block publishes its render map");
+        assert_eq!(sources(authored_map), ["Card.svelte"]);
+    }
+
+    #[test]
+    fn a_supplied_style_result_that_does_not_describe_its_block_refuses_the_compile() {
+        let postcss = "<div class=\"card\">x</div>\n<style lang=\"postcss\">$tone: red;\n.card { color: $tone; }</style>\n".to_string();
+        let stale = crate::assembly::ContentId::from_content_bytes(b".card { color: $other; }");
+        let cases = [
+            (
+                "stale basis",
+                SCSS_COMPONENT.to_string(),
+                vec![Some(supplied_style(Some(stale), None))],
+            ),
+            (
+                "missing basis",
+                SCSS_COMPONENT.to_string(),
+                vec![Some(supplied_style(None, None))],
+            ),
+            (
+                "unknown authored dialect",
+                postcss.clone(),
+                vec![Some(supplied_style(
+                    Some(authored_style_basis(&postcss)),
+                    None,
+                ))],
+            ),
+            (
+                "no block at the slot",
+                SCSS_COMPONENT.to_string(),
+                vec![
+                    None,
+                    Some(supplied_style(
+                        Some(authored_style_basis(SCSS_COMPONENT)),
+                        None,
+                    )),
+                ],
+            ),
+        ];
+        for (case, source, supplied) in cases {
+            let refusal = render_with_styles(&source, supplied).expect_err(case);
+            assert!(
+                matches!(
+                    &refusal,
+                    SvelteHostCompileRefusal::RuntimeSurfaceRefused { diagnostic_code, .. }
+                        if diagnostic_code == STYLE_CONTINUATION_REFUSED
+                ),
+                "{case}: {refusal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_continued_block_parses_its_produced_bytes_at_most_once() {
+        let basis = authored_style_basis(SCSS_COMPONENT);
+        let hint = crate::style_planner::prepare_supplied_style(
+            verter_css_syntax::PreprocessedStyle::admitted(
+                PRODUCED,
+                verter_css_syntax::PreprocessorIdentity::Anonymous,
+            ),
+        )
+        .expect("the produced css parses");
+        let parses = |parsed: Option<crate::style_planner::PreparedStyleIr>| {
+            let before = verter_css_syntax::parse_style_ir_thread_invocations();
+            render_with_styles(
+                SCSS_COMPONENT,
+                vec![Some(supplied_style(Some(basis.clone()), parsed))],
+            )
+            .expect("a continued block compiles");
+            verter_css_syntax::parse_style_ir_thread_invocations() - before
+        };
+        assert_eq!(
+            parses(Some(hint)),
+            0,
+            "the host's parse of the produced bytes is reused"
+        );
+        assert_eq!(
+            parses(None),
+            1,
+            "without it, the produced bytes parse exactly once"
         );
     }
 

@@ -68,9 +68,10 @@ use crate::framework_common::vue_runtime_backend::{
     vue_runtime_backend_registration, VueRuntimeBackend,
 };
 use crate::framework_common::{
-    CompileUnsupported, IdeOutput, RuntimeBlockContentInput, RuntimeBlockContentInputs,
-    RuntimeCompileOptions, RuntimeCompileOutput, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
-    RuntimeOutputDescriptor, RuntimeStyleBlock, RuntimeSurfaceRefusal, SourceMapFidelity,
+    CompileUnsupported, IdeOutput, QualifiedRuntimeStyle, RuntimeBlockContentInput,
+    RuntimeBlockContentInputs, RuntimeCompileOptions, RuntimeCompileOutput, RuntimeDiagnostic,
+    RuntimeDiagnosticSeverity, RuntimeOutputDescriptor, RuntimeStyleBlock, RuntimeSurfaceRefusal,
+    SourceMapFidelity,
 };
 use crate::parser::types::{sfc_script_dialect, ParsedSfc, SfcScriptDialect};
 use crate::style_planner::{
@@ -164,6 +165,10 @@ pub enum DirectExecutionInputs<'a> {
 pub struct DirectCompileOutput {
     pub artifacts: ArtifactSet,
     pub styles: Vec<RuntimeStyleBlock>,
+    /// Stage-qualified style outputs — Svelte's external scoped-css
+    /// artifact. A compile publishes its styles here or in
+    /// [`Self::styles`], never both.
+    pub qualified_styles: Vec<QualifiedRuntimeStyle>,
     pub diagnostics: Vec<CompileDiagnostic>,
 }
 
@@ -1685,6 +1690,7 @@ pub(crate) fn compile_vue_parsed_runtime(
     Ok(DirectCompileOutput {
         artifacts,
         styles: primary.bundle.styles,
+        qualified_styles: Vec::new(),
         diagnostics,
     })
 }
@@ -2071,6 +2077,10 @@ impl SvelteRuntimeBackend {
             css: None,
             custom_element_descriptor: None,
             prepared_styles: opts.prepared_styles.clone(),
+            // A Svelte component has one top-level `<style>`: the first
+            // inventory slot. The runtime refuses a continuation that slot's
+            // block does not bind.
+            style_continuation: opts.style_continuations.first().cloned().flatten(),
         };
         // `opts.source_map` is the neutral OUTPUT-axis map demand: it reaches
         // the css RENDER through `compile_client`'s `want_source_map` (never
@@ -2082,26 +2092,15 @@ impl SvelteRuntimeBackend {
                 bundle.main.lang = Some("js".to_string());
                 // The EXTERNAL scoped-css artifact (the official
                 // `compiled.css` — `{ code, map, hasGlobal }` + the scope
-                // hash): it publishes as the bundle's style block (the Svelte
-                // analogue of the Vue styles population). Injected-mode css is
-                // inlined in the module (no artifact), and a style-less
-                // component has none.
+                // hash) publishes as the bundle's stage-qualified style.
+                // Injected-mode css is inlined in the module (no artifact),
+                // and a style-less component has none.
                 if let Some(css) = module.css {
-                    let (space, artifact) = RuntimeOutputDescriptor::carrier_source(source);
-                    let output_descriptor = RuntimeOutputDescriptor::generated(
-                        &css.code,
-                        css.source_map.as_deref(),
-                        &[(space.as_str(), artifact.as_str())],
-                        SourceMapFidelity::Approximate,
-                    );
-                    bundle.styles.push(RuntimeStyleBlock {
-                        code: css.code,
-                        source_map: css.source_map,
-                        lang: None,
-                        scope_hash: Some(css.hash),
-                        has_global: css.has_global,
-                        output_descriptor,
-                    });
+                    bundle.qualified_styles.push(qualified_svelte_style(
+                        source,
+                        css,
+                        runtime_opts.style_continuation.as_ref(),
+                    ));
                 }
                 Ok(())
             }
@@ -2519,6 +2518,7 @@ impl StandaloneCompiler {
         Ok(DirectCompileOutput {
             artifacts,
             styles,
+            qualified_styles: Vec::new(),
             diagnostics,
         })
     }
@@ -2590,7 +2590,7 @@ impl StandaloneCompiler {
 
         let mut validated_fragments = Vec::new();
         let mut pending: Vec<PendingRuntime> = Vec::new();
-        let mut styles: Vec<RuntimeStyleBlock> = Vec::new();
+        let mut styles: Vec<QualifiedRuntimeStyle> = Vec::new();
 
         // Iterate the SAME capability answer the plan preflight used, so a
         // kind this loop can build and a kind the preflight admits cannot
@@ -2602,33 +2602,23 @@ impl StandaloneCompiler {
             }
             let ssr = kind == ProductKind::RuntimeServer;
             let want_maps = runtime_source_map_wanted(request, kind);
-            let module = compile_client(source, parsed, &opts, &allocator, ssr, want_maps)
+            let mut module = compile_client(source, parsed, &opts, &allocator, ssr, want_maps)
                 .map_err(DirectCompileError::Svelte)?;
 
             // The EXTERNAL scoped-css artifact — the Svelte analogue of
-            // Vue's own `<style>` blocks — mirrors the production host
-            // route's identical conversion
-            // (`SvelteRuntimeBackend::compile_bundle_runtime`'s
-            // `RuntimeStyleBlock` population). Style content does not vary
-            // between client/server compiles of the SAME source, so it is
-            // taken from whichever kind's compile produces it first.
+            // Vue's own `<style>` blocks — goes through the same
+            // stage-qualified conversion as the production host route
+            // (`SvelteRuntimeBackend::compile_bundle_runtime`). Style content
+            // does not vary between client/server compiles of the SAME
+            // source, so it is taken from whichever kind's compile produces
+            // it first.
             if styles.is_empty() {
-                if let Some(css) = &module.css {
-                    let (space, artifact) = RuntimeOutputDescriptor::carrier_source(source);
-                    let output_descriptor = RuntimeOutputDescriptor::generated(
-                        &css.code,
-                        css.source_map.as_deref(),
-                        &[(space.as_str(), artifact.as_str())],
-                        crate::framework_common::SourceMapFidelity::Approximate,
-                    );
-                    styles.push(RuntimeStyleBlock {
-                        code: css.code.clone(),
-                        source_map: css.source_map.clone(),
-                        lang: None,
-                        scope_hash: Some(css.hash.clone()),
-                        has_global: css.has_global,
-                        output_descriptor,
-                    });
+                if let Some(css) = module.css.take() {
+                    styles.push(qualified_svelte_style(
+                        source,
+                        css,
+                        opts.style_continuation.as_ref(),
+                    ));
                 }
             }
 
@@ -2678,7 +2668,8 @@ impl StandaloneCompiler {
         let artifacts = publish(&plan, contributions)?;
         Ok(DirectCompileOutput {
             artifacts,
-            styles,
+            styles: Vec::new(),
+            qualified_styles: styles,
             diagnostics: Vec::new(),
         })
     }
@@ -3103,6 +3094,9 @@ fn direct_svelte_runtime_options(
         css: svelte_request.css,
         custom_element_descriptor,
         prepared_styles: execution_inputs.prepared_styles.clone(),
+        // The direct route carries no host-admitted preprocessing result:
+        // every style block it compiles is the carrier's own.
+        style_continuation: None,
     })
 }
 
@@ -3321,6 +3315,91 @@ fn hash_output_descriptor(hasher: &mut blake3::Hasher, descriptor: &RuntimeOutpu
     hasher.update(&[descriptor.source_map.fidelity as u8]);
 }
 
+/// Publish a Svelte external scoped-css artifact as the stage-qualified style
+/// output: the rendered bytes as a framework-rewritten result, declared over
+/// the one byte space the render consumed — the carrier source for an
+/// authored block, or the bound continuation's produced bytes. The css map,
+/// when demanded, addresses that same space.
+///
+/// A continued block declares the HOST-minted identity of the produced bytes,
+/// never a carrier space minted here over them. The host holds the
+/// produced-to-authored map under exactly those tokens, so declaring them is
+/// what keeps this map chain joinable back to the authored `.svelte` block;
+/// a locally minted space would address the same bytes under an identity
+/// nothing else in the host knows.
+///
+/// A continued block's render map addresses the produced bytes while naming
+/// the carrier file, so it is never published as is: it is chained through
+/// the host's produced-to-authored map, exactly as a supplied Vue block's
+/// map is. With no host map, or one the chain cannot read, the map is
+/// published absent rather than mis-mapped.
+///
+/// The diagnostics the producing tool reported ride the published result in
+/// production order, each still naming the space its position is in.
+fn qualified_svelte_style(
+    source: &str,
+    css: crate::svelte::runtime::client::ScopedCssArtifact,
+    continuation: Option<&crate::framework_common::carrier_compiler::BoundStyleContinuation>,
+) -> QualifiedRuntimeStyle {
+    let render_map = css.source_map;
+    let (space, artifact, source_map) = match continuation {
+        Some(bound) => (
+            bound.source_space_token.clone(),
+            bound.content_artifact_token.clone(),
+            render_map.as_deref().and_then(|render| {
+                let host = bound.source_map.as_deref().filter(|map| !map.is_empty())?;
+                chain_generated_map_json(render, host)
+            }),
+        ),
+        None => {
+            let (space, artifact) = RuntimeOutputDescriptor::carrier_source(source);
+            (space, artifact, render_map)
+        }
+    };
+    let diagnostics = continuation
+        .map(|bound| bound.continuation.diagnostics().to_vec())
+        .unwrap_or_default();
+    let output_descriptor = RuntimeOutputDescriptor::generated(
+        &css.code,
+        source_map.as_deref(),
+        &[(space.as_str(), artifact.as_str())],
+        SourceMapFidelity::Approximate,
+    );
+    QualifiedRuntimeStyle {
+        result: verter_css_syntax::QualifiedStyleResult::framework_rewritten(
+            CssDialect::Css,
+            css.code,
+            diagnostics,
+        ),
+        consumed_stage: css.consumed_stage,
+        source_map,
+        scope_hash: Some(css.hash),
+        has_global: css.has_global,
+        output_descriptor,
+    }
+}
+
+fn style_stage_rank(stage: verter_css_syntax::StyleStage) -> usize {
+    match stage {
+        verter_css_syntax::StyleStage::Authored => 0,
+        verter_css_syntax::StyleStage::Preprocessed => 1,
+        verter_css_syntax::StyleStage::FrameworkRewritten => 2,
+    }
+}
+
+fn hash_opt_span(hasher: &mut blake3::Hasher, span: Option<verter_span::Span>) {
+    match span {
+        Some(span) => {
+            hasher.update(&[1u8]);
+            hasher.update(&span.start.to_le_bytes());
+            hasher.update(&span.end.to_le_bytes());
+        }
+        None => {
+            hasher.update(&[0u8]);
+        }
+    }
+}
+
 /// A canonical, length-prefixed blake3 digest over every field
 /// [`AssembledArtifact`]/[`RuntimeStyleBlock`]/[`CompileDiagnostic`] actually
 /// expose: per-artifact `kind`/`code`/`dialect`/both source-map slots, hashed
@@ -3363,21 +3442,31 @@ pub fn direct_compile_output_digest(output: &DirectCompileOutput) -> [u8; 32] {
         hash_output_descriptor(&mut hasher, &style.output_descriptor);
     }
 
+    hash_usize(&mut hasher, output.qualified_styles.len());
+    for style in &output.qualified_styles {
+        hash_len_prefixed_str(&mut hasher, style.result.code());
+        hash_usize(&mut hasher, style_stage_rank(style.result.stage()));
+        hash_usize(&mut hasher, style_stage_rank(style.consumed_stage));
+        hash_len_prefixed_opt_str(&mut hasher, style.source_map.as_deref());
+        hash_len_prefixed_opt_str(&mut hasher, style.scope_hash.as_deref());
+        hasher.update(&[style.has_global as u8]);
+        hash_output_descriptor(&mut hasher, &style.output_descriptor);
+        let diagnostics = style.result.diagnostics();
+        hash_usize(&mut hasher, diagnostics.len());
+        for diagnostic in diagnostics {
+            hash_usize(&mut hasher, style_stage_rank(diagnostic.stage()));
+            hash_usize(&mut hasher, diagnostic.severity() as usize);
+            hash_len_prefixed_str(&mut hasher, diagnostic.message());
+            hash_opt_span(&mut hasher, diagnostic.span());
+        }
+    }
+
     hash_usize(&mut hasher, output.diagnostics.len());
     for diagnostic in &output.diagnostics {
         hash_usize(&mut hasher, diagnostic.severity as usize);
         hash_len_prefixed_str(&mut hasher, &diagnostic.code);
         hash_len_prefixed_str(&mut hasher, &diagnostic.message);
-        match diagnostic.span {
-            Some(span) => {
-                hasher.update(&[1u8]);
-                hasher.update(&span.start.to_le_bytes());
-                hasher.update(&span.end.to_le_bytes());
-            }
-            None => {
-                hasher.update(&[0u8]);
-            }
-        }
+        hash_opt_span(&mut hasher, diagnostic.span);
     }
 
     *hasher.finalize().as_bytes()
@@ -3724,12 +3813,17 @@ mod tests {
         let output = StandaloneCompiler
             .compile(SVELTE_STYLED_SOURCE, &request, svelte_inputs())
             .expect("a styled Svelte RuntimeClient compile must not be refused");
-        assert_eq!(output.styles.len(), 1, "the one <style> block must publish");
         assert!(
-            output.styles[0].code.contains("color: red"),
-            "got:\n{}",
-            output.styles[0].code
+            output.styles.is_empty(),
+            "Svelte css publishes only as a stage-qualified style"
         );
+        assert_eq!(
+            output.qualified_styles.len(),
+            1,
+            "the one <style> block must publish"
+        );
+        let css = output.qualified_styles[0].result.code();
+        assert!(css.contains("color: red"), "got:\n{css}");
     }
 
     #[test]

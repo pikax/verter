@@ -9548,3 +9548,461 @@ fn flow_return_clause_entry_restore_excludes_every_executed_write() {
         "changing write read inside the finally"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Flow/query convergence over a selective operand: the flow rail retains
+// a demanded callee's selective return type as a CARRIER and admits the
+// complete result without forcing it; the consumer's demand forces the
+// carrier through the one shared query graph, where the dead branch
+// costs zero semantic work, zero dependency facts, and no candidate.
+// ────────────────────────────────────────────────────────────────────────
+
+/// The file every DEAD branch declaration lives in. A whole-hash fact of
+/// this file inside a measured window is a dead-operand dependency read.
+const CONV_DEAD: &str = "/ws/conv_dead.ts";
+const CONV_OWNER: &str = "/ws/conv_owner.ts";
+
+/// The two revisions of the dead file, and the two dead-branch spellings
+/// of the owner. Every incremental step below names the pair it is at, so
+/// the same pair can be replayed on a FRESH host as the oracle.
+const CONV_DEAD_V0: &str = "export type DeadDeclared = { dropped: \"no\" };\n";
+const CONV_DEAD_V1: &str = "export type DeadDeclared = { dropped: \"changed\" };\n";
+const CONV_FALSE_V0: &str = "DeadShell";
+const CONV_FALSE_V1: &str = "DeadShell | { extra: \"e\" }";
+
+/// The dead branch reaches the dead file only through a LOCAL alias
+/// shell: minting the shell's `DeclRef` records no fact of the dead file
+/// (shallow indexing of an import route is not semantic work), so only
+/// FORCING the dead branch can read it.
+fn conv_owner_source(false_branch: &str) -> String {
+    format!(
+        "import type {{ DeadDeclared }} from \"{CONV_DEAD}\";\n\
+         export type DeadShell = DeadDeclared;\n\
+         export type Cond<T> = T extends string ? {{ picked: \"yes\" }} : {false_branch};\n\
+         export declare function pick(): Cond<string>;\n\
+         export declare function pickDead(): Cond<number>;\n\
+         export function makeProps() {{ return {{ v: pick() }} }}\n\
+         export function makeDead() {{ return {{ v: pickDead() }} }}\n"
+    )
+}
+
+fn conv_upsert(host: &VerterHost, canonical: &str, source: String) {
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(source),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+}
+
+/// Run `f` under the host's fact tracer and count the finalised facts
+/// naming the dead file. A non-cacheable or overflowed tracer is a fixture
+/// fault, never a zero.
+fn conv_dead_file_fact_reads<R>(host: &VerterHost, f: impl FnOnce() -> R) -> (R, usize) {
+    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
+    let (value, read_set) =
+        host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, f);
+    let facts = match read_set.finalise() {
+        FactReadSetFinalise::Ok(facts) => facts,
+        other => panic!("convergence tracer must finalise on a tiny fixture: {other:?}"),
+    };
+    let dead = facts
+        .iter()
+        .filter(|fact| {
+            matches!(
+                fact,
+                FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == CONV_DEAD
+            )
+        })
+        .count();
+    (value, dead)
+}
+
+fn conv_flow_key(dispatch: &ProjectSemanticDispatch<'_>, name: &str) -> FlowReturnKey {
+    FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(CONV_OWNER),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(CONV_OWNER),
+        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
+    }
+}
+
+/// The consumer's demand: walk member `v` of the published flow node in
+/// the published `Expanded` mode — the same shared `ProjectPath` route
+/// every consumer takes to read a member of a resolved return surface.
+fn conv_member_demand(base: SemanticNodeId) -> SemanticQueryKey {
+    use crate::semantic_query::{
+        PathSegment, ProjectionMode, ProjectionReductionContext, PropertyKey,
+    };
+    SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(
+            vec![PathSegment::Member(PropertyKey::identifier(Arc::from("v")))].into_boxed_slice(),
+        ),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }
+}
+
+fn conv_execute_node(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    key: SemanticQueryKey,
+) -> SemanticNodeId {
+    match dispatch.execute(key) {
+        QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::TypeNode(node),
+            ..
+        }) => node,
+        other => panic!("the member demand must resolve to a type node, got {other:?}"),
+    }
+}
+
+/// The single property of a projected object surface: `(key, value)`.
+fn conv_sole_property(expr: &verter_type_expr::TypeExpr) -> (String, verter_type_expr::TypeExpr) {
+    let verter_type_expr::TypeExpr::Object(object) = expr else {
+        panic!("expected an object surface, got {expr:?}");
+    };
+    let [verter_type_expr::ObjectMember::Property(property)] = object.properties.as_slice() else {
+        panic!("expected exactly one property, got {:?}", object.properties);
+    };
+    (
+        property
+            .key
+            .as_string()
+            .expect("the fixture's keys are string names")
+            .to_owned(),
+        property.ty.clone(),
+    )
+}
+
+fn conv_stats(host: &VerterHost) -> crate::semantic_query::SemanticGraphStats {
+    host.project_type_store().semantic_graph().stats_snapshot()
+}
+
+/// One measured pass over the flow result and the consumer's demand.
+struct ConvObservation {
+    flow_projected: verter_type_expr::TypeExpr,
+    flow_candidates: usize,
+    demand_projected: verter_type_expr::TypeExpr,
+    demand_node: SemanticNodeId,
+    demand_dead_fact_reads: usize,
+    demand_conditionals_decided: u64,
+    demand_false_selections: u64,
+}
+
+/// Cold-or-warm pass: the flow result is read under the fact tracer and
+/// pinned to enter no forcing family and read no dead-file fact; the
+/// member demand is then measured for dead-file facts and branch
+/// selections. `expect_flow_cold` pins the flow window's exact family
+/// multiset for a cold evaluation; a warm read must enter neither a
+/// forcing family NOR a cold one, which is what separates a memo hit
+/// from a silent recomputation that lands on the same answer.
+fn conv_observe(host: &Arc<VerterHost>, function: &str, expect_flow_cold: bool) -> ConvObservation {
+    use super::semantic_operand_tests::{dispatch_classes_since, trace_len};
+    with_dispatch(host, |dispatch| {
+        let key = conv_flow_key(dispatch, function);
+        let flow_window = trace_len();
+        let (result, flow_dead_reads) =
+            conv_dead_file_fact_reads(host, || flow_result_value(dispatch, key.clone()));
+        let flow_classes = dispatch_classes_since(flow_window);
+        assert_eq!(
+            result.degradation(),
+            None,
+            "{function}: a retained selective carrier is a COMPLETE flow answer"
+        );
+        assert_eq!(
+            flow_dead_reads, 0,
+            "{function}: the flow rail read {flow_dead_reads} dead-file fact(s) — it forced a \
+             branch the consumer never demanded"
+        );
+        if expect_flow_cold {
+            // The callee's `typeof pick` resolution and the ONE declared-return
+            // lowering: no Instantiate / Conditional family inside the flow
+            // window — the selective operand stays a carrier here.
+            assert_eq!(
+                flow_classes,
+                [("LowerLocator", 1), ("TypeOf", 1)]
+                    .into_iter()
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+                "{function}: the cold flow window entered a forcing family"
+            );
+        } else {
+            // A warm read serves the memo: it enters NO family at all. The
+            // COLD families are pinned to zero alongside the forcing ones
+            // because a cache miss that recomputed the whole flow result
+            // re-enters exactly `LowerLocator` + `TypeOf`, and the candidate
+            // COUNT cannot see it — an invalidated candidate is REPLACED, so
+            // the count stays one. Without these two names a silent
+            // recomputation would satisfy every warm assertion below.
+            for family in [
+                "LowerLocator",
+                "TypeOf",
+                "Instantiate",
+                "Conditional",
+                "ProjectPath",
+                "IndexedAccess",
+            ] {
+                assert_eq!(
+                    flow_classes.get(family).copied().unwrap_or(0),
+                    0,
+                    "{function}: a warm flow read entered {family}"
+                );
+            }
+        }
+        let flow_projected = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("the flow node projects");
+        let flow_candidates = dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
+
+        let demand = conv_member_demand(result.return_type());
+        let before = conv_stats(host);
+        let (demand_node, demand_dead_fact_reads) =
+            conv_dead_file_fact_reads(host, || conv_execute_node(dispatch, demand));
+        let after = conv_stats(host);
+        let demand_projected = host
+            .project_node_to_type_expr_for_test(demand_node)
+            .expect("the demanded member projects");
+        ConvObservation {
+            flow_projected,
+            flow_candidates,
+            demand_projected,
+            demand_node,
+            demand_dead_fact_reads,
+            demand_conditionals_decided: after.conditional_decided_count
+                - before.conditional_decided_count,
+            demand_false_selections: after.branch_selections_false - before.branch_selections_false,
+        }
+    })
+}
+
+/// The INDEPENDENT oracle: a brand-new host that has only ever seen this
+/// exact source pair, observed cold. An incremental result is equal to
+/// FRESH only when it matches this — comparing it against a pre-edit
+/// observation of DIFFERENT source proves nothing about the edited
+/// inputs, because the pre-edit answer is the one the edit was supposed
+/// to be allowed to change.
+///
+/// Only the projections are comparable across hosts: node identities and
+/// the graph counters belong to the host that produced them.
+fn conv_fresh(dead_source: &str, false_branch: &str) -> ConvObservation {
+    let host = make_host();
+    conv_upsert(&host, CONV_DEAD, dead_source.to_owned());
+    conv_upsert(&host, CONV_OWNER, conv_owner_source(false_branch));
+    conv_observe(&host, "makeProps", true)
+}
+
+/// A function returning `{ v: pick() }` with `pick(): Cond<string>` — a
+/// callee whose declared return is a selective operand whose dead branch
+/// lives in a second file.
+///
+/// * The flow rail lowers the callee's declared return in structural
+///   transit and publishes the member as the `Cond<string>` CARRIER: the
+///   cold flow window enters no forcing family, reads no dead-file fact,
+///   and admits ONE warm candidate. Mutation recipe: lowering the declared
+///   return in a published mode forces `Instantiate` + `Conditional`
+///   inside the flow window and fails the family pin.
+/// * The consumer's `Expanded` demand on `v` forces the carrier through
+///   the shared graph: exactly one conditional decision, the TRUE branch,
+///   zero FALSE selections, zero dead-file facts, and the answer is the
+///   selected branch alone. Mutation recipe: materialising both branches
+///   before selecting (an eager conditional) reads the dead file and
+///   selects the false branch once.
+/// * The warm repeat of the demand returns the same node, interns zero
+///   nodes, and decides nothing again; the warm flow read admits no
+///   second candidate.
+/// * The positive control `makeDead` (`Cond<number>`) selects the FALSE
+///   branch: it reads the dead file and publishes the dead declaration —
+///   the zero assertions above discriminate.
+/// * A same-owner edit that respells only the dead branch recomputes (or
+///   conservatively re-serves) a result EQUAL to fresh with the same zero
+///   dead-branch work; an edit to the dead FILE alone invalidates nothing:
+///   the flow read is a warm hit and the demanded operand decides nothing
+///   again. Mutation recipe: rooting the operand result on the dead
+///   branch's file makes the dead-file edit re-decide the conditional.
+/// * "Equal to fresh" is decided against `conv_fresh`: an independent host
+///   that has only ever seen the edited sources, observed cold. Both edited
+///   states are checked against their own oracle, so a stale re-serve
+///   cannot certify convergence merely by agreeing with the answer it held
+///   BEFORE the edit. Mutation recipe: serving the pre-edit result for an
+///   edit that does change the demanded member fails the oracle while the
+///   node-identity and re-decision counters still pass.
+#[test]
+fn flow_return_retains_a_selective_operand_as_a_carrier_and_forces_it_only_on_consumer_demand() {
+    use super::semantic_operand_tests::interned_nodes;
+    use crate::project_semantic_dispatch::raise::enable_dispatch_trace_for_test;
+    use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
+
+    let host = make_host();
+    conv_upsert(&host, CONV_DEAD, CONV_DEAD_V0.to_owned());
+    conv_upsert(&host, CONV_OWNER, conv_owner_source(CONV_FALSE_V0));
+    let _trace = enable_dispatch_trace_for_test();
+
+    let carrier = TypeExpr::Ref {
+        name: Arc::from("Cond"),
+        type_arguments: Arc::from(
+            vec![TypeExpr::Primitive(PrimitiveName::String)].into_boxed_slice(),
+        ),
+    };
+    let picked = (
+        "picked".to_owned(),
+        TypeExpr::Literal(LiteralValue::String("yes".to_owned())),
+    );
+
+    // ── COLD: flow result, then the consumer's demand ──────────────────
+    let cold = conv_observe(&host, "makeProps", true);
+    assert_eq!(
+        conv_sole_property(&cold.flow_projected),
+        ("v".to_owned(), carrier.clone()),
+        "the flow result publishes the selective operand as its carrier"
+    );
+    assert_eq!(
+        cold.flow_candidates, 1,
+        "the complete flow result admits one warm candidate"
+    );
+    assert_eq!(
+        conv_sole_property(&cold.demand_projected),
+        picked,
+        "the demand publishes exactly the selected branch"
+    );
+    assert_eq!(
+        cold.demand_dead_fact_reads, 0,
+        "the cold demand read a dead-file fact"
+    );
+    assert_eq!(
+        cold.demand_conditionals_decided, 1,
+        "the cold demand decides the conditional once"
+    );
+    assert_eq!(
+        cold.demand_false_selections, 0,
+        "the cold demand selected the dead branch"
+    );
+
+    // ── WARM repeat: same node, zero growth, nothing re-decided ────────
+    let nodes_before = interned_nodes(&host);
+    let warm = conv_observe(&host, "makeProps", false);
+    assert_eq!(
+        warm.demand_node, cold.demand_node,
+        "the warm demand serves the same node"
+    );
+    assert_eq!(
+        interned_nodes(&host) - nodes_before,
+        0,
+        "a warm pass interned semantic nodes"
+    );
+    assert_eq!(
+        warm.demand_conditionals_decided, 0,
+        "a warm demand re-decided the conditional"
+    );
+    assert_eq!(
+        warm.demand_dead_fact_reads, 0,
+        "a warm demand read a dead-file fact"
+    );
+    assert_eq!(
+        warm.flow_candidates, 1,
+        "a warm flow read appended a candidate"
+    );
+
+    // ── POSITIVE CONTROL: the false branch DOES read the dead file ─────
+    let control = conv_observe(&host, "makeDead", true);
+    assert_eq!(
+        conv_sole_property(&control.demand_projected).0,
+        "dropped",
+        "selecting the false branch publishes the dead declaration"
+    );
+    assert_eq!(
+        control.demand_false_selections, 1,
+        "the control selects the false branch once"
+    );
+    assert!(
+        control.demand_dead_fact_reads >= 1,
+        "forcing the dead branch must read the dead file — the zero assertions discriminate"
+    );
+
+    // ── SAME-OWNER DEAD EDIT: equal to FRESH, zero dead-branch work ────
+    conv_upsert(&host, CONV_OWNER, conv_owner_source(CONV_FALSE_V1));
+    let edited = conv_observe(&host, "makeProps", true);
+    // The oracle: an independent host that has only ever seen the EDITED
+    // owner. This is what "equals fresh" has to mean — `cold` observed a
+    // different owner source, so agreeing with it is a separate (and
+    // weaker) claim about the respell being invisible.
+    let fresh_after_owner_edit = conv_fresh(CONV_DEAD_V0, CONV_FALSE_V1);
+    assert_eq!(
+        conv_sole_property(&edited.flow_projected),
+        conv_sole_property(&fresh_after_owner_edit.flow_projected),
+        "the incrementally recomputed flow result differs from a fresh computation over the \
+         edited source"
+    );
+    assert_eq!(
+        conv_sole_property(&edited.demand_projected),
+        conv_sole_property(&fresh_after_owner_edit.demand_projected),
+        "the incrementally recomputed demand differs from a fresh computation over the edited \
+         source"
+    );
+    assert_eq!(
+        conv_sole_property(&edited.flow_projected),
+        conv_sole_property(&cold.flow_projected),
+        "respelling only the dead branch changed the published flow result"
+    );
+    assert_eq!(
+        conv_sole_property(&edited.demand_projected),
+        conv_sole_property(&cold.demand_projected),
+        "respelling only the dead branch changed the demanded member"
+    );
+    assert_eq!(
+        edited.demand_dead_fact_reads, 0,
+        "recomputation read a dead-file fact"
+    );
+    assert_eq!(
+        edited.demand_false_selections, 0,
+        "recomputation selected the dead branch"
+    );
+    let candidates_after_owner_edit = edited.flow_candidates;
+
+    // ── DEAD-FILE EDIT: invalidates nothing the consumer demanded ──────
+    conv_upsert(&host, CONV_DEAD, CONV_DEAD_V1.to_owned());
+    let nodes_before = interned_nodes(&host);
+    let dead_edit = conv_observe(&host, "makeProps", false);
+    // Serving the SAME node is only correct if that node is still the
+    // answer a fresh computation over BOTH edited files produces. The
+    // oracle rules out a stale re-serve that happens to keep its identity.
+    let fresh_after_dead_edit = conv_fresh(CONV_DEAD_V1, CONV_FALSE_V1);
+    assert_eq!(
+        conv_sole_property(&dead_edit.flow_projected),
+        conv_sole_property(&fresh_after_dead_edit.flow_projected),
+        "the re-served flow result differs from a fresh computation over the edited dead file"
+    );
+    assert_eq!(
+        conv_sole_property(&dead_edit.demand_projected),
+        conv_sole_property(&fresh_after_dead_edit.demand_projected),
+        "the re-served demand differs from a fresh computation over the edited dead file"
+    );
+    assert_eq!(
+        dead_edit.demand_node, edited.demand_node,
+        "the dead-file edit re-served the demand"
+    );
+    assert_eq!(
+        dead_edit.demand_conditionals_decided, 0,
+        "the dead-file edit re-decided the conditional"
+    );
+    assert_eq!(
+        interned_nodes(&host) - nodes_before,
+        0,
+        "the dead-file edit interned semantic nodes"
+    );
+    assert_eq!(
+        dead_edit.flow_candidates, candidates_after_owner_edit,
+        "the dead-file edit invalidated the flow result"
+    );
+}
