@@ -4109,8 +4109,10 @@ fn flow_return_try_assertion_narrow_stays_clause_scoped() {
 }
 
 /// The switch twin: an assertion narrow established in one case must not
-/// leak into a sibling case. tsgo: `{ c: string | number }` (case 0's own
-/// narrowed arm subtype-reduces away against the unnarrowed arms).
+/// leak into a sibling case. tsgo: `{ c: string | number }` — case 0's own
+/// narrowed `{ c: string }` arm subtype-reduces away against the
+/// unnarrowed arms, so ONE object survives and the narrow is visible only
+/// as its absence from the surviving member's type.
 #[test]
 fn flow_return_switch_assertion_narrow_stays_case_scoped() {
     let (expr, degradation) = flow_expr_for_script(
@@ -4121,13 +4123,7 @@ fn flow_return_switch_assertion_narrow_stays_case_scoped() {
         verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
         verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
     ]);
-    assert_eq!(
-        member_types(&expr, "c"),
-        vec![
-            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
-            string_or_number,
-        ]
-    );
+    assert_eq!(member_types(&expr, "c"), vec![string_or_number]);
 }
 
 /// A CONDITIONAL-returning finally absorbs the pending break only on the
@@ -9077,11 +9073,13 @@ fn flow_return_switch_case_refinement_outranks_enclosing_guard_fact() {
     let overlapping_member_past_try = format!("{TYPES}function makeProps(p: O) {{ if (typeof p.v === \"string\") {{ try {{ switch (p.k) {{ case \"a\": break; default: throw 0 }} }} finally {{}} return {{ v: p.v }} }} throw 0 }}");
     for (case, body, expected) in [
         // The case arm `{ v: "a" }`, the default arm `{ v: string }`, and
-        // the trailing return `{ v: number }`.
+        // the trailing return `{ v: number }` — the refined `{ v: "a" }`
+        // arm is a strict subtype of the default's `{ v: string }`, so the
+        // return-position reunion absorbs it and two arms survive.
         (
             "whole-binding refinement at the case",
             "function makeProps(p: string | number) { if (typeof p === \"string\") { switch (p) { case \"a\": return { v: p }; default: return { v: p } } } return { v: 0 } }",
-            vec![string_literal("a"), number.clone(), string.clone()],
+            vec![number.clone(), string.clone()],
         ),
         // Only the `"a"` case completes the try normally, and nothing is
         // written: the clause-entry restore must not bring the guard's
@@ -9226,4 +9224,335 @@ fn flow_return_clause_entry_restore_excludes_every_executed_write() {
         Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition),
         "changing write read inside the finally"
     );
+}
+
+// ── Return-position subtype reunion ───────────────────────────────────
+
+/// A return join absorbs a strict-subtype arm into its supertype peer —
+/// TypeScript's own return-position subtype reduction — while the
+/// CANONICAL union over the identical constituents keeps both.
+///
+/// The two halves discriminate WHERE the reduction lives: a reduction
+/// added to the canonical algebra would collapse the second half too, and
+/// a reduction missing from the inference layer would leave the first half
+/// a two-arm union. The pair is `{ c: string }` / `{ c: string | number }`
+/// — object arms with the SAME key set, where the canonical layer's rule
+/// that a supertype arm never swallows a subtype arm is what keeps both.
+#[test]
+fn flow_return_reunion_absorbs_a_subtype_arm_but_the_canonical_union_keeps_both() {
+    let (expr, degradation) = flow_expr_cold_warm(
+        "function assertString(v: unknown): asserts v is string { if (typeof v !== \"string\") throw 0 }\nfunction makeProps(v: number, p: string | number) { switch (v) { case 0: assertString(p); return { c: p }; case 1: return { c: p }; default: return { c: p } } }",
+    );
+    assert_eq!(degradation, None);
+    assert!(
+        matches!(expr, verter_type_expr::TypeExpr::Object(_)),
+        "the asserted `{{ c: string }}` arm is absorbed into `{{ c: string | number }}`, leaving \
+         ONE object: {expr:?}"
+    );
+    assert_eq!(
+        member_types(&expr, "c"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        ])]
+    );
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let string = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        let number = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Number,
+        ));
+        let string_or_number =
+            dispatch.intern_normalized_union_or_intersection(&[string, number], true);
+        let member = |value: SemanticNodeId| crate::semantic_query::SurfaceMember {
+            key: crate::semantic_query::AuthoredPropertyKey::string("c"),
+            value,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            spans: Default::default(),
+            declaration_origin: None,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+        };
+        let object = |value: SemanticNodeId| {
+            graph.intern_node(crate::semantic_query::SemanticNodeData::Object(
+                crate::semantic_query::surface_view! {
+                    members: Arc::from(vec![member(value)].into_boxed_slice()),
+                    call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    index_signatures: Arc::from(Vec::<crate::semantic_query::IndexSignature>::new().into_boxed_slice()),
+                    keyspace: None,
+                    has_index_signature: false,
+                },
+            ))
+        };
+        let narrow = object(string);
+        let wide = object(string_or_number);
+        let union = dispatch.intern_normalized_union_or_intersection(&[narrow, wide], true);
+        let Some(crate::semantic_query::SemanticNodeData::Union(members)) =
+            graph.node_data(union).as_deref().cloned()
+        else {
+            panic!("the canonical union of the two object arms must stay a union");
+        };
+        assert_eq!(
+            members.to_vec(),
+            vec![narrow, wide],
+            "the canonical layer keeps every constituent: a supertype arm never swallows a \
+             subtype arm there"
+        );
+    });
+}
+
+/// The arms that SURVIVE reduction keep their source order: the absorbed
+/// arm is removed in place, never re-sorted around.
+#[test]
+fn flow_return_reunion_keeps_the_surviving_arms_in_source_order() {
+    let (expr, degradation) = flow_expr_cold_warm(
+        "function makeProps(flag: boolean, c: boolean, b: { b: true }) { let x: string | { b: true } = \"a\"; try { if (flag) { x = b; return { out: 0 } } } finally { if (c) return { out: x } } return { out: x } }",
+    );
+    assert_eq!(degradation, None);
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("the two surviving object arms stay a union, got {expr:?}");
+    };
+    assert_eq!(
+        arms.len(),
+        2,
+        "the third `{{ out: string }}` arm is a strict subtype of `{{ out: string | {{ b: true }} }}`"
+    );
+    let out = member_types(&expr, "out");
+    assert_eq!(out.len(), 2, "one `out` member per surviving arm: {out:?}");
+    assert_eq!(
+        out[0],
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        "the early `{{ out: 0 }}` return stays FIRST: {out:?}"
+    );
+    let verter_type_expr::TypeExpr::Union(second) = &out[1] else {
+        panic!(
+            "the finally's arm keeps its declared union, got {:?}",
+            out[1]
+        );
+    };
+    assert_eq!(
+        second.first(),
+        Some(&verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String
+        )),
+        "the surviving supertype arm is `string | {{ b: true }}`, not the absorbed bare `string`"
+    );
+    assert!(
+        matches!(second.get(1), Some(verter_type_expr::TypeExpr::Object(_))),
+        "…whose second constituent is the object arm: {second:?}"
+    );
+}
+
+/// An arm pair the relation authority cannot decide leaves the reduction
+/// UNFINISHED: every arm survives, the typed nominal-relation gap rides
+/// the result, and the result is `ReturnOnly` — never a guessed
+/// absorption promoted warm.
+///
+/// `L & K` is assignable to `L`, so the pair IS an admitted reduction
+/// candidate; the reverse direction (`L` against the intersection) is the
+/// judgement the authority does not give.
+#[test]
+fn flow_return_reunion_undecided_reverse_relation_keeps_every_arm_and_never_warms() {
+    let script = "class K { readonly k = \"k\" }\nclass L { readonly l = \"l\" }\ndeclare const anL: L\nfunction makeProps(x: L | null) { if (x instanceof K) { return x } return anL }";
+    let (expr, degradation) = flow_expr_for_script(script);
+    assert_eq!(
+        degradation,
+        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+            crate::semantic_query::FlowGap::NominalRelation
+        )),
+        "an undecided arm pair records the typed relation gap"
+    );
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("every arm must survive an undecided reduction, got {expr:?}");
+    };
+    assert_eq!(arms.len(), 2, "both arms survive: {expr:?}");
+    assert!(
+        arms.iter().any(|arm| matches!(
+            arm,
+            verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "L"
+        )),
+        "the supertype arm survives: {expr:?}"
+    );
+    assert!(
+        arms.iter()
+            .any(|arm| matches!(arm, verter_type_expr::TypeExpr::Intersection(_))),
+        "the candidate subtype arm survives unabsorbed: {expr:?}"
+    );
+    assert_eq!(
+        flow_return_slot_candidates(script, "makeProps"),
+        0,
+        "a degraded reduction is ReturnOnly — nothing warms"
+    );
+}
+
+/// A cold join asks the relation authority at most once per ORDERED arm
+/// pair, and a warm replay of the same demand asks NOTHING.
+#[test]
+fn flow_return_reunion_asks_each_arm_pair_once_and_a_warm_replay_asks_nothing() {
+    // Three arms: `{ v: "a" }`, `{ v: string }`, `{ v: number }`.
+    let script = "function makeProps(p: string | number) { if (typeof p === \"string\") { switch (p) { case \"a\": return { v: p }; default: return { v: p } } } return { v: 0 } }";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let canonical = "/ws/flow-control-probe.ts";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(crate::u6_flow_shape_corpus_tests::module_script(script)),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    let key = |dispatch: &ProjectSemanticDispatch<'_>| FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(canonical),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from("makeProps"),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(canonical),
+        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
+    };
+    let (cold_reads, cold) = with_dispatch(&host, |dispatch| {
+        let before = dispatch.graph().stats_snapshot().relation_check_count;
+        let value = flow_result_value(dispatch, key(dispatch));
+        (
+            dispatch.graph().stats_snapshot().relation_check_count - before,
+            value,
+        )
+    });
+    assert_eq!(cold.degradation(), None, "the join is clean");
+    // The whole request's relation budget, PINNED. Most of it belongs to
+    // the `typeof` guard's own narrowing; the reunion's share is bounded
+    // by "once per ordered arm pair", and dropping the per-join memo (so
+    // a pair is re-asked once per scan) raises this number. A pin rather
+    // than an inequality: an inequality with slack cannot see the memo
+    // disappear.
+    assert_eq!(
+        cold_reads, 15,
+        "the cold relation budget of this three-arm join moved; a reunion that re-asks a \
+         decided arm pair spends more"
+    );
+    let warm_reads = with_dispatch(&host, |dispatch| {
+        let before = dispatch.graph().stats_snapshot().relation_check_count;
+        let warm = dispatch
+            .graph()
+            .get_flow_return_result(dispatch.ctx, &key(dispatch));
+        assert_eq!(
+            warm.as_ref(),
+            Some(&cold),
+            "the reduced result replays warm, equal to the fresh one"
+        );
+        dispatch.graph().stats_snapshot().relation_check_count - before
+    });
+    assert_eq!(
+        warm_reads, 0,
+        "an identical warm demand re-decides no arm pair"
+    );
+}
+
+/// The `slot_candidate_count` of `function`'s whole-return demand — zero
+/// for a `ReturnOnly` result, non-zero once a clean result is admitted.
+fn flow_return_slot_candidates(script: &str, function: &str) -> usize {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let canonical = "/ws/flow-control-probe.ts";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(crate::u6_flow_shape_corpus_tests::module_script(script)),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let key = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(canonical),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from(function),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(canonical),
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        let _ = flow_result_value(dispatch, key.clone());
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)))
+    })
+}
+
+/// The call value of a generic callee whose declared return intersects
+/// the empty object type reduces to the bare constituent, at the whole
+/// return AND at a member position — the checker's own
+/// `getIntersectionType` reduction, applied where the call instantiates
+/// it and NOT in the canonical intersection algebra.
+#[test]
+fn flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object() {
+    let (whole, whole_degradation) = flow_expr_cold_warm(
+        "function andD<T>(x: T): T & {} { return x as T & {} }\nfunction makeProps() { return andD(\"x\") }",
+    );
+    assert_eq!(whole_degradation, None);
+    assert_eq!(
+        whole,
+        verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String("x".to_owned())),
+        "`\"x\" & {{}}` reduces to `\"x\"`"
+    );
+
+    let (member, member_degradation) = flow_expr_cold_warm(
+        "function andD<T>(x: T): T & {} { return x as T & {} }\nfunction makeProps() { return { a: andD(\"x\") } }",
+    );
+    assert_eq!(member_degradation, None);
+    assert_eq!(
+        member_types(&member, "a"),
+        vec![verter_type_expr::TypeExpr::Literal(
+            verter_type_expr::LiteralValue::String("x".to_owned())
+        )],
+        "the same reduction applies at a member position"
+    );
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let literal = graph.intern_node(crate::semantic_query::SemanticNodeData::Literal(
+            verter_type_expr::LiteralValue::String("x".to_owned()),
+        ));
+        let empty = graph.intern_node(crate::semantic_query::SemanticNodeData::Object(
+            crate::semantic_query::SurfaceView::new(
+                Arc::from(Vec::new().into_boxed_slice()),
+                Arc::from(Vec::new().into_boxed_slice()),
+                Arc::from(Vec::new().into_boxed_slice()),
+                Arc::from(Vec::new().into_boxed_slice()),
+                None,
+                false,
+            ),
+        ));
+        let intersection =
+            dispatch.intern_normalized_union_or_intersection(&[empty, literal], false);
+        assert!(
+            matches!(
+                graph.node_data(intersection).as_deref(),
+                Some(crate::semantic_query::SemanticNodeData::Intersection(_))
+            ),
+            "an AUTHORED `{{}} & \"x\"` keeps both constituents in the canonical layer"
+        );
+    });
 }
