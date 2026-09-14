@@ -407,6 +407,121 @@ defineSlots<{
     expect(defaultSlot).toBeDefined();
   });
 
+  // Regression: concrete-inline slot-binding types must survive the
+  // native structured surface AND the compat display as their declared
+  // types — not as the binding's own NAME (the synthetic carrier's
+  // rendering). Observed defect (vue-benchmarks component-meta/slots):
+  // `default({ open: boolean })` reported `open` as the type of `open`,
+  // and `footer({ id: number })` reported `id`; a nested payload
+  // (`payload({ meta: { deep: string } })`) reported `meta`.
+  it("publishes concrete slot binding leaf types through native and compat surfaces", async () => {
+    const checker = await createRuntimeChecker("native-eval-slot-binding-leaf-types");
+
+    checker.updateFile(
+      "Card.vue",
+      `<script setup lang="ts">
+defineSlots<{
+  default(props: { open: boolean }): any
+  footer(props: { id: number }): any
+  value(props: { value: string }): any
+  other(props: { value: number }): any
+  optional(props: { flag?: boolean }): any
+  payload(props: { meta: { deep: string } }): any
+  deeper(props: { meta: { deep: { deeper: string } } }): any
+  bare(): any
+}>()
+</script>
+<template><slot :open="true" /></template>`,
+    );
+
+    await settleNativeProject();
+
+    const meta = await checker.getComponentMeta("Card.vue");
+
+    // Native structured surface: the descriptor IS the declared primitive.
+    const nativeSlots = meta._verter!.slots;
+    const nativeDefault = nativeSlots.find((slot) => slot.name === "default");
+    expect(nativeDefault).toBeDefined();
+    expect(nativeDefault!.bindings.find((b) => b.name === "open")!.type).toEqual({
+      kind: "primitive",
+      name: "boolean",
+    });
+
+    const nativeFooter = nativeSlots.find((slot) => slot.name === "footer");
+    expect(nativeFooter).toBeDefined();
+    expect(nativeFooter!.bindings.find((b) => b.name === "id")!.type).toEqual({
+      kind: "primitive",
+      name: "number",
+    });
+
+    // Same-named binding under different slots keeps its own distinct type.
+    expect(
+      nativeSlots.find((slot) => slot.name === "value")!.bindings.find((b) => b.name === "value")!
+        .type,
+    ).toEqual({ kind: "primitive", name: "string" });
+    expect(
+      nativeSlots.find((slot) => slot.name === "other")!.bindings.find((b) => b.name === "value")!
+        .type,
+    ).toEqual({ kind: "primitive", name: "number" });
+
+    // Empty-slot control.
+    expect(nativeSlots.find((slot) => slot.name === "bare")!.bindings).toEqual([]);
+
+    // Optional-binding control: the declared `?` does not change the
+    // binding's published TYPE. (The binding row itself carries no
+    // optionality field today — the declared `?` is not yet surfaced on
+    // the public slot-binding surface; the type is.)
+    expect(
+      nativeSlots.find((slot) => slot.name === "optional")!.bindings.find((b) => b.name === "flag")!
+        .type,
+    ).toEqual({ kind: "primitive", name: "boolean" });
+
+    // Nested-payload: a payload object whose own members are all leaves
+    // publishes the bounded closed surface, so the declared member type
+    // survives — the binding's own name is never reported as its type.
+    const nestedSlot = nativeSlots.find((slot) => slot.name === "payload");
+    expect(nestedSlot).toBeDefined();
+    expect(nestedSlot!.bindings.find((b) => b.name === "meta")!.type).toMatchObject({
+      kind: "object",
+      properties: [{ name: "deep", type: { kind: "primitive", name: "string" } }],
+    });
+
+    // Boundary control: a payload object with a NON-leaf member stays the
+    // STRUCTURED carrier (typed-IR identity naming its own slot/binding —
+    // a cross-slot mixup changes the key), never a flattened guess and
+    // never `unknown`.
+    const deeperSlot = nativeSlots.find((slot) => slot.name === "deeper");
+    expect(deeperSlot).toBeDefined();
+    expect(deeperSlot!.bindings.find((b) => b.name === "meta")!.type).toMatchObject({
+      kind: "syntheticSlotBinding",
+      surfaceKind: "slotBinding",
+      slotName: "deeper",
+      bindingName: "meta",
+    });
+
+    // Compat (Volar-interop) display: the slot type string renders the
+    // declared leaf types, never the binding's own name.
+    const compatDefault = meta.slots.find((slot) => slot.name === "default");
+    expect(compatDefault).toBeDefined();
+    expect(compatDefault!.type).toBe("{ open: boolean; }");
+
+    const compatFooter = meta.slots.find((slot) => slot.name === "footer");
+    expect(compatFooter).toBeDefined();
+    expect(compatFooter!.type).toBe("{ id: number; }");
+
+    // The nested payload renders its declared member type, never the
+    // binding name (`{ meta: meta; }` was the defect).
+    const compatPayload = meta.slots.find((slot) => slot.name === "payload");
+    expect(compatPayload).toBeDefined();
+    expect(compatPayload!.type).not.toContain("meta: meta");
+    expect(compatPayload!.type).toContain("deep: string");
+
+    // The optional binding's declared leaf type reaches the compat display.
+    const compatOptional = meta.slots.find((slot) => slot.name === "optional");
+    expect(compatOptional).toBeDefined();
+    expect(compatOptional!.type).toContain("flag: boolean");
+  });
+
   it("evaluates defineModel types", async () => {
     const checker = await createRuntimeChecker("native-eval-model");
 

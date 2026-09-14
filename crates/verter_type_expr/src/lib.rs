@@ -351,7 +351,9 @@ pub enum TypeExpr {
     },
 
     /// Synthetic slot-binding / `defineSlots` binding carrier. Minted only
-    /// at the no-parser branch of `publish_merged_bindings`. The
+    /// at the no-parser branch of `publish_merged_bindings`, for binding
+    /// values richer than a complete closed leaf (a concrete leaf /
+    /// leaf-union value publishes its closed fact directly). The
     /// projector pipeline and component-meta registry treat this variant
     /// as a shallow terminal — explicit deep materialisation routes
     /// through `ShapeCacheKey::synthetic_binding_whole(SyntheticBindingId::from_carrier_key(&carrier), mode)`,
