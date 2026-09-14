@@ -513,6 +513,10 @@ pub struct BoundStyleContinuation {
     pub source_space_token: String,
     /// Host-minted identity of the produced byte artifact (code plus any map).
     pub content_artifact_token: String,
+    /// The host-admitted produced-to-authored map. An output rendered from
+    /// the produced bytes publishes its map chained through this one; without
+    /// it that output has no honest map to publish.
+    pub source_map: Option<Arc<str>>,
 }
 
 impl Default for RuntimeCompileOptions {

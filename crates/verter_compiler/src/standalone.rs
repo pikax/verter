@@ -3343,21 +3343,35 @@ fn hash_output_descriptor(hasher: &mut blake3::Hasher, descriptor: &RuntimeOutpu
 /// what keeps this map chain joinable back to the authored `.svelte` block;
 /// a locally minted space would address the same bytes under an identity
 /// nothing else in the host knows.
+///
+/// A continued block's render map addresses the produced bytes while naming
+/// the carrier file, so it is never published as is: it is chained through
+/// the host's produced-to-authored map, exactly as a supplied Vue block's
+/// map is. With no host map, or one the chain cannot read, the map is
+/// published absent rather than mis-mapped.
 fn qualified_svelte_style(
     source: &str,
     css: crate::svelte::runtime::client::ScopedCssArtifact,
     continuation: Option<&crate::framework_common::carrier_compiler::BoundStyleContinuation>,
 ) -> QualifiedRuntimeStyle {
-    let (space, artifact) = match continuation {
+    let render_map = css.source_map;
+    let (space, artifact, source_map) = match continuation {
         Some(bound) => (
             bound.source_space_token.clone(),
             bound.content_artifact_token.clone(),
+            render_map.as_deref().and_then(|render| {
+                let host = bound.source_map.as_deref().filter(|map| !map.is_empty())?;
+                chain_generated_map_json(render, host)
+            }),
         ),
-        None => RuntimeOutputDescriptor::carrier_source(source),
+        None => {
+            let (space, artifact) = RuntimeOutputDescriptor::carrier_source(source);
+            (space, artifact, render_map)
+        }
     };
     let output_descriptor = RuntimeOutputDescriptor::generated(
         &css.code,
-        css.source_map.as_deref(),
+        source_map.as_deref(),
         &[(space.as_str(), artifact.as_str())],
         SourceMapFidelity::Approximate,
     );
@@ -3368,7 +3382,7 @@ fn qualified_svelte_style(
             Vec::new(),
         ),
         consumed_stage: css.consumed_stage,
-        source_map: css.source_map,
+        source_map,
         scope_hash: Some(css.hash),
         has_global: css.has_global,
         output_descriptor,

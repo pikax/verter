@@ -443,7 +443,8 @@ fn prepare_svelte_execution_inputs(
 /// A supplied style slot — a completed external preprocessing result the
 /// host admitted — is handed over ONCE, as the stage-qualified result the
 /// compiler binds to its block: the produced bytes, their producer, the
-/// host-minted identity of those bytes, the host's parse of them, and the
+/// host-minted identity of those bytes, the host's produced-to-authored map
+/// of them, the host's parse of them, and the
 /// content identity of the authored bytes the selection was validated
 /// against. Every one of those facts is read off the projection the
 /// block-content capture fence stamped, so the compiler binds the revision
@@ -495,6 +496,7 @@ fn svelte_supplied_style(
         code: input.code,
         source_space_token: input.source_space_token,
         content_artifact_token: input.content_artifact_token,
+        source_map: input.source_map,
         parsed: input.parsed,
         consumed_basis: input.authored_basis,
     }
@@ -1396,9 +1398,19 @@ mod tests {
     /// from whatever the carrier holds later.
     #[test]
     fn a_selected_style_carries_its_projections_authored_basis() {
-        let supplied = svelte_supplied_style(selected_style(Some(PreprocessorIdentity::Named(
-            ExternalStyleProducer::new("sass", Some("1.77.0"), None).expect("named producer"),
-        ))));
+        const HOST_MAP: &str =
+            r#"{"version":3,"sources":["Card.scss"],"names":[],"mappings":"AACA"}"#;
+        let supplied = svelte_supplied_style(RuntimeBlockContentInput {
+            source_map: Some(std::sync::Arc::from(HOST_MAP)),
+            ..selected_style(Some(PreprocessorIdentity::Named(
+                ExternalStyleProducer::new("sass", Some("1.77.0"), None).expect("named producer"),
+            )))
+        });
+        assert_eq!(
+            supplied.source_map.as_deref(),
+            Some(HOST_MAP),
+            "the host's produced-to-authored map reaches the compiler with its bytes"
+        );
         assert_eq!(supplied.code.as_ref(), PRODUCED);
         assert_eq!(
             supplied.consumed_basis,

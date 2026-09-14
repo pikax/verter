@@ -744,10 +744,10 @@ pub(crate) fn bind_svelte_style_continuations(
                     supplied.code.as_ref(),
                     Vec::new(),
                 ),
-                // The host's raw map is not decoded here: no anchors is an
-                // absent map, never an implicit identity one. The chain back
-                // to the authored block stays joinable because the produced
-                // bytes keep the host's own space identity below.
+                // The host's raw map is not decoded into anchors: no anchors
+                // is an absent map, never an implicit identity one. The map
+                // travels beside the continuation below, and the published
+                // css map is chained through it.
                 anchors: Vec::new(),
                 product,
             })
@@ -757,6 +757,7 @@ pub(crate) fn bind_svelte_style_continuations(
                         continuation: Arc::new(continuation),
                         source_space_token: supplied.source_space_token.clone(),
                         content_artifact_token: supplied.content_artifact_token.clone(),
+                        source_map: supplied.source_map.clone(),
                     },
                 )
             })

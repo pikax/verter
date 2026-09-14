@@ -306,6 +306,11 @@ pub struct SvelteSuppliedStyle {
     pub source_space_token: String,
     /// Host-minted identity of the exact produced byte artifact.
     pub content_artifact_token: String,
+    /// The host-admitted map from `code` back to the authored bytes the tool
+    /// consumed. It is the only way a position in the produced bytes reaches
+    /// the authored block, so a continued block's published css map is
+    /// chained through it, or published absent when there is none.
+    pub source_map: Option<Arc<str>>,
     /// The host's retained parse of exactly these bytes, when admission
     /// produced one.
     pub parsed: Option<crate::style_planner::PreparedStyleIr>,
@@ -1845,6 +1850,7 @@ mod tests {
             code: Arc::from(PRODUCED),
             source_space_token: HOST_PRODUCED_SPACE.to_string(),
             content_artifact_token: HOST_PRODUCED_ARTIFACT.to_string(),
+            source_map: None,
             parsed,
             consumed_basis,
         }
@@ -1854,9 +1860,21 @@ mod tests {
         source: &str,
         supplied_styles: Vec<Option<SvelteSuppliedStyle>>,
     ) -> Result<RuntimeCompileOutput, SvelteHostCompileRefusal> {
+        render_with_styles_for(
+            source,
+            SvelteHostRuntimeRenderDemand::default(),
+            supplied_styles,
+        )
+    }
+
+    fn render_with_styles_for(
+        source: &str,
+        demand: SvelteHostRuntimeRenderDemand,
+        supplied_styles: Vec<Option<SvelteSuppliedStyle>>,
+    ) -> Result<RuntimeCompileOutput, SvelteHostCompileRefusal> {
         let artifact = svelte_artifact(source);
         let admission = SvelteHostIntegrationBackend::new()
-            .admit_runtime_render(&artifact, SvelteHostRuntimeRenderDemand::default())
+            .admit_runtime_render(&artifact, demand)
             .expect("admits");
         let alloc = oxc_allocator::Allocator::new();
         SvelteHostIntegrationBackend::new()
@@ -1972,6 +1990,102 @@ mod tests {
             &[carrier],
             "an authored block declares its carrier source"
         );
+    }
+
+    /// A continued block's css map reaches the AUTHORED block through the
+    /// host's produced-to-authored map. The bare render map addresses the
+    /// produced bytes under the carrier's name, so publishing it would label
+    /// preprocessor-output positions as `.svelte` ones; with no host map there
+    /// is no honest map, and none publishes.
+    #[test]
+    fn a_continued_style_map_is_chained_through_the_hosts_produced_to_authored_map() {
+        use oxc_sourcemap::{SourceMap, SourceMapBuilder};
+
+        const AUTHORED_BODY: &str = "$tone: red;\n.card { color: $tone; }";
+        // The produced `.card` (line 0, column 0) was made from authored
+        // line 1, column 0.
+        let host_map = {
+            let mut builder = SourceMapBuilder::default();
+            let id = builder.add_source_and_content("Card.scss", AUTHORED_BODY);
+            builder.add_token(0, 0, 1, 0, Some(id), None);
+            builder.into_sourcemap().to_json_string()
+        };
+        let demand = || SvelteHostRuntimeRenderDemand {
+            runtime: RuntimeProductRequest {
+                runtime_source_map: true,
+                ..Default::default()
+            },
+            filename: Some("Card.svelte".to_string()),
+            ..Default::default()
+        };
+        let continued = |source_map: Option<&str>| {
+            let supplied = SvelteSuppliedStyle {
+                source_map: source_map.map(Arc::from),
+                ..supplied_style(Some(authored_style_basis(SCSS_COMPONENT)), None)
+            };
+            render_with_styles_for(SCSS_COMPONENT, demand(), vec![Some(supplied)])
+                .expect("a continued block compiles")
+        };
+        let sources = |json: &str| -> Vec<String> {
+            SourceMap::from_json_string(json)
+                .expect("a published map is valid")
+                .get_sources()
+                .map(str::to_string)
+                .collect()
+        };
+
+        let bundle = continued(Some(&host_map));
+        let style = bundle
+            .qualified_styles
+            .first()
+            .expect("the scoped stylesheet");
+        let json = style
+            .source_map
+            .as_deref()
+            .expect("a demanded map is chained through the host's");
+        assert_eq!(
+            sources(json),
+            ["Card.scss"],
+            "the chained map names the authored source, not the carrier: {json}"
+        );
+        let css = style.result.code();
+        let offset = css.find(".card").expect("the rendered selector");
+        let line = css[..offset].matches('\n').count() as u32;
+        let column = (offset - css[..offset].rfind('\n').map_or(0, |at| at + 1)) as u32;
+        let map = SourceMap::from_json_string(json).expect("a published map is valid");
+        let table = map.generate_lookup_table();
+        let token = map
+            .lookup_token(&table, line, column)
+            .expect("the rendered selector is mapped");
+        assert_eq!(
+            (token.get_src_line(), token.get_src_col()),
+            (1, 0),
+            "the rendered selector resolves to its authored position"
+        );
+
+        let unmapped = continued(None);
+        assert!(
+            unmapped
+                .qualified_styles
+                .first()
+                .expect("the scoped stylesheet")
+                .source_map
+                .is_none(),
+            "without the host's map a continued block publishes no map, never the bare render map"
+        );
+
+        // Control: the demand is live, and an authored block's own render
+        // map is published naming its carrier.
+        let authored = render_with_styles_for(CSS_COMPONENT, demand(), Vec::new())
+            .expect("an authored css block compiles");
+        let authored_map = authored
+            .qualified_styles
+            .first()
+            .expect("the scoped stylesheet")
+            .source_map
+            .as_deref()
+            .expect("an authored block publishes its render map");
+        assert_eq!(sources(authored_map), ["Card.svelte"]);
     }
 
     #[test]
