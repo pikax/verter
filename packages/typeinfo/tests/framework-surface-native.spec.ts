@@ -37,20 +37,15 @@ defineSlots<{ default(props: { item: string }): unknown }>();
 <template><div></div></template>
 `;
 
-/** Encode the wire `TypeInfoGraphRequest` envelope for a Vue component. */
-function encodeRequest(canonicalId: string): Buffer {
+/** Encode the wire `TypeInfoGraphRequest` envelope for a registered adapter id. */
+function encodeRequest(canonicalId: string, frameworkAdapterId: string): Buffer {
   const request = create(TypeInfoGraphRequestSchema, {
     schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
     operation: GraphOperation.FRAMEWORK_SURFACES,
     payload: {
       case: "frameworkSurface",
       value: {
-        selector: {
-          canonicalId,
-          exportName: "",
-          hasExportName: false,
-          frameworkAdapterId: "vue",
-        },
+        selector: { canonicalId, exportName: "", hasExportName: false, frameworkAdapterId },
         context: {
           mode: GraphProjectionMode.NAVIGATE,
           demand: GraphReductionDemand.PUBLISHED,
@@ -82,7 +77,7 @@ describe("resolveFrameworkSurfaceWithAudit (native binding)", () => {
     });
 
     const { response, auditRecord } = host.resolveFrameworkSurfaceWithAudit(
-      encodeRequest(canonicalId),
+      encodeRequest(canonicalId, "vue"),
     );
     expect(response).toBeInstanceOf(Buffer);
     // Audit is enabled, so the record rides the result.
@@ -154,5 +149,94 @@ describe("resolveFrameworkSurfaceWithAudit (native binding)", () => {
 
     const decoded = decodeFrameworkSurfaceResponse(new Uint8Array(response));
     expect("error" in decoded).toBe(true);
+  });
+});
+
+/**
+ * The Svelte framework-surface response's OWN contract.
+ *
+ * Structural framework metadata answers names / requiredness / runtime
+ * defaults. It carries NO member type: a callback prop's signature is
+ * obtained from the named-symbol type query
+ * (`tests/resolve-symbol.spec.ts`), never by reading a type field off a
+ * surface member.
+ *
+ * REGRESSION — fails if a member type field is invented on the public
+ * decoded member, if the derived callback-event surface starts trusting
+ * the `on` name prefix instead of the resolved callable arm, or if the
+ * requiredness / default projection drifts.
+ */
+
+const SVELTE_CALLBACKS = `<script lang="ts">
+type Handler = (id: string) => void;
+interface Props {
+  onMove: (x: number, y: number) => void;
+  onToggle?: (on?: boolean) => void;
+  onSelect: Handler;
+  onlabel: string;
+  label: string;
+}
+let { onMove, onToggle, onSelect, onlabel, label = "untitled" }: Props = $props();
+</script>
+<div>{label}</div>
+`;
+
+describe("resolveFrameworkSurfaceWithAudit (Svelte callback props)", () => {
+  it("answers names / requiredness / defaults and carries no member type", () => {
+    const host = new VerterHost({ auditEnabled: false });
+    const canonicalId = "/fixtures/Callbacks.svelte";
+    host.upsert({
+      canonicalId,
+      inputId: canonicalId,
+      source: Buffer.from(SVELTE_CALLBACKS, "utf-8"),
+    });
+
+    const { response } = host.resolveFrameworkSurfaceWithAudit(
+      encodeRequest(canonicalId, "svelte"),
+    );
+    const decoded = decodeFrameworkSurfaceResponse(new Uint8Array(response));
+    expect("error" in decoded).toBe(false);
+    const surface = decoded as FrameworkSurface;
+
+    const props = surface.kinds.get(FrameworkSurfaceKind.PROPS)!;
+    expect(props.isSupported).toBe(true);
+    expect(props.members.map((m) => m.name)).toEqual([
+      "onMove",
+      "onToggle",
+      "onSelect",
+      "onlabel",
+      "label",
+    ]);
+    // Requiredness is the DESTRUCTURING-aware Svelte answer: the `?`-optional
+    // member and the member with a destructuring default are both optional;
+    // the rest are required.
+    expect(props.members.map((m) => m.required)).toEqual([true, false, true, true, false]);
+    // Defaults are runtime expression source text, present only where authored.
+    expect(props.members.map((m) => m.default)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      '"untitled"',
+    ]);
+
+    // The derived callback-event surface keys off the RESOLVED callable arm,
+    // not the `on` name prefix: `onlabel: string` is a prop but never an
+    // event, while the aliased `onSelect: Handler` resolves to a callable and
+    // is. A response that trusted the name alone would list `label` here.
+    const emits = surface.kinds.get(FrameworkSurfaceKind.EMITS)!;
+    expect(emits.isSupported).toBe(true);
+    expect([...emits.members.map((m) => m.name)].sort()).toEqual(["Move", "Select", "Toggle"]);
+
+    // No surface member advertises a type / signature: member-type information
+    // is genuinely ABSENT from this response, not shallow or opaque.
+    for (const member of [...props.members, ...emits.members]) {
+      const keys = Object.keys(member);
+      expect(keys).not.toContain("type");
+      expect(keys).not.toContain("signature");
+      expect(keys).not.toContain("parameters");
+    }
+
+    host.close();
   });
 });
