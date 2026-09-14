@@ -8,6 +8,7 @@
 //! host-owned identifiers through [`VueMainDecoration`]; they do not infer
 //! framework module topology or reconstruct it from block fields.
 
+#[cfg(any(test, feature = "test-support"))]
 use std::cell::Cell;
 use std::ops::Range;
 
@@ -564,8 +565,7 @@ fn mint_and_validate(
 /// [`crate::compile_request::CompileRequest`] atomically) can keep the
 /// fragments alive across that combination. [`compose_main_module`] is the
 /// single-artifact convenience that composes AND publishes in one call for a
-/// caller (`verter_session`'s host composer) that only ever publishes this
-/// one artifact.
+/// caller that only ever publishes this one artifact.
 pub(crate) struct ComposedFragments {
     pub fragments: Vec<ValidatedFragment>,
     pub code: String,

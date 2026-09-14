@@ -1945,6 +1945,40 @@ mod tests {
         use crate::framework_common::{
             RuntimeOutputDescriptor, RuntimeScriptBlock, SourceMapFidelity,
         };
+        let artifact = vue_artifact(SFC);
+        let alloc = oxc_allocator::Allocator::new();
+        let admission = VueHostIntegrationBackend::new()
+            .admit_host_products(
+                &artifact,
+                VueHostMultiProductDemand {
+                    products: vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
+                        runtime_source_map: true,
+                        ..Default::default()
+                    })],
+                    ..Default::default()
+                },
+            )
+            .expect("admits maps-on Main");
+        let products = VueHostIntegrationBackend::new()
+            .compile_host_products(
+                admission,
+                &artifact,
+                &VueHostExecutionInputs {
+                    want_main: true,
+                    has_script: true,
+                    has_template: true,
+                    canonical_id: "/src/Maps.vue".to_string(),
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("compiler-generated maps let the host lane assemble");
+        let bundle = products.runtime_client_bundle().expect("client runtime");
+        assert!(
+            bundle.main.body_code.is_some(),
+            "maps-on Main demand must publish an assembled body"
+        );
+
         let compiled = RuntimeCompileOutput {
             script: Some(RuntimeScriptBlock {
                 code: "const n = 1\n".to_string(),

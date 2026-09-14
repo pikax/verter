@@ -1,13 +1,14 @@
 //! Assembled-module source map support: lifting a decoded fragment map into
-//! the typed wire form [`crate::compile::assemble_vue_main_module`]'s own
-//! composition needs. The `__sfc__` → `_sfc_main` rewrite itself
-//! ([`verter_compiler::assembly::rewrite_script`], `pub(crate)` there) now
-//! lives in `verter_compiler` — the SAME algorithm both this crate's
-//! host-decorated composer and the direct one-shot core drive through
-//! [`verter_compiler::assembly::compose_main_module`]. This module's own
-//! remaining job is decode-regime-specific: only THIS crate's hardened,
-//! multi-fragment [`super::map_input::DecodedFragmentMap`] needs lifting
-//! into an `oxc_sourcemap::SourceMap` before it can cross that boundary.
+//! the typed wire form [`super::compose_main_module`]'s own composition
+//! needs. The `__sfc__` → `_sfc_main` rewrite itself
+//! ([`super::vue_module::rewrite_script`], `pub(crate)` there) lives in this
+//! crate — the SAME algorithm the session identifier/axes transport
+//! (`assemble_vue_main_module` → [`super::assemble_vue_runtime_main`]) and
+//! the direct one-shot core drive through [`super::compose_main_module`].
+//! This module's own remaining job is decode-regime-specific: only THIS
+//! crate's hardened, multi-fragment [`super::map_input::DecodedFragmentMap`]
+//! needs lifting into an `oxc_sourcemap::SourceMap` before it can cross
+//! that boundary.
 
 use crate::oxc_sourcemap::{SourceMap, Token};
 

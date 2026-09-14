@@ -3281,6 +3281,40 @@ mod tests {
     }
 
     #[test]
+    fn empty_script_map_with_main_demand_is_vue_main_assembly_failed() {
+        let source = "<script setup>const n = 1</script><template><div>{{ n }}</div></template>";
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let opts = RuntimeCompileOptions {
+            filename: Some("Maps.vue".to_string()),
+            source_map: true,
+            want_runtime: true,
+            want_main: false,
+            vue_has_script: true,
+            vue_has_template: true,
+            ..Default::default()
+        };
+        let mut bundle = VueCarrierCompiler
+            .compile_bundle_expect_produced(source, &artifact, &opts, &alloc)
+            .expect("maps-on compile without Main demand produces a bundle");
+        let script = bundle.script.as_mut().expect("script block");
+        script.source_map.clear();
+        let parsed = VueCarrierCompiler
+            .parsed_sfc(artifact.as_ref())
+            .expect("admitted Vue parse");
+        let mut refuse_opts = opts;
+        refuse_opts.want_main = true;
+        let failure = emit_assembled_vue_main(&mut bundle, parsed, &refuse_opts)
+            .expect_err("empty script map must refuse compiler Main assembly");
+        assert!(bundle.main.body_code.is_none());
+        assert!(bundle.main.artifacts.is_none());
+        assert!(matches!(
+            CompileUnsupported::VueMainAssemblyFailed(failure.to_string()),
+            CompileUnsupported::VueMainAssemblyFailed(_)
+        ));
+    }
+
+    #[test]
     fn template_only_main_lang_is_javascript() {
         let source = "<template><div/></template>";
         let artifact = artifact_for(source);

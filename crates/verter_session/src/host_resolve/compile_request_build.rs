@@ -1351,6 +1351,29 @@ mod tests {
             compile_unsupported_code(&unsupported),
             "HOST_MAIN_MODULE_ASSEMBLY_FAILED"
         );
+        let snapshot = DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+            severity: HostSeverity::Error,
+            code: compile_unsupported_code(&unsupported).to_string(),
+            message: match &unsupported {
+                verter_compiler::framework_common::CompileUnsupported::VueMainAssemblyFailed(
+                    reason,
+                ) => reason.clone(),
+                _ => String::new(),
+            },
+            arguments: Vec::new(),
+            span: verter_span::Span::new(0, 12),
+        }]);
+        assert_eq!(
+            snapshot.diagnostics[0].code,
+            "HOST_MAIN_MODULE_ASSEMBLY_FAILED"
+        );
+        assert!(
+            snapshot.diagnostics[0]
+                .message
+                .contains("carries no source map"),
+            "typed assembly reason must reach the host diagnostic, got {}",
+            snapshot.diagnostics[0].message
+        );
     }
 
     /// The profile-borne Svelte option axes (`css`, the custom-element
