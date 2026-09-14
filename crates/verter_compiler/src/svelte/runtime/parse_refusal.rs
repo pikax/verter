@@ -24,6 +24,10 @@ use crate::svelte::parser::{
     SvelteNode, SvelteSpecialKind, SvelteStyle,
 };
 
+/// The refusal code for an external style continuation that is not bound to
+/// the component's top-level `<style>` block.
+const STYLE_CONTINUATION_UNBOUND: &str = "svelte-runtime-style-continuation-unbound";
+
 /// The pre-lowering style stage a top-level `<style>` produces when the
 /// parse-domain gate ACCEPTS it: the detected css output mode plus the parsed
 /// and analyzed css body. The pipeline completes it into the full
@@ -95,7 +99,17 @@ pub(super) fn parse_domain_gate(
             admitted,
             custom_element,
         )?),
-        None => None,
+        // A supplied result for a block this component does not have is
+        // bound to nothing; it never silently goes unused.
+        None => match &opts.style_continuation {
+            Some(bound) => {
+                return Err(UnsupportedSvelteRuntimeSurface::StyleCssAnalysis {
+                    code: STYLE_CONTINUATION_UNBOUND,
+                    span: bound.continuation.authored_extent(),
+                })
+            }
+            None => None,
+        },
     };
     // The `<svelte:options>` element itself needs no refusal here: every MALFORMED
     // options form (a duplicate / nested / non-root placement, child content, a
@@ -145,10 +159,27 @@ fn prepare_style_surface(
         .content
         .unwrap_or(Span::new(style.tag_open.end, style.tag_open.end));
 
-    if style
-        .lang
-        .as_deref()
-        .is_some_and(|lang| !lang.eq_ignore_ascii_case("css"))
+    // A continuation replaces exactly the block its authored extent names.
+    // One naming any other extent is refused, never set aside in favour of
+    // the authored bytes.
+    let continued = match &opts.style_continuation {
+        Some(bound) if style.content == Some(bound.continuation.authored_extent()) => true,
+        Some(bound) => {
+            return Err(UnsupportedSvelteRuntimeSurface::StyleCssAnalysis {
+                code: STYLE_CONTINUATION_UNBOUND,
+                span: bound.continuation.authored_extent(),
+            })
+        }
+        None => false,
+    };
+
+    // Authored bytes in a preprocessor dialect cannot enter scoping; a
+    // continued block's body is the continuation's plain-CSS output instead.
+    if !continued
+        && style
+            .lang
+            .as_deref()
+            .is_some_and(|lang| !lang.eq_ignore_ascii_case("css"))
     {
         return Err(UnsupportedSvelteRuntimeSurface::StyleCssAnalysis {
             code: "svelte-runtime-style-stage-requires-plain-css",

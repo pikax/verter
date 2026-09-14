@@ -53,4 +53,8 @@ pub struct ScopedCssArtifact {
     /// Whether the component's css includes GLOBAL css (the official
     /// `css.hasGlobal` — `analysis.css.has_global`).
     pub has_global: bool,
+    /// The stage of the bytes the scoped render consumed: the authored block,
+    /// or an admitted external continuation's produced bytes. The source map
+    /// addresses exactly that space.
+    pub consumed_stage: verter_css_syntax::StyleStage,
 }

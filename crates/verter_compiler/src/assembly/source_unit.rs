@@ -75,6 +75,12 @@ impl SourceUnit {
 /// canonical id) plus the unit's role. Revision and content stay off this
 /// constructor — hashing a path string into [`SourceUnitId`] is forbidden.
 pub(crate) fn source_unit_id(canonical_id: &str, logical_role: &str) -> SourceUnitId {
+    SourceUnitId::from_lineage(&carrier_source_id(canonical_id), logical_role)
+}
+
+/// The logical source a carrier's units share, from its canonical id — the
+/// one lineage every unit minted from that carrier descends from.
+pub(crate) fn carrier_source_id(canonical_id: &str) -> SourceId {
     struct CanonicalSource<'a>(&'a str);
     impl CanonicalEncode for CanonicalSource<'_> {
         const DOMAIN_TAG: &'static str = "verter.compiler.assembly.logical_source.v1";
@@ -82,10 +88,22 @@ pub(crate) fn source_unit_id(canonical_id: &str, logical_role: &str) -> SourceUn
             e.field_str(1, self.0);
         }
     }
-    SourceUnitId::from_lineage(
-        &SourceId::from_canonical(&CanonicalSource(canonical_id)),
-        logical_role,
-    )
+    SourceId::from_canonical(&CanonicalSource(canonical_id))
+}
+
+/// The revision of a carrier whose exact bytes are `source`: two compiles of
+/// the same bytes name the same revision, and any byte change names another.
+pub(crate) fn carrier_revision(source: &str) -> SourceRevision {
+    struct CarrierBytes(ContentId);
+    impl CanonicalEncode for CarrierBytes {
+        const DOMAIN_TAG: &'static str = "verter.compiler.assembly.carrier_revision.v1";
+        fn encode_fields(&self, e: &mut CanonicalEncoder) {
+            e.field_bytes(1, self.0.canonical_bytes());
+        }
+    }
+    SourceRevision::from_canonical(&CarrierBytes(ContentId::from_content_bytes(
+        source.as_bytes(),
+    )))
 }
 
 #[cfg(test)]

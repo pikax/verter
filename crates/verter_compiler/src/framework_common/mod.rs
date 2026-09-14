@@ -50,7 +50,7 @@ pub use capability::{
     ProductExecutionGrant, ProductExecutionGrants, ProjectionBackend, RuntimeCompilerBackend,
 };
 pub use carrier_compiler::{
-    CarrierCompileOutcome, CompileUnsupported, IdeCompileOptions, IdeOutput,
+    CarrierCompileOutcome, CompileUnsupported, IdeCompileOptions, IdeOutput, QualifiedRuntimeStyle,
     RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
     RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
     RuntimeMainModule, RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock,
@@ -70,6 +70,7 @@ pub use svelte_host_integration::{
     SvelteHostAdmissionRefusal, SvelteHostCompileRefusal, SvelteHostCompiledProducts,
     SvelteHostExecutionInputs, SvelteHostIntegrationBackend, SvelteHostMultiProductDemand,
     SvelteHostRenderedMain, SvelteHostRuntimeRenderDemand, SvelteHostUnproducibleDemand,
+    SvelteSuppliedStyle,
 };
 pub use vue_carrier_frontend::{vue_carrier_frontend_registration, VueCarrierFrontend, VueSfcV3};
 pub use vue_host_integration::{
