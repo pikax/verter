@@ -375,6 +375,15 @@ enum SharedDependencyAxis {
 /// request and a profile-derived demand execute over identical resolved
 /// inputs; the routes differ only in the demand document they admit and
 /// in whether they own the shared dependency axis.
+//
+// `VueHostExecutionInputs` carries one `#[cfg(any(test, feature =
+// "test-support"))]` field, and that cfg is evaluated in `verter_compiler`,
+// not here: `verter_session/test-support` forwards to `verter_scheduler`, so
+// nothing this crate can spell predicts whether the field exists. The struct
+// update tail is what makes the literal correct in every combination --
+// `Default` supplies exactly the fields that were compiled. Naming the field
+// under a local cfg instead fails `cargo check --workspace` with E0560.
+#[allow(clippy::needless_update)]
 fn prepare_vue_execution_inputs(
     host: &crate::VerterHost,
     snapshot: &CompileInput,
@@ -428,12 +437,7 @@ fn prepare_vue_execution_inputs(
         has_script: snapshot.meta.has_script,
         has_template: snapshot.meta.has_template,
         script_lang: snapshot.meta.script_lang.clone(),
-        // The only remaining field is test-gated, so naming it here keeps the
-        // literal exhaustive in BOTH configurations: a `..Default::default()`
-        // tail is dead code without the cfg (clippy::needless_update denies
-        // the build), and omitting the field breaks the cfg'd one.
-        #[cfg(any(test, feature = "test-support"))]
-        drop_required_script_map: false,
+        ..Default::default()
     })
 }
 

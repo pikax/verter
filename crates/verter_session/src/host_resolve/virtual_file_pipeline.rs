@@ -3585,6 +3585,11 @@ impl VerterHost {
                         snapshot.meta.custom_types.len(),
                         &snapshot.meta,
                     );
+                // The update tail is load-bearing: see the note on
+                // `prepare_vue_execution_inputs` -- the struct's last field is
+                // cfg'd in `verter_compiler`, so only `Default` knows which
+                // fields this build actually has.
+                #[allow(clippy::needless_update)]
                 let inputs = VueHostExecutionInputs {
                     block_content: snapshot.block_content_inputs.clone(),
                     vue_facts: Some(vue_facts),
@@ -3596,11 +3601,7 @@ impl VerterHost {
                     has_script: snapshot.meta.has_script,
                     has_template: snapshot.meta.has_template,
                     script_lang: snapshot.meta.script_lang.clone(),
-                    // Test-gated field named explicitly for the same reason as
-                    // the host-resolve builder: the literal must stay
-                    // exhaustive with and without the cfg.
-                    #[cfg(any(test, feature = "test-support"))]
-                    drop_required_script_map: false,
+                    ..Default::default()
                 };
                 // A runtime-surface refusal is the absence of the render's
                 // whole subject (typed, same as the HostBacked route); every
