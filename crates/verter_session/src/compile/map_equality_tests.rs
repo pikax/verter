@@ -480,7 +480,7 @@ fn compared_artifact(side: &str, raw: &str, code: &str) -> ComparedArtifact {
         ignore_list,
         mappings,
         segments: decoded
-            .segments
+            .segments()
             .iter()
             .map(|segment| ComparedSegment {
                 gen_line: segment.generated_line,

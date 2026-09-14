@@ -270,15 +270,19 @@ pub struct WireSegment {
 }
 
 /// One fragment's validated map, ready to compose.
+///
+/// Fields are private so public callers cannot mint an unvalidated
+/// instance that [`super::map_compose::to_source_map`] would trust.
+/// Construct only through [`validate_and_decode`].
 #[derive(Debug, Clone)]
 pub struct DecodedFragmentMap {
-    pub sources: Vec<String>,
-    pub names: Vec<String>,
+    sources: Vec<String>,
+    names: Vec<String>,
     /// Absent when the input declared no `sourcesContent`; otherwise parallel
     /// to `sources`.
-    pub sources_content: Option<Vec<Option<String>>>,
+    sources_content: Option<Vec<Option<String>>>,
     /// Normalised: absent when the member is absent or JSON null.
-    pub source_root: Option<String>,
+    source_root: Option<String>,
     /// The validated entries at full binary64 identity — non-negative,
     /// integral, and proven in `[0, sources.len())`, so a consumer may narrow
     /// to a small integer type; the wide storage exists because every numeric
@@ -290,8 +294,40 @@ pub struct DecodedFragmentMap {
     /// composition, which sequences the template's RAW already-encoded map
     /// string directly (`assemble_sequence` decodes it, and this field's
     /// ignore-list bounds, again, independently).
-    pub ignore_list: Vec<f64>,
-    pub segments: Vec<WireSegment>,
+    ignore_list: Vec<f64>,
+    segments: Vec<WireSegment>,
+}
+
+impl DecodedFragmentMap {
+    #[must_use]
+    pub fn sources(&self) -> &[String] {
+        &self.sources
+    }
+
+    #[must_use]
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    #[must_use]
+    pub fn sources_content(&self) -> Option<&[Option<String>]> {
+        self.sources_content.as_deref()
+    }
+
+    #[must_use]
+    pub fn source_root(&self) -> Option<&str> {
+        self.source_root.as_deref()
+    }
+
+    #[must_use]
+    pub fn ignore_list(&self) -> &[f64] {
+        &self.ignore_list
+    }
+
+    #[must_use]
+    pub fn segments(&self) -> &[WireSegment] {
+        &self.segments
+    }
 }
 
 const I32_MAX: i64 = 2_147_483_647;
@@ -678,8 +714,8 @@ pub(crate) fn agree_source_root<'a>(
     let mut agreed: Option<Option<String>> = None;
     for (fragment, map) in contributing {
         match &agreed {
-            None => agreed = Some(map.source_root.clone()),
-            Some(existing) if *existing == map.source_root => {}
+            None => agreed = Some(map.source_root().map(str::to_string)),
+            Some(existing) if existing.as_deref() == map.source_root() => {}
             // Attributed to the fragment that INTRODUCED the disagreement — the
             // later one in fixed script-then-template order, per layer 1's
             // `DECISION` D-8 (§4.3 step 2.1). Under the current two-fragment

@@ -169,22 +169,22 @@ fn decode_artifact(raw: &str) -> Artifact {
     let decoded = validate_and_decode(raw, &permissive)
         .expect("the emitted artifact is itself a valid flat v3 map");
     Artifact {
-        sources: decoded.sources,
-        names: decoded.names,
-        sources_content: decoded.sources_content,
-        source_root: decoded.source_root,
+        sources: decoded.sources().to_vec(),
+        names: decoded.names().to_vec(),
+        sources_content: decoded.sources_content().map(|rows| rows.to_vec()),
+        source_root: decoded.source_root().map(str::to_string),
         // The emitted artifact's own ignore-list entries are always small
         // integral values (they already passed step 1.23's bound check
         // against the fragment's own table before composition), so narrowing
         // from the decoder's binary64 storage to u32 here is exact — see the
         // comment on `map_compose.rs`'s own composition step.
         ignore_list: decoded
-            .ignore_list
+            .ignore_list()
             .iter()
             .map(|entry| *entry as u32)
             .collect(),
         segments: decoded
-            .segments
+            .segments()
             .iter()
             .map(|segment: &WireSegment| {
                 (

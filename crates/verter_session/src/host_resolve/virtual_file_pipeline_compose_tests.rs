@@ -161,6 +161,54 @@ fn planted_host_vue_topology_reconstruction_is_refused() {
         render_err.diagnostics[0].code,
         "HOST_VUE_MAIN_NOT_ASSEMBLED"
     );
+
+    let mut planted_body = RuntimeCompileOutput {
+        script: Some(RuntimeScriptBlock {
+            code: "const n = 1".to_string(),
+            source_map: String::new(),
+            setup: true,
+            output_descriptor: RuntimeOutputDescriptor::generated(
+                "const n = 1",
+                None,
+                &[("test:space", "test:artifact")],
+                SourceMapFidelity::Approximate,
+            ),
+            generated_template_hole: None,
+            runtime_imports: Vec::new(),
+            sfc_export_placement: None,
+        }),
+        template: Some(template("const render = () => {}", "", vec![])),
+        main: Default::default(),
+        ..Default::default()
+    };
+    planted_body.main.body_code = Some("export default {}".to_string());
+    let planted_products =
+        BoundCompiledProducts::Vue(VueHostCompiledProducts::from_admitted_runtime_bundle(
+            planted_body,
+            ProductKind::RuntimeClient,
+        ));
+    let mut planted_outputs = FxHashMap::default();
+    let planted_err = publish_runtime_nodes(
+        &input,
+        &planted_products,
+        &RuntimeNodePublication {
+            publish_runtime_module: true,
+            publish_script: true,
+            publish_template: true,
+            publish_style: false,
+            runtime_module_name: None,
+            assembly: crate::compile::VueMainAssemblyAxes::from(
+                &crate::types::CompileProfile::default(),
+            ),
+        },
+        &mut planted_outputs,
+    )
+    .expect_err("a planted body without a typed main artifact must refuse");
+    assert_eq!(
+        planted_err.diagnostics[0].code,
+        "HOST_VUE_MAIN_NOT_ASSEMBLED"
+    );
+    assert!(!planted_outputs.contains_key(&crate::types::VirtualNodeKind::Main));
 }
 
 #[test]

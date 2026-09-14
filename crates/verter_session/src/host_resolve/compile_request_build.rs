@@ -1351,18 +1351,18 @@ mod tests {
             compile_unsupported_code(&unsupported),
             "HOST_MAIN_MODULE_ASSEMBLY_FAILED"
         );
-        let snapshot = DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
-            severity: HostSeverity::Error,
-            code: compile_unsupported_code(&unsupported).to_string(),
-            message: match &unsupported {
-                verter_compiler::framework_common::CompileUnsupported::VueMainAssemblyFailed(
-                    reason,
-                ) => reason.clone(),
-                _ => String::new(),
-            },
-            arguments: Vec::new(),
-            span: verter_span::Span::new(0, 12),
-        }]);
+        let artifact = verter_compiler::framework_common::registered_carrier_projection::parse_registered_source_for_tests(
+            verter_language::FileLanguage::vue(),
+            verter_language::carrier_grammar::CarrierGrammarConfig::vue(
+                "{{",
+                "}}",
+                std::iter::empty::<&str>(),
+            )
+            .unwrap(),
+            "<script setup>const n = 1</script><template><div/></template>",
+        );
+        let snapshot =
+            runtime_bundle_unsupported_diagnostics(&artifact, "Comp.vue", 12, &unsupported);
         assert_eq!(
             snapshot.diagnostics[0].code,
             "HOST_MAIN_MODULE_ASSEMBLY_FAILED"

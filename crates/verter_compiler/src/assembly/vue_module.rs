@@ -1230,7 +1230,7 @@ pub fn vue_main_compile_artifacts(
                 generated_content: ContentId::from_content_bytes(code.as_bytes()),
                 input_basis,
                 sources: authored_ids,
-                segments: runtime_map_segments(map_json, code, &source_units),
+                segments: runtime_map_segments(map_json, code, &source_units, &authored),
             });
         }
     }
@@ -1242,6 +1242,19 @@ struct AuthoredContribution {
     role: String,
     content: String,
     span: verter_span::Span,
+    /// Composed-map source-row index for this contribution. Script and
+    /// template maps can share a source name and overlapping local spans;
+    /// tokens bind through this identity, not the name or span alone.
+    composed_source_id: u32,
+}
+
+fn fragment_source_row_count(map_json: &str) -> u32 {
+    if map_json.is_empty() {
+        return 0;
+    }
+    SourceMap::from_json_string(map_json)
+        .map(|map| map.get_sources().count() as u32)
+        .unwrap_or(0)
 }
 
 fn authored_contribution_units(
@@ -1249,15 +1262,20 @@ fn authored_contribution_units(
     runtime_source_map: Option<&str>,
 ) -> Vec<AuthoredContribution> {
     let mut units = Vec::new();
-    if let Some(script) = &compiled.script {
-        if let Some(unit) = authored_unit_from_map("script", &script.source_map) {
+    let mut source_base = 0u32;
+    let mut push_fragment = |role: &str, map_json: &str| {
+        let count = fragment_source_row_count(map_json);
+        if let Some(mut unit) = authored_unit_from_map(role, map_json) {
+            unit.composed_source_id = source_base.saturating_add(unit.composed_source_id);
             units.push(unit);
         }
+        source_base = source_base.saturating_add(count);
+    };
+    if let Some(script) = &compiled.script {
+        push_fragment("script", &script.source_map);
     }
     if let Some(template) = &compiled.template {
-        if let Some(unit) = authored_unit_from_map("template", &template.source_map) {
-            units.push(unit);
-        }
+        push_fragment("template", &template.source_map);
     }
     if units.is_empty() {
         if let Some(map_json) = runtime_source_map {
@@ -1307,6 +1325,7 @@ fn authored_unit_from_map(role: &str, map_json: &str) -> Option<AuthoredContribu
         role: role.to_string(),
         content,
         span: verter_span::Span::new(start, end),
+        composed_source_id: source_id,
     })
 }
 
@@ -1314,14 +1333,11 @@ fn runtime_map_segments(
     map_json: &str,
     generated: &str,
     source_units: &[ArtifactSourceUnit],
+    authored: &[AuthoredContribution],
 ) -> Vec<ArtifactMapSegment> {
     let Ok(map) = SourceMap::from_json_string(map_json) else {
         return Vec::new();
     };
-    let authored: Vec<_> = source_units
-        .iter()
-        .filter(|unit| unit.unit.logical_role() != "main")
-        .collect();
     if authored.is_empty() {
         return Vec::new();
     }
@@ -1351,9 +1367,14 @@ fn runtime_map_segments(
             if source_start > source_end {
                 return None;
             }
-            let unit = authored.iter().find(|unit| {
-                source_start >= unit.source_span.start && source_end <= unit.source_span.end
+            let contribution = authored.iter().find(|unit| {
+                token.get_source_id() == Some(unit.composed_source_id)
+                    && source_start >= unit.span.start
+                    && source_end <= unit.span.end
             })?;
+            let unit = source_units
+                .iter()
+                .find(|candidate| candidate.unit.logical_role() == contribution.role)?;
             let start = utf16_offset_to_bytes(
                 generated,
                 &gen_starts,
@@ -2007,6 +2028,133 @@ mod tests {
                     })
             }),
             "main must retain a typed script dependency"
+        );
+    }
+
+    #[test]
+    fn overlapping_local_spans_bind_by_composed_source_row() {
+        use crate::framework_common::{
+            RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeTemplateBlock, SourceMapFidelity,
+            TemplateRenderExport,
+        };
+        fn map_json(source: &str, content: &str) -> String {
+            let token = oxc_sourcemap::Token::new(0, 0, 0, 0, Some(0), None);
+            SourceMap::new(
+                None,
+                Vec::new(),
+                None,
+                vec![source.into()],
+                vec![Some(content.into())],
+                Box::new([token]),
+                None,
+            )
+            .to_json_string()
+        }
+        let script_content = "const n = 1\n";
+        let template_content = "<div>{{ n }}</div>\n";
+        let script_map = map_json("Comp.vue", script_content);
+        let template_map = map_json("Comp.vue", template_content);
+        let composed = SourceMap::new(
+            None,
+            Vec::new(),
+            None,
+            vec!["Comp.vue".into(), "Comp.vue".into()],
+            vec![Some(script_content.into()), Some(template_content.into())],
+            Box::new([
+                oxc_sourcemap::Token::new(0, 0, 0, 0, Some(0), None),
+                oxc_sourcemap::Token::new(1, 0, 0, 0, Some(1), None),
+            ]),
+            None,
+        )
+        .to_json_string();
+        let compiled = RuntimeCompileOutput {
+            script: Some(RuntimeScriptBlock {
+                code: script_content.to_string(),
+                source_map: script_map,
+                setup: false,
+                output_descriptor: RuntimeOutputDescriptor::generated(
+                    script_content,
+                    None,
+                    &[("test:space", "test:artifact")],
+                    SourceMapFidelity::Approximate,
+                ),
+                generated_template_hole: None,
+                runtime_imports: Vec::new(),
+                sfc_export_placement: None,
+            }),
+            template: Some(RuntimeTemplateBlock {
+                code: "function render() {}\n".to_string(),
+                source_map: template_map,
+                imports: Vec::new(),
+                ssr_imports: Vec::new(),
+                render_export: TemplateRenderExport::Render,
+                output_descriptor: RuntimeOutputDescriptor::generated(
+                    "function render() {}\n",
+                    None,
+                    &[("test:space", "test:artifact")],
+                    SourceMapFidelity::Approximate,
+                ),
+            }),
+            ..empty_bundle()
+        };
+        let generated = "const n = 1\nfunction render() {}\n";
+        let artifacts = vue_main_compile_artifacts(
+            "Comp.vue",
+            &compiled,
+            ProductKind::RuntimeClient,
+            FragmentDialect::JavaScript,
+            generated,
+            Some(&composed),
+            &VueMainDecoration::default(),
+            true,
+        )
+        .expect("schema accepts overlapping local spans");
+        let script_unit = artifacts
+            .source_units()
+            .find(|unit| unit.unit.logical_role() == "script")
+            .expect("script unit");
+        let template_unit = artifacts
+            .source_units()
+            .find(|unit| unit.unit.logical_role() == "template")
+            .expect("template unit");
+        assert_eq!(
+            script_unit.source_span.start,
+            template_unit.source_span.start
+        );
+        let map = artifacts
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.name() == "main")
+            .expect("main")
+            .maps
+            .iter()
+            .find(|map| map.family == ArtifactMapFamily::RuntimeSourceMap)
+            .expect("runtime map");
+        let script_id = script_unit.unit.id().clone();
+        let template_id = template_unit.unit.id().clone();
+        let script_segments: Vec<_> = map
+            .segments
+            .iter()
+            .filter(|segment| segment.source_unit == script_id)
+            .collect();
+        let template_segments: Vec<_> = map
+            .segments
+            .iter()
+            .filter(|segment| segment.source_unit == template_id)
+            .collect();
+        assert!(
+            !script_segments.is_empty(),
+            "script tokens must bind to the script unit"
+        );
+        assert!(
+            !template_segments.is_empty(),
+            "template tokens must bind to the template unit, not the overlapping script span"
+        );
+        assert!(
+            template_segments
+                .iter()
+                .all(|segment| segment.source_unit != script_id),
+            "duplicate source names must not collapse template tokens onto script"
         );
     }
 

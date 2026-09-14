@@ -283,7 +283,7 @@ pub struct CompileBatchRenderProfile {
     /// Collapsing an absent value to `false` would strip comments from
     /// dev builds.
     pub comments: Option<bool>,
-    /// HMR injection strategy the host-side main-module assembly emits.
+    /// HMR injection strategy forwarded to compiler-owned Main decoration.
     pub hmr_strategy: crate::types::HmrStrategy,
     /// Runtime module import specifier (e.g. `"vue"`).
     pub runtime_module_name: Option<String>,

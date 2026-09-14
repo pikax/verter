@@ -28,7 +28,7 @@ pub fn to_source_map(map: &DecodedFragmentMap) -> SourceMap<'static> {
     use std::borrow::Cow;
 
     let tokens: Vec<Token> = map
-        .segments
+        .segments()
         .iter()
         .map(|segment| match segment.payload {
             Some(payload) => Token::new(
@@ -52,17 +52,16 @@ pub fn to_source_map(map: &DecodedFragmentMap) -> SourceMap<'static> {
 
     let mut source_map = SourceMap::new(
         None,
-        map.names
+        map.names()
             .iter()
             .map(|name| Cow::Owned(name.clone()))
             .collect(),
-        map.source_root.clone().map(Cow::Owned),
-        map.sources
+        map.source_root().map(str::to_string).map(Cow::Owned),
+        map.sources()
             .iter()
             .map(|source| Cow::Owned(source.clone()))
             .collect(),
-        map.sources_content
-            .as_ref()
+        map.sources_content()
             .map(|rows| rows.iter().map(|row| row.clone().map(Cow::Owned)).collect())
             .unwrap_or_default(),
         tokens.into_boxed_slice(),
@@ -72,9 +71,13 @@ pub fn to_source_map(map: &DecodedFragmentMap) -> SourceMap<'static> {
     // (see `code_transform::chain`) — it must be set here, on the map fed
     // INTO the chain, or the rewritten script's re-encoded map would
     // silently lose every ignore-listed source row.
-    if !map.ignore_list.is_empty() {
-        source_map
-            .set_x_google_ignore_list(map.ignore_list.iter().map(|entry| *entry as u32).collect());
+    if !map.ignore_list().is_empty() {
+        source_map.set_x_google_ignore_list(
+            map.ignore_list()
+                .iter()
+                .map(|entry| *entry as u32)
+                .collect(),
+        );
     }
     source_map
 }

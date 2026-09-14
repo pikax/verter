@@ -2594,7 +2594,7 @@ fn syntax_error_does_not_warm_or_publish_main() {
     };
     let first = host.get_virtual_file(query.clone());
     assert!(
-        first.as_ref().is_err() || first.as_ref().is_ok_and(|r| r.stale || r.code.is_empty()),
+        first.as_ref().is_err() || first.as_ref().is_ok_and(|r| r.stale),
         "syntax error must not publish a fresh Main, got {first:?}"
     );
     if let Ok(first) = first.as_ref() {
@@ -2611,7 +2611,10 @@ fn syntax_error_does_not_warm_or_publish_main() {
                 !response.cache_hit,
                 "a later read must not be a warm hit of the refused assembly"
             );
-            assert!(response.stale || response.code.is_empty());
+            assert!(
+                response.stale,
+                "a later successful Main must be last-known-good stale, got {response:?}"
+            );
         }
     }
 }
