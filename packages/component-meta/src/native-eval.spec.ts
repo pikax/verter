@@ -497,6 +497,85 @@ const flag = defineModel('flag', { default: false })
     }
   });
 
+  it("publishes reactive props destructure defaults and reflects initializer edits like a fresh query", async () => {
+    const source = (initializers: { count: string; verbose: string }) => `<script setup lang="ts">
+const { count${initializers.count}, verbose${initializers.verbose}, zero = 0, empty = '', label: text = 'hi', title, note } = defineProps<{
+  count?: number
+  verbose?: boolean
+  zero?: number
+  empty?: string
+  label?: string
+  title: string
+  note?: string
+}>()
+</script>
+<template><div>{{ count }} {{ verbose }} {{ zero }} {{ empty }} {{ text }} {{ title }} {{ note }}</div></template>`;
+    const checker = await createRuntimeChecker("native-eval-destructure-defaults");
+    const defaultsOf = (meta: Awaited<ReturnType<typeof checker.getComponentMeta>>) =>
+      meta
+        ._verter!.props.map((p) => ({
+          name: p.name,
+          required: p.required,
+          hasDefault: p.hasDefault,
+          default: p.default,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+    checker.updateFile("Destructured.vue", source({ count: " = 1", verbose: " = false" }));
+    await settleNativeProject();
+    const meta = await checker.getComponentMeta("Destructured.vue");
+
+    // Prop identity: the destructure alias `text` never replaces `label`.
+    expect(meta.props.map((p) => p.name).sort()).toEqual(
+      ["count", "empty", "label", "note", "title", "verbose", "zero"].sort(),
+    );
+
+    // Native surface: falsy defaults keep both presence and verbatim value;
+    // uninitialized members stay distinguishable by requiredness.
+    expect(defaultsOf(meta)).toEqual([
+      { name: "count", required: false, hasDefault: true, default: "1" },
+      { name: "empty", required: false, hasDefault: true, default: "''" },
+      { name: "label", required: false, hasDefault: true, default: "'hi'" },
+      { name: "note", required: false, hasDefault: false, default: undefined },
+      { name: "title", required: true, hasDefault: false, default: undefined },
+      { name: "verbose", required: false, hasDefault: true, default: "false" },
+      { name: "zero", required: false, hasDefault: true, default: "0" },
+    ]);
+
+    // Compat surface threads the same defaults.
+    const compatDefault = (name: string) => meta.props.find((p) => p.name === name)!.default;
+    expect(compatDefault("count")).toBe("1");
+    expect(compatDefault("verbose")).toBe("false");
+    expect(compatDefault("zero")).toBe("0");
+    expect(compatDefault("empty")).toBe('""');
+    expect(compatDefault("label")).toBe('"hi"');
+    expect(compatDefault("title")).toBeUndefined();
+    expect(compatDefault("note")).toBeUndefined();
+
+    // Same-session edit: change one initializer and remove another.
+    const edited = source({ count: " = 2", verbose: "" });
+    checker.updateFile("Destructured.vue", edited);
+    await settleNativeProject();
+    const editedDefaults = defaultsOf(await checker.getComponentMeta("Destructured.vue"));
+    expect(editedDefaults.find((p) => p.name === "count")).toEqual({
+      name: "count",
+      required: false,
+      hasDefault: true,
+      default: "2",
+    });
+    expect(editedDefaults.find((p) => p.name === "verbose")).toEqual({
+      name: "verbose",
+      required: false,
+      hasDefault: false,
+      default: undefined,
+    });
+
+    const fresh = await createRuntimeChecker("native-eval-destructure-defaults-fresh");
+    fresh.updateFile("Destructured.vue", edited);
+    await settleNativeProject();
+    expect(editedDefaults).toEqual(defaultsOf(await fresh.getComponentMeta("Destructured.vue")));
+  });
+
   // The native evaluator RESOLVES chained indexed access under explicit
   // demand; publication keeps the wire shallow by design. Path-precise
   // two-hop terminals (`Button['variants']['color']`) land as concrete
