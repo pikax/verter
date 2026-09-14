@@ -428,7 +428,12 @@ fn prepare_vue_execution_inputs(
         has_script: snapshot.meta.has_script,
         has_template: snapshot.meta.has_template,
         script_lang: snapshot.meta.script_lang.clone(),
-        ..Default::default()
+        // The only remaining field is test-gated, so naming it here keeps the
+        // literal exhaustive in BOTH configurations: a `..Default::default()`
+        // tail is dead code without the cfg (clippy::needless_update denies
+        // the build), and omitting the field breaks the cfg'd one.
+        #[cfg(any(test, feature = "test-support"))]
+        drop_required_script_map: false,
     })
 }
 
