@@ -9241,6 +9241,14 @@ fn flow_return_clause_entry_restore_excludes_every_executed_write() {
 const CONV_DEAD: &str = "/ws/conv_dead.ts";
 const CONV_OWNER: &str = "/ws/conv_owner.ts";
 
+/// The two revisions of the dead file, and the two dead-branch spellings
+/// of the owner. Every incremental step below names the pair it is at, so
+/// the same pair can be replayed on a FRESH host as the oracle.
+const CONV_DEAD_V0: &str = "export type DeadDeclared = { dropped: \"no\" };\n";
+const CONV_DEAD_V1: &str = "export type DeadDeclared = { dropped: \"changed\" };\n";
+const CONV_FALSE_V0: &str = "DeadShell";
+const CONV_FALSE_V1: &str = "DeadShell | { extra: \"e\" }";
+
 /// The dead branch reaches the dead file only through a LOCAL alias
 /// shell: minting the shell's `DeclRef` records no fact of the dead file
 /// (shallow indexing of an import route is not semantic work), so only
@@ -9375,8 +9383,9 @@ struct ConvObservation {
 /// pinned to enter no forcing family and read no dead-file fact; the
 /// member demand is then measured for dead-file facts and branch
 /// selections. `expect_flow_cold` pins the flow window's exact family
-/// multiset for a cold evaluation (a warm hit enters no forcing family
-/// either, but its exact window is a memo detail this test does not own).
+/// multiset for a cold evaluation; a warm read must enter neither a
+/// forcing family NOR a cold one, which is what separates a memo hit
+/// from a silent recomputation that lands on the same answer.
 fn conv_observe(host: &Arc<VerterHost>, function: &str, expect_flow_cold: bool) -> ConvObservation {
     use super::semantic_operand_tests::{dispatch_classes_since, trace_len};
     with_dispatch(host, |dispatch| {
@@ -9407,7 +9416,21 @@ fn conv_observe(host: &Arc<VerterHost>, function: &str, expect_flow_cold: bool) 
                 "{function}: the cold flow window entered a forcing family"
             );
         } else {
-            for family in ["Instantiate", "Conditional", "ProjectPath", "IndexedAccess"] {
+            // A warm read serves the memo: it enters NO family at all. The
+            // COLD families are pinned to zero alongside the forcing ones
+            // because a cache miss that recomputed the whole flow result
+            // re-enters exactly `LowerLocator` + `TypeOf`, and the candidate
+            // COUNT cannot see it — an invalidated candidate is REPLACED, so
+            // the count stays one. Without these two names a silent
+            // recomputation would satisfy every warm assertion below.
+            for family in [
+                "LowerLocator",
+                "TypeOf",
+                "Instantiate",
+                "Conditional",
+                "ProjectPath",
+                "IndexedAccess",
+            ] {
                 assert_eq!(
                     flow_classes.get(family).copied().unwrap_or(0),
                     0,
@@ -9443,6 +9466,22 @@ fn conv_observe(host: &Arc<VerterHost>, function: &str, expect_flow_cold: bool) 
     })
 }
 
+/// The INDEPENDENT oracle: a brand-new host that has only ever seen this
+/// exact source pair, observed cold. An incremental result is equal to
+/// FRESH only when it matches this — comparing it against a pre-edit
+/// observation of DIFFERENT source proves nothing about the edited
+/// inputs, because the pre-edit answer is the one the edit was supposed
+/// to be allowed to change.
+///
+/// Only the projections are comparable across hosts: node identities and
+/// the graph counters belong to the host that produced them.
+fn conv_fresh(dead_source: &str, false_branch: &str) -> ConvObservation {
+    let host = make_host();
+    conv_upsert(&host, CONV_DEAD, dead_source.to_owned());
+    conv_upsert(&host, CONV_OWNER, conv_owner_source(false_branch));
+    conv_observe(&host, "makeProps", true)
+}
+
 /// A function returning `{ v: pick() }` with `pick(): Cond<string>` — a
 /// callee whose declared return is a selective operand whose dead branch
 /// lives in a second file.
@@ -9471,6 +9510,13 @@ fn conv_observe(host: &Arc<VerterHost>, function: &str, expect_flow_cold: bool) 
 ///   the flow read is a warm hit and the demanded operand decides nothing
 ///   again. Mutation recipe: rooting the operand result on the dead
 ///   branch's file makes the dead-file edit re-decide the conditional.
+/// * "Equal to fresh" is decided against `conv_fresh`: an independent host
+///   that has only ever seen the edited sources, observed cold. Both edited
+///   states are checked against their own oracle, so a stale re-serve
+///   cannot certify convergence merely by agreeing with the answer it held
+///   BEFORE the edit. Mutation recipe: serving the pre-edit result for an
+///   edit that does change the demanded member fails the oracle while the
+///   node-identity and re-decision counters still pass.
 #[test]
 fn flow_return_retains_a_selective_operand_as_a_carrier_and_forces_it_only_on_consumer_demand() {
     use super::semantic_operand_tests::interned_nodes;
@@ -9478,12 +9524,8 @@ fn flow_return_retains_a_selective_operand_as_a_carrier_and_forces_it_only_on_co
     use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
     let host = make_host();
-    conv_upsert(
-        &host,
-        CONV_DEAD,
-        "export type DeadDeclared = { dropped: \"no\" };\n".to_owned(),
-    );
-    conv_upsert(&host, CONV_OWNER, conv_owner_source("DeadShell"));
+    conv_upsert(&host, CONV_DEAD, CONV_DEAD_V0.to_owned());
+    conv_upsert(&host, CONV_OWNER, conv_owner_source(CONV_FALSE_V0));
     let _trace = enable_dispatch_trace_for_test();
 
     let carrier = TypeExpr::Ref {
@@ -9567,22 +9609,35 @@ fn flow_return_retains_a_selective_operand_as_a_carrier_and_forces_it_only_on_co
         "forcing the dead branch must read the dead file — the zero assertions discriminate"
     );
 
-    // ── SAME-OWNER DEAD EDIT: equal to fresh, zero dead-branch work ────
-    conv_upsert(
-        &host,
-        CONV_OWNER,
-        conv_owner_source("DeadShell | { extra: \"e\" }"),
-    );
+    // ── SAME-OWNER DEAD EDIT: equal to FRESH, zero dead-branch work ────
+    conv_upsert(&host, CONV_OWNER, conv_owner_source(CONV_FALSE_V1));
     let edited = conv_observe(&host, "makeProps", true);
+    // The oracle: an independent host that has only ever seen the EDITED
+    // owner. This is what "equals fresh" has to mean — `cold` observed a
+    // different owner source, so agreeing with it is a separate (and
+    // weaker) claim about the respell being invisible.
+    let fresh_after_owner_edit = conv_fresh(CONV_DEAD_V0, CONV_FALSE_V1);
+    assert_eq!(
+        conv_sole_property(&edited.flow_projected),
+        conv_sole_property(&fresh_after_owner_edit.flow_projected),
+        "the incrementally recomputed flow result differs from a fresh computation over the \
+         edited source"
+    );
+    assert_eq!(
+        conv_sole_property(&edited.demand_projected),
+        conv_sole_property(&fresh_after_owner_edit.demand_projected),
+        "the incrementally recomputed demand differs from a fresh computation over the edited \
+         source"
+    );
     assert_eq!(
         conv_sole_property(&edited.flow_projected),
         conv_sole_property(&cold.flow_projected),
-        "the recomputed flow result equals fresh"
+        "respelling only the dead branch changed the published flow result"
     );
     assert_eq!(
         conv_sole_property(&edited.demand_projected),
         conv_sole_property(&cold.demand_projected),
-        "the recomputed demand equals fresh"
+        "respelling only the dead branch changed the demanded member"
     );
     assert_eq!(
         edited.demand_dead_fact_reads, 0,
@@ -9595,13 +9650,23 @@ fn flow_return_retains_a_selective_operand_as_a_carrier_and_forces_it_only_on_co
     let candidates_after_owner_edit = edited.flow_candidates;
 
     // ── DEAD-FILE EDIT: invalidates nothing the consumer demanded ──────
-    conv_upsert(
-        &host,
-        CONV_DEAD,
-        "export type DeadDeclared = { dropped: \"changed\" };\n".to_owned(),
-    );
+    conv_upsert(&host, CONV_DEAD, CONV_DEAD_V1.to_owned());
     let nodes_before = interned_nodes(&host);
     let dead_edit = conv_observe(&host, "makeProps", false);
+    // Serving the SAME node is only correct if that node is still the
+    // answer a fresh computation over BOTH edited files produces. The
+    // oracle rules out a stale re-serve that happens to keep its identity.
+    let fresh_after_dead_edit = conv_fresh(CONV_DEAD_V1, CONV_FALSE_V1);
+    assert_eq!(
+        conv_sole_property(&dead_edit.flow_projected),
+        conv_sole_property(&fresh_after_dead_edit.flow_projected),
+        "the re-served flow result differs from a fresh computation over the edited dead file"
+    );
+    assert_eq!(
+        conv_sole_property(&dead_edit.demand_projected),
+        conv_sole_property(&fresh_after_dead_edit.demand_projected),
+        "the re-served demand differs from a fresh computation over the edited dead file"
+    );
     assert_eq!(
         dead_edit.demand_node, edited.demand_node,
         "the dead-file edit re-served the demand"
