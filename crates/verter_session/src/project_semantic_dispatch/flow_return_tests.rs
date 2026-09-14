@@ -154,6 +154,11 @@ export function subUnappliedParamWrite(x: string | number) {
   return { a: (x = "s"), b: x };
 }
 
+export function subCompoundParamWrite(x: string | number) {
+  x += "s";
+  return x;
+}
+
 export function subWriteToUnreadSlot(x: number) {
   let dead = 0;
   dead = x;
@@ -163,6 +168,14 @@ export function subWriteToUnreadSlot(x: number) {
 export function subStandalonePrecedingWrite(x: string | number) {
   x = "s";
   return x;
+}
+
+export function subSourceOrderReadBeforeWrite(x: string | number) {
+  return { b: x, a: (x = "s") };
+}
+
+export function subSourceOrderDeferredRead(x: string | number) {
+  return { b: () => x, a: (x = "s") };
 }
 
 export declare const q: number;
@@ -186,6 +199,13 @@ export function subBranchVarAny(flag: boolean) {
   if (flag) var x: any = 1;
   else var x: any = "s";
   return x;
+}
+
+export function subBranchVarUndef(flag: boolean) {
+  if (flag) {
+    var y: number | undefined = 1;
+  }
+  return y;
 }
 
 export function subBranchVarOneArm(flag: boolean) {
@@ -2292,21 +2312,23 @@ fn flow_return_shadowed_outer_initializer_stays_clean_and_admits() {
     });
 }
 
-/// Unapplied write effects (defect B): the evaluator does not yet apply
-/// `FlowSliceIR.effects` write retypes, so a slice carrying a whole-slot
-/// write into a parameter (or any value-selected slot) MUST fail closed as
-/// the `UnappliedWriteEffect` DEGRADED SUCCESS — a usable value, ReturnOnly,
-/// never warm-admitted. Before the fix `subUnappliedParamWrite` published
-/// `{ a: string, b: string | number }` as COMPLETE + warm-admissible while
-/// tsc says `b: string` (the assignment narrows left-to-right) — wrong +
-/// complete + non-degraded, the worst combination.
+/// Unapplied write effects (defect B rail): a whole-slot write the
+/// evaluator has NO evaluation-order application for — the COMPOUND
+/// operator (`x += "s"`), which neither the statement nor the expression
+/// application arm models — MUST fail closed as the `UnappliedWriteEffect`
+/// DEGRADED SUCCESS: a usable value, ReturnOnly, never warm-admitted.
+/// (The plain-`=` statement and expression positions now APPLY their
+/// writes in source/evaluation order — see
+/// `flow_return_standalone_preceding_write_applies_and_publishes_clean`
+/// and `flow_return_source_order_object_read_before_write_publishes_clean`
+/// — so the rail is the residual guard for everything they do not model.)
 #[test]
 fn flow_return_unapplied_write_effect_degrades_and_admits_nothing() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
         let key = flow_key(
             dispatch,
-            "subUnappliedParamWrite",
+            "subCompoundParamWrite",
             FunctionPartIdentity::DeclarationBody,
             0,
         );
@@ -3232,18 +3254,52 @@ fn assert_degraded_return_only(
     );
 }
 
-/// A `var` whose reaching definition was recorded inside an `if` arm is
-/// observed AFTER the arms rejoin, where the substrate has no branch-join
-/// algebra over the function-scoped layer: the last-evaluated arm's value
-/// would publish as the reaching definition. That is a wrong answer
-/// published clean + warm (`if (flag) var x: any = 1; else var x: any =
-/// "s"; return x` published `string` where the oracle is `any`), so the
-/// observation fails closed as a degraded success instead.
-///
-/// The one-armed form is the accepted cost: `if (flag) { var w = 1 }
-/// return w` returns a coincidentally-correct `number` today, and tsc
-/// REJECTS that program outright (TS2454, used before assigned) — fail
-/// closed is the contract.
+/// D13 / CONDITIONAL-VAR-BRANCH-JOIN — `branchVar`: the function-scoped
+/// `var` layer joins over the ONE shared product lattice at the `if`'s
+/// branch join. Both arms of `if (flag) var x: any = 1; else var x: any =
+/// "s"; return x` define `x` on every continuing path, so the join's
+/// reaching definition (`any`) publishes CLEAN and warm-admissible — the
+/// checker's own answer, where the pre-join substrate degraded to the
+/// last-evaluated arm's value or failed closed.
+#[test]
+fn flow_return_branch_var() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        assert_clean_warm(
+            &host,
+            dispatch,
+            "subBranchVarAny",
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Any),
+        );
+    });
+}
+
+/// D13 / CONDITIONAL-VAR-BRANCH-JOIN — `branchVarUndef`: the one-armed
+/// `if (flag) { var y: number | undefined = 1; } return y` folds the
+/// never-assigned path's DECLARED authority into the branch join
+/// (`number | undefined`), publishing the checker's answer CLEAN and
+/// warm-admissible. The declared authority is what makes the fold sound;
+/// without it the negative below keeps the typed refusal.
+#[test]
+fn flow_return_branch_var_undef() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        assert_clean_warm(
+            &host,
+            dispatch,
+            "subBranchVarUndef",
+            &verter_type_expr::TypeExpr::union(vec![
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
+            ]),
+        );
+    });
+}
+
+/// The one-armed `var` WITHOUT a declared annotation stays degraded:
+/// `if (flag) { var w = 1; } return w` has a never-assigned path no
+/// declared authority covers, and tsc REJECTS that program outright
+/// (TS2454, used before being assigned) — fail closed is the contract.
 #[test]
 fn flow_return_conditionally_defined_var_degrades_at_observation() {
     let host = make_host();
@@ -3251,14 +3307,279 @@ fn flow_return_conditionally_defined_var_degrades_at_observation() {
         assert_degraded_return_only(
             &host,
             dispatch,
-            "subBranchVarAny",
-            crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
-        );
-        assert_degraded_return_only(
-            &host,
-            dispatch,
             "subBranchVarOneArm",
             crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+        );
+    });
+}
+
+/// D13 / R2-UNAPPLIED-WRITE-EFFECT-SOURCE-ORDER — the expression-position
+/// whole-slot write applies with EVALUATION-ORDER reasoning. Object
+/// members evaluate left-to-right, so `{ b: x, a: (x = "s") }` reads `b`
+/// BEFORE the write (`string | number`, the parameter's own reaching) and
+/// applies the write AT `a` — publishing `{ b: string | number; a: string }`,
+/// the checker's own answer, CLEAN and warm-admissible. The
+/// write-then-read twin (`subUnappliedParamWrite`) publishes
+/// `{ a: string; b: string }` the same way. A span-comparison suppression
+/// ("drop the degradation when every read precedes the write") is
+/// unsound and stays rejected — the deferred-read negative below is the
+/// counterexample.
+#[test]
+fn flow_return_source_order_object_read_before_write_publishes_clean() {
+    let host = make_host();
+    let string_or_number = verter_type_expr::TypeExpr::union(vec![
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+    ]);
+    let string = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String);
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subSourceOrderReadBeforeWrite",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the in-order-applied expression write degrades nothing"
+        );
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("the clean result projects");
+        assert_eq!(object_prop(&projected, "b"), &string_or_number);
+        assert_eq!(object_prop(&projected, "a"), &string);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean result admits warm"
+        );
+
+        let key = flow_key(
+            dispatch,
+            "subUnappliedParamWrite",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the write-then-read twin applies the write before `b` reads it"
+        );
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("the clean result projects");
+        assert_eq!(object_prop(&projected, "a"), &string);
+        assert_eq!(object_prop(&projected, "b"), &string);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean result admits warm"
+        );
+    });
+}
+
+/// The R2 DEFERRED-READ negative: a closure created inside the same
+/// object literal observes the write that evaluates AFTER it — the
+/// checker's deferred-read rule — so `{ b: () => x, a: (x = "s") }`
+/// publishes `b: () => string`, NOT the statement-entry
+/// `() => string | number` a span-order suppression would publish. This
+/// is exactly why suppressing the write rail by comparing read and write
+/// spans was ruled unsound.
+#[test]
+fn flow_return_source_order_deferred_read_still_observes_the_write() {
+    let host = make_host();
+    let string = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String);
+    let returns_string = verter_type_expr::TypeExpr::Function(std::sync::Arc::new(
+        verter_type_expr::FunctionExpr::synthetic(
+            Vec::new(),
+            Some(std::sync::Arc::new(string.clone())),
+            Vec::new(),
+        ),
+    ));
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subSourceOrderDeferredRead",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the capture look-ahead observes the write and publishes the checker's answer"
+        );
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("the clean result projects");
+        assert_eq!(object_prop(&projected, "b"), &returns_string);
+        assert_eq!(object_prop(&projected, "a"), &string);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean result admits warm"
+        );
+    });
+}
+
+const OWNER_PROBE_CANONICAL: &str = "/ws/owner-probe.ts";
+
+const OWNER_PROBE_FIXTURE: &str = r#"
+export function ownerAbsentClassCarrier() {
+  class FrameOnly {}
+  const g = (v: FrameOnly): FrameOnly => v;
+  return g;
+}
+
+export function ownerAbsentEnumCarrier() {
+  enum FrameEnum {
+    A,
+  }
+  const h = (v: FrameEnum): FrameEnum => v;
+  return h;
+}
+
+export class FrameCollision {}
+
+export function ownerCollisionClass() {
+  class FrameCollision {}
+  const g = (v: FrameCollision): FrameCollision => v;
+  return g;
+}
+"#;
+
+/// D13 / TYPE-SPACE-OWNER-PROBE-CARRIER-SETTLEMENT — the owner-side probe
+/// settles through the shared head-resolution authority. An owner-absent
+/// class or enum name the frame owns is a GENUINE MISS in owner scope
+/// (its carrier-mode probe lowers to a `BareRef` carrier, which the
+/// demand-point settlement proves unresolved), so the frame gate stays
+/// silent and the signature PRESERVES the unchanged unresolved carrier —
+/// never the unmodelled-position marker substitution the old
+/// carrier-counts-as-answered probe forced. A REAL owner-scope
+/// collision (a module-scope class of the same name) still fails closed:
+/// the positions carry the marker, the result is degraded, and nothing
+/// warm-publishes a wrong value.
+#[test]
+fn flow_return_unanswered_type_space_owner_probe_preserves_unresolved_carrier() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(OWNER_PROBE_CANONICAL.to_string()),
+        input_id: OWNER_PROBE_CANONICAL.to_string(),
+        source: Arc::from(OWNER_PROBE_FIXTURE),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(OWNER_PROBE_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        for (name, carrier) in [
+            ("ownerAbsentClassCarrier", "FrameOnly"),
+            ("ownerAbsentEnumCarrier", "FrameEnum"),
+        ] {
+            let key = FlowReturnKey {
+                function: dispatch.flow_function_slot_for(
+                    Arc::from(OWNER_PROBE_CANONICAL),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from(name),
+                    FunctionPartIdentity::DeclarationBody,
+                    0,
+                ),
+                normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+                context: dispatch.flow_return_context_for(OWNER_PROBE_CANONICAL),
+                demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+                input: crate::semantic_query::FlowInputContext::empty(),
+                result_contract: super::flow_solve::flow_return_result_contract_id(),
+            };
+            let result = flow_result_value(dispatch, key.clone());
+            assert_eq!(
+                result.degradation(),
+                None,
+                "{name}: an owner-absent frame-owned name never trips the frame gate"
+            );
+            let projected = host
+                .project_node_to_type_expr_for_test(result.return_type())
+                .expect("the signature projects");
+            let verter_type_expr::TypeExpr::Function(function) = &projected else {
+                panic!("{name}: a function value, got {projected:?}");
+            };
+            let expected = verter_type_expr::TypeExpr::Ref {
+                name: Arc::from(carrier),
+                type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+            };
+            assert_eq!(
+                function.parameters[0].ty, expected,
+                "{name}: the parameter keeps the unchanged unresolved carrier"
+            );
+            assert_eq!(
+                function.return_type.as_deref(),
+                Some(&expected),
+                "{name}: the return keeps the unchanged unresolved carrier"
+            );
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                1,
+                "{name}: the carrier-preserving result admits warm"
+            );
+        }
+
+        let collision = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(OWNER_PROBE_CANONICAL),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("ownerCollisionClass"),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(OWNER_PROBE_CANONICAL),
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        let result = flow_result_value(dispatch, collision.clone());
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition),
+            "a real owner-scope collision fails closed"
+        );
+        // POSITIONAL: the signature keeps its shape and every slot that
+        // referenced the colliding name carries the typed marker — never
+        // the outer class's value.
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("the degraded signature projects");
+        let verter_type_expr::TypeExpr::Function(function) = &projected else {
+            panic!("the collision keeps the signature shape, got {projected:?}");
+        };
+        let marker = verter_type_expr::TypeExpr::Unknown(
+            verter_type_expr::UnknownValue::compatibility_projection("unmodeledPosition"),
+        );
+        assert_eq!(
+            function.parameters[0].ty, marker,
+            "the collision substitutes the typed marker at the parameter, never the outer class's value"
+        );
+        assert_eq!(
+            function.return_type.as_deref(),
+            Some(&marker),
+            "the collision substitutes the typed marker at the return, never the outer class's value"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(collision))),
+            0,
+            "the collision never warm-publishes a wrong value"
         );
     });
 }

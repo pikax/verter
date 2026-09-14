@@ -908,7 +908,7 @@ fn degraded_inline_flow_return_never_warms_the_enclosing_call() {
         canonical_id: Some(CANONICAL.to_string()),
         input_id: CANONICAL.to_string(),
         source: Arc::from(
-            "export function degraded(x: string | number) { return { a: (x = \"s\"), b: x }; }\nexport function clean() { return 1; }",
+            "export function degraded(x: string | number) { return { a: (x += \"s\"), b: x }; }\nexport function clean() { return 1; }",
         ),
         file_language: crate::LanguageRegistry::global()
             .classify_static(CANONICAL)

@@ -3843,10 +3843,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // The writes the content half lowered as applicable assignments —
         // the scan below subtracts exactly these from the unapplied-write
         // degradation, by the span identity both halves inherit from the
-        // skeleton.
+        // skeleton. The EXPRESSION-position writes ride the value roots and
+        // are subtracted only for a whole-return demand: a member
+        // projection evaluates just the demanded member, so a
+        // sibling-member write never applies and keeps its degradation.
         let applied_write_spans = {
             let mut spans = rustc_hash::FxHashSet::default();
-            collect_assignment_spans(&ir.body, &mut spans);
+            collect_assignment_spans(&ir.body, &mut spans, member_filter.is_none());
             spans.extend(ir.inert_write_spans.iter().copied());
             spans
         };
@@ -4095,6 +4098,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             collect_throw_points: false,
             scope_shadows: Vec::new(),
             call_evidence: Vec::new(),
+            expression_write_nodes: rustc_hash::FxHashMap::default(),
+            capture_write_lookahead: rustc_hash::FxHashMap::default(),
             executed_walk: ExecutedSliceWalk::default(),
         };
         let holds;
@@ -4596,32 +4601,42 @@ struct MemberDemandFilter {
 /// for any other non-whole-return point (fail closed at the caller).
 /// Collect the spans of every assignment statement in a region tree —
 /// the writes the evaluator APPLIES, which the unapplied-write
-/// degradation subtracts by span identity.
+/// degradation subtracts by span identity. With
+/// `include_expression_writes`, also collect every EXPRESSION-position
+/// write the tree's value roots carry (return arguments, binding
+/// initializers, statement-write right-hand sides): those apply in
+/// evaluation order through [`crate::flow_slice_content::SliceExpr::Assignment`].
+/// A member-projection demand evaluates only the demanded member, so its
+/// sibling-member writes never apply and are NOT subtracted there.
 fn collect_assignment_spans(
     region: &crate::flow_slice_content::SliceRegion,
     out: &mut rustc_hash::FxHashSet<verter_semantic::analysis::flow::FrameSpan>,
+    include_expression_writes: bool,
 ) {
     for statement in region.statements.iter() {
         match statement {
-            crate::flow_slice_content::SliceStatement::Assignment { span, .. } => {
+            crate::flow_slice_content::SliceStatement::Assignment { span, value, .. } => {
                 out.insert(*span);
+                if include_expression_writes {
+                    collect_expression_write_spans(value, out);
+                }
             }
             crate::flow_slice_content::SliceStatement::If {
                 consequent,
                 alternate,
                 ..
             } => {
-                collect_assignment_spans(consequent, out);
+                collect_assignment_spans(consequent, out, include_expression_writes);
                 if let Some(alternate) = alternate {
-                    collect_assignment_spans(alternate, out);
+                    collect_assignment_spans(alternate, out, include_expression_writes);
                 }
             }
             crate::flow_slice_content::SliceStatement::Block(block) => {
-                collect_assignment_spans(block, out);
+                collect_assignment_spans(block, out, include_expression_writes);
             }
             crate::flow_slice_content::SliceStatement::Switch { cases, .. } => {
                 for case in cases.iter() {
-                    collect_assignment_spans(&case.region, out);
+                    collect_assignment_spans(&case.region, out, include_expression_writes);
                 }
             }
             crate::flow_slice_content::SliceStatement::Try {
@@ -4630,20 +4645,32 @@ fn collect_assignment_spans(
                 finally,
                 ..
             } => {
-                collect_assignment_spans(block, out);
+                collect_assignment_spans(block, out, include_expression_writes);
                 if let Some(catch) = catch {
-                    collect_assignment_spans(&catch.region, out);
+                    collect_assignment_spans(&catch.region, out, include_expression_writes);
                 }
                 if let Some(finally) = finally {
-                    collect_assignment_spans(finally, out);
+                    collect_assignment_spans(finally, out, include_expression_writes);
                 }
             }
             crate::flow_slice_content::SliceStatement::Labeled { body, .. } => {
-                collect_assignment_spans(body, out);
+                collect_assignment_spans(body, out, include_expression_writes);
             }
-            crate::flow_slice_content::SliceStatement::Return { .. }
-            | crate::flow_slice_content::SliceStatement::Gap(_)
-            | crate::flow_slice_content::SliceStatement::Binding { .. }
+            crate::flow_slice_content::SliceStatement::Return { argument, .. } => {
+                if include_expression_writes {
+                    if let Some(argument) = argument {
+                        collect_expression_write_spans(argument, out);
+                    }
+                }
+            }
+            crate::flow_slice_content::SliceStatement::Binding { init, .. } => {
+                if include_expression_writes {
+                    if let Some(init) = init {
+                        collect_expression_write_spans(init, out);
+                    }
+                }
+            }
+            crate::flow_slice_content::SliceStatement::Gap(_)
             | crate::flow_slice_content::SliceStatement::Assertion { .. }
             | crate::flow_slice_content::SliceStatement::Break { .. }
             | crate::flow_slice_content::SliceStatement::Throw
@@ -4653,6 +4680,68 @@ fn collect_assignment_spans(
             | crate::flow_slice_content::SliceStatement::Unsupported(_) => {}
         }
     }
+}
+
+/// Collect the spans of every expression-position write in an expression
+/// tree — the same spans [`collect_assignment_spans`] subtracts for value
+/// roots, walked over every structurally-lowered nesting a write can sit
+/// in (object members and keys, spreads, branch arms, an IIFE's nested
+/// function value, the write's own right-hand side).
+fn collect_expression_write_spans(
+    expr: &crate::flow_slice_content::SliceExpr,
+    out: &mut rustc_hash::FxHashSet<verter_semantic::analysis::flow::FrameSpan>,
+) {
+    for write in expression_write_tree(expr) {
+        if let crate::flow_slice_content::SliceExpr::Assignment { span, .. } = write {
+            out.insert(*span);
+        }
+    }
+}
+
+/// Every expression-position write in an expression tree, in tree order —
+/// the pre-scan's work list.
+fn expression_write_tree(
+    expr: &crate::flow_slice_content::SliceExpr,
+) -> Vec<&crate::flow_slice_content::SliceExpr> {
+    use crate::flow_slice_content::{SliceCall, SliceExpr, SliceObjectEntry, SliceObjectKey};
+    let mut out = Vec::new();
+    fn walk<'e>(expr: &'e SliceExpr, out: &mut Vec<&'e SliceExpr>) {
+        match expr {
+            SliceExpr::Assignment { value, .. } => {
+                out.push(expr);
+                walk(value, out);
+            }
+            SliceExpr::FrameShadowed { inner, .. } => walk(inner, out),
+            SliceExpr::OptionalAnyChain { root } => walk(root, out),
+            SliceExpr::Object { entries } => {
+                for entry in entries.iter() {
+                    match entry {
+                        SliceObjectEntry::Spread { source } => walk(source, out),
+                        SliceObjectEntry::Member(member) => {
+                            if let SliceObjectKey::Computed { value, .. } = &member.key {
+                                walk(value, out);
+                            }
+                            walk(&member.value, out);
+                            if let Some(assignment_value) = member.assignment_value.as_ref() {
+                                walk(assignment_value, out);
+                            }
+                        }
+                    }
+                }
+            }
+            SliceExpr::Union { arms, .. } => {
+                for arm in arms.iter() {
+                    walk(arm, out);
+                }
+            }
+            SliceExpr::Call(SliceCall::Nested(function_value), _) => {
+                walk(function_value, out);
+            }
+            _ => {}
+        }
+    }
+    walk(expr, &mut out);
+    out
 }
 
 fn flow_demanded_member_name(
@@ -4869,8 +4958,22 @@ struct FlowBinderEnv {
 /// Asked through the ONE shared lowering the answer itself would take
 /// (`typeof name` for a value reference, a bare `name` reference for a
 /// type or namespace one), so the verdict is exactly "would the answer
-/// bind something here". A typed MISS means the owner scope answers
-/// nothing, so nothing can be mis-bound.
+/// bind something here". The probe settles THREE ways:
+///
+/// - a RESOLVED answer (any non-opaque node) — the owner scope binds the
+///   name, a real collision, fail closed;
+/// - a typed MISS (`Opaque`) — the owner scope answers nothing, so
+///   nothing can be mis-bound and the frame-owned name evaluates
+///   unchanged;
+/// - an UNRESOLVED CARRIER (`BareRef`) — the carrier-mode lowering's
+///   honest spelling of "not resolved HERE". A carrier is NOT positive
+///   proof that the owner scope answers the name: it settles through the
+///   shared head-resolution authority at the demand point (`Expanded`),
+///   which separates a genuine miss (the name binds nothing anywhere —
+///   the frame's own class / enum name keeps its unchanged unresolved
+///   carrier) from degraded uncertainty (an authored import binds the
+///   name while its route is currently unresolvable — fail closed, the
+///   owner scope cannot be proved silent).
 ///
 /// The two type-space meanings share one probe by construction: the HEAD
 /// of `N.B` is the same scope lookup as a bare `N`, and it is the FRAME
@@ -4896,21 +4999,50 @@ fn owner_scope_answers_frame_name(
             }
         }
     };
-    let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-    let node = dispatch.shallow_lower_type_expr_with_context(
-        &probe,
-        &binder_env.env,
-        &binder_env.scope,
-        &binder_env.name_resolution,
-        binder_env.scope_payload.as_ref(),
-        &binder_env.shadowing,
-        &mut substitutions,
-        crate::semantic_query::ProjectionReductionContext::structural_transit(),
-    );
-    !matches!(
-        dispatch.graph().node_data(node).as_deref(),
-        Some(SemanticNodeData::Opaque(_))
-    )
+    let lower_probe = |context: crate::semantic_query::ProjectionReductionContext| {
+        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+        dispatch.shallow_lower_type_expr_with_context(
+            &probe,
+            &binder_env.env,
+            &binder_env.scope,
+            &binder_env.name_resolution,
+            binder_env.scope_payload.as_ref(),
+            &binder_env.shadowing,
+            &mut substitutions,
+            context,
+        )
+    };
+    let node = lower_probe(crate::semantic_query::ProjectionReductionContext::structural_transit());
+    match dispatch.graph().node_data(node).as_deref() {
+        Some(SemanticNodeData::Opaque(_)) => false,
+        Some(SemanticNodeData::BareRef(_)) => {
+            // Settle the unresolved carrier through the shared
+            // head-resolution authority at the demand point: the eager
+            // mode either resolves the head (a real collision — fail
+            // closed) or reports the typed miss. A miss still naming an
+            // AUTHORED IMPORT is degraded uncertainty, not a genuine
+            // miss — the import binds the name in owner scope even
+            // while its route is unresolvable, so the probe cannot
+            // certify silence and fails closed too.
+            let settled = lower_probe(
+                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    crate::semantic_query::ProjectionMode::Expanded,
+                ),
+            );
+            match dispatch.graph().node_data(settled).as_deref() {
+                Some(SemanticNodeData::Opaque(_)) => {
+                    let head = match name {
+                        crate::flow_slice_content::FrameShadowedName::Value(name)
+                        | crate::flow_slice_content::FrameShadowedName::Type(name)
+                        | crate::flow_slice_content::FrameShadowedName::Namespace(name) => name,
+                    };
+                    dispatch.unresolved_head_is_authored_import(&binder_env.scope, head)
+                }
+                _ => true,
+            }
+        }
+        _ => true,
+    }
 }
 
 /// Whether ANY frame-owned name a signature answer references is
@@ -5104,6 +5236,12 @@ struct PreparedFlowCaptureInput {
     assignment: DefiniteAssignmentProduct,
     reaching: Option<ReachingTypeProduct>,
     declared: Option<SemanticNodeId>,
+    /// The statement's deferred-read look-ahead — the post-write reaching
+    /// a closure created in the statement observes (the checker's own
+    /// deferred-read rule). The declared-authority application below must
+    /// not clobber it: the write REPLACES the parameter's declared
+    /// reaching for a deferred read exactly as it does for a direct one.
+    deferred_write: Option<SemanticNodeId>,
 }
 
 impl PreparedFlowCaptureInput {
@@ -5113,13 +5251,14 @@ impl PreparedFlowCaptureInput {
         source: &crate::flow_slice_content::SliceCaptureAuthoritySource,
     ) {
         self.declared = Some(node);
-        if self.reaching.is_none()
-            || matches!(
-                source,
-                crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
-                    crate::flow_slice_content::SliceBindingKind::Var
-                ) | crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter { .. }
-            )
+        if self.deferred_write.is_none()
+            && (self.reaching.is_none()
+                || matches!(
+                    source,
+                    crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
+                        crate::flow_slice_content::SliceBindingKind::Var
+                    ) | crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter { .. }
+                ))
         {
             self.reaching = Some(ReachingTypeProduct::of(node));
         }
@@ -5314,6 +5453,25 @@ struct FlowEvaluator<'d, 'b> {
     /// nothing, so its obligations stay unclaimed and the demand
     /// finalizes unproven.
     call_evidence: Vec<FlowCallEvidence>,
+    /// Expression-position write application (the R2 source-order rule):
+    /// the pre-scanned right-hand-side verdicts of the CURRENT statement's
+    /// [`SliceExpr::Assignment`] writes, keyed by the write's frame span.
+    /// The pre-scan evaluates each RHS exactly once against a scratch
+    /// continuation (so a later RHS sees an earlier write's value, in
+    /// evaluation order) and the in-order application REUSES the verdict —
+    /// no right-hand side evaluates twice.
+    expression_write_nodes: rustc_hash::FxHashMap<
+        verter_semantic::analysis::flow::FrameSpan,
+        Positional<SemanticNodeId>,
+    >,
+    /// The deferred-read look-ahead of the CURRENT statement: the
+    /// post-write reaching value per canonical subject, replacing the
+    /// statement-entry reaching for CAPTURE inputs only. A closure created
+    /// anywhere in the statement observes every whole-slot write the
+    /// statement performs (the checker's own deferred-read rule — the
+    /// reason span-comparison suppression is unsound); direct reads keep
+    /// the live, evaluation-ordered reaching.
+    capture_write_lookahead: rustc_hash::FxHashMap<FlowProductSubject, SemanticNodeId>,
     /// The structural walk ledger of THIS run, recorded at the walk
     /// sites (`eval_region`'s recording shell and its statement loop) —
     /// see [`ExecutedSliceWalk`]. The execution witness yields an
@@ -5816,6 +5974,7 @@ fn push_narrowing_into(
 /// missing body, a budget, an empty cycle, a torn view, and an unmodelled
 /// DEMAND point. Every one of those is produced OUTSIDE these two
 /// functions.
+#[derive(Clone)]
 enum Positional<T> {
     /// A modelled value.
     Value(T),
@@ -6056,6 +6215,114 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             other => self.eval_expr(other),
         }
+    }
+
+    /// Evaluate one whole-binding write's right-hand side under the
+    /// target's declared authority — the shared body of the statement and
+    /// expression application arms (a declared UNION needs the
+    /// pre-widening assignment view, a declared non-union discards the
+    /// value, an EVOLVING target takes the freshness-directed widening).
+    fn eval_write_rhs(
+        &mut self,
+        target: &crate::flow_slice_content::SliceNarrowSubject,
+        value: &crate::flow_slice_content::SliceExpr,
+        freshness: &crate::flow_slice_content::SliceFreshness,
+    ) -> Positional<SemanticNodeId> {
+        let declared = self.target_declared_node(target);
+        match declared {
+            Some(node) if self.dispatch.union_arms_of(node).is_some() => {
+                self.eval_assignment_expr(value)
+            }
+            Some(_) => self.eval_expr(value),
+            None => self.eval_evolving_rhs(value, freshness),
+        }
+    }
+
+    /// Pre-scan one statement's value root (a return argument, a binding
+    /// initializer, a statement write's right-hand side) for the
+    /// EXPRESSION-position writes it carries, so the statement's DEFERRED
+    /// closure captures observe them (the checker's own deferred-read
+    /// rule — the reason span-comparison suppression is unsound). Each
+    /// write's right-hand side evaluates EXACTLY ONCE, in tree order,
+    /// against a SCRATCH continuation of the live layers — a later
+    /// right-hand side sees an earlier write's value, which IS evaluation
+    /// order — and the verdict is memoized for the in-order application
+    /// ([`Self::eval_expr`]'s [`SliceExpr::Assignment`] arm REUSES it, so
+    /// no right-hand side runs twice). The post-write value per canonical
+    /// subject becomes the capture look-ahead, REPLACING the
+    /// statement-entry reaching for capture inputs only; direct reads
+    /// keep the live, evaluation-ordered reaching. A value root with no
+    /// expression writes clears both maps and evaluates nothing here. A
+    /// member-projection demand never pre-scans (its evaluation visits
+    /// only the demanded member, and the unapplied-write rail keeps the
+    /// degradation for the whole frame).
+    fn prescan_statement_value_writes(
+        &mut self,
+        root: Option<&crate::flow_slice_content::SliceExpr>,
+    ) {
+        self.expression_write_nodes.clear();
+        self.capture_write_lookahead.clear();
+        if self.member_filter.is_some() {
+            return;
+        }
+        let Some(root) = root else {
+            return;
+        };
+        let writes = expression_write_tree(root);
+        if writes.is_empty() {
+            return;
+        }
+        // The SCRATCH continuation: a clone of the live product store the
+        // pre-scan applies its writes to, so RHS reads observe the earlier
+        // writes of the same statement (evaluation order) without
+        // disturbing the live reaching the statement's own in-order walk
+        // consumes.
+        let scratch = self.products.clone();
+        let live = std::mem::replace(&mut self.products, scratch);
+        let narrowing_base = self.narrowing_writes.len();
+        let holds_base = self.holds.len();
+        let fresh_deposit_base = self.call_fresh_literal_returns.len();
+        for write in writes {
+            let crate::flow_slice_content::SliceExpr::Assignment {
+                target,
+                value,
+                freshness,
+                definition,
+                span,
+            } = write
+            else {
+                continue;
+            };
+            let outcome = self.eval_write_rhs(target, value, freshness);
+            self.expression_write_nodes.insert(*span, outcome.clone());
+            self.holds.truncate(holds_base);
+            if let Positional::Value(node) = outcome {
+                let written = self.apply_write(target, node, false, *definition);
+                let subject = match &target.root {
+                    crate::flow_slice_content::SliceNarrowRoot::Param { binding, .. } => {
+                        FlowProductSubject::Local(*binding)
+                    }
+                    crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => {
+                        binding.clone()
+                    }
+                };
+                let subject = self.canonical_runtime_subject(&subject);
+                match self.capture_write_lookahead.get(&subject) {
+                    Some(&earlier) => {
+                        let joined = self
+                            .dispatch
+                            .intern_normalized_union_or_intersection(&[earlier, written], true);
+                        self.capture_write_lookahead.insert(subject, joined);
+                    }
+                    None => {
+                        self.capture_write_lookahead.insert(subject, written);
+                    }
+                }
+            }
+        }
+        self.narrowing_writes.truncate(narrowing_base);
+        self.call_fresh_literal_returns.truncate(fresh_deposit_base);
+        self.products = live;
     }
 
     /// The property key one structurally lowered member names, or `None`
@@ -6834,13 +7101,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// value it replaces dies first — including the one the enclosing
     /// guard just established (`if (typeof v === "string") { v = … }`
     /// reads the WRITTEN value after the statement, not the narrow).
+    /// Returns the node the target now holds (the assignment-reduced
+    /// value — the expression twin's own value).
     fn apply_write(
         &mut self,
         target: &crate::flow_slice_content::SliceNarrowSubject,
         node: SemanticNodeId,
         degraded: bool,
         definition: verter_semantic::analysis::flow::SkeletonExprSiteId,
-    ) {
+    ) -> SemanticNodeId {
         // A failed RHS carries the explicit unmodelled-position marker. It
         // cannot select a declared constituent; preserving the marker keeps
         // the positional failure visible to every downstream consumer.
@@ -6892,6 +7161,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 );
             }
         }
+        node
     }
 
     /// Merge exactly the paths that continue past a conditional. A missing
@@ -6927,9 +7197,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
 
         let states: smallvec::SmallVec<[&FlowLayerState; 2]> = incoming.iter().collect();
         let mut joined = self.join_states(&states, observation);
-        // The function-scoped conditional-definition fact is discharged
-        // only for an already-established binding carried by every continuing
-        // predecessor. Conditional declarations retain their existing typed gap.
+        // The branch join over the function-scoped `var` layer — the ONE
+        // shared `FlowFrame` product lattice over this graph's edge class,
+        // never a merge over the evaluator's locals maps. Every continuing
+        // predecessor's reaching definition unions through the shared
+        // join above; a predecessor with NO reaching definition is the
+        // never-assigned path, and it folds its DECLARED authority into
+        // the joined reaching when it has one (the var's annotation
+        // covers the paths that never assign — `if (flag) { var y:
+        // number | undefined = 1; } return y` joins `number` with
+        // `number | undefined`). A never-assigned path with NO declared
+        // authority keeps the conditional-definition refusal: tsc
+        // REJECTS that program (TS2454, used before assigned), so the
+        // fail-closed degradation is the contract, and an
+        // already-established binding keeps the entry's own flag.
         for subject in joined
             .products
             .subjects_in(super::flow_solve::FlowDomain::ReachingType)
@@ -6937,13 +7218,45 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             if !self.uses_conditional_definition_policy(&subject) {
                 continue;
             }
-            let defined_on_every_path = incoming
-                .iter()
-                .all(|state| state.products.reaching(&subject).is_some());
-            let single_path = !defined_on_every_path
-                || entry.reaching(&subject).is_none()
-                || entry.assignment(&subject).single_path()
-                || self.conditional_arm_nesting > 0;
+            let mut defined_on_every_path = true;
+            let mut never_assigned_declared: Option<Option<SemanticNodeId>> = None;
+            for state in incoming.iter() {
+                if state.products.reaching(&subject).is_none() {
+                    defined_on_every_path = false;
+                    let declared = state.products.declared_type(&subject);
+                    never_assigned_declared = Some(match never_assigned_declared {
+                        None => declared,
+                        // One authority-less predecessor is enough to keep
+                        // the refusal: the fold must cover EVERY path.
+                        Some(None) => None,
+                        Some(earlier) => earlier.filter(|_| declared.is_some()),
+                    });
+                }
+            }
+            let inherited =
+                entry.assignment(&subject).single_path() || self.conditional_arm_nesting > 0;
+            let single_path = if defined_on_every_path {
+                inherited
+            } else {
+                match never_assigned_declared {
+                    Some(Some(declared)) => {
+                        let folded = match joined.products.reaching(&subject) {
+                            Some(reaching) => {
+                                self.dispatch.intern_normalized_union_or_intersection(
+                                    &[reaching, declared],
+                                    true,
+                                )
+                            }
+                            None => declared,
+                        };
+                        joined
+                            .products
+                            .set_reaching_type(&subject, ReachingTypeProduct::of(folded));
+                        inherited
+                    }
+                    _ => true,
+                }
+            };
             let assignment = joined
                 .products
                 .assignment(&subject)
@@ -9851,6 +10164,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     freshness,
                 } => {
                     path_alive = false;
+                    self.prescan_statement_value_writes(argument.as_ref());
                     if self.member_filter.is_some() {
                         // Member-projection demand: evaluate ONLY the
                         // demanded member of a structural object return.
@@ -10963,6 +11277,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // the whole declaration, so nothing here can observe
                     // an unselected sibling.
                     if let Some(init) = init {
+                        self.prescan_statement_value_writes(Some(init));
                         // A MIXED-freshness conditional `const`
                         // initializer (a bare fresh literal arm beside an
                         // authored pin, a call, a reference): evaluate
@@ -11116,15 +11431,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // selection), a declared non-union discards the value
                     // (the declared type wins), and an EVOLVING target
                     // takes the freshness-directed widening.
+                    self.prescan_statement_value_writes(Some(value));
                     let holds_before = self.holds.len();
-                    let declared = self.target_declared_node(target);
-                    let outcome = match declared {
-                        Some(node) if self.dispatch.union_arms_of(node).is_some() => {
-                            self.eval_assignment_expr(value)
-                        }
-                        Some(_) => self.eval_expr(value),
-                        None => self.eval_evolving_rhs(value, freshness),
-                    };
+                    let outcome = self.eval_write_rhs(target, value, freshness);
                     match outcome {
                         Positional::Value(node) => {
                             self.holds.truncate(holds_before);
@@ -11630,8 +11939,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     } else {
                         DefiniteAssignmentProduct::default()
                     },
+                    // A DEFERRED read observes every whole-slot write the
+                    // enclosing statement performs, ahead of the in-order
+                    // application: the statement's capture look-ahead
+                    // REPLACES the statement-entry reaching (the checker's
+                    // own deferred-read rule). Direct reads are unaffected
+                    // — they consume the live, evaluation-ordered reaching.
+                    deferred_write: value_demanded
+                        .then(|| {
+                            self.capture_write_lookahead
+                                .get(&self.canonical_runtime_subject(&parent))
+                                .copied()
+                        })
+                        .flatten(),
                     reaching: value_demanded
-                        .then(|| self.products.reaching_type(&parent).cloned())
+                        .then(|| {
+                            self.capture_write_lookahead
+                                .get(&self.canonical_runtime_subject(&parent))
+                                .map(|node| ReachingTypeProduct::of(*node))
+                                .or_else(|| self.products.reaching_type(&parent).cloned())
+                        })
                         .flatten(),
                     declared: value_demanded
                         .then(|| self.products.declared_type(&parent))
@@ -11824,6 +12151,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 collect_throw_points: false,
                 scope_shadows: Vec::new(),
                 call_evidence: Vec::new(),
+                expression_write_nodes: rustc_hash::FxHashMap::default(),
+                capture_write_lookahead: rustc_hash::FxHashMap::default(),
                 executed_walk: ExecutedSliceWalk::default(),
             };
             nested_evaluator.seed_hoisted_var_declarations(body);
@@ -12271,6 +12600,47 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             crate::flow_slice_content::SliceExpr::Object { entries } => {
                 self.eval_object_literal(entries, false)
+            }
+            crate::flow_slice_content::SliceExpr::Assignment {
+                target,
+                value,
+                freshness,
+                definition,
+                span,
+            } => {
+                // THE applied write at VALUE position — the R2 source-order
+                // rule. The write applies IN EVALUATION ORDER: a read
+                // evaluated before this expression kept the pre-write
+                // reaching definition, a read after it observes the write,
+                // and a DEFERRED closure read observes it through the
+                // statement's capture look-ahead (which is why suppressing
+                // the write rail by comparing read and write SPANS is
+                // unsound and stays rejected). The pre-scanned verdict, if
+                // the statement carried one, is REUSED — the right-hand
+                // side never evaluates twice. The expression's own value is
+                // the written (assignment-reduced) node.
+                let holds_before = self.holds.len();
+                let memo = self.expression_write_nodes.remove(span);
+                let outcome = match memo {
+                    Some(outcome) => outcome,
+                    None => self.eval_write_rhs(target, value, freshness),
+                };
+                match outcome {
+                    Positional::Value(node) => {
+                        self.holds.truncate(holds_before);
+                        Positional::Value(self.apply_write(target, node, false, *definition))
+                    }
+                    Positional::Hold => {
+                        self.holds.truncate(holds_before);
+                        Positional::Hold
+                    }
+                    Positional::Unmodeled => {
+                        self.holds.truncate(holds_before);
+                        let marker =
+                            super::flow_return_callee::unmodeled_position_marker(self.dispatch);
+                        Positional::Value(self.apply_write(target, marker, true, *definition))
+                    }
+                }
             }
             crate::flow_slice_content::SliceExpr::NestedFunctionValue {
                 function,

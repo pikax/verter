@@ -1693,6 +1693,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "d7b616ee9e42758ab6c958c3f50839790cbd088d0441663fa5c4a7c6d64ac479",
     ),
     (
+        "X95_evolving_let_both_branches_join",
+        "7f27ccc7b5bbe32c1600e75488c6bd1d9ba20c285fe253808bc3ffbfd7514ff0",
+    ),
+    (
         "X99_nested_try_finally_collects_every_return",
         "46933021df276dc95d823af15b07d58e2c20f7dc05ce61b5d55cc897b4703772",
     ),
@@ -2906,6 +2910,12 @@ mod corpus_suite {
         /// the verdict-directed semantic test, and the byte-divergence
         /// claimed here is asserted live below.
         const RENDER_INCOMPARABLE: &[(&str, &str)] = &[
+            (
+                "X95_evolving_let_both_branches_join",
+                "checker prints `{ v: \"p\" | 1; }`; the renderer spells the same \
+                 node `{ v: Union(\"p\" | 1) }` — union spelling and member \
+                 terminators differ",
+            ),
             (
                 "N139_flow_callee_authored_fresh_arm_widens_at_member",
                 "checker prints `{ a: string | { value: string; }; }`; the renderer \
@@ -4675,11 +4685,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member Union — the published value EQUALS the checker, so a recursive pin would assert a divergence this KnownOwed row does not have",
     ),
     (
-        "X95_evolving_let_both_branches_join",
-        Owner::U6ValueInference,
-        "member Union — the published value EQUALS the checker (the const-asserted literals are preserved through the join), so a recursive pin would assert a divergence this KnownOwed row does not have; it stays parked on the ConditionalVarDefinition admission",
-    ),
-    (
         "X96_evolving_let_explicit_undefined_initializer",
         Owner::U6ValueInference,
         "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
@@ -4855,7 +4860,6 @@ const OPEN_DEBTS: &[&str] = &[
     // inside a narrowed arm.
     "X91_assert_never_default_arm_contributes_nothing",
     "X94_evolving_let_one_branch_keeps_undefined",
-    "X95_evolving_let_both_branches_join",
     "X96_evolving_let_explicit_undefined_initializer",
     "X97_evolving_let_switch_without_default_keeps_undefined",
     "X101_optional_chain_nullish_coalesce",
@@ -4912,11 +4916,13 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // subtype reduction and absorbs a subtype arm into its supertype; the
     // canonical union keeps every constituent. Extensionally equal, so
     // the rows stay clean and warm while parked with the value-inference
-    // owner.
-    (Owner::U6ValueInference, 93, 73, 17),
+    // owner. (X95 — the evolving-`let` both-branch join — moved to
+    // MatchesChecker when D13 landed the branch join over the shared
+    // product lattice.)
+    (Owner::U6ValueInference, 92, 73, 16),
     (Owner::U6LoopClosure, 6, 1, 2),
     (Owner::U6ContextualCore, 8, 7, 1),
-    (Owner::U6FlowReturnSubstrate, 63, 47, 3),
+    (Owner::U6FlowReturnSubstrate, 64, 48, 3),
     (Owner::U6NarrowTypeof, 48, 28, 20),
     // The `instanceof` arm rule: derived-arm selection with nullish
     // stripping and the whole-subject intersection fallback are exact;

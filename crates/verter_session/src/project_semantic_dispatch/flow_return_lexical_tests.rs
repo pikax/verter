@@ -2919,7 +2919,37 @@ fn flow_return_nested_signature_type_parameter_shadows_captured_type_space_name(
             "{name}: the nested binder `T` must survive, got {returned:?}"
         );
     }
-    assert_fails_closed(&host, "genuineCapture");
+    // `genuineCapture` — a captured type-space name with NO same-named
+    // binder. The owner-scope probe settles it as a GENUINE MISS (the
+    // frame's own `class GC` binds nothing in owner scope), so the gate
+    // stays silent and the signature's `x as GC` return keeps its
+    // UNCHANGED UNRESOLVED CARRIER — the honest interim for a frame-local
+    // class this substrate cannot yet model — never the module-scope twin
+    // and never the marker substitution the pre-settlement probe forced
+    // on every owner-absent name.
+    let outcome = r5_eval(&host, "genuineCapture")
+        .unwrap_or_else(|| panic!("genuineCapture must produce a value"));
+    assert_eq!(
+        outcome.degradation, None,
+        "genuineCapture: an owner-absent frame-owned name never trips the frame gate"
+    );
+    assert_eq!(
+        outcome.candidates, 1,
+        "genuineCapture: the carrier-preserving result admits warm"
+    );
+    let TypeExpr::Function(function) = &outcome.ty else {
+        panic!("genuineCapture: a function value, got {:?}", outcome.ty);
+    };
+    assert_eq!(
+        function.parameters[0].ty,
+        TypeExpr::Primitive(PrimitiveName::Unknown),
+        "genuineCapture: the parameter keeps its annotation"
+    );
+    assert_eq!(
+        function.return_type.as_deref(),
+        Some(&type_ref("GC")),
+        "genuineCapture: the return keeps the unchanged unresolved carrier"
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────────
