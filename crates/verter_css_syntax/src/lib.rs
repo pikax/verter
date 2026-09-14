@@ -51,8 +51,8 @@ pub use selector::{
 };
 pub use stage::{
     ExternalStyleProducer, PreprocessedStyle, PreprocessorIdentity, QualifiedStyleResult,
-    StyleDependency, StyleDependencyKind, StyleDiagnostic, StyleProducer, StyleSpecifier,
-    StyleSpecifierForm, StyleStage,
+    StyleDependency, StyleDependencyKind, StyleDiagnostic, StyleDiagnosticSeverity, StyleProducer,
+    StyleSpecifier, StyleSpecifierForm, StyleStage,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use style_ir::parse_style_ir_thread_invocations;

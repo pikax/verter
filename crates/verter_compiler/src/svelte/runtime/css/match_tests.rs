@@ -147,8 +147,9 @@ fn facts(source: &str) -> Facts {
         false,
     ) {
         Ok(plan) => {
-            let AnalyzedStyleBody { tree, mut analysis } =
-                analyze_style_body(source, body_span(source)).expect("re-analysis succeeds");
+            let AnalyzedStyleBody {
+                tree, mut analysis, ..
+            } = analyze_style_body(source, body_span(source)).expect("re-analysis succeeds");
             crate::svelte::runtime::css::matcher::match_stylesheet(
                 source,
                 &tree,
@@ -1335,8 +1336,9 @@ fn entity_decoded_class_value_scopes_the_div_and_matches_word_selectors() {
 
     // The per-selector used verdicts: `.b` matches a decoded word; `.c`
     // matches nothing (the negative — it must stay pruned).
-    let AnalyzedStyleBody { tree, mut analysis } =
-        analyze_style_body(source, body_span(source)).expect("re-analysis succeeds");
+    let AnalyzedStyleBody {
+        tree, mut analysis, ..
+    } = analyze_style_body(source, body_span(source)).expect("re-analysis succeeds");
     crate::svelte::runtime::css::matcher::match_stylesheet(source, &tree, &mut analysis, &ir)
         .expect("re-match succeeds");
     let mut used = Vec::new();

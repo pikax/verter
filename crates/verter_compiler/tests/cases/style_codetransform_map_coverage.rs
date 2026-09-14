@@ -532,6 +532,8 @@ fn vue_style_source_map_toggle_is_a_genuine_caller_facing_ab_option_through_comp
                 source_space_token: "space:theme-css".to_string(),
                 parsed: None,
                 producer: None,
+                authored_basis: None,
+                diagnostics: Vec::new(),
             })],
             ..Default::default()
         },

@@ -129,7 +129,7 @@ schema = 2
 "CCA2C" = { status = "pending" }
 "CCA2D" = { status = "pending" }
 "CCA2D0" = { status = "pending" }
-"CCA2DS" = { status = "pending" }
+"CCA2DS" = { status = "implemented", commit_message = "feat(core): continue Svelte styles through the stage-qualified boundary", commit_date = "2026-09-14T19:00:00+01:00" }
 "CCA2DV" = { status = "pending" }
 "CCA2E" = { status = "pending" }
 "CCA2E0" = { status = "pending" }

@@ -2226,6 +2226,14 @@ pub struct BlockContentSnapshot {
     pub availability: BlockContentAvailability,
     pub origin: Option<BlockContentOrigin>,
     pub content: Option<Arc<str>>,
+    /// The AUTHORED bytes this selection was validated against, as the same
+    /// read that produced `content` observed them.
+    ///
+    /// For supplied content this is the input the producing tool consumed,
+    /// which `content` is NOT. It is retained rather than left to be
+    /// re-sliced from the carrier later because a later read addresses
+    /// whatever revision is live then, not the one this selection validated.
+    pub authored_content: Option<Arc<str>>,
     pub content_class: BlockContentClass,
     pub lang: String,
     pub block_token: crate::carrier_publication_store::ArtifactBlockToken,
