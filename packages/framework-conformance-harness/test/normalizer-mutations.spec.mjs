@@ -11,10 +11,15 @@
 // test, swapped constants never stand in for an effect-order test, and a
 // property-key mutation never stands in for an authored-local-name test.
 //
-// Identifier rule under test (see src/normalize.mjs header): identifiers
-// are STRUCTURAL — the pinned official compilers emit no private-generated
-// provenance marker, so NO binding is ever alpha-renamed away. Renaming any
-// binding — authored or generated-looking — is a structural difference.
+// Identifier rule under test (see `matchLocalBindings` in src/compare.mjs):
+// a module-local binding renamed consistently — its declaration and every
+// use, resolved by scope on each side — is cosmetic, whether authored or
+// compiler-generated. Names that are observable or not local stay
+// structural: exported names, imported names and module paths, property
+// keys, function/class names and bindings that name an anonymous function
+// (`.name`), names reachable by direct `eval`, and free globals. A rename
+// that re-binds a use to a different declaration (shadow capture) is a
+// structural difference.
 
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
@@ -60,6 +65,84 @@ function goldenSvelteClient() {
 function assertMutationApplied(original, mutated) {
   expect(mutated).not.toBe(original);
   expect(mutated.length === original.length && mutated === original).toBe(false);
+}
+
+/** Every identifier spelling in `code`, to prove a rename target is fresh. */
+function identifierNames(code) {
+  const names = new Set();
+  const visit = (value) => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (value === null || typeof value !== "object" || typeof value.type !== "string") return;
+    if (value.type === "Identifier") names.add(value.name);
+    for (const [key, child] of Object.entries(value)) if (key !== "loc") visit(child);
+  };
+  visit(parseModule(code, "identifier-names"));
+  return names;
+}
+
+/** `parent[key]` names a property or an import/export name, not a binding. */
+function isNonBindingName(parent, key) {
+  return (
+    (parent.type === "MemberExpression" && key === "property" && !parent.computed) ||
+    (["Property", "MethodDefinition", "PropertyDefinition"].includes(parent.type) &&
+      key === "key" &&
+      !parent.computed) ||
+    (parent.type === "ImportSpecifier" && key === "imported") ||
+    (parent.type === "ExportSpecifier" && key === "exported")
+  );
+}
+
+/**
+ * Renames the bindings spelled like the keys of `renames` — declarations and
+ * uses — by splicing at parser-reported identifier positions. Property and
+ * import/export names are kept: `{ a }` becomes `{ a: renamed }`,
+ * `import { a }` becomes `import { a as renamed }`, `export { a }` becomes
+ * `export { renamed as a }`. Every target must be absent from the module (so
+ * the rename cannot capture) and every source name must be renamed.
+ */
+function renameLocals(code, renames) {
+  const existing = identifierNames(code);
+  for (const target of Object.values(renames)) expect(existing.has(target), target).toBe(false);
+  const edits = [];
+  const renamed = new Set();
+  const edit = (id, text) => {
+    edits.push({ start: id.start, end: id.end, text });
+    renamed.add(id.name);
+  };
+  const visit = (node, parent, key) => {
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item, parent, key);
+      return;
+    }
+    if (node === null || typeof node !== "object" || typeof node.type !== "string") return;
+    if (node.type === "Identifier") {
+      if (Object.hasOwn(renames, node.name) && !isNonBindingName(parent, key))
+        edit(node, renames[node.name]);
+      return;
+    }
+    const local = node.type === "Property" ? node.value : node.local;
+    if (local?.type === "Identifier" && Object.hasOwn(renames, local.name)) {
+      const target = renames[local.name];
+      if (node.type === "Property" && node.shorthand)
+        return edit(local, `${local.name}: ${target}`);
+      if (node.type === "ImportSpecifier" && node.imported === local)
+        return edit(local, `${local.name} as ${target}`);
+      if (node.type === "ExportSpecifier" && node.exported === local)
+        return edit(local, `${target} as ${local.name}`);
+    }
+    for (const [childKey, child] of Object.entries(node))
+      if (childKey !== "loc") visit(child, node, childKey);
+  };
+  visit(parseModule(code, "rename-locals"), null, null);
+  for (const source of Object.keys(renames)) expect(renamed.has(source), source).toBe(true);
+  let out = code;
+  for (const { start, end, text } of edits.sort((a, b) => b.start - a.start))
+    out = out.slice(0, start) + text + out.slice(end);
+  assertMutationApplied(code, out);
+  return out;
 }
 
 describe("normalizer — allowed cosmetic mutations (must PASS)", () => {
@@ -132,6 +215,62 @@ describe("normalizer — allowed cosmetic mutations (must PASS)", () => {
       { linkBaseDir: VUE_BASE },
     );
     expect(report.verdict).toBe("pass");
+  });
+
+  it("real Vue output: consistent local renames, reflow and a prose comment are cosmetic", async () => {
+    const golden = goldenVdom();
+    const renamed = renameLocals(golden.code, {
+      ref: "makeRef", // import alias; the imported name stays `ref`
+      count: "counter", // authored setup binding; its setup-return key stays `count`
+      items: "entries",
+      item: "entry", // authored v-for iteration variable
+      _sfc_main: "component", // compiler-generated bindings
+      __returned__: "setupState",
+      __expose: "exposeFn",
+      _hoisted_1: "rootProps",
+      _toDisplayString: "display",
+      $setup: "setupBindings",
+    });
+    const mutated = `// prose note, consumed by no tool\n${renamed.replace(/\n/g, "\n\n")}`;
+    // Public names survive: setup-return keys, template reads, the render name.
+    expect(mutated).toContain("count: counter, items: entries, ref: makeRef");
+    expect(mutated).toContain("setupBindings.count");
+    expect(mutated).toContain("function render(");
+    const report = await compareArtifacts(
+      golden,
+      { ...golden, code: mutated },
+      { linkBaseDir: VUE_BASE },
+    );
+    expect(report.verdict).toBe("pass");
+    expect(report.fidelity).toEqual({ status: "equivalent", firstDivergence: null });
+    expect(report.structural.localBindingMatching).toEqual({ golden: true, candidate: true });
+  });
+
+  it("real Svelte output: consistent local renames (namespace import included), reindent and a prose comment are cosmetic", async () => {
+    const golden = goldenSvelteClient();
+    const renamed = renameLocals(golden.code, {
+      $: "internal", // namespace import alias; the module path stays
+      $$anchor: "anchor",
+      root_3: "template_root",
+      div: "host",
+      node: "branch_anchor",
+      ul: "list",
+      li: "row",
+      text: "label",
+      item: "value",
+      count: "total",
+      items: "rows",
+    });
+    const mutated = `/* prose note, consumed by no tool */\n${renamed.replace(/\t/g, "  ")}`;
+    expect(mutated).toContain("import * as internal from 'svelte/internal/client'");
+    expect(mutated).toContain("export default function Basic_runes(anchor)");
+    const report = await compareArtifacts(
+      golden,
+      { ...golden, code: mutated },
+      { linkBaseDir: SVELTE_BASE },
+    );
+    expect(report.verdict).toBe("pass");
+    expect(report.fidelity).toEqual({ status: "equivalent", firstDivergence: null });
   });
 });
 
@@ -465,19 +604,61 @@ describe("normalizer — forbidden mutations (must be CAUGHT, every contract cat
     expect(report.verdict).toBe("fail");
   });
 
-  // Category: source-authored names — a REAL authored LOCAL BINDING (the
-  // v-for iteration variable `item`, authored in the fixture template)
-  // consistently renamed. Under an alpha-renaming normalizer both spellings
-  // canonicalize to the same fresh name and this FALSELY passes; under the
-  // conservative structural-identifier rule it must fail.
-  it("authored local-binding rename (v-for iteration variable renamed consistently)", async () => {
-    const golden = goldenVdom();
-    expect(golden.code).toMatch(/\(item\) => \{/); // the authored binding, as a parameter
-    const mutated = golden.code.replace(/\bitem\b/g, "entry");
+  // Category: bindings/capture — a rename on real official output that
+  // re-binds a use to another declaration (`var item` shares the callback
+  // parameter's binding, so `set_text` now reads the child node twice).
+  it("real Svelte output: a rename that captures another binding (shadow capture) is caught", async () => {
+    const golden = goldenSvelteClient();
+    const mutated = golden.code
+      .replace("var text = $.child(li, true);", "var item = $.child(li, true);")
+      .replace("$.set_text(text, item)", "$.set_text(item, item)");
     assertMutationApplied(golden.code, mutated);
-    expect(mutated).toMatch(/\(entry\) => \{/);
-    expect(mutated).not.toMatch(/\bitem\b/);
-    expect(mutated).toContain("items"); // proves the sibling authored name was untouched
+    expect(mutated).not.toMatch(/\btext\b/);
+    const report = await compareArtifacts(
+      golden,
+      { ...golden, code: mutated },
+      { linkBaseDir: SVELTE_BASE },
+    );
+    expect(report.candidateParse.ok).toBe(true);
+    expect(report.verdict).toBe("fail");
+    expect(report.structural.equal).toBe(false);
+  });
+
+  // Category: names observable through reflection (`Function.prototype.name`).
+  it("real Vue output: renaming the render function changes its observable name", async () => {
+    const golden = goldenVdom();
+    const mutated = renameLocals(golden.code, { render: "renderFn" });
+    expect(mutated).toContain("_sfc_main.render = renderFn"); // the options key stays
+    const report = await compareArtifacts(
+      golden,
+      { ...golden, code: mutated },
+      { linkBaseDir: VUE_BASE },
+    );
+    expect(report.verdict).toBe("fail");
+    expect(report.structural.equal).toBe(false);
+  });
+
+  it("real Svelte output: renaming a binding that names an arrow function changes its observable name", async () => {
+    const golden = goldenSvelteClient();
+    const mutated = renameLocals(golden.code, { consequent: "when_true" });
+    expect(mutated).toContain("$$render(when_true)");
+    const report = await compareArtifacts(
+      golden,
+      { ...golden, code: mutated },
+      { linkBaseDir: SVELTE_BASE },
+    );
+    expect(report.verdict).toBe("fail");
+    expect(report.structural.equal).toBe(false);
+  });
+
+  // Category: public names — a setup-return key is the template's public
+  // binding name (the local-rename twin above keeps the key and passes).
+  it("real Vue output: renaming a setup-return key and its template reads is caught", async () => {
+    const golden = goldenVdom();
+    const mutated = golden.code.replace(/\bcount\b/g, "counter");
+    assertMutationApplied(golden.code, mutated);
+    expect(mutated).toContain("{ counter, items, ref }");
+    expect(mutated).toContain("$setup.counter");
     const report = await compareArtifacts(
       golden,
       { ...golden, code: mutated },
@@ -505,26 +686,6 @@ describe("normalizer — forbidden mutations (must be CAUGHT, every contract cat
       { linkBaseDir: VUE_BASE },
     );
     expect(report.verdict).toBe("fail");
-  });
-
-  // Conservative identifier rule: a generated-LOOKING binding carries no
-  // explicit provenance, so renaming it is ALSO structural — never silently
-  // equated. (This inverts the pre-rule behavior, which alpha-renamed it
-  // away and passed.)
-  it("generated-looking identifier rename without provenance is structural (must FAIL)", async () => {
-    const golden = goldenVdom();
-    expect(golden.code).toContain("_sfc_main");
-    const mutated = golden.code.replaceAll("_sfc_main", "_component_impl_renamed");
-    assertMutationApplied(golden.code, mutated);
-    expect(mutated).toContain("_component_impl_renamed");
-    expect(mutated).not.toContain("_sfc_main");
-    const report = await compareArtifacts(
-      golden,
-      { ...golden, code: mutated },
-      { linkBaseDir: VUE_BASE },
-    );
-    expect(report.verdict).toBe("fail");
-    expect(report.structural.equal).toBe(false);
   });
 
   // Category: fold control flow.
@@ -608,9 +769,10 @@ describe("normalizer — forbidden mutations (must be CAUGHT, every contract cat
 // is cosmetic — two modules importing the same names from the same source in a
 // different order are the same program (ESM bindings are hoisted, and the
 // binding set is what the module sees). EVERY other import fact stays
-// structural: membership, imported name, local alias, source module,
-// default/namespace form, the top-level order of the declarations themselves,
-// and the side-effect import sequence.
+// structural: membership, imported name, source module, default/namespace
+// form, the top-level order of the declarations themselves, and the
+// side-effect import sequence. A local alias is a local binding, matched by
+// scope like any other (see the local-binding tables at the end).
 //
 // This is deliberately NARROWER than the Rust structural comparator, which is
 // not the authority this normalizer mirrors: `compare.rs`'s own
@@ -736,15 +898,6 @@ describe("normalizer — every OTHER import fact stays structural (must be CAUGH
       'import { a } from "x";\nexport default a;',
     );
     expect(report.candidateParse.ok).toBe(true);
-    expect(report.verdict).toBe("fail");
-    expect(report.structural.equal).toBe(false);
-  });
-
-  it("renaming a named specifier's LOCAL alias is caught (same imported name)", async () => {
-    const report = await compareSynthetic(
-      'import { a as _a, b as _b } from "x";\nexport default _b;',
-      'import { a as _renamed, b as _b } from "x";\nexport default _b;',
-    );
     expect(report.verdict).toBe("fail");
     expect(report.structural.equal).toBe(false);
   });
@@ -1053,5 +1206,145 @@ describe("normalizer — semantic comments (tool-consumed comments are structure
       { code: mutated, diagnostics: [] },
     );
     expect(report.verdict).toBe("fail");
+  });
+});
+
+// Local-binding matching over the scoping forms the resolver models. Each
+// EQUIVALENT pair renames only local bindings, capture-free; each DISTINCT
+// pair differs in which declaration a use reaches, or renames a name that is
+// observable or not local.
+
+const EQUIVALENT_LOCAL_RENAMES = [
+  [
+    "a used import alias",
+    'import { a as _a } from "x";\nexport default _a;',
+    'import { a as helper } from "x";\nexport default helper;',
+  ],
+  [
+    "an unused import alias",
+    'import { a as _a, b as _b } from "x";\nexport default _b;',
+    'import { a as _renamed, b as _b } from "x";\nexport default _b;',
+  ],
+  [
+    "a namespace import",
+    'import * as $ from "x";\nexport default $.a;',
+    'import * as ns from "x";\nexport default ns.a;',
+  ],
+  [
+    "a shorthand property expanded around a renamed local",
+    "const a = 1;\nexport default { a };",
+    "const _a = 1;\nexport default { a: _a };",
+  ],
+  [
+    "an export specifier's local (exported name kept)",
+    "const a = 1;\nexport { a };",
+    "const _a = 1;\nexport { _a as a };",
+  ],
+  [
+    "a hoisted var, a block let and a parameter",
+    "function f(c) {\n  { var v = 1; let w = 2; v += w; }\n  return v + c;\n}\nexport default f;",
+    "function f(k) {\n  { var x = 1; let y = 2; x += y; }\n  return x + k;\n}\nexport default f;",
+  ],
+  [
+    "shadowing parameters",
+    "export default (a) => [a, (a) => a];",
+    "export default (b) => [b, (c) => c];",
+  ],
+  [
+    "a destructured catch parameter",
+    "export default () => {\n  try { f(); } catch ({ message: m }) { g(m); }\n};",
+    "export default () => {\n  try { f(); } catch ({ message: text }) { g(text); }\n};",
+  ],
+  [
+    "method parameters and static-block locals (exported class name kept)",
+    "export class K { m(a) { return a; } static { let s = 1; K.s = s; } }",
+    "export class K { m(b) { return b; } static { let t = 1; K.s = t; } }",
+  ],
+];
+
+const DISTINCT_BINDINGS = [
+  [
+    "shadow capture (a use re-bound to an inner declaration)",
+    "let a = 1;\nfunction f() {\n  let b = 2;\n  return a + b;\n}\nexport default f;",
+    "let a = 1;\nfunction f() {\n  let a = 2;\n  return a + a;\n}\nexport default f;",
+  ],
+  [
+    "var hoisting captures a use of the outer binding",
+    "let a = 1;\nfunction f() {\n  { var b = 2; }\n  return a;\n}\nexport default f;",
+    "let a = 1;\nfunction f() {\n  { var a = 2; }\n  return a;\n}\nexport default f;",
+  ],
+  [
+    "a var re-declaring a parameter keeps the parameter's value",
+    "export default function f(p = 1) {\n  var p;\n  return p;\n}",
+    "export default function f(q = 1) {\n  var r;\n  return r;\n}",
+  ],
+  [
+    "a parameter default does not see body declarations",
+    "let x = 0;\nexport function f(g = () => x) {\n  let x = 1;\n  return g();\n}",
+    "let x = 0;\nexport function f(g = () => z) {\n  let z = 1;\n  return g();\n}",
+  ],
+  [
+    "a local renamed onto a global it then shadows",
+    "const t = 1;\nexport default () => [t, Math];",
+    "const Math = 1;\nexport default () => [Math, Math];",
+  ],
+  [
+    "import aliases swapped between imported names",
+    'import { a as x, b as y } from "m";\nexport default x;',
+    'import { a as y, b as x } from "m";\nexport default x;',
+  ],
+  ["an exported declaration renamed", "export const answer = 1;", "export const result = 1;"],
+  [
+    "an exported name changed through a specifier",
+    "const a = 1;\nexport { a as b };",
+    "const a = 1;\nexport { a as c };",
+  ],
+  [
+    "a function declaration renamed (Function.prototype.name)",
+    "function helper() {}\nexport default helper;",
+    "function util() {}\nexport default util;",
+  ],
+  [
+    "a binding that names an anonymous function renamed",
+    "const helper = () => 1;\nexport default helper;",
+    "const util = () => 1;\nexport default util;",
+  ],
+  [
+    "a binding named through assignment renamed",
+    "let helper;\nhelper = function () {};\nexport default helper;",
+    "let util;\nutil = function () {};\nexport default util;",
+  ],
+  ["two different globals", "export default () => console;", "export default () => window;"],
+];
+
+describe("local-binding matching — capture-free local renames are cosmetic (must PASS)", () => {
+  it.each(EQUIVALENT_LOCAL_RENAMES)("%s", async (_label, a, b) => {
+    const report = await compareSynthetic(a, b);
+    expect(report.verdict).toBe("pass");
+    expect(report.structural.equal).toBe(true);
+  });
+});
+
+describe("local-binding matching — capture, observable and non-local names stay structural (must be CAUGHT)", () => {
+  it.each(DISTINCT_BINDINGS)("%s", async (_label, a, b) => {
+    const report = await compareSynthetic(a, b);
+    expect(report.candidateParse.ok).toBe(true);
+    expect(report.verdict).toBe("fail");
+    expect(report.structural.equal).toBe(false);
+  });
+
+  it("a direct eval makes every name in the module observable", async () => {
+    const control = await compareSynthetic(
+      "const a = 1;\nexport default (s) => s;",
+      "const b = 1;\nexport default (s) => s;",
+    );
+    expect(control.verdict).toBe("pass");
+    const report = await compareSynthetic(
+      "const a = 1;\nexport default (s) => eval(s);",
+      "const b = 1;\nexport default (s) => eval(s);",
+    );
+    expect(report.structural.localBindingMatching).toEqual({ golden: false, candidate: false });
+    expect(report.verdict).toBe("fail");
+    expect(report.structural.equal).toBe(false);
   });
 });
