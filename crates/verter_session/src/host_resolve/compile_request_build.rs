@@ -497,6 +497,7 @@ fn svelte_supplied_style(
         source_space_token: input.source_space_token,
         content_artifact_token: input.content_artifact_token,
         source_map: input.source_map,
+        diagnostics: input.diagnostics,
         parsed: input.parsed,
         consumed_basis: input.authored_basis,
     }
@@ -1389,6 +1390,7 @@ mod tests {
             parsed: None,
             producer,
             authored_basis: Some(ContentId::from_content_bytes(AUTHORED.as_bytes())),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -1400,8 +1402,15 @@ mod tests {
     fn a_selected_style_carries_its_projections_authored_basis() {
         const HOST_MAP: &str =
             r#"{"version":3,"sources":["Card.scss"],"names":[],"mappings":"AACA"}"#;
+        let reported = vec![verter_css_syntax::StyleDiagnostic::with_severity(
+            verter_css_syntax::StyleStage::Authored,
+            verter_css_syntax::StyleDiagnosticSeverity::Warning,
+            "deprecated division",
+            None,
+        )];
         let supplied = svelte_supplied_style(RuntimeBlockContentInput {
             source_map: Some(std::sync::Arc::from(HOST_MAP)),
+            diagnostics: reported.clone(),
             ..selected_style(Some(PreprocessorIdentity::Named(
                 ExternalStyleProducer::new("sass", Some("1.77.0"), None).expect("named producer"),
             )))
@@ -1410,6 +1419,10 @@ mod tests {
             supplied.source_map.as_deref(),
             Some(HOST_MAP),
             "the host's produced-to-authored map reaches the compiler with its bytes"
+        );
+        assert_eq!(
+            supplied.diagnostics, reported,
+            "the tool's diagnostics reach the compiler with its bytes"
         );
         assert_eq!(supplied.code.as_ref(), PRODUCED);
         assert_eq!(

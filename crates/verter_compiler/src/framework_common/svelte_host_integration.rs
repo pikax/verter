@@ -311,6 +311,10 @@ pub struct SvelteSuppliedStyle {
     /// the authored block, so a continued block's published css map is
     /// chained through it, or published absent when there is none.
     pub source_map: Option<Arc<str>>,
+    /// Diagnostics the producing tool reported, in production order. They
+    /// ride the continuation's result and the published style, never
+    /// dropped at this boundary.
+    pub diagnostics: Vec<verter_css_syntax::StyleDiagnostic>,
     /// The host's retained parse of exactly these bytes, when admission
     /// produced one.
     pub parsed: Option<crate::style_planner::PreparedStyleIr>,
@@ -1851,9 +1855,55 @@ mod tests {
             source_space_token: HOST_PRODUCED_SPACE.to_string(),
             content_artifact_token: HOST_PRODUCED_ARTIFACT.to_string(),
             source_map: None,
+            diagnostics: Vec::new(),
             parsed,
             consumed_basis,
         }
+    }
+
+    /// The diagnostics the producing tool reported survive the continuation
+    /// boundary: they ride the published stylesheet in production order, at
+    /// their stated severity and in the space each names, rather than being
+    /// replaced by an empty list when the result is bound.
+    #[test]
+    fn a_continued_style_publishes_its_producers_diagnostics() {
+        use verter_css_syntax::{StyleDiagnostic, StyleDiagnosticSeverity, StyleStage};
+
+        let reported = vec![
+            StyleDiagnostic::with_severity(
+                StyleStage::Authored,
+                StyleDiagnosticSeverity::Warning,
+                "deprecated division",
+                None,
+            ),
+            StyleDiagnostic::new(
+                StyleStage::Preprocessed,
+                "suspicious selector",
+                Some(verter_span::Span::new(0, 5)),
+            ),
+        ];
+        let supplied = SvelteSuppliedStyle {
+            diagnostics: reported.clone(),
+            ..supplied_style(Some(authored_style_basis(SCSS_COMPONENT)), None)
+        };
+        let bundle = render_with_styles(SCSS_COMPONENT, vec![Some(supplied)])
+            .expect("a continued block compiles");
+        let style = bundle
+            .qualified_styles
+            .first()
+            .expect("the scoped stylesheet");
+        assert_eq!(
+            style.result.diagnostics(),
+            reported.as_slice(),
+            "the producer's diagnostics reach the published style"
+        );
+
+        let authored =
+            render_with_styles(CSS_COMPONENT, Vec::new()).expect("an authored css block compiles");
+        assert!(
+            authored.qualified_styles[0].result.diagnostics().is_empty(),
+            "an authored block has no producer to report"
+        );
     }
 
     fn render_with_styles(

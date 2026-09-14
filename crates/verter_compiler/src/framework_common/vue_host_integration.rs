@@ -1720,6 +1720,7 @@ mod tests {
                     parsed: None,
                     producer: None,
                     authored_basis: None,
+                    diagnostics: Vec::new(),
                 }),
                 ..Default::default()
             },

@@ -3315,22 +3315,6 @@ fn hash_output_descriptor(hasher: &mut blake3::Hasher, descriptor: &RuntimeOutpu
     hasher.update(&[descriptor.source_map.fidelity as u8]);
 }
 
-/// A canonical, length-prefixed blake3 digest over every field
-/// [`AssembledArtifact`]/[`RuntimeStyleBlock`]/[`CompileDiagnostic`] actually
-/// expose: per-artifact `kind`/`code`/`dialect`/both source-map slots, hashed
-/// in the order [`crate::assembly::ArtifactSet::artifacts`] exposes them —
-/// publication order is part of the observable result, so a route that
-/// reordered artifacts must produce a different digest, not the same one, then
-/// `styles`' `code`/`source_map`/`lang`/`scope_hash`/`has_global`/
-/// `output_descriptor` (via [`hash_output_descriptor`] — itself derived
-/// purely from `code`/the raw map/declared-source identity, but hashed
-/// explicitly rather than assumed redundant), then `diagnostics`'
-/// `severity`/`code`/`message`/`span`. Lets a result-identity comparison
-/// across routes (direct / prepared-first / prepared-repeat / batch) report
-/// ONE short mismatching digest per fixture/route instead of a giant string
-/// diff. Shared verbatim by this module's own tests and the
-/// `compiler_route_overhead` bench harness — do not write a second copy of this
-/// logic anywhere else.
 /// Publish a Svelte external scoped-css artifact as the stage-qualified style
 /// output: the rendered bytes as a framework-rewritten result, declared over
 /// the one byte space the render consumed — the carrier source for an
@@ -3349,6 +3333,9 @@ fn hash_output_descriptor(hasher: &mut blake3::Hasher, descriptor: &RuntimeOutpu
 /// the host's produced-to-authored map, exactly as a supplied Vue block's
 /// map is. With no host map, or one the chain cannot read, the map is
 /// published absent rather than mis-mapped.
+///
+/// The diagnostics the producing tool reported ride the published result in
+/// production order, each still naming the space its position is in.
 fn qualified_svelte_style(
     source: &str,
     css: crate::svelte::runtime::client::ScopedCssArtifact,
@@ -3369,6 +3356,9 @@ fn qualified_svelte_style(
             (space, artifact, render_map)
         }
     };
+    let diagnostics = continuation
+        .map(|bound| bound.continuation.diagnostics().to_vec())
+        .unwrap_or_default();
     let output_descriptor = RuntimeOutputDescriptor::generated(
         &css.code,
         source_map.as_deref(),
@@ -3379,7 +3369,7 @@ fn qualified_svelte_style(
         result: verter_css_syntax::QualifiedStyleResult::framework_rewritten(
             CssDialect::Css,
             css.code,
-            Vec::new(),
+            diagnostics,
         ),
         consumed_stage: css.consumed_stage,
         source_map,
@@ -3397,6 +3387,35 @@ fn style_stage_rank(stage: verter_css_syntax::StyleStage) -> usize {
     }
 }
 
+fn hash_opt_span(hasher: &mut blake3::Hasher, span: Option<verter_span::Span>) {
+    match span {
+        Some(span) => {
+            hasher.update(&[1u8]);
+            hasher.update(&span.start.to_le_bytes());
+            hasher.update(&span.end.to_le_bytes());
+        }
+        None => {
+            hasher.update(&[0u8]);
+        }
+    }
+}
+
+/// A canonical, length-prefixed blake3 digest over every field
+/// [`AssembledArtifact`]/[`RuntimeStyleBlock`]/[`CompileDiagnostic`] actually
+/// expose: per-artifact `kind`/`code`/`dialect`/both source-map slots, hashed
+/// in the order [`crate::assembly::ArtifactSet::artifacts`] exposes them —
+/// publication order is part of the observable result, so a route that
+/// reordered artifacts must produce a different digest, not the same one, then
+/// `styles`' `code`/`source_map`/`lang`/`scope_hash`/`has_global`/
+/// `output_descriptor` (via [`hash_output_descriptor`] — itself derived
+/// purely from `code`/the raw map/declared-source identity, but hashed
+/// explicitly rather than assumed redundant), then `diagnostics`'
+/// `severity`/`code`/`message`/`span`. Lets a result-identity comparison
+/// across routes (direct / prepared-first / prepared-repeat / batch) report
+/// ONE short mismatching digest per fixture/route instead of a giant string
+/// diff. Shared verbatim by this module's own tests and the
+/// `compiler_route_overhead` bench harness — do not write a second copy of this
+/// logic anywhere else.
 pub fn direct_compile_output_digest(output: &DirectCompileOutput) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
 
@@ -3432,6 +3451,14 @@ pub fn direct_compile_output_digest(output: &DirectCompileOutput) -> [u8; 32] {
         hash_len_prefixed_opt_str(&mut hasher, style.scope_hash.as_deref());
         hasher.update(&[style.has_global as u8]);
         hash_output_descriptor(&mut hasher, &style.output_descriptor);
+        let diagnostics = style.result.diagnostics();
+        hash_usize(&mut hasher, diagnostics.len());
+        for diagnostic in diagnostics {
+            hash_usize(&mut hasher, style_stage_rank(diagnostic.stage()));
+            hash_usize(&mut hasher, diagnostic.severity() as usize);
+            hash_len_prefixed_str(&mut hasher, diagnostic.message());
+            hash_opt_span(&mut hasher, diagnostic.span());
+        }
     }
 
     hash_usize(&mut hasher, output.diagnostics.len());
@@ -3439,16 +3466,7 @@ pub fn direct_compile_output_digest(output: &DirectCompileOutput) -> [u8; 32] {
         hash_usize(&mut hasher, diagnostic.severity as usize);
         hash_len_prefixed_str(&mut hasher, &diagnostic.code);
         hash_len_prefixed_str(&mut hasher, &diagnostic.message);
-        match diagnostic.span {
-            Some(span) => {
-                hasher.update(&[1u8]);
-                hasher.update(&span.start.to_le_bytes());
-                hasher.update(&span.end.to_le_bytes());
-            }
-            None => {
-                hasher.update(&[0u8]);
-            }
-        }
+        hash_opt_span(&mut hasher, diagnostic.span);
     }
 
     *hasher.finalize().as_bytes()

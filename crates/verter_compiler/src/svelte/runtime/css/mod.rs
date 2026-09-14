@@ -103,7 +103,9 @@ pub(super) fn seed_admitted_from_prepared(
         // body is read from: the authored block, or the produced bytes of
         // the continuation bound to it.
         let continuation = admitted.continuation_for(content);
-        let (text, body) = style_body_bytes(source, content, continuation.as_deref());
+        let Some((text, body)) = style_body_bytes(source, content, continuation.as_deref()) else {
+            continue;
+        };
         let Some(css) = text.get(body.start as usize..body.end as usize) else {
             continue;
         };
@@ -126,7 +128,9 @@ pub(super) fn admit_style_body(
     admitted: &mut AdmittedStyleIrs,
 ) -> Option<&'static str> {
     let continuation = admitted.continuation_for(content);
-    let (text, body) = style_body_bytes(source, content, continuation.as_deref());
+    let Some((text, body)) = style_body_bytes(source, content, continuation.as_deref()) else {
+        return Some("css_expected_identifier");
+    };
     if let Some(ir) = admitted.get(body) {
         return verter_css_syntax::svelte_reject_from_ir(ir);
     }
@@ -144,22 +148,43 @@ pub(super) fn admit_style_body(
 
 /// The bytes a style body is read from, and its extent within them: the
 /// carrier `source` at `content`, or — for a continued block — the
-/// continuation's produced bytes over their whole extent.
+/// continuation's produced bytes over their whole extent. `None` when the
+/// produced bytes are longer than a span can address: a truncated extent
+/// would read only a prefix of the body.
 fn style_body_bytes<'a>(
     source: &'a str,
     content: Span,
     continuation: Option<&'a ExternalStyleContinuation>,
-) -> (&'a str, Span) {
+) -> Option<(&'a str, Span)> {
     match continuation {
         Some(continuation) => {
             let code = continuation.result().code();
-            // An extent the span type cannot hold stays unaddressable, and
-            // the caller's bounded read of it fails closed.
-            let end = u32::try_from(code.len()).unwrap_or(u32::MAX);
-            (code, Span::new(0, end))
+            Some((code, produced_body_extent(code)?))
         }
-        None => (source, content),
+        None => Some((source, content)),
     }
+}
+
+/// The whole extent of a continuation's produced bytes, or `None` when their
+/// length does not fit a span.
+pub(crate) fn produced_body_extent(code: &str) -> Option<Span> {
+    produced_extent_of_len(code.len())
+}
+
+fn produced_extent_of_len(len: usize) -> Option<Span> {
+    u32::try_from(len).ok().map(|end| Span::new(0, end))
+}
+
+#[cfg(all(test, target_pointer_width = "64"))]
+#[test]
+fn a_produced_body_longer_than_a_span_is_unaddressable() {
+    let max = u32::MAX as usize;
+    assert_eq!(produced_extent_of_len(max), Some(Span::new(0, u32::MAX)));
+    assert_eq!(
+        produced_extent_of_len(max + 1),
+        None,
+        "a length past the span range is refused, never saturated to a prefix"
+    );
 }
 // `ComplexSelectorPart`/`StyleStatement` are read only by the alloc-probe
 // bridge below (`reread_cached_css_facts_for_alloc_probe`, itself gated the
@@ -250,7 +275,13 @@ pub(super) fn analyze_style_body_admitted(
 ) -> Result<AnalyzedStyleBody, StylePlanFailure> {
     verter_audit::attribute_scope!(StyleAnalysis);
     let continuation = admitted.continuation_for(content);
-    let (source, body) = style_body_bytes(source, content, continuation.as_deref());
+    let (source, body) =
+        style_body_bytes(source, content, continuation.as_deref()).ok_or(StylePlanFailure {
+            class: StylePlanFailureClass::ParseAnalysis,
+            code: "css_expected_identifier",
+            span: content,
+            construct: None,
+        })?;
     // A failure inside a continuation's produced bytes has no authored
     // position finer than the block it replaced.
     let at_carrier = |span: Span| {

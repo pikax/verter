@@ -159,6 +159,7 @@ fn projected_template(code: &str) -> RuntimeBlockContentInput {
         parsed: None,
         producer: None,
         authored_basis: None,
+        diagnostics: Vec::new(),
     }
 }
 

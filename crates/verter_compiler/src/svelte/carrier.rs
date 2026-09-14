@@ -597,6 +597,9 @@ pub(crate) enum StyleContinuationBindRefusal {
     UnknownAuthoredDialect { extent: Span },
     /// The host stated no authored basis for the result.
     MissingBasis { extent: Span },
+    /// The produced bytes are longer than a span can address, so no stage
+    /// could read them whole.
+    UnaddressableResult { extent: Span },
     /// The continuation boundary refused the stated facts.
     Refused {
         extent: Span,
@@ -612,6 +615,7 @@ impl StyleContinuationBindRefusal {
             Self::UnboundSlot { .. } => Span::new(0, source.len() as u32),
             Self::UnknownAuthoredDialect { extent }
             | Self::MissingBasis { extent }
+            | Self::UnaddressableResult { extent }
             | Self::Refused { extent, .. } => *extent,
         }
     }
@@ -720,6 +724,9 @@ pub(crate) fn bind_svelte_style_continuations(
                 .consumed_basis
                 .clone()
                 .ok_or(StyleContinuationBindRefusal::MissingBasis { extent })?;
+            if crate::svelte::runtime::produced_body_extent(&supplied.code).is_none() {
+                return Err(StyleContinuationBindRefusal::UnaddressableResult { extent });
+            }
             let style_unit = SourceUnit::mint(
                 source_id.clone(),
                 revision.clone(),
@@ -742,7 +749,7 @@ pub(crate) fn bind_svelte_style_continuations(
                 result: QualifiedStyleResult::preprocessed(
                     supplied.producer.clone(),
                     supplied.code.as_ref(),
-                    Vec::new(),
+                    supplied.diagnostics.clone(),
                 ),
                 // The host's raw map is not decoded into anchors: no anchors
                 // is an absent map, never an implicit identity one. The map
@@ -1793,6 +1800,7 @@ let count = $state(0);
             parsed: None,
             producer: None,
             authored_basis: None,
+            diagnostics: Vec::new(),
         }
     }
 

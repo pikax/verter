@@ -603,6 +603,9 @@ pub struct RuntimeBlockContentInput {
     /// validated, so a consumer that needs a basis reads it here or refuses.
     /// `None` when the host could not state one.
     pub authored_basis: Option<crate::assembly::ContentId>,
+    /// Diagnostics the external producer reported for these bytes, in
+    /// production order. Empty for the carrier's own content.
+    pub diagnostics: Vec<verter_css_syntax::StyleDiagnostic>,
 }
 
 /// Parser-local projection of validated block content. Ordering exists only at

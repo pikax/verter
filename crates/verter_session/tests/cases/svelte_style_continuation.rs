@@ -6,8 +6,9 @@
 use std::sync::Arc;
 
 use verter_session::{
-    hash_block_content, BlockOverrideEntry, BlockOverrideRequest, CompileProfile, FileLanguage,
-    HostConfig, PreprocessorRequest, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
+    hash_block_content, BlockOverrideEntry, BlockOverrideRequest, CompileErrorPolicy,
+    CompileProfile, FileLanguage, HostConfig, PreprocessorRequest, UpsertRequest, VerterHost,
+    VirtualNodeKind, VirtualQuery,
 };
 
 const INPUT_ID: &str = "/workspace/Card.svelte";
@@ -113,26 +114,35 @@ fn a_supplied_result_is_the_only_body_its_block_scopes() {
     );
 }
 
+/// A host that reports a failed compile as a failure instead of serving the
+/// last good output, so a stale result's absence is observable.
+fn strict_host() -> VerterHost {
+    VerterHost::new_standalone(HostConfig {
+        dev_mode: false,
+        compile_error_policy: CompileErrorPolicy::StrictError,
+        ..HostConfig::default()
+    })
+}
+
 #[test]
 fn fresh_and_edit_revert_compiles_of_a_continued_block_agree() {
-    let fresh = VerterHost::new_standalone(HostConfig::default());
+    let fresh = strict_host();
     let (fresh_id, fresh_request) = upsert(&fresh, None, SOURCE);
     admit(&fresh, &fresh_id, &fresh_request, PRODUCED);
     let expected = compiled_with_supplied_result(&fresh, &fresh_id);
 
-    let host = VerterHost::new_standalone(HostConfig::default());
+    let host = strict_host();
     let (canonical_id, request) = upsert(&host, None, SOURCE);
     admit(&host, &canonical_id, &request, PRODUCED);
     let _ = compiled_with_supplied_result(&host, &canonical_id);
 
     // The edit leaves the admitted result describing bytes the block no
-    // longer holds: nothing may publish from it.
+    // longer holds: nothing may publish from it, and the authored SCSS
+    // cannot be scoped in its place.
     let _ = upsert(&host, Some(canonical_id.clone()), EDITED);
     let stale = virtual_file(&host, &canonical_id, VirtualNodeKind::Style { index: 0 });
     assert!(
-        stale
-            .as_deref()
-            .is_none_or(|css| !css.contains("color: red")),
+        stale.is_none(),
         "a result for the pre-edit block must not publish after the edit: {stale:?}"
     );
 

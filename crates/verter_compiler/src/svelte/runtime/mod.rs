@@ -196,6 +196,9 @@ pub use compile_options::{
 // nothing. Same opt-in seam as `compile_client` above.
 #[cfg(any(test, feature = "test-support"))]
 pub use css::{analyze_style_body_for_alloc_probe, reread_cached_css_facts_for_alloc_probe};
+// The one addressability rule for a continuation's produced bytes, shared
+// with the binder that admits them.
+pub(crate) use css::produced_body_extent;
 pub use expr::StateLowering;
 pub use helpers::SvelteHelperMask;
 pub use html::{DynamicSlot, NodePathPlan, PathBase};

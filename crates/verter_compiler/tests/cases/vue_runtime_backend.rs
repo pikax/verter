@@ -216,6 +216,7 @@ fn selected_style(code: &str) -> RuntimeBlockContentInput {
         parsed: None,
         producer: None,
         authored_basis: None,
+        diagnostics: Vec::new(),
     }
 }
 
@@ -233,6 +234,7 @@ fn selected_template_with_map(code: &str, source_map: Option<&str>) -> RuntimeBl
         parsed: None,
         producer: None,
         authored_basis: None,
+        diagnostics: Vec::new(),
     }
 }
 
@@ -246,6 +248,7 @@ fn selected_style_with_map(code: &str, source_map: Option<&str>) -> RuntimeBlock
         parsed: None,
         producer: None,
         authored_basis: None,
+        diagnostics: Vec::new(),
     }
 }
 
@@ -1786,6 +1789,7 @@ fn selected_script(code: &str, lang: &str) -> RuntimeBlockContentInput {
         parsed: None,
         producer: None,
         authored_basis: None,
+        diagnostics: Vec::new(),
     }
 }
 

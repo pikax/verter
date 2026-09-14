@@ -1282,6 +1282,7 @@ mod tests {
             parsed: None,
             producer: None,
             authored_basis: None,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -1893,6 +1894,7 @@ mod tests {
                             parsed: None,
                             producer: None,
                             authored_basis: None,
+                            diagnostics: Vec::new(),
                         })],
                         ..Default::default()
                     },
@@ -1955,6 +1957,7 @@ mod tests {
                             parsed,
                             producer: Some(supplied_producer()),
                             authored_basis: None,
+                            diagnostics: Vec::new(),
                         })],
                         ..Default::default()
                     },
@@ -2010,6 +2013,7 @@ mod tests {
                         parsed: Some(prepared),
                         producer: Some(supplied_producer()),
                         authored_basis: None,
+                        diagnostics: Vec::new(),
                     })],
                     ..Default::default()
                 },
@@ -2052,6 +2056,7 @@ mod tests {
                             parsed: None,
                             producer: None,
                             authored_basis: None,
+                            diagnostics: Vec::new(),
                         })],
                         ..Default::default()
                     },
@@ -2155,6 +2160,7 @@ mod tests {
                             parsed: Some(prepared),
                             producer: Some(supplied_producer()),
                             authored_basis: None,
+                            diagnostics: Vec::new(),
                         })],
                         ..Default::default()
                     },
@@ -2206,6 +2212,7 @@ mod tests {
                                 parsed: None,
                                 producer: Some(supplied_producer()),
                                 authored_basis: None,
+                                diagnostics: Vec::new(),
                             }),
                             Some(RuntimeBlockContentInput {
                                 code: Arc::from(css),
@@ -2216,6 +2223,7 @@ mod tests {
                                 parsed: None,
                                 producer: Some(supplied_producer()),
                                 authored_basis: None,
+                                diagnostics: Vec::new(),
                             }),
                         ],
                         ..Default::default()
