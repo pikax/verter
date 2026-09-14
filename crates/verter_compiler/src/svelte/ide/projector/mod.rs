@@ -251,6 +251,8 @@ pub fn project_svelte_ide(
         dialect,
         script_declared,
         block_declared: Vec::new(),
+        render_anchor: None,
+        deferred_anchor_scopes: Vec::new(),
     };
     projector.project_template(&parsed.template, region);
     drop(projector);
@@ -496,6 +498,16 @@ struct TemplateProjector<'ct, 'a> {
     /// so a `$`-named block binding is treated as an ORDINARY local (NOT a
     /// store-sub) inside its block, and never leaks to a sibling.
     block_declared: Vec<Vec<String>>,
+    /// The first markup byte (`region.0`) while the walk runs. An element whose
+    /// `open_span.start` equals it shares that byte with the render-header
+    /// anchor: same-index CodeTransform insertions stack in call order, and the
+    /// header (prepended AFTER the walk) would land BELOW the element's
+    /// snippet-scope IIFE — inside its `return (` — producing invalid TSX.
+    /// Such scopes are deferred past the header prepend.
+    render_anchor: Option<u32>,
+    /// Element snippet scopes anchored exactly at [`Self::render_anchor`],
+    /// emitted after the render header prepends at the same byte.
+    deferred_anchor_scopes: Vec<ElementScopeSite>,
 }
 
 /// A snippet declarator to hoist to the top of its scope function.
@@ -533,6 +545,38 @@ struct DeclMove {
     text_rewrite: Option<String>,
 }
 
+/// The element facts the snippet-scope emitter needs, detached from the AST
+/// borrow so a scope anchored at the FIRST template byte can be deferred past
+/// the render-header prepend (same-index insertions stack in call order).
+struct ElementScopeSite {
+    /// Whether the owning element is a component (drives the snippet props
+    /// wiring + contextual annotation).
+    is_component: bool,
+    /// The owning element's tag name.
+    name: String,
+    /// The element's open-tag span start (the IIFE anchor).
+    open_start: u32,
+    /// The element's open-tag span end (the props-wiring insertion point).
+    open_end: u32,
+    /// The element's close end (the IIFE closer anchor).
+    close_end: u32,
+    /// The immediate `{#snippet}` children the scope declares.
+    snippets: Vec<SnippetMove>,
+}
+
+impl ElementScopeSite {
+    fn new(el: &SvelteElement, snippets: Vec<SnippetMove>) -> Self {
+        Self {
+            is_component: matches!(el.kind, SvelteElementKind::Component),
+            name: el.name.clone(),
+            open_start: el.open_span.start,
+            open_end: el.open_span.end,
+            close_end: el.close_span.unwrap_or(el.open_span).end,
+            snippets,
+        }
+    }
+}
+
 impl TemplateProjector<'_, '_> {
     /// Project the whole template into the render scope function.
     ///
@@ -557,9 +601,11 @@ impl TemplateProjector<'_, '_> {
         // declarations are visible inside the render fn with no TDZ. The
         // declarator MOVEs land before the render-header insertion at `first`
         // (verified by the ordering test).
+        self.render_anchor = Some(first);
         for node in nodes {
             self.project_node(node);
         }
+        self.render_anchor = None;
 
         // Hoist snippet declarators to MODULE scope (before the render fn).
         // Module-scope `const`s are visible inside the render fn with no TDZ,
@@ -605,9 +651,6 @@ impl TemplateProjector<'_, '_> {
                 }
             }
         }
-        // The render fn closes here; the file is made a module by the
-        // PUBLIC-FACADE `export default` appended after the projector runs.
-        self.ct.append_left(last, "\n</>);\n}\n");
         // F8 `<svelte:self>` LOCAL contract — emitted at MODULE scope ABOVE the
         // render fn, as a PREFIX of the render-header insertion (one chunk, so it
         // reliably lands above `;function __verter_render()` regardless of
@@ -638,6 +681,19 @@ impl TemplateProjector<'_, '_> {
             first,
             &format!("{self_contract}\n;function __verter_render() {{\nreturn (<>\n"),
         );
+        // Same-index insertions stack in CALL order, so an element snippet
+        // scope anchored exactly at `first` is emitted only NOW — after the
+        // header prepend — to land BELOW the header (inside the render
+        // fragment, wrapping its owning element) instead of above it.
+        let deferred_scopes = std::mem::take(&mut self.deferred_anchor_scopes);
+        for site in &deferred_scopes {
+            self.emit_element_snippet_scope(site);
+        }
+        // The render fn closes LAST so a deferred scope whose element closes
+        // at `last` still nests its IIFE closer INSIDE the render fragment.
+        // The file is made a module by the PUBLIC-FACADE `export default`
+        // appended after the projector runs.
+        self.ct.append_left(last, "\n</>);\n}\n");
     }
 
     /// Emit one hoisted snippet declarator at the scope top.
@@ -865,29 +921,42 @@ impl TemplateProjector<'_, '_> {
             }
         }
         if !scoped_snippets.is_empty() {
-            self.emit_element_snippet_scope(el, &scoped_snippets);
+            let site = ElementScopeSite::new(el, scoped_snippets);
+            if Some(site.open_start) == self.render_anchor {
+                // The element shares its first byte with the render-header
+                // anchor — defer the scope below the header (see
+                // [`Self::emit_element_snippet_scope`]).
+                self.deferred_anchor_scopes.push(site);
+            } else {
+                self.emit_element_snippet_scope(&site);
+            }
         }
         if pushed {
             self.pop_block_bindings();
         }
     }
 
-    /// Emit immediate child snippets in an IIFE whose lexical scope owns the
-    /// element. Component-owned snippets are also wired as named props and
-    /// contextually typed from the component's public Svelte prop contract.
-    fn emit_element_snippet_scope(&mut self, el: &SvelteElement, snippets: &[SnippetMove]) {
-        let anchor = el.open_span.start;
-        let is_component = matches!(el.kind, SvelteElementKind::Component);
+    /// Emit one element's immediate snippet scope.
+    ///
+    /// When the element's anchor equals the render-header anchor (the element
+    /// starts at the FIRST template byte), emission is DEFERRED past the header
+    /// prepend: CodeTransform insertions at one index stack in call order, so
+    /// emitting inline would stack the IIFE ABOVE the later-prepended header —
+    /// the header would land inside the IIFE's `return (` and the projected
+    /// TSX would not parse.
+    fn emit_element_snippet_scope(&mut self, site: &ElementScopeSite) {
+        let anchor = site.open_start;
+        let is_component = site.is_component;
 
-        for (index, snip) in snippets.iter().enumerate() {
+        for (index, snip) in site.snippets.iter().enumerate() {
             let prefix = match (index == 0, is_component, self.dialect) {
                 (true, true, SvelteIdeDialect::JavaScript) => format!(
                     "{{(() => {{\n/** @type {{NonNullable<__VerterComponentProps<typeof {}>[{:?}]>}} */\nconst ",
-                    el.name, snip.name
+                    site.name, snip.name
                 ),
                 (false, true, SvelteIdeDialect::JavaScript) => format!(
                     "/** @type {{NonNullable<__VerterComponentProps<typeof {}>[{:?}]>}} */\nconst ",
-                    el.name, snip.name
+                    site.name, snip.name
                 ),
                 (true, _, _) => "{(() => {\nconst ".to_string(),
                 _ => "const ".to_string(),
@@ -895,7 +964,7 @@ impl TemplateProjector<'_, '_> {
             let annotation = if is_component && self.dialect == SvelteIdeDialect::TypeScript {
                 format!(
                     ": NonNullable<__VerterComponentProps<typeof {}>[{:?}]>",
-                    el.name, snip.name
+                    site.name, snip.name
                 )
             } else {
                 String::new()
@@ -905,16 +974,15 @@ impl TemplateProjector<'_, '_> {
 
         self.ct.append_left(anchor, "return (\n");
         if is_component {
-            let insertion = snippets.iter().fold(String::new(), |mut out, snip| {
+            let insertion = site.snippets.iter().fold(String::new(), |mut out, snip| {
                 use std::fmt::Write;
                 let _ = write!(out, " {}={{{}}}", snip.name, snip.name);
                 out
             });
             self.ct
-                .append_left(el.open_span.end.saturating_sub(1), &insertion);
+                .append_left(site.open_end.saturating_sub(1), &insertion);
         }
-        let close = el.close_span.unwrap_or(el.open_span).end;
-        self.ct.append_left(close, "\n); })()}");
+        self.ct.append_left(site.close_end, "\n); })()}");
     }
 
     /// Add a private direct-call check for a component's prop bag.
