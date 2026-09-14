@@ -2552,14 +2552,54 @@ pub(crate) fn try_extract_macro_from_var_decl(
         } else {
             None
         };
-        if let Some(m) =
+        if let Some(mut m) =
             try_extract_macro(init, binding_name, source, comments, owner, binding_index)
         {
             if m.kind == AnalyzedMacroKind::WithDefaults {
                 try_extract_inner_macro(init, macros, source, comments, owner, binding_index);
             }
+            if m.kind == AnalyzedMacroKind::DefineProps {
+                if let BindingPattern::ObjectPattern(pattern) = &decl.id {
+                    append_destructure_defaults(pattern, source, &mut m);
+                }
+            }
             macros.push(m);
         }
+    }
+}
+
+/// Record the reactive props destructure initializers of
+/// `const { count = 1, label: text = 'x' } = defineProps(...)` as prop
+/// defaults, keyed by the destructured PROP name (never the local alias).
+///
+/// Mirrors Vue's destructure contract: only a static identifier or string
+/// key whose value is `local = default` with an identifier `local` declares a
+/// default; the value carries the verbatim source text of the initializer,
+/// exactly like `withDefaults()` defaults. A key that already has an
+/// authored runtime `default:` keeps that single entry.
+fn append_destructure_defaults(pattern: &ObjectPattern<'_>, source: &str, m: &mut AnalyzedMacro) {
+    for prop in &pattern.properties {
+        let BindingPattern::AssignmentPattern(assign) = &prop.value else {
+            continue;
+        };
+        if !matches!(assign.left, BindingPattern::BindingIdentifier(_)) {
+            continue;
+        }
+        let key = match &prop.key {
+            PropertyKey::StaticIdentifier(id) => id.name.to_string(),
+            PropertyKey::StringLiteral(lit) => lit.value.to_string(),
+            _ => continue,
+        };
+        if m.default_keys.contains(&key) {
+            continue;
+        }
+        let value = default_value_source_text(&assign.right, source).unwrap_or_default();
+        m.default_values.push(AnalyzedDefaultValue {
+            key: key.clone(),
+            value,
+            span: assign.right.span().into(),
+        });
+        m.default_keys.push(key);
     }
 }
 

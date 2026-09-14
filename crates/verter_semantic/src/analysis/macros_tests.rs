@@ -1146,6 +1146,54 @@ fn with_defaults_extracts_default_values() {
 }
 
 #[test]
+fn destructured_define_props_initializers_are_prop_defaults() {
+    let code = r#"const { count = 1, verbose = false, zero = 0, empty = '', label: alias = 'x', required, optional, ...rest } = defineProps<{ count?: number; verbose?: boolean; zero?: number; empty?: string; label?: string; required: string; optional?: string; other?: string }>()"#;
+    let macros = parse_macros(code);
+    let dp = macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+        .unwrap();
+    let mut keys = dp.default_keys.clone();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec!["count", "empty", "label", "verbose", "zero"],
+        "only initialized destructure members are defaulted, keyed by prop name (never the local alias)"
+    );
+    let value = |k: &str| {
+        dp.default_values
+            .iter()
+            .find(|d| d.key == k)
+            .unwrap_or_else(|| panic!("default for {k}"))
+            .value
+            .as_str()
+    };
+    assert_eq!(value("count"), "1");
+    assert_eq!(value("verbose"), "false");
+    assert_eq!(value("zero"), "0");
+    assert_eq!(value("empty"), "''");
+    assert_eq!(value("label"), "'x'");
+    assert_eq!(dp.default_values.len(), keys.len());
+}
+
+#[test]
+fn destructured_runtime_define_props_merges_option_and_initializer_defaults() {
+    let code = r#"const { a = 1, b } = defineProps({ a: Number, b: { type: String, default: 'b' }, c: String })"#;
+    let macros = parse_macros(code);
+    let dp = macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+        .unwrap();
+    let mut keys = dp.default_keys.clone();
+    keys.sort();
+    assert_eq!(keys, vec!["a", "b"]);
+    let a = dp.default_values.iter().find(|d| d.key == "a").unwrap();
+    assert_eq!(a.value, "1");
+    let b = dp.default_values.iter().find(|d| d.key == "b").unwrap();
+    assert_eq!(b.value, "'b'");
+}
+
+#[test]
 fn with_defaults_string_defaults_preserve_verbatim_source_quoting() {
     let code = r#"withDefaults(defineProps<{ o?: string, d?: string }>(), { o: 'vertical', d: "horizontal" })"#;
     let macros = parse_macros(code);
