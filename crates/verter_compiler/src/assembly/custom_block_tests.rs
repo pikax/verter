@@ -142,7 +142,7 @@ fn local_src_backed_and_empty_round_trip_named_fields_without_copying_external_c
         artifact.id().clone(),
         "docs",
         1,
-        Span::new(27, 31),
+        Span::new(27, 27),
         CustomBlockContent::SrcBacked,
         Some("./docs.md"),
         None,
@@ -192,11 +192,16 @@ fn local_src_backed_and_empty_round_trip_named_fields_without_copying_external_c
     let wire: serde_json::Value = serde_json::from_str(&attached.to_json().unwrap()).unwrap();
     let blocks = wire["customBlocks"].as_array().unwrap();
     assert_eq!(blocks.len(), 4);
+    assert_eq!(blocks[0]["id"], hex::encode(local.id().canonical_bytes()));
     assert_eq!(blocks[0]["role"], "i18n");
     assert_eq!(blocks[0]["sourceOrder"], 0);
     assert_eq!(blocks[0]["lang"], "json");
     assert_eq!(blocks[0]["content"]["availability"], "local");
     assert_eq!(blocks[0]["content"]["text"], "{\"a\":1}");
+    assert_eq!(
+        blocks[0]["content"]["content"],
+        hex::encode(ContentId::from_content_bytes(b"{\"a\":1}").canonical_bytes())
+    );
     assert_eq!(
         local.attributes(),
         &[
@@ -254,6 +259,7 @@ fn local_src_backed_and_empty_round_trip_named_fields_without_copying_external_c
     assert_eq!(blocks[2]["content"]["availability"], "empty");
     assert_eq!(blocks[3]["content"]["availability"], "unavailable");
     assert_eq!(blocks[3]["content"]["reason"], "unsupported");
+    assert!(blocks[3]["content"].get("text").is_none());
     assert_eq!(
         attached.custom_blocks()[0].id(),
         local.id(),
@@ -328,6 +334,22 @@ fn identity_binds_unit_revision_role_order_region_attributes_lang_src_and_conten
         base.id()
     );
     other_role.attributes = vec![("lang".into(), "json".into())];
+    other_role.source_id = SourceId::from_canonical(&Tag("Other.vue"));
+    assert_ne!(
+        CustomBlockDescriptor::try_new(other_role.clone())
+            .unwrap()
+            .id(),
+        base.id()
+    );
+    other_role.source_id = unit.unit.source_id().clone();
+    other_role.source_content = ContentId::from_content_bytes(b"other");
+    assert_ne!(
+        CustomBlockDescriptor::try_new(other_role.clone())
+            .unwrap()
+            .id(),
+        base.id()
+    );
+    other_role.source_content = unit.unit.content().clone();
     other_role.content = CustomBlockContent::Empty;
     assert_ne!(
         CustomBlockDescriptor::try_new(other_role).unwrap().id(),
@@ -618,6 +640,120 @@ fn malformed_alias_order_and_region_fail_closed() {
         vec![host.clone(), other_artifact.clone()],
     )
     .unwrap();
+    let unknown_target = complete(
+        &unit,
+        other_artifact.id().clone(),
+        "i18n",
+        0,
+        Span::new(20, 24),
+        CustomBlockContent::Empty,
+        None,
+        None,
+        vec![],
+    );
+    assert_eq!(
+        set.clone()
+            .attach_custom_blocks(vec![unknown_target.clone()])
+            .unwrap_err(),
+        E::UnknownRelationTarget
+    );
+    assert_eq!(
+        set.warm_custom_block(&unknown_target).unwrap_err(),
+        E::UnknownRelationTarget
+    );
+    let unknown_unit = complete(
+        &other_unit,
+        other_artifact.id().clone(),
+        "i18n",
+        0,
+        Span::new(20, 24),
+        CustomBlockContent::Empty,
+        None,
+        None,
+        vec![],
+    );
+    assert_eq!(
+        set.clone()
+            .attach_custom_blocks(vec![unknown_unit.clone()])
+            .unwrap_err(),
+        E::UnknownSourceUnit
+    );
+    assert_eq!(
+        set.warm_custom_block(&unknown_unit).unwrap_err(),
+        E::UnknownSourceUnit
+    );
+    let mut extra_input = request(
+        &unit,
+        id.clone(),
+        "i18n",
+        0,
+        Span::new(20, 24),
+        CustomBlockContent::Empty,
+        None,
+        None,
+        vec![],
+        CustomBlockLifecycle::Complete,
+    );
+    extra_input
+        .provenance
+        .inputs
+        .insert(other_unit.unit.id().clone());
+    let extra_input = CustomBlockDescriptor::try_new(extra_input).unwrap();
+    assert_eq!(
+        set.clone()
+            .attach_custom_blocks(vec![extra_input.clone()])
+            .unwrap_err(),
+        E::UnknownSourceUnit
+    );
+    assert_eq!(
+        set.warm_custom_block(&extra_input).unwrap_err(),
+        E::UnknownSourceUnit
+    );
+    let mut missing_primary = request(
+        &unit,
+        id.clone(),
+        "i18n",
+        0,
+        Span::new(20, 24),
+        CustomBlockContent::Empty,
+        None,
+        None,
+        vec![],
+        CustomBlockLifecycle::Complete,
+    );
+    missing_primary.provenance.inputs.clear();
+    assert_eq!(
+        CustomBlockDescriptor::try_new(missing_primary).unwrap_err(),
+        E::MissingPrimaryInput
+    );
+    assert_eq!(
+        set.clone()
+            .attach_custom_blocks(vec![first.clone(), first.clone()])
+            .unwrap_err(),
+        E::DuplicateIdentity
+    );
+    let attached_first = set
+        .clone()
+        .attach_custom_blocks(vec![first.clone()])
+        .unwrap();
+    let warm_dup_order = complete(
+        &unit,
+        id.clone(),
+        "docs",
+        0,
+        Span::new(30, 40),
+        CustomBlockContent::Empty,
+        None,
+        None,
+        vec![],
+    );
+    assert_eq!(
+        attached_first
+            .warm_custom_block(&warm_dup_order)
+            .unwrap_err(),
+        E::DuplicateOrder
+    );
+    attached_first.warm_custom_block(&first).unwrap();
     let left = complete(
         &unit,
         id.clone(),
@@ -641,9 +777,32 @@ fn malformed_alias_order_and_region_fail_closed() {
         vec![],
     );
     let attached = multi_source
+        .clone()
         .attach_custom_blocks(vec![left, right])
         .unwrap();
     assert_eq!(attached.custom_blocks().len(), 2);
+    let cross = complete(
+        &unit,
+        other_artifact.id().clone(),
+        "i18n",
+        0,
+        Span::new(20, 24),
+        CustomBlockContent::Empty,
+        None,
+        None,
+        vec![],
+    );
+    assert_eq!(
+        multi_source
+            .clone()
+            .attach_custom_blocks(vec![cross.clone()])
+            .unwrap_err(),
+        E::SourceMismatch
+    );
+    assert_eq!(
+        multi_source.warm_custom_block(&cross).unwrap_err(),
+        E::SourceMismatch
+    );
 
     let sibling = source("custom:docs", "one");
     let sibling_artifact = artifact(&sibling.unit);

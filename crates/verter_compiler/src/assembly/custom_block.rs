@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use verter_identity::identity::{ContentId, SourceId, SourceRevision, SourceUnitId};
 use verter_span::Span;
 
-use super::fragment::{ArtifactId, ArtifactProvenance, ArtifactUnavailableReason};
+use super::fragment::{ArtifactId, ArtifactProvenance, ArtifactUnavailableReason, CompileArtifact};
 use super::source_unit::ArtifactSourceUnit;
 
 /// Canonical descriptor lineage. Bound fields include source unit, source
@@ -86,11 +86,15 @@ pub struct CustomBlockDescriptorRequest {
     pub lang: Option<String>,
     pub src: Option<String>,
     pub attributes: Vec<(String, String)>,
+    /// Position of this block within its [`SourceId`]. Unique per `SourceId`
+    /// in an attached set. After the per-source sort, `region.start` must
+    /// strictly increase with `source_order`.
     pub source_order: u32,
-    /// SFC-absolute content region in UTF-8 bytes. For
-    /// [`CustomBlockContent::Local`], `region.len()` must equal `text.len()`.
-    /// Other content states use the claimed block region; an empty body does
-    /// not require an empty span.
+    /// SFC-absolute content region in UTF-8 bytes, for every content state.
+    /// For [`CustomBlockContent::Local`], `region.len()` must equal `text.len()`.
+    /// [`CustomBlockContent::Empty`], [`CustomBlockContent::SrcBacked`], and
+    /// [`CustomBlockContent::Unavailable`] do not constrain `region.len()`;
+    /// the span must still lie inside the staged source-unit span.
     pub region: Span,
     pub content: CustomBlockContent,
     pub provenance: ArtifactProvenance,
@@ -323,7 +327,7 @@ fn encode_content_state(content: &CustomBlockContent) -> Vec<u8> {
 
 pub(crate) fn validate_attachment(
     source_units: &BTreeMap<SourceUnitId, ArtifactSourceUnit>,
-    artifact_ids: &BTreeSet<ArtifactId>,
+    artifacts: &[CompileArtifact],
     mut descriptors: Vec<CustomBlockDescriptor>,
 ) -> Result<Vec<CustomBlockDescriptor>, CustomBlockDescriptorError> {
     use CustomBlockDescriptorError as E;
@@ -337,16 +341,16 @@ pub(crate) fn validate_attachment(
     let mut ids = BTreeSet::new();
     let mut regions: BTreeMap<&SourceId, Vec<Span>> = BTreeMap::new();
     for descriptor in &descriptors {
-        check_against_set(source_units, artifact_ids, descriptor)?;
+        check_against_set(source_units, artifacts, descriptor)?;
+        if !ids.insert(&descriptor.id) {
+            return Err(E::DuplicateIdentity);
+        }
         if !orders
             .entry(&descriptor.source_id)
             .or_default()
             .insert(descriptor.source_order)
         {
             return Err(E::DuplicateOrder);
-        }
-        if !ids.insert(&descriptor.id) {
-            return Err(E::DuplicateIdentity);
         }
         let source_regions = regions.entry(&descriptor.source_id).or_default();
         if source_regions
@@ -368,15 +372,22 @@ pub(crate) fn validate_attachment(
 
 pub(crate) fn validate_warm(
     source_units: &BTreeMap<SourceUnitId, ArtifactSourceUnit>,
-    artifact_ids: &BTreeSet<ArtifactId>,
+    artifacts: &[CompileArtifact],
+    stored: &[CustomBlockDescriptor],
     descriptor: &CustomBlockDescriptor,
 ) -> Result<(), CustomBlockDescriptorError> {
-    check_against_set(source_units, artifact_ids, descriptor)
+    let mut combined: Vec<CustomBlockDescriptor> = stored
+        .iter()
+        .filter(|existing| existing.id != descriptor.id)
+        .cloned()
+        .collect();
+    combined.push(descriptor.clone());
+    validate_attachment(source_units, artifacts, combined).map(|_| ())
 }
 
 fn check_against_set(
     source_units: &BTreeMap<SourceUnitId, ArtifactSourceUnit>,
-    artifact_ids: &BTreeSet<ArtifactId>,
+    artifacts: &[CompileArtifact],
     descriptor: &CustomBlockDescriptor,
 ) -> Result<(), CustomBlockDescriptorError> {
     use CustomBlockDescriptorError as E;
@@ -410,8 +421,17 @@ fn check_against_set(
     {
         return Err(E::UnknownSourceUnit);
     }
-    if !artifact_ids.contains(&descriptor.attached_to) {
+    let Some(target) = artifacts
+        .iter()
+        .find(|artifact| artifact.id() == &descriptor.attached_to)
+    else {
         return Err(E::UnknownRelationTarget);
+    };
+    let Some(target_source) = source_units.get(target.source_unit()) else {
+        return Err(E::UnknownSourceUnit);
+    };
+    if descriptor.source_id != *target_source.unit.source_id() {
+        return Err(E::SourceMismatch);
     }
     Ok(())
 }

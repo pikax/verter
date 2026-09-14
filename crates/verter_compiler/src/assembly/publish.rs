@@ -159,24 +159,31 @@ impl CompileArtifactSet {
         mut self,
         descriptors: Vec<CustomBlockDescriptor>,
     ) -> Result<Self, CustomBlockDescriptorError> {
-        let ids: std::collections::BTreeSet<_> =
-            self.artifacts.iter().map(|a| a.id().clone()).collect();
         let mut combined = std::mem::take(&mut self.custom_blocks);
         combined.extend(descriptors);
-        self.custom_blocks =
-            super::custom_block::validate_attachment(&self.source_units, &ids, combined)?;
+        self.custom_blocks = super::custom_block::validate_attachment(
+            &self.source_units,
+            &self.artifacts,
+            combined,
+        )?;
         Ok(self)
     }
 
-    /// Warm gate: the same fail-closed checks as attachment, independent of
-    /// whether `descriptor` is already stored on this set.
+    /// Warm gate: the same fail-closed checks as attachment, including
+    /// set-level identity, order, overlap, and region-order rules against
+    /// already-attached descriptors. Independent of whether `descriptor` is
+    /// already stored on this set — an identical stored id is not treated as
+    /// a duplicate of itself.
     pub fn warm_custom_block(
         &self,
         descriptor: &CustomBlockDescriptor,
     ) -> Result<(), CustomBlockDescriptorError> {
-        let ids: std::collections::BTreeSet<_> =
-            self.artifacts.iter().map(|a| a.id().clone()).collect();
-        super::custom_block::validate_warm(&self.source_units, &ids, descriptor)
+        super::custom_block::validate_warm(
+            &self.source_units,
+            &self.artifacts,
+            &self.custom_blocks,
+            descriptor,
+        )
     }
 
     pub fn source_units(
