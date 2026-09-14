@@ -173,6 +173,7 @@ schema = 2
 "CVO3" = { status = "implemented", commit_message = "test(*): add the false-green control set for the validation probe machinery", commit_date = "2026-09-12T17:30:00+01:00" }
 "CVO4" = { status = "pending" }
 "D1" = { status = "implemented", commit_message = "feat(session): add private hermetic flow completeness foundation", commit_date = "2026-08-29T20:05:00+01:00" }
+"D14" = { status = "implemented", commit_message = "test(session): extend the checker-syntax comparer and deep-pin fourteen corpus rows", commit_date = "2026-09-14T23:34:00+01:00" }
 "D2A" = { status = "implemented", commit_message = "feat(session): canonical flow demand and proof substrate", commit_date = "2026-08-30T09:46:00+01:00" }
 "D2B" = { status = "implemented", commit_message = "feat(session): route flow-return admission through the sole completeness proof", commit_date = "2026-08-30T17:32:00+01:00" }
 "D2C" = { status = "implemented", commit_message = "feat(session): explain flow-return partiality in the audit payload", commit_date = "2026-09-02T09:00:00+01:00" }
