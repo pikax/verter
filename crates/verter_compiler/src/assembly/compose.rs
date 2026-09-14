@@ -219,10 +219,10 @@ pub fn prepend_preamble(
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct SequencedOutput {
     pub code: String,
-    pub source_map: String,
+    pub source_map: SourceMap<'static>,
 }
 
 /// Table accumulator for [`assemble_sequence`] — STABLE APPEND, no dedup.
@@ -367,7 +367,7 @@ pub fn assemble_sequence(
 
     Ok(SequencedOutput {
         code,
-        source_map: result.to_json_string(),
+        source_map: result,
     })
 }
 
@@ -912,8 +912,7 @@ mod tests {
         let output = assemble_sequence(&[&script, &template], None).expect("assembles cleanly");
         assert_eq!(output.code, "const n = 1\nfunction render() {}\n");
 
-        let decoded = SourceMap::from_json_string(&output.source_map).unwrap();
-        let tokens: Vec<_> = decoded.get_tokens().collect();
+        let tokens: Vec<_> = output.source_map.get_tokens().collect();
 
         // Script's own segment: unshifted (it's the first fragment,
         // placement is (0,0)).
@@ -947,8 +946,8 @@ mod tests {
         let a = seq_fragment("a", "const n = 1", Some(map)); // no trailing newline
         let b = seq_fragment("b", "\nexport default {}", None);
         let output = assemble_sequence(&[&a, &b], None).expect("assembles cleanly");
-        let decoded = SourceMap::from_json_string(&output.source_map).unwrap();
-        let sourceless_count = decoded
+        let sourceless_count = output
+            .source_map
             .get_tokens()
             .filter(|t| t.get_source_id().is_none())
             .count();
@@ -964,10 +963,9 @@ mod tests {
         let map = "{\"version\":3,\"sources\":[\"Comp.vue\"],\"names\":[],\"mappings\":\"MACM\"}";
         let a = seq_fragment("a", "const n = 1", Some(map));
         let output = assemble_sequence(&[&a], Some("/src")).expect("assembles cleanly");
-        let decoded = SourceMap::from_json_string(&output.source_map).unwrap();
-        assert_eq!(decoded.get_source_root(), Some("/src"));
+        assert_eq!(output.source_map.get_source_root(), Some("/src"));
         // The segment itself must still survive the sourceRoot rebuild.
-        let token = decoded.get_tokens().next().unwrap();
+        let token = output.source_map.get_tokens().next().unwrap();
         assert_eq!(token.get_dst_col(), 6);
     }
 
@@ -985,8 +983,7 @@ mod tests {
         let script = seq_fragment("script", "const n = 1\n", Some(script_map));
         let template = seq_fragment("template", "function render() {}\n", Some(template_map));
         let output = assemble_sequence(&[&script, &template], None).expect("assembles cleanly");
-        let decoded = SourceMap::from_json_string(&output.source_map).unwrap();
-        let sources: Vec<&str> = decoded.get_sources().collect();
+        let sources: Vec<&str> = output.source_map.get_sources().collect();
         assert_eq!(
             sources,
             vec!["Comp.vue", "Comp.vue"],
@@ -996,7 +993,8 @@ mod tests {
         // The template's token must reference the SECOND row (index 1), not
         // the first — proving the two rows are genuinely distinct, not
         // merely duplicated text.
-        let template_token = decoded
+        let template_token = output
+            .source_map
             .get_tokens()
             .find(|t| t.get_dst_line() == 1 && t.get_source_id().is_some())
             .expect("the template's own segment survives");
@@ -1007,7 +1005,6 @@ mod tests {
     fn assemble_sequence_with_no_maps_produces_an_empty_map() {
         let a = seq_fragment("a", "export default {}", None);
         let output = assemble_sequence(&[&a], None).expect("assembles cleanly");
-        let decoded = SourceMap::from_json_string(&output.source_map).unwrap();
-        assert_eq!(decoded.get_tokens().count(), 0);
+        assert_eq!(output.source_map.get_tokens().count(), 0);
     }
 }

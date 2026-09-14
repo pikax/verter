@@ -38,7 +38,7 @@ use verter_compiler::framework_common::{RuntimeDiagnosticSeverity, RuntimeTempla
 /// artifact set. Callers must not reconstruct topology from block fields.
 #[derive(Debug)]
 pub(super) struct TakenCompilerVueMain<'a> {
-    pub code: &'a str,
+    pub code: Arc<str>,
     pub source_map: &'a str,
     pub lang: String,
     pub artifacts: Option<&'a verter_compiler::assembly::CompileArtifactSet>,
@@ -52,7 +52,7 @@ pub(super) fn take_compiler_vue_main<'a>(
     snapshot: &CompileInput,
     force_js: bool,
 ) -> Result<TakenCompilerVueMain<'a>, DiagnosticsSnapshot> {
-    match compiled.main.body_code.as_deref() {
+    match compiled.main.body_code.as_ref() {
         Some(body) => {
             let lang = compiled.main.lang.clone().unwrap_or_else(|| {
                 if force_js {
@@ -67,7 +67,7 @@ pub(super) fn take_compiler_vue_main<'a>(
                 }
             });
             Ok(TakenCompilerVueMain {
-                code: body,
+                code: Arc::clone(body),
                 source_map: compiled.main.source_map.as_str(),
                 lang,
                 artifacts: compiled.main.artifacts.as_ref(),
@@ -3731,7 +3731,7 @@ impl VerterHost {
         let taken = take_compiler_vue_main(compiled, snapshot, profile.force_js).map_err(fatal)?;
 
         Ok(RenderOnlyMain {
-            code: Arc::from(taken.code),
+            code: taken.code,
             source_map: (!taken.source_map.is_empty()).then(|| Arc::from(taken.source_map)),
             lang: Some(taken.lang),
             diagnostics: compile_diags
@@ -3816,7 +3816,7 @@ pub(super) fn publish_runtime_nodes(
             outputs.insert(
                 VirtualNodeKind::Main,
                 CachedVirtualFile {
-                    code: Arc::from(taken.code),
+                    code: taken.code,
                     source_map: (!taken.source_map.is_empty()).then(|| Arc::from(taken.source_map)),
                     lang: Some(taken.lang),
                     meta: VirtualMeta {

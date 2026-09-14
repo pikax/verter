@@ -278,7 +278,7 @@ pub(crate) fn assemble_vue_main_module_with_axes(
         ),
     })?;
     Ok(AssembledVueModule {
-        code: assembled.code,
+        code: assembled.code.to_string(),
         source_map: assembled.source_map,
         lang: assembled.lang,
     })

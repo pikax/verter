@@ -11,6 +11,7 @@
 #[cfg(any(test, feature = "test-support"))]
 use std::cell::Cell;
 use std::ops::Range;
+use std::sync::Arc;
 
 use oxc_sourcemap::SourceMap;
 
@@ -393,9 +394,12 @@ pub struct VueRuntimeMainRequest<'a> {
 }
 
 /// Assembled Vue `_sfc_main` plus its compile-artifact-set relations.
+///
+/// `code` is the same allocation stored on the main artifact's
+/// [`ArtifactContent::Available`] payload.
 #[derive(Debug)]
 pub struct VueRuntimeMainAssembled {
-    pub code: String,
+    pub code: Arc<str>,
     pub source_map: Option<String>,
     pub lang: String,
     pub artifacts: CompileArtifactSet,
@@ -570,6 +574,7 @@ pub(crate) struct ComposedFragments {
     pub fragments: Vec<ValidatedFragment>,
     pub code: String,
     pub source_map: String,
+    pub decoded_map: SourceMap<'static>,
     pub emitted_imports: Vec<DeclaredImport>,
 }
 
@@ -837,7 +842,8 @@ pub(crate) fn compose_fragments(
     Ok(ComposedFragments {
         fragments,
         code: sequenced.code,
-        source_map: sequenced.source_map,
+        source_map: sequenced.source_map.to_json_string(),
+        decoded_map: sequenced.source_map,
         emitted_imports,
     })
 }
@@ -916,7 +922,7 @@ pub fn assemble_vue_runtime_main(
 
     record_vue_main_assembly();
 
-    let set = compose_main_module(VueMainModuleRequest {
+    let composed = compose_fragments(VueMainModuleRequest {
         canonical_id: request.canonical_id,
         compiled: request.compiled,
         dialect,
@@ -928,18 +934,32 @@ pub fn assemble_vue_runtime_main(
         template_map_json,
         decoration: request.decoration.clone(),
     })?;
-    let artifact = set
-        .artifact(planned_kind)
-        .expect("publish returns exactly the one planned artifact kind");
-    let code = artifact.code().to_string();
-    let source_map = artifact.runtime_source_map().map(str::to_string);
+    let fragment_refs: Vec<&ValidatedFragment> = composed.fragments.iter().collect();
+    let plan = ProductPlan::single(PlannedArtifact {
+        kind: planned_kind,
+        requires_source_projection_map: false,
+        requires_runtime_source_map: want_maps,
+    });
+    let source_map = want_maps.then(|| composed.source_map.clone());
+    let contribution = ArtifactContribution {
+        kind: planned_kind,
+        fragments: fragment_refs,
+        code: composed.code.clone(),
+        emitted_imports: composed.emitted_imports,
+        dialect,
+        source_projection_map: None,
+        runtime_source_map: source_map.clone(),
+    };
+    publish(&plan, vec![contribution]).map_err(VueMainAssemblyFailure::from)?;
+    let code: Arc<str> = Arc::from(composed.code);
     let artifacts = vue_main_compile_artifacts(
         request.canonical_id,
         request.compiled,
         planned_kind,
         dialect,
-        &code,
+        Arc::clone(&code),
         source_map.as_deref(),
+        want_maps.then_some(&composed.decoded_map),
         &request.decoration,
         want_maps,
     )
@@ -1104,11 +1124,13 @@ pub fn vue_main_compile_artifacts(
     compiled: &RuntimeCompileOutput,
     kind: ProductKind,
     dialect: FragmentDialect,
-    code: &str,
+    code: impl Into<Arc<str>>,
     runtime_source_map: Option<&str>,
+    decoded_runtime_map: Option<&SourceMap>,
     decoration: &VueMainDecoration,
     want_maps: bool,
 ) -> Result<CompileArtifactSet, super::publish::ArtifactSchemaError> {
+    let code = code.into();
     use std::collections::BTreeSet;
 
     let script_bytes = compiled
@@ -1189,7 +1211,7 @@ pub fn vue_main_compile_artifacts(
             producer,
             inputs: inputs.clone(),
         },
-        ArtifactContent::Available(code.to_string()),
+        ArtifactContent::Available(Arc::clone(&code)),
     );
     for role in ["script", "template"] {
         let Some(unit) = source_units.iter().find(|u| u.unit.logical_role() == role) else {
@@ -1230,7 +1252,13 @@ pub fn vue_main_compile_artifacts(
                 generated_content: ContentId::from_content_bytes(code.as_bytes()),
                 input_basis,
                 sources: authored_ids,
-                segments: runtime_map_segments(map_json, code, &source_units, &authored),
+                segments: runtime_map_segments(
+                    map_json,
+                    decoded_runtime_map,
+                    &code,
+                    &source_units,
+                    &authored,
+                ),
             });
         }
     }
@@ -1331,12 +1359,21 @@ fn authored_unit_from_map(role: &str, map_json: &str) -> Option<AuthoredContribu
 
 fn runtime_map_segments(
     map_json: &str,
+    decoded_runtime_map: Option<&SourceMap>,
     generated: &str,
     source_units: &[ArtifactSourceUnit],
     authored: &[AuthoredContribution],
 ) -> Vec<ArtifactMapSegment> {
-    let Ok(map) = SourceMap::from_json_string(map_json) else {
-        return Vec::new();
+    let decoded_owned;
+    let map = match decoded_runtime_map {
+        Some(map) => map,
+        None => match SourceMap::from_json_string(map_json) {
+            Ok(map) => {
+                decoded_owned = map;
+                &decoded_owned
+            }
+            Err(_) => return Vec::new(),
+        },
     };
     if authored.is_empty() {
         return Vec::new();
@@ -1808,7 +1845,8 @@ mod tests {
             &compiled,
             ProductKind::RuntimeClient,
             FragmentDialect::JavaScript,
-            &vite,
+            vite.as_str(),
+            None,
             None,
             &VueMainDecoration {
                 hmr: RuntimeHmrStrategy::Vite,
@@ -1835,7 +1873,8 @@ mod tests {
             &compiled,
             ProductKind::RuntimeClient,
             FragmentDialect::JavaScript,
-            &code,
+            code.as_str(),
+            None,
             None,
             &vite,
             false,
@@ -1846,7 +1885,8 @@ mod tests {
             &compiled,
             ProductKind::RuntimeClient,
             FragmentDialect::JavaScript,
-            &code,
+            code.as_str(),
+            None,
             None,
             &none,
             false,
@@ -1858,7 +1898,8 @@ mod tests {
             &compiled,
             ProductKind::RuntimeClient,
             FragmentDialect::JavaScript,
-            &edited,
+            edited.as_str(),
+            None,
             None,
             &vite,
             false,
@@ -1869,7 +1910,8 @@ mod tests {
             &compiled,
             ProductKind::RuntimeClient,
             FragmentDialect::JavaScript,
-            &code,
+            code.as_str(),
+            None,
             None,
             &vite,
             false,
@@ -1972,6 +2014,7 @@ mod tests {
             FragmentDialect::JavaScript,
             generated,
             Some(script_map),
+            None,
             &VueMainDecoration::default(),
             true,
         )
@@ -2105,6 +2148,7 @@ mod tests {
             FragmentDialect::JavaScript,
             generated,
             Some(&composed),
+            None,
             &VueMainDecoration::default(),
             true,
         )
@@ -2167,7 +2211,8 @@ mod tests {
             &compiled,
             ProductKind::RuntimeClient,
             FragmentDialect::JavaScript,
-            &huge,
+            huge.as_str(),
+            None,
             None,
             &VueMainDecoration::default(),
             false,
@@ -2194,6 +2239,49 @@ mod tests {
         assert!(
             main.provenance.input_basis.canonical_bytes().len() < huge.len() / 4,
             "input basis must not retain the assembled payload"
+        );
+    }
+
+    #[test]
+    fn demanded_main_shares_one_payload_allocation() {
+        let compiled = empty_bundle();
+        let assembled = assemble_vue_runtime_main(VueRuntimeMainRequest {
+            canonical_id: "Comp.vue",
+            compiled: &compiled,
+            script_lang: Some("js"),
+            has_script: false,
+            has_template: false,
+            force_js: false,
+            source_map: false,
+            runtime: "vue",
+            ssr: false,
+            decoration: VueMainDecoration::default(),
+        })
+        .expect("template-less assembly still emits Main");
+        let main = assembled
+            .artifacts
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.name() == "main")
+            .expect("main");
+        let ArtifactContent::Available(content) = &main.content else {
+            panic!(
+                "produced Main must keep available content, got {:?}",
+                main.content
+            );
+        };
+        assert!(
+            Arc::ptr_eq(&assembled.code, content),
+            "body payload and typed artifact must share one allocation"
+        );
+        assert!(
+            assembled
+                .artifacts
+                .artifacts()
+                .iter()
+                .filter(|artifact| artifact.name() != "main")
+                .all(|artifact| matches!(artifact.content, ArtifactContent::Unavailable(_))),
+            "script/template artifacts must not copy fragment bytes"
         );
     }
 

@@ -2079,7 +2079,7 @@ impl SvelteRuntimeBackend {
         // a lowering option on `SvelteRuntimeOptions`).
         match compile_client(source, parsed, &runtime_opts, alloc, opts.ssr, opts.source_map) {
             Ok(module) => {
-                bundle.main.body_code = Some(module.code);
+                bundle.main.body_code = Some(std::sync::Arc::from(module.code));
                 bundle.main.source_map = module.source_map.unwrap_or_default();
                 bundle.main.lang = Some("js".to_string());
                 // The EXTERNAL scoped-css artifact (the official

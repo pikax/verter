@@ -677,8 +677,9 @@ pub struct RuntimeDiagnostic {
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeMainModule {
     /// The framework-owned ESM body, when the carrier emits one directly.
-    /// `None` ⇒ no runtime main to publish.
-    pub body_code: Option<String>,
+    /// `None` ⇒ no runtime main to publish. Shared with the typed main
+    /// artifact when Vue assembly produced this body.
+    pub body_code: Option<std::sync::Arc<str>>,
     /// Source map for `body_code` (empty when none / disabled).
     pub source_map: String,
     /// The language id of the produced body (`"js"` / `"ts"`), when known.

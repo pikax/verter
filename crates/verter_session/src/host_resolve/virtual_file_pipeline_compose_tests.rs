@@ -181,7 +181,7 @@ fn planted_host_vue_topology_reconstruction_is_refused() {
         main: Default::default(),
         ..Default::default()
     };
-    planted_body.main.body_code = Some("export default {}".to_string());
+    planted_body.main.body_code = Some(Arc::from("export default {}"));
     let planted_products =
         BoundCompiledProducts::Vue(VueHostCompiledProducts::from_admitted_runtime_bundle(
             planted_body,
@@ -242,7 +242,7 @@ fn take_compiler_vue_main_preserves_artifact_relations() {
         ..Default::default()
     };
     let generated = "const n = 1\nexport default n;\n";
-    bundle.main.body_code = Some(generated.to_string());
+    bundle.main.body_code = Some(Arc::from(generated));
     bundle.main.artifacts = Some(
         vue_main_compile_artifacts(
             "Comp.vue",
@@ -251,6 +251,7 @@ fn take_compiler_vue_main_preserves_artifact_relations() {
             FragmentDialect::JavaScript,
             generated,
             Some(script_map),
+            None,
             &VueMainDecoration::default(),
             true,
         )
@@ -288,7 +289,7 @@ fn take_compiler_vue_main_preserves_artifact_relations() {
         prepared_styles: Vec::new(),
     };
     let taken = take_compiler_vue_main(&bundle, &input, false).expect("body is present");
-    assert_eq!(taken.code, generated);
+    assert_eq!(&*taken.code, generated);
     let set = taken
         .artifacts
         .expect("typed artifact set survives handoff");

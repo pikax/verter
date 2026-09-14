@@ -25,6 +25,7 @@
 //! Nothing routes a producer-supplied fragment through it unchecked.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Statement;
@@ -76,9 +77,12 @@ pub enum ArtifactUnavailableReason {
 }
 
 /// Empty available content is distinct from unavailable content.
+///
+/// Available bytes are `Arc<str>` so a publication payload and the typed
+/// artifact can share one allocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactContent {
-    Available(String),
+    Available(Arc<str>),
     Unavailable(ArtifactUnavailableReason),
 }
 
