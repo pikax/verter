@@ -203,7 +203,7 @@ pub fn assemble_vue_main_module(
     )
 }
 
-/// Exactly the axes the host-side `Main` assembly reads, named
+/// Exactly the axes the compiler-owned `Main` assembly reads, named
 /// independently of the vocabulary a caller happens to state them in.
 ///
 /// The assembly itself has one implementation; this carrier is what lets

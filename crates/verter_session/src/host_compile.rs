@@ -324,19 +324,20 @@ pub struct CompileBatchOptions {
 ///   registered carrier, without the per-file session-wrapper overhead. Each
 ///   entry is its own host compile request with its own request-scoped bound
 ///   host request; the bound framework host backend issues the render
-///   admission and the matching runtime backend executes it, then the host
-///   assembles `Main` (`assemble_vue_main_module` for Vue). The carrier is
-///   chosen by that binding, never by a language predicate at the
-///   coordinator. Cross-file macros still go through TypeInfo dispatch.
-///   Authoritative failures stay fatal.
+///   admission and the matching runtime backend executes it. Vue `Main` is
+///   compiler-assembled when the lane demands it (`want_main`); the host
+///   publishes the already-assembled artifact and does not reconstruct
+///   topology. The carrier is chosen by that binding, never by a language
+///   predicate at the coordinator. Cross-file macros still go through
+///   TypeInfo dispatch. Authoritative failures stay fatal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileManyTarget {
     /// The full session-wrapper path (`compile_entry`). Byte-for-byte
     /// unchanged; used by every IDE / analysis / TSC / type-resolution
     /// consumer.
     HostBacked,
-    /// The public runtime-render request. Vue uses the same substrate +
-    /// host-side `Main` assembly without per-file wrapper overhead; other
+    /// The public runtime-render request. Vue `Main` is compiler-assembled
+    /// (host publishes the artifact, no per-file wrapper overhead); other
     /// registered carriers use their effective host-backed route. The
     /// [`CompileBatchRenderProfile`] is REQUIRED — carried on the variant so
     /// the lane is fail-closed by construction: you cannot request a runtime

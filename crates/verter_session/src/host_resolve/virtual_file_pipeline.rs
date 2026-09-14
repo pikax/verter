@@ -1210,10 +1210,11 @@ impl VerterHost {
     /// Private Vue render-worker `Main` output for a Vue
     /// [`crate::host_compile::CompileManyTarget::RuntimeRender`] request:
     /// byte-identical `Main` bytes to the `HostBacked` wrapper, produced
-    /// through the SAME shared substrate and host-side `Main` assembly,
-    /// without the per-file session-wrapper overhead. Public non-Vue requests
-    /// remain on their effective host-backed route. `diagnostics` carries only
-    /// the soft (warning-severity) diagnostics of a SUCCESSFUL Vue render.
+    /// through the SAME shared substrate and compiler-owned Vue `Main`
+    /// assembly, without the per-file session-wrapper overhead. Public
+    /// non-Vue requests remain on their effective host-backed route.
+    /// `diagnostics` carries only the soft (warning-severity) diagnostics
+    /// of a SUCCESSFUL Vue render.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn render_only_main(
         &self,
