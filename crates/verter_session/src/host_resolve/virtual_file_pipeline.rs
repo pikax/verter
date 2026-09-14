@@ -3595,6 +3595,7 @@ impl VerterHost {
                     has_script: snapshot.meta.has_script,
                     has_template: snapshot.meta.has_template,
                     script_lang: snapshot.meta.script_lang.clone(),
+                    ..Default::default()
                 };
                 // A runtime-surface refusal is the absence of the render's
                 // whole subject (typed, same as the HostBacked route); every

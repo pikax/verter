@@ -2743,68 +2743,61 @@ fn host_ssr_registration_opt_out_is_honored() {
 
 #[test]
 fn compiler_assembly_map_refusal_does_not_publish_or_warm_main() {
-    use verter_compiler::assembly::{
-        assemble_vue_runtime_main, VueMainDecoration, VueRuntimeMainRequest,
-    };
+    use verter_compiler::compile_request::{CompileProduct, RuntimeProductRequest};
+    use verter_compiler::framework_common::FrameworkHostIntegrationBackend as _;
     use verter_compiler::framework_common::{
-        RuntimeCompileOutput, RuntimeOutputDescriptor, RuntimeScriptBlock, SourceMapFidelity,
+        CompileUnsupported, VueHostCompileRefusal, VueHostExecutionInputs,
+        VueHostIntegrationBackend, VueHostMultiProductDemand,
     };
-    let compiled = RuntimeCompileOutput {
-        script: Some(RuntimeScriptBlock {
-            code: "const n = 1\n".to_string(),
-            source_map: String::new(),
-            setup: true,
-            output_descriptor: RuntimeOutputDescriptor::generated(
-                "const n = 1\n",
-                None,
-                &[("test:space", "test:artifact")],
-                SourceMapFidelity::Approximate,
-            ),
-            generated_template_hole: None,
-            runtime_imports: Vec::new(),
-            sfc_export_placement: None,
-        }),
-        ..Default::default()
-    };
-    assemble_vue_runtime_main(VueRuntimeMainRequest {
-        canonical_id: "/src/Maps.vue",
-        compiled: &compiled,
-        script_lang: Some("js"),
-        has_script: true,
-        has_template: false,
-        force_js: false,
-        source_map: true,
-        runtime: "vue",
-        ssr: false,
-        decoration: VueMainDecoration::default(),
-    })
-    .expect_err("empty script map must refuse compiler assembly");
 
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let _ = upsert_vue(
-        &host,
-        "/src/Maps.vue",
+    let artifact = verter_compiler::framework_common::registered_carrier_projection::parse_registered_source_for_tests(
+        FileLanguage::vue(),
+        verter_language::carrier_grammar::CarrierGrammarConfig::vue(
+            "{{",
+            "}}",
+            std::iter::empty::<&str>(),
+        )
+        .unwrap(),
         "<script setup>const n = 1</script><template><div>{{ n }}</div></template>",
     );
-    let mut profile = profile_dev();
-    profile.source_map = true;
-    let query = VirtualQuery {
-        raw_id: Some("/src/Maps.vue".to_string()),
-        canonical_id: None,
-        node_kind: Some(VirtualNodeKind::Main),
-        compile_profile: profile,
-    };
-    let first = host.get_virtual_file(query.clone()).unwrap();
-    assert!(
-        !first.cache_hit,
-        "first maps-on Main read is a cold compile"
-    );
-    assert!(!first.code.is_empty());
-    let second = host.get_virtual_file(query).unwrap();
-    assert!(
-        second.cache_hit,
-        "a successful maps-on assembly may warm; a refusal must not"
-    );
+    let alloc = oxc_allocator::Allocator::new();
+    let backend = VueHostIntegrationBackend::registered();
+    let admission = backend
+        .admit_host_products(
+            artifact.as_ref(),
+            VueHostMultiProductDemand {
+                products: vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
+                    runtime_source_map: true,
+                    ..Default::default()
+                })],
+                ..Default::default()
+            },
+        )
+        .expect("admits maps-on Main");
+    let refusal = backend
+        .compile_host_products(
+            admission,
+            artifact.as_ref(),
+            &VueHostExecutionInputs {
+                want_main: true,
+                has_script: true,
+                has_template: true,
+                canonical_id: "/src/Maps.vue".to_string(),
+                drop_required_script_map: true,
+                ..Default::default()
+            },
+            &alloc,
+        )
+        .expect_err("empty required script map must refuse host Main assembly");
+    match refusal {
+        VueHostCompileRefusal::Unsupported(CompileUnsupported::VueMainAssemblyFailed(reason)) => {
+            assert!(
+                reason.contains("source map") || reason.contains("script"),
+                "typed assembly reason must survive the host products lane, got {reason}"
+            );
+        }
+        other => panic!("expected VueMainAssemblyFailed, got {other:?}"),
+    }
 }
 
 /// @ai-generated - export type must be stripped from main module when force_js: true

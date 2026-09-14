@@ -427,6 +427,7 @@ fn prepare_vue_execution_inputs(
         has_script: snapshot.meta.has_script,
         has_template: snapshot.meta.has_template,
         script_lang: snapshot.meta.script_lang.clone(),
+        ..Default::default()
     })
 }
 
@@ -1373,6 +1374,73 @@ mod tests {
                 .contains("carries no source map"),
             "typed assembly reason must reach the host diagnostic, got {}",
             snapshot.diagnostics[0].message
+        );
+    }
+
+    #[test]
+    fn compile_host_products_assembly_refusal_maps_to_the_stable_host_code() {
+        use verter_compiler::compile_request::{CompileProduct, RuntimeProductRequest};
+        use verter_compiler::framework_common::FrameworkHostIntegrationBackend as _;
+        use verter_compiler::framework_common::{
+            VueHostCompileRefusal, VueHostExecutionInputs, VueHostIntegrationBackend,
+            VueHostMultiProductDemand,
+        };
+
+        let artifact = verter_compiler::framework_common::registered_carrier_projection::parse_registered_source_for_tests(
+            verter_language::FileLanguage::vue(),
+            verter_language::carrier_grammar::CarrierGrammarConfig::vue(
+                "{{",
+                "}}",
+                std::iter::empty::<&str>(),
+            )
+            .unwrap(),
+            "<script setup>const n = 1</script><template><div>{{ n }}</div></template>",
+        );
+        let alloc = oxc_allocator::Allocator::new();
+        let backend = VueHostIntegrationBackend::registered();
+        let admission = backend
+            .admit_host_products(
+                artifact.as_ref(),
+                VueHostMultiProductDemand {
+                    products: vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
+                        runtime_source_map: true,
+                        ..Default::default()
+                    })],
+                    ..Default::default()
+                },
+            )
+            .expect("admits maps-on Main");
+        let refusal = backend
+            .compile_host_products(
+                admission,
+                artifact.as_ref(),
+                &VueHostExecutionInputs {
+                    want_main: true,
+                    has_script: true,
+                    has_template: true,
+                    canonical_id: "/src/Maps.vue".to_string(),
+                    drop_required_script_map: true,
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect_err("host products lane must refuse missing required script map");
+        let VueHostCompileRefusal::Unsupported(unsupported) = refusal else {
+            panic!("expected CompileUnsupported assembly refusal, got {refusal:?}");
+        };
+        let snapshot = runtime_bundle_unsupported_diagnostics(
+            artifact.as_ref(),
+            "/src/Maps.vue",
+            12,
+            &unsupported,
+        );
+        assert_eq!(
+            snapshot.diagnostics[0].code,
+            "HOST_MAIN_MODULE_ASSEMBLY_FAILED"
+        );
+        assert!(
+            !snapshot.diagnostics[0].message.is_empty(),
+            "typed assembly reason must reach the host diagnostic"
         );
     }
 

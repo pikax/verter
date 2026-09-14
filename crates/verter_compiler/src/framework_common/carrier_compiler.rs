@@ -505,6 +505,10 @@ pub struct RuntimeCompileOptions {
     /// Host canonical identity for `__file` and SSR registration fallback.
     /// Distinct from [`Self::filename`].
     pub vue_canonical_id: Option<String>,
+    /// Test-only: drop the generated script map before Main assembly so the
+    /// maps-on demand refuses as [`CompileUnsupported::VueMainAssemblyFailed`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub drop_required_script_map: bool,
 }
 
 impl Default for RuntimeCompileOptions {
@@ -559,6 +563,8 @@ impl Default for RuntimeCompileOptions {
             vue_has_template: true,
             vue_script_lang: None,
             vue_canonical_id: None,
+            #[cfg(any(test, feature = "test-support"))]
+            drop_required_script_map: false,
         }
     }
 }

@@ -335,6 +335,9 @@ pub struct VueHostExecutionInputs {
     pub has_template: bool,
     /// Authored script lang; `None` when no script block exists.
     pub script_lang: Option<String>,
+    /// Test-only: drop the generated script map before Main assembly.
+    #[cfg(any(test, feature = "test-support"))]
+    pub drop_required_script_map: bool,
 }
 
 impl Default for VueHostExecutionInputs {
@@ -350,6 +353,8 @@ impl Default for VueHostExecutionInputs {
             has_script: true,
             has_template: true,
             script_lang: None,
+            #[cfg(any(test, feature = "test-support"))]
+            drop_required_script_map: false,
         }
     }
 }
@@ -886,6 +891,8 @@ fn derive_admitted_runtime_options(
         vue_has_template: inputs.has_template,
         vue_script_lang: inputs.script_lang.clone(),
         vue_canonical_id: (!inputs.canonical_id.is_empty()).then(|| inputs.canonical_id.clone()),
+        #[cfg(any(test, feature = "test-support"))]
+        drop_required_script_map: inputs.drop_required_script_map,
         vue_main: crate::assembly::VueMainDecoration {
             hmr: request.hmr_strategy(),
             is_production: request.is_production(),
@@ -1939,12 +1946,6 @@ mod tests {
 
     #[test]
     fn compile_host_products_map_refusal_is_unsupported() {
-        use crate::assembly::{
-            assemble_vue_runtime_main, VueMainDecoration, VueRuntimeMainRequest,
-        };
-        use crate::framework_common::{
-            RuntimeOutputDescriptor, RuntimeScriptBlock, SourceMapFidelity,
-        };
         let artifact = vue_artifact(SFC);
         let alloc = oxc_allocator::Allocator::new();
         let admission = VueHostIntegrationBackend::new()
@@ -1959,7 +1960,7 @@ mod tests {
                 },
             )
             .expect("admits maps-on Main");
-        let products = VueHostIntegrationBackend::new()
+        let refusal = VueHostIntegrationBackend::new()
             .compile_host_products(
                 admission,
                 &artifact,
@@ -1968,52 +1969,23 @@ mod tests {
                     has_script: true,
                     has_template: true,
                     canonical_id: "/src/Maps.vue".to_string(),
+                    drop_required_script_map: true,
                     ..Default::default()
                 },
                 &alloc,
             )
-            .expect("compiler-generated maps let the host lane assemble");
-        let bundle = products.runtime_client_bundle().expect("client runtime");
-        assert!(
-            bundle.main.body_code.is_some(),
-            "maps-on Main demand must publish an assembled body"
-        );
-
-        let compiled = RuntimeCompileOutput {
-            script: Some(RuntimeScriptBlock {
-                code: "const n = 1\n".to_string(),
-                source_map: String::new(),
-                setup: true,
-                output_descriptor: RuntimeOutputDescriptor::generated(
-                    "const n = 1\n",
-                    None,
-                    &[("test:space", "test:artifact")],
-                    SourceMapFidelity::Approximate,
-                ),
-                generated_template_hole: None,
-                runtime_imports: Vec::new(),
-                sfc_export_placement: None,
-            }),
-            ..Default::default()
-        };
-        let refusal = assemble_vue_runtime_main(VueRuntimeMainRequest {
-            canonical_id: "Comp.vue",
-            compiled: &compiled,
-            script_lang: Some("ts"),
-            has_script: true,
-            has_template: false,
-            force_js: false,
-            source_map: true,
-            runtime: "vue",
-            ssr: false,
-            decoration: VueMainDecoration::default(),
-        })
-        .expect_err("empty script map must refuse assembly");
-        let unsupported = CompileUnsupported::VueMainAssemblyFailed(refusal.to_string());
-        assert!(matches!(
-            unsupported,
-            CompileUnsupported::VueMainAssemblyFailed(_)
-        ));
+            .expect_err("empty required script map must refuse the host products lane");
+        match refusal {
+            VueHostCompileRefusal::Unsupported(CompileUnsupported::VueMainAssemblyFailed(
+                reason,
+            )) => {
+                assert!(
+                    reason.contains("source map") || reason.contains("script"),
+                    "assembly refusal must carry the missing-map reason, got {reason}"
+                );
+            }
+            other => panic!("expected VueMainAssemblyFailed, got {other:?}"),
+        }
     }
 
     /// Per-leg source-map faithfulness: each admitted product's OWN map

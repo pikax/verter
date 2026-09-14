@@ -638,6 +638,12 @@ pub(crate) fn vue_carrier_bundle(
             .as_ref()
             .map(|input| input.code.as_ref()),
     );
+    #[cfg(any(test, feature = "test-support"))]
+    if opts.drop_required_script_map {
+        if let Some(script) = bundle.script.as_mut() {
+            script.source_map.clear();
+        }
+    }
     if opts.want_main && !bundle.has_errors() {
         emit_assembled_vue_main(&mut bundle, parsed, opts)
             .map_err(|failure| CompileUnsupported::VueMainAssemblyFailed(failure.to_string()))?;
