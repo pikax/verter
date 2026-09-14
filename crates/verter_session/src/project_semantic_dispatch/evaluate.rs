@@ -481,8 +481,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `InstantiationRef` materialisation in `relation::record_target_shape`) to
     /// BOTH residual carriers. It is NOT a second resolver: every resolution step
     /// delegates to the existing shared `ResolveDecl` / `Instantiate` queries
-    /// (the same keys [`realize_callable_member`](crate::meta_resolve::dispatch_helpers::realize_callable_member)
-    /// issues), records their dep-signature facts into the active tracer, and
+    /// (the callable realizer [`realize_callable_member`](crate::meta_resolve::dispatch_helpers::realize_callable_member)
+    /// classifies over exactly this primitive), records their dep-signature facts into the active tracer, and
     /// folds their partial / suppress signals — so a node-domain reader's
     /// cache-validity signature observes exactly the facts the resolution
     /// depended on. It NEVER lowers through `TypeExpr` and NEVER walks structure
@@ -628,8 +628,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             let resolved = match data.as_ref() {
                 // Residual DeclRef → the canonical shallow `ResolveDecl` query
-                // (the same `ScopeId { canonical_id, local_scope: None }` shape
-                // `realize_callable_member`'s DeclRef arm issues).
+                // (the `ScopeId { canonical_id, local_scope: None }` shape the
+                // canonical resolver issues).
                 SemanticNodeData::DeclRef { identity } => {
                     let identity = identity.clone();
                     drop(data);

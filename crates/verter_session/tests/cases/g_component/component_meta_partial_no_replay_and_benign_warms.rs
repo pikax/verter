@@ -98,12 +98,6 @@ fn component_meta_cache_len(host: &Arc<VerterHost>) -> usize {
     host.project_type_store().component_meta_results().len()
 }
 
-fn materialize_structure_cache_len(host: &Arc<VerterHost>) -> usize {
-    host.project_type_store()
-        .materialize_structure_db()
-        .live_count()
-}
-
 fn shape_cache_len(host: &Arc<VerterHost>) -> usize {
     host.project_type_store().shape_cache_db().live_count()
 }
@@ -239,18 +233,8 @@ fn partial_component_meta_does_not_warm_replay_across_three_requests() {
 /// once and serves it warm thereafter. `synthesis_should_suppress` MUST stay
 /// false for a complete result.
 ///
-/// The REAL benign non-cacheable PRODUCER (a forced tracer-signature
-/// Overflow that surfaces a COMPLETE `MaterializeOutcome::Value` with
-/// `result_is_partial = false`) is exercised + mutation-checked directly at
-/// the materialiser entry by the lib-level
-/// `overflow_returns_valid_outcome_and_refuses_cache_admission` test
-/// (Discrimination #1–#4): the materialiser is `pub(crate)`, and the
-/// shallow-by-default projector deliberately does NOT route a plain
-/// component-meta synthesis through `materialize_component_meta_structure`,
-/// so the forced-overflow knob cannot fire on this public `resolve_component_meta`
-/// path (it stayed at 0 — the prior round's test was vacuous for exactly
-/// this reason). This integration test therefore owns the orthogonal
-/// public-API half: a complete result warms + replays warm.
+/// This integration test owns the public-API half of the benign
+/// non-cacheable contract: a complete result warms + replays warm.
 ///
 /// DISCRIMINATION: were a complete result wrongly tagged
 /// `result_is_partial=true` at any synthesis sub-read, the final admission
@@ -304,8 +288,6 @@ fn benign_complete_result_warms_and_replays_from_final_cache() {
 /// E2e replay across the result-cache set. After a
 /// budget-exhausted request-1 partial:
 /// - `ComponentMetaResultDb` stays EMPTY (the final partial never warms);
-/// - `MaterializeStructureDb` stays EMPTY (no partial structural
-///   entry is admitted);
 /// - `ShapeCacheDb` holds ONLY benign-COMPLETE prefixes (the members that
 ///   resolved completely BEFORE the budget tripped legitimately warm —
 ///   the "benign-complete still warms" behaviour) and does NOT
@@ -313,10 +295,7 @@ fn benign_complete_result_warms_and_replays_from_final_cache() {
 /// - request 2 reproduces request 1's EXACT partial shape (not served as
 ///   a laundered complete result).
 ///
-/// MUTATION CHECK: reverting the `finish_materialize_admission` gate
-/// lets the budget-tripped partial admit a `MaterializeStructureDb` entry
-/// — the `materialize_structure_cache_len == 0` assertion fails. Reverting
-/// the `ShapeCacheDb` gate lets the budget-tripped PARTIAL member
+/// MUTATION CHECK: reverting the `ShapeCacheDb` gate lets the budget-tripped PARTIAL member
 /// shapes admit too — the shape cache grows past its benign-complete
 /// prefix count AND request 2 can launder a larger result, failing the
 /// stable-shape / no-growth assertions.
@@ -330,7 +309,6 @@ fn partial_leaves_result_caches_uncorrupted_and_request2_not_complete() {
         ],
     );
     assert_eq!(component_meta_cache_len(&host), 0);
-    assert_eq!(materialize_structure_cache_len(&host), 0);
     assert_eq!(shape_cache_len(&host), 0);
 
     // Request 1 — budget-exhausted partial.
@@ -345,13 +323,6 @@ fn partial_leaves_result_caches_uncorrupted_and_request2_not_complete() {
         component_meta_cache_len(&host),
         0,
         "ComponentMetaResultDb MUST be empty after a partial",
-    );
-    assert_eq!(
-        materialize_structure_cache_len(&host),
-        0,
-        "MaterializeStructureDb MUST be empty after a budget-exhausted partial — a \
-         non-zero count means the partial admitted a structural entry (revert the \
-         finish_materialize_admission gate to see this fail)",
     );
 
     // Request 2 — MUST NOT be served as a laundered complete result.
@@ -368,11 +339,6 @@ fn partial_leaves_result_caches_uncorrupted_and_request2_not_complete() {
         component_meta_cache_len(&host),
         0,
         "ComponentMetaResultDb MUST still be empty after request 2",
-    );
-    assert_eq!(
-        materialize_structure_cache_len(&host),
-        0,
-        "MaterializeStructureDb MUST still be empty after request 2",
     );
     // ShapeCacheDb may hold benign-COMPLETE prefixes (the members that
     // completed before the budget tripped). The discriminating signal is

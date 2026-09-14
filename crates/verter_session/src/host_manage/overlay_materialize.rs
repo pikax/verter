@@ -978,7 +978,7 @@ impl VerterHost {
         // remaining env-hash dimensions (`resolve_env_hash`,
         // `type_env_hash`, `lib_env_hash`, `project_identity`) are
         // composed by the downstream caches that read this artifact
-        // (`AnalysisReadyDb`, `RouteDb`, `MaterializeStructureDb`,
+        // (`AnalysisReadyDb`, `RouteDb`, `SemanticGraphStore`,
         // `ComponentMetaResultDb`) — that is where the wider env
         // split is the cache-correctness boundary. The materialiser's
         // contract here is candidate isolation between overlay and

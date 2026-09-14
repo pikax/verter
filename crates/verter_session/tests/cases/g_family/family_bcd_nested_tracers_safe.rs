@@ -1,7 +1,7 @@
 //! Nested `install_fact_tracer` calls fan facts into both layers via
 //! the TLS tracer stack.
 //!
-//! The 5 Family B/C/D caches (`MaterializeStructureDb`,
+//! The Family B/C/D caches (
 //! `MemoEntry`, `AppConfigNoOverrideProofDb`,
 //! `OwnerImportSurfaceDb`) wrap their cold builds with
 //! `install_fact_tracer`. This test installs an OUTER tracer, then

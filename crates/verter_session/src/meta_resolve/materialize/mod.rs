@@ -30,7 +30,7 @@ pub(crate) use field_types::MetaResolveFieldTypesOutputCap;
 // widens only who can NAME the type, not who can mint it.
 // The node-domain registry member-surface stabiliser + the stabilised-value
 // carrier: the node-first second pass that reduces a first-pass
-// `MaterializeStructureDb` node through the `ShapeCacheDb` member-node slot,
+// structural node through the `ShapeCacheDb` member-node slot,
 // reproducing the `_until_stable_full` reduction context.
 // The node-domain reduction-context helper: consumed by the stabiliser
 // (same module) and by the publication finaliser's node-start per-field

@@ -10,8 +10,8 @@
 //! expansion of the 16-archetype path-precise corpus across 5
 //! owner shapes — 16 × 5 = 80 logical components, here laid out
 //! as 80 distinct component files importing the same `DerivedProps`
-//! interface so we exercise cross-owner reuse of
-//! `MaterializeStructureDb`).
+//! interface so we exercise cross-owner reuse on the shared semantic
+//! graph).
 //!
 //! Bench output: prints per-batch (16-component windows) p50/p95/p99
 //! latencies. The discrimination is:

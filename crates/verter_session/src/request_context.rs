@@ -107,8 +107,7 @@ thread_local! {
     /// Per-thread stack of per-COLD-COMPUTE completeness accumulators.
     ///
     /// A cold compute that admits a result into a SHARED semantic cache
-    /// (`MaterializeStructureDb`, reused across consumers via R7
-    /// cross-owner reuse) pushes a scope ([`ColdComputeCompletenessScope`])
+    /// (reused across consumers via R7 cross-owner reuse) pushes a scope ([`ColdComputeCompletenessScope`])
     /// for the duration of its single-threaded compute. The compute's
     /// contributing child reads fold their partiality into the top scope
     /// via [`observe_component_meta_read_suppress`] /
@@ -118,9 +117,8 @@ thread_local! {
     /// consumer's partial poison a sibling consumer's complete entry.
     ///
     /// Single-threaded by construction: each singleflight cold compute
-    /// runs start-to-finish on the winning flight's thread (the same
-    /// model as the materialiser's `MATERIALIZE_IN_FLIGHT` / depth TLS),
-    /// so the per-thread stack matches the compute's call tree. A nested
+    /// runs start-to-finish on the winning flight's thread, so the
+    /// per-thread stack matches the compute's call tree. A nested
     /// compute bubbles its completeness into its parent on scope drop.
     static COLD_COMPUTE_COMPLETENESS: RefCell<Vec<ResultCompleteness>> =
         const { RefCell::new(Vec::new()) };
@@ -363,7 +361,7 @@ pub fn fold_result_completeness(joined: ResultCompleteness) {
 ///
 /// EVERY `dispatch.execute_read(...)` in the component-meta path
 /// (projectors, the macro-payload substrate, dispatch helpers, graph
-/// predicates, the slot-binding graph, and `component_meta_materialize`)
+/// predicates, and the slot-binding graph)
 /// must route its result through this helper. A budget exhaustion / fatal
 /// `QueryError` (`BudgetExceeded` / `UnstableState`) / same-path recursion
 /// / walker fatal produces a PARTIAL value: such a read MUST suppress the
@@ -503,7 +501,9 @@ pub struct PerRequestCacheCounters {
     pub intrinsic_registry: HitMiss,
     /// `SemanticGraphStore` — semantic-query memo / graph cache.
     pub semantic_graph: HitMiss,
-    /// `MaterializeStructureDb` — structural materialisation cache.
+    /// Structural-materialisation cache layer. No production producer
+    /// populates it; the row stays on the audit wire as a zero-valued
+    /// layer.
     pub materialize_structure: HitMiss,
     /// `ShapeCacheDb` — universal shape cache, TypeExpr
     /// subject. Counter retained under the legacy name to preserve
@@ -685,17 +685,18 @@ pub struct RequestContext {
     /// `ColdAbortSwept` — a cold entry reaped during generation
     /// reconciliation.
     pub cold_aborts_swept: AtomicU64,
-    /// Per-context counter — total
-    /// `materialize_component_meta_structure` invocations observed
-    /// during the request.
+    /// Per-context structural-materialisation call counter. No
+    /// production producer bumps it (the projector pipeline publishes
+    /// structural surfaces without a separate materialiser); it stays
+    /// on the audit payload as a zero-valued field.
     pub materialize_structure_calls: AtomicU64,
     /// Per-request projection-operation fuse used by semantic dispatch.
     /// Stored on the existing request context so scheduler worker TLS
     /// propagation carries the same budget state as audit/cache counters.
     pub projection_budget: Arc<RequestBudget>,
-    /// Per-context counter — subset of `materialize_structure_calls`
-    /// satisfied by the materialiser's `MaterializeStructureDb` peek.
-    ///
+    /// Per-context structural-materialisation warm-hit counter. No
+    /// production producer bumps it; it stays on the audit payload as a
+    /// zero-valued field.
     pub materialize_structure_cache_hits: AtomicU64,
     /// Per-context counter — lock acquisitions on the per-scope
     /// `NodeArena` dedup index.

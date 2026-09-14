@@ -13,10 +13,8 @@
 /// `resolve_payload_surface`, `resolve_member_value_for_classification`),
 /// the materialiser site in
 /// `meta_resolve/materialize/field_types.rs::materialize_component_meta_type_expr_until_stable_full`,
-/// the cycle-gate site in
-/// `meta_resolve/graph_predicates.rs::node_root_reaches_transitive_cycle_with_fence`,
-/// and the registry-materialise site in
-/// `resolver_core/component_meta_query_engine/registry_decl.rs::materialize_member_surface_expr`
+/// and the cycle-gate site in
+/// `meta_resolve/graph_predicates.rs::node_root_reaches_transitive_cycle_with_fence`
 /// — fan their `DepSignature` through this helper. The bridge preserves
 /// `WholeHash` and `ProjectGeneration`; `RouteGeneration` has no validating
 /// fact representation and is deliberately omitted. The enclosing

@@ -7,8 +7,7 @@
 //! cache-validity rail — once carried as `ReadSetSignature.legacy` —
 //! is retired. No cache-carrier struct may carry a `DepSignature`
 //! field under any visibility class except for the single sanctioned
-//! sibling `dispatch_dep_signature` field on `MemoEntry` /
-//! `MaterializeStructureEntry`.
+//! sibling `dispatch_dep_signature` field on `MemoEntry`.
 //!
 //! This guard scans `crates/verter_session/src/**/*.rs` (production
 //! source) for any `<vis> <name>: DepSignature` field declaration
@@ -134,8 +133,7 @@ fn struct_is_cache_carrier(name: &str) -> bool {
 }
 
 /// The single sanctioned cache-carrier `DepSignature` field name. The
-/// dispatch-return accumulator on `MemoEntry` /
-/// `MaterializeStructureEntry` is an internal
+/// dispatch-return accumulator on `MemoEntry` is an internal
 /// sibling rail (not a cache-validity rail), so it is allowed to live
 /// on a cache-carrier struct under `pub(crate)` / `pub(super)`. Any
 /// other name under restricted visibility is a regression.
@@ -454,7 +452,7 @@ fn scan_file_rails(path: &Path, hits: &mut Vec<RailHit>) {
 /// `*Signature` / `*Snapshot`) may carry a `DepSignature` field under
 /// `pub`, `pub(crate)`, or `pub(super)` visibility, except for the
 /// single sanctioned `dispatch_dep_signature` sibling field on
-/// `MemoEntry` / `MaterializeStructureEntry`
+/// `MemoEntry`
 /// (allowed under restricted visibility only — never `pub`).
 /// Re-introducing one resurrects the retired bundled rail.
 #[test]

@@ -218,12 +218,6 @@ fn cooperative_return_only_not_shared_to_joiners() {
             .join("src/cache_runtime/singleflight.rs"),
     )
     .expect("read cache_runtime/singleflight.rs");
-    let mat_src = std::fs::read_to_string(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/component_meta_materialize.rs"),
-    )
-    .expect("read component_meta_materialize.rs");
-
     assert!(
         ca_src.contains("pub enum ComputeAdmission<V, Entry> {"),
         "ComputeAdmission<V, Entry> must exist with the three-variant shape"
@@ -294,47 +288,6 @@ fn cooperative_return_only_not_shared_to_joiners() {
          runs `validate` on its own thread — view-checking the entry \
          and bubbling the cached entry's facts into the joiner's outer \
          fact tracer."
-    );
-
-    // The materialiser routes through the admission API. The
-    // multi-candidate substrate funnels the materialiser's
-    // `cooperative_admit_with_post_publish` usage through
-    // `MaterializeStructureDb::get_or_compute_admit`, whose `compute`
-    // closure returns the `singleflight::ComputeAdmission` carrier — the
-    // `ReturnOnly` arm is the overflow / non-cacheable path. Assert BOTH
-    // so the guard still proves overflow outcomes are modelled as
-    // `ComputeAdmission::ReturnOnly` via the cooperative-admission API.
-    assert!(
-        mat_src.contains("get_or_compute_admit(&cache_key, ctx, compute)"),
-        "materialize_component_meta_structure must route a canonical-keyed \
-         (decl-rooted) subject's cold build through the cooperative-admission \
-         `MaterializeStructureDb::get_or_compute_admit` API so it is a one-winner \
-         singleflight (a root-less anonymous subject keys no DB slot and computes \
-         uncached via `run_uncached_materialisation` — it is shared with no one)"
-    );
-    assert!(
-        mat_src.contains("crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {"),
-        "the materialiser's `get_or_compute_admit` compute closure must \
-         model overflow / non-cacheable outcomes as \
-         `singleflight::ComputeAdmission::ReturnOnly` so they are NOT \
-         broadcast to cooperative joiners"
-    );
-    // The stack-local `non_cacheable_outcome: RefCell<...>` side
-    // channel is retired.
-    assert!(
-        !mat_src.contains("let non_cacheable_outcome: NonCacheableSlot = RefCell::new(None);"),
-        "the stack-local `non_cacheable_outcome` side channel must be retired — \
-         non-cacheable outcomes are modelled by `ComputeAdmission::ReturnOnly`."
-    );
-    assert!(
-        !mat_src.contains("non_cacheable_for_compute"),
-        "the `non_cacheable_for_compute` reference must be retired — \
-         the compute closure returns `ComputeAdmission::ReturnOnly` directly."
-    );
-    assert!(
-        !mat_src.contains("non_cacheable_for_overflow"),
-        "the `non_cacheable_for_overflow` reference must be retired — \
-         the install_fact_tracer wrapper converts Cacheable to ReturnOnly directly."
     );
 }
 

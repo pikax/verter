@@ -41,7 +41,6 @@
 //! | `OwnerImportSurfaceDb`     | `owner_import_surface.rs`       |
 //! | `ImportedRegistryDb`       | `component_meta_caches.rs`      |
 //! | `ShapeCacheDb`             | `component_meta_caches.rs`      |
-//! | `MaterializeStructureDb`   | `component_meta_caches.rs`      |
 //!
 //! The retired `RefCycleResultDb` was intentionally NOT enrolled — it
 //! cached booleans / cycle identities only and carried no

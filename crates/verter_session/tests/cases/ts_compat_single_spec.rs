@@ -89,14 +89,6 @@ const TARGET_STRUCTS: &[(&str, &str)] = &[
         "crates/verter_session/src/component_meta_result_db.rs",
     ),
     (
-        "MaterializeRuntimeKey",
-        "crates/verter_session/src/component_meta_materialize.rs",
-    ),
-    (
-        "MaterializationCacheKey",
-        "crates/verter_session/src/component_meta_materialize.rs",
-    ),
-    (
         "ShapeCacheKey",
         "crates/verter_session/src/component_meta_caches.rs",
     ),

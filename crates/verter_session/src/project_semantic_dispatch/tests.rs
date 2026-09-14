@@ -21987,9 +21987,8 @@ fn navigate_integrity_project_path_does_not_route_through_macro_payload() {
 // introduced beyond ResolveMacroPayload".
 // ──────────────────────────────────────────────────────────────────────────
 
-use super::{
-    omit_builtin_decl_identity, pick_builtin_decl_identity, LiteralValue, ProjectSemanticDispatch,
-};
+use super::{omit_builtin_decl_identity, pick_builtin_decl_identity, ProjectSemanticDispatch};
+use crate::semantic_query::LiteralValue;
 
 /// `intern_string_literal_union` empty case folds to `Primitive(Never)`
 /// per the TS spec §4.4 rule that `Pick<T, never>` reduces to `{}`.
@@ -22090,36 +22089,6 @@ fn intern_string_literal_union_multi_preserves_members() {
     );
 }
 
-/// `lower_path_segments` produces one `PathSegment::Member(Arc<str>)`
-/// per input string, in the same order. Empty input → empty slice.
-#[test]
-fn lower_path_segments_preserves_order_and_arity() {
-    let segs = ProjectSemanticDispatch::lower_path_segments(&[
-        "a".to_string(),
-        "b".to_string(),
-        "c".to_string(),
-    ]);
-    assert_eq!(segs.len(), 3, "must produce one segment per input");
-    let names: Vec<String> = segs
-        .iter()
-        .map(|s| match s {
-            PathSegment::Member(name) => name
-                .as_string()
-                .expect("member-path display fixture uses string keys")
-                .to_owned(),
-            _ => panic!("must produce Member segments"),
-        })
-        .collect();
-    assert_eq!(
-        names,
-        vec!["a".to_string(), "b".to_string(), "c".to_string()],
-        "segments must preserve input order"
-    );
-
-    let empty = ProjectSemanticDispatch::lower_path_segments(&[]);
-    assert!(empty.is_empty(), "empty input must produce empty slice");
-}
-
 /// `pick_builtin_decl_identity()` returns the `__builtin__` sentinel
 /// matching the convention at `meta_resolve.rs:9959/9977/9998`. Any
 /// drift from this sentinel breaks the
@@ -22145,140 +22114,6 @@ fn omit_builtin_decl_identity_uses_canonical_sentinel() {
     let id = omit_builtin_decl_identity();
     assert_eq!(id.defining_canonical.as_ref(), "__builtin__");
     assert_eq!(id.merged_symbol_name.as_ref(), "Omit");
-}
-
-/// `execute_pick` dispatches through `Instantiate { base:
-/// pick_builtin_decl_identity(), .. }`. Discriminating: calling
-/// `execute_pick` and a manually-constructed `Instantiate` with the
-/// same args produce the same `SemanticNodeId` (warm dedup proves
-/// they share the memo entry).
-#[test]
-fn execute_pick_dispatches_through_instantiate_pick_builtin() {
-    let host = host();
-    let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let base = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-        members: Arc::from(
-            vec![SurfaceMember {
-                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                visibility: verter_type_expr::MemberVisibility::Public,
-                key: crate::semantic_query::AuthoredPropertyKey::string("foo"),
-                value: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
-                optional: false,
-                readonly: false,
-                method_kind: None,
-                has_implementation_body: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-                spans: Default::default(),
-                declaration_origin: None,
-            }]
-            .into_boxed_slice(),
-        ),
-        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
-    }));
-
-    let dispatch = ProjectSemanticDispatch::new(&host);
-    let members = vec![Arc::from("foo")];
-    let key_set = dispatch.intern_string_literal_union(&members);
-
-    // Direct Instantiate dispatch.
-    let direct = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
-            pick_builtin_decl_identity(),
-            Arc::from(vec![base, key_set].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Expanded,
-                ),
-                Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
-            ),
-        ),
-    ));
-    let direct_node = match direct {
-        QueryResult::Value(SemanticQueryOutput { value: n, .. }) => n,
-        other => panic!("direct Pick Instantiate failed: {other:?}"),
-    };
-
-    // execute_pick — must hit the same warm entry.
-    let via_helper = dispatch.execute_pick(base, &members, ProjectionMode::Expanded);
-    let helper_node = match via_helper {
-        QueryResult::Value(n) => n,
-        other => panic!("execute_pick failed: {other:?}"),
-    };
-
-    assert_eq!(
-        helper_node, direct_node,
-        "execute_pick must dispatch through Instantiate{{base: pick_builtin_decl_identity(), ..}} — \
-         identical args MUST converge on the same warm node"
-    );
-}
-
-/// `execute_omit` dispatches through `Instantiate { base:
-/// omit_builtin_decl_identity(), .. }`. Pairs with the Pick test.
-#[test]
-fn execute_omit_dispatches_through_instantiate_omit_builtin() {
-    let host = host();
-    let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let base = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-        members: Arc::from(
-            vec![SurfaceMember {
-                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                visibility: verter_type_expr::MemberVisibility::Public,
-                key: crate::semantic_query::AuthoredPropertyKey::string("foo"),
-                value: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
-                optional: false,
-                readonly: false,
-                method_kind: None,
-                has_implementation_body: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-                spans: Default::default(),
-                declaration_origin: None,
-            }]
-            .into_boxed_slice(),
-        ),
-        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
-    }));
-
-    let dispatch = ProjectSemanticDispatch::new(&host);
-    let members = vec![Arc::from("bar")];
-    let key_set = dispatch.intern_string_literal_union(&members);
-
-    let direct = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
-            omit_builtin_decl_identity(),
-            Arc::from(vec![base, key_set].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Expanded,
-                ),
-                Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
-            ),
-        ),
-    ));
-    let direct_node = match direct {
-        QueryResult::Value(SemanticQueryOutput { value: n, .. }) => n,
-        other => panic!("direct Omit Instantiate failed: {other:?}"),
-    };
-    let via_helper = dispatch.execute_omit(base, &members, ProjectionMode::Expanded);
-    let helper_node = match via_helper {
-        QueryResult::Value(n) => n,
-        other => panic!("execute_omit failed: {other:?}"),
-    };
-    assert_eq!(
-        helper_node, direct_node,
-        "execute_omit must dispatch through Instantiate{{base: omit_builtin_decl_identity(), ..}}"
-    );
 }
 
 /// `execute_read` returns the full `CacheRead<QueryResult<SemanticNodeId>>`
@@ -22317,52 +22152,12 @@ fn execute_read_preserves_dep_signature_on_success() {
     );
 }
 
-/// `materialize_surface` is a direct mirror of
-/// `materialize_component_meta_structure` — the dispatcher exposes
-/// it so consumers route policy-gated materialisation through
-/// dispatch without inflating the variant set per the §0 binding
-/// amendment. Discriminating: calling the helper produces the same
-/// `MaterializeOutcome` shape the underlying function returns.
-#[test]
-fn materialize_surface_mirrors_materialize_component_meta_structure() {
-    use crate::component_meta_materialize::{MaterializationScope, MaterializeRuntimeKey};
-
-    let host = host();
-    let graph = host.project_type_store().semantic_graph();
-    let base = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-
-    let key = MaterializeRuntimeKey {
-        scope_canonical_id: Arc::from("/c.vue"),
-        base,
-        scope_axis: MaterializationScope::TopLevel,
-        mode: ProjectionMode::Expanded,
-    };
-
-    let dispatch = ProjectSemanticDispatch::new(&host);
-    let read_via_helper = dispatch.materialize_surface(key.clone());
-    let read_direct =
-        crate::component_meta_materialize::materialize_component_meta_structure(&host, key);
-
-    // Discriminating: `materialize_surface` is a thin method wrapper over
-    // `materialize_component_meta_structure`, so both calls return the
-    // same `MaterializeOutcome` variant. (A `Primitive` base is a
-    // root-less anonymous subject — it keys no DB slot, so both calls
-    // compute uncached; this pins the wrapper's shape equivalence, not a
-    // warm hit.) Compare carriers structurally.
-    let helper_disc = std::mem::discriminant(&read_via_helper.value);
-    let direct_disc = std::mem::discriminant(&read_direct.value);
-    assert_eq!(
-        helper_disc, direct_disc,
-        "materialize_surface must produce the same MaterializeOutcome variant as the underlying function"
-    );
-}
-
 /// **Variant-set invariant:** the `SemanticQueryKey` enum is structurally
 /// pinned via an exhaustive match. Any new variant added without updating
-/// this test breaks compilation, surfacing the addition for review (the
-/// dispatch helpers such as `materialize_surface` / `execute_pick` /
-/// `execute_omit` stay NON-variant — methods on `ProjectSemanticDispatch`,
-/// never enum arms). The class/namespace/enum/overload key surface
+/// this test breaks compilation, surfacing the addition for review (there
+/// are no ad hoc dispatch helpers — every utility route constructs the
+/// canonical `SemanticQueryKey` directly, never a bespoke enum arm). The
+/// class/namespace/enum/overload key surface
 /// (`ResolveClassSurface` / `ResolveAmbientNamespace` / `ResolveEnum` /
 /// `ResolveOverloadSet`) is part of the pinned set.
 #[test]

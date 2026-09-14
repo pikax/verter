@@ -1,12 +1,10 @@
-//! Shared harness for the 25 fact-matrix slices.
+//! Shared harness for the fact-matrix slices.
 //!
 //! Each slice consumes:
 //! - `make_host(canonical, source)` — build a hermetic host with a
 //!   workspace-backed canonical file at the requested path.
 //! - `read_app_config_proof_installs(host)` — observability counter
 //!   read for the AppConfigNoOverrideProofDb producer.
-//! - `read_materialize_structure_installs(host)` — same for
-//!   `MaterializeStructureDb`.
 //! - `read_memo_entry_installs(host)` — same for the memo
 //!   (`SemanticGraphStore::execute_cooperative` cold builds).
 //! - `read_owner_import_surface_installs(host)` — same for
@@ -35,12 +33,6 @@ pub fn make_host(canonical: &str, source: &str) -> Arc<VerterHost> {
 pub fn read_app_config_proof_installs(host: &VerterHost) -> u64 {
     host.provenance()
         .app_config_proof_fact_tracer_installs
-        .load(std::sync::atomic::Ordering::Relaxed)
-}
-
-pub fn read_materialize_structure_installs(host: &VerterHost) -> u64 {
-    host.provenance()
-        .materialize_structure_fact_tracer_installs
         .load(std::sync::atomic::Ordering::Relaxed)
 }
 

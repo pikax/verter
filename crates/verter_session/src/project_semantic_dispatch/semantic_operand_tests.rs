@@ -300,7 +300,7 @@ fn with_split_env(operand: &SemanticOperand, split_env: OperandSplitEnv) -> Sema
     )
 }
 
-fn assert_primitive(host: &VerterHost, node: SemanticNodeId, expected: PrimitiveKind) {
+pub(super) fn assert_primitive(host: &VerterHost, node: SemanticNodeId, expected: PrimitiveKind) {
     assert!(
         matches!(
             host.project_type_store().semantic_graph().node_data(node).as_deref(),
@@ -1136,7 +1136,7 @@ fn node_operand_merges_producer_roots_into_active_candidate() {
 /// The request-side spelling of a statically-known derived path. A
 /// computed index has no static spelling — it is a sealed operand — so a
 /// precision carrying one cannot round-trip through here.
-fn demand_from_known_path(path: &Arc<[PathSegment]>) -> Arc<[ForceProjectionSegment]> {
+pub(super) fn demand_from_known_path(path: &Arc<[PathSegment]>) -> Arc<[ForceProjectionSegment]> {
     Arc::from(
         path.iter()
             .map(|segment| match segment {
@@ -2458,7 +2458,7 @@ fn deep_locator() -> AuthoredBodyLocator {
     )
 }
 
-fn member_path(names: &[&str]) -> Arc<[PathSegment]> {
+pub(super) fn member_path(names: &[&str]) -> Arc<[PathSegment]> {
     Arc::from(
         names
             .iter()
@@ -2468,11 +2468,11 @@ fn member_path(names: &[&str]) -> Arc<[PathSegment]> {
     )
 }
 
-fn empty_path() -> Arc<[PathSegment]> {
+pub(super) fn empty_path() -> Arc<[PathSegment]> {
     Arc::from(Vec::<PathSegment>::new().into_boxed_slice())
 }
 
-fn candidates(host: &VerterHost, key: &SemanticQueryKey) -> usize {
+pub(super) fn candidates(host: &VerterHost, key: &SemanticQueryKey) -> usize {
     host.project_type_store()
         .semantic_graph()
         .slot_candidate_count_for_tests(key)
@@ -2480,7 +2480,7 @@ fn candidates(host: &VerterHost, key: &SemanticQueryKey) -> usize {
 
 /// The measurement window marker: how many `execute_read` entries have
 /// been recorded so far. Everything after it is work ONE force performed.
-fn trace_len() -> usize {
+pub(super) fn trace_len() -> usize {
     DISPATCH_TRACE.with(|trace| trace.borrow().len())
 }
 
@@ -2491,7 +2491,9 @@ fn trace_len() -> usize {
 /// that reached sibling work through a different family — a declaration
 /// resolution, an instantiation, a conditional or mapped reduction, a
 /// `typeof` — cannot pass unobserved.
-fn dispatch_classes_since(from: usize) -> std::collections::BTreeMap<&'static str, usize> {
+pub(super) fn dispatch_classes_since(
+    from: usize,
+) -> std::collections::BTreeMap<&'static str, usize> {
     DISPATCH_TRACE.with(|trace| {
         let trace = trace.borrow();
         let mut counts = std::collections::BTreeMap::<&'static str, usize>::new();
@@ -2502,12 +2504,15 @@ fn dispatch_classes_since(from: usize) -> std::collections::BTreeMap<&'static st
     })
 }
 
-fn class_count(counts: &std::collections::BTreeMap<&'static str, usize>, class: &str) -> usize {
+pub(super) fn class_count(
+    counts: &std::collections::BTreeMap<&'static str, usize>,
+    class: &str,
+) -> usize {
     counts.get(class).copied().unwrap_or(0)
 }
 
 /// Interned semantic nodes — the graph's allocation counter.
-fn interned_nodes(host: &VerterHost) -> usize {
+pub(super) fn interned_nodes(host: &VerterHost) -> usize {
     host.project_type_store().semantic_graph().node_count()
 }
 
@@ -2530,7 +2535,7 @@ fn measured_request(id: u64, owner: &str) -> Arc<RequestContext> {
 /// projects at the empty path. Reading it through the shared
 /// `LowerLocator` query is what lets the assertions below name the exact
 /// whole-surface `ProjectPath` key a selective force must never dispatch.
-fn lowered_root(
+pub(super) fn lowered_root(
     host: &VerterHost,
     dispatch: &ProjectSemanticDispatch<'_>,
     locator: AuthoredBodyLocator,
@@ -2544,7 +2549,7 @@ fn lowered_root(
     }
 }
 
-fn force_projecting(
+pub(super) fn force_projecting(
     dispatch: &ProjectSemanticDispatch<'_>,
     operand: &SemanticOperand,
     context: ProjectionReductionContext,

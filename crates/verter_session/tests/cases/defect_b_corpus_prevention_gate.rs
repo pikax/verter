@@ -113,7 +113,7 @@ const NO_TIMEOUT_MANDATORY_COMPONENTS: &[&str] = &[
 /// COMPLETE nested materialise refused warm-cache admission as a
 /// partial (the false-partial class — admission refusal is benign
 /// non-cacheability; pinned by
-/// `component_meta_materialize::tests::admission_revalidation_refusal_is_not_a_partial_result`).
+/// the cache-runtime admission-revalidation refusal suite).
 /// A solo cold resolve completes with no suppress flag, no trip, and
 /// no sentinel. Tracker:
 /// `chat_messages_resolves_complete_without_false_partial`.
@@ -977,7 +977,7 @@ fn chat_messages_resolves_without_timeout() {
 /// `synthesis_should_suppress` — with no diagnostic, no trip, and no
 /// sentinel. Admission refusal is benign non-cacheability, never a
 /// partial; the hermetic pin is
-/// `component_meta_materialize::tests::admission_revalidation_refusal_is_not_a_partial_result`.
+/// the cache-runtime admission-revalidation refusal suite.
 #[test]
 fn chat_messages_resolves_complete_without_false_partial() {
     let corpus_root = locate_corpus_root();

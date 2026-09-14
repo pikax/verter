@@ -17,11 +17,10 @@ The arch guard
 consumer × fact-kind cell on the 10 × 5 grid has a slice file on
 disk under this directory.
 
-## Caches (9)
+## Caches (8)
 
 Block 1.H (counter-delta discriminator on producer tracer installs):
 
-- `materialize_structure` — `MaterializeStructureDb`
 - `memo_entry` — `MemoEntry` (`SemanticGraphStore::execute_cooperative`)
 - `app_config_proof` — `AppConfigNoOverrideProofDb`
 - `owner_import_surface` — `OwnerImportSurfaceDb`

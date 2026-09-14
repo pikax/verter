@@ -18,10 +18,6 @@ mod byte_identical_upsert_no_op;
 mod capture_token_smoke;
 #[path = "g_misc0/closure_boundary_invalidation.rs"]
 mod closure_boundary_invalidation;
-#[path = "g_misc0/cross_owner_materialise_reuse.rs"]
-mod cross_owner_materialise_reuse;
-#[path = "g_misc0/cross_owner_materialise_reuse_production.rs"]
-mod cross_owner_materialise_reuse_production;
 #[path = "g_misc0/cycle_safety.rs"]
 mod cycle_safety;
 #[path = "g_misc0/declaration_merge_facts.rs"]
@@ -84,8 +80,6 @@ mod language_routing_characterization;
 mod legacy_dep_signature_field_gone;
 #[path = "g_misc0/legacy_walker_parity_baseline.rs"]
 mod legacy_walker_parity_baseline;
-#[path = "g_misc0/materialiser_observes_or_dies.rs"]
-mod materialiser_observes_or_dies;
 #[path = "g_misc0/materializations_lane_wired.rs"]
 mod materializations_lane_wired;
 #[path = "g_misc0/mcp_audit_e2e.rs"]

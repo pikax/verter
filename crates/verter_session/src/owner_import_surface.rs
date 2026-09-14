@@ -596,7 +596,7 @@ where
     // an unrooted `OwnerImportSurface` cache entry that warm validation
     // could never invalidate.
     let base_facts =
-        crate::component_meta_materialize::fact_signature_from_fence(owner_target_fence.as_ref())
+        crate::fact_signature_helpers::fact_signature_from_fence(owner_target_fence.as_ref())
             .expect(
                 "OwnerImportSurface owner_target_fence is built exclusively from \
                  DepVersion::WholeHash entries, so fact_signature_from_fence — which \

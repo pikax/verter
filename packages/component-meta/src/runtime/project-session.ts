@@ -181,7 +181,7 @@ export class ProjectSession {
    * Batch native component-meta query. All `canonicalIds` resolve under
    * a single shared overlay view and a single scheduler dispatch on
    * the native side; host-owned admission caches
-   * (`MaterializeStructureDb`, `ComponentMetaResultDb`,
+   * (`ShapeCacheDb`, `ComponentMetaResultDb`,
    * `SemanticGraphStore`) are shared across the batch.
    *
    * Returns one slot per input in input order — decoded metadata for

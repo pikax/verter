@@ -1,39 +1,8 @@
-//! Cache invariant migration tests.
-//!
-//! Captures the per-cache invariants for `MaterializeStructureDb`
-//! (the structural materialiser cache that supports the projector
-//! path's dispatch-path refinement) as discriminating regression
-//! tests.
-//!
-//! Each invariant test characterises a property the cache must
-//! preserve. The dispatch-path refinement (the projector pipeline)
-//! exercises this cache on the production `getComponentMeta` flow,
-//! so the invariants must hold against that path.
+//! Cache invariant migration tests: the discriminating regression tests
+//! for the projector path's dispatch-path refinement and the
+//! cache-cluster schema-version eviction contract.
 //!
 //! ## Invariant catalogue
-//!
-//! ### MaterializeStructureDb
-//!
-//! - **MS-1** Cooperative-admission across N concurrent requests.
-//!   Spawn N threads requesting the same component-meta resolution;
-//!   the cache must end with a bounded number of entries (one per
-//!   distinct cache key) and the live counter must reflect actual
-//!   admitted work, not a multiplied count from torn cold builds.
-//!
-//! - **MS-2** dep_signature validation refuses stale reads. Populate
-//!   the cache via a real `getComponentMeta` request, mutate the
-//!   dependency file, re-resolve; the prior entry must NOT survive
-//!   silently, and the result must reflect the new content.
-//!
-//! - **MS-3** Generation-scoped invalidation on file delete. Populate
-//!   then `evict(canonical)`; subsequent peeks against the canonical's
-//!   dep_signature must miss.
-//!
-//! - **MS-4** post_publish acceptance. Two distinct component-meta
-//!   resolutions that produce overlapping dep_signature entries each
-//!   produce a distinct cache row keyed by the content-free
-//!   `MaterializationCacheKey`; cooperative admission's reverse
-//!   index records both keys against the shared canonical.
 //!
 //! ### Dispatch-path refinement determinism (MM)
 //!
@@ -99,117 +68,6 @@ defineProps<Props>()
 </script>
 <template><div>{{ message }} {{ count }}</div></template>
 "#;
-
-// ──────────────────────────────────────────────────────────────────
-// MS-1 : MaterializeStructureDb cooperative-admission
-// ──────────────────────────────────────────────────────────────────
-
-/// MS-1: a single component-meta resolution must publish at most a
-/// bounded number of entries into `MaterializeStructureDb` (live
-/// count rises by O(1)) — a runaway publication would indicate the
-/// cooperative-admission gate is broken.
-#[test]
-fn materialize_structure_db_cooperative_admission_bounded() {
-    let host = build_host(&[
-        ("/workspace/src/types.ts", SHARED_TYPES_TS),
-        ("/workspace/src/Comp.vue", COMP_VUE),
-    ]);
-
-    let pre = host
-        .project_type_store()
-        .materialize_structure_db()
-        .live_count();
-
-    let _ = host.get_component_meta("/workspace/src/Comp.vue");
-
-    let post = host
-        .project_type_store()
-        .materialize_structure_db()
-        .live_count();
-
-    let delta = post.saturating_sub(pre);
-    // The cache must have admitted work — but the count must be
-    // bounded. A nontrivial component-meta resolution that triggers
-    // structural materialization populates a small number of rows
-    // (one per distinct (scope, target) the materialiser saw). 64 is
-    // a wide upper bound that reflects "single component, small
-    // workspace" — well below any pathological multiplication.
-    assert!(
-        delta < 64,
-        "MS-1: MaterializeStructureDb live_count must rise by a bounded \
-         O(1) amount per single resolution (cooperative admission); got \
-         delta={delta} (pre={pre}, post={post}). A larger delta indicates \
-         the admission gate is broken or the cache is inflating per call."
-    );
-}
-
-/// MS-1 (companion): repeated identical resolutions must NOT inflate
-/// the cache. After a cold pass, a warm pass does not add new rows.
-#[test]
-fn materialize_structure_db_warm_pass_does_not_inflate() {
-    let host = build_host(&[
-        ("/workspace/src/types.ts", SHARED_TYPES_TS),
-        ("/workspace/src/Comp.vue", COMP_VUE),
-    ]);
-
-    let _ = host.get_component_meta("/workspace/src/Comp.vue");
-    let after_cold = host
-        .project_type_store()
-        .materialize_structure_db()
-        .live_count();
-
-    let _ = host.get_component_meta("/workspace/src/Comp.vue");
-    let after_warm = host
-        .project_type_store()
-        .materialize_structure_db()
-        .live_count();
-
-    assert_eq!(
-        after_cold, after_warm,
-        "MS-1 warm: a repeated identical resolution must NOT add new \
-         MaterializeStructureDb rows (cold={after_cold}, warm={after_warm})"
-    );
-}
-
-// ──────────────────────────────────────────────────────────────────
-// MS-3 : MaterializeStructureDb invalidation on canonical eviction
-// ──────────────────────────────────────────────────────────────────
-
-/// MS-3: evicting the owner canonical must shrink the cache (or at
-/// minimum not leave a stale row for the same key alive). The
-/// reverse-index `canonical_to_keys` registers entries; eviction
-/// drains them.
-#[test]
-fn materialize_structure_db_eviction_drains_owner_entries() {
-    let host = build_host(&[
-        ("/workspace/src/types.ts", SHARED_TYPES_TS),
-        ("/workspace/src/Comp.vue", COMP_VUE),
-    ]);
-
-    let _ = host.get_component_meta("/workspace/src/Comp.vue");
-    let before_evict = host
-        .project_type_store()
-        .materialize_structure_db()
-        .live_count();
-
-    host.evict("/workspace/src/Comp.vue");
-
-    let after_evict = host
-        .project_type_store()
-        .materialize_structure_db()
-        .live_count();
-
-    // Eviction must NOT inflate the cache (a buggy eviction that
-    // forgot to drain reverse-index entries would leave them all
-    // behind). Equality is the strictest possible: pre-publish there
-    // were N rows, evict drops them to 0 or fewer, but the live count
-    // must not increase.
-    assert!(
-        after_evict <= before_evict,
-        "MS-3: evicting the owner canonical must NOT inflate \
-         MaterializeStructureDb (before={before_evict}, after={after_evict})"
-    );
-}
 
 // ──────────────────────────────────────────────────────────────────
 // MS-2 / MR-2 : dep_signature validation refuses stale reads
@@ -384,41 +242,6 @@ fn evicted_owner_reloads_after_dep_edit() {
 // ──────────────────────────────────────────────────────────────────
 // MS-4 : post_publish dep_signature acceptance
 // ──────────────────────────────────────────────────────────────────
-
-/// MS-4: cooperative-admission's `post_publish` path must accept
-/// distinct cache rows produced by overlapping component-meta
-/// resolutions on the SAME canonical owner. Two resolutions of the
-/// same component yield identical dep_signatures and must collapse
-/// onto a single cache row (no duplicate entries published per
-/// `(MaterializationCacheKey, dep_signature)` pair).
-#[test]
-fn materialize_structure_db_post_publish_collapses_duplicates() {
-    let host = build_host(&[
-        ("/workspace/src/types.ts", SHARED_TYPES_TS),
-        ("/workspace/src/Comp.vue", COMP_VUE),
-    ]);
-
-    // First resolution publishes cache rows.
-    let _ = host.get_component_meta("/workspace/src/Comp.vue");
-    let after_first = host
-        .project_type_store()
-        .materialize_structure_db()
-        .live_count();
-
-    // Second resolution with identical inputs must NOT increase the
-    // live count — `post_publish` collapses onto the existing row.
-    let _ = host.get_component_meta("/workspace/src/Comp.vue");
-    let after_second = host
-        .project_type_store()
-        .materialize_structure_db()
-        .live_count();
-
-    assert_eq!(
-        after_first, after_second,
-        "MS-4: identical resolutions must collapse via post_publish; \
-         live_count changed from {after_first} to {after_second}"
-    );
-}
 
 // ──────────────────────────────────────────────────────────────────
 // MM-1 : determinism across repeated dispatch — verified end-to-end
@@ -796,25 +619,6 @@ fn schema_bump_evicts_shape_cache_db_stale_entries() {
     let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
     assert_eq!(evicted, 1, "ShapeCacheDb: must drain stale");
     assert_eq!(db.live_count(), 0, "ShapeCacheDb: empty after evict");
-}
-
-#[test]
-fn schema_bump_evicts_materialize_structure_db_stale_entries() {
-    use verter_session::component_meta_caches::MaterializeStructureDb;
-
-    let db = MaterializeStructureDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
-    db.insert_synthetic_for_schema_test("/workspace/synthetic-materialize-structure.ts");
-
-    assert_eq!(db.live_count(), 1, "MaterializeStructureDb pre-evict count");
-    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
-
-    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
-    assert_eq!(evicted, 1, "MaterializeStructureDb: must drain stale");
-    assert_eq!(
-        db.live_count(),
-        0,
-        "MaterializeStructureDb: empty after evict"
-    );
 }
 
 // Negative-discrimination companion: a Db constructed at the CURRENT

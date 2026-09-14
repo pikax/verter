@@ -32,9 +32,6 @@
 //!   (`project_semantic_dispatch::cycle_gate`) — the sealed
 //!   materialization cycle gate, a semantic-query family over the
 //!   `SemanticGraphStore` memo (singleflight cold build).
-//! - [`MaterializeStructureDb`](crate::component_meta_caches::MaterializeStructureDb)
-//!   — interned structural projections produced by the canonical
-//!   materialiser; sole authoritative materialiser cache.
 //!
 //! All five participate in `ProjectTypeStore`'s invalidation cascade
 //! and are fact-validated on warm hit by re-walking each candidate's
@@ -95,9 +92,9 @@ use crate::semantic_query::SemanticNodeId;
 
 // The output-sink capabilities for this subtree are defined PER-SINK in the
 // exact output-SINK modules that project — NOT subtree-wide:
-// `MetaQuerySurfaceOutputCap` in `surface.rs` and `MetaQueryRegistryOutputCap`
-// in `registry_decl.rs` (each a single-file sink with no production
-// submodule). A subtree-wide cap
+// `MetaQuerySurfaceOutputCap` in `surface.rs` (a single-file sink with no
+// production submodule; `registry_decl.rs` mints no cap because it owns
+// no member-surface demand route). A subtree-wide cap
 // (`pub(in crate::resolver_core::component_meta_query_engine)`) would let any
 // sibling in this subtree mint it; terminal-sink minting (each mint scope's
 // whole reachable production module tree is output-only) makes the
@@ -165,7 +162,6 @@ pub(crate) use surface::{
 // `impl OutputProjector for <Cap>` registration pairs. The `new()`
 // CONSTRUCTORS stay leaf-private (`mint: pub(in …::{surface,registry_decl})`),
 // so these re-exports do NOT widen who can mint — only who can name the types.
-pub(crate) use registry_decl::MetaQueryRegistryOutputCap;
 pub(crate) use surface::MetaQuerySurfaceOutputCap;
 
 // Predicate/utility helpers (route-expr surface keys,

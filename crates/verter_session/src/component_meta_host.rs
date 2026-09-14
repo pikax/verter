@@ -393,8 +393,8 @@ impl ComponentMetaSession {
     ///
     /// Delegates to [`crate::meta::MetaSession::get_component_meta_batch`]
     /// so all N queries share the host-owned admission caches
-    /// (`MaterializeStructureDb`, `ComponentMetaResultDb`,
-    /// `SemanticGraphStore`). Per-id failures surface in each result
+    /// (`ComponentMetaResultDb`, `SemanticGraphStore`, `ShapeCacheDb`).
+    /// Per-id failures surface in each result
     /// slot; the batch does not abort.
     pub fn get_component_meta_batch(
         &self,

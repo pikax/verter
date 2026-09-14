@@ -9,7 +9,7 @@
 //! underscore binding. `warm_publish_one` then derived the memo entry's
 //! `read_set_signature` (the `ReadSetSignature.facts` + `self_root_canonicals`
 //! validity rail) from
-//! `crate::component_meta_materialize::fact_signature_from_fence` —
+//! `crate::fact_signature_helpers::fact_signature_from_fence` —
 //! a legacy bridge that only converts `DepVersion::WholeHash` entries
 //! to `FactVersionRef::FileWholeHash`. Every `Parse(...)`,
 //! `ResolveImports(...)`, and `RouteSurface(...)` observation made

@@ -417,7 +417,7 @@ schema = 2
 "TE2" = { status = "implemented", commit_message = "fix(session): defer conditional branches until selection on te2-lowering-instantiation", commit_date = "2026-09-12T11:30:00+01:00" }
 "TE3" = { status = "implemented", commit_message = "feat(core): demand-selected projection precision at the operand forcing boundary", commit_date = "2026-09-05T12:00:00+01:00" }
 "TE4" = { status = "implemented", commit_message = "perf(session): decide mapped key remaps before forcing their value operands", commit_date = "2026-09-12T12:00:00+01:00" }
-"TE5" = { status = "pending" }
+"TE5" = { status = "implemented", commit_message = "refactor(session): delete the residual ad hoc selective-operator entrances", commit_date = "2026-09-13T16:30:00+01:00" }
 "TIF0" = { status = "pending" }
 "TIF1" = { status = "pending" }
 "UAI0" = { status = "pending" }

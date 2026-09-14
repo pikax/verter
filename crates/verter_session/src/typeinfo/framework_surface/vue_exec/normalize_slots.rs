@@ -369,9 +369,8 @@ fn binding_fields_from_param_node(
 ///
 /// - **Builtin-Pick identity** — the carrier is the BUILTIN `Pick`
 ///   (`base.canonical_id == "__builtin__"` AND `base.decl_name == "Pick"`, two
-///   args): the SAME builtin-utility identity the resolver's route extractors read
-///   (`extract_route_root_identity_node` / `node_root_identity` in
-///   `meta_resolve::graph_predicates`). A USERLAND `type Pick<T, K>` that shadows
+///   args): the SAME builtin-utility identity the resolver's root-identity
+///   predicate reads (`node_root_identity` in `meta_resolve::graph_predicates`). A USERLAND `type Pick<T, K>` that shadows
 ///   the builtin is NOT a builtin `Pick` — its carrier base is the declaring file,
 ///   not `__builtin__`, so it fails here and each member mints its own concrete
 ///   (userland-Pick body) value instead of a symbolic access.
@@ -387,10 +386,9 @@ fn binding_fields_from_param_node(
 ///   `<object>['foo']` access would be bogus: return `None` and let each member
 ///   mint its own concrete member value.
 ///
-/// NOTE: this predicate does NOT mirror `extract_pick_omit_route`'s arm set. In
-/// that route extractor a non-nominal root returns `None` to PRESERVE the
-/// carrier; here `None` means CONCRETE materialization — the OPPOSITE
-/// consequence — so the arm sets are intentionally different.
+/// NOTE: here `None` means CONCRETE materialization (each member mints its
+/// own concrete value) — the OPPOSITE of a carrier-preserving predicate, so
+/// this arm set is deliberately its own.
 ///
 /// A typed-IR STRUCTURAL match (node-domain `canonical_id` / `decl_name` + the
 /// source-root shape) — NOT a `"Pick<"` text sniff and NOT a
@@ -422,9 +420,8 @@ fn pick_source_root_node(
             // root — `DeclRef` / `InstantiationRef` / the unresolved
             // macro-carrier `BareRef` (an inline macro-authored source); a
             // structural source mints each member's own concrete value at the
-            // sink instead. NOT `extract_pick_omit_route`'s arm set — there
-            // `None` PRESERVES the carrier, here `None` means CONCRETE
-            // materialization.
+            // sink instead — here `None` means CONCRETE materialization, not a
+            // preserved carrier.
             let root = args[0];
             match node_data_for(dispatch.ctx, root).as_deref() {
                 Some(

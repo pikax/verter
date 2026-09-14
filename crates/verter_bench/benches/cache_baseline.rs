@@ -235,8 +235,8 @@ fn run_baseline_measurement() -> BaselineSnapshot {
         p99_per_component_ms: p99,
         fact_validation_warm_hit_count: 0,
         fact_validation_miss_count: canonicals.len() as u64,
-        // Today every `(scope_canonical_id, base, scope_axis, mode)`
-        // slot in `MaterializeStructureDb` carries exactly one entry.
+        // Every `(scope_canonical_id, base, scope_axis, mode)` slot of the
+        // legacy per-owner materialisation carried exactly one entry.
         // The hermetic baseline's `ChatMessageProps`-style shared dep
         // (`DerivedProps`) appears in all N component-owners' slots when
         // stored per-owner (cardinality == N); the multi-candidate
@@ -261,8 +261,9 @@ fn run_baseline_measurement() -> BaselineSnapshot {
             "fact_validation_miss_count records the cold-pass count (every component \
              missed because no fact-validated cache existed at query time)."
                 .to_string(),
-            "materialise_cardinality_per_owner == N today (one MaterializeStructureDb \
-             entry per owner-instance of the shared dep); Stage 5 inverts to == 1."
+            "materialise_cardinality_per_owner == N under the legacy per-owner \
+             materialisation (one entry per owner-instance of the shared dep); the \
+             shared query route inverts it to == 1."
                 .to_string(),
             "candidate_set_size_histogram has only the \"1\" bin populated today; Stage 5 \
              multi-candidate storage grows the histogram up to the R20 cap = 4."

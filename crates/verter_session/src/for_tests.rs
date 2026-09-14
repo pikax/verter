@@ -66,8 +66,8 @@ pub use crate::semantic_query_memo::{
 
 /// Carrier type for cache-entry dependency signatures. Integration
 /// tests construct `ReadSetSignature` directly when seeding
-/// fixtures into `ComponentMetaResultEntry` / `MaterializeStructureEntry` /
-/// `OwnerImportSurface` / `MemoEntry`.
+/// fixtures into `ComponentMetaResultEntry` / `OwnerImportSurface` /
+/// `MemoEntry`.
 pub use crate::fact_signature_helpers::ReadSetSignature;
 
 /// Re-export the cooperative-admission outcome enum so integration
@@ -147,140 +147,9 @@ pub fn read_signature_overflow_at_install(host: &crate::VerterHost) -> u64 {
     crate::fact_signature_helpers::read_signature_overflow_at_install(host)
 }
 
-/// Arm the materialiser's test-only fact-injection knob with `n`
-/// synthetic `FileWholeHash` observations per cold-compute call.
-/// When `n > FACT_SIGNATURE_CAP` (1024), the cold compute's
-/// installed fact tracer finalises with `Overflow`, exercising the
-/// `materialize_structure_overflow_refusals` admission-refusal path
-/// without requiring a workspace fixture that organically emits
-/// thousands of facts. The returned guard zeroes the knob on drop.
-///
-/// Integration tests in
-/// `crates/verter_session/tests/cases/g_family/family_bcd_*overflow*.rs` use
-/// this to discriminate the `MaterializeOutcome::Value` vs `Tainted`
-/// distinction on admission refusal. Per-host so the forced state never
-/// leaks into a concurrent materialise on a different host.
-pub fn materialize_force_overflow_observations_for_tests(
-    host: &crate::VerterHost,
-    n: usize,
-) -> MaterializeForceOverflowGuard<'_> {
-    MaterializeForceOverflowGuard::arm(host, n)
-}
-
-/// Host-scoped RAII guard that arms and clears the per-host materialiser
-/// fact-injection knob
-/// [`crate::VerterHost::materialize_force_overflow_observations`].
-///
-/// When the knob is set to `N > 0`, the materialiser's cold-compute
-/// closure observes `N` synthetic `FileWholeHash` facts via
-/// `observe_fan_out` BEFORE returning, deterministically forcing the
-/// installed fact tracer to either overflow (when `N > FACT_SIGNATURE_CAP`)
-/// or accumulate a large signature. Drives the discriminating
-/// Overflow-returns-valid-result test without a pathological workspace
-/// fixture.
-///
-/// The guard lives here (not in the seal-scoped
-/// `component_meta_materialize.rs`) so the resolver-tier seal — which
-/// forbids naming the concrete `VerterHost` type — is preserved. The
-/// production cold path reads the knob through
-/// `ctx.host_for_fact_tracer_install()`; only this test-only guard needs
-/// to name the host directly to arm/clear the field.
-pub struct MaterializeForceOverflowGuard<'h> {
-    host: &'h crate::VerterHost,
-}
-
-impl<'h> MaterializeForceOverflowGuard<'h> {
-    /// Set `host`'s forced observation count to `n` and return the guard.
-    fn arm(host: &'h crate::VerterHost, n: usize) -> Self {
-        host.materialize_force_overflow_observations
-            .store(n, std::sync::atomic::Ordering::Relaxed);
-        Self { host }
-    }
-}
-
-impl Drop for MaterializeForceOverflowGuard<'_> {
-    fn drop(&mut self) {
-        self.host
-            .materialize_force_overflow_observations
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-/// Arm the per-host materialiser GENUINE-in-scope-partial injection knob
-/// and return an RAII guard that clears it on drop.
-///
-/// When armed, the materialiser's cold-compute closure folds a partial
-/// into its active [`crate::request_context::ColdComputeCompletenessScope`]
-/// via the EXACT production rail a budget-tripped child read uses
-/// ([`crate::request_context::mark_request_result_partial`]).
-/// The per-cold-compute completeness therefore goes `Partial` and the
-/// `MaterializeStructureDb` admission gate
-/// (`refuse_result_cache_admission_if_partial`) must refuse the entry —
-/// the SAME outcome a real budget trip produces, with a deterministic
-/// trigger. Per-host so the forced state never leaks into a concurrent
-/// materialise on a different host.
-pub fn materialize_force_in_scope_partial_for_tests(
-    host: &crate::VerterHost,
-) -> MaterializeForceInScopePartialGuard<'_> {
-    MaterializeForceInScopePartialGuard::arm(host)
-}
-
-/// Host-scoped RAII guard for the per-host materialiser in-scope-partial
-/// injection knob
-/// [`crate::VerterHost::materialize_force_in_scope_partial`]. Mirrors
-/// [`MaterializeForceOverflowGuard`] for the genuine-partial fold path.
-pub struct MaterializeForceInScopePartialGuard<'h> {
-    host: &'h crate::VerterHost,
-}
-
-impl<'h> MaterializeForceInScopePartialGuard<'h> {
-    /// Arm `host`'s in-scope-partial knob and return the guard.
-    fn arm(host: &'h crate::VerterHost) -> Self {
-        host.materialize_force_in_scope_partial
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        Self { host }
-    }
-}
-
-impl Drop for MaterializeForceInScopePartialGuard<'_> {
-    fn drop(&mut self) {
-        self.host
-            .materialize_force_in_scope_partial
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-/// Arm the per-host mid-compute generation-bump knob
-/// ([`crate::VerterHost::materialize_force_mid_compute_generation_bump`])
-/// and return an RAII guard that clears it on drop. The next
-/// materialiser cold compute bumps the project generation once, so the
-/// runtime's post-compute revalidation rejects the freshly-built entry
-/// through the exact production admission-refusal path.
-pub fn materialize_force_mid_compute_generation_bump_for_tests(
-    host: &crate::VerterHost,
-) -> MaterializeForceMidComputeGenerationBumpGuard<'_> {
-    host.materialize_force_mid_compute_generation_bump
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    MaterializeForceMidComputeGenerationBumpGuard { host }
-}
-
-/// Host-scoped RAII guard for the mid-compute generation-bump knob.
-pub struct MaterializeForceMidComputeGenerationBumpGuard<'h> {
-    host: &'h crate::VerterHost,
-}
-
-impl Drop for MaterializeForceMidComputeGenerationBumpGuard<'_> {
-    fn drop(&mut self) {
-        self.host
-            .materialize_force_mid_compute_generation_bump
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
 /// Arm the per-host relation-memo fact-injection knob and return an RAII
-/// guard that zeroes it on drop. Mirrors
-/// [`materialize_force_overflow_observations_for_tests`] for the relation
-/// engine's overflow-refusal path.
+/// guard that zeroes it on drop — the relation engine's overflow-refusal
+/// path.
 pub fn relation_force_overflow_observations_for_tests(
     host: &crate::VerterHost,
     n: usize,
@@ -406,16 +275,6 @@ pub fn reset_compile_tier_prefetch_invocations_for_tests(host: &crate::VerterHos
 /// prefetch gate.
 pub fn compile_tier_prefetch_invocations_for_tests(host: &crate::VerterHost) -> usize {
     crate::host_resolve::compile_tier_prefetch_invocations(host)
-}
-
-/// Read the materialiser's `materialize_structure_overflow_refusals`
-/// counter for the given host. Test surface; production callers reach
-/// this through the `host_audit_runtime().snapshot()` provenance
-/// surface.
-pub fn read_materialize_structure_overflow_refusals(host: &crate::VerterHost) -> u64 {
-    host.provenance
-        .materialize_structure_overflow_refusals
-        .load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Read the workspace `semantic_transitive` dependency set for
@@ -687,11 +546,9 @@ pub fn component_meta_cold_traced_read_set_for_tests(
     Some(read_set.finalise())
 }
 
-/// Discriminating probes for the dispatch DepSignature→fact bridges. Used by
+/// Discriminating probe for the dispatch DepSignature→fact bridge. Used by
 /// `tests/cases/g_misc0/dispatch_bridges_convert_project_generation.rs`.
-pub use crate::tests::dispatch_bridges::{
-    dispatch_dep_signature_facts_for_tests, observe_fence_entry_for_tests,
-};
+pub use crate::tests::dispatch_bridges::dispatch_dep_signature_facts_for_tests;
 
 /// Test-only probe: returns `true` iff the scheduler holds an
 /// artifact snapshot for the `(canonical, profile)` pair. Mirrors

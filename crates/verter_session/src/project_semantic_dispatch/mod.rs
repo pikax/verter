@@ -62,11 +62,11 @@ use verter_semantic::analysis::type_solver::host::{
 use crate::resolver_core::prepared_decl::PreparedTypeDeclResolution;
 use crate::resolver_core::{BudgetDomain, BudgetExceededFailure, ResolverContext};
 use crate::semantic_query::{
-    BranchSelection, CacheRead, DeclIdentity, DepSignature, DepVersion, IndexKey, LiteralValue,
-    NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
-    PropertyKey, QueryError, QueryResult, ResolveDeclKey, ResultProvenance, ScopeId,
-    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
-    SemanticQueryValue, SemanticQueryValueTag, SignatureRef,
+    BranchSelection, CacheRead, DeclIdentity, DepSignature, DepVersion, IndexKey, NodeScopeId,
+    OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode, PropertyKey,
+    QueryError, QueryResult, ResolveDeclKey, ResultProvenance, ScopeId, SemanticNodeData,
+    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
+    SemanticQueryValueTag, SignatureRef,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use verter_type_expr::PrimitiveName;
@@ -156,6 +156,11 @@ mod return_equation_tests;
 pub(crate) mod semantic_operand;
 #[cfg(test)]
 mod semantic_operand_binder_tests;
+/// Unified dead-operand deep-work matrix (cross-operator table over
+/// the forcing boundary) plus the one-authority convergence proof for
+/// the builtin utility route.
+#[cfg(test)]
+mod semantic_operand_dead_work_tests;
 #[cfg(test)]
 mod semantic_operand_tests;
 pub(crate) mod semantic_source;
@@ -165,6 +170,11 @@ pub(crate) mod substitute;
 pub(crate) mod symbol_identity;
 pub(crate) mod template_class_facts;
 pub(crate) mod walk;
+
+/// Shared structural depth-fuse cap. The walker's per-request depth
+/// budget is clamped against it (`walk` treats a budget at or above this
+/// cap as uncapped); a trip is a bug, not a soft-fail.
+pub const MAX_DEPTH: usize = 4096;
 
 #[cfg(test)]
 mod object_spread_projection_eval_tests;
@@ -3762,30 +3772,6 @@ pub fn omit_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotId
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
-    /// Direct mirror of
-    /// [`materialize_component_meta_structure`](crate::component_meta_materialize::materialize_component_meta_structure).
-    ///
-    /// Caller pattern-matches `MaterializeOutcome` directly — no
-    /// conversion to `QueryResult`. Use this when callers need
-    /// `PackageRefTopLevel` / `FunctionPropertyAtNested` /
-    /// `RecursiveHelperCycleGuard` / `MAX_DEPTH` gates (which
-    /// `ProjectPath` does NOT inherit).
-    ///
-    /// **Why not a `SemanticQueryKey` variant?** Per §0 binding
-    /// amendment, `MaterializeSurface` is redundant with the existing
-    /// `ComponentMetaResultDb<ComponentMetaAnalysis>` sidecar +
-    /// `MaterializeStructureDb` cache. This helper exposes the
-    /// existing function as a method on the dispatcher so consumers
-    /// can route policy-gated materialisations through dispatch
-    /// without inflating the variant set.
-    #[allow(dead_code)]
-    pub fn materialize_surface(
-        &self,
-        key: crate::component_meta_materialize::MaterializeRuntimeKey,
-    ) -> CacheRead<crate::component_meta_materialize::MaterializeOutcome> {
-        crate::component_meta_materialize::materialize_component_meta_structure(self.ctx, key)
-    }
-
     /// Test seam: the flow-demand ledger footprint of this dispatch —
     /// `(installed demand count, reserved demand storage capacity)`. The
     /// no-flow allocation contract: an ordinary query and every pending
@@ -3798,68 +3784,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             txn.obligations.flow_demand_count(),
             txn.obligations.flow_demand_storage_capacity(),
         )
-    }
-
-    /// `Pick<base, members>` via the existing builtin
-    /// Pick dispatch (`build_builtin_utility` Pick arm at `build.rs:870`).
-    ///
-    /// Inherits TS Pick semantics including modifier preservation
-    /// (`optional`/`readonly` flow through). The members slice is
-    /// interned as a `Union` of string literals via
-    /// [`Self::intern_string_literal_union`] before dispatch — empty
-    /// members produce a `Primitive(Never)` keyspace which the Pick
-    /// arm reduces to an empty Object (TS spec §4.4 Pick semantics).
-    ///
-    /// **Why not a variant?** Per §0 binding amendment, `Pick` /
-    /// `Omit` are already routed through the
-    /// `build_builtin_utility` path under
-    /// `SemanticQueryKey::Instantiate`. This helper is a typed
-    /// convenience wrapper — the underlying memo entry is the same
-    /// `Instantiate` family/slot.
-    pub fn execute_pick(
-        &self,
-        base: SemanticNodeId,
-        members: &[Arc<str>],
-        mode: ProjectionMode,
-    ) -> QueryResult<SemanticNodeId> {
-        let key_set = self.intern_string_literal_union(members);
-        crate::semantic_query::strip_output_provenance(self.execute_type_node(
-            SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-                self.builtin_type_slot("Pick"),
-                Arc::from(vec![base, key_set].into_boxed_slice()),
-                self.instantiate_context_for(
-                    "__builtin__",
-                    crate::semantic_query::ProjectionReductionContext::published(mode),
-                ),
-            )),
-        ))
-    }
-
-    /// `Omit<base, members>` via the existing builtin
-    /// Omit dispatch (`build_builtin_utility` Omit arm at `build.rs:911`).
-    ///
-    /// Inherits TS Omit semantics including the "Omit preserves
-    /// source signatures" rule (per `build.rs:937-939` doc) — call /
-    /// construct / index signatures of the base are kept when the
-    /// keys-to-omit don't shadow them.
-    #[allow(dead_code)]
-    pub fn execute_omit(
-        &self,
-        base: SemanticNodeId,
-        members: &[Arc<str>],
-        mode: ProjectionMode,
-    ) -> QueryResult<SemanticNodeId> {
-        let key_set = self.intern_string_literal_union(members);
-        crate::semantic_query::strip_output_provenance(self.execute_type_node(
-            SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-                self.builtin_type_slot("Omit"),
-                Arc::from(vec![base, key_set].into_boxed_slice()),
-                self.instantiate_context_for(
-                    "__builtin__",
-                    crate::semantic_query::ProjectionReductionContext::published(mode),
-                ),
-            )),
-        ))
     }
 
     /// Slot-binding terminal-id variant for `defineSlots<T>()`. Three-hop
@@ -4006,32 +3930,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Trivial helper: lower a `[String]` member-name
-    /// list to an `Arc<[PathSegment]>` for `ProjectPath` queries.
-    ///
-    /// Each member name becomes a typed string property-key segment. The
-    /// result has the same length and order as the input.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn lower_path_segments(p: &[String]) -> Arc<[PathSegment]> {
-        let segs: Vec<PathSegment> = p
-            .iter()
-            .map(|s| PathSegment::Member(PropertyKey::identifier(s.as_str())))
-            .collect();
-        Arc::from(segs.into_boxed_slice())
-    }
-
-    /// Trivial helper: intern a `[Arc<str>]` member-name
+    /// Intern a `[Arc<str>]` member-name
     /// list as a `Union` of string-literal nodes.
     ///
     /// Empty input produces `Primitive(Never)` — caller-side pickup of
     /// the TS spec §4.4 rule that `Pick<T, never>` reduces to `{}`.
     /// Single-element input produces a `Union<[lit]>` (always
     /// uniformly `Union` even at arity 1, for caller uniformity).
-    /// `Pick` / `Omit` callers can pass the result directly as the
+    /// Builtin-utility key builders pass the result directly as the
     /// 2nd argument of `Instantiate`.
+    ///
+    /// Test-support only: the production utility route constructs the
+    /// builtin `Instantiate` key itself, so this emitter exists solely
+    /// to build that canonical key shape in tests.
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn intern_string_literal_union(&self, members: &[Arc<str>]) -> SemanticNodeId {
+        use crate::semantic_query::LiteralValue;
         let graph = self.graph();
         if members.is_empty() {
             return graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));

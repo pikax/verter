@@ -33,7 +33,7 @@
 //! - `RouteDb` per-name and effective-set caches **DO** include `lib_env_hash`
 //!   because module augmentations (which live in libs / ambient corpora)
 //!   stitch into the effective surface.
-//! - Typed-IR resolve, `MaterializeStructureDb`,
+//! - Typed-IR resolve,
 //!   `SemanticGraphStore`, `ComponentMetaResultDb` **DO** include
 //!   `lib_env_hash` because semantic meaning depends on intrinsic types
 //!   (`Array<T>`, `HTMLElement`, etc.).
@@ -217,7 +217,7 @@ impl IdeProjectConfigEnvHash for IdeProjectConfig {
     /// `type_env_hash` — captures TS semantic options that change type
     /// meaning (`strict`, `noImplicitAny`, etc.).
     ///
-    /// Bound by: typed-IR resolve, `MaterializeStructureDb`,
+    /// Bound by: typed-IR resolve,
     /// `SemanticGraphStore`, `ComponentMetaResultDb`.
     fn type_env_hash(&self, inputs: &EnvHashInputs<'_>) -> Hash16 {
         let mut buf: Vec<u8> = Vec::with_capacity(32);
@@ -238,7 +238,7 @@ impl IdeProjectConfigEnvHash for IdeProjectConfig {
     ///
     /// R21 scoping rule: enters a cache key only when the cached value
     /// depends on lib data. `ResolvedImportFacts` MUST NOT key on this
-    /// hash; `RouteDb`, typed-IR resolve, `MaterializeStructureDb`,
+    /// hash; `RouteDb`, typed-IR resolve,
     /// `SemanticGraphStore`, `ComponentMetaResultDb`
     /// MUST.
     fn lib_env_hash(&self, inputs: &EnvHashInputs<'_>) -> Hash16 {

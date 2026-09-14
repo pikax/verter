@@ -6,7 +6,7 @@
 //! A class of durable query-identity caches stores entries whose
 //! effective identity carries self-version state — `ComponentMetaResultDb`
 //! carries the owner whole-hash, the retired `RefCycleResultDb` keyed on a
-//! `DeclIdentity` that embeds the file whole-hash, `MaterializeStructureDb`
+//! `DeclIdentity` that embeds the file whole-hash, `ShapeCacheDb`
 //! and the `SemanticGraphStore` memo key on content-derived
 //! `SemanticNodeId`s. Each distinct content edit of an owner appends a
 //! fresh, permanent entry to those caches. Without a routine reclamation
