@@ -173,7 +173,7 @@ schema = 2
 "CVO3" = { status = "implemented", commit_message = "test(*): add the false-green control set for the validation probe machinery", commit_date = "2026-09-12T17:30:00+01:00" }
 "CVO4" = { status = "pending" }
 "D1" = { status = "implemented", commit_message = "feat(session): add private hermetic flow completeness foundation", commit_date = "2026-08-29T20:05:00+01:00" }
-"D10" = { status = "pending" }
+"D10" = { status = "implemented", commit_message = "fix(session): decide instanceof derivation by class heritage, resolve the lib Function global, and mint the in-key Record intersection", commit_date = "2026-09-15T16:00:00+01:00" }
 "D11" = { status = "pending" }
 "D12" = { status = "pending" }
 "D13" = { status = "implemented", commit_message = "fix(session): apply write effects in evaluation order, join branch vars over the shared lattice, and settle the type-space owner probe", commit_date = "2026-09-14T23:56:00+01:00" }

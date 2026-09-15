@@ -2707,6 +2707,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(SemanticNodeData::InstantiationRef { base, args }) = data.as_deref() else {
             return None;
         };
+        // The lib `Function` global's carrier is a TERMINAL nominal, not
+        // an alias instantiation: its `__builtin__` base names no
+        // declaration the Instantiate dispatch can serve, so dispatching
+        // would MISS non-cacheably and taint the enclosing join's warm
+        // admission for a carrier that has nothing to expand to.
+        if self.runtime_nominal_identity(base)
+            == Some(crate::intrinsic_registry::RuntimeNominal::Function)
+        {
+            return None;
+        }
         let oracle_demand = ProjectionReductionContext::structural_transit_with_mode(
             crate::semantic_query::ProjectionMode::Navigate,
         );

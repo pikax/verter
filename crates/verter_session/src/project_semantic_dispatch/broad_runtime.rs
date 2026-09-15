@@ -781,6 +781,7 @@ fn broad_kind_for_nominal(kind: RuntimeNominal) -> BroadRuntimeKind {
         RuntimeNominal::WeakSet => BroadRuntimeKind::WeakSet,
         RuntimeNominal::Promise => BroadRuntimeKind::Promise,
         RuntimeNominal::Error => BroadRuntimeKind::Error,
+        RuntimeNominal::Function => BroadRuntimeKind::Function,
     }
 }
 

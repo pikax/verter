@@ -127,6 +127,13 @@ pub(crate) enum ExpectedNode {
     TypeParam { name: &'static str },
     /// `SemanticNodeData::DeclRef` naming this declaration.
     DeclRef { name: &'static str },
+    /// `SemanticNodeData::InstantiationRef` whose BASE declaration is
+    /// named here (the generic-application carrier — `Record<"c",
+    /// unknown>`'s arm of the `in`-guard intersection mint). Distinct
+    /// from [`ExpectedNode::DeclRef`]: the carrier holds argument nodes
+    /// the boundary pin discriminates, where this pin discriminates the
+    /// base.
+    InstantiationRef { name: &'static str },
     /// `SemanticNodeData::BareRef` carrying this unresolved name.
     BareRef { name: &'static str },
     /// The typed unmodelled-position marker
@@ -312,6 +319,10 @@ pub(crate) fn node_matches(
         (ExpectedNode::DeclRef { name }, SemanticNodeData::DeclRef { identity }) => {
             &*identity.decl_name == *name
         }
+        (
+            ExpectedNode::InstantiationRef { name },
+            SemanticNodeData::InstantiationRef { base, .. },
+        ) => &*base.decl_name == *name,
         (ExpectedNode::BareRef { name }, SemanticNodeData::BareRef(_)) => {
             data.bare_ref_head().is_some_and(|(got, _)| &**got == *name)
         }
@@ -1051,10 +1062,13 @@ pub(crate) mod checker_syntax {
         BoolLit(bool),
         Primitive(PrimitiveKind),
         Ref(String),
-        /// `Name<T, …>`. Parses; matches NOTHING: no deep row measures
-        /// an `InstantiationRef` a generic print could compare against,
-        /// so an acceptance arm would be unexercised vocabulary.
-        /// Reintroduce it only with a row + control.
+        /// `Name<T, …>`. Matches a live `InstantiationRef` carrier by
+        /// base name with ordered-exact, recursively equal arguments.
+        /// Reintroduced with its row + control:
+        /// `N88_in_unknown_key_keeps_subject_as_typed_superset` (the
+        /// `in`-guard's `(subject) & Record<key, unknown>` mint), with
+        /// the wrong-argument / wrong-name rejection clauses held by
+        /// `extended_checker_prints_compare_deliberately`.
         GenericRef {
             name: String,
             args: Vec<CheckerType>,
@@ -1617,10 +1631,38 @@ pub(crate) mod checker_syntax {
                 e == g
             }
             (CheckerType::Primitive(e), SemanticNodeData::Primitive(g)) => e == g,
-            // A reference name matches a resolved `DeclRef` only.
-            // `BareRef` / `TypeParam` reach `_ => false` (fail-closed).
+            // A reference name matches a resolved `DeclRef` only — plus
+            // the ZERO-ARGUMENT generic carrier, whose raised print is
+            // the identical bare reference. `BareRef` / `TypeParam` / an
+            // argument-bearing carrier reach `_ => false` (fail-closed).
             (CheckerType::Ref(name), SemanticNodeData::DeclRef { identity }) => {
                 &*identity.decl_name == name.as_str()
+            }
+            (
+                CheckerType::Ref(name),
+                SemanticNodeData::InstantiationRef {
+                    base,
+                    args: got_args,
+                },
+            ) => got_args.is_empty() && &*base.decl_name == name.as_str(),
+            // A generic print matches the generic-application CARRIER it
+            // names: base by declaration name, arguments ordered-exact
+            // and recursive. The row + control this arm exists for is
+            // `N88_in_unknown_key_keeps_subject_as_typed_superset` (the
+            // `in`-guard's `(subject) & Record<key, unknown>`
+            // intersection); a plain `DeclRef` never matches a generic
+            // print (no arguments to compare) and an `InstantiationRef`
+            // never matches a bare ref print.
+            (
+                CheckerType::GenericRef { name, args },
+                SemanticNodeData::InstantiationRef { base, args: got },
+            ) => {
+                &*base.decl_name == name.as_str()
+                    && got.len() == args.len()
+                    && got
+                        .iter()
+                        .zip(args.iter())
+                        .all(|(node, expected)| matches_node(dispatch, *node, expected, depth + 1))
             }
             (CheckerType::Union(exp), SemanticNodeData::Union(members)) => {
                 // Order-insensitive EXACT set equality, backtracking so
@@ -3844,15 +3886,68 @@ mod expectation_controls {
                 );
             },
         );
-        // Generic-argument references fail closed on X18's program.
+        // Generic-argument references: the `in`-guard's Record mint
+        // (N88's program) carries a live `InstantiationRef` carrier, so
+        // the generic print accepts it — and every wrong name or wrong
+        // argument spelling is rejected.
+        with_flow_node(
+            "function makeProps(x: { a: number } | { b: string }) { return { v: \"c\" in x ? x \
+             : 0 } }",
+            "makeProps",
+            |dispatch, node| {
+                assert!(
+                    accepts(
+                        dispatch,
+                        node,
+                        "{ v: number | (({ a: number; } | { b: string; }) & Record<\"c\", \
+                         unknown>); }"
+                    ),
+                    "precondition: the minted intersection accepts the checker's generic \
+                     print (measured {})",
+                    render_node(dispatch, node, 0)
+                );
+                assert!(
+                    !accepts(
+                        dispatch,
+                        node,
+                        "{ v: number | (({ a: number; } | { b: string; }) & Record<\"c\", \
+                         any>); }"
+                    ),
+                    "a WRONG type ARGUMENT must be rejected — `Record<\"c\", any>` names a \
+                     different instantiation than the minted `unknown` value arm"
+                );
+                assert!(
+                    !accepts(
+                        dispatch,
+                        node,
+                        "{ v: number | (({ a: number; } | { b: string; }) & Record<\"d\", \
+                         unknown>); }"
+                    ),
+                    "a WRONG KEY argument must be rejected — `Record<\"d\", unknown>` names a \
+                     different instantiation than the minted `\"c\"` key arm"
+                );
+                assert!(
+                    !accepts(
+                        dispatch,
+                        node,
+                        "{ v: number | (({ a: number; } | { b: string; }) & Record); }"
+                    ),
+                    "a BARE `Record` print must be rejected against the argument-bearing \
+                     carrier — a bare ref matches a `DeclRef` or a ZERO-argument carrier \
+                     only, never one that carries generic arguments"
+                );
+            },
+        );
+        // A generic print against a NON-carrier node still fails closed
+        // (X18's program publishes the unwrapped inner object).
         with_flow_node(
             "async function makeProps() { return { label: \"x\" } }",
             "makeProps",
             |dispatch, node| {
                 assert!(
                     !accepts(dispatch, node, "Promise<{ label: string; }>"),
-                    "a GENERIC-ARGUMENT reference print must match NOTHING — no acceptance arm \
-                     is modelled (measured {})",
+                    "a GENERIC-ARGUMENT reference print against a non-carrier node must \
+                     match NOTHING (measured {})",
                     render_node(dispatch, node, 0)
                 );
             },
@@ -5466,30 +5561,34 @@ fn instanceof_narrows_by_the_checker_rule_and_gaps_only_unproven_arms() {
     }
     let cases = [
         Case {
-            // The downcast direction is underivable from structure
-            // alone: the subject stays `Base` behind the typed gap
-            // where the checker downcasts to `Sub` — an honest
-            // ReturnOnly superset, never an unproven exact answer.
+            // The downcast direction is decided by HERITAGE: `Sub`'s
+            // declaration-identity chain reaches `Base`, so the arm
+            // narrows TO the instance type exactly as the checker does —
+            // clean and warm.
             id: "instanceof_downcast_positive",
             script: "class Base { name = \"\" }\nclass Sub extends Base { extra = 1 }\nexport function f(x: Base) { if (x instanceof Sub) return x; return 0; }",
             checker: "0 | Sub",
-            rendered: "Union(DeclRef(Base) | 0)",
-            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
-            warm: false,
+            rendered: "Union(DeclRef(Sub) | 0)",
+            degradation: Degr::None,
+            warm: true,
         },
         Case {
             // The double-negated spelling rides the same positive edge
-            // and gaps identically.
+            // and downcasts identically — clean and warm.
             id: "instanceof_downcast_negated",
             script: "class Base { name = \"\" }\nclass Sub extends Base { extra = 1 }\nexport function f(x: Base) { if (!(x instanceof Sub)) return 0; return x; }",
             checker: "0 | Sub",
-            rendered: "Union(DeclRef(Base) | 0)",
-            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
-            warm: false,
+            rendered: "Union(DeclRef(Sub) | 0)",
+            degradation: Degr::None,
+            warm: true,
         },
         Case {
-            // An interface subject under an implementing-class test is
-            // the same underivable downcast direction.
+            // An interface subject under an implementing-class test:
+            // `implements` contributes no heritage fact to the class
+            // surface (it is a check, not a derivation), so the downcast
+            // direction stays structurally underivable — the subject
+            // stays `Animal` behind the typed gap, an honest superset of
+            // the checker's downcast.
             id: "instanceof_interface_subject_implementing_class",
             script: "interface Animal { name: string }\nclass Dog implements Animal { name: string = \"\"; bark(): void { } }\nexport function f(x: Animal) { if (x instanceof Dog) return x; return 0; }",
             checker: "0 | Dog",
