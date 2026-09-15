@@ -123,7 +123,7 @@ schema = 2
 "CCA1T4" = { status = "pending" }
 "CCA2" = { status = "pending" }
 "CCA2A" = { status = "pending" }
-"CCA2B" = { status = "pending" }
+"CCA2B" = { status = "implemented", commit_message = "docs(core): converge Vue and Svelte assembly-authority proof", commit_date = "2026-09-15T19:51:02+01:00" }
 "CCA2BS" = { status = "pending" }
 "CCA2BV" = { status = "pending" }
 "CCA2C" = { status = "pending" }
