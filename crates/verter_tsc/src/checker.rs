@@ -177,6 +177,19 @@ fn is_svelte_carrier(path: &Path) -> bool {
     carrier_language(path).is_svelte()
 }
 
+/// Svelte admission is the typecheck/IDE route (ECRS2). `--declaration` is the
+/// Vue-shaped temp-file emit path (`generate_all_tsc` →
+/// `postprocess_vue_declarations`) and is not a current Svelte CLI contract
+/// (CLI/CLITS). Filtering here names that unimplemented route instead of
+/// feeding Svelte into Vue declaration postprocess.
+fn vue_declaration_carriers(admitted: &[PathBuf]) -> Vec<PathBuf> {
+    admitted
+        .iter()
+        .filter(|path| !is_svelte_carrier(path))
+        .cloned()
+        .collect()
+}
+
 fn ide_check_profile() -> CompileProfile {
     CompileProfile {
         target: CompileTarget::IDE,
@@ -863,31 +876,36 @@ pub fn run(
     //    emit surface). Only when `--declaration` is requested. FAIL-CLOSED: an
     //    engine that cannot run the emit is a hard error, never silent success. ──
     let emitted_files = if opts.declaration {
-        let (decl_diagnostics, emitted, declaration_failures) = run_declaration_stage(
-            &host,
-            config,
-            &admission.admitted,
-            tsconfig_path,
-            opts,
-            tsgo_bin,
-        )?;
-        diagnostics.extend(decl_diagnostics);
-        for failure in declaration_failures {
-            if !public_api_failures.iter().any(|existing| {
-                existing.source == failure.source
-                    && existing.code == failure.code
-                    && existing.detail_code == failure.detail_code
-                    && existing.subject == failure.subject
-                    && existing.declaration_shape_reason == failure.declaration_shape_reason
-                    && existing.member_ordinal == failure.member_ordinal
-                    && existing.outcome_kind == failure.outcome_kind
-                    && existing.outcome_reason == failure.outcome_reason
-                    && existing.outcome_diagnostic == failure.outcome_diagnostic
-            }) {
-                public_api_failures.push(failure);
+        let vue_declaration = vue_declaration_carriers(&admission.admitted);
+        if vue_declaration.is_empty() {
+            Vec::new()
+        } else {
+            let (decl_diagnostics, emitted, declaration_failures) = run_declaration_stage(
+                &host,
+                config,
+                &vue_declaration,
+                tsconfig_path,
+                opts,
+                tsgo_bin,
+            )?;
+            diagnostics.extend(decl_diagnostics);
+            for failure in declaration_failures {
+                if !public_api_failures.iter().any(|existing| {
+                    existing.source == failure.source
+                        && existing.code == failure.code
+                        && existing.detail_code == failure.detail_code
+                        && existing.subject == failure.subject
+                        && existing.declaration_shape_reason == failure.declaration_shape_reason
+                        && existing.member_ordinal == failure.member_ordinal
+                        && existing.outcome_kind == failure.outcome_kind
+                        && existing.outcome_reason == failure.outcome_reason
+                        && existing.outcome_diagnostic == failure.outcome_diagnostic
+                }) {
+                    public_api_failures.push(failure);
+                }
             }
+            emitted
         }
-        emitted
     } else {
         Vec::new()
     };
@@ -938,6 +956,45 @@ fn slash(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 
+/// Overlay package root so TypeScript node resolution finds
+/// `@verter/svelte-jsx/*` without writing `compilerOptions.paths` (which would
+/// replace inherited user aliases across `extends`).
+fn svelte_jsx_package_dir(base: &Path) -> PathBuf {
+    base.join("node_modules").join("@verter").join("svelte-jsx")
+}
+
+/// Marker whose parent is `node_modules/@verter`, so overlay `directoryExists`
+/// is true for the scoped folder (TypeScript's scoped node_modules lookup).
+fn svelte_jsx_scope_marker(base: &Path) -> PathBuf {
+    base.join("node_modules")
+        .join("@verter")
+        .join(".verter-svelte-jsx")
+}
+
+/// Types-only package.json so `moduleResolution: bundler` honors the subpath
+/// exports the per-file `@jsxImportSource @verter/svelte-jsx` pragma resolves.
+const SVELTE_JSX_PACKAGE_JSON: &str = r#"{
+  "name": "@verter/svelte-jsx",
+  "version": "0.0.0",
+  "type": "module",
+  "types": "jsx-runtime.d.ts",
+  "exports": {
+    "./jsx-runtime": { "types": "./jsx-runtime.d.ts" },
+    "./jsx-dev-runtime": { "types": "./jsx-dev-runtime.d.ts" },
+    "./svg/jsx-runtime": { "types": "./svg/jsx-runtime.d.ts" },
+    "./svg/jsx-dev-runtime": { "types": "./svg/jsx-dev-runtime.d.ts" },
+    "./mathml/jsx-runtime": { "types": "./mathml/jsx-runtime.d.ts" },
+    "./mathml/jsx-dev-runtime": { "types": "./mathml/jsx-dev-runtime.d.ts" }
+  }
+}
+"#;
+
+/// Overlay-only shims live under `node_modules` and must not be program roots
+/// (they would pull the JSX namespace into the global program).
+fn is_program_root_shim(path: &str) -> bool {
+    !path.contains("/node_modules/")
+}
+
 /// The ambient `.d.ts` shim carriers `(virtual path, content)`, rooted at
 /// virtual in-project paths under `base`.
 ///
@@ -948,17 +1005,18 @@ fn slash(p: &Path) -> String {
 /// real one's exports (the `TS2305`/`TS2694` "has no exported member" class). Each
 /// such augmentation is therefore served as its own MODULE carrier
 /// (`import "<mod>"; declare module "<mod>" { … } export {};`), where it augments.
-fn svelte_jsx_shim_dir(base: &Path) -> PathBuf {
-    base.join("__verter_svelte_jsx")
-}
-
 fn svelte_admission_shims(base: &Path) -> Vec<(String, String)> {
     use verter_session::framework::svelte_jsx_assets as jsx;
-    let dir = svelte_jsx_shim_dir(base);
+    let dir = svelte_jsx_package_dir(base);
     vec![
         (
             slash(&base.join("svelte-shims.d.ts")),
             SVELTE_SHIMS_DTS.to_string(),
+        ),
+        (slash(&svelte_jsx_scope_marker(base)), String::new()),
+        (
+            slash(&dir.join("package.json")),
+            SVELTE_JSX_PACKAGE_JSON.to_string(),
         ),
         (
             slash(&dir.join("jsx-runtime.d.ts")),
@@ -1269,7 +1327,9 @@ fn run_inmemory_typecheck(
     let mut config_files: Vec<String> = Vec::new();
     let has_svelte = admitted.iter().any(|path| is_svelte_carrier(path));
     for (path, content) in ambient_shim_carriers_for(&root, has_svelte) {
-        config_files.push(path.clone());
+        if is_program_root_shim(&path) {
+            config_files.push(path.clone());
+        }
         overlay_files.push(api_check::OverlayFile {
             path,
             content,
@@ -1319,7 +1379,6 @@ fn run_inmemory_typecheck(
         &config_files,
         &validation_opts,
         &config.root_dir,
-        has_svelte,
     );
     let tsconfig_bytes = match serde_json::to_string_pretty(&tsconfig_value) {
         Ok(s) => s,
@@ -1737,7 +1796,7 @@ fn write_temp_tsconfig(
         .map(|p| synthetic_tsconfig_spelling(&p.canonicalize().unwrap_or_else(|_| p.to_path_buf())))
         .collect();
 
-    let tsconfig_json = synthetic_tsconfig_value(&original_abs, &files, opts, root_dir, false);
+    let tsconfig_json = synthetic_tsconfig_value(&original_abs, &files, opts, root_dir);
 
     let suffix = if opts.declaration { "decl" } else { "check" };
     let temp_tsconfig = temp_dir.join(format!("verter-tsc-{suffix}.tsconfig.json"));
@@ -1765,7 +1824,6 @@ fn synthetic_tsconfig_value(
     files: &[String],
     opts: &EmitOptions,
     root_dir: &Path,
-    has_svelte: bool,
 ) -> serde_json::Value {
     let mut compiler_options = serde_json::json!({
         "skipLibCheck": true,
@@ -1810,18 +1868,6 @@ fn synthetic_tsconfig_value(
         .any(|f| f.ends_with(".jsx") || f.ends_with(".js"))
     {
         compiler_options["allowJs"] = serde_json::json!(true);
-    }
-    if has_svelte {
-        compiler_options["baseUrl"] = serde_json::json!(slash(root_dir));
-        let shim = slash(&svelte_jsx_shim_dir(root_dir));
-        compiler_options["paths"] = serde_json::json!({
-            "@verter/svelte-jsx/jsx-runtime": [format!("{shim}/jsx-runtime.d.ts")],
-            "@verter/svelte-jsx/jsx-dev-runtime": [format!("{shim}/jsx-dev-runtime.d.ts")],
-            "@verter/svelte-jsx/svg/jsx-runtime": [format!("{shim}/svg/jsx-runtime.d.ts")],
-            "@verter/svelte-jsx/svg/jsx-dev-runtime": [format!("{shim}/svg/jsx-dev-runtime.d.ts")],
-            "@verter/svelte-jsx/mathml/jsx-runtime": [format!("{shim}/mathml/jsx-runtime.d.ts")],
-            "@verter/svelte-jsx/mathml/jsx-dev-runtime": [format!("{shim}/mathml/jsx-dev-runtime.d.ts")],
-        });
     }
     if opts.declaration {
         compiler_options["declaration"] = serde_json::json!(true);
@@ -3077,6 +3123,13 @@ mod tests {
     #[test]
     fn ambient_shims_carry_the_intrinsic_map_augmentation_for_jsdoc_widened_stubs() {
         let carriers = ambient_shim_carriers_for(Path::new("/base"), false);
+        assert!(
+            carriers
+                .iter()
+                .all(|(path, _)| !path.contains("svelte-jsx")
+                    && !path.ends_with("svelte-shims.d.ts")),
+            "Vue-only admission must not inject Svelte shims: {carriers:?}"
+        );
         let augment = carriers
             .iter()
             .find(|(path, _)| path.ends_with("vue-intrinsic-map-augment.d.ts"))
@@ -3095,6 +3148,61 @@ mod tests {
              the real `vue` instead of REPLACING it: {}",
             augment.1
         );
+    }
+
+    /// Svelte JSX shims are a node_modules overlay package, not a `paths`
+    /// rewrite. TypeScript does not merge `paths` across `extends`; injecting
+    /// them would drop user aliases (`@/*`, SvelteKit `$lib`).
+    #[test]
+    fn svelte_jsx_shims_are_a_node_modules_package() {
+        let carriers = ambient_shim_carriers_for(Path::new("/proj"), true);
+        let paths: Vec<&str> = carriers.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            paths.iter().any(|p| p.ends_with("svelte-shims.d.ts")),
+            "wildcard `*.svelte` shim stays a program root: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"/proj/node_modules/@verter/.verter-svelte-jsx"),
+            "scoped node_modules dir needs an overlay file so directoryExists(@verter) is true: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"/proj/node_modules/@verter/svelte-jsx/package.json"),
+            "package.json overlay for node resolution: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"/proj/node_modules/@verter/svelte-jsx/jsx-runtime.d.ts"),
+            "jsx-runtime overlay: {paths:?}"
+        );
+        let pkg = carriers
+            .iter()
+            .find(|(p, _)| p.ends_with("svelte-jsx/package.json"))
+            .map(|(_, c)| c.as_str())
+            .expect("package.json content");
+        assert!(
+            pkg.contains("\"name\": \"@verter/svelte-jsx\"") && pkg.contains("\"./jsx-runtime\""),
+            "package.json must export jsx-runtime: {pkg}"
+        );
+        assert!(
+            carriers
+                .iter()
+                .filter(|(p, _)| p.contains("/node_modules/"))
+                .all(|(p, _)| !is_program_root_shim(p)),
+            "node_modules overlay rows must not be synthetic tsconfig files entries"
+        );
+        assert!(is_program_root_shim("/proj/svelte-shims.d.ts"));
+    }
+
+    #[test]
+    fn svelte_carriers_are_excluded_from_declaration_admission() {
+        let svelte = PathBuf::from("/p/A.svelte");
+        let vue = PathBuf::from("/p/B.vue");
+        let out = vue_declaration_carriers(&[svelte.clone(), vue.clone()]);
+        assert_eq!(
+            out,
+            vec![vue],
+            "only non-Svelte carriers reach the Vue-shaped declaration stage"
+        );
+        assert!(vue_declaration_carriers(&[svelte]).is_empty());
     }
 
     /// Build a standalone host with each carrier upserted, so `generate_all_tsx`
@@ -6294,7 +6402,6 @@ const props = defineProps<{ msg: string }>()
             &["/project/A_0.jsx".into(), "/project/B_1.tsx".into()],
             &opts,
             temp.path(),
-            false,
         );
         assert_eq!(
             with_js["compilerOptions"]["allowJs"],
@@ -6316,12 +6423,39 @@ const props = defineProps<{ msg: string }>()
             &["/project/B_1.tsx".into()],
             &opts,
             temp.path(),
-            false,
         );
         assert!(
             ts_only["compilerOptions"].get("allowJs").is_none(),
             "a TypeScript-only carrier set must not gain allowJs: {}",
             ts_only["compilerOptions"]
+        );
+    }
+
+    /// Admitting Svelte must not write `paths`/`baseUrl` on the synthetic
+    /// tsconfig: TypeScript replaces those across `extends` instead of merging.
+    #[test]
+    fn synthetic_tsconfig_does_not_write_paths_or_base_url() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let opts = EmitOptions {
+            no_emit: true,
+            declaration: false,
+            declaration_dir: None,
+        };
+        let value = synthetic_tsconfig_value(
+            "/project/tsconfig.json",
+            &["/project/A.tsx".into()],
+            &opts,
+            temp.path(),
+        );
+        assert!(
+            value["compilerOptions"].get("paths").is_none(),
+            "synthetic tsconfig must not clobber inherited paths: {}",
+            value["compilerOptions"]
+        );
+        assert!(
+            value["compilerOptions"].get("baseUrl").is_none(),
+            "synthetic tsconfig must not clobber inherited baseUrl: {}",
+            value["compilerOptions"]
         );
     }
 

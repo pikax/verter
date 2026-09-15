@@ -663,26 +663,14 @@ fn svelte_template_mismatch_is_attributed() {
         !diags.is_empty(),
         "admitted Svelte template mismatch must produce diagnostics. stdout={stdout}\nstderr={stderr}"
     );
-    let template = diags
-        .iter()
-        .filter(|d| d.file.ends_with("TemplateMismatch.svelte"))
-        .collect::<Vec<_>>();
-    assert!(
-        !template.is_empty(),
-        "expected a diagnostic on TemplateMismatch.svelte, found none.\nAll: {diags:#?}"
-    );
-    assert!(
-        template
-            .iter()
-            .any(|d| d.ts_code == 2551 || d.ts_code == 2339 || d.ts_code == 2322),
-        "expected a template property/type mismatch on TemplateMismatch.svelte, got {template:#?}"
-    );
+    assert_error_at(&diags, "TemplateMismatch.svelte", 5, 2551);
     assert_no_tsx_paths(&diags);
     drop(temp);
 }
 
 /// ECRS2-AC2: include/exclude and nested import discriminate admission.
-/// `src/excluded` and `outside/` are not admitted; nested `Child.svelte` is.
+/// `src/excluded` and `outside/` are not admitted; nested `NestedMismatch.svelte`
+/// is admitted (TS2322) — a clean nested file would not discriminate the walk.
 #[test]
 fn svelte_config_include_exclude_and_nested_discriminate_admission() {
     let Some((temp, root)) = setup_svelte_temp_project() else {
@@ -707,6 +695,7 @@ fn svelte_config_include_exclude_and_nested_discriminate_admission() {
     assert_no_errors(&diags, "Child.svelte");
     assert_no_errors(&diags, "NestedParent.svelte");
     assert_no_errors(&diags, "Shadowing.svelte");
+    assert_error_at(&diags, "NestedMismatch.svelte", 2, 2322);
     drop(temp);
 }
 
@@ -731,8 +720,11 @@ fn svelte_ts_glob_does_not_admit_svelte_carriers() {
     drop(temp);
 }
 
-/// ECRS2-AC2: the current CLI has no direct-file source root. A bare `.svelte`
-/// path is not typechecked; the unimplemented route must not exit 0.
+/// ECRS2-AC2: the current CLI has no direct-file source root. A positional
+/// `.svelte` path is parsed as a tsconfig, skipped as invalid JSON, checks 0
+/// carriers, and exits 0. That is the unimplemented route (CLI/CLITS), named
+/// here — not a typecheck of the file. Do not treat exit 0 as a successful
+/// check of the source.
 #[test]
 fn svelte_direct_file_path_is_not_a_current_cli_contract() {
     let temp = tempfile::TempDir::new().expect("temp dir");
@@ -768,5 +760,44 @@ fn svelte_direct_file_path_is_not_a_current_cli_contract() {
             .all(|d| !d.file.ends_with("ScriptMismatch.svelte")),
         "positional `.svelte` must not be treated as an admitted source root: {stdout}"
     );
+    assert!(
+        output.status.success(),
+        "current CLI names this unimplemented route by skipping the file as a \
+         tsconfig and exiting 0; a non-zero exit would be a different contract.\n\
+         stdout={stdout}\nstderr={stderr}"
+    );
+    drop(temp);
+}
+
+/// ECRS2: admitting a Svelte carrier must not clobber user `paths`/`baseUrl`.
+/// Mixed Vue+Svelte files importing through `@/` must not report TS2307.
+#[test]
+fn svelte_user_paths_aliases_survive_svelte_admission() {
+    let Some((temp, root)) = setup_svelte_temp_project() else {
+        return;
+    };
+    let Some((diags, stdout, stderr)) = run_svelte_verter_tsc(&root, &root.join("tsconfig.json"))
+    else {
+        eprintln!(
+            "SKIP: rc tsgo `--api` engine not found — set VERTER_TSGO_BIN or run `pnpm install`"
+        );
+        drop(temp);
+        return;
+    };
+
+    let alias_misses: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.ts_code == 2307
+                && (d.file.ends_with("UseSvelte.svelte") || d.file.ends_with("UseVue.vue"))
+        })
+        .collect();
+    assert!(
+        alias_misses.is_empty(),
+        "admitting Svelte must not drop user paths aliases (TS2307 on @/util). \
+         stdout={stdout}\nstderr={stderr}\nmisses={alias_misses:#?}"
+    );
+    assert_no_errors(&diags, "UseSvelte.svelte");
+    assert_no_errors(&diags, "UseVue.vue");
     drop(temp);
 }

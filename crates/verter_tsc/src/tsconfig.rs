@@ -658,11 +658,18 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let src = temp.path().join("src");
         let excluded = src.join("excluded");
+        let nested = src.join("nested");
         let outside = temp.path().join("outside");
         std::fs::create_dir_all(&excluded).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(src.join("App.svelte"), "<script lang=\"ts\"></script>\n").unwrap();
         std::fs::write(src.join("App.vue"), "<script setup lang=\"ts\"></script>\n").unwrap();
+        std::fs::write(
+            nested.join("Deep.svelte"),
+            "<script lang=\"ts\"></script>\n",
+        )
+        .unwrap();
         std::fs::write(
             excluded.join("Skipped.svelte"),
             "<script lang=\"ts\"></script>\n",
@@ -696,6 +703,10 @@ mod tests {
         assert!(
             names.iter().any(|n| n == "App.vue"),
             "directory include must still admit .vue: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "Deep.svelte"),
+            "directory include must walk nested .svelte carriers: {names:?}"
         );
         assert!(
             names.iter().all(|n| n != "Skipped.svelte"),
