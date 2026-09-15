@@ -42,12 +42,13 @@ use std::sync::Arc;
 
 use super::*;
 use crate::semantic_query::{
-    FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
+    FlowGap, FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput,
+    SemanticQueryValue,
 };
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 use verter_type_expr::facts::FunctionPartIdentity;
-use verter_type_expr::{LiteralValue, PrimitiveName, TopLevelOwnerId, TypeExpr};
+use verter_type_expr::{LiteralValue, PrimitiveName, TopLevelOwnerId, TypeExpr, UnknownValue};
 
 // ──────────────────────────────────────────────────────────────────────
 // Fixtures
@@ -73,6 +74,28 @@ export class LeafSuperBase {
 export class LeafSuperDerived extends LeafSuperBase {
   m(): number {
     return super.m();
+  }
+}
+
+export class LeafSuperGenericBase<T> {
+  m(): T {
+    return null as unknown as T;
+  }
+}
+export class LeafSuperGenericDerived extends LeafSuperGenericBase<string> {
+  m(): string {
+    return super.m();
+  }
+}
+
+export class LeafSuperStaticBase {
+  static s(): string {
+    return "s";
+  }
+}
+export class LeafSuperStaticDerived extends LeafSuperStaticBase {
+  static s(): string {
+    return super.s();
   }
 }
 
@@ -147,6 +170,17 @@ export function jsxFrag() {
 export declare function jsxHelper(n: number): "H";
 export function jsxAttrCall() {
   return <div data-x={jsxHelper(1)} />;
+}
+"#;
+
+/// A `.tsx` file with NO configured `JSX` namespace anywhere in scope —
+/// the negative control for the JSX leaf: even with nothing to resolve
+/// `JSX.Element` against, the leaf still publishes the honest unresolved
+/// `Ref { name: "JSX.Element" }` carrier, never a fabricated `any`.
+const JSX_UNCONFIGURED: &str = "/ws/cov/jsx_unconfigured.tsx";
+const JSX_UNCONFIGURED_SRC: &str = r#"
+export function jsxElemNoNamespace() {
+  return <div />;
 }
 "#;
 
@@ -231,6 +265,16 @@ export function callCtorSigNew() {
 export declare const maybeObj: { b: string } | undefined;
 export function callOptionalMemberRead() {
   return maybeObj?.b;
+}
+
+export declare const optProp: { b?: string };
+export function callOptionalDeclaredMemberRead() {
+  return optProp?.b;
+}
+
+export declare const optChainProp: { b?: { c: number } };
+export function callOptionalDeclaredChainMemberRead() {
+  return optChainProp?.b?.c;
 }
 "#;
 
@@ -545,6 +589,7 @@ fn ts_host() -> Arc<VerterHost> {
     host_with(&[
         (LEAF, LEAF_SRC),
         (JSX, JSX_SRC),
+        (JSX_UNCONFIGURED, JSX_UNCONFIGURED_SRC),
         (CALLS, CALLS_SRC),
         (TL, TL_SRC),
         (GEO, GEO_SRC),
@@ -1543,116 +1588,171 @@ fn assignment_expression_return_is_the_assigned_type() {
     assert_clean_warm(&host, LEAF, "leafAssign", number());
 }
 
-/// CANARY — a `ClassExpression` in return position is the anonymous
-/// class's constructor type, not `any`.
+/// CANARY (fail-closed leg) — a `ClassExpression` in return position is
+/// the anonymous class's constructor type, not `any`.
 ///
 /// Oracle: `ReturnType<typeof leafClassExpr>` is
 /// `typeof (Anonymous class)`.
 ///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left != right` failed: leafClassExpr must not be `any`
-///   left: Primitive(Any)
-///  right: Primitive(Any)
-/// ```
-///
-/// Owning layer: `flow_slice_content::lower_leaf`. The assertion is
-/// negative because the typed IR has no stable spelling for an anonymous
-/// class's constructor type; `!= any` still discriminates exactly the
-/// defect — it fails today and passes on any real answer.
+/// The fabricated `any` this row was parked against is DELETED: the
+/// shared shallow pass's unmodelled-form fallback now reports
+/// completeness `Unmodeled` and the leaf lowers to the typed
+/// `FlowGap::UnmodeledExpression` — the value is the positional marker,
+/// nothing warms. The typed publication (the constructor type through
+/// `ResolveClassSurface`) has no stable spelling for an ANONYMOUS class
+/// expression in this IR, so the form keeps the charter's fail-closed
+/// branch and this row stays the `!= any` discriminator.
 #[test]
-#[ignore = "ClassExpression has no leaf rule: it evaluates to `any` and is admitted warm"]
 fn class_expression_return_is_not_any() {
     let host = ts_host();
-    assert_ne!(
-        value_of(&host, LEAF, "leafClassExpr"),
-        TypeExpr::Primitive(PrimitiveName::Any),
-        "leafClassExpr must not be `any`"
+    assert_eq!(
+        eval(&host, LEAF, "leafClassExpr"),
+        Outcome::Value {
+            ty: TypeExpr::Unknown(UnknownValue::compatibility_projection("unmodeledPosition")),
+            degradation: Some(FlowReturnDegradation::FlowGap(FlowGap::UnmodeledExpression)),
+            candidates: 0,
+        },
+        "leafClassExpr"
     );
 }
 
-/// CANARY — an `ImportExpression` (dynamic `import(...)`) in return
-/// position is a `Promise` of the module's namespace type.
+/// CANARY (fail-closed leg) — an `ImportExpression` (dynamic
+/// `import(...)`) in return position is a `Promise` of the module's
+/// namespace type.
 ///
 /// Oracle: `ReturnType<typeof leafImportExpr>` is
 /// `Promise<typeof import("…/dep")>`.
 ///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left != right` failed: leafImportExpr must not be `any`
-///   left: Primitive(Any)
-///  right: Primitive(Any)
-/// ```
-///
-/// Owning layer: `flow_slice_content::lower_leaf`. Negative assertion for
-/// the same reason as the class-expression row — a module-namespace type
-/// has no stable typed-IR spelling here.
+/// The fabricated `any` this row was parked against is DELETED (see the
+/// class-expression row): the form lowers to the typed
+/// `FlowGap::UnmodeledExpression` and never warms. The typed
+/// publication — `Promise<typeof import("m")>` through the
+/// module-namespace surface — has no carrier spelling in this IR yet,
+/// so the form keeps the charter's fail-closed branch.
 #[test]
-#[ignore = "ImportExpression has no leaf rule: the dynamic-import promise evaluates to `any` and is admitted warm"]
 fn dynamic_import_expression_return_is_not_any() {
     let host = ts_host();
-    assert_ne!(
-        value_of(&host, LEAF, "leafImportExpr"),
-        TypeExpr::Primitive(PrimitiveName::Any),
-        "leafImportExpr must not be `any`"
+    assert_eq!(
+        eval(&host, LEAF, "leafImportExpr"),
+        Outcome::Value {
+            ty: TypeExpr::Unknown(UnknownValue::compatibility_projection("unmodeledPosition")),
+            degradation: Some(FlowReturnDegradation::FlowGap(FlowGap::UnmodeledExpression)),
+            candidates: 0,
+        },
+        "leafImportExpr"
     );
 }
 
-/// CANARY — a `MetaProperty` (`new.target`) in return position is not
-/// `any`.
+/// CANARY (fail-closed leg) — a `MetaProperty` (`new.target`) in return
+/// position is not `any`.
 ///
 /// Oracle: `ReturnType<typeof leafNewTarget>` prints as
 /// `() => typeof leafNewTarget` — `new.target` inside `f` is typed as
 /// `typeof f`, so the wrapper's answer is the function type itself.
 ///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left != right` failed: leafNewTarget must not be `any`
-///   left: Primitive(Any)
-///  right: Primitive(Any)
-/// ```
-///
-/// Owning layer: `flow_slice_content::lower_leaf` — `MetaProperty` is in
-/// the leaf fall-through set with no `new.target` rule, so the shallow
-/// pass answers `any`, admitted warm.
+/// The fabricated `any` this row was parked against is DELETED (see the
+/// class-expression row): the form lowers to the typed
+/// `FlowGap::UnmodeledExpression` and never warms. The typed publication
+/// — the containing function's own type for `new.target`, the lib
+/// `ImportMeta` surface for `import.meta` — has no carrier spelling in
+/// this IR yet, so the form keeps the charter's fail-closed branch.
 #[test]
-#[ignore = "MetaProperty (`new.target`) has no arm: it evaluates to `any` and is admitted warm"]
 fn meta_property_new_target_return_is_not_any() {
     let host = ts_host();
-    assert_ne!(
-        value_of(&host, LEAF, "leafNewTarget"),
-        TypeExpr::Primitive(PrimitiveName::Any),
-        "leafNewTarget must not be `any`"
+    assert_eq!(
+        eval(&host, LEAF, "leafNewTarget"),
+        Outcome::Value {
+            ty: TypeExpr::Unknown(UnknownValue::compatibility_projection("unmodeledPosition")),
+            degradation: Some(FlowReturnDegradation::FlowGap(FlowGap::UnmodeledExpression)),
+            candidates: 0,
+        },
+        "leafNewTarget"
     );
 }
 
-/// CANARY — a `super.m()` call in a derived class method resolves to the
-/// base member's declared return.
+/// CANARY — a typed optional member read (`maybeObj?.b`) publishes the
+/// member's type over the nullish-stripped base, `| undefined` — the
+/// checker's `string | undefined` for a nullable base, clean and warm.
+///
+/// Oracle: `ReturnType<typeof callOptionalMemberRead>` is
+/// `string | undefined`.
+///
+/// Verbatim failure (before the `SliceExpr::OptionalMember` carrier):
+///
+/// ```text
+/// assertion `left == right` failed
+///   left: Value { ty: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection }), degradation: Some(FlowGap(UnmodeledExpression)), candidates: 0 }
+///  right: Value { ty: Union([Primitive(String), Primitive(Undefined)]), degradation: None, candidates: 1 }
+/// ```
+///
+/// Owning layer: the content half's chain arm — a member-valued chain
+/// used to ride the still-`any` `OptionalAnyChain` rail (whose non-`any`
+/// root degraded) or the whole-form leaf gap. The typed carrier strips
+/// each optional link's nullish arms, projects the link through the one
+/// shared path walk, and unions `undefined` exactly when a strip removed
+/// arms; a NON-nullable base keeps the plain member type (no undefined)
+/// and an `any` root keeps `any`.
+#[test]
+fn optional_member_read_return_is_the_stripped_member_or_undefined() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "callOptionalMemberRead",
+        TypeExpr::union(vec![
+            string(),
+            TypeExpr::Primitive(PrimitiveName::Undefined),
+        ]),
+    );
+    // A DECLARED-optional member (`b?: string`) folds its own absent-key
+    // `undefined` into the read even over a NON-nullable base — the same
+    // fold `project_segments_navigate` applies to a plain member path.
+    // Before the per-link fold, this hop bypassed that authority and
+    // published the bare member type clean and warm.
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "callOptionalDeclaredMemberRead",
+        TypeExpr::union(vec![
+            string(),
+            TypeExpr::Primitive(PrimitiveName::Undefined),
+        ]),
+    );
+    // Chained declared-optional hops over a non-nullable root: each link
+    // folds its own optionality independently, so the terminal read still
+    // carries `| undefined` even though neither hop's base is nullish.
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "callOptionalDeclaredChainMemberRead",
+        TypeExpr::union(vec![
+            TypeExpr::Primitive(PrimitiveName::Undefined),
+            number(),
+        ]),
+    );
+}
+/// CANARY (landed) — a `super.m()` call in a derived class method
+/// resolves to the base member's declared return.
 ///
 /// Oracle: `ReturnType<typeof LeafSuperDerived.prototype.m>` is `number`.
 ///
-/// Verbatim failure (un-ignored):
+/// Verbatim failure (before the `SliceCall::OnHeritage` carrier):
 ///
 /// ```text
 /// assertion `left == right` failed
 ///   left: Value { ty: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
 ///  right: Value { ty: Primitive(Number), degradation: None, candidates: 1 }
-/// ```///
-/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
-/// result is a degraded success and nothing warms — so the row observes a
-/// VALUE rather than `Miss`. The capability gap named below is unchanged.
+/// ```
 ///
-/// Owning layer: the flow evaluator's call carrier — a `Super` callee
-/// root has no arm, so the base class's member is never reached. The
-/// admission half is settled: a call whose callee cannot be represented
-/// at all fails closed rather than publishing the shallow leaf's `any`
-/// warm.
+/// Owning layer: the content half's call lowering — a `Super` callee root
+/// now lowers onto the HERITAGE surface (`SliceCall::OnHeritage`): the
+/// enclosing class's `extends` expression rides as a gated value type,
+/// the evaluator projects `prototype.m` off it through the ONE shared
+/// path walk (only the demanded member is materialised) and hands the
+/// resolved callee to the one call sink. A heritage the shallow pass
+/// cannot model (a call, a mixin) keeps the fail-closed rail below, as
+/// does a computed `super[k]()` link.
 #[test]
-#[ignore = "a `super.m()` callee root has no arm: the call fails closed instead of resolving the base member"]
 fn super_method_call_return_resolves_to_the_base_member() {
     let host = ts_host();
     assert_eq!(
@@ -1663,6 +1763,60 @@ fn super_method_call_return_resolves_to_the_base_member() {
             candidates: 1,
         }
     );
+}
+
+/// CANARY — `super.s()` reaches the base's STATIC side (not the
+/// instance/prototype side) when the calling member is itself static.
+///
+/// Oracle: `ReturnType<typeof LeafSuperStaticDerived.s>` is `string`.
+#[test]
+fn super_static_method_call_return_resolves_to_the_base_static_member() {
+    let host = ts_host();
+    assert_eq!(
+        eval_part(&host, LEAF, "LeafSuperStaticDerived", member_part(0), 0),
+        Outcome::Value {
+            ty: string(),
+            degradation: None,
+            candidates: 1,
+        }
+    );
+}
+
+/// CANARY (fail-closed leg) — `super.m()` over a GENERIC base
+/// (`extends Base<string>`) does not publish the base's unbound type
+/// parameter (or any other uninstantiated answer) clean and warm. The
+/// heritage carrier only ever projects the base's PROTOTYPE side
+/// UNINSTANTIATED, so publishing through it here would hand back a free
+/// `T`, or whatever the unbound construct-signature instantiation
+/// yields — a wrong answer that is still typed and still not `any`.
+/// `lower_super_call_on_heritage` fails closed (no carrier) whenever the
+/// enclosing class's heritage carries `super_type_arguments`, so this
+/// falls to the shared fail-closed rail — the SAME `UnmodeledPosition`
+/// marker an unrepresentable callee root takes elsewhere — instead of
+/// fabricating an uninstantiated member type.
+///
+/// Oracle: `ReturnType<typeof LeafSuperGenericDerived.prototype.m>` is
+/// `string` (the checker instantiates `Base<string>` before projecting
+/// `m`) — an answer this form does not yet attempt to produce.
+#[test]
+fn super_method_call_over_generic_base_fails_closed_not_uninstantiated() {
+    let host = ts_host();
+    match eval_part(&host, LEAF, "LeafSuperGenericDerived", member_part(0), 0) {
+        Outcome::Value {
+            ty,
+            degradation,
+            candidates,
+        } => {
+            assert_ne!(ty, string(), "must not silently produce the checker's answer via an unmodeled/uninstantiated path");
+            assert_eq!(
+                degradation,
+                Some(FlowReturnDegradation::UnmodeledPosition),
+                "generic super call must fail closed with the typed gap"
+            );
+            assert_eq!(candidates, 0, "a fail-closed answer must not warm");
+        }
+        other => panic!("expected a degraded fail-closed value, got {other:?}"),
+    }
 }
 
 /// CANARY — a `PrivateInExpression` (`#x in o`) in return position is
@@ -1758,46 +1912,69 @@ fn generator_return_is_wrapped_in_generator() {
     );
 }
 
-/// CANARY — a JSX element / fragment in return position is the configured
-/// `JSX.Element`.
+/// CANARY (landed) — a JSX element / fragment in return position is the
+/// configured `JSX.Element`.
 ///
 /// Oracle: with `declare global { namespace JSX { interface Element … } }`
 /// in scope, tsgo types all three of `ReturnType<typeof jsxElem>`,
 /// `ReturnType<typeof jsxFrag>` and `ReturnType<typeof jsxAttrCall>` as
 /// `Element`.
 ///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left != right` failed: jsxElem must not be `any`
-///   left: Primitive(Any)
-///  right: Primitive(Any)
-/// ```
-///
-/// Owning layer: `flow_slice_content::lower_leaf` — `JSXElement` and
-/// `JSXFragment` are in the leaf fall-through set, so the shallow pass's
-/// fallback `any` is published warm. All THREE rows are that one gap.
+/// The fabricated `any` this row was parked against is DELETED:
+/// `JSXElement` / `JSXFragment` now lower to the whole-form leaf
+/// `JSX.Element` type reference, resolved through the ONE shared
+/// lowering exactly as an authored `JSX.Element` annotation is (the
+/// frame gate's `Namespace`-meaning probe covers a frame-local shadow
+/// of `JSX`), and an unresolvable `JSX` namespace keeps the honest
+/// authored-unresolved carrier — never `any`.
 ///
 /// `jsxAttrCall` is deliberately NOT routed through the call-position
 /// fail-closed rail, even though it does embed a call: a JSX element's
 /// value is `JSX.Element` and does not depend on any attribute's value,
-/// so the attribute's call is not a value provider of the return and
-/// failing the element closed on account of it would be wrong for a
-/// reason unrelated to the call. What is wrong here is the element's own
-/// unmodeled `any` — which is the shallow pass's `_ => Primitive(Any)`
-/// row, the same one `leafNewTarget` / `leafClassExpr` /
-/// `leafImportExpr` sit on.
+/// so the attribute's call takes the ordinary decided-above
+/// certification instead (`record_decided_above_calls`), not a
+/// fail-closed verdict for the element.
 #[test]
-#[ignore = "JSXElement / JSXFragment have no leaf rule: they evaluate to the shallow pass's fallback `any` and are admitted warm"]
 fn jsx_element_fragment_and_attribute_call_returns_are_not_any() {
     let host = ts_host();
-    for name in ["jsxElem", "jsxFrag", "jsxAttrCall"] {
-        assert_ne!(
-            value_of(&host, JSX, name),
-            TypeExpr::Primitive(PrimitiveName::Any),
-            "{name} must not be `any`"
-        );
+    // Positive pin: the whole-form JSX leaf publishes the checker's
+    // answer — the `JSX.Element` reference — clean and warm-admitted.
+    // This discriminates the claimed typed publication from the typed
+    // fail-closed gap marker (`Unknown { raw: "unmodeledPosition" }`,
+    // `FlowGap::UnmodeledExpression`), which also satisfies a bare
+    // `!= any` assertion but is a wholly different outcome (degraded,
+    // zero candidates).
+    for name in ["jsxElem", "jsxFrag"] {
+        assert_clean_warm(&host, JSX, name, type_ref("JSX.Element"));
     }
+    // `jsxAttrCall`'s attribute value is itself a call the surrounding
+    // narrowing pass cannot model precisely, so the whole return degrades
+    // with the unrelated `FlowGap::GuardNarrowing` gap (a general
+    // narrowing limitation, not specific to JSX or to this charter). The
+    // JSX leaf's own answer still resolves to the same typed
+    // `JSX.Element` reference rather than a fabricated `any`, so the full
+    // outcome is pinned exactly — still discriminating the typed leaf
+    // from both `any` and the `UnmodeledExpression` gap marker.
+    assert_eq!(
+        eval(&host, JSX, "jsxAttrCall"),
+        Outcome::Value {
+            ty: type_ref("JSX.Element"),
+            degradation: Some(FlowReturnDegradation::FlowGap(FlowGap::GuardNarrowing)),
+            candidates: 0,
+        },
+        "jsxAttrCall"
+    );
+    // Negative control: with no `JSX` namespace configured anywhere in
+    // scope, the leaf still publishes the same honest unresolved
+    // `Ref { name: "JSX.Element" }` carrier — never a fabricated `any`,
+    // and never silently promoted to a different shape just because the
+    // reference cannot resolve further.
+    assert_clean_warm(
+        &host,
+        JSX_UNCONFIGURED,
+        "jsxElemNoNamespace",
+        type_ref("JSX.Element"),
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -3202,21 +3379,20 @@ fn non_call_forms_and_modeled_call_arms_are_untouched_by_the_call_position_gate(
     // An IIFE still resolves through the nested-function arm (its lone
     // fresh literal contributor widens, exactly as a plain body's does).
     assert_clean_warm(&host, GEO, "geoIifeInside", string());
-    // A typed optional MEMBER read is not a call position, but its
-    // optionality/member projection is still unmodelled by the leaf
-    // lowerer. It therefore takes the expression-gap rail, not the
-    // optional-call refusal and not a fabricated warm `any`.
-    assert_eq!(
-        eval(&host, CALLS, "callOptionalMemberRead"),
-        Outcome::Value {
-            ty: TypeExpr::Unknown(verter_type_expr::UnknownValue::compatibility_projection(
-                "unmodeledPosition",
-            )),
-            degradation: Some(FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::UnmodeledExpression,
-            )),
-            candidates: 0,
-        },
-        "the degraded optional-member result keeps its published value pin",
+    // A typed optional MEMBER read is not a call position: it publishes
+    // the member's type over the NULLISH-STRIPPED base with `undefined`
+    // unioned in — the checker's `string | undefined`, clean and warm
+    // (the carrier's own canary,
+    // `optional_member_read_return_is_the_stripped_member_or_undefined`,
+    // pins the shape; this row pins only that the call-position gate
+    // leaves it alone).
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "callOptionalMemberRead",
+        TypeExpr::union(vec![
+            string(),
+            TypeExpr::Primitive(PrimitiveName::Undefined),
+        ]),
     );
 }

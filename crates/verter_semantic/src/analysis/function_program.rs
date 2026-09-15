@@ -888,6 +888,7 @@ struct DiscoveryCtx<'source, 'ast> {
     owners: &'source TopLevelOwnerTable,
     nodes: Option<FunctionProgramNodes<'ast>>,
     enclosing_type_parameters: Option<&'ast oxc_ast::ast::TSTypeParameterDeclaration<'ast>>,
+    enclosing_heritage: Option<EnclosingHeritage<'ast>>,
     entries: Vec<FunctionProgramEntry>,
     expressions: Vec<ProgramExpressionRecord>,
     /// Source-order ordinal counter for nested served positions (hoisted
@@ -937,6 +938,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
                     node,
                     self_name,
                     enclosing_type_parameters: self.enclosing_type_parameters,
+                    enclosing_heritage: self.enclosing_heritage,
                 });
         }
         self.entries.push(entry);
@@ -985,6 +987,7 @@ fn build_function_program_index_impl<'ast>(
         owners,
         nodes,
         enclosing_type_parameters: None,
+        enclosing_heritage: None,
         entries: Vec::new(),
         expressions: Vec::new(),
         next_nested_ordinal: 0,
@@ -2733,6 +2736,7 @@ fn discover_class_members<'ast>(
 ) {
     let previous_type_parameters = ctx.enclosing_type_parameters;
     ctx.enclosing_type_parameters = class.type_parameters.as_deref();
+    let previous_heritage = ctx.enclosing_heritage;
     let mut member_overloads: rustc_hash::FxHashMap<(String, bool), u32> =
         rustc_hash::FxHashMap::default();
     for (member_ordinal, element) in class.body.body.iter().enumerate() {
@@ -2756,6 +2760,18 @@ fn discover_class_members<'ast>(
                 if method.value.body.is_none() {
                     continue;
                 }
+                // A `super.x` in this member reads the base's INSTANCE side
+                // (prototype) for an instance member, its STATIC side for a
+                // static one — the member's own `static` flag decides which.
+                ctx.enclosing_heritage =
+                    class
+                        .super_class
+                        .as_ref()
+                        .map(|super_class| EnclosingHeritage {
+                            super_class,
+                            super_type_arguments: class.super_type_arguments.as_deref(),
+                            static_side: method.r#static,
+                        });
                 let member_path: Arc<[u32]> = Arc::from(vec![member_ordinal].into_boxed_slice());
                 let mut descent = base_descent.clone();
                 descent.push(FunctionDescentStep::ClassMember { member_ordinal });
@@ -2768,6 +2784,7 @@ fn discover_class_members<'ast>(
                     overload,
                     ctx,
                 );
+                ctx.enclosing_heritage = previous_heritage;
             }
             oxc_ast::ast::ClassElement::PropertyDefinition(prop) => {
                 let Some(_member_name) = static_property_key_name(&prop.key) else {
@@ -2776,6 +2793,15 @@ fn discover_class_members<'ast>(
                 let member_path: Arc<[u32]> = Arc::from(vec![member_ordinal].into_boxed_slice());
                 let mut descent = base_descent.clone();
                 descent.push(FunctionDescentStep::ClassMember { member_ordinal });
+                ctx.enclosing_heritage =
+                    class
+                        .super_class
+                        .as_ref()
+                        .map(|super_class| EnclosingHeritage {
+                            super_class,
+                            super_type_arguments: class.super_type_arguments.as_deref(),
+                            static_side: prop.r#static,
+                        });
                 match prop.value.as_ref() {
                     Some(Expression::ArrowFunctionExpression(arrow)) => {
                         discover_arrow_inner(
@@ -2800,11 +2826,13 @@ fn discover_class_members<'ast>(
                     }
                     _ => {}
                 }
+                ctx.enclosing_heritage = previous_heritage;
             }
             _ => {}
         }
     }
     ctx.enclosing_type_parameters = previous_type_parameters;
+    ctx.enclosing_heritage = previous_heritage;
 }
 
 pub(crate) fn static_property_key_name(key: &PropertyKey<'_>) -> Option<String> {
@@ -2939,6 +2967,7 @@ fn discover_nested_positions<'ast>(
     ctx: &mut DiscoveryCtx<'_, 'ast>,
 ) {
     let previous_type_parameters = ctx.enclosing_type_parameters.take();
+    let previous_heritage = ctx.enclosing_heritage.take();
     let mut local_ordinal = 0;
     for_each_nested_callable(statements, |node| {
         let ordinal = ctx.next_nested_ordinal;
@@ -2959,6 +2988,7 @@ fn discover_nested_positions<'ast>(
         );
     });
     ctx.enclosing_type_parameters = previous_type_parameters;
+    ctx.enclosing_heritage = previous_heritage;
 }
 /// One function / arrow expression in call-argument position, discovered
 /// under its lexical parent's key.
@@ -4028,6 +4058,30 @@ pub struct ResolvedFunctionNode<'a> {
     /// a variable declarator, and an object literal declare no type
     /// parameters, so those descents carry `None`.
     pub enclosing_type_parameters: Option<&'a oxc_ast::ast::TSTypeParameterDeclaration<'a>>,
+    /// The enclosing class-member heritage context, when the function is
+    /// a DIRECT member of a class with an `extends` clause: the heritage
+    /// expression and whether the member is STATIC — the two facts a
+    /// `super.x` access inside the member resolves through (the base's
+    /// instance side for an instance member, its static side for a static
+    /// one). `None` outside a direct class member and for heritage-less
+    /// classes; nested callables clear it, mirroring the type-parameter
+    /// clause rule above.
+    pub enclosing_heritage: Option<EnclosingHeritage<'a>>,
+}
+
+/// The heritage (`extends`) access context one direct class member's body
+/// evaluates its `super.x` expressions against.
+#[derive(Debug, Clone, Copy)]
+pub struct EnclosingHeritage<'a> {
+    /// The class's authored `extends` expression.
+    pub super_class: &'a oxc_ast::ast::Expression<'a>,
+    /// The class's authored `extends Base<Args>` type arguments, when the
+    /// heritage is generic (`None` for a non-generic `extends Base`).
+    pub super_type_arguments: Option<&'a oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+    /// Whether the member declaring the frame is STATIC — `super.x` in a
+    /// static member reads the base CONSTRUCTOR's own (static) side; in an
+    /// instance member it reads the base's PROTOTYPE side.
+    pub static_side: bool,
 }
 
 /// Resolve one function's locator against the retained snapshot: the
@@ -4050,6 +4104,11 @@ pub fn resolve_function_node<'a>(
     // IIFE callee). `None` while the descent is still navigating
     // declarations from the contributor statement.
     let mut current_body: Option<&'a oxc_ast::ast::FunctionBody<'a>> = None;
+    // The heritage context of the innermost enclosing class member, set by
+    // a `ClassMember` step and cleared by every deeper nested-position step
+    // — mirroring discovery, which binds the heritage only to the member's
+    // own program.
+    let mut enclosing_heritage: Option<EnclosingHeritage<'a>> = None;
     let mut steps = locator.descent.iter().peekable();
     loop {
         match steps.next()? {
@@ -4074,6 +4133,7 @@ pub fn resolve_function_node<'a>(
                         node: FunctionNode::Function(func),
                         self_name,
                         enclosing_type_parameters: None,
+                        enclosing_heritage,
                     });
                 }
                 // Non-terminal: a nested position inside this function's body.
@@ -4095,6 +4155,7 @@ pub fn resolve_function_node<'a>(
                             node: function_from_expression(init)?,
                             self_name,
                             enclosing_type_parameters: None,
+                            enclosing_heritage,
                         });
                     }
                     Some(FunctionDescentStep::ObjectMember { member_ordinal }) => {
@@ -4115,6 +4176,7 @@ pub fn resolve_function_node<'a>(
                                 node,
                                 self_name: None,
                                 enclosing_type_parameters: None,
+                                enclosing_heritage,
                             });
                         }
                         // Non-terminal: a nested position inside the member body.
@@ -4132,22 +4194,36 @@ pub fn resolve_function_node<'a>(
                     return None;
                 };
                 let element = class.body.body.get(*member_ordinal as usize)?;
-                let node = match element {
-                    ClassElement::MethodDefinition(method) => FunctionNode::Function(&method.value),
-                    ClassElement::PropertyDefinition(property) => {
-                        function_from_expression(property.value.as_ref()?)?
+                let (node, member_is_static) = match element {
+                    ClassElement::MethodDefinition(method) => {
+                        (FunctionNode::Function(&method.value), method.r#static)
                     }
+                    ClassElement::PropertyDefinition(property) => (
+                        function_from_expression(property.value.as_ref()?)?,
+                        property.r#static,
+                    ),
                     _ => return None,
                 };
+                enclosing_heritage =
+                    class
+                        .super_class
+                        .as_ref()
+                        .map(|super_class| EnclosingHeritage {
+                            super_class,
+                            super_type_arguments: class.super_type_arguments.as_deref(),
+                            static_side: member_is_static,
+                        });
                 if steps.len() == 0 {
                     // Terminal step: the class member at `member_ordinal`.
                     // Class members have no bare-identifier self name. The
                     // CLASS's own type-parameter clause binds throughout every
-                    // member body, so it rides out with the node.
+                    // member body, so it rides out with the node — as does the
+                    // heritage context a `super.x` access resolves through.
                     return Some(ResolvedFunctionNode {
                         node,
                         self_name: None,
                         enclosing_type_parameters: class.type_parameters.as_deref(),
+                        enclosing_heritage,
                     });
                 }
                 // Non-terminal: a nested position inside the member body.
@@ -4171,6 +4247,7 @@ pub fn resolve_function_node<'a>(
                         node,
                         self_name: None,
                         enclosing_type_parameters: None,
+                        enclosing_heritage,
                     });
                 }
                 // Non-terminal: a nested position inside the member body.
@@ -4182,6 +4259,7 @@ pub fn resolve_function_node<'a>(
                 return None;
             }
             FunctionDescentStep::NestedCallable { ordinal } => {
+                enclosing_heritage = None;
                 let body = current_body?;
                 let mut position = 0;
                 let mut selected = None;
@@ -4203,11 +4281,13 @@ pub fn resolve_function_node<'a>(
                         node,
                         self_name,
                         enclosing_type_parameters: None,
+                        enclosing_heritage,
                     });
                 }
                 current_body = node.body();
             }
             FunctionDescentStep::BodyStatement { statement_ordinal } => {
+                enclosing_heritage = None;
                 // The statement at `statement_ordinal` inside the enclosing
                 // function's body — a hoisted nested function declaration.
                 let body = current_body?;
@@ -4222,6 +4302,7 @@ pub fn resolve_function_node<'a>(
                         node: FunctionNode::Function(func),
                         self_name,
                         enclosing_type_parameters: None,
+                        enclosing_heritage,
                     });
                 }
                 // Non-terminal: a nested position inside this declaration's body.
@@ -4231,6 +4312,7 @@ pub fn resolve_function_node<'a>(
                 call_ordinal,
                 arg_ordinal,
             } => {
+                enclosing_heritage = None;
                 // The argument at `arg_ordinal` of the enclosing body's
                 // `call_ordinal`-th call site — a callback position.
                 let body = current_body?;
@@ -4249,12 +4331,14 @@ pub fn resolve_function_node<'a>(
                         node,
                         self_name,
                         enclosing_type_parameters: None,
+                        enclosing_heritage,
                     });
                 }
                 // Non-terminal: a nested position inside the callback's body.
                 current_body = node.body();
             }
             FunctionDescentStep::CallCallee { call_ordinal } => {
+                enclosing_heritage = None;
                 // The CALLEE of the enclosing body's `call_ordinal`-th call
                 // site — an immediately-invoked function expression.
                 let body = current_body?;
@@ -4271,6 +4355,7 @@ pub fn resolve_function_node<'a>(
                         node,
                         self_name,
                         enclosing_type_parameters: None,
+                        enclosing_heritage,
                     });
                 }
                 // Non-terminal: a nested position inside the callee's body.

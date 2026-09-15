@@ -6175,6 +6175,18 @@ enum Positional<T> {
     Unmodeled,
 }
 
+/// The outcome of stripping the nullish (`null` / `undefined`) arms of
+/// one optional-member link's base union.
+enum NullishStrip {
+    /// No nullish arm was present — the base is non-nullable, so the
+    /// link adds nothing and keeps the base node itself.
+    Unchanged,
+    /// Nullish arms were removed; the link's read continues from here.
+    Stripped(SemanticNodeId),
+    /// EVERY arm was nullish — the chain short-circuits to `undefined`.
+    AllNullish,
+}
+
 impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// Promote the first statement-level gap only when evaluation found no
     /// concrete degradation.
@@ -12727,6 +12739,77 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Unmodeled => Positional::Unmodeled,
                 }
             }
+            // A typed optional member read (`maybeObj?.b`): the checker's
+            // answer is the member's type over the link bases' non-nullish
+            // parts, `| undefined` exactly when an optional link's base was
+            // nullable. Each link strips its own nullish arms, projects
+            // through the ONE shared `ProjectPath { Navigate }` walk, and
+            // the chain unions `undefined` once if any strip removed arms —
+            // a non-nullable base publishes the plain member type, exactly
+            // as the checker does.
+            crate::flow_slice_content::SliceExpr::OptionalMember { root, links } => {
+                let node = match self.eval_expr(root) {
+                    Positional::Value(node) => node,
+                    Positional::Hold => return Positional::Hold,
+                    Positional::Unmodeled => return Positional::Unmodeled,
+                };
+                // An `any` root keeps the authored `any`: every member
+                // read off `any` is `any`, optionality included.
+                if self.node_is_semantic_any(node) {
+                    return Positional::Value(node);
+                }
+                let mut current = node;
+                let mut adds_undefined = false;
+                for (name, optional) in links.iter() {
+                    if *optional {
+                        match self.strip_nullish_arms_for_optional_read(current) {
+                            NullishStrip::Unchanged => {}
+                            NullishStrip::Stripped(stripped) => {
+                                adds_undefined = true;
+                                current = stripped;
+                            }
+                            // A base that is nullish ENTIRELY short-circuits
+                            // the chain: the read is `undefined`, full stop.
+                            NullishStrip::AllNullish => {
+                                return Positional::Value(graph.intern_node(
+                                    SemanticNodeData::Primitive(PrimitiveKind::Undefined),
+                                ));
+                            }
+                        }
+                    }
+                    let Some(member) =
+                        self.project_path_navigate(current, std::slice::from_ref(name))
+                    else {
+                        self.record_degradation(FlowReturnDegradation::FlowGap(
+                            crate::semantic_query::FlowGap::UnmodeledExpression,
+                        ));
+                        return Positional::Unmodeled;
+                    };
+                    // A declared-optional member (`b?: string`) folds its
+                    // absent-key `undefined` into THIS link's read — the
+                    // same authority `project_segments_navigate` uses for
+                    // a plain member path — regardless of whether the hop
+                    // itself used `?.` or `.`.
+                    let declared_optional =
+                        self.member_read_optionality(current, name.as_ref()) == Some(true);
+                    current = if declared_optional {
+                        self.fold_optional_read_undefined(member)
+                    } else {
+                        member
+                    };
+                }
+                if adds_undefined {
+                    current = self.dispatch.intern_normalized_union_or_intersection(
+                        &[
+                            current,
+                            graph
+                                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
+                        ],
+                        true,
+                    );
+                }
+                Positional::Value(current)
+            }
             crate::flow_slice_content::SliceExpr::Local {
                 binding,
                 name,
@@ -12905,6 +12988,48 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // at THIS position — the marker, never a fabricated `any` and
             // never the enclosing structure.
             crate::flow_slice_content::SliceExpr::Elided => Positional::Unmodeled,
+        }
+    }
+
+    /// Strip the nullish arms of one optional-member link's base — the
+    /// checker's non-nullish reduction of `a?.b`'s operand. A base that is
+    /// not a union (and is not itself nullish) is unchanged; a union keeps
+    /// its non-nullish arms through the shared normalizing interner.
+    fn strip_nullish_arms_for_optional_read(&mut self, node: SemanticNodeId) -> NullishStrip {
+        let graph = self.dispatch.graph();
+        let is_nullish = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Undefined | PrimitiveKind::Null
+                ))
+            )
+        };
+        let data = graph.node_data(node);
+        let members = match data.as_deref() {
+            Some(SemanticNodeData::Union(members)) => members,
+            _ => {
+                return if is_nullish(node) {
+                    NullishStrip::AllNullish
+                } else {
+                    NullishStrip::Unchanged
+                };
+            }
+        };
+        let kept: Vec<SemanticNodeId> = members
+            .iter()
+            .copied()
+            .filter(|member| !is_nullish(*member))
+            .collect();
+        if kept.len() == members.len() {
+            NullishStrip::Unchanged
+        } else if kept.is_empty() {
+            NullishStrip::AllNullish
+        } else {
+            NullishStrip::Stripped(
+                self.dispatch
+                    .intern_normalized_union_or_intersection(&kept, true),
+            )
         }
     }
 
@@ -13675,6 +13800,33 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                     FlowReturnStep::NoValue(_) => Positional::Unmodeled,
                 }
+            }
+            crate::flow_slice_content::SliceCall::OnHeritage {
+                heritage,
+                member,
+                static_side,
+            } => {
+                // `super.m()` — the base member through the HERITAGE
+                // surface. The heritage expression's value type (the base
+                // constructor) lowers through the same shared body-type
+                // lowering an authored annotation takes; the base member
+                // walks the ONE shared `ProjectPath { Navigate }`
+                // projection — `prototype` plus the authored member path
+                // for an INSTANCE member's `super`, the member path
+                // directly on the constructor for a STATIC member's — so
+                // only the DEMANDED member is materialised, never the
+                // base's whole surface. The resolved callee then takes the
+                // one call sink every other resolved callee takes.
+                let base = self.lower_body_type(heritage.ty());
+                let mut segments: Vec<Arc<str>> = Vec::with_capacity(member.len() + 1);
+                if !*static_side {
+                    segments.push(Arc::from("prototype"));
+                }
+                segments.extend(member.iter().cloned());
+                let Some(callee) = self.project_path_navigate(base, &segments) else {
+                    return self.degraded_unrepresentable_callee();
+                };
+                self.call_return_of_callee_node(callee, site)
             }
             crate::flow_slice_content::SliceCall::Symbolic(ty, binding) => {
                 // The symbolic `ReturnType<typeof …>` carrier: lower the

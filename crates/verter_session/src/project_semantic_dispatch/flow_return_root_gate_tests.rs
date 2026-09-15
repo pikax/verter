@@ -485,18 +485,28 @@ fn assert_clean_warm_object(host: &Arc<VerterHost>, name: &str, expected: &[(&st
 ///
 /// tsgo gives `number` for every one of them (`{ z: number }` for the
 /// `new` case).
+///
+/// `gateOptionalChain` LEFT this set when the typed optional-member
+/// carrier landed: its root lowers through the frame (the `Local`
+/// carrier, substitution and narrowing included), so nothing can
+/// mis-bind — the row now asserts the checker's `number`, clean and
+/// warm, in the test below.
 #[test]
 fn flow_return_unmodelled_form_read_through_a_frame_binding_fails_closed() {
     let host = make_host();
     for name in [
         "gateComputedMember",
-        "gateOptionalChain",
         "gateNewExpression",
         "gateTaggedTemplate",
         "gatePrivateField",
     ] {
         assert_fails_closed(&host, name);
     }
+    // A MEMBER-valued optional chain over a FRAME-OWNED root resolves the
+    // root through the frame — the local `{ y: number }` (non-nullable, so
+    // no `| undefined`), never the owner-scope `declare const` of the
+    // same name.
+    assert_clean_warm(&host, "gateOptionalChain", number());
 }
 
 /// The positive controls. The gate is about names the FRAME owns, so a
