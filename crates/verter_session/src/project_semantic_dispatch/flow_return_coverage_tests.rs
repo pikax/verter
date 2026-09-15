@@ -42,7 +42,8 @@ use std::sync::Arc;
 
 use super::*;
 use crate::semantic_query::{
-    FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
+    FlowGap, FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput,
+    SemanticQueryValue,
 };
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
@@ -147,6 +148,17 @@ export function jsxFrag() {
 export declare function jsxHelper(n: number): "H";
 export function jsxAttrCall() {
   return <div data-x={jsxHelper(1)} />;
+}
+"#;
+
+/// A `.tsx` file with NO configured `JSX` namespace anywhere in scope —
+/// the negative control for the JSX leaf: even with nothing to resolve
+/// `JSX.Element` against, the leaf still publishes the honest unresolved
+/// `Ref { name: "JSX.Element" }` carrier, never a fabricated `any`.
+const JSX_UNCONFIGURED: &str = "/ws/cov/jsx_unconfigured.tsx";
+const JSX_UNCONFIGURED_SRC: &str = r#"
+export function jsxElemNoNamespace() {
+  return <div />;
 }
 "#;
 
@@ -545,6 +557,7 @@ fn ts_host() -> Arc<VerterHost> {
     host_with(&[
         (LEAF, LEAF_SRC),
         (JSX, JSX_SRC),
+        (JSX_UNCONFIGURED, JSX_UNCONFIGURED_SRC),
         (CALLS, CALLS_SRC),
         (TL, TL_SRC),
         (GEO, GEO_SRC),
@@ -1800,13 +1813,44 @@ fn generator_return_is_wrapped_in_generator() {
 #[test]
 fn jsx_element_fragment_and_attribute_call_returns_are_not_any() {
     let host = ts_host();
-    for name in ["jsxElem", "jsxFrag", "jsxAttrCall"] {
-        assert_ne!(
-            value_of(&host, JSX, name),
-            TypeExpr::Primitive(PrimitiveName::Any),
-            "{name} must not be `any`"
-        );
+    // Positive pin: the whole-form JSX leaf publishes the checker's
+    // answer — the `JSX.Element` reference — clean and warm-admitted.
+    // This discriminates the claimed typed publication from the typed
+    // fail-closed gap marker (`Unknown { raw: "unmodeledPosition" }`,
+    // `FlowGap::UnmodeledExpression`), which also satisfies a bare
+    // `!= any` assertion but is a wholly different outcome (degraded,
+    // zero candidates).
+    for name in ["jsxElem", "jsxFrag"] {
+        assert_clean_warm(&host, JSX, name, type_ref("JSX.Element"));
     }
+    // `jsxAttrCall`'s attribute value is itself a call the surrounding
+    // narrowing pass cannot model precisely, so the whole return degrades
+    // with the unrelated `FlowGap::GuardNarrowing` gap (a general
+    // narrowing limitation, not specific to JSX or to this charter). The
+    // JSX leaf's own answer still resolves to the same typed
+    // `JSX.Element` reference rather than a fabricated `any`, so the full
+    // outcome is pinned exactly — still discriminating the typed leaf
+    // from both `any` and the `UnmodeledExpression` gap marker.
+    assert_eq!(
+        eval(&host, JSX, "jsxAttrCall"),
+        Outcome::Value {
+            ty: type_ref("JSX.Element"),
+            degradation: Some(FlowReturnDegradation::FlowGap(FlowGap::GuardNarrowing)),
+            candidates: 0,
+        },
+        "jsxAttrCall"
+    );
+    // Negative control: with no `JSX` namespace configured anywhere in
+    // scope, the leaf still publishes the same honest unresolved
+    // `Ref { name: "JSX.Element" }` carrier — never a fabricated `any`,
+    // and never silently promoted to a different shape just because the
+    // reference cannot resolve further.
+    assert_clean_warm(
+        &host,
+        JSX_UNCONFIGURED,
+        "jsxElemNoNamespace",
+        type_ref("JSX.Element"),
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────────
