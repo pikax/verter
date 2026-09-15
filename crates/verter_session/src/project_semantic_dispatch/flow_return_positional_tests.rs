@@ -275,11 +275,6 @@ fn is_unresolved_marker(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNo
 #[test]
 fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
     let host = make_pos_host();
-    // `assignmentCallPosition` writes to a PARAMETER, so the evaluation
-    // observes `UnappliedWriteEffect` first and first-observed wins. The
-    // load-bearing assertions for that row are the surviving sibling, the
-    // marker, and the zero candidate count — the reason is a control on
-    // the OTHER rows, where nothing else is degraded.
     for (name, reason) in [
         (
             "objectWithUnmodeledCall",
@@ -292,10 +287,6 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
         (
             "arrayWithUnmodeledCall",
             FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
-        ),
-        (
-            "assignmentCallPosition",
-            FlowReturnDegradation::UnappliedWriteEffect,
         ),
         (
             "computedMemberOffCall",
@@ -340,6 +331,35 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
             "{name} degraded success is ReturnOnly — nothing warms"
         );
     }
+
+    // `assignmentCallPosition` — `(z = fs())` is a whole-binding write in
+    // expression position whose right-hand side is a resolved call: the
+    // evaluator applies the write IN EVALUATION ORDER (the D13 / R2
+    // source-order rule), so the member publishes the call's declared
+    // return — `string`, the checker's own answer — and the frame stays
+    // clean and warm. This superseded the row's interim
+    // `UnappliedWriteEffect` parking in the loop above.
+    let outcome = evaluate(&host, POS_CANONICAL, "assignmentCallPosition")
+        .unwrap_or_else(|| panic!("assignmentCallPosition must produce a value"));
+    assert_eq!(
+        outcome.degradation, None,
+        "assignmentCallPosition: the in-order-applied write degrades nothing"
+    );
+    assert_eq!(
+        outcome.candidates, 1,
+        "assignmentCallPosition: the clean result admits warm"
+    );
+    with_dispatch(&host, |dispatch| {
+        let made = member(dispatch, outcome.node, "made");
+        assert!(
+            matches!(
+                dispatch.graph().node_data(made).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            ),
+            "assignmentCallPosition: `made` is the written call return, got {:?}",
+            dispatch.graph().node_data(made)
+        );
+    });
 }
 
 /// The COMPOSITE-POSITION TWIN of every other positional class.

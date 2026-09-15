@@ -811,7 +811,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// authored-resolution debt: ambient names and unrelated file imports are
     /// not inferred from spelling, and same-file declarations retain their
     /// normal shadowing precedence.
-    fn unresolved_head_is_authored_import(&self, scope: &NodeScopeId, name: &str) -> bool {
+    /// Whether an unresolved head names an AUTHORED IMPORT of the scope's
+    /// own file (the declaration exists; only its route is currently
+    /// unresolvable). Shared with the flow frame's owner-scope probe,
+    /// which must distinguish that degraded uncertainty from a genuine
+    /// miss.
+    pub(super) fn unresolved_head_is_authored_import(
+        &self,
+        scope: &NodeScopeId,
+        name: &str,
+    ) -> bool {
         let NodeScopeId::File {
             canonical_id,
             owner,

@@ -333,7 +333,7 @@ pub enum SliceStatement {
     },
     /// A whole-binding write (`x = v`, never `x.a = v` and never a
     /// compound operator) at statement position, targeting a formal
-    /// parameter or a modelable same-frame local, whose right-hand side
+    /// parameter or modelable same-frame local, whose right-hand side
     /// the demand slice value-selected. This is the ONE statement form
     /// through which a write re-enters evaluation: the evaluator applies
     /// it (retyping the binding in source order), so the write-effect
@@ -341,9 +341,9 @@ pub enum SliceStatement {
     ///
     /// Every other write shape stays out of the content tree exactly as
     /// before and keeps the typed unapplied-write degradation: a
-    /// projection-path write (`x.a = v`) never retypes the binding, and a
-    /// write in expression position (`return (x = 1, x)`) has no
-    /// evaluation-order guarantee against the reads around it.
+    /// projection-path write (`x.a = v`) never retypes the binding. A
+    /// write in expression position lowers through
+    /// [`SliceExpr::Assignment`] and is applied in evaluation order.
     Assignment {
         /// The write target (a binding root; the path is always empty for
         /// this variant — a member-path write never lowers).
@@ -1011,6 +1011,36 @@ pub enum SliceExpr {
     /// and fails closed at the evaluator — it is never a fabricated
     /// `any` and never a silently widened sibling.
     Elided,
+    /// A whole-binding `=` write at VALUE position (`{ a: (x = "s") }`,
+    /// `const v = (x = 1)`), targeting a formal parameter or modelable
+    /// same-frame local, whose right-hand side the demand slice
+    /// value-selected — the expression twin of
+    /// [`SliceStatement::Assignment`].
+    ///
+    /// The evaluator applies it IN EVALUATION ORDER: a read evaluated
+    /// before it keeps the pre-write reaching definition, a read after it
+    /// observes the write, and a DEFERRED closure read observes it too
+    /// (the evaluator's capture look-ahead), because the checker's own
+    /// deferred read observes every write of the enclosing frame. That
+    /// evaluation-order reasoning is exactly why a bare span comparison
+    /// ("drop the degradation when every read span precedes the write
+    /// span") is unsound and stays rejected.
+    Assignment {
+        /// The write target (a binding root; the path is always empty for
+        /// this variant — a member-path write never lowers).
+        target: SliceNarrowSubject,
+        definition: verter_semantic::analysis::flow::SkeletonExprSiteId,
+        /// The write expression's span, in this frame's coordinates — the
+        /// identity the evaluator's write-effect ledger matches against
+        /// (recorded at the TARGET IDENTIFIER, exactly like the statement
+        /// twin).
+        span: FrameSpan,
+        /// The lowered right-hand side.
+        value: Box<SliceExpr>,
+        /// The right-hand side's top-level freshness shape, aligned with
+        /// the statement twin.
+        freshness: SliceFreshness,
+    },
 }
 
 /// The source of one mutable closure capture's authored declaration authority.
@@ -6819,6 +6849,45 @@ impl Lowerer<'_> {
         &mut self,
         assignment: &oxc_ast::ast::AssignmentExpression<'_>,
     ) -> Option<SliceStatement> {
+        let (target, definition, span) =
+            self.modeled_assignment_parts(assignment, assignment.right.span())?;
+        let value = self.lowered_assignment_rhs(assignment);
+        Some(SliceStatement::Assignment {
+            definition,
+            target: SliceNarrowSubject {
+                root: target,
+                path: Arc::from(Vec::new().into_boxed_slice()),
+            },
+            // The span identity matches the slice's typed write
+            // effect, which the skeleton records at the TARGET
+            // IDENTIFIER — never the whole assignment expression.
+            span,
+            value: Box::new(value),
+            freshness: expression_freshness(&assignment.right),
+        })
+    }
+
+    /// The shared modeling half of a whole-binding `=` write: the narrow
+    /// root of an identifier target this frame models, the selected value
+    /// site, and the TARGET-IDENTIFIER span the write-effect ledger
+    /// matches. `None` = the write keeps its unmodeled disposition (leaf
+    /// lowering in value position, the fail-closed scan at statement
+    /// position) and the typed unapplied-write degradation.
+    ///
+    /// `definition_span` selects the value site: the RHS's own span at
+    /// statement position (the planner's write machinery selects the
+    /// write's value site), the WHOLE assignment expression's span in
+    /// value position (the planner dispositions an assignment as one
+    /// `Leaf` site — its RHS has no separate site there).
+    fn modeled_assignment_parts(
+        &mut self,
+        assignment: &oxc_ast::ast::AssignmentExpression<'_>,
+        definition_span: oxc_span::Span,
+    ) -> Option<(
+        SliceNarrowRoot,
+        verter_semantic::analysis::flow::SkeletonExprSiteId,
+        FrameSpan,
+    )> {
         let oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(identifier) =
             &assignment.left
         else {
@@ -6835,30 +6904,53 @@ impl Lowerer<'_> {
                 return None
             }
         };
-        let definition = self
-            .selection?
-            .value_site(self.rebase(assignment.right.span()))?;
-        let value = self.lower_expr(
+        let definition = self.selection?.value_site(self.rebase(definition_span))?;
+        Some((root, definition, self.rebase(identifier.span)))
+    }
+
+    /// Lower a modeled write's right-hand side — shared by the statement
+    /// and expression twins, so the two positions can never diverge on
+    /// what the written value is.
+    fn lowered_assignment_rhs(
+        &mut self,
+        assignment: &oxc_ast::ast::AssignmentExpression<'_>,
+    ) -> SliceExpr {
+        self.lower_expr(
             &assignment.right,
             ExprMode::BindingInit {
                 // Preserve the RHS until the evaluator can reduce it
                 // against the target's authored declared type. When the
                 // target has no declared authority the evaluator widens
                 // exactly the FRESH positions, directed by the
-                // `freshness` mirror below.
+                // `freshness` mirror the callers carry.
                 preserve_literal: true,
             },
-        );
-        Some(SliceStatement::Assignment {
+        )
+    }
+
+    /// The modeled whole-binding-write VALUE form (an assignment in
+    /// expression position). `site_span` is the span of the WHOLE value
+    /// expression the planner tracked (a paren-wrapped assignment keys
+    /// its site at the wrapper's span; the assignment's own span is the
+    /// fallback). Same conditions as the statement twin; when they do not
+    /// hold the caller keeps the leaf lowering and the typed
+    /// unapplied-write degradation.
+    fn modeled_assignment_expression(
+        &mut self,
+        assignment: &oxc_ast::ast::AssignmentExpression<'_>,
+        site_span: oxc_span::Span,
+    ) -> Option<SliceExpr> {
+        let (root, definition, span) = self
+            .modeled_assignment_parts(assignment, site_span)
+            .or_else(|| self.modeled_assignment_parts(assignment, assignment.span()))?;
+        let value = self.lowered_assignment_rhs(assignment);
+        Some(SliceExpr::Assignment {
             definition,
             target: SliceNarrowSubject {
                 root,
                 path: Arc::from(Vec::new().into_boxed_slice()),
             },
-            // The span identity matches the slice's typed write
-            // effect, which the skeleton records at the TARGET
-            // IDENTIFIER — never the whole assignment expression.
-            span: self.rebase(identifier.span),
+            span,
             value: Box::new(value),
             freshness: expression_freshness(&assignment.right),
         })
@@ -7113,110 +7205,140 @@ impl Lowerer<'_> {
             // are `Leaf` to the classifier: they have no
             // value-contributing sub-expression the demand plan must
             // reach, only a frame-local carrier this half mints.
-            other => match value_descent(other) {
-                ValueDescent::Transparent(inner) => self.lower_expr(inner, mode),
-                // A TYPE carrier decides the published type (`x as
-                // const` pins what a bare literal would widen). That is
-                // a statement about the MEMBER POLICY, not a reason to
-                // abandon the structural lowering: folding the carrier
-                // into one leaf answer takes every sibling with it, and
-                // a leaf answer over a CALL-sourced spread embeds the
-                // callee's unreduced `ReturnType<…>` carrier, which the
-                // fabricated-value gate refuses. `{ ...base(), n: 1 } as
-                // const` failed its whole return closed for a value the
-                // checker calls `{ readonly label: string; readonly n: 1
-                // }`.
-                //
-                // So a carrier over an OBJECT LITERAL lowers the literal
-                // structurally under the carrier's own member policy,
-                // and every other carrier keeps the whole-carrier leaf
-                // lowering (its type is genuinely the carrier's, not its
-                // operand's).
-                ValueDescent::TypeCarrier(inner) => match member_literal_policy(other, self.source)
-                {
-                    Some(policy) => match value_descent(inner) {
-                        ValueDescent::Object(object) => {
-                            self.lower_object_literal_with_policy(object, other, mode, policy)
+            other => {
+                // A whole-binding `=` write in VALUE position — the
+                // expression twin of [`SliceStatement::Assignment`] — is
+                // applied by the evaluator IN EVALUATION ORDER (a read
+                // before it keeps the pre-write reaching definition, a
+                // read after it and a DEFERRED closure read observe the
+                // write). Paren wrappers are unwrapped HERE rather than
+                // through the shared `Transparent` descent so the
+                // planner-tracked site span (the OUTERMOST wrapper's) is
+                // still in hand at the probe. An unmodeled target shape
+                // falls through to the leaf lowering below and keeps the
+                // typed unapplied-write degradation, exactly as before.
+                let mut unwrapped = other;
+                while let Expression::ParenthesizedExpression(paren) = unwrapped {
+                    unwrapped = &paren.expression;
+                }
+                if let Expression::AssignmentExpression(assignment) = unwrapped {
+                    if matches!(
+                        assignment.operator,
+                        oxc_ast::ast::AssignmentOperator::Assign
+                    ) {
+                        let site_span = other.span();
+                        if let Some(modeled) =
+                            self.modeled_assignment_expression(assignment, site_span)
+                        {
+                            return modeled;
                         }
-                        _ => self.lower_leaf(other, mode),
-                    },
-                    None => self.lower_leaf(other, mode),
-                },
-                ValueDescent::Object(object) => self.lower_object_literal_with_policy(
-                    object,
-                    other,
-                    mode,
-                    ObjectMemberPolicy::Widen,
-                ),
-                // A CONDITIONAL's value is the union of its branch
-                // values, and each branch is lowered as a flow
-                // expression — so a call in a branch rides
-                // `SliceExpr::Call` to the evaluator's one call sink,
-                // exactly as the `if` / `return` twin's does. Folding
-                // the whole ternary through the leaf lowering instead
-                // published the callee's UNREDUCED return carrier: its
-                // own binders intact, its overload group unconsulted,
-                // warm.
-                ValueDescent::Branches(conditional) => {
-                    let guard = self.lower_guard(&conditional.test);
-                    // The ternary's TEST is a control position exactly as
-                    // the `if` twin's: only its provably result-independent
-                    // calls are decided above; an unprovable one flags the
-                    // enclosing statement's guard-narrowing gap.
-                    if self.record_control_position_calls(&conditional.test) {
-                        self.control_test_gap = true;
-                    }
-                    // The ternary's arms are GUARDED exactly as the `if`
-                    // statement's are: a closure created inside one
-                    // captures the guarded reading of the guard's
-                    // subject, and a later write to that subject makes
-                    // the capture unsound. The two control spellings must
-                    // reach the closure-capture rail with the same active
-                    // guard set, or the same source degrades under `if`
-                    // and seals clean under `?:`.
-                    let active_guard_base = self.active_guard_bindings.len();
-                    let active_guard_subject_base = self.active_guard_subjects.len();
-                    let guard_bindings = self.guard_bindings(&guard, conditional.test.span());
-                    let guard_name = self.predicate_subject_binding(&conditional.test);
-                    self.active_guard_bindings
-                        .extend(guard_bindings.iter().copied());
-                    self.active_guard_subjects
-                        .extend(guard_name.iter().cloned());
-                    let consequent = self.lower_expr(&conditional.consequent, mode);
-                    let alternate = self.lower_expr(&conditional.alternate, mode);
-                    self.active_guard_bindings.truncate(active_guard_base);
-                    self.active_guard_subjects
-                        .truncate(active_guard_subject_base);
-                    SliceExpr::Union {
-                        arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
-                        guard,
                     }
                 }
-                // A CALL POSITION with no structural arm (`new f()`,
-                // `` tag`…` ``, `f?.()`, `await f()`, `(0, new f())`). The
-                // fail-closed verdict is the CLASSIFIER's, taken on the
-                // expression FORM — not on whether the shallow pass
-                // happened to mint a `ReturnType<callee>` carrier the
-                // leaf gate could recognise. For every form here it does
-                // not: it answers a bare `any`, which reaches
-                // `SliceExpr::Any` BEFORE the carrier gate and publishes
-                // warm and clean. That is the hole this arm closes.
-                ValueDescent::UnmodeledCall => SliceExpr::UnreducedCallValue,
-                // A leaf-answered form takes the shared shallow-pass
-                // leaf lowering THROUGH `lower_leaf`, whose gate refuses
-                // a leaf answer that embeds an unreduced call-return
-                // carrier AND refuses a bare `any` answer at a call
-                // position. A form here therefore either contains no
-                // call in value position, or fails closed. It does NOT
-                // follow that every leaf form is modeled: several answer
-                // the shallow pass's fallback `any` for reasons that have
-                // nothing to do with calls (`JSXElement`, `Super`,
-                // `await x` over a non-call) — see `lower_leaf`.
-                ValueDescent::Reference
-                | ValueDescent::Logical
-                | ValueDescent::Sequence
-                | ValueDescent::Leaf => self.lower_leaf(other, mode),
-            },
+                match value_descent(other) {
+                    ValueDescent::Transparent(inner) => self.lower_expr(inner, mode),
+                    // A TYPE carrier decides the published type (`x as
+                    // const` pins what a bare literal would widen). That is
+                    // a statement about the MEMBER POLICY, not a reason to
+                    // abandon the structural lowering: folding the carrier
+                    // into one leaf answer takes every sibling with it, and
+                    // a leaf answer over a CALL-sourced spread embeds the
+                    // callee's unreduced `ReturnType<…>` carrier, which the
+                    // fabricated-value gate refuses. `{ ...base(), n: 1 } as
+                    // const` failed its whole return closed for a value the
+                    // checker calls `{ readonly label: string; readonly n: 1
+                    // }`.
+                    //
+                    // So a carrier over an OBJECT LITERAL lowers the literal
+                    // structurally under the carrier's own member policy,
+                    // and every other carrier keeps the whole-carrier leaf
+                    // lowering (its type is genuinely the carrier's, not its
+                    // operand's).
+                    ValueDescent::TypeCarrier(inner) => {
+                        match member_literal_policy(other, self.source) {
+                            Some(policy) => match value_descent(inner) {
+                                ValueDescent::Object(object) => self
+                                    .lower_object_literal_with_policy(object, other, mode, policy),
+                                _ => self.lower_leaf(other, mode),
+                            },
+                            None => self.lower_leaf(other, mode),
+                        }
+                    }
+                    ValueDescent::Object(object) => self.lower_object_literal_with_policy(
+                        object,
+                        other,
+                        mode,
+                        ObjectMemberPolicy::Widen,
+                    ),
+                    // A CONDITIONAL's value is the union of its branch
+                    // values, and each branch is lowered as a flow
+                    // expression — so a call in a branch rides
+                    // `SliceExpr::Call` to the evaluator's one call sink,
+                    // exactly as the `if` / `return` twin's does. Folding
+                    // the whole ternary through the leaf lowering instead
+                    // published the callee's UNREDUCED return carrier: its
+                    // own binders intact, its overload group unconsulted,
+                    // warm.
+                    ValueDescent::Branches(conditional) => {
+                        let guard = self.lower_guard(&conditional.test);
+                        // The ternary's TEST is a control position exactly as
+                        // the `if` twin's: only its provably result-independent
+                        // calls are decided above; an unprovable one flags the
+                        // enclosing statement's guard-narrowing gap.
+                        if self.record_control_position_calls(&conditional.test) {
+                            self.control_test_gap = true;
+                        }
+                        // The ternary's arms are GUARDED exactly as the `if`
+                        // statement's are: a closure created inside one
+                        // captures the guarded reading of the guard's
+                        // subject, and a later write to that subject makes
+                        // the capture unsound. The two control spellings must
+                        // reach the closure-capture rail with the same active
+                        // guard set, or the same source degrades under `if`
+                        // and seals clean under `?:`.
+                        let active_guard_base = self.active_guard_bindings.len();
+                        let active_guard_subject_base = self.active_guard_subjects.len();
+                        let guard_bindings = self.guard_bindings(&guard, conditional.test.span());
+                        let guard_name = self.predicate_subject_binding(&conditional.test);
+                        self.active_guard_bindings
+                            .extend(guard_bindings.iter().copied());
+                        self.active_guard_subjects
+                            .extend(guard_name.iter().cloned());
+                        let consequent = self.lower_expr(&conditional.consequent, mode);
+                        let alternate = self.lower_expr(&conditional.alternate, mode);
+                        self.active_guard_bindings.truncate(active_guard_base);
+                        self.active_guard_subjects
+                            .truncate(active_guard_subject_base);
+                        SliceExpr::Union {
+                            arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
+                            guard,
+                        }
+                    }
+                    // A CALL POSITION with no structural arm (`new f()`,
+                    // `` tag`…` ``, `f?.()`, `await f()`, `(0, new f())`). The
+                    // fail-closed verdict is the CLASSIFIER's, taken on the
+                    // expression FORM — not on whether the shallow pass
+                    // happened to mint a `ReturnType<callee>` carrier the
+                    // leaf gate could recognise. For every form here it does
+                    // not: it answers a bare `any`, which reaches
+                    // `SliceExpr::Any` BEFORE the carrier gate and publishes
+                    // warm and clean. That is the hole this arm closes.
+                    ValueDescent::UnmodeledCall => SliceExpr::UnreducedCallValue,
+                    // A leaf-answered form takes the shared shallow-pass
+                    // leaf lowering THROUGH `lower_leaf`, whose gate refuses
+                    // a leaf answer that embeds an unreduced call-return
+                    // carrier AND refuses a bare `any` answer at a call
+                    // position. A form here therefore either contains no
+                    // call in value position, or fails closed. It does NOT
+                    // follow that every leaf form is modeled: several answer
+                    // the shallow pass's fallback `any` for reasons that have
+                    // nothing to do with calls (`JSXElement`, `Super`,
+                    // `await x` over a non-call) — see `lower_leaf`.
+                    ValueDescent::Reference
+                    | ValueDescent::Logical
+                    | ValueDescent::Sequence
+                    | ValueDescent::Leaf => self.lower_leaf(other, mode),
+                }
+            }
         }
     }
 

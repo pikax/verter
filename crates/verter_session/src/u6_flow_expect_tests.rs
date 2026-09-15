@@ -6214,9 +6214,9 @@ fn single_v_object_json(ty: &str) -> String {
 /// RHS all route through the ONE assignment authority; a fresh and a
 /// pinned spelling of the SAME literal collapse to the pinned literal
 /// (measured: `c ? 1 : 1 as const` reads `1`, never `number`). The
-/// `if`/`else` twin keeps its sound `ConditionalVarDefinition`
-/// fail-close (the substrate cannot yet prove the never-assigned path
-/// empty), but its VALUE now carries the pinned literals.
+/// `if`/`else` twin joins every continuing arm's reaching definition over
+/// the shared product lattice — an arm-assigned binding on every path
+/// publishes the checker's `"p" | 1` clean and warm.
 #[test]
 fn as_const_literal_identity_survives_evolving_assignments_and_joins() {
     let lit_s = |v: &str| format!(r#"{{"kind":"literal","literalKind":"string","value":"{v}"}}"#);
@@ -6237,11 +6237,11 @@ fn as_const_literal_identity_survives_evolving_assignments_and_joins() {
             true,
         ),
         (
-            "ifelse_asconst_join_keeps_conditional_fail_close",
+            "ifelse_asconst_join",
             "function f(n: number) { let v; if (n > 0) { v = \"p\" as const } else { v = 1 as const } return { v } }",
             single_v_object_json(&union2(&lit_s("p"), &lit_n("1.0"))),
-            Degr::ConditionalVarDefinition,
-            false,
+            Degr::None,
+            true,
         ),
         (
             "straightline_reassign_last_pinned_write_wins",
