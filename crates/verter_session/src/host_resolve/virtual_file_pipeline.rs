@@ -92,6 +92,63 @@ pub(super) fn vue_main_reconstruction_diagnostics(source_len: u32) -> Diagnostic
     }])
 }
 
+/// Compiler-owned Svelte Main handoff: publication payload plus the typed
+/// artifact set. Callers must not reconstruct topology from the body.
+#[derive(Debug)]
+pub(super) struct TakenCompilerSvelteMain<'a> {
+    pub code: Arc<str>,
+    pub source_map: &'a str,
+    pub lang: String,
+    pub artifacts: &'a verter_compiler::assembly::CompileArtifactSet,
+}
+
+fn has_main_artifact(set: &verter_compiler::assembly::CompileArtifactSet) -> bool {
+    set.artifacts()
+        .iter()
+        .any(|artifact| artifact.name() == "main")
+}
+
+/// Consume the compiler-owned Svelte Main body. The compile artifact set is
+/// the typed transport; a missing body or missing main artifact is a planted
+/// reconstruction refusal, never host composition or text scanning.
+pub(super) fn take_compiler_svelte_main<'a>(
+    compiled: &'a verter_compiler::framework_common::RuntimeCompileOutput,
+    snapshot: &CompileInput,
+) -> Result<TakenCompilerSvelteMain<'a>, DiagnosticsSnapshot> {
+    match (
+        compiled.main.body_code.as_ref(),
+        compiled.main.artifacts.as_ref(),
+    ) {
+        (Some(body), Some(artifacts)) if has_main_artifact(artifacts) => {
+            Ok(TakenCompilerSvelteMain {
+                code: Arc::clone(body),
+                source_map: compiled.main.source_map.as_str(),
+                lang: compiled
+                    .main
+                    .lang
+                    .clone()
+                    .unwrap_or_else(|| "js".to_string()),
+                artifacts,
+            })
+        }
+        _ => Err(svelte_main_reconstruction_diagnostics(
+            snapshot.source.len() as u32,
+        )),
+    }
+}
+
+/// Planted host-side Svelte topology reconstruction is forbidden: Svelte
+/// main bytes come from the compiler-owned self-contained module.
+pub(super) fn svelte_main_reconstruction_diagnostics(source_len: u32) -> DiagnosticsSnapshot {
+    DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+        severity: HostSeverity::Error,
+        code: "HOST_SVELTE_MAIN_NOT_ASSEMBLED".to_string(),
+        message: "Svelte main module was not assembled by the Svelte compiler; host-side topology reconstruction is refused".to_string(),
+        arguments: Vec::new(),
+        span: verter_span::Span::new(0, source_len),
+    }])
+}
+
 pub(super) fn template_compose_refusal_diagnostics(
     refusal: verter_compiler::assembly::ComposeRefusal,
     source_len: u32,
@@ -3726,19 +3783,34 @@ impl VerterHost {
         }
 
         // Consume the compiler-owned assembled `Main`. A carrier that
-        // produced no runtime surface has no `Main`. Planted Vue topology
-        // reconstruction (blocks without a body) is refused.
+        // produced no runtime surface has no `Main`. Planted topology
+        // reconstruction is refused per framework.
         if !compiled.has_runtime_surface() {
             return Err(HostError::MissingVirtualNode {
                 canonical_id: snapshot.canonical_id.clone(),
             });
         }
-        let taken = take_compiler_vue_main(compiled, snapshot, profile.force_js).map_err(fatal)?;
+        let (code, source_map, lang) = match &rendered {
+            BoundRenderedMain::Vue(_) => {
+                let taken =
+                    take_compiler_vue_main(compiled, snapshot, profile.force_js).map_err(fatal)?;
+                (taken.code, taken.source_map, taken.lang)
+            }
+            BoundRenderedMain::Svelte(_) => {
+                let taken = take_compiler_svelte_main(compiled, snapshot).map_err(fatal)?;
+                if !has_main_artifact(taken.artifacts) {
+                    return Err(fatal(svelte_main_reconstruction_diagnostics(
+                        snapshot.source.len() as u32,
+                    )));
+                }
+                (taken.code, taken.source_map, taken.lang)
+            }
+        };
 
         Ok(RenderOnlyMain {
-            code: taken.code,
-            source_map: (!taken.source_map.is_empty()).then(|| Arc::from(taken.source_map)),
-            lang: Some(taken.lang),
+            code,
+            source_map: (!source_map.is_empty()).then(|| Arc::from(source_map)),
+            lang: Some(lang),
             diagnostics: compile_diags
                 .diagnostics
                 .into_iter()
@@ -3776,8 +3848,8 @@ pub(super) struct RuntimeNodePublication {
 /// the point of insertion.
 ///
 /// The `Main` virtual node is the framework RUNTIME module. A carrier that
-/// produced a runtime surface assembles it; a carrier that projects ONLY
-/// an IDE surface (Svelte today) emits NO `Main` node —
+/// produced a runtime surface publishes the compiler-owned assembled body;
+/// a carrier that projects ONLY an IDE surface emits NO `Main` node —
 /// `get_virtual_file(Main)` then reports missing until that carrier emits
 /// a runtime surface.
 ///
@@ -3807,25 +3879,33 @@ pub(super) fn publish_runtime_nodes(
     // for.
     if let Some(compiled) = products.runtime_bundle() {
         if publish_runtime_module && compiled.has_runtime_surface() {
-            let taken = take_compiler_vue_main(compiled, snapshot, policy.assembly.force_js)?;
-            if matches!(products, BoundCompiledProducts::Vue(_)) {
-                let has_main_artifact = taken.artifacts.is_some_and(|set| {
-                    set.artifacts()
-                        .iter()
-                        .any(|artifact| artifact.name() == "main")
-                });
-                if !has_main_artifact {
-                    return Err(vue_main_reconstruction_diagnostics(
-                        snapshot.source.len() as u32
-                    ));
+            let (code, source_map, lang) = match products {
+                BoundCompiledProducts::Vue(_) => {
+                    let taken =
+                        take_compiler_vue_main(compiled, snapshot, policy.assembly.force_js)?;
+                    if !taken.artifacts.is_some_and(has_main_artifact) {
+                        return Err(vue_main_reconstruction_diagnostics(
+                            snapshot.source.len() as u32
+                        ));
+                    }
+                    (taken.code, taken.source_map, taken.lang)
                 }
-            }
+                BoundCompiledProducts::Svelte(_) => {
+                    let taken = take_compiler_svelte_main(compiled, snapshot)?;
+                    if !has_main_artifact(taken.artifacts) {
+                        return Err(svelte_main_reconstruction_diagnostics(
+                            snapshot.source.len() as u32,
+                        ));
+                    }
+                    (taken.code, taken.source_map, taken.lang)
+                }
+            };
             outputs.insert(
                 VirtualNodeKind::Main,
                 CachedVirtualFile {
-                    code: taken.code,
-                    source_map: (!taken.source_map.is_empty()).then(|| Arc::from(taken.source_map)),
-                    lang: Some(taken.lang),
+                    code,
+                    source_map: (!source_map.is_empty()).then(|| Arc::from(source_map)),
+                    lang: Some(lang),
                     meta: VirtualMeta {
                         scope_id: if compiled.scope_id.is_empty() {
                             None

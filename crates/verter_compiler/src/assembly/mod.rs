@@ -29,6 +29,7 @@ pub mod plan;
 pub mod publish;
 pub mod source_space;
 pub mod source_unit;
+pub mod svelte_module;
 pub mod vue_module;
 
 pub use compose::{
@@ -62,6 +63,9 @@ pub use source_space::{
 pub use source_unit::{
     ArtifactSourceUnit, ContentId, SourceId, SourceRevision, SourceUnit, SourceUnitId,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use svelte_module::{reset_svelte_main_assembly_count, svelte_main_assembly_count};
+pub use svelte_module::{svelte_main_compile_artifacts, SvelteMainCompileRequest};
 pub use vue_module::{
     assemble_vue_runtime_main, compose_main_module, vue_main_compile_artifacts, ExtraFragment,
     SfcRewriteRefusal, VueMainAssemblyFailure, VueMainCompositionFailure, VueMainDecoration,

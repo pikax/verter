@@ -1192,6 +1192,97 @@ mod tests {
             "a supported component emits no diagnostics, got: {:?}",
             bundle.diagnostics
         );
+        let set = bundle
+            .main
+            .artifacts
+            .as_ref()
+            .expect("compiler-owned artifact set");
+        let main = set
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.name() == "main")
+            .expect("main artifact");
+        let crate::assembly::ArtifactContent::Available(content) = &main.content else {
+            panic!("produced Main must keep available content");
+        };
+        assert!(
+            std::sync::Arc::ptr_eq(&body, content),
+            "body payload and typed artifact must share one allocation"
+        );
+        assert!(
+            body.contains("export default function"),
+            "producer-owned default export remains in the self-contained body:\n{body}"
+        );
+    }
+
+    #[test]
+    fn compile_bundle_converts_the_self_contained_module_once() {
+        let source = "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count}</button>\n<style>.x{color:red}</style>\n";
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::default();
+        crate::assembly::reset_svelte_main_assembly_count();
+        let bundle = compile_bundle_expect_produced(
+            source,
+            &artifact,
+            &RuntimeCompileOptions {
+                filename: Some("Counter.svelte".to_string()),
+                source_map: true,
+                ..Default::default()
+            },
+            &alloc,
+        )
+        .expect("svelte runtime bundle");
+        assert_eq!(crate::assembly::svelte_main_assembly_count(), 1);
+        let set = bundle.main.artifacts.as_ref().expect("artifact set");
+        let main = set
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.name() == "main")
+            .expect("main");
+        let style = set
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.name() == "style")
+            .expect("external-style companion");
+        assert!(main.relations.iter().any(|relation| {
+            relation.kind == crate::assembly::ArtifactRelationKind::CompanionOf
+                && relation.target == *style.id()
+        }));
+        let map = main
+            .maps
+            .iter()
+            .find(|map| map.family == crate::assembly::ArtifactMapFamily::RuntimeSourceMap)
+            .expect("runtime map");
+        let main_unit = set
+            .source_units()
+            .find(|unit| unit.unit.logical_role() == "main")
+            .expect("main unit")
+            .unit
+            .id()
+            .clone();
+        assert!(
+            map.segments
+                .iter()
+                .all(|segment| segment.source_unit != main_unit),
+            "qualified segments must not identity-map onto generated Main"
+        );
+        crate::assembly::reset_svelte_main_assembly_count();
+        compile_bundle_expect_produced(
+            source,
+            &artifact,
+            &RuntimeCompileOptions {
+                want_runtime: false,
+                want_ide: true,
+                ..Default::default()
+            },
+            &alloc,
+        )
+        .expect("ide-only");
+        assert_eq!(
+            crate::assembly::svelte_main_assembly_count(),
+            0,
+            "unrequested Main must be zero-work"
+        );
     }
 
     #[test]

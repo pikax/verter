@@ -714,23 +714,22 @@ pub struct RuntimeDiagnostic {
 /// The framework-OWNED ESM body the carrier emits for the runtime module.
 ///
 /// Vue's runtime compiler now emits the assembled `_sfc_main` body here
-/// together with its compile artifact set. A framework whose runtime module
-/// is a single self-contained ESM (e.g. Svelte's official-shaped runtime
-/// output) also returns `Some` here. `None` means there is no runtime
-/// surface to publish — the host must not reconstruct Vue topology from
-/// block fields.
+/// together with its compile artifact set. Svelte's runtime compiler emits
+/// its self-contained ESM the same way. `None` means there is no runtime
+/// surface to publish — the host must not reconstruct framework topology
+/// from block fields.
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeMainModule {
     /// The framework-owned ESM body, when the carrier emits one directly.
     /// `None` ⇒ no runtime main to publish. Shared with the typed main
-    /// artifact when Vue assembly produced this body.
+    /// artifact when compiler assembly produced this body.
     pub body_code: Option<std::sync::Arc<str>>,
     /// Source map for `body_code` (empty when none / disabled).
     pub source_map: String,
     /// The language id of the produced body (`"js"` / `"ts"`), when known.
     pub lang: Option<String>,
-    /// Compile-artifact schema for the assembled Vue main, when this body was
-    /// produced by Vue main-module assembly. Svelte leaves this `None`.
+    /// Compile-artifact schema for the assembled main, when this body was
+    /// produced by compiler-owned main-module assembly.
     pub artifacts: Option<crate::assembly::CompileArtifactSet>,
 }
 
@@ -881,8 +880,8 @@ pub struct RuntimeCustomBlock {
 #[derive(Debug, Default)]
 pub struct RuntimeCompileOutput {
     /// The framework-owned main module (body / map / lang). `body_code`
-    /// `None` ⇒ there is no runtime surface to publish. Vue emits an
-    /// assembled body; the host must not reconstruct topology from blocks.
+    /// `None` ⇒ there is no runtime surface to publish. Vue and Svelte emit
+    /// an assembled body; the host must not reconstruct topology from blocks.
     pub main: RuntimeMainModule,
     /// The compiled `<script>` block, when present.
     pub script: Option<RuntimeScriptBlock>,

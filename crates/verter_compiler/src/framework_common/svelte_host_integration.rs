@@ -416,6 +416,16 @@ impl SvelteHostCompiledProducts {
     pub fn diagnostics(&self) -> &[RuntimeDiagnostic] {
         &self.bundle.diagnostics
     }
+
+    /// Wrap an already-produced runtime bundle as an admitted product.
+    /// Test/harness constructor for publication-refusal coverage.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_admitted_runtime_bundle(bundle: RuntimeCompileOutput, kind: ProductKind) -> Self {
+        Self {
+            admitted: vec![kind],
+            bundle,
+        }
+    }
 }
 
 /// Render-only handoff of one admitted runtime-render compile: the
@@ -1473,6 +1483,13 @@ mod tests {
         assert!(
             bundle.main.body_code.is_some(),
             "the self-contained Main module comes from the one population"
+        );
+        assert!(
+            bundle.main.artifacts.as_ref().is_some_and(|set| set
+                .artifacts()
+                .iter()
+                .any(|artifact| artifact.name() == "main")),
+            "the one population admits the self-contained module as a staged artifact"
         );
         assert!(
             !bundle.qualified_styles.is_empty(),
