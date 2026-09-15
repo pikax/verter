@@ -42,6 +42,7 @@ use crate::assembly::plan::ProductPlan;
 use crate::assembly::publish::{publish, ArtifactContribution};
 use crate::assembly::source_space::SourceSpaceKind;
 use crate::assembly::source_unit::source_unit_id;
+use crate::assembly::svelte_module::{svelte_main_compile_artifacts, SvelteMainCompileRequest};
 use crate::assembly::vue_module::{
     compose_fragments, ComposedFragments, VueMainCompositionFailure, VueMainModuleRequest,
 };
@@ -2089,9 +2090,37 @@ impl SvelteRuntimeBackend {
         // a lowering option on `SvelteRuntimeOptions`).
         match compile_client(source, parsed, &runtime_opts, alloc, opts.ssr, opts.source_map) {
             Ok(module) => {
-                bundle.main.body_code = Some(std::sync::Arc::from(module.code));
-                bundle.main.source_map = module.source_map.unwrap_or_default();
+                let css_code = module.css.as_ref().map(|css| css.code.as_str());
+                let source_map = module.source_map;
+                let code: std::sync::Arc<str> = std::sync::Arc::from(module.code);
+                let artifacts = svelte_main_compile_artifacts(SvelteMainCompileRequest {
+                    canonical_id: runtime_opts.filename.as_deref().unwrap_or(""),
+                    source,
+                    code: std::sync::Arc::clone(&code),
+                    source_map: source_map.as_deref(),
+                    kind: if opts.ssr {
+                        ProductKind::RuntimeServer
+                    } else {
+                        ProductKind::RuntimeClient
+                    },
+                    want_maps: opts.source_map,
+                    is_production: runtime_opts.is_production,
+                    ssr: opts.ssr,
+                    runes: runtime_opts.runes,
+                    css_hash_override: runtime_opts.css_hash_override.as_deref(),
+                    custom_element: runtime_opts.custom_element,
+                    css_code,
+                })
+                .map_err(|err| RuntimeSurfaceRefusal {
+                    diagnostic_code: "svelte-main-artifact-schema".to_string(),
+                    message: err.to_string(),
+                    span: verter_span::Span::new(0, source.len() as u32),
+                    diagnostics: std::mem::take(&mut bundle.diagnostics),
+                })?;
+                bundle.main.body_code = Some(code);
+                bundle.main.source_map = source_map.unwrap_or_default();
                 bundle.main.lang = Some("js".to_string());
+                bundle.main.artifacts = Some(artifacts);
                 // The EXTERNAL scoped-css artifact (the official
                 // `compiled.css` — `{ code, map, hasGlobal }` + the scope
                 // hash) publishes as the bundle's stage-qualified style.
