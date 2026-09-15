@@ -696,8 +696,11 @@ pub fn value_composes_unmodeled_call(expression: &Expression<'_>) -> bool {
 
 /// Whether an optional-chain element takes its value from a CALL
 /// (`f?.()`, `a?.b()`, `a.b?.()`) as opposed to a pure member read
-/// (`a?.b`, `a?.[k]`).
-fn chain_is_call_valued(element: &ChainElement<'_>) -> bool {
+/// (`a?.b`, `a?.[k]`). Public for the content half's chain arm, which
+/// routes a member-valued chain to the typed optional-member carrier and
+/// a call-valued one to the still-`any` optional-call rail — the same
+/// split this predicate draws for the call-position question.
+pub fn chain_is_call_valued(element: &ChainElement<'_>) -> bool {
     match element {
         ChainElement::CallExpression(_) => true,
         ChainElement::TSNonNullExpression(inner) => value_is_unmodeled_call(&inner.expression),

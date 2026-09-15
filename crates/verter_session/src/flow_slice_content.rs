@@ -908,6 +908,21 @@ pub enum SliceExpr {
     OptionalAnyChain {
         root: Box<SliceExpr>,
     },
+    /// A MEMBER-valued optional chain (`maybeObj?.b`, `a.b?.c`) — a typed
+    /// optional member read over a NON-call base. The root rides the same
+    /// carriers a bare read of it takes (substitution and narrowing
+    /// included); the evaluator strips each optional link's nullish arms,
+    /// projects the link through the ONE shared path walk, and unions
+    /// `undefined` exactly when a strip removed arms — the checker's
+    /// `T | undefined` for a nullable base, plain `T` for a non-nullable
+    /// one. Every link is STATIC (a computed key or a terminal call keeps
+    /// the optional-`any`-chain / fail-closed rails instead).
+    OptionalMember {
+        root: Box<SliceExpr>,
+        /// The member links in evaluation order, each with its own
+        /// `?.`-authored optionality.
+        links: Arc<[(Arc<str>, bool)]>,
+    },
     /// A local binding reference; its reaching definition is resolved by
     /// the evaluator. Covers BOTH a same-frame local and a binding an
     /// ENCLOSING frame declares (read from inside a nested function
@@ -1221,6 +1236,23 @@ pub enum SliceCall {
     /// resolves EXACTLY (a same-file served function position) — a Flow
     /// obligation edge to that target.
     Direct(verter_semantic::analysis::function_program::FunctionProgramKey),
+    /// A `super.m()` call — the callee is a static member chain rooted at
+    /// `super`. The base member resolves through the HERITAGE surface: the
+    /// enclosing class's `extends` expression, lowered here as a gated
+    /// value type, then projected `prototype` + the authored member path
+    /// (the member path directly, for a STATIC member's base access) and
+    /// called through the ONE call sink. A heritage this half cannot lower
+    /// (a call, a mixin) never reaches this carrier — the call keeps the
+    /// fail-closed rail.
+    OnHeritage {
+        /// The heritage expression's gated value type (`typeof Base`).
+        heritage: GatedType,
+        /// The authored member path off the base (`m` for `super.m()`).
+        member: Arc<[Arc<str>]>,
+        /// Whether the member declaring this frame is STATIC — its `super`
+        /// reads the base constructor's own side, not its prototype.
+        static_side: bool,
+    },
     /// A call lowered to the symbolic `ReturnType<typeof …>` carrier.
     Symbolic(TypeExpr, Option<FlowBindingRef>),
 }
@@ -1905,6 +1937,7 @@ pub(crate) fn build_flow_slice_content(
         params: &params,
         type_param_names: &type_param_names,
         self_name: self_name.as_deref(),
+        enclosing_heritage: resolved.enclosing_heritage,
         skeleton,
         captures,
         control: Arc::clone(&entry.control),
@@ -2376,6 +2409,92 @@ fn pure_member_root_identifier<'a>(
             pure_optional_member_root_identifier(&chain.expression)
         }
         _ => None,
+    }
+}
+
+/// Split a MEMBER-valued optional chain into its root identifier and its
+/// STATIC member links, each with its own `?.`-authored optionality, in
+/// EVALUATION order (`a?.b.c` → `a`, `[(b, true), (c, false)]`).
+///
+/// `None` for every shape the typed optional-member carrier cannot retain
+/// honestly: a computed key (`a?.[k]`), a private-field link, a non-static
+/// root, or a root that is not a bare identifier (`this?.b`, a chain over
+/// a parenthesised expression). Those keep the rails they had — the leaf
+/// lowering and its fail-closed gap — never a half-modeled path.
+fn optional_member_chain_parts<'a>(
+    element: &'a oxc_ast::ast::ChainElement<'_>,
+) -> Option<SplitOptionalMemberChain<'a>> {
+    let mut links: Vec<OptionalMemberLink> = Vec::new();
+    // The outermost member is the chain element; every inner link is an
+    // ordinary (possibly optional) static member expression, and oxc may
+    // nest a further `ChainExpression` in the object position.
+    let mut next = match element {
+        oxc_ast::ast::ChainElement::StaticMemberExpression(member) => {
+            links.push(optional_member_link(member));
+            &member.object
+        }
+        _ => return None,
+    };
+    loop {
+        match next {
+            Expression::StaticMemberExpression(member) => {
+                links.push(optional_member_link(member));
+                next = &member.object;
+            }
+            Expression::ChainExpression(chain) => match &chain.expression {
+                oxc_ast::ast::ChainElement::StaticMemberExpression(member) => {
+                    links.push(optional_member_link(member));
+                    next = &member.object;
+                }
+                _ => return None,
+            },
+            Expression::Identifier(identifier) => {
+                links.reverse();
+                return Some(SplitOptionalMemberChain {
+                    root: identifier,
+                    links,
+                });
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// One STATIC link of a member-valued optional chain: the member name and
+/// its own `?.`-authored optionality.
+type OptionalMemberLink = (Arc<str>, bool);
+
+fn optional_member_link(member: &oxc_ast::ast::StaticMemberExpression<'_>) -> OptionalMemberLink {
+    (Arc::from(member.property.name.as_str()), member.optional)
+}
+
+/// The split of one member-valued optional chain — its root identifier and
+/// its static links in evaluation order.
+struct SplitOptionalMemberChain<'a> {
+    root: &'a oxc_ast::ast::IdentifierReference<'a>,
+    links: Vec<OptionalMemberLink>,
+}
+
+/// The static member path of a `super.a.b(…)` callee — the path off the
+/// base that the call's value resolves through. `None` unless the callee
+/// is a paren-transparent static member chain rooted at a bare `super`
+/// (`super.m()`, `super.a.b()`); a computed link keeps the fail-closed
+/// rail.
+fn super_callee_static_path(callee: &Expression<'_>) -> Option<Vec<Arc<str>>> {
+    let mut path = Vec::new();
+    let mut current = unwrap_parenthesized(callee);
+    loop {
+        match current {
+            Expression::StaticMemberExpression(member) => {
+                path.push(Arc::from(member.property.name.as_str()));
+                current = unwrap_parenthesized(&member.object);
+            }
+            Expression::Super(_) => {
+                path.reverse();
+                return Some(path);
+            }
+            _ => return None,
+        }
     }
 }
 
@@ -3935,6 +4054,12 @@ struct Lowerer<'a> {
     /// NOT be reported as shadowed by a captured same-named `class`.
     type_param_names: &'a [Arc<str>],
     self_name: Option<&'a str>,
+    /// The heritage (`extends`) context of the enclosing class member this
+    /// frame is, when it is a DIRECT member of a class with an `extends`
+    /// clause — what a `super.x` access inside the body resolves through.
+    /// `None` for every other frame (nested callables included, mirroring
+    /// the type-parameter clause rule).
+    enclosing_heritage: Option<verter_semantic::analysis::function_program::EnclosingHeritage<'a>>,
     /// This frame's shared structural skeleton. Runtime references use the
     /// prepared map's exact occurrence records; type-position visibility
     /// queries use the skeleton's separate lexical meaning rules.
@@ -7051,6 +7176,15 @@ impl Lowerer<'_> {
         match expr {
             Expression::Identifier(identifier) => self.lower_identifier_read(identifier, mode),
             Expression::ChainExpression(chain) => {
+                // A MEMBER-valued chain (`maybeObj?.b`) is a typed optional
+                // member read over a non-call base: it publishes
+                // `T | undefined` through the shared path walk, not the
+                // still-`any` optional-call rail below.
+                if !verter_semantic::analysis::flow::chain_is_call_valued(&chain.expression) {
+                    if let Some(member) = self.lower_optional_member_chain(chain, mode) {
+                        return member;
+                    }
+                }
                 match pure_optional_chain_root_identifier(&chain.expression) {
                     Some(root) if self.optional_chain_root_has_prior_flow_change(root) => {
                         SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression)
@@ -7185,6 +7319,14 @@ impl Lowerer<'_> {
                             SliceCall::Direct(direct.target.clone()),
                             call_site(call),
                         );
+                    }
+                }
+                // A `super.m()` callee root: the base member resolves
+                // through the heritage surface. A heritage this half
+                // cannot lower keeps the rail below.
+                if let Some(member) = super_callee_static_path(&call.callee) {
+                    if let Some(carrier) = self.lower_super_call_on_heritage(&member, call, mode) {
+                        return carrier;
                     }
                 }
                 // The SAME root-identifier gate the leaf path takes: a
@@ -7458,6 +7600,93 @@ impl Lowerer<'_> {
                 None,
             )),
         }
+    }
+
+    /// Lower a MEMBER-valued optional chain to the typed
+    /// [`SliceExpr::OptionalMember`] carrier. `None` for every shape the
+    /// carrier cannot retain (see [`optional_member_chain_parts`]) — the
+    /// caller then keeps the rails the chain already had.
+    fn lower_optional_member_chain(
+        &mut self,
+        chain: &oxc_ast::ast::ChainExpression<'_>,
+        mode: ExprMode,
+    ) -> Option<SliceExpr> {
+        let SplitOptionalMemberChain { root, links } =
+            optional_member_chain_parts(&chain.expression)?;
+        // The same write-effect rail the optional-`any`-chain root takes:
+        // a root whose reaching definition an in-frame guard or write
+        // changes is not honestly re-readable here.
+        if self.optional_chain_root_has_prior_flow_change(root) {
+            return Some(SliceExpr::Gap(
+                crate::semantic_query::FlowGap::UnmodeledExpression,
+            ));
+        }
+        let root_expr = self.lower_identifier_read(root, mode);
+        Some(SliceExpr::OptionalMember {
+            root: Box::new(root_expr),
+            links: Arc::from(links.into_boxed_slice()),
+        })
+    }
+
+    /// Lower a `super.m(…)` call onto the heritage surface:
+    /// [`SliceCall::OnHeritage`], carrying the enclosing class's `extends`
+    /// expression as a gated value type plus the authored member path.
+    ///
+    /// `None` when there is no heritage context (not a direct class
+    /// member, or a heritage-less class), the heritage expression is one
+    /// the shared shallow pass cannot model (a call, a mixin composition),
+    /// or the heritage is GENERIC (`extends Base<Args>`) — the carrier
+    /// projects the base's PROTOTYPE side unbound, which would publish
+    /// the base's free type parameters instead of `Args`-instantiated
+    /// members; failing closed here is honest, an eager fabrication is
+    /// not. In every `None` case the call then keeps the fail-closed
+    /// rail. The heritage answer is gated exactly like any leaf that
+    /// names names: a frame that shadows the heritage expression's root
+    /// wraps the call in the root-identifier gate's carrier, and the
+    /// evaluator fails it closed when the owner scope would answer the
+    /// shadowed name.
+    fn lower_super_call_on_heritage(
+        &mut self,
+        member: &[Arc<str>],
+        call: &oxc_ast::ast::CallExpression<'_>,
+        mode: ExprMode,
+    ) -> Option<SliceExpr> {
+        let heritage_access = self.enclosing_heritage?;
+        if heritage_access.super_type_arguments.is_some() {
+            return None;
+        }
+        let super_class = heritage_access.super_class;
+        // The heritage expression's gated value type, through the same
+        // leaf lowering + frame gate any authored heritage read takes.
+        let (ty, shadowed) = match self.leaf_type(super_class, mode) {
+            // A heritage the shared shallow pass cannot model (a call, a
+            // computed composition) has no honest base to walk.
+            LeafLowering::Unmodeled => return None,
+            LeafLowering::Free(ty) => {
+                let shadowed = self.answer_names_frame_bound(&ty, super_class.span(), &[]);
+                (ty, Arc::from(shadowed.into_boxed_slice()))
+            }
+            LeafLowering::FrameShadowed { ty, shadowed } => (ty, shadowed),
+        };
+        let call_expr = SliceExpr::Call(
+            SliceCall::OnHeritage {
+                heritage: GatedType {
+                    ty,
+                    shadowed: Arc::clone(&shadowed),
+                },
+                member: Arc::from(member.to_vec().into_boxed_slice()),
+                static_side: heritage_access.static_side,
+            },
+            call_site(call),
+        );
+        Some(if shadowed.is_empty() {
+            call_expr
+        } else {
+            SliceExpr::FrameShadowed {
+                inner: Box::new(call_expr),
+                shadowed,
+            }
+        })
     }
 
     fn optional_chain_root_has_prior_flow_change(
@@ -8224,6 +8453,28 @@ impl Lowerer<'_> {
     }
 
     fn leaf_type(&mut self, expr: &Expression<'_>, mode: ExprMode) -> LeafLowering {
+        // A JSX element / fragment's value is the configured `JSX`
+        // namespace's `Element` type — a TYPE-space reference the shared
+        // lowering resolves exactly as an authored `JSX.Element`
+        // annotation would (the global `JSX` namespace here; the gate's
+        // `Namespace`-meaning probe below covers a frame-local shadow of
+        // it). The element's own structure — attributes, children — never
+        // contributes to the value, so this is a whole-form leaf answer,
+        // and the shared shallow pass has no arm for the form itself.
+        if matches!(expr, Expression::JSXElement(_) | Expression::JSXFragment(_)) {
+            let ty = TypeExpr::Ref {
+                name: Arc::from("JSX.Element"),
+                type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+            };
+            let shadowed = self.answer_names_frame_bound(&ty, expr.span(), &[]);
+            if shadowed.is_empty() {
+                return LeafLowering::Free(ty);
+            }
+            return LeafLowering::FrameShadowed {
+                ty,
+                shadowed: Arc::from(shadowed.into_boxed_slice()),
+            };
+        }
         // A return argument PRESERVES its top-level literal: the aggregate
         // widening decision belongs to the return join, which is the only
         // place the deduplicated contributor cardinality is known.

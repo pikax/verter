@@ -1325,6 +1325,21 @@ fn apply_selected_runtime_styles(
         .strip_prefix("data-v-")
         .unwrap_or(&bundle.scope_id)
         .to_string();
+    // Every style in this carrier consumed the qualified continuation
+    // boundary: the whole carrier's published styles move together into
+    // `bundle.qualified_styles` below, never split across it and the legacy
+    // `bundle.styles` list (see `RuntimeCompileOutput::qualified_styles`).
+    // A partial selection (a sibling block still unavailable, or none
+    // selected at all) keeps publishing through the legacy list unchanged —
+    // there is no fact to qualify an untouched sibling's stage with.
+    let selects_style_fully =
+        !block_content.styles.is_empty() && block_content.styles.iter().all(Option::is_some);
+    let mut qualified_meta: Vec<
+        Option<(
+            verter_css_syntax::StyleStage,
+            verter_css_syntax::QualifiedStyleResult,
+        )>,
+    > = (0..bundle.styles.len()).map(|_| None).collect();
     for (style_index, ((slot, selected), node)) in block_content
         .styles
         .iter()
@@ -1353,22 +1368,11 @@ fn apply_selected_runtime_styles(
         if authored_dialect.is_none() && !supplied_by_external_tool {
             return Err(VueParsedRuntimeError::BlockContentUnavailable);
         }
-        let mut current = input.code.to_string();
-        let mut current_map = if verter_options.source_map {
-            input.source_map.as_deref().map(str::to_string)
-        } else {
-            None
-        };
-        let mut descriptor = RuntimeOutputDescriptor::identity(
-            &current,
-            &input.source_space_token,
-            &input.content_artifact_token,
-        );
-        let mut applied_rewrite_stages = 0u8;
-
-        if !supplied_by_external_tool {
+        let current_input = input.code.to_string();
+        let cascade_module = node.module && !selected_dialect.requires_external_preprocessing();
+        let outcome = if !supplied_by_external_tool {
             let mut authored = AuthoredStyleInput::new(
-                &current,
+                &current_input,
                 selected_dialect,
                 &input.source_space_token,
                 &input.source_space_token,
@@ -1378,57 +1382,23 @@ fn apply_selected_runtime_styles(
                 input.parsed.as_ref(),
                 style_prepared,
                 style_index,
-                current.as_str(),
+                current_input.as_str(),
             ) {
                 authored = authored.with_prepared(prepared.ir());
             }
-            let cascade_module = node.module && !selected_dialect.requires_external_preprocessing();
-            let outcome = run_vue_style_cascade(
+            run_vue_style_cascade(
                 authored,
                 &style_scope,
                 cascade_module,
                 node.scoped,
                 verter_options.source_map,
-            );
-            if !outcome.stage_failures.is_empty() {
-                return Err(VueParsedRuntimeError::BlockContentUnavailable);
-            }
-            let stage_count = [
-                outcome.facts.rewrites.v_bind,
-                outcome.facts.rewrites.css_modules,
-                outcome.facts.rewrites.scoped_selector
-                    || outcome.facts.rewrites.keyframes
-                    || outcome.facts.rewrites.deep
-                    || outcome.facts.rewrites.slotted
-                    || outcome.facts.rewrites.global,
-            ]
-            .into_iter()
-            .filter(|applied| *applied)
-            .count();
-            if stage_count > 0 {
-                current = outcome.result.into_code();
-                current_map = compose_selected_style_map(
-                    verter_options.source_map,
-                    &outcome.source_map,
-                    input.source_map.as_deref(),
-                )?;
-                descriptor = RuntimeOutputDescriptor::generated(
-                    &current,
-                    current_map.as_deref(),
-                    &[(
-                        input.source_space_token.as_str(),
-                        input.content_artifact_token.as_str(),
-                    )],
-                    SourceMapFidelity::Exact,
-                );
-                applied_rewrite_stages = applied_rewrite_stages.saturating_add(stage_count as u8);
-            }
+            )
         } else {
             let prepared = prepared_style_for_sealed_slot(
                 input.parsed.as_ref(),
                 style_prepared,
                 style_index,
-                current.as_str(),
+                current_input.as_str(),
             )
             .ok_or(VueParsedRuntimeError::BlockContentUnavailable)?;
             let verified = VerifiedPlainCss::from_parsed_native_css(prepared.ir())
@@ -1440,8 +1410,7 @@ fn apply_selected_runtime_styles(
                 .producer
                 .clone()
                 .ok_or(VueParsedRuntimeError::BlockContentUnavailable)?;
-            let cascade_module = node.module && !selected_dialect.requires_external_preprocessing();
-            let outcome = transform_vue_style(
+            transform_vue_style(
                 verified,
                 CascadeInput::Preprocessed(producer),
                 &input.source_space_token,
@@ -1451,44 +1420,68 @@ fn apply_selected_runtime_styles(
                 cascade_module,
                 node.scoped,
                 verter_options.source_map,
+            )
+        };
+        if !outcome.stage_failures.is_empty() {
+            return Err(VueParsedRuntimeError::BlockContentUnavailable);
+        }
+        let stage_count = [
+            outcome.facts.rewrites.v_bind,
+            outcome.facts.rewrites.css_modules,
+            outcome.facts.rewrites.scoped_selector
+                || outcome.facts.rewrites.keyframes
+                || outcome.facts.rewrites.deep
+                || outcome.facts.rewrites.slotted
+                || outcome.facts.rewrites.global,
+        ]
+        .into_iter()
+        .filter(|applied| *applied)
+        .count();
+
+        let (current, current_map, mut descriptor) = if stage_count > 0 {
+            let current = outcome.result.code().to_string();
+            let current_map = compose_selected_style_map(
+                verter_options.source_map,
+                &outcome.source_map,
+                input.source_map.as_deref(),
+            )?;
+            let descriptor = RuntimeOutputDescriptor::generated(
+                &current,
+                current_map.as_deref(),
+                &[(
+                    input.source_space_token.as_str(),
+                    input.content_artifact_token.as_str(),
+                )],
+                SourceMapFidelity::Exact,
             );
-            if !outcome.stage_failures.is_empty() {
-                return Err(VueParsedRuntimeError::BlockContentUnavailable);
-            }
-            let stage_count = [
-                outcome.facts.rewrites.v_bind,
-                outcome.facts.rewrites.css_modules,
-                outcome.facts.rewrites.scoped_selector
-                    || outcome.facts.rewrites.keyframes
-                    || outcome.facts.rewrites.deep
-                    || outcome.facts.rewrites.slotted
-                    || outcome.facts.rewrites.global,
-            ]
-            .into_iter()
-            .filter(|applied| *applied)
-            .count();
-            if stage_count > 0 {
-                current = outcome.result.into_code();
-                current_map = compose_selected_style_map(
-                    verter_options.source_map,
-                    &outcome.source_map,
-                    input.source_map.as_deref(),
-                )?;
-                descriptor = RuntimeOutputDescriptor::generated(
-                    &current,
-                    current_map.as_deref(),
-                    &[(
-                        input.source_space_token.as_str(),
-                        input.content_artifact_token.as_str(),
-                    )],
-                    SourceMapFidelity::Exact,
-                );
-                applied_rewrite_stages = applied_rewrite_stages.saturating_add(stage_count as u8);
-            }
+            (current, current_map, descriptor)
+        } else {
+            let current_map = if verter_options.source_map {
+                input.source_map.as_deref().map(str::to_string)
+            } else {
+                None
+            };
+            let descriptor = RuntimeOutputDescriptor::identity(
+                &current_input,
+                &input.source_space_token,
+                &input.content_artifact_token,
+            );
+            (current_input.clone(), current_map, descriptor)
+        };
+        if stage_count > 1 {
+            descriptor.source_map.fidelity = SourceMapFidelity::Approximate;
         }
 
-        if applied_rewrite_stages > 1 {
-            descriptor.source_map.fidelity = SourceMapFidelity::Approximate;
+        if selects_style_fully {
+            let consumed_stage = if supplied_by_external_tool {
+                verter_css_syntax::StyleStage::Preprocessed
+            } else {
+                verter_css_syntax::StyleStage::Authored
+            };
+            qualified_meta[style_index] = Some((
+                consumed_stage,
+                requalify_vue_style(outcome.result, input.producer.as_ref(), &input.diagnostics),
+            ));
         }
 
         selected.code = current;
@@ -1496,7 +1489,58 @@ fn apply_selected_runtime_styles(
         selected.lang = Some(input.lang.clone());
         selected.output_descriptor = descriptor;
     }
+
+    if selects_style_fully {
+        let mut qualified = Vec::with_capacity(bundle.styles.len());
+        for (style, meta) in bundle.styles.drain(..).zip(qualified_meta) {
+            let (consumed_stage, result) =
+                meta.expect("selects_style_fully guarantees every style slot was qualified above");
+            qualified.push(QualifiedRuntimeStyle {
+                result,
+                consumed_stage,
+                source_map: style.source_map,
+                scope_hash: style.scope_hash,
+                has_global: style.has_global,
+                output_descriptor: style.output_descriptor,
+            });
+        }
+        bundle.qualified_styles = qualified;
+    }
     Ok(())
+}
+
+/// Fold the external producer's own diagnostics into a finished cascade's
+/// qualified result. The cascade reports only its OWN rewrite refusals — the
+/// producer's diagnostics were reported before the cascade ever ran, so they
+/// are unrepresentable in the cascade's own [`verter_css_syntax::QualifiedStyleResult`]
+/// and must be folded in here, at the one site that holds both.
+fn requalify_vue_style(
+    result: verter_css_syntax::QualifiedStyleResult,
+    producer: Option<&verter_css_syntax::PreprocessorIdentity>,
+    producer_diagnostics: &[verter_css_syntax::StyleDiagnostic],
+) -> verter_css_syntax::QualifiedStyleResult {
+    use verter_css_syntax::{QualifiedStyleResult, StyleStage};
+    if producer_diagnostics.is_empty() {
+        return result;
+    }
+    let stage = result.stage();
+    let dialect = result.dialect();
+    let mut diagnostics = producer_diagnostics.to_vec();
+    diagnostics.extend(result.diagnostics().iter().cloned());
+    let code = result.into_code();
+    match stage {
+        StyleStage::Authored => QualifiedStyleResult::authored(dialect, code, diagnostics),
+        StyleStage::Preprocessed => QualifiedStyleResult::preprocessed(
+            producer
+                .cloned()
+                .unwrap_or(verter_css_syntax::PreprocessorIdentity::Anonymous),
+            code,
+            diagnostics,
+        ),
+        StyleStage::FrameworkRewritten => {
+            QualifiedStyleResult::framework_rewritten(dialect, code, diagnostics)
+        }
+    }
 }
 
 fn compose_selected_style_map(
@@ -1693,7 +1737,7 @@ pub(crate) fn compile_vue_parsed_runtime(
     Ok(DirectCompileOutput {
         artifacts,
         styles: primary.bundle.styles,
-        qualified_styles: Vec::new(),
+        qualified_styles: primary.bundle.qualified_styles,
         diagnostics,
     })
 }

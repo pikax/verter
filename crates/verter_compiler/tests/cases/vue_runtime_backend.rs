@@ -342,6 +342,24 @@ fn assert_runtime_parity(
         assert_eq!(backend_style.scope_hash, standalone_style.scope_hash);
         assert_eq!(backend_style.has_global, standalone_style.has_global);
     }
+    assert_eq!(
+        via_backend.qualified_styles.len(),
+        via_standalone.qualified_styles.len()
+    );
+    for (backend_style, standalone_style) in via_backend
+        .qualified_styles
+        .iter()
+        .zip(via_standalone.qualified_styles.iter())
+    {
+        assert_eq!(backend_style.result, standalone_style.result);
+        assert_eq!(
+            backend_style.consumed_stage,
+            standalone_style.consumed_stage
+        );
+        assert_eq!(backend_style.source_map, standalone_style.source_map);
+        assert_eq!(backend_style.scope_hash, standalone_style.scope_hash);
+        assert_eq!(backend_style.has_global, standalone_style.has_global);
+    }
 }
 
 /// A genuine consume-once PROJECTION grant, for wrong-demand
@@ -979,19 +997,22 @@ fn vue_runtime_backend_preserves_selected_style_bytes() {
     )
     .expect("selected style");
     assert!(
-        !via_backend.styles.is_empty(),
-        "selected style must publish a style block"
-    );
-    let style = &via_backend.styles[0];
-    assert!(
-        style.code.contains("color: red") || style.code.contains("color:red"),
-        "selected CSS bytes must be preserved: {}",
-        style.code
+        via_backend.styles.is_empty(),
+        "the selected style must publish qualified"
     );
     assert!(
-        style.code.contains("data-v-scope123"),
-        "selected CSS must still be scoped: {}",
-        style.code
+        !via_backend.qualified_styles.is_empty(),
+        "selected style must publish a qualified style block"
+    );
+    let style = &via_backend.qualified_styles[0];
+    let code = style.result.code();
+    assert!(
+        code.contains("color: red") || code.contains("color:red"),
+        "selected CSS bytes must be preserved: {code}"
+    );
+    assert!(
+        code.contains("data-v-scope123"),
+        "selected CSS must still be scoped: {code}"
     );
     assert_eq!(
         style.output_descriptor.source_map.declared_space_tokens,
@@ -1542,14 +1563,18 @@ fn rewritten_selected_style_composes_cascade_map_with_supplied_source_map() {
     )
     .expect("rewritten selected style");
     assert!(
-        !via_backend.styles.is_empty(),
-        "selected style must publish a style block"
+        via_backend.styles.is_empty(),
+        "the selected style must publish qualified"
     );
-    let style = &via_backend.styles[0];
     assert!(
-        style.code.contains("data-v-scope123"),
+        !via_backend.qualified_styles.is_empty(),
+        "selected style must publish a qualified style block"
+    );
+    let style = &via_backend.qualified_styles[0];
+    assert!(
+        style.result.code().contains("data-v-scope123"),
         "selected CSS must still be scoped: {}",
-        style.code
+        style.result.code()
     );
     let map = style
         .source_map
