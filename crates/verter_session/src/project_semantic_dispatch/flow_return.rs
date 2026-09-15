@@ -8790,7 +8790,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// surface is unavailable — including a lowering that only reaches an
     /// UNRESOLVED bare reference or an opaque carrier, which must never
     /// publish as a resolved narrow — so the caller keeps the arm
-    /// possible, degraded, never proved off an edge.
+    /// possible, degraded, never proved off an edge. A userland shadow
+    /// (`interface Function { … }`, an imported alias named `Function`)
+    /// is likewise rejected: see [`Self::is_unshadowed_builtin_carrier`].
     fn lower_global_function_surface(&mut self) -> Option<SemanticNodeId> {
         let ty = verter_type_expr::TypeExpr::Ref {
             name: Arc::from("Function"),
@@ -8802,9 +8804,32 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             &ty,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
         )?;
+        self.is_unshadowed_builtin_carrier(node).then_some(node)
+    }
+
+    /// Whether `node` is a resolved reference-head carrier
+    /// (`DeclRef` / `InstantiationRef`) whose declaration identity is
+    /// the `"__builtin__"` sentinel `resolve_bare_ref_head` stamps on
+    /// an UNSHADOWED ambient lib global or utility — never a userland
+    /// declaration that happens to share the name. `false` for an
+    /// unresolved `BareRef`, an `Opaque` miss, a missing node, AND a
+    /// resolved carrier whose base names a real workspace/lib file (the
+    /// shadow case: the bare-name walk found the user's own
+    /// declaration instead of routing through the builtin fast path).
+    /// Shared by the two lib-global guard-narrow mints
+    /// ([`Self::mint_in_key_record_intersection`],
+    /// [`Self::lower_global_function_surface`]) so a userland shadow of
+    /// `Record` or `Function` never mints as the checker's resolved
+    /// narrow — it stays the typed `GuardNarrowing` gap.
+    fn is_unshadowed_builtin_carrier(&self, node: SemanticNodeId) -> bool {
         match self.dispatch.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::BareRef(_)) | Some(SemanticNodeData::Opaque(_)) | None => None,
-            _ => Some(node),
+            Some(SemanticNodeData::DeclRef { identity }) => {
+                identity.canonical_id.as_ref() == "__builtin__"
+            }
+            Some(SemanticNodeData::InstantiationRef { base, .. }) => {
+                base.canonical_id.as_ref() == "__builtin__"
+            }
+            _ => false,
         }
     }
 
@@ -9956,7 +9981,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// subject node is kept as the intersection's subject arm,
     /// preserving its spelling. `None` when the utility does not
     /// resolve (a userland shadow, an unresolvable reference): the
-    /// caller keeps the typed gap.
+    /// caller keeps the typed gap. The resolved carrier is accepted
+    /// ONLY when its head identity is the `"__builtin__"` sentinel —
+    /// the SAME shadow-detection identity `resolve_bare_ref_head`
+    /// stamps on the ambient lib global. A userland `type Record = …`
+    /// (or an imported alias of that name) resolves through the
+    /// ordinary bare-name walk instead, landing a `DeclRef` /
+    /// `InstantiationRef` whose `base.canonical_id` names the
+    /// shadowing file — never `"__builtin__"` — so it is rejected here
+    /// rather than minted as the checker's narrow.
     fn mint_in_key_record_intersection(
         &mut self,
         subject: SemanticNodeId,
@@ -9980,13 +10013,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             &record,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
         )?;
-        match self.dispatch.graph().node_data(utility).as_deref() {
-            Some(SemanticNodeData::BareRef(_)) | Some(SemanticNodeData::Opaque(_)) | None => None,
-            _ => Some(
-                self.dispatch
-                    .intern_normalized_union_or_intersection(&[subject, utility], false),
-            ),
+        if !self.is_unshadowed_builtin_carrier(utility) {
+            return None;
         }
+        Some(
+            self.dispatch
+                .intern_normalized_union_or_intersection(&[subject, utility], false),
+        )
     }
 
     /// One union arm's key-presence verdict for `"key" in subject`,

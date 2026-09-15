@@ -7076,6 +7076,102 @@ function f(x: A | B, A: typeof B) {
     });
 }
 
+/// D10 shadow control for the `"k" in x` unknown-key positive edge: a
+/// userland `type Record<K, V>` shadows the ambient lib `Record` in
+/// scope, so `mint_in_key_record_intersection`'s owner-scope lowering
+/// resolves the SHADOWING declaration (a `DeclRef`/`InstantiationRef`
+/// whose base names this file, never the `"__builtin__"` sentinel) —
+/// the mint must reject it and keep the typed `GuardNarrowing` gap
+/// rather than publish `(subject) & Record<"c", unknown>` against the
+/// user's own `Record`.
+#[test]
+fn in_key_unknown_key_positive_edge_gaps_when_record_is_shadowed() {
+    const CANONICAL: &str = "/ws/in-key-record-shadow/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+type Record<K extends string, V> = { shadowed: true };
+
+function makeProps(x: { a: number } | { b: string }) {
+  return { v: "c" in x ? x : 0 };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "makeProps");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert!(
+            !format!("{expr:?}").contains("\"Record\""),
+            "a shadowed `Record` must never mint into the published narrow, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing
+            )),
+            "the shadowed lib utility keeps the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a shadow-gapped narrow never warms"
+        );
+    });
+}
+
+/// D10 shadow control for the `typeof x === "function"` positive edge
+/// over `object`: a module-scoped `interface Function` shadows the
+/// ambient lib `Function` in scope, so `lower_global_function_surface`
+/// resolves the SHADOWING declaration instead of the lib global — the
+/// narrow must reject it, keep the arm possible, and record the typed
+/// `GuardNarrowing` gap rather than publish the checker's `Function`
+/// against the user's own shadowing interface.
+#[test]
+fn typeof_function_over_object_gaps_when_function_is_shadowed() {
+    const CANONICAL: &str = "/ws/typeof-function-shadow/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+interface Function { shadowed: true }
+
+function makeProps(x: object) {
+  if (typeof x === "function") { return x; }
+  return 0 as const;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "makeProps");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert!(
+            !format!("{expr:?}").contains("\"Function\""),
+            "a shadowed `Function` must never mint into the published narrow, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing
+            )),
+            "the shadowed lib global keeps the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a shadow-gapped narrow never warms"
+        );
+    });
+}
+
 /// The D10 heritage controls for `instanceof` derivation: the
 /// declaration-identity chain decides both edges without a single
 /// relation read, a STRUCTURAL TWIN with no heritage relation takes the
