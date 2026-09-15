@@ -326,6 +326,7 @@ fn load_tsconfig_recursive(
                 let ext = path.extension().and_then(|e| e.to_str());
                 let include = match ext_filter {
                     Some("vue") => ext == Some("vue"),
+                    Some("svelte") => ext == Some("svelte"),
                     Some("ts") => {
                         matches!(ext, Some("ts") | Some("tsx") | Some("mts") | Some("cts"))
                     }
@@ -334,7 +335,7 @@ fn load_tsconfig_recursive(
                     }
                     Some(_) | None => true, // No extension filter — include all classifiable files.
                 };
-                if include {
+                if include && include_pattern_matches(pattern, path, &root_dir) {
                     let canon = simplify_verbatim_path(
                         &path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
                     )
@@ -371,11 +372,86 @@ fn glob_dir_prefix(pattern: &str) -> &str {
     }
 }
 
+/// Apply the filename and path portion of an include glob before classifying.
+///
+/// `infer_ext_filter` only reduces `src/App*.svelte` to "any `.svelte` file".
+/// Without this match, the walk admits every `.svelte` under the directory
+/// prefix (including `Other.svelte`). Bare directory/file patterns have no
+/// glob metacharacters and are already constrained by the scan directory.
+fn include_pattern_matches(pattern: &str, file: &Path, root_dir: &Path) -> bool {
+    if !pattern.contains(['*', '?']) {
+        return true;
+    }
+    let rel = match file.strip_prefix(root_dir) {
+        Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+        Err(_) => return false,
+    };
+    glob_match_path(pattern.trim_start_matches("./"), &rel)
+}
+
+fn glob_match_path(pattern: &str, path: &str) -> bool {
+    let pat: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    glob_match_segments(&pat, &segs)
+}
+
+fn glob_match_segments(pat: &[&str], segs: &[&str]) -> bool {
+    let Some((head, rest)) = pat.split_first() else {
+        return segs.is_empty();
+    };
+    if *head == "**" {
+        if rest.is_empty() {
+            return true;
+        }
+        for i in 0..=segs.len() {
+            if glob_match_segments(rest, &segs[i..]) {
+                return true;
+            }
+        }
+        return false;
+    }
+    let Some((seg, rest_segs)) = segs.split_first() else {
+        return false;
+    };
+    glob_match_name(head, seg) && glob_match_segments(rest, rest_segs)
+}
+
+fn glob_match_name(pattern: &str, name: &str) -> bool {
+    let mut pi = 0;
+    let mut ni = 0;
+    let pat = pattern.as_bytes();
+    let name = name.as_bytes();
+    let mut star_pat = None;
+    let mut star_name = 0;
+    while ni < name.len() {
+        if pi < pat.len() && pat[pi] == b'*' {
+            star_pat = Some(pi);
+            star_name = ni;
+            pi += 1;
+        } else if pi < pat.len() && (pat[pi] == b'?' || pat[pi] == name[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if let Some(sp) = star_pat {
+            pi = sp + 1;
+            star_name += 1;
+            ni = star_name;
+        } else {
+            return false;
+        }
+    }
+    while pi < pat.len() && pat[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pat.len()
+}
+
 /// Infer the extension filter from an include pattern's tail.
 fn infer_ext_filter(pattern: &str) -> Option<&'static str> {
     let lower = pattern.to_ascii_lowercase();
     if lower.ends_with(".vue") {
         Some("vue")
+    } else if lower.ends_with(".svelte") {
+        Some("svelte")
     } else if lower.ends_with(".ts")
         || lower.ends_with(".tsx")
         || lower.ends_with(".mts")
@@ -403,8 +479,12 @@ fn load_raw_tsconfig(path: &Path) -> Result<RawTsConfig, String> {
 }
 
 fn classify_file(path: &Path, vue_files: &mut Vec<PathBuf>, ts_files: &mut Vec<PathBuf>) {
+    let as_str = path.to_string_lossy().replace('\\', "/");
+    if verter_semantic::resolver_core::path_is_carrier(&as_str) {
+        vue_files.push(path.to_path_buf());
+        return;
+    }
     match path.extension().and_then(|e| e.to_str()) {
-        Some("vue") => vue_files.push(path.to_path_buf()),
         Some("ts") | Some("tsx") | Some("mts") | Some("cts") => ts_files.push(path.to_path_buf()),
         _ => {}
     }
@@ -644,6 +724,131 @@ mod tests {
         assert_eq!(glob_dir_prefix("./*.ts"), ".");
         assert_eq!(glob_dir_prefix("src"), "src");
         assert_eq!(glob_dir_prefix("typings/env.d.ts"), "typings/env.d.ts");
+    }
+
+    #[test]
+    fn directory_include_admits_svelte_carriers_and_honors_exclude() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        let excluded = src.join("excluded");
+        let nested = src.join("nested");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&excluded).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(src.join("App.svelte"), "<script lang=\"ts\"></script>\n").unwrap();
+        std::fs::write(src.join("App.vue"), "<script setup lang=\"ts\"></script>\n").unwrap();
+        std::fs::write(
+            nested.join("Deep.svelte"),
+            "<script lang=\"ts\"></script>\n",
+        )
+        .unwrap();
+        std::fs::write(
+            excluded.join("Skipped.svelte"),
+            "<script lang=\"ts\"></script>\n",
+        )
+        .unwrap();
+        std::fs::write(
+            outside.join("Outside.svelte"),
+            "<script lang=\"ts\"></script>\n",
+        )
+        .unwrap();
+        let tsconfig = temp.path().join("tsconfig.json");
+        std::fs::write(
+            &tsconfig,
+            r#"{
+                "include": ["src"],
+                "exclude": ["src/excluded"]
+            }"#,
+        )
+        .unwrap();
+
+        let config = load_tsconfig(&tsconfig).unwrap();
+        let names: Vec<String> = config
+            .vue_files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "App.svelte"),
+            "directory include must admit .svelte: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "App.vue"),
+            "directory include must still admit .vue: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "Deep.svelte"),
+            "directory include must walk nested .svelte carriers: {names:?}"
+        );
+        assert!(
+            names.iter().all(|n| n != "Skipped.svelte"),
+            "exclude must drop src/excluded: {names:?}"
+        );
+        assert!(
+            names.iter().all(|n| n != "Outside.svelte"),
+            "files outside include must not be admitted: {names:?}"
+        );
+    }
+
+    #[test]
+    fn ts_glob_does_not_own_svelte_and_svelte_glob_does_not_own_vue() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("App.svelte"), "<script lang=\"ts\"></script>\n").unwrap();
+        std::fs::write(src.join("App.vue"), "<script setup lang=\"ts\"></script>\n").unwrap();
+        std::fs::write(src.join("plain.ts"), "export const n = 1;\n").unwrap();
+
+        let ts_only = temp.path().join("tsconfig.ts-only.json");
+        std::fs::write(&ts_only, r#"{ "include": ["src/**/*.ts"] }"#).unwrap();
+        let ts_config = load_tsconfig(&ts_only).unwrap();
+        assert!(
+            ts_config.vue_files.is_empty(),
+            "*.ts include must not own .svelte/.vue, got {:?}",
+            ts_config.vue_files
+        );
+        assert_eq!(ts_config.ts_files.len(), 1);
+
+        let svelte_only = temp.path().join("tsconfig.svelte.json");
+        std::fs::write(&svelte_only, r#"{ "include": ["src/**/*.svelte"] }"#).unwrap();
+        let svelte_config = load_tsconfig(&svelte_only).unwrap();
+        let names: Vec<String> = svelte_config
+            .vue_files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(names, vec!["App.svelte".to_string()]);
+    }
+
+    #[test]
+    fn svelte_filename_glob_keeps_path_constraint() {
+        assert!(glob_match_path("src/App*.svelte", "src/App.svelte"));
+        assert!(glob_match_path("src/App*.svelte", "src/AppFoo.svelte"));
+        assert!(!glob_match_path("src/App*.svelte", "src/Other.svelte"));
+        assert!(!glob_match_path("src/App*.svelte", "src/nested/App.svelte"));
+        assert!(glob_match_path("src/**/*.svelte", "src/nested/App.svelte"));
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("App.svelte"), "<script lang=\"ts\"></script>\n").unwrap();
+        std::fs::write(src.join("Other.svelte"), "<script lang=\"ts\"></script>\n").unwrap();
+
+        let tsconfig = temp.path().join("tsconfig.json");
+        std::fs::write(&tsconfig, r#"{ "include": ["src/App*.svelte"] }"#).unwrap();
+        let config = load_tsconfig(&tsconfig).unwrap();
+        let names: Vec<String> = config
+            .vue_files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(
+            names,
+            vec!["App.svelte".to_string()],
+            "src/App*.svelte must not reduce to every .svelte under src: {names:?}"
+        );
+        assert!(config.ts_files.is_empty());
     }
 
     // ── strip_json_comments ────────────────────────────────────────
