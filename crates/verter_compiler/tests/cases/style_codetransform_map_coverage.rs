@@ -548,7 +548,7 @@ fn vue_style_source_map_toggle_is_a_genuine_caller_facing_ab_option_through_comp
         .expect("compiles with source_map: false")
         .into_produced()
         .expect("runtime surface produced");
-    let style_off = off.styles.first().expect("style output");
+    let style_off = off.qualified_styles.first().expect("style output");
 
     let artifact_on = registered_artifact("file:///ToggleOn.vue", source);
     let on = compiler
@@ -556,24 +556,25 @@ fn vue_style_source_map_toggle_is_a_genuine_caller_facing_ab_option_through_comp
         .expect("compiles with source_map: true")
         .into_produced()
         .expect("runtime surface produced");
-    let style_on = on.styles.first().expect("style output");
+    let style_on = on.qualified_styles.first().expect("style output");
 
     // Sanity: a real byte-changing rewrite actually happened (the scoped
     // stage ran) — otherwise this would not be a rewriting fixture at all.
     assert!(
-        style_off.code.contains(".x[data-v-scope123]"),
+        style_off.result.code().contains(".x[data-v-scope123]"),
         "{}",
-        style_off.code
+        style_off.result.code()
     );
     assert_ne!(
-        style_off.code.as_str(),
+        style_off.result.code(),
         ".x { color: red; }",
         "the scoped rewrite must change the authored bytes"
     );
 
     // (a) the toggle never changes emitted code bytes.
     assert_eq!(
-        style_off.code, style_on.code,
+        style_off.result.code(),
+        style_on.result.code(),
         "the source_map toggle must never change emitted code bytes"
     );
     // (b) with the toggle off, no map is handed back to the caller.
