@@ -1739,6 +1739,263 @@ impl<'a> ProjectSemanticDispatch<'a> {
         result.with_return_type(self.graph().as_ref(), closed)
     }
 
+    // ──────────────────────────────────────────────────────────────────
+    // The function-kind return wrap (async / generator / async-generator)
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Attach the deferred function-kind wrap to a joined body result.
+    ///
+    /// The wrap is a FACT about the function's authored FORM (`async` /
+    /// `generator` flags of the skeleton), recorded here — at the ONE
+    /// join — and materialized only where the value leaves the frame for
+    /// publication ([`Self::materialize_flow_return_wrap`]). Everything
+    /// between (the equation fixed point, the post-convergence literal
+    /// widening, the per-key substitution, the pre-seal union re-close)
+    /// operates on the unwrapped body join.
+    fn attach_function_kind_wrap(
+        &self,
+        result: FlowReturnResult,
+        kind: verter_semantic::analysis::flow::FunctionBodyKind,
+        yield_contributions: &[(SemanticNodeId, bool)],
+        binder_env: &FlowBinderEnv,
+    ) -> FlowReturnResult {
+        use verter_semantic::analysis::flow::FunctionBodyKind;
+        if kind == FunctionBodyKind::Plain {
+            return result;
+        }
+        let yield_join = match kind {
+            FunctionBodyKind::Generator | FunctionBodyKind::AsyncGenerator => {
+                self.join_yield_contributions(yield_contributions)
+            }
+            FunctionBodyKind::Async | FunctionBodyKind::Plain => None,
+        };
+        let generator_head = match kind {
+            FunctionBodyKind::Generator => self.resolve_lib_head_for_wrap("Generator", binder_env),
+            FunctionBodyKind::AsyncGenerator => {
+                self.resolve_lib_head_for_wrap("AsyncGenerator", binder_env)
+            }
+            FunctionBodyKind::Async | FunctionBodyKind::Plain => None,
+        };
+        result.with_function_wrap(crate::semantic_query::FlowReturnWrap {
+            kind,
+            yield_join,
+            generator_head,
+        })
+    }
+
+    /// Join a generator's yielded-expression types into the wrap's yield
+    /// parameter — the return join's own arm rules (dedupe, then widen a
+    /// lone FRESH literal: `yield 1` widens to `number`, `yield 1; yield
+    /// 2` keeps `1 | 2`). An empty contribution set is `None`: the wrap
+    /// publishes the empty union (`never`).
+    fn join_yield_contributions(
+        &self,
+        contributions: &[(SemanticNodeId, bool)],
+    ) -> Option<SemanticNodeId> {
+        if contributions.is_empty() {
+            return None;
+        }
+        let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(contributions.len());
+        let mut all_fresh = true;
+        for &(node, fresh) in contributions {
+            all_fresh &= fresh;
+            if !arms.contains(&node) {
+                arms.push(node);
+            }
+        }
+        if arms.len() == 1 && all_fresh {
+            arms[0] = widen_literal_node(self, arms[0]);
+        }
+        Some(self.intern_normalized_union_or_intersection(&arms, true))
+    }
+
+    /// Resolve a wrap's lib generic head (`Generator` /
+    /// `AsyncGenerator`) through the ONE shared bare-ref resolver, under
+    /// the evaluation's own binder environment — the same resolution an
+    /// authored `Generator<…>` annotation in the same position takes, so
+    /// the wrap and an authored reference mint ONE declaration identity.
+    /// A head the environment cannot resolve is `None`: the wrap then
+    /// publishes the typed gap, never a fabricated wrapper.
+    fn resolve_lib_head_for_wrap(
+        &self,
+        name: &str,
+        binder_env: &FlowBinderEnv,
+    ) -> Option<SemanticNodeId> {
+        let ty = verter_type_expr::TypeExpr::Ref {
+            name: Arc::from(name),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let mut substitutions = Vec::new();
+        let node = self.shallow_lower_type_expr_with_context(
+            &ty,
+            &binder_env.env,
+            &binder_env.scope,
+            &binder_env.name_resolution,
+            binder_env.scope_payload.as_ref(),
+            &binder_env.shadowing,
+            &mut substitutions,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        );
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. }) => {
+                Some(node)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the builtin-sentinel carrier identity is the registry's
+    /// `Promise` global — the same registry lookup
+    /// [`Self::runtime_nominal_global_name`] answers for an authored
+    /// unshadowed `Promise<…>` reference.
+    fn is_promise_carrier_identity(&self, identity: &crate::semantic_query::DeclIdentity) -> bool {
+        identity.canonical_id.as_ref() == "__builtin__"
+            && matches!(
+                self.runtime_nominal_global_name(identity.decl_name.as_ref()),
+                Some(crate::intrinsic_registry::RuntimeNominal::Promise)
+            )
+    }
+
+    /// Whether a joined body type embeds a `Promise<…>` carrier at its
+    /// top level (the whole join or any union member) — the shapes the
+    /// async wrap must `Awaited`-collapse before re-wrapping, exactly as
+    /// the checker's `Promise<Awaited<union>>` return rule does.
+    fn flow_join_embeds_promise_carrier(&self, node: SemanticNodeId) -> bool {
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::InstantiationRef { base, .. }) => {
+                self.is_promise_carrier_identity(base)
+            }
+            Some(SemanticNodeData::Union(members)) => members
+                .iter()
+                .any(|member| self.flow_join_embeds_promise_carrier(*member)),
+            _ => false,
+        }
+    }
+
+    /// Dispatch the lib `Awaited<T>` instantiation over `node` — the ONE
+    /// shared `Instantiate` executor, memoized like every other — and
+    /// the unwrap arm both `await x` positions and the async return wrap
+    /// share. `None` when the executor refused (the caller publishes the
+    /// typed gap).
+    fn instantiate_awaited(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        let read = self.execute_read(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                self.builtin_type_slot("Awaited"),
+                Arc::from(vec![node].into_boxed_slice()),
+                self.instantiate_context_for(
+                    "__builtin__",
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                ),
+            ),
+        ));
+        match read.value {
+            QueryResult::Value(awaited) => Some(awaited),
+            _ => None,
+        }
+    }
+
+    /// Materialize the pending function-kind wrap — the LAST value
+    /// transformation before the seal, run exactly where the value
+    /// leaves the frame for publication (the root close, the SCC member
+    /// finalize, the provisional caller step). The proof and both
+    /// publish channels see the WRAPPED value, so warm and replay carry
+    /// it verbatim.
+    ///
+    /// - `async`: `Promise<Awaited<join>>` — the `Awaited` dispatch
+    ///   fires only when the join embeds a `Promise` carrier at its top
+    ///   level (one lib instantiation per wrap otherwise: the `Promise`
+    ///   identity is registry-decided and interns directly, the same
+    ///   identity an authored unshadowed `Promise<…>` reference takes).
+    /// - generator kinds: `Generator<Y, join, unknown>` /
+    ///   `AsyncGenerator<Y, join, unknown>` over the RESOLVED lib head
+    ///   captured at the evaluation (`Y` is the yield join, `never` for
+    ///   a yield-less body).
+    /// - an unresolvable lib head, a refused `Awaited` executor, or an
+    ///   already-degraded body publishes the TYPED GAP — the rebuilt
+    ///   result re-derives `UnresolvedValue` over the marker, so it is
+    ///   `ReturnOnly` and never warms.
+    pub(super) fn materialize_flow_return_wrap(
+        &self,
+        result: FlowReturnResult,
+    ) -> FlowReturnResult {
+        use verter_semantic::analysis::flow::FunctionBodyKind;
+        let Some(wrap) = result.function_wrap().copied() else {
+            return result;
+        };
+        // A degraded body join keeps its typed gap and its own verdict:
+        // wrapping it would bury the gap under a wrapper the evaluation
+        // never earned. Degraded results never seal either way.
+        if result.degradation().is_some() {
+            return result;
+        }
+        let graph = self.graph();
+        let body = result.return_type();
+        let wrapper = match wrap.kind {
+            FunctionBodyKind::Plain => return result,
+            FunctionBodyKind::Async => {
+                let awaited = if self.flow_join_embeds_promise_carrier(body) {
+                    match self.instantiate_awaited(body) {
+                        Some(awaited) => awaited,
+                        None => return self.materialize_wrap_typed_gap(result),
+                    }
+                } else {
+                    body
+                };
+                graph.intern_node(SemanticNodeData::InstantiationRef {
+                    base: crate::semantic_query::DeclIdentity {
+                        canonical_id: Arc::from("__builtin__"),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        whole_hash: crate::semantic_query::HashValue::default(),
+                        decl_name: Arc::from("Promise"),
+                    },
+                    args: Arc::from(vec![awaited].into_boxed_slice()),
+                })
+            }
+            FunctionBodyKind::Generator | FunctionBodyKind::AsyncGenerator => {
+                let head_identity =
+                    wrap.generator_head
+                        .and_then(|head| match graph.node_data(head).as_deref() {
+                            Some(SemanticNodeData::DeclRef { identity }) => Some(identity.clone()),
+                            Some(SemanticNodeData::InstantiationRef { base, .. }) => {
+                                Some(base.clone())
+                            }
+                            _ => None,
+                        });
+                let Some(base) = head_identity else {
+                    return self.materialize_wrap_typed_gap(result);
+                };
+                let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+                let yield_join = wrap.yield_join.unwrap_or(never);
+                let next = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
+                graph.intern_node(SemanticNodeData::InstantiationRef {
+                    base,
+                    args: Arc::from(vec![yield_join, body, next].into_boxed_slice()),
+                })
+            }
+        };
+        FlowReturnResult::new_with_fresh_literal_arms(
+            graph,
+            wrapper,
+            result.can_fall_through,
+            result.degradation(),
+            &[],
+        )
+    }
+
+    /// The typed-gap arm of the wrap materialization: the whole return
+    /// carries the typed unmodelled-position marker. The rebuilt result
+    /// re-derives `UnresolvedValue` over the marker.
+    fn materialize_wrap_typed_gap(&self, result: FlowReturnResult) -> FlowReturnResult {
+        let marker = super::flow_return_callee::unmodeled_position_marker(self);
+        FlowReturnResult::new_with_fresh_literal_arms(
+            self.graph(),
+            marker,
+            result.can_fall_through,
+            None,
+            &[],
+        )
+    }
+
     /// Close the machinery ROOT frame.
     /// Test seam: close one inline frame with a decided outcome and
     /// tagged holds. Flow identities are rejected by the callee gate's
@@ -2695,7 +2952,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // its typed discharge report ride the deferral to the close.
             let step = match &outcome {
                 FlowReturnPendingOutcome::EvaluatedValue(result) => FlowReturnStep::Complete(
-                    self.apply_frame_key_substitution(&root_key, result.clone()),
+                    // The caller-facing step leaves the frame: substitute
+                    // the instantiation mapping, then materialize the
+                    // function-kind wrap — a caller joining this callee's
+                    // return sees the CALLEE'S full return type.
+                    self.materialize_flow_return_wrap(
+                        self.apply_frame_key_substitution(&root_key, result.clone()),
+                    ),
                 ),
                 FlowReturnPendingOutcome::NoValue { failure, .. } => {
                     FlowReturnStep::NoValue(*failure)
@@ -3008,6 +3271,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // point, widening and substitution, before the seal — the
                 // proof and both publish channels see the closed value.
                 let result = self.close_flow_result_pre_seal(result);
+                // The function-kind wrap materializes LAST — the sealed
+                // value, the proof, and both publish channels see the
+                // WRAPPED return, so warm and replay carry it verbatim.
+                let result = self.materialize_flow_return_wrap(result);
                 // FINALIZE the root's own demand — after the component
                 // fixed point, the literal widening, and the per-key
                 // substitution: the proof covers exactly this value. A
@@ -3249,7 +3516,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .as_ref()
                     .map(|result| result.fresh_literal_arms().to_vec())
                     .unwrap_or_default();
-                let next = FlowReturnResult::new_with_fresh_literal_arms(
+                let mut next = FlowReturnResult::new_with_fresh_literal_arms(
                     graph,
                     self.intern_normalized_union_or_intersection(&flat, true),
                     NormalCompletion::minted(
@@ -3263,6 +3530,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     degradation,
                     &seed_fresh,
                 );
+                // The equation's lattice is the BODY join, so the fixed
+                // point rebuilds never see the wrapper — but the pending
+                // function-kind wrap is a fact about the ENTRY's own body,
+                // and it must survive every rebuild to be materialized at
+                // the member's publication close.
+                if let Some(wrap) = current[i]
+                    .as_ref()
+                    .and_then(|result| result.function_wrap().copied())
+                {
+                    next = next.with_function_wrap(wrap);
+                }
                 if current[i].as_ref() != Some(&next) {
                     current[i] = Some(next);
                     progressed = true;
@@ -3797,6 +4075,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             demanded_member.as_ref().map(|member| MemberDemandFilter {
                 member: Arc::clone(member),
             });
+        // Read once here: the filter moves into the evaluator below, and
+        // the function-kind wrap attaches only on the whole-return point.
+        let whole_return_point = member_filter.is_none();
         // The demand selection IS the lowered slice: only slice-selected
         // expression content and value-selected slots lower — an
         // unselected binding initializer, sibling member value, or
@@ -4082,6 +4363,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             observations: BodyCompletionObservations::none(),
             member_filter,
             holds: Vec::new(),
+            yield_contributions: Vec::new(),
             degradation: unapplied_write_effect
                 .then_some(crate::semantic_query::FlowReturnDegradation::UnappliedWriteEffect)
                 .or_else(|| {
@@ -4102,6 +4384,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             executed_walk: ExecutedSliceWalk::default(),
         };
         let holds;
+        let yield_contributions;
         let degradation;
         let observations;
         let mut call_evidence;
@@ -4115,6 +4398,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
             evaluator.promote_pending_statement_gap();
             holds = std::mem::take(&mut evaluator.holds);
+            yield_contributions = std::mem::take(&mut evaluator.yield_contributions);
             observations = evaluator.observations;
             call_evidence = std::mem::take(&mut evaluator.call_evidence);
             executed_walk = std::mem::take(&mut evaluator.executed_walk);
@@ -4294,7 +4578,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
             degradation,
             ir.empty_completion,
         ) {
-            Ok(joined) => joined,
+            Ok(joined) => {
+                // Attach the function-kind wrap to the BODY join — deferred
+                // until publication. A member-projection demand never asks
+                // for the wrap (its answer is the projected member, not the
+                // whole return), so the wrap attaches only on the
+                // whole-return point.
+                let (result, fresh_seed) = joined;
+                let result = if whole_return_point {
+                    self.attach_function_kind_wrap(
+                        result,
+                        skeleton.kind,
+                        &yield_contributions,
+                        &binder_env,
+                    )
+                } else {
+                    result
+                };
+                (result, fresh_seed)
+            }
             Err(failure) => {
                 return FlowEvaluationOutcome {
                     outcome: FlowReturnPendingOutcome::NoValue {
@@ -4815,6 +5117,13 @@ fn collect_assignment_spans(
                 collect_assignment_spans(body, out, include_expression_writes);
             }
             crate::flow_slice_content::SliceStatement::Return { argument, .. } => {
+                if include_expression_writes {
+                    if let Some(argument) = argument {
+                        collect_expression_write_spans(argument, out);
+                    }
+                }
+            }
+            crate::flow_slice_content::SliceStatement::Yield { argument, .. } => {
                 if include_expression_writes {
                     if let Some(argument) = argument {
                         collect_expression_write_spans(argument, out);
@@ -5377,6 +5686,7 @@ fn slice_statements_have_non_subject_return<'a>(
         | SliceStatement::Assignment { .. }
         | SliceStatement::Assertion { .. }
         | SliceStatement::Break { .. }
+        | SliceStatement::Yield { .. }
         | SliceStatement::Throw
         | SliceStatement::ThrowPoint
         | SliceStatement::Binding { .. }
@@ -5534,6 +5844,13 @@ struct FlowEvaluator<'d, 'b> {
     /// `undefined` contributor even though the runtime edge is
     /// overridden).
     observations: BodyCompletionObservations,
+    /// The generator yield-parameter contributions collected by the
+    /// statement walk, in evaluation order: each entry is the evaluated
+    /// yielded expression's node and whether it is a FRESH literal (the
+    /// yield join widens a lone fresh literal exactly as the return join
+    /// does). Read by the function-kind wrap at the join; a generator
+    /// without yields joins the empty union (`never`).
+    yield_contributions: Vec<(SemanticNodeId, bool)>,
     /// The member-projection demand filter, when this evaluation serves
     /// a single-named-member `ReturnProjectionDemand` (`ReturnType<typeof
     /// f>['b']`). Return sites evaluate ONLY the demanded member of a
@@ -10339,6 +10656,52 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 crate::flow_slice_content::SliceStatement::Gap(gap) => {
                     self.pending_statement_gap.get_or_insert(*gap);
                 }
+                // A statement-position `yield x` contributes the YIELD
+                // parameter of the generator's return wrap. It evaluates
+                // at its statement position (a read here observes every
+                // write before it) and never ends the path. A member-
+                // projection demand never asks for the wrap, so the yield
+                // evaluations are skipped there; a HOLD-dependent yielded
+                // call is not re-derived by the return fixed point, so it
+                // degrades rather than freezing its first-pass value.
+                crate::flow_slice_content::SliceStatement::Yield {
+                    argument,
+                    freshness,
+                } => {
+                    if self.member_filter.is_none() {
+                        match argument {
+                            Some(expr) => {
+                                self.prescan_statement_value_writes(Some(expr));
+                                let bare_literal = matches!(
+                                    freshness,
+                                    crate::flow_slice_content::SliceFreshness::Fresh
+                                );
+                                let fresh = bare_literal || self.reads_widening_literal_local(expr);
+                                let outcome = self.eval_expr(expr);
+                                match self.settle(outcome) {
+                                    Some(node) => {
+                                        self.yield_contributions.push((node, fresh));
+                                    }
+                                    None => {
+                                        self.record_degradation(
+                                            crate::semantic_query::FlowReturnDegradation::UnmodeledPosition,
+                                        );
+                                    }
+                                }
+                            }
+                            None => {
+                                // A bare `yield;` yields `undefined`.
+                                let graph = self.dispatch.graph();
+                                self.yield_contributions.push((
+                                    graph.intern_node(SemanticNodeData::Primitive(
+                                        PrimitiveKind::Undefined,
+                                    )),
+                                    false,
+                                ));
+                            }
+                        }
+                    }
+                }
                 crate::flow_slice_content::SliceStatement::Return {
                     argument,
                     freshness,
@@ -12290,6 +12653,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         ));
         let nested_degradation;
         let nested_observations;
+        let nested_yield_contributions;
         let (contributors, nested_body_falls_through) = {
             let mut nested_evaluator = FlowEvaluator {
                 dispatch: self.dispatch,
@@ -12314,6 +12678,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // filter is a top-level demand axis.
                 member_filter: None,
                 holds: Vec::new(),
+                yield_contributions: Vec::new(),
                 degradation: None,
                 pending_statement_gap: None,
                 conditional_arm_nesting: 0,
@@ -12331,6 +12696,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             nested_evaluator.seed_hoisted_var_declarations(body);
             let (outcome, nested_body_falls_through) = nested_evaluator.eval_region(body);
             nested_evaluator.promote_pending_statement_gap();
+            nested_yield_contributions = std::mem::take(&mut nested_evaluator.yield_contributions);
             #[cfg(test)]
             if self
                 .dispatch
@@ -12450,7 +12816,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 empty_completion,
             )
         }) {
-            Ok((result, _fresh_seed)) => result.return_type(),
+            // The nested signature's return IS the function-kind-wrapped
+            // body join (an async arrow's type is `() => Promise<T>`), so
+            // the wrap attaches and MATERIALIZES here — the nested body has
+            // no equation fixed point of its own ("no fixed point closes
+            // here"), and the signature consumes the node directly.
+            Ok((result, _fresh_seed)) => {
+                let wrapped = self.dispatch.materialize_flow_return_wrap(
+                    self.dispatch.attach_function_kind_wrap(
+                        result,
+                        skeleton.kind,
+                        &nested_yield_contributions,
+                        &binder_env,
+                    ),
+                );
+                wrapped.return_type()
+            }
             Err(_) => self.unmodeled_position(),
         };
         graph.intern_node(SemanticNodeData::Signature {
@@ -12851,6 +13232,38 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             crate::flow_slice_content::SliceExpr::SemanticAny => Positional::Value(
                 graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
             ),
+            // An `await x`: the operand evaluates through its own arm (a
+            // call operand through the ONE call sink above), then the
+            // resolved value unwraps through the lib `Awaited` surface —
+            // ONE shared `Instantiate` dispatch, memoized like every
+            // other. The reducer passes settled non-thenables through
+            // verbatim and unwraps `Promise<…>` carriers recursively; an
+            // operand it cannot settle answers the deferred miss shell,
+            // which the result constructor's unresolved backstop turns
+            // into the typed degradation — never a wrong warm answer.
+            crate::flow_slice_content::SliceExpr::Awaited { operand } => {
+                match self.eval_expr(operand) {
+                    Positional::Value(node) => {
+                        let read = self.dispatch.execute_read(SemanticQueryKey::Instantiate(
+                            crate::semantic_query::InstantiateKey::new(
+                                self.dispatch.builtin_type_slot("Awaited"),
+                                Arc::from(vec![node].into_boxed_slice()),
+                                self.dispatch.instantiate_context_for(
+                                    "__builtin__",
+                                    crate::semantic_query::ProjectionReductionContext::structural_transit(
+                                    ),
+                                ),
+                            ),
+                        ));
+                        match read.value {
+                            QueryResult::Value(awaited) => Positional::Value(awaited),
+                            _ => Positional::Unmodeled,
+                        }
+                    }
+                    Positional::Hold => Positional::Hold,
+                    Positional::Unmodeled => Positional::Unmodeled,
+                }
+            }
             crate::flow_slice_content::SliceExpr::Gap(gap) => {
                 self.record_degradation(FlowReturnDegradation::FlowGap(*gap));
                 Positional::Unmodeled

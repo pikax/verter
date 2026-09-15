@@ -55,6 +55,10 @@ use verter_type_expr::{LiteralValue, PrimitiveName, TopLevelOwnerId, TypeExpr};
 
 const LEAF: &str = "/ws/cov/leaf.ts";
 const LEAF_SRC: &str = r#"
+// The lib generator surface this standalone host has no `lib*.d.ts` for:
+// the wrap resolves `Generator` through the ONE shared bare-ref resolver,
+// so a file-scope declaration is the environment's stand-in.
+interface Generator<T, TReturn, TNext> {}
 export declare function idf<T>(x: T): T;
 
 export function leafInstExpr() {
@@ -150,6 +154,19 @@ export function jsxAttrCall() {
 }
 "#;
 
+const NEG: &str = "/ws/cov/nolib.ts";
+const NEG_SRC: &str = r#"
+// NO lib generator surface: this file deliberately declares neither
+// `Generator` nor `AsyncGenerator`, so the wrap's lib-head resolution
+// fails and the wrap must keep the typed gap.
+export function* negGen() {
+  return 1;
+}
+export async function negAsync() {
+  return 1;
+}
+"#;
+
 const CALLS: &str = "/ws/cov/calls.ts";
 const CALLS_SRC: &str = r#"
 export class CtorC {
@@ -207,6 +224,8 @@ export function callThisParam() {
 }
 
 export declare function asyncSrc(): Promise<number>;
+// The lib async-generator surface (see LEAF_SRC's `Generator` note).
+interface AsyncGenerator<T, TReturn, TNext> {}
 export async function callAwait() {
   return await asyncSrc();
 }
@@ -545,6 +564,7 @@ fn ts_host() -> Arc<VerterHost> {
     host_with(&[
         (LEAF, LEAF_SRC),
         (JSX, JSX_SRC),
+        (NEG, NEG_SRC),
         (CALLS, CALLS_SRC),
         (TL, TL_SRC),
         (GEO, GEO_SRC),
@@ -1733,7 +1753,7 @@ fn private_field_expression_return_is_the_field_type() {
 /// Oracle: `ReturnType<typeof leafGenerator>` is
 /// `Generator<number, string, unknown>`.
 ///
-/// Verbatim failure (un-ignored):
+/// Verbatim failure (before the wrap landed):
 ///
 /// ```text
 /// assertion `left != right` failed: a generator's return must not be the bare `return` type
@@ -1741,20 +1761,30 @@ fn private_field_expression_return_is_the_field_type() {
 ///  right: Primitive(String)
 /// ```
 ///
-/// Owning layer: the flow evaluator publishes the raw `return`
-/// contributor join with NO generator wrapping — no `is_generator`
-/// consultation exists anywhere on the flow path. This is a WARM WRONG
-/// answer, not merely an imprecise one: a consumer reading
-/// `ReturnType<typeof leafGenerator>` gets `string` where the language
-/// says `Generator<number, string, unknown>`.
+/// Owning layer (landed): the function-kind wrap — the skeleton carries
+/// the authored `generator` flag, the join defers the wrap past the
+/// equation fixed point, and the publication closure instantiates the
+/// resolved lib `Generator` head over `(yield join, return join,
+/// unknown)`. The fixture declares the `Generator` surface this
+/// standalone host has no `lib*.d.ts` for; an environment that cannot
+/// resolve the head keeps the typed gap (never warm) instead.
 #[test]
-#[ignore = "generator functions are not wrapped: the flow rail publishes the bare `return` join as the function's return type, warm"]
 fn generator_return_is_wrapped_in_generator() {
     let host = ts_host();
-    assert_ne!(
+    assert_eq!(
         value_of(&host, LEAF, "leafGenerator"),
-        string(),
-        "a generator's return must not be the bare `return` type"
+        TypeExpr::Ref {
+            name: Arc::from("Generator"),
+            type_arguments: Arc::from(
+                vec![
+                    number(),
+                    string(),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice()
+            ),
+        },
+        "a generator's return is Generator<yield, return, next>"
     );
 }
 
@@ -2007,7 +2037,7 @@ fn tagged_template_call_return_is_the_tag_return() {
 /// Oracle: `ReturnType<typeof callAsyncPlain>` is `Promise<number>` for
 /// `async function callAsyncPlain() { return 1; }`.
 ///
-/// Verbatim failure (un-ignored):
+/// Verbatim failure (before the wrap landed):
 ///
 /// ```text
 /// assertion `left != right` failed: an async function's return must not be the bare body type
@@ -2015,24 +2045,22 @@ fn tagged_template_call_return_is_the_tag_return() {
 ///  right: Primitive(Number)
 /// ```
 ///
-/// Owning layer: the flow evaluator publishes the raw `return`
-/// contributor join with NO `Promise` wrapping — `is_async` is not
-/// consulted anywhere on the flow path (neither
-/// `verter_session/src/flow_slice_content.rs`,
-/// `verter_session/src/project_semantic_dispatch/flow_return*.rs`, nor
-/// `verter_semantic/src/analysis/flow/**` reference it). This is a WARM
-/// WRONG answer at a public consumer boundary: a downstream
-/// `ReturnType<typeof asyncFn>` reads `number` where the language says
-/// `Promise<number>`, and the enclosing composition is never marked
-/// partial because `degradation` is `None`.
+/// Owning layer (landed): the function-kind wrap — the skeleton carries
+/// the authored `async` flag, the join defers the wrap past the equation
+/// fixed point (so the fresh literal `1` widens to `number` first), and
+/// the publication closure interns the registry-decided `Promise` builtin
+/// carrier over the body join — the same identity an authored unshadowed
+/// `Promise<…>` reference takes.
 #[test]
-#[ignore = "async functions are not wrapped: the flow rail publishes the bare body join as the function's return type, warm"]
 fn async_function_return_is_wrapped_in_promise() {
     let host = ts_host();
-    assert_ne!(
+    assert_eq!(
         value_of(&host, CALLS, "callAsyncPlain"),
-        number(),
-        "an async function's return must not be the bare body type"
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+        },
+        "an async function's return is Promise<body join>, warm"
     );
 }
 
@@ -2041,7 +2069,7 @@ fn async_function_return_is_wrapped_in_promise() {
 /// Oracle: `ReturnType<typeof callAsyncGen>` is
 /// `AsyncGenerator<number, void, unknown>`.
 ///
-/// Verbatim failure (un-ignored):
+/// Verbatim failure (before the wrap landed):
 ///
 /// ```text
 /// assertion `left != right` failed: an async generator's return must not be `void`
@@ -2049,16 +2077,26 @@ fn async_function_return_is_wrapped_in_promise() {
 ///  right: Primitive(Void)
 /// ```
 ///
-/// Owning layer: the same missing wrapping as the async and generator
-/// rows — the body's fall-through `void` is published warm.
+/// Owning layer (landed): the generator wrap over the async-generator
+/// kind — the yield join (`number`), the body's fall-through `void`, and
+/// `unknown` next, over the resolved lib `AsyncGenerator` head.
 #[test]
-#[ignore = "async generators are not wrapped: the flow rail publishes the body's fall-through `void`, warm"]
 fn async_generator_return_is_wrapped_in_async_generator() {
     let host = ts_host();
-    assert_ne!(
+    assert_eq!(
         value_of(&host, CALLS, "callAsyncGen"),
-        TypeExpr::Primitive(PrimitiveName::Void),
-        "an async generator's return must not be `void`"
+        TypeExpr::Ref {
+            name: Arc::from("AsyncGenerator"),
+            type_arguments: Arc::from(
+                vec![
+                    number(),
+                    TypeExpr::Primitive(PrimitiveName::Void),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice()
+            ),
+        },
+        "an async generator's return is AsyncGenerator<yield, return, next>"
     );
 }
 
@@ -2074,19 +2112,19 @@ fn async_generator_return_is_wrapped_in_async_generator() {
 ///   left: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection })
 ///  right: Ref { name: "Promise", type_arguments: [Primitive(Number)] }
 /// ```///
-/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
-/// result is a degraded success and nothing warms — so the row observes a
-/// VALUE rather than `Miss`. The capability gap named below is unchanged.
+/// The fail-closed DISPOSITION was POSITIONAL before the await arm
+/// landed: the value was the typed unresolved marker (projected
+/// `Unknown { raw: "unmodeledPosition" }`), a degraded success that
+/// never warmed.
 ///
-/// Owning layer: TWO independent capability gaps compose here — the
-/// awaited call is never resolved and never `Promise`-unwrapped, and the
-/// enclosing `async` is never re-wrapped. Fixing only the async wrapping
-/// would turn this into `Promise<any>`, still wrong. The admission half
-/// is settled: `await f()` is a `ValueDescent::UnmodeledCall`, so it
-/// fails closed rather than publishing `any` warm.
+/// Owning layer (landed): TWO arms compose — the awaited call resolves
+/// through the ONE call carrier (`ValueDescent::Awaited` descends both
+/// halves onto the operand) and unwraps through the lib `Awaited`
+/// instantiation, and the enclosing `async` re-wraps through the
+/// function-kind wrap. Fixing only one arm would have published
+/// `Promise<any>` (wrap without unwrap) or `number` (unwrap without
+/// wrap) — both wrong.
 #[test]
-#[ignore = "an awaited call is not resolved and the enclosing async is not wrapped: it fails closed as an unmodeled call position"]
 fn awaited_call_return_is_the_awaited_value_wrapped_again() {
     let host = ts_host();
     assert_eq!(
@@ -2095,6 +2133,110 @@ fn awaited_call_return_is_the_awaited_value_wrapped_again() {
             name: Arc::from("Promise"),
             type_arguments: Arc::from(vec![number()].into_boxed_slice()),
         },
+    );
+}
+
+/// D12-AC2 NEGATIVE LEG — a wrap whose lib head the environment cannot
+/// resolve keeps the TYPED GAP and never warms.
+///
+/// `negGen`'s file declares no `Generator` surface, so the wrap's shared
+/// bare-ref head resolution misses and the materialization publishes the
+/// typed marker: a degraded success with zero warm candidates. Contrast
+/// `leafGenerator` (same shape, with the surface declared), which
+/// publishes `Generator<number, string, unknown>` clean and warm.
+#[test]
+fn generator_wrap_without_lib_surface_keeps_typed_gap_and_never_warms() {
+    let host = ts_host();
+    match eval(&host, NEG, "negGen") {
+        Outcome::Value {
+            degradation,
+            candidates,
+            ..
+        } => {
+            assert!(degradation.is_some(), "the unresolved wrap must degrade");
+            assert_eq!(
+                candidates, 0,
+                "a gapped wrap is ReturnOnly — it must never warm"
+            );
+        }
+        other => panic!("negGen must produce a degraded value, got {other:?}"),
+    }
+}
+
+/// D12-AC3 — wrapped results admit WARM and REPLAY equal to FRESH.
+///
+/// The wrap is materialized inside the sealed value (the proof covers the
+/// wrapped node), so the memo stores it and every later demand — the same
+/// dispatch's warm read, and a FRESH dispatch over the same store —
+/// publishes the identical wrapped answer.
+#[test]
+fn wrapped_async_return_admits_warm_and_replay_equal_to_fresh() {
+    let host = ts_host();
+    let expected = TypeExpr::Ref {
+        name: Arc::from("Promise"),
+        type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+    };
+    // Fresh, then warm on the same dispatch.
+    assert_clean_warm(&host, CALLS, "callAsyncPlain", expected.clone());
+    assert_clean_warm(&host, CALLS, "callAsyncPlain", expected.clone());
+    // Replay: a fresh dispatch over the same store answers warm-equal.
+    assert_clean_warm(&host, CALLS, "callAsyncPlain", expected);
+}
+
+/// D12-AC4 — BOUNDED WORK: one lib instantiation per awaited unwrap, and
+/// identical warm demand adds ZERO instantiations.
+///
+/// The wrap's `Promise` carrier is a registry-decided interning (no
+/// `Instantiate` dispatch); the ONE dispatch an awaited operand costs is
+/// the lib `Awaited` instantiation, memoized like every other — so the
+/// cold demand pays it exactly once and warm repeats pay nothing.
+#[test]
+fn wrapped_await_demand_adds_one_cold_instantiation_and_zero_warm() {
+    let host = ts_host();
+    let before = host
+        .project_type_store()
+        .semantic_graph()
+        .stats_snapshot()
+        .instantiate_count;
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "callAwait",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+        },
+    );
+    let cold = host
+        .project_type_store()
+        .semantic_graph()
+        .stats_snapshot()
+        .instantiate_count;
+    assert_eq!(
+        cold - before,
+        1,
+        "the cold awaited-unwrap demand pays exactly one lib instantiation"
+    );
+    // bounded-loop: three warm repeats, a fixed demand count
+    for _ in 0..3 {
+        assert_clean_warm(
+            &host,
+            CALLS,
+            "callAwait",
+            TypeExpr::Ref {
+                name: Arc::from("Promise"),
+                type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+            },
+        );
+    }
+    let warm = host
+        .project_type_store()
+        .semantic_graph()
+        .stats_snapshot()
+        .instantiate_count;
+    assert_eq!(
+        warm, cold,
+        "identical warm demand must add ZERO instantiations"
     );
 }
 
@@ -3112,27 +3254,24 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// callCtorSigNew  new ctorSig(1)                  { q: string; }
 /// callOptional    maybeFn?.()                     number | undefined
 /// callTagged      tag`a${1}b`                     boolean
-/// callAwait       await asyncSrc()                Promise<number>
 /// ```
+///
+/// `await asyncSrc()` LEFT this set with the D12 await arm: an awaited
+/// call is a modelled form (`ValueDescent::Awaited`) whose operand rides
+/// the call carrier, so `callAwait` publishes `Promise<number>` (see
+/// `awaited_call_return_is_the_awaited_value_wrapped_again`).
 ///
 /// Mutation recipe: `value_is_unmodeled_call` is the single authority
 /// (both `value_descent`'s guarded arm and the content half's residual
 /// type-carrier check delegate to it), so flipping one of its arms flips
 /// exactly the matching rows — `NewExpression` /
 /// `TaggedTemplateExpression` to `false` flips `callNew` /
-/// `callCtorSigNew` / `callTagged` back to a warm `any`,
-/// `ChainElement::CallExpression` to `false` flips `callOptional`, and
-/// the `AwaitExpression` arm flips `callAwait`.
+/// `callCtorSigNew` / `callTagged` back to a warm `any`, and
+/// `ChainElement::CallExpression` to `false` flips `callOptional`.
 #[test]
 fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() {
     let host = ts_host();
-    for name in [
-        "callNew",
-        "callCtorSigNew",
-        "callOptional",
-        "callTagged",
-        "callAwait",
-    ] {
+    for name in ["callNew", "callCtorSigNew", "callOptional", "callTagged"] {
         assert_fails_closed(&host, CALLS, name);
     }
 }
@@ -3148,10 +3287,13 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 ///
 /// The discriminator runs the other way with the same fixture: every
 /// call form with NO structural arm (`new`, an optional call, a tagged
-/// template, `await`) keeps the fail-closed verdict when a sequence
-/// wraps it — the sequence context never converts an unmodeled call
-/// into a published value either. The delegation answers the CALL's own
-/// question; it invents no arm.
+/// template) keeps the fail-closed verdict when a sequence wraps it —
+/// the sequence context never converts an unmodeled call into a
+/// published value either. The delegation answers the CALL's own
+/// question; it invents no arm. An `await` last operand is a MODELLED
+/// form since the D12 await arm, so `(0, await asyncSrc())` surfaces
+/// `Promise<number>` clean and warm — the await's own verdict, kept by
+/// the sequence exactly as the resolved bare call's is.
 ///
 /// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
 /// --ignoreConfig`) — the answers the fail-closed rows decline to
@@ -3161,26 +3303,31 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 /// callSeqNew       CtorC
 /// callSeqOptional  number | undefined
 /// callSeqTagged    boolean
-/// callSeqAwait     Promise<number>
 /// ```
 ///
 /// Mutation recipe: dropping the sequence delegation from the content
-/// half's sequence arm flips `callSeqRest` to the fail-closed marker;
-/// widening the delegation past the paren-transparent `CallExpression`
-/// form (a `New` / chain / tagged / `await` last operand) flips the four
-/// negative rows to a published value.
+/// half's sequence arm flips `callSeqRest` and `callSeqAwait` to the
+/// fail-closed marker; widening the delegation past the
+/// paren-transparent `CallExpression` form (a `New` / chain / tagged
+/// last operand) flips the three negative rows to a published value.
 #[test]
 fn a_sequence_wrapped_call_keeps_the_calls_own_verdict() {
     let host = ts_host();
     // A resolved call surfaces through the sequence, clean and warm.
     assert_clean_warm(&host, CALLS, "callSeqRest", string_lit("rest"));
-    // Every form with no structural arm keeps failing closed.
-    for name in [
-        "callSeqNew",
-        "callSeqOptional",
-        "callSeqTagged",
+    // An awaited call keeps its own modelled verdict through the
+    // sequence: resolved operand, `Awaited` unwrap, async re-wrap.
+    assert_clean_warm(
+        &host,
+        CALLS,
         "callSeqAwait",
-    ] {
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+        },
+    );
+    // Every form with no structural arm keeps failing closed.
+    for name in ["callSeqNew", "callSeqOptional", "callSeqTagged"] {
         assert_fails_closed(&host, CALLS, name);
     }
 }

@@ -127,6 +127,15 @@ pub(crate) enum ExpectedNode {
     TypeParam { name: &'static str },
     /// `SemanticNodeData::DeclRef` naming this declaration.
     DeclRef { name: &'static str },
+    /// `SemanticNodeData::InstantiationRef` whose base names this
+    /// declaration (the builtin-sentinel `__builtin__` carrier included —
+    /// the async return wrap's `Promise<…>` and the generator wrap's
+    /// resolved lib head both mint this shape), with exactly these type
+    /// arguments, in order.
+    Instantiation {
+        name: &'static str,
+        args: &'static [ExpectedNode],
+    },
     /// `SemanticNodeData::BareRef` carrying this unresolved name.
     BareRef { name: &'static str },
     /// The typed unmodelled-position marker
@@ -311,6 +320,20 @@ pub(crate) fn node_matches(
         }
         (ExpectedNode::DeclRef { name }, SemanticNodeData::DeclRef { identity }) => {
             &*identity.decl_name == *name
+        }
+        (
+            ExpectedNode::Instantiation { name, args },
+            SemanticNodeData::InstantiationRef {
+                base,
+                args: got_args,
+            },
+        ) => {
+            &*base.decl_name == *name
+                && got_args.len() == args.len()
+                && got_args
+                    .iter()
+                    .zip(args.iter())
+                    .all(|(got, exp)| node_matches(dispatch, *got, exp, depth + 1))
         }
         (ExpectedNode::BareRef { name }, SemanticNodeData::BareRef(_)) => {
             data.bare_ref_head().is_some_and(|(got, _)| &**got == *name)
@@ -1032,7 +1055,8 @@ pub(crate) fn check_boundary_refusal(
 /// (`new (…) => T` never satisfies it). Parameter names are ignored;
 /// types and arity are exact. A reference name matches a resolved
 /// `DeclRef` only — `BareRef` / `TypeParam` reach `_ => false`
-/// (fail-closed). Generic-argument references, accessor prints, and
+/// (fail-closed). A generic-argument reference matches an
+/// `InstantiationRef` (name + exact argument list). Accessor prints and
 /// elided-member markers PARSE but match NOTHING (fail-closed; see the
 /// variant docs) — re-add those arms only with a control. A live
 /// object-spread program is compared through the SAME public
@@ -1051,10 +1075,11 @@ pub(crate) mod checker_syntax {
         BoolLit(bool),
         Primitive(PrimitiveKind),
         Ref(String),
-        /// `Name<T, …>`. Parses; matches NOTHING: no deep row measures
-        /// an `InstantiationRef` a generic print could compare against,
-        /// so an acceptance arm would be unexercised vocabulary.
-        /// Reintroduce it only with a row + control.
+        /// `Name<T, …>`. Matches a live `InstantiationRef` naming the
+        /// same declaration with the exact argument list — reintroduced
+        /// with X18's deep pin (the async return wrap's `Promise<…>`
+        /// builtin carrier), discriminated by the mutation control over
+        /// X18's checker column.
         GenericRef {
             name: String,
             args: Vec<CheckerType>,
@@ -1621,6 +1646,25 @@ pub(crate) mod checker_syntax {
             // `BareRef` / `TypeParam` reach `_ => false` (fail-closed).
             (CheckerType::Ref(name), SemanticNodeData::DeclRef { identity }) => {
                 &*identity.decl_name == name.as_str()
+            }
+            // A generic print matches an `InstantiationRef` naming the
+            // same declaration with the exact argument list — introduced
+            // with X18's deep pin (`Promise<{ label: string; }>` against
+            // the async return wrap's builtin carrier), discriminated by
+            // the mutation control over X18's checker column.
+            (
+                CheckerType::GenericRef { name, args },
+                SemanticNodeData::InstantiationRef {
+                    base,
+                    args: got_args,
+                },
+            ) => {
+                &*base.decl_name == name.as_str()
+                    && got_args.len() == args.len()
+                    && got_args
+                        .iter()
+                        .zip(args.iter())
+                        .all(|(got, exp)| matches_node(dispatch, *got, exp, depth + 1))
             }
             (CheckerType::Union(exp), SemanticNodeData::Union(members)) => {
                 // Order-insensitive EXACT set equality, backtracking so
@@ -3844,16 +3888,29 @@ mod expectation_controls {
                 );
             },
         );
-        // Generic-argument references fail closed on X18's program.
+        // Generic-argument references: the acceptance arm introduced with
+        // X18's async-wrap deep pin — an `InstantiationRef` with the exact
+        // head name and argument list, with the wrong-head and wrong-arity
+        // negative legs. The D12-era fail-closed control was retired with
+        // the arm; the corpus mutation control discriminates the argument
+        // clauses.
         with_flow_node(
             "async function makeProps() { return { label: \"x\" } }",
             "makeProps",
             |dispatch, node| {
                 assert!(
-                    !accepts(dispatch, node, "Promise<{ label: string; }>"),
-                    "a GENERIC-ARGUMENT reference print must match NOTHING — no acceptance arm \
-                     is modelled (measured {})",
+                    accepts(dispatch, node, "Promise<{ label: string; }>"),
+                    "the async wrap's `Promise<…>` carrier must accept its own generic \
+                     print (measured {})",
                     render_node(dispatch, node, 0)
+                );
+                assert!(
+                    !accepts(dispatch, node, "Map<{ label: string; }>"),
+                    "a wrong generic HEAD name must be rejected"
+                );
+                assert!(
+                    !accepts(dispatch, node, "Promise<{ label: string; }>[]"),
+                    "a wrong arity SHAPE must be rejected"
                 );
             },
         );
