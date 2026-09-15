@@ -295,7 +295,15 @@ INTERNALLY then re-expresses it neutrally
 (`vue_result_to_runtime_bundle`); the Vue runtime compiler assembles
 the `_sfc_main` module and emits `main.body_code`. The host publishes
 that already-assembled body and refuses reconstruction with
-`HOST_VUE_MAIN_NOT_ASSEMBLED` when the body is missing. Map validation
+`HOST_VUE_MAIN_NOT_ASSEMBLED` when the body is missing. After Main
+assembly, `vue_bridge::admit_vue_custom_block_descriptors` mints one
+source-backed `CustomBlockDescriptor` per custom block from the
+registered parse (role, `lang`/`src`, ordered attrs, SFC-absolute
+content region, local/`src`/empty content state, provenance bound to the
+registered parse key + carrier structure hash) and admits them, each with
+its own `custom:{order}` backing unit, to `main.artifacts` — complete-only,
+metadata-only, `src` never loaded; the neutral `custom_blocks` list stays
+the compatibility projection. Map validation
 and composition live in `verter_compiler::assembly` (`map_input`,
 `map_compose`). A carrier that projects ONLY an IDE
 surface (Svelte today) returns a bundle with no runtime surface

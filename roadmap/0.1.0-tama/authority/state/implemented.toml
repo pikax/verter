@@ -134,7 +134,7 @@ schema = 2
 "CCA2E" = { status = "pending" }
 "CCA2E0" = { status = "pending" }
 "CCA2EH" = { status = "pending" }
-"CCA2EV" = { status = "pending" }
+"CCA2EV" = { status = "implemented", commit_message = "feat(compiler): produce source-backed Vue custom-block descriptors", commit_date = "2026-09-15T12:00:00+01:00" }
 "CCA2F" = { status = "pending" }
 "CEC0" = { status = "pending" }
 "CEF0" = { status = "pending" }

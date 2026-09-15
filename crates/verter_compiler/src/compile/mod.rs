@@ -904,23 +904,18 @@ fn compile_inner(
     let block_ranges = extract_block_ranges(parsed, input);
 
     // Collect custom blocks before taking template ast
-    let custom_blocks: Vec<VerterCustomBlock> = parsed
-        .unknown_nodes()
-        .iter()
-        .map(|node| {
-            let tag_name = &input[node.tag_open.start as usize..node.tag_open.name_end as usize];
-            // Extract tag name (skip the '<')
-            let block_type = tag_name.strip_prefix('<').unwrap_or(tag_name).to_string();
-            let content = node
+    let custom_blocks: Vec<VerterCustomBlock> = vue_custom_block_facts(parsed, input)
+        .map(|facts| VerterCustomBlock {
+            block_type: facts.tag.to_string(),
+            content: facts
                 .content
                 .map(|span| input[span.start as usize..span.end as usize].to_string())
-                .unwrap_or_default();
-            let attrs = extract_attrs(&node.attributes, input);
-            VerterCustomBlock {
-                block_type,
-                content,
-                attrs,
-            }
+                .unwrap_or_default(),
+            attrs: facts
+                .attributes
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.unwrap_or_default().to_string()))
+                .collect(),
         })
         .collect();
 
@@ -2377,6 +2372,40 @@ fn compile_inner(
         actual_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
         downgrade_reason: None,
         template_binding_metadata,
+    })
+}
+
+/// The parser-minted facts of every Vue custom block, in source order.
+pub(crate) fn vue_custom_block_facts<'a>(
+    parsed: &'a ParsedSfc,
+    source: &'a str,
+) -> impl Iterator<Item = VueCustomBlockFacts<'a>> + 'a {
+    parsed.unknown_nodes().iter().map(move |node| {
+        let open = &source[node.tag_open.start as usize..node.tag_open.name_end as usize];
+        let end = node
+            .tag_close
+            .as_ref()
+            .map(|close| close.end)
+            .or(node.content.map(|content| content.end))
+            .unwrap_or(node.tag_open.end);
+        VueCustomBlockFacts {
+            tag: open.strip_prefix('<').unwrap_or(open),
+            element: crate::common::Span::new(node.tag_open.start, end),
+            content: node.content,
+            unclosed: node.tag_close.is_none() && node.content.is_some(),
+            attributes: node
+                .attributes
+                .iter()
+                .filter(|prop| !prop.is_directive)
+                .map(|prop| {
+                    let value = match (prop.value_start, prop.value_end) {
+                        (Some(start), Some(end)) => Some(&source[start as usize..end as usize]),
+                        _ => None,
+                    };
+                    (&source[prop.start as usize..prop.name_end as usize], value)
+                })
+                .collect(),
+        }
     })
 }
 

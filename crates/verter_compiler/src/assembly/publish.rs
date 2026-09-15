@@ -40,6 +40,43 @@ impl std::fmt::Display for ArtifactSchemaError {
 }
 impl std::error::Error for ArtifactSchemaError {}
 
+/// Why produced custom-block descriptors were not admitted to a set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CustomBlockAdmissionError {
+    /// A backing source unit violates the set's source-unit schema.
+    Schema(ArtifactSchemaError),
+    /// A descriptor failed construction or attachment validation.
+    Descriptor(CustomBlockDescriptorError),
+}
+
+/// Add one source unit under the set's schema rules: ordered span, named
+/// role, one revision per source, unique identity.
+fn stage_source_unit(
+    sources: &mut std::collections::BTreeMap<
+        super::source_unit::SourceUnitId,
+        super::source_unit::ArtifactSourceUnit,
+    >,
+    source: super::source_unit::ArtifactSourceUnit,
+) -> Result<(), ArtifactSchemaError> {
+    use ArtifactSchemaError as E;
+    if source.source_span.start > source.source_span.end {
+        return Err(E::InvalidSourceSpan);
+    }
+    if source.unit.logical_role().is_empty() {
+        return Err(E::InvalidIdentity);
+    }
+    if sources.values().any(|existing| {
+        existing.unit.source_id() == source.unit.source_id()
+            && existing.unit.revision() != source.unit.revision()
+    }) {
+        return Err(E::ConflictingSourceRevision);
+    }
+    if sources.insert(source.unit.id().clone(), source).is_some() {
+        return Err(E::DuplicateSourceUnit);
+    }
+    Ok(())
+}
+
 /// Immutable compiler-owned schema over already-produced facts. Creation
 /// validates references and coordinate qualification, and sorts set-valued
 /// data; it performs no parsing, lowering, code generation or publication.
@@ -62,25 +99,8 @@ impl CompileArtifactSet {
         use std::collections::{BTreeMap, BTreeSet};
         use ArtifactSchemaError as E;
         let mut sources = BTreeMap::new();
-        let mut revisions = BTreeMap::new();
         for source in source_units {
-            if source.source_span.start > source.source_span.end {
-                return Err(E::InvalidSourceSpan);
-            }
-            if source.unit.logical_role().is_empty() {
-                return Err(E::InvalidIdentity);
-            }
-            if let Some(revision) = revisions.insert(
-                source.unit.source_id().clone(),
-                source.unit.revision().clone(),
-            ) {
-                if revision != *source.unit.revision() {
-                    return Err(E::ConflictingSourceRevision);
-                }
-            }
-            if sources.insert(source.unit.id().clone(), source).is_some() {
-                return Err(E::DuplicateSourceUnit);
-            }
+            stage_source_unit(&mut sources, source)?;
         }
         artifacts.sort_by(|a, b| a.id().cmp(b.id()));
         let ids: BTreeSet<_> = artifacts.iter().map(|a| a.id().clone()).collect();
@@ -167,6 +187,28 @@ impl CompileArtifactSet {
             combined,
         )?;
         Ok(self)
+    }
+
+    /// Admit produced descriptors together with the authored source units
+    /// backing them. Units join under the same schema rules as [`Self::new`];
+    /// the combined descriptors then pass the [`Self::attach_custom_blocks`]
+    /// checks. Atomic: on refusal the set is unchanged.
+    pub(crate) fn admit_custom_blocks(
+        &mut self,
+        units: Vec<super::source_unit::ArtifactSourceUnit>,
+        descriptors: Vec<CustomBlockDescriptor>,
+    ) -> Result<(), CustomBlockAdmissionError> {
+        let mut staged = self.source_units.clone();
+        for unit in units {
+            stage_source_unit(&mut staged, unit).map_err(CustomBlockAdmissionError::Schema)?;
+        }
+        let mut combined = self.custom_blocks.clone();
+        combined.extend(descriptors);
+        self.custom_blocks =
+            super::custom_block::validate_attachment(&staged, &self.artifacts, combined)
+                .map_err(CustomBlockAdmissionError::Descriptor)?;
+        self.source_units = staged;
+        Ok(())
     }
 
     /// Warm gate: the same fail-closed checks as attachment, including

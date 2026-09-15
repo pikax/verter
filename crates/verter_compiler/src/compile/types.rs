@@ -472,6 +472,27 @@ pub struct VerterCustomBlock {
     pub attrs: Vec<(String, String)>,
 }
 
+/// Parser-minted facts of one Vue custom block. The single fact source for
+/// both the [`VerterCustomBlock`] projection and the source-backed
+/// [`crate::assembly::CustomBlockDescriptor`]; nothing here is rediscovered
+/// from source text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VueCustomBlockFacts<'a> {
+    /// Authored tag name (e.g. `"i18n"`).
+    pub tag: &'a str,
+    /// SFC-absolute authored element: opening tag through closing tag, the
+    /// self-closing opening tag, or opening tag through end of input when
+    /// the parser recovered an unclosed block.
+    pub element: crate::common::Span,
+    /// SFC-absolute raw content between the tags; `None` when self-closing.
+    pub content: Option<crate::common::Span>,
+    /// The parser recovered this block at end of input without a closing tag.
+    pub unclosed: bool,
+    /// Non-directive attributes in authored order; `None` for a valueless
+    /// attribute.
+    pub attributes: Vec<(&'a str, Option<&'a str>)>,
+}
+
 /// A single destructured binding's source mapping.
 /// All offsets are UTF-8 byte offsets (Rust-internal).
 #[derive(Debug, Clone)]
