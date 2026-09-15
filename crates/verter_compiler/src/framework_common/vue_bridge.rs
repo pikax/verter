@@ -3598,6 +3598,17 @@ mod tests {
         "<note/>\n",
     );
 
+    /// [`BLOCKS`] with its template body and first `<i18n>` content swapped.
+    fn blocks_with(template: &str, message: &str) -> String {
+        format!(
+            "<template>{template}</template>\n\
+             <i18n lang=\"json\" locale=\"en\">{message}</i18n>\n\
+             <docs src=\"./docs.md\" lang=\"md\">inline ignored</docs>\n\
+             <i18n></i18n>\n\
+             <note/>\n"
+        )
+    }
+
     fn descriptor_bundle_with(
         source: &str,
         generation: u64,
@@ -3757,8 +3768,9 @@ mod tests {
         use CustomBlockDescriptorError as E;
         let fresh = descriptor_set(BLOCKS, 1);
         let incremental = descriptor_set(BLOCKS, 7);
-        let content_edit = descriptor_set(&BLOCKS.replace("{\"a\":1}", "{\"a\":2}"), 8);
-        let template_edit = descriptor_set(&BLOCKS.replace("<div/>", "<span/>"), 9);
+        assert_eq!(blocks_with("<div/>", "{\"a\":1}"), BLOCKS);
+        let content_edit = descriptor_set(&blocks_with("<div/>", "{\"a\":2}"), 8);
+        let template_edit = descriptor_set(&blocks_with("<span/>", "{\"a\":1}"), 9);
         let reverted = descriptor_set(BLOCKS, 10);
         assert_eq!(fresh.to_json().unwrap(), incremental.to_json().unwrap());
         assert_eq!(fresh.to_json().unwrap(), reverted.to_json().unwrap());
