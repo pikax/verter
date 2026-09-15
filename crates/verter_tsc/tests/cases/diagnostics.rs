@@ -724,6 +724,39 @@ fn svelte_ts_glob_does_not_admit_svelte_carriers() {
     drop(temp);
 }
 
+/// Vue-only include: an admitted Vue carrier that imports an excluded `.svelte`
+/// file must resolve via the wildcard shim (no TS2307) even though no Svelte
+/// carrier is admitted and `@verter/svelte-jsx` overlays are not installed.
+#[test]
+fn svelte_wildcard_shim_covers_vue_only_include_of_excluded_svelte() {
+    let Some((temp, root)) = setup_svelte_temp_project() else {
+        return;
+    };
+    let Some((diags, stdout, stderr)) =
+        run_svelte_verter_tsc(&root, &root.join("tsconfig.vue-only.json"))
+    else {
+        eprintln!(
+            "SKIP: rc tsgo `--api` engine not found — set VERTER_TSGO_BIN or run `pnpm install`"
+        );
+        drop(temp);
+        return;
+    };
+
+    assert!(
+        stderr.contains("checking 1"),
+        "vue-only include must admit the Vue carrier; stderr={stderr}"
+    );
+    assert_error_at(&diags, "UseExcludedSvelte.vue", 3, 2322);
+    let svelte_module_misses: Vec<_> = diags.iter().filter(|d| d.ts_code == 2307).collect();
+    assert!(
+        svelte_module_misses.is_empty(),
+        "Vue-only include must install `*.svelte` wildcard (TS2307). \
+         stdout={stdout}\nstderr={stderr}\nmisses={svelte_module_misses:#?}"
+    );
+    assert_no_errors(&diags, "Skipped.svelte");
+    drop(temp);
+}
+
 /// ECRS2-AC2: the current CLI has no direct-file source root. A positional
 /// `.svelte` path is parsed as a tsconfig, skipped as invalid JSON, checks 0
 /// carriers, and exits 0. That is the unimplemented route (CLI/CLITS), named

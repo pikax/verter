@@ -941,7 +941,10 @@ const VUE_SHIMS_DTS: &str = "declare module '*.vue' {\n  \
      export default component\n}\n";
 
 /// Wildcard so a bare in-project `.svelte` import that is not lowered to a
-/// public-API stub still resolves (TS2307 otherwise).
+/// public-API stub still resolves (TS2307 otherwise). Installed independently
+/// of admitted Svelte projection: a Vue-only include that imports an excluded
+/// `.svelte` file keeps the specifier, and `api_check::typecheck` has no
+/// Verter Svelte resolver for that path.
 const SVELTE_SHIMS_DTS: &str = "declare module '*.svelte' {\n  \
      import type { Component } from 'svelte'\n  \
      const component: Component<any, any, any>\n  \
@@ -1048,14 +1051,19 @@ fn overlay_shim(path: String, content: String) -> AmbientShim {
 /// real one's exports (the `TS2305`/`TS2694` "has no exported member" class). Each
 /// such augmentation is therefore served as its own MODULE carrier
 /// (`import "<mod>"; declare module "<mod>" { … } export {};`), where it augments.
-fn svelte_admission_shims(base: &Path) -> Vec<AmbientShim> {
+fn svelte_wildcard_shim(base: &Path) -> AmbientShim {
+    root_shim(
+        slash(&base.join("svelte-shims.d.ts")),
+        SVELTE_SHIMS_DTS.to_string(),
+    )
+}
+
+/// `@verter/svelte-jsx` overlays for admitted Svelte TSX (`@jsxImportSource`).
+/// Not required when only Vue projections import a non-admitted `.svelte`.
+fn svelte_jsx_overlay_shims(base: &Path) -> Vec<AmbientShim> {
     use verter_session::framework::svelte_jsx_assets as jsx;
     let dir = svelte_jsx_package_dir(base);
     vec![
-        root_shim(
-            slash(&base.join("svelte-shims.d.ts")),
-            SVELTE_SHIMS_DTS.to_string(),
-        ),
         overlay_shim(slash(&svelte_jsx_node_modules_marker(base)), String::new()),
         overlay_shim(slash(&svelte_jsx_scope_marker(base)), String::new()),
         overlay_shim(
@@ -1136,8 +1144,12 @@ fn ambient_shim_carriers_for(base: &Path, has_svelte: bool) -> Vec<AmbientShim> 
     .into_iter()
     .map(|(path, content)| root_shim(path, content))
     .collect();
+    // Independent of `has_svelte`: Vue projections that import a non-admitted
+    // `.svelte` still need the wildcard. JSX runtime overlays stay gated on
+    // admitted Svelte projection generation.
+    carriers.push(svelte_wildcard_shim(base));
     if has_svelte {
-        carriers.extend(svelte_admission_shims(base));
+        carriers.extend(svelte_jsx_overlay_shims(base));
     }
     carriers
 }
@@ -3171,10 +3183,15 @@ mod tests {
     fn ambient_shims_carry_the_intrinsic_map_augmentation_for_jsdoc_widened_stubs() {
         let carriers = ambient_shim_carriers_for(Path::new("/base"), false);
         assert!(
-            carriers.iter().all(|shim| {
-                !shim.path.contains("svelte-jsx") && !shim.path.ends_with("svelte-shims.d.ts")
-            }),
-            "Vue-only admission must not inject Svelte shims: {carriers:?}"
+            carriers.iter().all(|shim| !shim.path.contains("svelte-jsx")
+                && !shim.path.contains(".verter-svelte-jsx")),
+            "Vue-only admission must not inject Svelte JSX overlays: {carriers:?}"
+        );
+        assert!(
+            carriers
+                .iter()
+                .any(|shim| shim.path.ends_with("svelte-shims.d.ts") && shim.program_root),
+            "Vue-only admission still needs the `*.svelte` wildcard: {carriers:?}"
         );
         let augment = carriers
             .iter()
@@ -3193,6 +3210,24 @@ mod tests {
             "the augmentation is a MODULE carrier (import + export) so it augments \
              the real `vue` instead of REPLACING it: {}",
             augment.content
+        );
+    }
+
+    /// Vue-only admission installs the `*.svelte` wildcard (excluded `.svelte`
+    /// imports on generated Vue TSX) and must not install `@verter/svelte-jsx`.
+    #[test]
+    fn vue_only_admission_installs_svelte_wildcard_without_jsx_overlays() {
+        let carriers = ambient_shim_carriers_for(Path::new("/base"), false);
+        let paths: Vec<&str> = carriers.iter().map(|s| s.path.as_str()).collect();
+        assert!(
+            paths.iter().any(|p| p.ends_with("svelte-shims.d.ts")),
+            "wildcard `*.svelte` shim is independent of admitted Svelte: {paths:?}"
+        );
+        assert!(
+            paths
+                .iter()
+                .all(|p| { !p.contains("svelte-jsx") && !p.contains(".verter-svelte-jsx") }),
+            "JSX overlays stay gated on admitted Svelte projection: {paths:?}"
         );
     }
 
