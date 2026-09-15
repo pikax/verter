@@ -7275,9 +7275,17 @@ function twin(x: Twin) { if (x instanceof KSub) return x; return 0; }
         );
 
         // (4) STRUCTURAL TWIN control: `Twin` is shape-identical to
-        // `KSub` with NO heritage relation, so no derivation is provable
-        // — the arm takes the structural fallback and stays `Twin`
-        // behind the typed guard gap, never warm.
+        // `KSub` with NO heritage relation. The checker itself would
+        // decide this arm through `isTypeSubtypeOf`, but the shared
+        // relation authority answers `Twin` vs `KSub` as UNDECIDED (not a
+        // decided structural verdict either way) rather than a proof of
+        // mutual assignability, so this arm is indistinguishable here
+        // from a genuinely undecidable-heritage arm (an opaque carrier,
+        // an unresolved import): it stays possible behind the typed
+        // guard gap, never warm. Reproducing the checker's own
+        // structural-subtype fallback for this control needs the
+        // relation authority to decide class-vs-class structural
+        // assignability, which is out of this evaluator's scope.
         let key = whole_return_key(dispatch, CANONICAL, "twin");
         let result = flow_result_value(dispatch, key.clone());
         let expr = host
@@ -7296,14 +7304,14 @@ function twin(x: Twin) { if (x instanceof KSub) return x; return 0; }
             Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
                 crate::semantic_query::FlowGap::GuardNarrowing
             )),
-            "the twin takes the structural fallback behind the typed guard gap"
+            "the twin's undecided structural relation stays behind the typed guard gap"
         );
         assert_eq!(
             dispatch
                 .graph()
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
             0,
-            "an underived twin never warms"
+            "an underived, structurally-undecided twin never warms"
         );
 
         // (5) Bounded work: an identical warm demand adds ZERO dispatches

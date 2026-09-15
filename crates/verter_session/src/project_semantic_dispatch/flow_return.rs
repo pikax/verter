@@ -3695,7 +3695,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let FlowSliceDemandSite {
             indexed,
-            self_roots,
+            mut self_roots,
             slice_key_function,
             slice_key,
             demanded_member,
@@ -4100,6 +4100,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             expression_write_nodes: rustc_hash::FxHashMap::default(),
             capture_write_lookahead: rustc_hash::FxHashMap::default(),
             executed_walk: ExecutedSliceWalk::default(),
+            heritage_self_roots: Vec::new(),
         };
         let holds;
         let degradation;
@@ -4136,6 +4137,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             degradation = evaluator.degradation;
             frame_bindings = Arc::clone(&evaluator.bindings);
             frame_products = evaluator.products.clone();
+            // Fold in every cross-file heritage hop the `instanceof`
+            // narrowing observed (see the field doc on
+            // `FlowEvaluator::heritage_self_roots`): a `class_heritage_bases`
+            // read is `ReturnOnly` and records no fact of its own, so those
+            // reads must join the frame's published self-roots explicitly.
+            for root in std::mem::take(&mut evaluator.heritage_self_roots) {
+                if !self_roots.contains(&root) {
+                    self_roots.push(root);
+                }
+            }
             (outcome, body_falls_through)
         };
         // A call the lowering DECIDED ABOVE (folded into a surviving
@@ -5632,6 +5643,18 @@ struct FlowEvaluator<'d, 'b> {
     /// see [`ExecutedSliceWalk`]. The execution witness yields an
     /// executed selection only from a complete, unaborted ledger.
     executed_walk: ExecutedSliceWalk,
+    /// Cross-file self-roots observed by the `instanceof` heritage-chain
+    /// walk ([`Self::class_heritage_chain_of`]): each declaration file the
+    /// walk reads through `class_heritage_bases` (a `ReturnOnly` read that
+    /// records no fact of its own), keyed at the whole-hash it was served
+    /// at — the same observation the static composer makes before its own
+    /// `class_heritage_bases` hop (`build.rs`'s
+    /// `ensure_indexed_ready_serve` self-root push). Folded into the
+    /// frame's published self-roots at frame close so an edit to an
+    /// intermediate heritage file (a base class gaining or losing an
+    /// `extends` clause) invalidates a warm `instanceof` narrow instead of
+    /// silently surviving it.
+    heritage_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
 }
 
 /// The evaluator-recorded structural execution ledger of one run: how
@@ -9796,12 +9819,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// a missing hop can only make a reachability claim HARDER, so no
     /// false derivation can be published.
     fn class_heritage_chain_of(
-        &self,
+        &mut self,
         root: &crate::semantic_query::DeclIdentity,
     ) -> Vec<crate::semantic_query::DeclIdentity> {
         let mut chain: Vec<crate::semantic_query::DeclIdentity> = Vec::new();
         let mut queue: Vec<crate::semantic_query::DeclIdentity> = vec![root.clone()];
         while let Some(current) = queue.pop() {
+            self.record_heritage_self_root(current.canonical_id.as_ref());
             for (base_canonical, base_owner, base_name, _args) in self
                 .dispatch
                 .class_heritage_bases(&current.canonical_id, current.owner, &current.decl_name)
@@ -9831,13 +9855,35 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// makes. One bounded walk per question; a warm demand never asks it
     /// at all.
     fn class_heritage_chain_reaches(
-        &self,
+        &mut self,
         from: &crate::semantic_query::DeclIdentity,
         to: &crate::semantic_query::DeclIdentity,
     ) -> bool {
         self.class_heritage_chain_of(from)
             .iter()
             .any(|ancestor| Self::same_class_identity(ancestor, to))
+    }
+
+    /// Observe one heritage-chain hop's declaration file at the whole-hash
+    /// it was served at — the same self-root the static composer records
+    /// before its own `class_heritage_bases` read (`build.rs`
+    /// `ensure_indexed_ready_serve` push). `class_heritage_bases` reads the
+    /// file's prepared decl through a `ReturnOnly` accessor that records no
+    /// fact of its own, so every canonical this walk visits must be rooted
+    /// explicitly or a warm `instanceof` narrow can survive an edit to an
+    /// intermediate base class. A file that cannot be served contributes no
+    /// root: the chain walk already treats a missing hop as "simply
+    /// shorter", never fabricated, so an unobservable file cannot widen the
+    /// walk's own conclusions — it can only leave them unrooted, which the
+    /// caller's cache-suppression on a missing serve already guards
+    /// against for the file's OWN declarations.
+    fn record_heritage_self_root(&mut self, canonical: &str) {
+        if let Some(serve) = self.dispatch.ctx.ensure_indexed_ready_serve(canonical) {
+            let root = (Arc::<str>::from(canonical), serve.indexed.whole_hash);
+            if !self.heritage_self_roots.contains(&root) {
+                self.heritage_self_roots.push(root);
+            }
+        }
     }
 
     /// Whether one union arm is beyond `instanceof` classification
@@ -12554,6 +12600,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 expression_write_nodes: rustc_hash::FxHashMap::default(),
                 capture_write_lookahead: rustc_hash::FxHashMap::default(),
                 executed_walk: ExecutedSliceWalk::default(),
+                heritage_self_roots: Vec::new(),
             };
             nested_evaluator.seed_hoisted_var_declarations(body);
             let (outcome, nested_body_falls_through) = nested_evaluator.eval_region(body);
@@ -12643,6 +12690,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.call_evidence
                 .append(&mut nested_evaluator.call_evidence);
             self.executed_walk.absorb(nested_evaluator.executed_walk);
+            // A heritage hop the NESTED body's `instanceof` narrowing read
+            // is still a cross-file observation of THIS run: it rides the
+            // enclosing self-roots exactly as the nested holds do.
+            for root in nested_evaluator.heritage_self_roots.drain(..) {
+                if !self.heritage_self_roots.contains(&root) {
+                    self.heritage_self_roots.push(root);
+                }
+            }
             (outcome, nested_body_falls_through)
         };
         // A degraded nested body degrades the enclosing value that
