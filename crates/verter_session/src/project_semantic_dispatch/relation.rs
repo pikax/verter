@@ -6755,6 +6755,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         drop(data);
         let transit = ProjectionReductionContext::structural_transit();
+        // The lib `Function` global's carrier is its own terminal
+        // identity: the `__builtin__` base names no declaration the
+        // Instantiate dispatch can serve, so the dispatch would MISS
+        // non-cacheably and taint every enclosing build's warm admission
+        // for a carrier the checker publishes as an ordinary type
+        // (`typeof x === "function"` over `object` narrows to
+        // `Function`). Relations decide it by identity / tag, never by a
+        // body it does not have. Every other base keeps dispatching.
+        if self.runtime_nominal_identity(&identity)
+            == Some(crate::intrinsic_registry::RuntimeNominal::Function)
+        {
+            return IdentityCarrierUnwrap::Concrete(id);
+        }
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
             self.type_slot_for(
                 Arc::clone(&identity.canonical_id),
@@ -6860,6 +6873,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 _ => return IdentityCarrierUnwrap::Concrete(current),
             };
             drop(data);
+            // The lib `Function` global's carrier is its own terminal
+            // identity for relations: the `__builtin__` base names no
+            // declaration the Instantiate dispatch can serve, so the
+            // dispatch would MISS non-cacheably and taint every
+            // enclosing build's warm admission for a carrier the
+            // checker publishes as an ordinary type (`typeof x ===
+            // "function"` over `object` narrows to `Function`). Relations
+            // decide it by identity / tag, never by a body it does not
+            // have. Every OTHER non-file base (the remaining runtime
+            // nominals, the global sentinel) keeps dispatching — its
+            // Unresolvable verdict is the measured relation behavior
+            // those carriers' consumers pin.
+            if self.runtime_nominal_identity(&identity)
+                == Some(crate::intrinsic_registry::RuntimeNominal::Function)
+            {
+                return IdentityCarrierUnwrap::Concrete(current);
+            }
             let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
                 self.type_slot_for(
                     Arc::clone(&identity.canonical_id),

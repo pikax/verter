@@ -7076,6 +7076,168 @@ function f(x: A | B, A: typeof B) {
     });
 }
 
+/// The D10 heritage controls for `instanceof` derivation: the
+/// declaration-identity chain decides both edges without a single
+/// relation read, a STRUCTURAL TWIN with no heritage relation takes the
+/// structural fallback (typed gap, never warm), and an identical warm
+/// demand adds zero dispatches of any class.
+#[test]
+fn instanceof_heritage_decides_both_edges_and_bounds_its_reads() {
+    use super::semantic_operand_tests::{dispatch_classes_since, trace_len};
+
+    const CANONICAL: &str = "/ws/instanceof-heritage/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+class K { k = 1 }
+class KSub extends K { s = 1 }
+class Twin { k = 1; s = 1 }
+
+function keep(x: K | KSub) { if (x instanceof K) return x; return 0; }
+function down(x: K) { if (x instanceof KSub) return x; return 0; }
+function negated(x: K | KSub) { if (!(x instanceof K)) return x; return 0; }
+function twin(x: Twin) { if (x instanceof KSub) return x; return 0; }
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        // (1) The subclass arm survives as itself: `K | KSub` under
+        // `instanceof K` keeps the whole union, CLEAN, warm.
+        let key = whole_return_key(dispatch, CANONICAL, "keep");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert!(
+            matches!(&expr, verter_type_expr::TypeExpr::Union(arms)
+            if arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "KSub"
+            ))),
+            "the subclass arm survives the matching-family test, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the matching-family test is clean"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean matching-family result warms"
+        );
+
+        // (2) The base arm downcasts: `K` under `instanceof KSub`
+        // publishes `KSub`, CLEAN, warm.
+        let key = whole_return_key(dispatch, CANONICAL, "down");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert!(
+            matches!(&expr, verter_type_expr::TypeExpr::Union(arms)
+            if arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "KSub"
+            )) && !arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "K"
+            ))),
+            "the base arm narrows TO the subclass instance type, got {expr:?}"
+        );
+        assert_eq!(result.degradation(), None, "the downcast is clean");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean downcast warms"
+        );
+
+        // (3) The negated edge drops the whole tested family: both `K`
+        // and `KSub` are instances of `K`, so the guarded subject reads
+        // `never` and only the fall-through contributes.
+        let key = whole_return_key(dispatch, CANONICAL, "negated");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert!(
+            !matches!(&expr, verter_type_expr::TypeExpr::Union(arms)
+            if arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. }
+                    if name.as_ref() == "K" || name.as_ref() == "KSub"
+            ))),
+            "the negated family drop leaves no class arm, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the heritage-proved family drop is clean"
+        );
+
+        // (4) STRUCTURAL TWIN control: `Twin` is shape-identical to
+        // `KSub` with NO heritage relation, so no derivation is provable
+        // — the arm takes the structural fallback and stays `Twin`
+        // behind the typed guard gap, never warm.
+        let key = whole_return_key(dispatch, CANONICAL, "twin");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert!(
+            matches!(&expr, verter_type_expr::TypeExpr::Union(arms)
+            if arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "Twin"
+            ))),
+            "the heritage-less twin arm is not narrowed away, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing
+            )),
+            "the twin takes the structural fallback behind the typed guard gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "an underived twin never warms"
+        );
+
+        // (5) Bounded work: an identical warm demand adds ZERO dispatches
+        // of ANY class — the whole FlowReturn, heritage reads included,
+        // is one warm admission.
+        let key = whole_return_key(dispatch, CANONICAL, "keep");
+        let warm_start = trace_len();
+        let warm = execute_flow(dispatch, key);
+        assert!(
+            matches!(
+                &warm,
+                QueryResult::Value(SemanticQueryOutput {
+                    value: SemanticQueryValue::FlowReturn(_),
+                    ..
+                })
+            ),
+            "the warm re-demand must serve the completed result"
+        );
+        let warm_window = dispatch_classes_since(warm_start);
+        let relation_reads = warm_window
+            .keys()
+            .filter(|class| **class == "Relate")
+            .count();
+        assert_eq!(
+            relation_reads, 0,
+            "an identical warm demand adds zero relation reads, recorded {warm_window:?}"
+        );
+    });
+}
+
 /// Assert that an `instanceof` test over `A | B` establishes no narrowing
 /// and never warms: the join keeps BOTH class arms, the demand carries
 /// the typed `GuardNarrowing` gap, and the family slot holds zero
