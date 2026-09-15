@@ -359,6 +359,170 @@ fn snippet_block_projects_to_a_branded_declarator_before_its_lexical_return() {
     );
 }
 
+/// Project a source whose markup begins immediately after the prepended
+/// `<script lang="ts"></script>` close, with no gap byte, so the first
+/// template byte directly follows the script close. `project()` prepends a
+/// script tag plus a trailing newline for dialect detection, which would mask
+/// the anchor collision these tests pin.
+fn project_markup_after_script(source: &str) -> String {
+    let typed = format!("<script lang=\"ts\"></script>{source}");
+    let parsed = parse_svelte(&typed);
+    project_svelte_ide(&typed, &parsed, Some("Comp.svelte"), false).code
+}
+
+/// The render header must OPEN the render fragment before any element-owned
+/// snippet IIFE: an element starting exactly at the first template byte shares
+/// that byte as its IIFE anchor, and the header must not land inside the
+/// IIFE's `return (`. Regression: `pikax/svelte-benchmarks` real-world corpus
+/// (`hperrin/svelte-material-ui` @ 8d204fe859940871afa832dade80789bab49d752,
+/// `packages/site/src/routes/demo/chips/_Input.svelte`) — the projected TSX
+/// did not parse (`Expression expected` at the render header).
+#[test]
+fn element_snippet_scope_at_the_first_template_byte_wraps_inside_the_render_fn() {
+    let code =
+        project_markup_after_script("<C>{#snippet s(x)}<span>{x}</span>{/snippet}</C><D>{a}</D>");
+    let header = code
+        .find(";function __verter_render()")
+        .expect("render header present");
+    let iife = code
+        .find("{(() => {")
+        .expect("element snippet IIFE present");
+    assert!(
+        header < iife,
+        "render header must precede the element-snippet IIFE: {code}"
+    );
+    // The IIFE still opens before its owning element and closes after it.
+    let element = code[iife..].find("<C").expect("owning element projected") + iife;
+    assert!(iife < element, "IIFE wraps its owning element: {code}");
+    let close = code[iife..].find("); })()}").expect("IIFE closes") + iife;
+    assert!(element < close, "IIFE close follows the element: {code}");
+    // The following sibling stays OUTSIDE the IIFE, inside the render fragment.
+    let sibling = code[close..].find("<D").expect("sibling projected") + close;
+    assert!(close < sibling, "sibling follows the IIFE close: {code}");
+    assert!(!code.contains("{#snippet"), "no #snippet residue: {code}");
+}
+
+/// The empty/optional-syntax neighbor: a parameterless snippet with an EMPTY
+/// body on an element at the first template byte keeps the same valid shape.
+#[test]
+fn element_snippet_scope_empty_body_at_the_first_template_byte_still_wraps() {
+    let code = project_markup_after_script("<C>{#snippet empty()}{/snippet}</C>");
+    let header = code
+        .find(";function __verter_render()")
+        .expect("render header present");
+    let iife = code
+        .find("{(() => {")
+        .expect("element snippet IIFE present");
+    assert!(
+        header < iife,
+        "render header must precede the empty snippet IIFE: {code}"
+    );
+    let element = code[iife..].find("<C").expect("owning element projected") + iife;
+    assert!(iife < element, "IIFE wraps its owning element: {code}");
+    let close = code[iife..].find("); })()}").expect("IIFE closes") + iife;
+    assert!(element < close, "IIFE close follows the element: {code}");
+}
+
+/// A one-byte gap (newline) between the script close and the element keeps the
+/// anchor-independent path: same wrapped shape, order derived from positions.
+#[test]
+fn element_snippet_scope_with_a_leading_gap_keeps_the_wrapped_shape() {
+    let code = project(
+        "<script lang=\"ts\">let a = 1;</script>\n<C>{#snippet s(x)}<span>{x}</span>{/snippet}</C>",
+    );
+    let header = code
+        .find(";function __verter_render()")
+        .expect("render header present");
+    let iife = code
+        .find("{(() => {")
+        .expect("element snippet IIFE present");
+    assert!(
+        header < iife,
+        "render header precedes the IIFE with a gap too: {code}"
+    );
+    let close = code[iife..].find("); })()}").expect("IIFE closes") + iife;
+    let element = code[iife..].find("<C").expect("owning element projected") + iife;
+    assert!(element < close, "IIFE close follows the element: {code}");
+}
+
+/// Nested neighbor: an INNER element owning a snippet inside an outer element
+/// that starts at the first template byte — both IIFEs land inside the render
+/// fragment, inner wrapping inner.
+#[test]
+fn nested_element_snippet_scopes_stay_nested_inside_the_render_fn() {
+    let code = project_markup_after_script(
+        "<C>{#snippet s(x)}<span>{x}</span>{/snippet}<E>{#snippet t()}<p>u</p>{/snippet}</E></C>",
+    );
+    let header = code
+        .find(";function __verter_render()")
+        .expect("render header present");
+    let outer = code.find("{(() => {").expect("outer IIFE present");
+    let inner = code[outer + 1..]
+        .find("{(() => {")
+        .expect("inner IIFE present")
+        + outer
+        + 1;
+    assert!(header < outer, "header precedes the outer IIFE: {code}");
+    assert!(outer < inner, "outer IIFE precedes the inner IIFE: {code}");
+    let inner_close = code[inner..].find("); })()}").expect("inner closes") + inner;
+    let rest = &code[inner_close + 1..];
+    let outer_close = rest.find("); })()}").expect("outer closes") + inner_close + 1;
+    let inner_el = code[inner..].find("<E").expect("inner element") + inner;
+    assert!(
+        inner < inner_el && inner_el < inner_close,
+        "inner IIFE wraps <E>: {code}"
+    );
+    assert!(inner_close < outer_close, "outer IIFE closes last: {code}");
+}
+
+/// Adjacent snippet-owning siblings: a first-template-byte element directly
+/// followed by a sibling that starts exactly at its close end. The sibling
+/// emits its own scope-opening insertions at that same byte during the walk,
+/// and same-index insertions stack in call order, so the first element's
+/// closer must be emitted INLINE in walk order — only the anchor-anchored
+/// opening is deferred below the render header.
+#[test]
+fn adjacent_element_snippet_scope_siblings_close_before_the_next_opens() {
+    for source in [
+        "<C>{#snippet a()}<p/>{/snippet}</C><D>{#snippet b()}<p/>{/snippet}</D>",
+        "<C>{#snippet a()}<p/>{/snippet}</C><div>{#snippet b()}<p/>{/snippet}</div>",
+    ] {
+        let code = project_markup_after_script(source);
+        let first_open = code.find("{(() => {").expect("first IIFE opens");
+        let first_close = code.find("); })()}").expect("first IIFE closes");
+        let second_open = code[first_open + 1..]
+            .find("{(() => {")
+            .expect("sibling IIFE opens")
+            + first_open
+            + 1;
+        assert!(
+            first_close < second_open,
+            "the first scope must close before the sibling's opens: {code}"
+        );
+        // Each scope wraps its own element and declares its own snippet.
+        // (Search from the IIFE onward — the prelude's generic helper types
+        // also contain `<C`-shaped substrings.)
+        let owning = code[first_open..]
+            .find("<C")
+            .expect("owning element projected")
+            + first_open;
+        assert!(
+            first_open < owning && owning < first_close,
+            "first IIFE wraps its owning element: {code}"
+        );
+        let sibling_binding = code.find("const b").expect("sibling snippet binding");
+        let second_close = code[second_open..]
+            .find("); })()}")
+            .expect("sibling IIFE closes")
+            + second_open;
+        assert!(
+            second_open < sibling_binding && sibling_binding < second_close,
+            "sibling IIFE declares its own snippet: {code}"
+        );
+        assert!(!code.contains("{#snippet"), "no #snippet residue: {code}");
+    }
+}
+
 #[test]
 fn a_scoped_snippet_name_maps_back_to_the_authored_declaration() {
     use oxc_sourcemap::SourceMap;
