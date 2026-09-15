@@ -36,8 +36,8 @@ use verter_compiler::compile_request::{
 };
 use verter_compiler::standalone::{DirectExecutionInputs, StandaloneCompiler};
 use verter_session::{
-    CompileTarget, FileLanguage, HostConfig, PublicApiProjectionError, PublicApiProjectionSubject,
-    UpsertRequest, VerterHost,
+    CompileProfile, CompileTarget, FileLanguage, HostConfig, LanguageRegistry,
+    PublicApiProjectionError, PublicApiProjectionSubject, UpsertRequest, VerterHost,
 };
 
 use crate::api_check;
@@ -167,6 +167,24 @@ fn canonical_path_id(path: &Path) -> String {
     verter_span::path::canonicalize_path(&path.to_string_lossy())
 }
 
+fn carrier_language(path: &Path) -> FileLanguage {
+    LanguageRegistry::global()
+        .classify_static(&path.to_string_lossy().replace('\\', "/"))
+        .static_resolution()
+}
+
+fn is_svelte_carrier(path: &Path) -> bool {
+    carrier_language(path).is_svelte()
+}
+
+fn ide_check_profile() -> CompileProfile {
+    CompileProfile {
+        target: CompileTarget::IDE,
+        source_map: true,
+        ..CompileProfile::default()
+    }
+}
+
 /// Generate public-API stub carriers for cross-component type resolution.
 ///
 /// For each `.vue` file, generates a stub containing the component's public API
@@ -285,9 +303,12 @@ fn generate_public_api_stubs(
     }
 }
 
-/// Validation stage: generate full TSX (script body + template) for every `.vue` file in parallel.
+/// Validation stage: generate full TSX (script body + template) for every
+/// admitted carrier.
 ///
-/// Uses `compile()` with `CompileTarget::TSX` for full type checking.
+/// Vue uses `StandaloneCompiler` with `CompileTarget::TSX`. Svelte's
+/// standalone route refuses `IdeCompanion`, so Svelte is dispatched through
+/// the existing host IDE path (`ensure_ide_compiled` + `get_ide`).
 /// IN-MEMORY: nothing is written to disk — `base_dir` only roots each carrier's
 /// deterministic virtual path (`<base>/Name_<hash>.tsx`, or `.jsx` for a
 /// JavaScript carrier — see the extension derivation below). Returns
@@ -297,12 +318,76 @@ fn generate_public_api_stubs(
 /// `vue_files` is the ADMITTED set ([`CarrierAdmission`]) — an SFC Vue itself
 /// refuses to compile never reaches here, so there is no carrier for it to
 /// mislabel.
+fn generate_svelte_ide_tsx(
+    host: &VerterHost,
+    svelte_path: &Path,
+    base_dir: &Path,
+) -> Result<(PathBuf, String, PathBuf), api_check::TypecheckError> {
+    let canonical_id = canonical_path_id(svelte_path);
+    let profile = ide_check_profile();
+    match host.ensure_ide_compiled(&canonical_id, &profile) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(api_check::TypecheckError::new(format!(
+                "verter-tsc: svelte carrier produced no IDE projection for {}",
+                svelte_path.display()
+            )));
+        }
+        Err(error) => {
+            return Err(api_check::TypecheckError::new(format!(
+                "verter-tsc: svelte IDE compile refused for {}: {error}",
+                svelte_path.display()
+            )));
+        }
+    }
+    let ide = host.get_ide(&canonical_id, &profile).ok_or_else(|| {
+        api_check::TypecheckError::new(format!(
+            "verter-tsc: compiler produced no validation carrier for {}",
+            svelte_path.display()
+        ))
+    })?;
+
+    let svelte_dir = svelte_path.parent().unwrap_or(Path::new("."));
+    let mut code = rewrite_relative_imports(&ide.code, svelte_dir);
+    code = canonicalize_nonrelative_carrier_specifiers(&code, &canonical_id, host);
+    if let Some(source_map) = ide.source_map.as_deref() {
+        if !source_map.is_empty() {
+            let encoded = base64::prelude::BASE64_STANDARD.encode(source_map.as_bytes());
+            code.push_str(&format!(
+                "\n//# sourceMappingURL=data:application/json;base64,{encoded}\n"
+            ));
+        }
+    }
+
+    let raw_name = svelte_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Component");
+    let component_name = sanitize_component_name(raw_name);
+    let hash = simple_hash(svelte_path.to_string_lossy().as_bytes());
+    let tsx_name = verter_semantic::resolver_core::carrier_ide_provider_path(
+        &format!("{component_name}_{hash:016x}"),
+        ide.is_jsx,
+    );
+    Ok((svelte_path.to_path_buf(), code, base_dir.join(&tsx_name)))
+}
+
 fn generate_all_tsx(
     host: &VerterHost,
     vue_files: &[PathBuf],
     base_dir: &Path,
 ) -> Result<Vec<(PathBuf, String, PathBuf)>, api_check::TypecheckError> {
-    // Produce the authoritative Vue macro semantic bundle for each carrier
+    let mut rows = Vec::with_capacity(vue_files.len());
+    let mut vue_only: Vec<&PathBuf> = Vec::new();
+    for path in vue_files {
+        if is_svelte_carrier(path) {
+            rows.push(generate_svelte_ide_tsx(host, path, base_dir)?);
+        } else {
+            vue_only.push(path);
+        }
+    }
+
+    // Produce the authoritative Vue macro semantic bundle for each Vue carrier
     // SEQUENTIALLY (bundle production reads the shared host store view; the
     // batch typecheck keeps it off the parallel compile lane, mirroring the
     // sequential `get_public_api_batch` design), then compile in parallel. The
@@ -310,8 +395,8 @@ fn generate_all_tsx(
     // without it, a type-based macro's template prop references degrade to
     // instance-property access (`___VERTER___instance.foo`) — unresolvable
     // against the public instance surface — instead of the resolved
-    // `__props.foo` form.
-    let macro_inputs: Vec<verter_compiler::compile::VueMacroSemanticInput> = vue_files
+    // `__props.foo` form. Svelte carriers never enter this lane.
+    let macro_inputs: Vec<verter_compiler::compile::VueMacroSemanticInput> = vue_only
         .iter()
         .map(|vue_path| {
             let canonical_id = canonical_path_id(vue_path);
@@ -319,7 +404,7 @@ fn generate_all_tsx(
         })
         .collect();
 
-    vue_files
+    let vue_rows: Vec<(PathBuf, String, PathBuf)> = vue_only
         .par_iter()
         .zip(macro_inputs.par_iter())
         .map(|(vue_path, macro_input)| {
@@ -436,9 +521,11 @@ fn generate_all_tsx(
             );
             let tsx_path = base_dir.join(&tsx_name);
 
-            Ok((vue_path.clone(), code, tsx_path))
+            Ok(((*vue_path).clone(), code, tsx_path))
         })
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.extend(vue_rows);
+    Ok(rows)
 }
 
 /// The 1-indexed `(line, column)` of a byte offset in `source`.
@@ -673,7 +760,15 @@ struct CarrierAdmission {
 
 impl CarrierAdmission {
     /// Admit `vue_path` unless its two script blocks disagree about `lang`.
+    ///
+    /// Vue dual-script `lang` disagreement is a Vue SFC rule. Svelte carriers
+    /// have no equivalent dual-block `lang` pair, so they are admitted here
+    /// and dispatched as Svelte — never run through the Vue tokenizer.
     fn admit(&mut self, vue_path: &Path, source: &str) {
+        if is_svelte_carrier(vue_path) {
+            self.admitted.push(vue_path.to_path_buf());
+            return;
+        }
         let Some(span) = verter_compiler::parser::sfc_script_lang_mismatch_span(source) else {
             self.admitted.push(vue_path.to_path_buf());
             return;
@@ -739,7 +834,7 @@ pub fn run(
                 canonical_id: Some(canonical_id.clone()),
                 input_id: canonical_id,
                 source: std::sync::Arc::<str>::from(source),
-                file_language: FileLanguage::vue(),
+                file_language: carrier_language(vue_path),
                 aliases: Vec::new(),
             })
             .map_err(|error| {
@@ -814,6 +909,13 @@ const VUE_SHIMS_DTS: &str = "declare module '*.vue' {\n  \
      const component: DefineComponent<{}, {}, any>\n  \
      export default component\n}\n";
 
+/// Wildcard so a bare in-project `.svelte` import that is not lowered to a
+/// public-API stub still resolves (TS2307 otherwise).
+const SVELTE_SHIMS_DTS: &str = "declare module '*.svelte' {\n  \
+     import type { Component } from 'svelte'\n  \
+     const component: Component<any, any, any>\n  \
+     export default component\n}\n";
+
 /// Augments Vue's `HTMLAttributes`/`SVGAttributes` with `children` so JSX children
 /// on intrinsic elements don't trip TS2322/TS2559. Separate from [`VUE_SHIMS_DTS`]
 /// because a top-level `import` would turn that file into a module and break its
@@ -846,7 +948,46 @@ fn slash(p: &Path) -> String {
 /// real one's exports (the `TS2305`/`TS2694` "has no exported member" class). Each
 /// such augmentation is therefore served as its own MODULE carrier
 /// (`import "<mod>"; declare module "<mod>" { … } export {};`), where it augments.
-fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
+fn svelte_jsx_shim_dir(base: &Path) -> PathBuf {
+    base.join("__verter_svelte_jsx")
+}
+
+fn svelte_admission_shims(base: &Path) -> Vec<(String, String)> {
+    use verter_session::framework::svelte_jsx_assets as jsx;
+    let dir = svelte_jsx_shim_dir(base);
+    vec![
+        (
+            slash(&base.join("svelte-shims.d.ts")),
+            SVELTE_SHIMS_DTS.to_string(),
+        ),
+        (
+            slash(&dir.join("jsx-runtime.d.ts")),
+            jsx::SVELTE_JSX_RUNTIME_DTS.to_string(),
+        ),
+        (
+            slash(&dir.join("jsx-dev-runtime.d.ts")),
+            jsx::SVELTE_JSX_DEV_RUNTIME_DTS.to_string(),
+        ),
+        (
+            slash(&dir.join("svg").join("jsx-runtime.d.ts")),
+            jsx::SVELTE_JSX_SVG_RUNTIME_DTS.to_string(),
+        ),
+        (
+            slash(&dir.join("svg").join("jsx-dev-runtime.d.ts")),
+            jsx::SVELTE_JSX_SVG_DEV_RUNTIME_DTS.to_string(),
+        ),
+        (
+            slash(&dir.join("mathml").join("jsx-runtime.d.ts")),
+            jsx::SVELTE_JSX_MATHML_RUNTIME_DTS.to_string(),
+        ),
+        (
+            slash(&dir.join("mathml").join("jsx-dev-runtime.d.ts")),
+            jsx::SVELTE_JSX_MATHML_DEV_RUNTIME_DTS.to_string(),
+        ),
+    ]
+}
+
+fn ambient_shim_carriers_for(base: &Path, has_svelte: bool) -> Vec<(String, String)> {
     let mut vue_jsx_runtime_augment = String::from("import \"vue/jsx-runtime\";\n");
     vue_jsx_runtime_augment.push_str(verter_compiler::VUE_JSX_RUNTIME_AUGMENTATION);
     vue_jsx_runtime_augment.push_str("\nexport {};\n");
@@ -864,7 +1005,7 @@ fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
     let mut vue_intrinsic_map_augment = String::from("import \"vue\";\n");
     vue_intrinsic_map_augment.push_str(verter_compiler::FALLTHROUGH_VUE_INTRINSIC_MAP_AUGMENTATION);
     vue_intrinsic_map_augment.push_str("\nexport {};\n");
-    vec![
+    let mut carriers = vec![
         (
             slash(&base.join("vue-shims.d.ts")),
             VUE_SHIMS_DTS.to_string(),
@@ -889,7 +1030,11 @@ fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
             slash(&base.join("vue-intrinsic-map-augment.d.ts")),
             vue_intrinsic_map_augment,
         ),
-    ]
+    ];
+    if has_svelte {
+        carriers.extend(svelte_admission_shims(base));
+    }
+    carriers
 }
 
 /// Resolve the gated tsgo engine for verter-tsc via the capability-validated
@@ -1122,7 +1267,8 @@ fn run_inmemory_typecheck(
     // Assemble the overlay carriers + the synthetic tsconfig `files` membership.
     let mut overlay_files: Vec<api_check::OverlayFile> = Vec::new();
     let mut config_files: Vec<String> = Vec::new();
-    for (path, content) in ambient_shim_carriers(&root) {
+    let has_svelte = admitted.iter().any(|path| is_svelte_carrier(path));
+    for (path, content) in ambient_shim_carriers_for(&root, has_svelte) {
         config_files.push(path.clone());
         overlay_files.push(api_check::OverlayFile {
             path,
@@ -1173,6 +1319,7 @@ fn run_inmemory_typecheck(
         &config_files,
         &validation_opts,
         &config.root_dir,
+        has_svelte,
     );
     let tsconfig_bytes = match serde_json::to_string_pretty(&tsconfig_value) {
         Ok(s) => s,
@@ -1590,7 +1737,7 @@ fn write_temp_tsconfig(
         .map(|p| synthetic_tsconfig_spelling(&p.canonicalize().unwrap_or_else(|_| p.to_path_buf())))
         .collect();
 
-    let tsconfig_json = synthetic_tsconfig_value(&original_abs, &files, opts, root_dir);
+    let tsconfig_json = synthetic_tsconfig_value(&original_abs, &files, opts, root_dir, false);
 
     let suffix = if opts.declaration { "decl" } else { "check" };
     let temp_tsconfig = temp_dir.join(format!("verter-tsc-{suffix}.tsconfig.json"));
@@ -1618,6 +1765,7 @@ fn synthetic_tsconfig_value(
     files: &[String],
     opts: &EmitOptions,
     root_dir: &Path,
+    has_svelte: bool,
 ) -> serde_json::Value {
     let mut compiler_options = serde_json::json!({
         "skipLibCheck": true,
@@ -1662,6 +1810,18 @@ fn synthetic_tsconfig_value(
         .any(|f| f.ends_with(".jsx") || f.ends_with(".js"))
     {
         compiler_options["allowJs"] = serde_json::json!(true);
+    }
+    if has_svelte {
+        compiler_options["baseUrl"] = serde_json::json!(slash(root_dir));
+        let shim = slash(&svelte_jsx_shim_dir(root_dir));
+        compiler_options["paths"] = serde_json::json!({
+            "@verter/svelte-jsx/jsx-runtime": [format!("{shim}/jsx-runtime.d.ts")],
+            "@verter/svelte-jsx/jsx-dev-runtime": [format!("{shim}/jsx-dev-runtime.d.ts")],
+            "@verter/svelte-jsx/svg/jsx-runtime": [format!("{shim}/svg/jsx-runtime.d.ts")],
+            "@verter/svelte-jsx/svg/jsx-dev-runtime": [format!("{shim}/svg/jsx-dev-runtime.d.ts")],
+            "@verter/svelte-jsx/mathml/jsx-runtime": [format!("{shim}/mathml/jsx-runtime.d.ts")],
+            "@verter/svelte-jsx/mathml/jsx-dev-runtime": [format!("{shim}/mathml/jsx-dev-runtime.d.ts")],
+        });
     }
     if opts.declaration {
         compiler_options["declaration"] = serde_json::json!(true);
@@ -2913,10 +3073,10 @@ mod tests {
     /// see.
     ///
     /// DISCRIMINATING: deleting the `vue-intrinsic-map-augment.d.ts` row from
-    /// `ambient_shim_carriers` fails it.
+    /// `ambient_shim_carriers_for` fails it.
     #[test]
     fn ambient_shims_carry_the_intrinsic_map_augmentation_for_jsdoc_widened_stubs() {
-        let carriers = ambient_shim_carriers(Path::new("/base"));
+        let carriers = ambient_shim_carriers_for(Path::new("/base"), false);
         let augment = carriers
             .iter()
             .find(|(path, _)| path.ends_with("vue-intrinsic-map-augment.d.ts"))
@@ -6134,6 +6294,7 @@ const props = defineProps<{ msg: string }>()
             &["/project/A_0.jsx".into(), "/project/B_1.tsx".into()],
             &opts,
             temp.path(),
+            false,
         );
         assert_eq!(
             with_js["compilerOptions"]["allowJs"],
@@ -6155,6 +6316,7 @@ const props = defineProps<{ msg: string }>()
             &["/project/B_1.tsx".into()],
             &opts,
             temp.path(),
+            false,
         );
         assert!(
             ts_only["compilerOptions"].get("allowJs").is_none(),

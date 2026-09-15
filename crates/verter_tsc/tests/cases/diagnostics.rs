@@ -553,3 +553,220 @@ fn verter_tsc_diagnostics_e2e() {
 
     drop(temp_dir);
 }
+
+// ── ECRS2: Svelte admission / diagnostic attribution ────────────────────
+
+fn svelte_fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("cases")
+        .join("fixtures")
+        .join("svelte_diagnostics")
+}
+
+fn resolve_rc_engine() -> Option<PathBuf> {
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        Some(workspace_root()),
+    );
+    verter_tsgo_api::toolchain::discovery::resolve_blocking(&request)
+        .ok()
+        .map(|resolution| resolution.path)
+}
+
+/// Copy the Svelte fixture tree and junction workspace `node_modules` (needs
+/// `svelte`). Skip only when that package is genuinely absent.
+fn setup_svelte_temp_project() -> Option<(tempfile::TempDir, PathBuf)> {
+    let node_modules_src = workspace_root().join("node_modules");
+    if !node_modules_src.join("svelte").exists() {
+        eprintln!("SKIP: workspace node_modules/svelte not found — run `pnpm install` first");
+        return None;
+    }
+
+    let temp = tempfile::TempDir::new().expect("failed to create temp dir");
+    let temp_path = temp.path().to_path_buf();
+    copy_dir_recursive(&svelte_fixture_dir(), &temp_path).expect("failed to copy svelte fixture");
+
+    let nm_dest = temp_path.join("node_modules");
+    create_junction_or_symlink(&node_modules_src, &nm_dest);
+    if !nm_dest.join("svelte").exists() {
+        eprintln!("SKIP: failed to create node_modules junction/symlink for svelte");
+        return None;
+    }
+
+    Some((temp, temp_path))
+}
+
+fn run_svelte_verter_tsc(project: &Path, tsconfig: &Path) -> Option<(Vec<Diag>, String, String)> {
+    let engine = resolve_rc_engine()?;
+    let bin = verter_test_support::cargo_test_binary_path!("verter-tsc");
+    let output = Command::new(bin)
+        .env("VERTER_TSGO_BIN", &engine)
+        .arg("--noEmit")
+        .arg("-p")
+        .arg(tsconfig)
+        .current_dir(project)
+        .output()
+        .expect("failed to execute verter-tsc");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    eprintln!("=== STDERR ===\n{stderr}");
+    eprintln!("=== STDOUT ===\n{stdout}");
+    Some((parse_diagnostics(&stdout), stdout, stderr))
+}
+
+/// ECRS2-AC1: a supported Svelte script mismatch yields TS2322 on the
+/// config-project route; the clean counterpart does not.
+#[test]
+fn svelte_script_mismatch_is_attributed_and_clean_is_silent() {
+    let Some((temp, root)) = setup_svelte_temp_project() else {
+        return;
+    };
+    let Some((diags, stdout, stderr)) = run_svelte_verter_tsc(&root, &root.join("tsconfig.json"))
+    else {
+        eprintln!(
+            "SKIP: rc tsgo `--api` engine not found — set VERTER_TSGO_BIN or run `pnpm install`"
+        );
+        drop(temp);
+        return;
+    };
+
+    assert!(
+        !diags.is_empty(),
+        "admitted Svelte script mismatch must produce diagnostics, not an empty set \
+         (admission drop). stdout={stdout}\nstderr={stderr}"
+    );
+    assert_has_error(&diags, "ScriptMismatch.svelte", 2322);
+    assert_error_at(&diags, "ScriptMismatch.svelte", 2, 2322);
+    assert_no_errors(&diags, "Clean.svelte");
+    assert_no_tsx_paths(&diags);
+    drop(temp);
+}
+
+/// ECRS2-AC1: an admitted Svelte template mismatch yields a meaningful
+/// diagnostic attributed to the `.svelte` source.
+#[test]
+fn svelte_template_mismatch_is_attributed() {
+    let Some((temp, root)) = setup_svelte_temp_project() else {
+        return;
+    };
+    let Some((diags, stdout, stderr)) = run_svelte_verter_tsc(&root, &root.join("tsconfig.json"))
+    else {
+        eprintln!(
+            "SKIP: rc tsgo `--api` engine not found — set VERTER_TSGO_BIN or run `pnpm install`"
+        );
+        drop(temp);
+        return;
+    };
+
+    assert!(
+        !diags.is_empty(),
+        "admitted Svelte template mismatch must produce diagnostics. stdout={stdout}\nstderr={stderr}"
+    );
+    let template = diags
+        .iter()
+        .filter(|d| d.file.ends_with("TemplateMismatch.svelte"))
+        .collect::<Vec<_>>();
+    assert!(
+        !template.is_empty(),
+        "expected a diagnostic on TemplateMismatch.svelte, found none.\nAll: {diags:#?}"
+    );
+    assert!(
+        template
+            .iter()
+            .any(|d| d.ts_code == 2551 || d.ts_code == 2339 || d.ts_code == 2322),
+        "expected a template property/type mismatch on TemplateMismatch.svelte, got {template:#?}"
+    );
+    assert_no_tsx_paths(&diags);
+    drop(temp);
+}
+
+/// ECRS2-AC2: include/exclude and nested import discriminate admission.
+/// `src/excluded` and `outside/` are not admitted; nested `Child.svelte` is.
+#[test]
+fn svelte_config_include_exclude_and_nested_discriminate_admission() {
+    let Some((temp, root)) = setup_svelte_temp_project() else {
+        return;
+    };
+    let Some((diags, stdout, stderr)) = run_svelte_verter_tsc(&root, &root.join("tsconfig.json"))
+    else {
+        eprintln!(
+            "SKIP: rc tsgo `--api` engine not found — set VERTER_TSGO_BIN or run `pnpm install`"
+        );
+        drop(temp);
+        return;
+    };
+
+    assert!(
+        !diags.is_empty(),
+        "config-project Svelte admission must produce diagnostics for included negatives. \
+         stdout={stdout}\nstderr={stderr}"
+    );
+    assert_no_errors(&diags, "Skipped.svelte");
+    assert_no_errors(&diags, "Outside.svelte");
+    assert_no_errors(&diags, "Child.svelte");
+    assert_no_errors(&diags, "NestedParent.svelte");
+    assert_no_errors(&diags, "Shadowing.svelte");
+    drop(temp);
+}
+
+/// ECRS2-AC2: an extension-specific `*.ts` include does not own `.svelte`.
+#[test]
+fn svelte_ts_glob_does_not_admit_svelte_carriers() {
+    let Some((temp, root)) = setup_svelte_temp_project() else {
+        return;
+    };
+    let Some((diags, _stdout, _stderr)) =
+        run_svelte_verter_tsc(&root, &root.join("tsconfig.ts-only.json"))
+    else {
+        eprintln!(
+            "SKIP: rc tsgo `--api` engine not found — set VERTER_TSGO_BIN or run `pnpm install`"
+        );
+        drop(temp);
+        return;
+    };
+
+    assert_no_errors(&diags, "ScriptMismatch.svelte");
+    assert_no_errors(&diags, "TemplateMismatch.svelte");
+    drop(temp);
+}
+
+/// ECRS2-AC2: the current CLI has no direct-file source root. A bare `.svelte`
+/// path is not typechecked; the unimplemented route must not exit 0.
+#[test]
+fn svelte_direct_file_path_is_not_a_current_cli_contract() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let svelte = temp.path().join("ScriptMismatch.svelte");
+    std::fs::write(
+        &svelte,
+        "<script lang=\"ts\">\n  const count: number = \"not-a-number\";\n</script>\n<p>{count}</p>\n",
+    )
+    .expect("write svelte");
+
+    let bin = verter_test_support::cargo_test_binary_path!("verter-tsc");
+    let output = Command::new(bin)
+        .arg("--noEmit")
+        .arg(&svelte)
+        .current_dir(temp.path())
+        .output()
+        .expect("failed to execute verter-tsc");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Current CLI: a positional path is a tsconfig (`-b` / default project),
+    // not a source root. A `.svelte` file is skipped as invalid JSON and the
+    // run checks 0 carriers. That is the unimplemented route — named here —
+    // not a typecheck of the file.
+    assert!(
+        stderr.contains("skipping tsconfig") || stderr.contains("checking 0"),
+        "positional `.svelte` must be named as a non-source tsconfig path, not \
+         silently typechecked.\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        parse_diagnostics(&stdout)
+            .iter()
+            .all(|d| !d.file.ends_with("ScriptMismatch.svelte")),
+        "positional `.svelte` must not be treated as an admitted source root: {stdout}"
+    );
+    drop(temp);
+}
