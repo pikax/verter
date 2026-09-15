@@ -335,7 +335,7 @@ fn load_tsconfig_recursive(
                     }
                     Some(_) | None => true, // No extension filter — include all classifiable files.
                 };
-                if include {
+                if include && include_pattern_matches(pattern, path, &root_dir) {
                     let canon = simplify_verbatim_path(
                         &path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
                     )
@@ -370,6 +370,79 @@ fn glob_dir_prefix(pattern: &str) -> &str {
             }
         }
     }
+}
+
+/// Apply the filename and path portion of an include glob before classifying.
+///
+/// `infer_ext_filter` only reduces `src/App*.svelte` to "any `.svelte` file".
+/// Without this match, the walk admits every `.svelte` under the directory
+/// prefix (including `Other.svelte`). Bare directory/file patterns have no
+/// glob metacharacters and are already constrained by the scan directory.
+fn include_pattern_matches(pattern: &str, file: &Path, root_dir: &Path) -> bool {
+    if !pattern.contains(['*', '?']) {
+        return true;
+    }
+    let rel = match file.strip_prefix(root_dir) {
+        Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+        Err(_) => return false,
+    };
+    glob_match_path(pattern.trim_start_matches("./"), &rel)
+}
+
+fn glob_match_path(pattern: &str, path: &str) -> bool {
+    let pat: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    glob_match_segments(&pat, &segs)
+}
+
+fn glob_match_segments(pat: &[&str], segs: &[&str]) -> bool {
+    let Some((head, rest)) = pat.split_first() else {
+        return segs.is_empty();
+    };
+    if *head == "**" {
+        if rest.is_empty() {
+            return true;
+        }
+        for i in 0..=segs.len() {
+            if glob_match_segments(rest, &segs[i..]) {
+                return true;
+            }
+        }
+        return false;
+    }
+    let Some((seg, rest_segs)) = segs.split_first() else {
+        return false;
+    };
+    glob_match_name(head, seg) && glob_match_segments(rest, rest_segs)
+}
+
+fn glob_match_name(pattern: &str, name: &str) -> bool {
+    let mut pi = 0;
+    let mut ni = 0;
+    let pat = pattern.as_bytes();
+    let name = name.as_bytes();
+    let mut star_pat = None;
+    let mut star_name = 0;
+    while ni < name.len() {
+        if pi < pat.len() && pat[pi] == b'*' {
+            star_pat = Some(pi);
+            star_name = ni;
+            pi += 1;
+        } else if pi < pat.len() && (pat[pi] == b'?' || pat[pi] == name[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if let Some(sp) = star_pat {
+            pi = sp + 1;
+            star_name += 1;
+            ni = star_name;
+        } else {
+            return false;
+        }
+    }
+    while pi < pat.len() && pat[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pat.len()
 }
 
 /// Infer the extension filter from an include pattern's tail.
@@ -746,6 +819,36 @@ mod tests {
             .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
             .collect();
         assert_eq!(names, vec!["App.svelte".to_string()]);
+    }
+
+    #[test]
+    fn svelte_filename_glob_keeps_path_constraint() {
+        assert!(glob_match_path("src/App*.svelte", "src/App.svelte"));
+        assert!(glob_match_path("src/App*.svelte", "src/AppFoo.svelte"));
+        assert!(!glob_match_path("src/App*.svelte", "src/Other.svelte"));
+        assert!(!glob_match_path("src/App*.svelte", "src/nested/App.svelte"));
+        assert!(glob_match_path("src/**/*.svelte", "src/nested/App.svelte"));
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("App.svelte"), "<script lang=\"ts\"></script>\n").unwrap();
+        std::fs::write(src.join("Other.svelte"), "<script lang=\"ts\"></script>\n").unwrap();
+
+        let tsconfig = temp.path().join("tsconfig.json");
+        std::fs::write(&tsconfig, r#"{ "include": ["src/App*.svelte"] }"#).unwrap();
+        let config = load_tsconfig(&tsconfig).unwrap();
+        let names: Vec<String> = config
+            .vue_files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(
+            names,
+            vec!["App.svelte".to_string()],
+            "src/App*.svelte must not reduce to every .svelte under src: {names:?}"
+        );
+        assert!(config.ts_files.is_empty());
     }
 
     // ── strip_json_comments ────────────────────────────────────────

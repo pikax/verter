@@ -705,7 +705,7 @@ fn svelte_ts_glob_does_not_admit_svelte_carriers() {
     let Some((temp, root)) = setup_svelte_temp_project() else {
         return;
     };
-    let Some((diags, _stdout, _stderr)) =
+    let Some((diags, _stdout, stderr)) =
         run_svelte_verter_tsc(&root, &root.join("tsconfig.ts-only.json"))
     else {
         eprintln!(
@@ -715,6 +715,10 @@ fn svelte_ts_glob_does_not_admit_svelte_carriers() {
         return;
     };
 
+    assert!(
+        stderr.contains("checking 0"),
+        "a TS-only include must admit zero Svelte carriers; stderr={stderr}"
+    );
     assert_no_errors(&diags, "ScriptMismatch.svelte");
     assert_no_errors(&diags, "TemplateMismatch.svelte");
     drop(temp);
@@ -967,6 +971,70 @@ fn svelte_declaration_is_named_unimplemented_at_cli() {
             !name.contains(".svelte")
         }),
         "Svelte --declaration must not emit a .svelte.d.ts: {emitted:?}"
+    );
+    drop(temp);
+}
+
+/// Svelte admission must not skip `run_declaration_stage` when `ts_files`
+/// remain. A project with Clean.svelte + util.ts still emits util.d.ts.
+#[test]
+fn svelte_project_still_emits_typescript_declarations() {
+    let Some((temp, root)) = setup_svelte_only_project(false) else {
+        return;
+    };
+    std::fs::copy(
+        svelte_fixture_dir().join("src").join("util.ts"),
+        root.join("src").join("util.ts"),
+    )
+    .expect("copy util.ts");
+    let Some(engine) = resolve_rc_engine() else {
+        eprintln!(
+            "SKIP: rc tsgo `--api` engine not found — set VERTER_TSGO_BIN or run `pnpm install`"
+        );
+        drop(temp);
+        return;
+    };
+
+    let out_dir = root.join("out");
+    std::fs::create_dir_all(&out_dir).expect("declarationDir");
+    let bin = verter_test_support::cargo_test_binary_path!("verter-tsc");
+    let output = Command::new(bin)
+        .env("VERTER_TSGO_BIN", &engine)
+        .arg("-p")
+        .arg(root.join("tsconfig.json"))
+        .arg("--declaration")
+        .arg("--emitDeclarationOnly")
+        .arg("--declarationDir")
+        .arg(&out_dir)
+        .current_dir(&root)
+        .output()
+        .expect("failed to execute verter-tsc");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("=== STDERR ===\n{stderr}");
+    eprintln!("=== STDOUT ===\n{stdout}");
+
+    assert!(
+        stderr.contains("--declaration does not emit Svelte carriers yet")
+            && stderr.contains("skipped 1 file"),
+        "Svelte skip notice must remain when TS emit still runs. \
+         stdout={stdout}\nstderr={stderr}"
+    );
+    let emitted = collect_emitted_dts(&out_dir);
+    assert!(
+        emitted.iter().any(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy() == "util.d.ts")
+        }),
+        "Svelte-only projects must still emit declarations for ts_files: {emitted:?}\n\
+         stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        emitted.iter().all(|p| {
+            !p.file_name()
+                .is_some_and(|n| n.to_string_lossy().contains(".svelte"))
+        }),
+        "must not emit a .svelte.d.ts: {emitted:?}"
     );
     drop(temp);
 }

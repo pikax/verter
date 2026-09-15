@@ -887,7 +887,10 @@ pub fn run(
             );
         }
         let vue_declaration = vue_declaration_carriers(&admission.admitted);
-        if vue_declaration.is_empty() {
+        // `run_declaration_stage` also emits `config.ts_files`. A Svelte-only
+        // project that still lists `.ts` roots (App.svelte + util.ts) must not
+        // skip the stage just because every carrier was filtered out.
+        if vue_declaration.is_empty() && config.ts_files.is_empty() {
             Vec::new()
         } else {
             let (decl_diagnostics, emitted, declaration_failures) = run_declaration_stage(
