@@ -128,6 +128,21 @@ export function leafRegExp() {
 export function leafTemplate() {
   return `x${1}`;
 }
+
+// A generator whose YIELD (not its return) calls a mutually recursive
+// sibling: `sccGenYield`/`sccGenPartner` form one SCC component through
+// the yield-position call, not through a return-position one.
+export function* sccGenYield(c: boolean) {
+  if (c) {
+    yield sccGenPartner(c);
+  }
+  return 1;
+}
+
+export function sccGenPartner(c: boolean) {
+  if (c) return "s";
+  return sccGenYield(false);
+}
 "#;
 
 const JSX: &str = "/ws/cov/jsx.tsx";
@@ -164,6 +179,18 @@ export function* negGen() {
 }
 export async function negAsync() {
   return 1;
+}
+
+// A SELF-REFERENTIAL Promise-embedding return: `negAsyncSelfRef`'s
+// authored `Promise<T>` return still interns the builtin-sentinel Promise
+// carrier identity (an unshadowed `Promise<...>` reference always does),
+// so the async wrap DOES take the Awaited-collapse branch — over an
+// operand whose own type argument is the SAME self-referential alias the
+// `Awaited` dispatch is asked to reduce.
+type NegSelfProm = Promise<NegSelfProm>;
+export declare function negAsyncSrc(): NegSelfProm;
+export async function negAsyncSelfRef() {
+  return negAsyncSrc();
 }
 "#;
 
@@ -234,6 +261,12 @@ export async function callAsyncPlain() {
 }
 export async function* callAsyncGen() {
   yield 1;
+}
+// A bare PASSTHROUGH of an already-`Promise`-typed value: the async wrap
+// must Awaited-collapse the embedded carrier before re-wrapping, so the
+// published type is `Promise<number>` — never `Promise<Promise<number>>`.
+export async function callAsyncPassthrough() {
+  return asyncSrc();
 }
 
 export declare function ovlAmbient(a: string): "S";
@@ -2136,6 +2169,30 @@ fn awaited_call_return_is_the_awaited_value_wrapped_again() {
     );
 }
 
+/// The Promise-EMBEDDING half of the async wrap's `Awaited`-collapse
+/// arm: `callAwait` covers an `await` operand (the value is unwrapped
+/// BEFORE the re-wrap), but a body that returns an already-`Promise`-typed
+/// value directly (no `await`) exercises `materialize_flow_return_wrap`'s
+/// OTHER branch — `flow_join_embeds_promise_carrier` sees the body ITSELF
+/// carries `Promise<…>`, so the wrap collapses it through the same
+/// `Awaited` dispatch before re-wrapping.
+///
+/// Oracle: `ReturnType<typeof callAsyncPassthrough>` is `Promise<number>`
+/// for `async function callAsyncPassthrough() { return asyncSrc(); }` —
+/// never `Promise<Promise<number>>`.
+#[test]
+fn async_return_of_an_already_promise_typed_value_collapses_the_embedded_carrier() {
+    let host = ts_host();
+    assert_eq!(
+        value_of(&host, CALLS, "callAsyncPassthrough"),
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+        },
+        "a bare Promise-typed passthrough must collapse to Promise<number>, not Promise<Promise<number>>",
+    );
+}
+
 /// D12-AC2 NEGATIVE LEG — a wrap whose lib head the environment cannot
 /// resolve keeps the TYPED GAP and never warms.
 ///
@@ -3365,5 +3422,84 @@ fn non_call_forms_and_modeled_call_arms_are_untouched_by_the_call_position_gate(
             candidates: 0,
         },
         "the degraded optional-member result keeps its published value pin",
+    );
+}
+
+/// A yield-position hold must never leak into the RETURN equation's own
+/// join. `sccGenYield` and `sccGenPartner` form one SCC component through
+/// the YIELD-position call (`yield sccGenPartner(c)`), not through a
+/// return-position one: `sccGenYield`'s own `return` is the unconditional
+/// literal `1`, and `sccGenPartner`'s hold-back to `sccGenYield` is a
+/// RETURN-position edge on `sccGenPartner`, not on `sccGenYield`.
+///
+/// Before the fix, the hold `sccGenPartner`'s call registered while
+/// evaluating the yield argument was never dropped from the frame's hold
+/// list, so the SCC fixed point folded `sccGenPartner`'s resolved return
+/// (`"s"`) into `sccGenYield`'s own return-type join — publishing
+/// `Generator<"s", "s" | 1, unknown>` instead of the correct
+/// `Generator<"s", number, unknown>`. The yield parameter alone carries
+/// `sccGenPartner`'s contribution; the return parameter must stay exactly
+/// `sccGenYield`'s own (widened) return-position value.
+#[test]
+fn yield_position_hold_does_not_contaminate_the_return_position_join() {
+    let host = ts_host();
+    assert_eq!(
+        value_of(&host, LEAF, "sccGenYield"),
+        TypeExpr::Ref {
+            name: Arc::from("Generator"),
+            type_arguments: Arc::from(
+                vec![string_lit("s"), number(), TypeExpr::Primitive(PrimitiveName::Unknown)]
+                    .into_boxed_slice()
+            ),
+        },
+        "the return parameter must be sccGenYield's own return join, never sccGenPartner's yielded value",
+    );
+}
+
+/// `negAsync`'s wrap has no generator lib-head dependency at all (plain
+/// `async`, no `Generator`/`AsyncGenerator` lookup), so — unlike `negGen`
+/// — the missing lib surface in this file never touches it: it must
+/// resolve exactly like `callAsyncPlain` does.
+#[test]
+fn plain_async_wrap_is_unaffected_by_a_missing_generator_lib_surface() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        NEG,
+        "negAsync",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+        },
+    );
+}
+
+/// The Promise-embedding collapse arm over a SELF-REFERENTIAL operand:
+/// `negAsyncSrc`'s declared return is the alias `NegSelfProm = Promise<
+/// NegSelfProm>`, so the async wrap's `flow_join_embeds_promise_carrier`
+/// check sees a genuine embedded `Promise<…>` carrier and dispatches the
+/// SAME `Awaited` instantiation `callAsyncPassthrough` exercises — over an
+/// operand whose own type argument recurses back through the identical
+/// alias. The shared type-argument carrier-stop keeps the embedded
+/// self-reference shallow (never inlined, never an infinite unwrap), so
+/// the wrap still resolves CLEAN and WARM — the collapse arm is safe over
+/// a self-referential operand, not merely over a settled one.
+#[test]
+fn async_wrap_awaited_collapse_stays_clean_over_a_self_referential_operand() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        NEG,
+        "negAsyncSelfRef",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(
+                vec![TypeExpr::Ref {
+                    name: Arc::from("NegSelfProm"),
+                    type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+                }]
+                .into_boxed_slice(),
+            ),
+        },
     );
 }

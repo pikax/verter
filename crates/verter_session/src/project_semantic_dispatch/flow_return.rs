@@ -10664,6 +10664,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // evaluations are skipped there; a HOLD-dependent yielded
                 // call is not re-derived by the return fixed point, so it
                 // degrades rather than freezing its first-pass value.
+                //
+                // The yield's own hold obligations are truncated out of
+                // `self.holds` the SAME way `settle_composite_part` drops
+                // a member value's hold: this position is not the RETURN
+                // equation's own arm, so a coinductive edge met while
+                // evaluating it must never become an obligation the SCC
+                // fixed point discharges into the caller's RETURN join —
+                // that would union a fellow component member's resolved
+                // return into a value only the yield ever produced.
                 crate::flow_slice_content::SliceStatement::Yield {
                     argument,
                     freshness,
@@ -10677,7 +10686,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     crate::flow_slice_content::SliceFreshness::Fresh
                                 );
                                 let fresh = bare_literal || self.reads_widening_literal_local(expr);
+                                let holds_before = self.holds.len();
                                 let outcome = self.eval_expr(expr);
+                                self.holds.truncate(holds_before);
                                 match self.settle(outcome) {
                                     Some(node) => {
                                         self.yield_contributions.push((node, fresh));
