@@ -1967,10 +1967,18 @@ mod tests {
                 &alloc,
             )
             .expect("supplied external style compiles");
-        let style = &output.styles[0];
+        assert!(
+            output.styles.is_empty(),
+            "the selected style must publish qualified"
+        );
+        let style = &output.qualified_styles[0];
 
-        assert!(style.code.contains(".x[data-v-scope123]"), "{}", style.code);
-        assert_eq!(style.lang.as_deref(), Some("css"));
+        assert!(
+            style.result.code().contains(".x[data-v-scope123]"),
+            "{}",
+            style.result.code()
+        );
+        assert_eq!(style.lang(), "css");
         assert_eq!(
             style.output_descriptor.source_map.declared_space_tokens,
             vec!["space:theme-css"]
@@ -2037,9 +2045,16 @@ mod tests {
             panic!("this fixture produces a runtime surface");
         };
         assert!(
-            output.styles[0].code.contains(".a[data-v-scope123]"),
+            output.styles.is_empty(),
+            "the selected style must publish qualified"
+        );
+        assert!(
+            output.qualified_styles[0]
+                .result
+                .code()
+                .contains(".a[data-v-scope123]"),
             "the supplied route still runs every plain-CSS stage: {}",
-            output.styles[0].code
+            output.qualified_styles[0].result.code()
         );
 
         match compile(None) {
@@ -2129,14 +2144,22 @@ mod tests {
                 &alloc,
             )
             .expect("supplied external style compiles");
-        let style = &output.styles[0];
+        assert!(
+            output.styles.is_empty(),
+            "the selected style must publish qualified"
+        );
+        let style = &output.qualified_styles[0];
 
         assert!(
-            style.code.contains("var(--scope123-tone)"),
+            style.result.code().contains("var(--scope123-tone)"),
             "{}",
-            style.code
+            style.result.code()
         );
-        assert!(style.code.contains(".x[data-v-scope123]"), "{}", style.code);
+        assert!(
+            style.result.code().contains(".x[data-v-scope123]"),
+            "{}",
+            style.result.code()
+        );
         assert_eq!(
             style.output_descriptor.source_map.fidelity,
             SourceMapFidelity::Approximate
@@ -2239,11 +2262,15 @@ mod tests {
             "an unchanged modules stage must hand its retained IR into \
              scoping, not force a second parse"
         );
-        let style = &output.styles[0];
         assert!(
-            style.code.contains("body[data-v-scope123]"),
+            output.styles.is_empty(),
+            "the selected style must publish qualified"
+        );
+        let style = &output.qualified_styles[0];
+        assert!(
+            style.result.code().contains("body[data-v-scope123]"),
             "{}",
-            style.code
+            style.result.code()
         );
     }
 
