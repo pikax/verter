@@ -192,6 +192,21 @@ export declare function negAsyncSrc(): NegSelfProm;
 export async function negAsyncSelfRef() {
   return negAsyncSrc();
 }
+
+// A THENABLE Promise payload: the shared `Awaited` reducer defers a
+// `then`-bearing object surface (structural thenables are out of scope —
+// see `reduce_awaited`'s object arm), so the async wrap's
+// Promise-embedding branch must reach `instantiate_awaited`'s deferred
+// `Opaque(Miss)` answer for the collapse, and the wrap must publish the
+// TYPED GAP rather than a fabricated `Promise<Thenable>` or a bare
+// unwrapped `Thenable`.
+interface NegThenable {
+  then(cb: (v: number) => void): void;
+}
+export declare function negThenableSrc(): Promise<NegThenable>;
+export async function negAsyncThenable() {
+  return negThenableSrc();
+}
 "#;
 
 const CALLS: &str = "/ws/cov/calls.ts";
@@ -2217,6 +2232,51 @@ fn generator_wrap_without_lib_surface_keeps_typed_gap_and_never_warms() {
             );
         }
         other => panic!("negGen must produce a degraded value, got {other:?}"),
+    }
+}
+
+/// D12-AC2 NEGATIVE LEG (async) — the Promise-EMBEDDING collapse branch's
+/// OWN failure path: `instantiate_awaited` reaching a genuine deferred
+/// `Opaque(Miss)` answer keeps the TYPED GAP, never a wrong warm value.
+///
+/// `negAsyncThenable`'s declared return is `Promise<NegThenable>` where
+/// `NegThenable` carries a `then` member — the shared `Awaited` reducer
+/// (`reduce_awaited` in `build.rs`) has no structural arm that settles a
+/// resolved-but-unrecognised carrier (measured: the un-expanded interface
+/// reference falls through its catch-all default, not its dedicated
+/// `then`-bearing-object arm — both keep the same deferred shell), so
+/// `Awaited<Promise<NegThenable>>` resolves to the deferred `Opaque(Miss)`
+/// shell. `FlowReturnResult::new_with_fresh_literal_arms`'s unresolved-reach
+/// backstop then folds `FlowReturnDegradation::UnresolvedValue` into the
+/// wrap's materialized result, so the whole `negAsyncThenable` return is a
+/// degraded success — unlike `negAsyncSelfRef`'s self-referential collapse
+/// (which resolves CLEAN), this row never warms. Verified by mutation: with
+/// `reduce_awaited`'s catch-all arm forced to pass its operand through
+/// instead of deferring, this test fails on a clean `Promise<NegThenable>`
+/// with `degradation=None`. Contrast with
+/// `generator_wrap_without_lib_surface_keeps_typed_gap_and_never_warms`:
+/// that row's gap comes from an unresolvable lib HEAD; this row's comes
+/// from the `Awaited` reducer's own deferred answer over an unrecognised
+/// payload shape.
+#[test]
+fn async_wrap_awaited_collapse_over_a_thenable_payload_keeps_typed_gap_and_never_warms() {
+    let host = ts_host();
+    match eval(&host, NEG, "negAsyncThenable") {
+        Outcome::Value {
+            degradation,
+            candidates,
+            ..
+        } => {
+            assert!(
+                degradation.is_some(),
+                "an Awaited-collapse over an unresolvable thenable payload must degrade"
+            );
+            assert_eq!(
+                candidates, 0,
+                "a gapped async wrap is ReturnOnly — it must never warm"
+            );
+        }
+        other => panic!("negAsyncThenable must produce a degraded value, got {other:?}"),
     }
 }
 
