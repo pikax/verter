@@ -876,6 +876,16 @@ pub fn run(
     //    emit surface). Only when `--declaration` is requested. FAIL-CLOSED: an
     //    engine that cannot run the emit is a hard error, never silent success. ──
     let emitted_files = if opts.declaration {
+        let svelte_skipped = admission
+            .admitted
+            .iter()
+            .filter(|path| is_svelte_carrier(path))
+            .count();
+        if svelte_skipped > 0 {
+            eprintln!(
+                "verter-tsc: --declaration does not emit Svelte carriers yet; skipped {svelte_skipped} file(s)"
+            );
+        }
         let vue_declaration = vue_declaration_carriers(&admission.admitted);
         if vue_declaration.is_empty() {
             Vec::new()
@@ -971,6 +981,15 @@ fn svelte_jsx_scope_marker(base: &Path) -> PathBuf {
         .join(".verter-svelte-jsx")
 }
 
+/// Marker whose parent is `node_modules` itself. Overlay `directoryExists` is
+/// true only for the immediate parent of an overlay file; the `@verter` scope
+/// marker does not imply the project-root `node_modules` directory. Without
+/// this row, a hoisted layout with no physical `node_modules` at the project
+/// root falls through to the real FS and misses `@verter/svelte-jsx` (TS2875).
+fn svelte_jsx_node_modules_marker(base: &Path) -> PathBuf {
+    base.join("node_modules").join(".verter-svelte-jsx-scope")
+}
+
 /// Types-only package.json so `moduleResolution: bundler` honors the subpath
 /// exports the per-file `@jsxImportSource @verter/svelte-jsx` pragma resolves.
 const SVELTE_JSX_PACKAGE_JSON: &str = r#"{
@@ -989,14 +1008,35 @@ const SVELTE_JSX_PACKAGE_JSON: &str = r#"{
 }
 "#;
 
-/// Overlay-only shims live under `node_modules` and must not be program roots
-/// (they would pull the JSX namespace into the global program).
-fn is_program_root_shim(path: &str) -> bool {
-    !path.contains("/node_modules/")
+/// One overlay `.d.ts` / marker row. `program_root` is explicit: overlay-only
+/// package files must not be synthetic-tsconfig `files` entries (they would
+/// pull the JSX namespace into the global program). Do not re-derive this
+/// from path text.
+#[derive(Debug, Clone)]
+struct AmbientShim {
+    path: String,
+    content: String,
+    program_root: bool,
 }
 
-/// The ambient `.d.ts` shim carriers `(virtual path, content)`, rooted at
-/// virtual in-project paths under `base`.
+fn root_shim(path: String, content: String) -> AmbientShim {
+    AmbientShim {
+        path,
+        content,
+        program_root: true,
+    }
+}
+
+fn overlay_shim(path: String, content: String) -> AmbientShim {
+    AmbientShim {
+        path,
+        content,
+        program_root: false,
+    }
+}
+
+/// The ambient `.d.ts` shim carriers, rooted at virtual in-project paths under
+/// `base`.
 ///
 /// `__verter_types.d.ts` is a SCRIPT-style shim (no top-level import/export) so
 /// its `declare module "@verter/types"` is a globally-visible ambient module. A
@@ -1005,47 +1045,48 @@ fn is_program_root_shim(path: &str) -> bool {
 /// real one's exports (the `TS2305`/`TS2694` "has no exported member" class). Each
 /// such augmentation is therefore served as its own MODULE carrier
 /// (`import "<mod>"; declare module "<mod>" { … } export {};`), where it augments.
-fn svelte_admission_shims(base: &Path) -> Vec<(String, String)> {
+fn svelte_admission_shims(base: &Path) -> Vec<AmbientShim> {
     use verter_session::framework::svelte_jsx_assets as jsx;
     let dir = svelte_jsx_package_dir(base);
     vec![
-        (
+        root_shim(
             slash(&base.join("svelte-shims.d.ts")),
             SVELTE_SHIMS_DTS.to_string(),
         ),
-        (slash(&svelte_jsx_scope_marker(base)), String::new()),
-        (
+        overlay_shim(slash(&svelte_jsx_node_modules_marker(base)), String::new()),
+        overlay_shim(slash(&svelte_jsx_scope_marker(base)), String::new()),
+        overlay_shim(
             slash(&dir.join("package.json")),
             SVELTE_JSX_PACKAGE_JSON.to_string(),
         ),
-        (
+        overlay_shim(
             slash(&dir.join("jsx-runtime.d.ts")),
             jsx::SVELTE_JSX_RUNTIME_DTS.to_string(),
         ),
-        (
+        overlay_shim(
             slash(&dir.join("jsx-dev-runtime.d.ts")),
             jsx::SVELTE_JSX_DEV_RUNTIME_DTS.to_string(),
         ),
-        (
+        overlay_shim(
             slash(&dir.join("svg").join("jsx-runtime.d.ts")),
             jsx::SVELTE_JSX_SVG_RUNTIME_DTS.to_string(),
         ),
-        (
+        overlay_shim(
             slash(&dir.join("svg").join("jsx-dev-runtime.d.ts")),
             jsx::SVELTE_JSX_SVG_DEV_RUNTIME_DTS.to_string(),
         ),
-        (
+        overlay_shim(
             slash(&dir.join("mathml").join("jsx-runtime.d.ts")),
             jsx::SVELTE_JSX_MATHML_RUNTIME_DTS.to_string(),
         ),
-        (
+        overlay_shim(
             slash(&dir.join("mathml").join("jsx-dev-runtime.d.ts")),
             jsx::SVELTE_JSX_MATHML_DEV_RUNTIME_DTS.to_string(),
         ),
     ]
 }
 
-fn ambient_shim_carriers_for(base: &Path, has_svelte: bool) -> Vec<(String, String)> {
+fn ambient_shim_carriers_for(base: &Path, has_svelte: bool) -> Vec<AmbientShim> {
     let mut vue_jsx_runtime_augment = String::from("import \"vue/jsx-runtime\";\n");
     vue_jsx_runtime_augment.push_str(verter_compiler::VUE_JSX_RUNTIME_AUGMENTATION);
     vue_jsx_runtime_augment.push_str("\nexport {};\n");
@@ -1063,7 +1104,7 @@ fn ambient_shim_carriers_for(base: &Path, has_svelte: bool) -> Vec<(String, Stri
     let mut vue_intrinsic_map_augment = String::from("import \"vue\";\n");
     vue_intrinsic_map_augment.push_str(verter_compiler::FALLTHROUGH_VUE_INTRINSIC_MAP_AUGMENTATION);
     vue_intrinsic_map_augment.push_str("\nexport {};\n");
-    let mut carriers = vec![
+    let mut carriers: Vec<AmbientShim> = vec![
         (
             slash(&base.join("vue-shims.d.ts")),
             VUE_SHIMS_DTS.to_string(),
@@ -1088,7 +1129,10 @@ fn ambient_shim_carriers_for(base: &Path, has_svelte: bool) -> Vec<(String, Stri
             slash(&base.join("vue-intrinsic-map-augment.d.ts")),
             vue_intrinsic_map_augment,
         ),
-    ];
+    ]
+    .into_iter()
+    .map(|(path, content)| root_shim(path, content))
+    .collect();
     if has_svelte {
         carriers.extend(svelte_admission_shims(base));
     }
@@ -1326,13 +1370,13 @@ fn run_inmemory_typecheck(
     let mut overlay_files: Vec<api_check::OverlayFile> = Vec::new();
     let mut config_files: Vec<String> = Vec::new();
     let has_svelte = admitted.iter().any(|path| is_svelte_carrier(path));
-    for (path, content) in ambient_shim_carriers_for(&root, has_svelte) {
-        if is_program_root_shim(&path) {
-            config_files.push(path.clone());
+    for shim in ambient_shim_carriers_for(&root, has_svelte) {
+        if shim.program_root {
+            config_files.push(shim.path.clone());
         }
         overlay_files.push(api_check::OverlayFile {
-            path,
-            content,
+            path: shim.path,
+            content: shim.content,
             remap: api_check::RemapKind::Passthrough,
         });
     }
@@ -3124,29 +3168,28 @@ mod tests {
     fn ambient_shims_carry_the_intrinsic_map_augmentation_for_jsdoc_widened_stubs() {
         let carriers = ambient_shim_carriers_for(Path::new("/base"), false);
         assert!(
-            carriers
-                .iter()
-                .all(|(path, _)| !path.contains("svelte-jsx")
-                    && !path.ends_with("svelte-shims.d.ts")),
+            carriers.iter().all(|shim| {
+                !shim.path.contains("svelte-jsx") && !shim.path.ends_with("svelte-shims.d.ts")
+            }),
             "Vue-only admission must not inject Svelte shims: {carriers:?}"
         );
         let augment = carriers
             .iter()
-            .find(|(path, _)| path.ends_with("vue-intrinsic-map-augment.d.ts"))
+            .find(|shim| shim.path.ends_with("vue-intrinsic-map-augment.d.ts"))
             .expect("the ambient shims include the intrinsic-map augmentation carrier");
         assert!(
             augment
-                .1
+                .content
                 .contains(verter_compiler::FALLTHROUGH_VUE_INTRINSIC_MAP_AUGMENTATION),
             "the carrier embeds the compiler's augmentation constant, so the two \
              cannot drift: {}",
-            augment.1
+            augment.content
         );
         assert!(
-            augment.1.contains("import \"vue\";") && augment.1.contains("export {};"),
+            augment.content.contains("import \"vue\";") && augment.content.contains("export {};"),
             "the augmentation is a MODULE carrier (import + export) so it augments \
              the real `vue` instead of REPLACING it: {}",
-            augment.1
+            augment.content
         );
     }
 
@@ -3156,10 +3199,14 @@ mod tests {
     #[test]
     fn svelte_jsx_shims_are_a_node_modules_package() {
         let carriers = ambient_shim_carriers_for(Path::new("/proj"), true);
-        let paths: Vec<&str> = carriers.iter().map(|(p, _)| p.as_str()).collect();
+        let paths: Vec<&str> = carriers.iter().map(|s| s.path.as_str()).collect();
         assert!(
             paths.iter().any(|p| p.ends_with("svelte-shims.d.ts")),
             "wildcard `*.svelte` shim stays a program root: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"/proj/node_modules/.verter-svelte-jsx-scope"),
+            "project-root node_modules dir needs an overlay file so directoryExists(node_modules) is true: {paths:?}"
         );
         assert!(
             paths.contains(&"/proj/node_modules/@verter/.verter-svelte-jsx"),
@@ -3175,21 +3222,22 @@ mod tests {
         );
         let pkg = carriers
             .iter()
-            .find(|(p, _)| p.ends_with("svelte-jsx/package.json"))
-            .map(|(_, c)| c.as_str())
+            .find(|s| s.path.ends_with("svelte-jsx/package.json"))
+            .map(|s| s.content.as_str())
             .expect("package.json content");
         assert!(
             pkg.contains("\"name\": \"@verter/svelte-jsx\"") && pkg.contains("\"./jsx-runtime\""),
             "package.json must export jsx-runtime: {pkg}"
         );
-        assert!(
-            carriers
-                .iter()
-                .filter(|(p, _)| p.contains("/node_modules/"))
-                .all(|(p, _)| !is_program_root_shim(p)),
-            "node_modules overlay rows must not be synthetic tsconfig files entries"
-        );
-        assert!(is_program_root_shim("/proj/svelte-shims.d.ts"));
+        for shim in &carriers {
+            let overlay_only =
+                shim.path.contains("/@verter/") || shim.path.ends_with(".verter-svelte-jsx-scope");
+            assert_eq!(
+                shim.program_root, !overlay_only,
+                "program_root is explicit (not path-text): {}",
+                shim.path
+            );
+        }
     }
 
     #[test]

@@ -797,7 +797,176 @@ fn svelte_user_paths_aliases_survive_svelte_admission() {
         "admitting Svelte must not drop user paths aliases (TS2307 on @/util). \
          stdout={stdout}\nstderr={stderr}\nmisses={alias_misses:#?}"
     );
+    assert_error_at(&diags, "ScriptMismatch.svelte", 2, 2322);
     assert_no_errors(&diags, "UseSvelte.svelte");
     assert_no_errors(&diags, "UseVue.vue");
+    drop(temp);
+}
+
+/// Copy only `Clean.svelte` into a temp project. `hoist_node_modules` places
+/// the svelte junction at the parent of the project (workspace-hoist layout)
+/// so the project root has no physical `node_modules`.
+fn setup_svelte_only_project(hoist_node_modules: bool) -> Option<(tempfile::TempDir, PathBuf)> {
+    let node_modules_src = workspace_root().join("node_modules");
+    if !node_modules_src.join("svelte").exists() {
+        eprintln!("SKIP: workspace node_modules/svelte not found — run `pnpm install` first");
+        return None;
+    }
+
+    let temp = tempfile::TempDir::new().expect("failed to create temp dir");
+    let project = if hoist_node_modules {
+        let parent_nm = temp.path().join("node_modules");
+        create_junction_or_symlink(&node_modules_src, &parent_nm);
+        if !parent_nm.join("svelte").exists() {
+            eprintln!("SKIP: failed to create parent node_modules junction/symlink for svelte");
+            return None;
+        }
+        let project = temp.path().join("packages").join("web");
+        std::fs::create_dir_all(&project).expect("packages/web");
+        project
+    } else {
+        let nm_dest = temp.path().join("node_modules");
+        create_junction_or_symlink(&node_modules_src, &nm_dest);
+        if !nm_dest.join("svelte").exists() {
+            eprintln!("SKIP: failed to create node_modules junction/symlink for svelte");
+            return None;
+        }
+        temp.path().to_path_buf()
+    };
+
+    std::fs::create_dir_all(project.join("src")).expect("src");
+    std::fs::copy(
+        svelte_fixture_dir().join("src").join("Clean.svelte"),
+        project.join("src").join("Clean.svelte"),
+    )
+    .expect("copy Clean.svelte");
+    std::fs::write(
+        project.join("tsconfig.json"),
+        r#"{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}
+"#,
+    )
+    .expect("write tsconfig");
+    Some((temp, project))
+}
+
+fn collect_emitted_dts(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "ts")
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().ends_with(".d.ts"))
+            {
+                out.push(path);
+            }
+        }
+    }
+    walk(dir, &mut out);
+    out
+}
+
+/// Overlay `directoryExists` must imply project-root `node_modules` so a
+/// hoisted layout still resolves `@verter/svelte-jsx` (no TS2875 on a clean
+/// Svelte file).
+#[test]
+fn svelte_jsx_runtime_resolves_when_node_modules_is_hoisted() {
+    let Some((temp, root)) = setup_svelte_only_project(true) else {
+        return;
+    };
+    assert!(
+        !root.join("node_modules").exists(),
+        "hoisted layout: project root must not have a physical node_modules"
+    );
+    let Some((diags, stdout, stderr)) = run_svelte_verter_tsc(&root, &root.join("tsconfig.json"))
+    else {
+        eprintln!(
+            "SKIP: rc tsgo `--api` engine not found — set VERTER_TSGO_BIN or run `pnpm install`"
+        );
+        drop(temp);
+        return;
+    };
+
+    assert!(
+        stderr.contains("checking 1"),
+        "Clean.svelte must be admitted so the overlay lookup runs. \
+         stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        diags.iter().all(|d| d.ts_code != 2875 && d.ts_code != 7026),
+        "hoisted layout must resolve @verter/svelte-jsx (no TS2875/TS7026). \
+         stdout={stdout}\nstderr={stderr}\ndiags={diags:#?}"
+    );
+    assert_no_errors(&diags, "Clean.svelte");
+    drop(temp);
+}
+
+/// ECRS2-AC2: `--declaration` on admitted Svelte is unimplemented (CLI/CLITS).
+/// Name it on stderr; do not emit `.svelte.d.ts`. Svelte-only so the Vue
+/// declaration engine is not required.
+#[test]
+fn svelte_declaration_is_named_unimplemented_at_cli() {
+    let Some((temp, root)) = setup_svelte_only_project(false) else {
+        return;
+    };
+    let Some(engine) = resolve_rc_engine() else {
+        eprintln!(
+            "SKIP: rc tsgo `--api` engine not found — set VERTER_TSGO_BIN or run `pnpm install`"
+        );
+        drop(temp);
+        return;
+    };
+
+    let out_dir = root.join("out");
+    std::fs::create_dir_all(&out_dir).expect("declarationDir");
+    let bin = verter_test_support::cargo_test_binary_path!("verter-tsc");
+    let output = Command::new(bin)
+        .env("VERTER_TSGO_BIN", &engine)
+        .arg("-p")
+        .arg(root.join("tsconfig.json"))
+        .arg("--declaration")
+        .arg("--emitDeclarationOnly")
+        .arg("--declarationDir")
+        .arg(&out_dir)
+        .current_dir(&root)
+        .output()
+        .expect("failed to execute verter-tsc");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("=== STDERR ===\n{stderr}");
+    eprintln!("=== STDOUT ===\n{stdout}");
+
+    assert!(
+        stderr.contains("--declaration does not emit Svelte carriers yet")
+            && stderr.contains("skipped 1 file"),
+        "unimplemented Svelte --declaration must be named on stderr. \
+         stdout={stdout}\nstderr={stderr}"
+    );
+    let emitted = collect_emitted_dts(&out_dir);
+    assert!(
+        emitted.iter().all(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or_default();
+            !name.contains(".svelte")
+        }),
+        "Svelte --declaration must not emit a .svelte.d.ts: {emitted:?}"
+    );
     drop(temp);
 }
