@@ -42,7 +42,7 @@
 //! used to be taken downstream, off the leaf lowering's ANSWER — the
 //! content half fails closed only when the shared shallow pass minted an
 //! unreduced `ReturnType<callee>` carrier it could recognise. For
-//! `new f()`, `` tag`…` ``, `f?.()`, `await f()` and a sequence whose
+//! `new f()`, `` tag`…` ``, `f?.()` and a sequence whose
 //! value operand is one of those (`(k, new f())`) that pass answers a
 //! bare `any` with no carrier in it, so nothing fired and a
 //! fabricated `any` published warm and clean under a promise that a call
@@ -54,8 +54,8 @@
 //! form is.
 
 use oxc_ast::ast::{
-    ChainElement, ConditionalExpression, Expression, ObjectExpression, ObjectProperty,
-    ObjectPropertyKind, PropertyKey, PropertyKind,
+    AwaitExpression, ChainElement, ConditionalExpression, Expression, ObjectExpression,
+    ObjectProperty, ObjectPropertyKind, PropertyKey, PropertyKind,
 };
 
 /// The value-structural disposition of one expression.
@@ -82,6 +82,15 @@ pub enum ValueDescent<'a, 'ast> {
     /// planner selected. That is over-selection, which is safe by the
     /// asymmetry above.
     TypeCarrier(&'a Expression<'ast>),
+    /// An `await x` — the OPERAND is a value provider of the await's
+    /// value, exactly as a sequence's last operand is: the content half
+    /// lowers the operand through its own arm (a call operand rides the
+    /// one call sink, a binding read the binding carriers, a leaf the
+    /// shared leaf lowering) and the evaluator unwraps the resolved
+    /// operand through the lib `Awaited` surface. Both halves therefore
+    /// descend into the operand; neither treats the await itself as a
+    /// call position.
+    Awaited(&'a AwaitExpression<'ast>),
     /// An object literal: its member VALUES are the descent, each one a
     /// value provider of exactly the key it provisions.
     Object(&'a ObjectExpression<'ast>),
@@ -92,10 +101,11 @@ pub enum ValueDescent<'a, 'ast> {
     Branches(&'a ConditionalExpression<'ast>),
     /// A CALL POSITION with no structural arm: this form's VALUE is
     /// produced by a call the substrate does not model —
-    /// `new f()`, `` tag`…` ``, an optional call chain (`f?.()`), an
-    /// awaited call (`await f()`), or a sequence whose last operand is
-    /// one of those (a sequence whose last operand is a bare call routes
-    /// to the call rails instead — [`sequence_value_takes_call_rail`]).
+    /// `new f()`, `` tag`…` ``, an optional call chain (`f?.()`), or a
+    /// sequence whose last operand is one of those (a sequence whose last
+    /// operand is a bare call routes to the call rails instead —
+    /// [`sequence_value_takes_call_rail`]; an awaited call is a modeled
+    /// [`Self::Awaited`] form, not this one).
     ///
     /// This variant exists because the fail-closed promise has to key on
     /// the EXPRESSION FORM, not on whatever the shared shallow pass
@@ -149,7 +159,7 @@ pub enum ValueDescent<'a, 'ast> {
     /// A `Leaf` verdict says the form has no value-providing child the
     /// demand plan must reach. It does NOT promise the leaf lowering
     /// MODELS the form: several leaves (`JSXElement`, `MetaProperty`,
-    /// `Super`, `await x` over a non-call) answer that pass's fallback
+    /// `Super`) answer that pass's fallback
     /// `any`. That fallback is the shallow pass's own coverage question,
     /// decided per expression at lowering time and not statically per
     /// form — the classifier cannot decide it and does not pretend to.
@@ -178,6 +188,11 @@ pub fn value_descent<'a, 'ast>(expression: &'a Expression<'ast>) -> ValueDescent
         }
         Expression::ObjectExpression(object) => ValueDescent::Object(object),
         Expression::ConditionalExpression(conditional) => ValueDescent::Branches(conditional),
+        // Matched BEFORE the call-position guard: an await is a modeled
+        // form whose OPERAND rides its own rails (a call operand through
+        // the one call sink), so the await itself is never an
+        // unmodeled-call position.
+        Expression::AwaitExpression(awaited) => ValueDescent::Awaited(awaited),
         // THE call-position disposition, delegated to the ONE predicate
         // that answers the question — never re-spelled per form here, so
         // this half and the content half's residual carrier check cannot
@@ -194,15 +209,16 @@ pub fn value_descent<'a, 'ast>(expression: &'a Expression<'ast>) -> ValueDescent
         // and lowered under its own skeleton, never through this one.
         //
         // `CallExpression`, `NewExpression`, `TaggedTemplateExpression`
-        // and the call-valued `ChainExpression` / `AwaitExpression` /
-        // `SequenceExpression` shapes are listed here for exhaustiveness
-        // but are consumed by the guarded arm above; what reaches `Leaf`
-        // through these names is the NON-call shape of each (`a?.b`,
-        // `await promiseVar`, `(a, b)`). A bare `CallExpression` never
-        // reaches the CONTENT half's classifier dispatch at all — that
-        // half owns six structural call arms and takes them first — and
-        // for the PLANNER half `UnmodeledCall` and `Leaf` are the same
-        // disposition, so the guard is safe for it either way.
+        // and the call-valued `ChainExpression` / `SequenceExpression`
+        // shapes are listed here for exhaustiveness but are consumed by
+        // the guarded arm above; what reaches `Leaf` through these names
+        // is the NON-call shape of each (`a?.b`, `(a, b)`). A bare
+        // `CallExpression` never reaches the CONTENT half's classifier
+        // dispatch at all — that half owns six structural call arms and
+        // takes them first — and for the PLANNER half `UnmodeledCall`
+        // and `Leaf` are the same disposition, so the guard is safe for
+        // it either way. `AwaitExpression` has its own early arm and
+        // never reaches this list.
         Expression::Identifier(_) | Expression::StaticMemberExpression(_) => {
             ValueDescent::Reference
         }
@@ -225,7 +241,6 @@ pub fn value_descent<'a, 'ast>(expression: &'a Expression<'ast>) -> ValueDescent
         | Expression::Super(_)
         | Expression::ArrayExpression(_)
         | Expression::AssignmentExpression(_)
-        | Expression::AwaitExpression(_)
         | Expression::BinaryExpression(_)
         | Expression::ChainExpression(_)
         | Expression::ImportExpression(_)
@@ -424,6 +439,27 @@ pub fn sequence_value_takes_call_rail(expression: &Expression<'_>) -> bool {
     }
 }
 
+/// Whether `operand` — a sequence's LAST operand — is an `await` the
+/// content half's sequence arm delegates to its structural `Awaited`
+/// arm (the operand then rides its own rails through the await). The
+/// call-rail twin of [`sequence_value_takes_call_rail`]: the sequence's
+/// value-structural shape stays plain [`ValueDescent::Sequence`] — the
+/// delegation answers the await's own question and invents no arm.
+#[must_use]
+pub fn sequence_value_takes_await_arm(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::ParenthesizedExpression(paren) => {
+            sequence_value_takes_await_arm(&paren.expression)
+        }
+        Expression::AwaitExpression(_) => true,
+        Expression::SequenceExpression(sequence) => sequence
+            .expressions
+            .last()
+            .is_some_and(sequence_value_takes_await_arm),
+        _ => false,
+    }
+}
+
 /// Whether `expression`'s VALUE is produced by a CALL the flow substrate
 /// has no structural arm for — the predicate
 /// [`ValueDescent::UnmodeledCall`] is decided by, and the same predicate
@@ -456,7 +492,11 @@ pub fn value_is_unmodeled_call(expression: &Expression<'_>) -> bool {
         Expression::TSTypeAssertion(inner) => value_is_unmodeled_call(&inner.expression),
         Expression::TSInstantiationExpression(inner) => value_is_unmodeled_call(&inner.expression),
         Expression::ChainExpression(chain) => chain_is_call_valued(&chain.expression),
-        Expression::AwaitExpression(inner) => value_is_unmodeled_call(&inner.argument),
+        // An `await x` is a modeled form: the operand rides its own rails
+        // through the [`ValueDescent::Awaited`] arm, so the await itself is
+        // not an unmodeled-call position. (The operand call is answered by
+        // the call rails; a non-call operand by the leaf / binding rails.)
+        Expression::AwaitExpression(_) => false,
         Expression::SequenceExpression(sequence) => {
             sequence.expressions.last().is_some_and(|last| {
                 !sequence_value_takes_call_rail(last) && value_is_unmodeled_call(last)
@@ -591,7 +631,12 @@ pub fn value_composes_unmodeled_call(expression: &Expression<'_>) -> bool {
                 || value_composes_unmodeled_call(&logical.right)
         }
         Expression::UnaryExpression(unary) => value_composes_unmodeled_call(&unary.argument),
-        Expression::AwaitExpression(inner) => value_composes_unmodeled_call(&inner.argument),
+        // An `await x` FOLDED INTO a leaf answer (inside an array, a
+        // non-structural object, a template) is answered by the shallow
+        // pass's fallback: the value-position await is modeled through
+        // [`ValueDescent::Awaited`], but a leaf-composed one never reaches
+        // that arm, so it composes an untyped position.
+        Expression::AwaitExpression(_) => true,
         Expression::ComputedMemberExpression(member) => {
             value_composes_unmodeled_call(&member.object)
                 || value_composes_unmodeled_call(&member.expression)

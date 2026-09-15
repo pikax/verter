@@ -56,9 +56,9 @@ pub mod value_descent;
 
 pub use value_descent::{
     expression_contains_call, object_entry_descent, object_entry_key,
-    sequence_value_takes_call_rail, static_property_key_text, value_composes_unmodeled_call,
-    value_descent, value_is_unmodeled_call, ObjectEntryDescent, ObjectEntryKey, ObjectEntryKind,
-    ValueDescent,
+    sequence_value_takes_await_arm, sequence_value_takes_call_rail, static_property_key_text,
+    value_composes_unmodeled_call, value_descent, value_is_unmodeled_call, ObjectEntryDescent,
+    ObjectEntryKey, ObjectEntryKind, ValueDescent,
 };
 
 #[cfg(test)]
@@ -710,6 +710,11 @@ pub struct SkeletonReturnSite {
 pub struct FunctionBodySkeleton {
     /// The interned name table.
     pub names: Arc<[Arc<str>]>,
+    /// The function's authored KIND (`async` / `generator` flags of the
+    /// declaration or arrow itself — never of an enclosing form). The flow
+    /// body's stable hash already folds the flags, so the fact is a property
+    /// of the same content version the skeleton is memoized under.
+    pub kind: FunctionBodyKind,
     /// The control regions; index 0 is the function-body root.
     pub regions: Arc<[SkeletonRegion]>,
     /// The lexical binding index.
@@ -720,6 +725,17 @@ pub struct FunctionBodySkeleton {
     pub return_sites: Arc<[SkeletonReturnSite]>,
     /// The assignment / kill summary, in source order.
     pub writes: Arc<[SkeletonWrite]>,
+}
+
+/// The authored kind of one function body — the `async` and `generator`
+/// flags the language's return-type rule keys on. A plain function or
+/// arrow is [`Self::Plain`]; an arrow can never be a generator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+pub enum FunctionBodyKind {
+    Plain,
+    Async,
+    Generator,
+    AsyncGenerator,
 }
 
 impl FunctionBodySkeleton {
@@ -945,6 +961,8 @@ impl FunctionBodySkeleton {
 pub struct FunctionBodySource<'a, 'ast> {
     /// The formal parameters.
     pub params: &'a oxc_ast::ast::FormalParameters<'ast>,
+    /// The function's authored kind (`async` / `generator` flags).
+    pub kind: FunctionBodyKind,
     /// The body statements.
     pub statements: &'a [Statement<'ast>],
     /// Whether the body is an expression-bodied arrow (the single
@@ -991,6 +1009,7 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
         let body = function.body.as_ref()?;
         Some(Self {
             params: &function.params,
+            kind: function_body_kind(function.r#async, function.generator),
             statements: &body.statements,
             expression_body: false,
             body_span: body.span.into(),
@@ -1015,12 +1034,24 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
     pub fn from_arrow(arrow: &'a ArrowFunctionExpression<'ast>) -> Self {
         Self {
             params: &arrow.params,
+            kind: function_body_kind(arrow.r#async, false),
             statements: &arrow.body.statements,
             expression_body: arrow.expression,
             body_span: arrow.body.span.into(),
             anchor: arrow.span.start,
             self_binding: None,
         }
+    }
+}
+
+/// The kind of a function body from its authored flags. An arrow passes
+/// `generator: false` — the grammar admits no generator arrow.
+fn function_body_kind(is_async: bool, is_generator: bool) -> FunctionBodyKind {
+    match (is_async, is_generator) {
+        (false, false) => FunctionBodyKind::Plain,
+        (true, false) => FunctionBodyKind::Async,
+        (false, true) => FunctionBodyKind::Generator,
+        (true, true) => FunctionBodyKind::AsyncGenerator,
     }
 }
 
@@ -1133,7 +1164,7 @@ fn build_body_skeleton(
     source: &FunctionBodySource<'_, '_>,
     entry: Option<&FunctionProgramEntry>,
 ) -> FunctionBodySkeleton {
-    let mut builder = SkeletonBuilder::new(source.anchor, source.body_span, entry);
+    let mut builder = SkeletonBuilder::new(source.anchor, source.kind, source.body_span, entry);
     // A named function expression's own name is an immutable binding of
     // its own frame, in scope over the parameters and the whole body. It
     // is recorded as a nested-function-kind binding: a function-valued
@@ -1186,6 +1217,7 @@ struct SkeletonBuilder<'entry> {
     /// that one call can hold an absolute offset: the record fields are
     /// typed [`FrameSpan`].
     anchor: u32,
+    kind: FunctionBodyKind,
     names: Vec<Arc<str>>,
     name_lookup: FxHashMap<Arc<str>, FlowNameId>,
     regions: Vec<SkeletonRegion>,
@@ -1204,6 +1236,7 @@ struct SkeletonBuilder<'entry> {
 impl<'entry> SkeletonBuilder<'entry> {
     fn new(
         anchor: u32,
+        kind: FunctionBodyKind,
         body_span: verter_span::Span,
         entry: Option<&'entry FunctionProgramEntry>,
     ) -> Self {
@@ -1216,6 +1249,7 @@ impl<'entry> SkeletonBuilder<'entry> {
         };
         Self {
             anchor,
+            kind,
             names: Vec::new(),
             name_lookup: FxHashMap::default(),
             regions: vec![root],
@@ -1382,6 +1416,10 @@ impl<'entry> SkeletonBuilder<'entry> {
             ValueDescent::Transparent(inner) | ValueDescent::TypeCarrier(inner) => {
                 self.open_site_at(inner, parent, span)
             }
+            // An `await x`'s operand is the await's value provider: the
+            // site opens over the operand (keeping the outermost await's
+            // span), exactly as a parenthesized expression's does.
+            ValueDescent::Awaited(awaited) => self.open_site_at(&awaited.argument, parent, span),
             ValueDescent::Object(object) => self.open_object_site(object, parent, span),
             ValueDescent::Branches(conditional) => self.open_branch_site(conditional, parent, span),
             // An unmodeled CALL POSITION has no value-providing child
@@ -2033,6 +2071,7 @@ impl<'entry> SkeletonBuilder<'entry> {
     /// type its published counterpart needs.
     fn finish(self) -> FunctionBodySkeleton {
         FunctionBodySkeleton {
+            kind: self.kind,
             names: Arc::from(self.names.into_boxed_slice()),
             regions: Arc::from(self.regions.into_boxed_slice()),
             bindings: Arc::from(self.bindings.into_boxed_slice()),

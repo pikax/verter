@@ -119,7 +119,7 @@ pub mod admit;
 pub mod carrier;
 pub mod composite;
 mod flow_return_result;
-pub use flow_return_result::FlowReturnResult;
+pub use flow_return_result::{FlowReturnResult, FlowReturnWrap};
 
 /// The ONE owner of the legacy compatibility-spelling family (exact
 /// spellings + parameterised prefixes) and the shared display-family

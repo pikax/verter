@@ -143,6 +143,10 @@ pub(crate) enum NodeShape {
     Tuple,
     IndexedAccess,
     Reference,
+    /// `SemanticNodeData::InstantiationRef` — a generic instantiation
+    /// carrier (the async return wrap's `Promise<…>` and the generator
+    /// wrap's resolved lib head mint this shape).
+    Instantiation,
     /// `SemanticNodeData::Opaque(QueryError::UnmodeledPosition)` — the typed
     /// unmodelled-position MARKER, distinct from a cache miss.
     OpaqueUnmodeledPosition,
@@ -737,6 +741,7 @@ fn node_shape(data: Option<&SemanticNodeData>) -> NodeShape {
         Some(SemanticNodeData::Array { .. }) => NodeShape::Array,
         Some(SemanticNodeData::Tuple { .. }) => NodeShape::Tuple,
         Some(SemanticNodeData::IndexedAccess { .. }) => NodeShape::IndexedAccess,
+        Some(SemanticNodeData::InstantiationRef { .. }) => NodeShape::Instantiation,
         Some(SemanticNodeData::Opaque(QueryError::UnmodeledPosition)) => {
             NodeShape::OpaqueUnmodeledPosition
         }
@@ -1421,6 +1426,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "X16_switch_fallthrough",
         "da6e096ca75e743743cf48d63f121f803c598115fec9705b8472acde93f03aab",
+    ),
+    (
+        "X18_async_return",
+        "bd3cc2b546461b8c5810e25edbcb0f5cfde123c05adfee7ea220d9c40b761a86",
     ),
     (
         "X20_as_const_spread_source",
@@ -3754,6 +3763,48 @@ mod corpus_suite {
                 );
             },
         );
+        // The generic-argument acceptance arm, discriminated on X18's
+        // async wrap (its live node IS the `Promise<…>` builtin carrier).
+        let x18 = row("X18_async_return");
+        with_live_flow_node(
+            x18.aux,
+            "ctl_x18_checker",
+            x18.script,
+            "makeProps",
+            |dispatch, node| {
+                let node = node.expect("X18 produces a value");
+                let accepts = |text: &str| {
+                    let parsed = checker_syntax::parse(text)
+                        .unwrap_or_else(|err| panic!("`{text}` must parse: {err}"));
+                    checker_syntax::matches_node(dispatch, node, &parsed, 0)
+                };
+                assert!(
+                    accepts(x18.checker),
+                    "the recorded checker `{}` must match X18's live wrapped surface",
+                    x18.checker
+                );
+                assert!(
+                    !accepts("Promise<{ label: number; }>"),
+                    "a wrong generic ARGUMENT member type must be rejected"
+                );
+                assert!(
+                    !accepts("Promise<{ n: string; }>"),
+                    "a wrong generic ARGUMENT member name must be rejected"
+                );
+                assert!(
+                    !accepts("Promise<{ label: string; n: number; }>"),
+                    "an extra generic ARGUMENT member (superset) must be rejected"
+                );
+                assert!(
+                    !accepts("{ label: string; }"),
+                    "the UNWRAPPED inner object must be rejected — the wrap is the answer"
+                );
+                assert!(
+                    !accepts("Map<{ label: string; }>"),
+                    "a wrong generic HEAD name must be rejected"
+                );
+            },
+        );
         // Function-print parameter/return and number-literal clauses,
         // exercised on CONTROL programs (no deep-pinned row carries a
         // parametered signature or number literal yet — these controls
@@ -4833,9 +4884,6 @@ const OPEN_DEBTS: &[&str] = &[
     // ── TypeScript semantics: adversarial axes (X family) ──────────────
     // A get/set pair surfaces as a duplicate member key: refused, TSX faults.
     "X14_accessor_pair",
-    // Async return wrapping is unmodelled: the Promise is silently unwrapped
-    // and the inner object is published as a props surface.
-    "X18_async_return",
     // The macro lane correctly rejects a generator return, but the TSX lane
     // faults with the same code — the consumer-reach debt class.
     "X19_generator_yield",
@@ -4969,8 +5017,9 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U6ContextualCore, 8, 7, 1),
     // B10's `as const` spread-modifier debt moved to the value-inference
     // owner with its B03/B04 class, so the substrate total drops by one
-    // from D13's 64 to 63.
-    (Owner::U6FlowReturnSubstrate, 63, 47, 3),
+    // from D13's 64 to 63. D12's async return wrap greens X18 (the
+    // `Promise<…>` carrier matches the checker), leaving two parked.
+    (Owner::U6FlowReturnSubstrate, 63, 48, 2),
     (Owner::U6NarrowTypeof, 48, 28, 20),
     // The `instanceof` arm rule: derived-arm selection with nullish
     // stripping and the whole-subject intersection fallback are exact;

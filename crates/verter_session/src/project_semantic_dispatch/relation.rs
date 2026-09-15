@@ -2140,9 +2140,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // Per-key substitution, then the final idempotent
                     // pre-seal closure — the member's proof, the value
                     // channel and the batch publish all see the closed
-                    // value.
-                    FlowReturnPendingOutcome::EvaluatedValue(self.close_flow_result_pre_seal(
-                        self.apply_frame_key_substitution(&member.key, result),
+                    // value — and the function-kind wrap materializes
+                    // last, exactly as the root's own close orders it.
+                    FlowReturnPendingOutcome::EvaluatedValue(self.materialize_flow_return_wrap(
+                        self.close_flow_result_pre_seal(
+                            self.apply_frame_key_substitution(&member.key, result),
+                        ),
                     ))
                 }
                 no_value => no_value,
