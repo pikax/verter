@@ -1,7 +1,7 @@
 /**
  * Focused public Svelte IDE-projection TSX validity case.
  *
- * Regression (ECRS1): a component element that starts AT the first template
+ * Regression: a component element that starts AT the first template
  * byte and owns an immediate `{#snippet}` child shared its IIFE anchor with
  * the render-header anchor, and the projected TSX did not parse (the header
  * landed inside the IIFE's `return (`). Minimized from the
@@ -62,6 +62,33 @@ describe("svelte ide projection tsx validity", () => {
     expect(code).not.toContain("{#snippet");
 
     expect(parseTsxDiagnostics("Min.svelte.tsx", code)).toEqual([]);
+  });
+
+  it("keeps adjacent snippet-owning siblings parseable when the first starts at the first template byte", () => {
+    // The sibling starts exactly at the first element's close end, so both
+    // scopes insert at the same source byte: the first scope must CLOSE
+    // before the sibling's IIFE opens, or the closer lands inside the
+    // sibling's `return (` and the TSX does not parse.
+    const host = new native.VerterHost({ analysisLevel: "full" });
+    const source =
+      '<script lang="ts">import C from "./C.svelte";import D from "./D.svelte";</script>' +
+      "<C>{#snippet a()}<p/>{/snippet}</C>" +
+      "<D>{#snippet b()}<p/>{/snippet}</D>";
+    host.upsert({ inputId: "Adj.svelte", source, fileKind: "svelte" });
+
+    expect(host.ensureIdeCompiled("Adj.svelte")).toBe(true);
+
+    const code = host.getIde("Adj.svelte")!.code;
+    const firstOpen = code.indexOf("{(() => {");
+    const firstClose = code.indexOf("); })()}");
+    const secondOpen = code.indexOf("{(() => {", firstOpen + 1);
+    expect(firstOpen).toBeGreaterThanOrEqual(0);
+    expect(firstClose).toBeGreaterThan(firstOpen);
+    expect(secondOpen).toBeGreaterThan(-1);
+    expect(firstClose).toBeLessThan(secondOpen);
+    expect(code).not.toContain("{#snippet");
+
+    expect(parseTsxDiagnostics("Adj.svelte.tsx", code)).toEqual([]);
   });
 
   it("still rejects malformed TSX through the same parser check", () => {

@@ -502,11 +502,12 @@ struct TemplateProjector<'ct, 'a> {
     /// `open_span.start` equals it shares that byte with the render-header
     /// anchor: same-index CodeTransform insertions stack in call order, and the
     /// header (prepended AFTER the walk) would land BELOW the element's
-    /// snippet-scope IIFE — inside its `return (` — producing invalid TSX.
-    /// Such scopes are deferred past the header prepend.
+    /// snippet-scope opening — inside its `return (` — producing invalid TSX.
+    /// Such scopes' OPENINGS are deferred past the header prepend.
     render_anchor: Option<u32>,
-    /// Element snippet scopes anchored exactly at [`Self::render_anchor`],
-    /// emitted after the render header prepends at the same byte.
+    /// Element snippet scopes anchored exactly at [`Self::render_anchor`];
+    /// their anchor-anchored openings are emitted after the render header
+    /// prepends at the same byte (their tails run inline during the walk).
     deferred_anchor_scopes: Vec<ElementScopeSite>,
 }
 
@@ -546,8 +547,9 @@ struct DeclMove {
 }
 
 /// The element facts the snippet-scope emitter needs, detached from the AST
-/// borrow so a scope anchored at the FIRST template byte can be deferred past
-/// the render-header prepend (same-index insertions stack in call order).
+/// borrow so a scope anchored at the FIRST template byte can have its opening
+/// deferred past the render-header prepend (same-index insertions stack in
+/// call order).
 struct ElementScopeSite {
     /// Whether the owning element is a component (drives the snippet props
     /// wiring + contextual annotation).
@@ -681,16 +683,18 @@ impl TemplateProjector<'_, '_> {
             first,
             &format!("{self_contract}\n;function __verter_render() {{\nreturn (<>\n"),
         );
-        // Same-index insertions stack in CALL order, so an element snippet
-        // scope anchored exactly at `first` is emitted only NOW — after the
-        // header prepend — to land BELOW the header (inside the render
-        // fragment, wrapping its owning element) instead of above it.
+        // Same-index insertions stack in CALL order, so the OPENING of an
+        // element snippet scope anchored exactly at `first` is emitted only
+        // NOW — after the header prepend — to land BELOW the header (inside
+        // the render fragment, wrapping its owning element) instead of above
+        // it. The scope's tail (props wiring + closer) already ran inline
+        // during the walk, ahead of any next sibling's same-byte insertions.
         let deferred_scopes = std::mem::take(&mut self.deferred_anchor_scopes);
         for site in &deferred_scopes {
-            self.emit_element_snippet_scope(site);
+            self.emit_element_snippet_scope_open(site);
         }
-        // The render fn closes LAST so a deferred scope whose element closes
-        // at `last` still nests its IIFE closer INSIDE the render fragment.
+        // The render fn closes LAST so a scope whose element closes at `last`
+        // still nests its IIFE closer INSIDE the render fragment.
         // The file is made a module by the PUBLIC-FACADE `export default`
         // appended after the projector runs.
         self.ct.append_left(last, "\n</>);\n}\n");
@@ -924,8 +928,14 @@ impl TemplateProjector<'_, '_> {
             let site = ElementScopeSite::new(el, scoped_snippets);
             if Some(site.open_start) == self.render_anchor {
                 // The element shares its first byte with the render-header
-                // anchor — defer the scope below the header (see
-                // [`Self::emit_element_snippet_scope`]).
+                // anchor — defer the scope OPENING below the header (see
+                // [`Self::emit_element_snippet_scope_open`]). The tail stays
+                // inline: a sibling starting exactly at this element's close
+                // end emits its own same-byte insertions later in the walk,
+                // and same-index insertions stack in call order, so a
+                // deferred closer would land after — inside — that sibling's
+                // opening.
+                self.emit_element_snippet_scope_tail(&site);
                 self.deferred_anchor_scopes.push(site);
             } else {
                 self.emit_element_snippet_scope(&site);
@@ -936,15 +946,26 @@ impl TemplateProjector<'_, '_> {
         }
     }
 
-    /// Emit one element's immediate snippet scope.
+    /// Emit one element's immediate snippet scope: the anchor-anchored
+    /// opening, then the in-element tail.
     ///
     /// When the element's anchor equals the render-header anchor (the element
-    /// starts at the FIRST template byte), emission is DEFERRED past the header
-    /// prepend: CodeTransform insertions at one index stack in call order, so
-    /// emitting inline would stack the IIFE ABOVE the later-prepended header —
-    /// the header would land inside the IIFE's `return (` and the projected
-    /// TSX would not parse.
+    /// starts at the FIRST template byte), only the OPENING is deferred past
+    /// the header prepend: CodeTransform insertions at one index stack in call
+    /// order, so emitting the opening inline would stack it ABOVE the
+    /// later-prepended header — the header would land inside the IIFE's
+    /// `return (` and the projected TSX would not parse. The tail runs inline
+    /// in walk order either way (see
+    /// [`Self::emit_element_snippet_scope_tail`]).
     fn emit_element_snippet_scope(&mut self, site: &ElementScopeSite) {
+        self.emit_element_snippet_scope_open(site);
+        self.emit_element_snippet_scope_tail(site);
+    }
+
+    /// The anchor-anchored half of an element snippet scope: the snippet
+    /// bindings and the IIFE's `return (` opener, all inserted at the
+    /// element's open-tag start.
+    fn emit_element_snippet_scope_open(&mut self, site: &ElementScopeSite) {
         let anchor = site.open_start;
         let is_component = site.is_component;
 
@@ -973,7 +994,15 @@ impl TemplateProjector<'_, '_> {
         }
 
         self.ct.append_left(anchor, "return (\n");
-        if is_component {
+    }
+
+    /// The in-element half of an element snippet scope: the component's
+    /// snippet props wiring (inside the open tag) and the IIFE closer (at the
+    /// element's close end). Emitted inline in walk order so a sibling that
+    /// starts exactly at the close end — stacking its own same-byte
+    /// insertions during the walk — opens AFTER this element's scope closes.
+    fn emit_element_snippet_scope_tail(&mut self, site: &ElementScopeSite) {
+        if site.is_component {
             let insertion = site.snippets.iter().fold(String::new(), |mut out, snip| {
                 use std::fmt::Write;
                 let _ = write!(out, " {}={{{}}}", snip.name, snip.name);
