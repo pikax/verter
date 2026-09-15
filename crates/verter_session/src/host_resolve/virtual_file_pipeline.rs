@@ -4,7 +4,6 @@
 //! compile path through the scheduler-backed cache.
 
 use super::compile_request_build::BoundCompiledProducts;
-use crate::compile::assemble_vue_main_module_with_axes;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -27,9 +26,6 @@ use super::compile_request_build::{
 };
 use super::native_host_binding::BoundNativeHostRequest;
 use super::vue_script_extract::template_converter_inputs;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::compile::assemble_vue_main_module;
-use crate::compile::VueMainAssemblyFailure;
 use crate::hash::compile_profile_hash;
 use crate::id::{parse_raw_id, render_ids, render_single_id};
 use crate::types::*;
@@ -39,20 +35,58 @@ use oxc_allocator::Allocator;
 use verter_compiler::compile::format_import_specifier;
 use verter_compiler::framework_common::{RuntimeDiagnosticSeverity, RuntimeTemplateBlock};
 
-/// Fail-closed Main-module assembly outcome as a compile error — every
-/// [`VueMainAssemblyFailure`] variant (missing/uncomposable input map,
-/// invalid `__sfc__` fact, fragment-grammar refusal, composition defect,
-/// or publication refusal) maps to this ONE stable host diagnostic, never
-/// an unwind. `source_len` spans the whole document; the failure is not
-/// one authored location.
-pub(super) fn assembled_map_failure_diagnostics(
-    failure: VueMainAssemblyFailure,
-    source_len: u32,
-) -> DiagnosticsSnapshot {
+/// Compiler-owned Vue Main handoff: publication payload plus the typed
+/// artifact set. Callers must not reconstruct topology from block fields.
+#[derive(Debug)]
+pub(super) struct TakenCompilerVueMain<'a> {
+    pub code: Arc<str>,
+    pub source_map: &'a str,
+    pub lang: String,
+    pub artifacts: Option<&'a verter_compiler::assembly::CompileArtifactSet>,
+}
+
+/// Consume the compiler-owned Vue Main body. The compile artifact set is
+/// the typed transport when present; `body_code` is the publication payload.
+/// A missing body is a planted-reconstruction refusal, never host composition.
+pub(super) fn take_compiler_vue_main<'a>(
+    compiled: &'a verter_compiler::framework_common::RuntimeCompileOutput,
+    snapshot: &CompileInput,
+    force_js: bool,
+) -> Result<TakenCompilerVueMain<'a>, DiagnosticsSnapshot> {
+    match compiled.main.body_code.as_ref() {
+        Some(body) => {
+            let lang = compiled.main.lang.clone().unwrap_or_else(|| {
+                if force_js {
+                    "js".to_string()
+                } else {
+                    snapshot
+                        .meta
+                        .script_lang
+                        .as_deref()
+                        .unwrap_or("js")
+                        .to_string()
+                }
+            });
+            Ok(TakenCompilerVueMain {
+                code: Arc::clone(body),
+                source_map: compiled.main.source_map.as_str(),
+                lang,
+                artifacts: compiled.main.artifacts.as_ref(),
+            })
+        }
+        None => Err(vue_main_reconstruction_diagnostics(
+            snapshot.source.len() as u32
+        )),
+    }
+}
+
+/// Planted host-side Vue topology reconstruction is forbidden: Vue main
+/// bytes come from the compiler-owned assembled body.
+pub(super) fn vue_main_reconstruction_diagnostics(source_len: u32) -> DiagnosticsSnapshot {
     DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
         severity: HostSeverity::Error,
-        code: "HOST_MAIN_MODULE_ASSEMBLY_FAILED".to_string(),
-        message: failure.to_string(),
+        code: "HOST_VUE_MAIN_NOT_ASSEMBLED".to_string(),
+        message: "Vue main module was not assembled by the Vue compiler; host-side topology reconstruction is refused".to_string(),
         arguments: Vec::new(),
         span: verter_span::Span::new(0, source_len),
     }])
@@ -1174,10 +1208,11 @@ impl VerterHost {
     /// Private Vue render-worker `Main` output for a Vue
     /// [`crate::host_compile::CompileManyTarget::RuntimeRender`] request:
     /// byte-identical `Main` bytes to the `HostBacked` wrapper, produced
-    /// through the SAME shared substrate and host-side `Main` assembly,
-    /// without the per-file session-wrapper overhead. Public non-Vue requests
-    /// remain on their effective host-backed route. `diagnostics` carries only
-    /// the soft (warning-severity) diagnostics of a SUCCESSFUL Vue render.
+    /// through the SAME shared substrate and compiler-owned Vue `Main`
+    /// assembly, without the per-file session-wrapper overhead. Public
+    /// non-Vue requests remain on their effective host-backed route.
+    /// `diagnostics` carries only the soft (warning-severity) diagnostics
+    /// of a SUCCESSFUL Vue render.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn render_only_main(
         &self,
@@ -3144,6 +3179,7 @@ impl VerterHost {
         // in `profile_hash`, so the publication identity carries the
         // requested-product set — no cache is re-keyed for this.
         let want_runtime = profile.target.needs_runtime_module();
+        let want_main = profile.target.publishes_runtime_module();
         // IDE TSX is requested when the profile target carries the TSX bit.
         let want_ide = profile.target.needs_tsx();
         // Template facts are requested by the active analysis scope OR an
@@ -3211,6 +3247,7 @@ impl VerterHost {
             want_runtime,
             want_ide,
             want_template_data,
+            want_main,
             &alloc,
         ) {
             Ok(products) => products,
@@ -3402,11 +3439,10 @@ impl VerterHost {
 
     /// Render-only sibling of [`Self::compile_entry`]: executes the ONE
     /// admitted runtime-render population through the request's BOUND
-    /// framework host-integration backend and assembles the runtime `Main`
-    /// host-side (the SAME byte-load-bearing [`assemble_vue_main_module`]
-    /// for a Vue carrier; a carrier-emitted self-contained body verbatim
-    /// otherwise). Returns the assembled `Main` code, its optional source
-    /// map, and warning-severity diagnostics of a successful render.
+    /// framework host-integration backend and consumes the compiler-owned
+    /// assembled `Main` body. Returns the assembled `Main` code, its
+    /// optional source map, and warning-severity diagnostics of a
+    /// successful render.
     ///
     /// Bound execution contract:
     /// - The consumed binding's catalog arm yields the backend; the backend
@@ -3542,10 +3578,30 @@ impl VerterHost {
                         ))));
                     }
                 };
+                let (style_specifiers, custom_specifiers) =
+                    crate::compile::vue_main_host_identifiers(
+                        &snapshot.canonical_id,
+                        snapshot.meta.style_langs.len(),
+                        snapshot.meta.custom_types.len(),
+                        &snapshot.meta,
+                    );
+                // The update tail is load-bearing: see the note on
+                // `prepare_vue_execution_inputs` -- the struct's last field is
+                // cfg'd in `verter_compiler`, so only `Default` knows which
+                // fields this build actually has.
+                #[allow(clippy::needless_update)]
                 let inputs = VueHostExecutionInputs {
                     block_content: snapshot.block_content_inputs.clone(),
                     vue_facts: Some(vue_facts),
                     prepared_styles: snapshot.prepared_styles.clone(),
+                    canonical_id: snapshot.canonical_id.clone(),
+                    style_specifiers,
+                    custom_specifiers,
+                    want_main: true,
+                    has_script: snapshot.meta.has_script,
+                    has_template: snapshot.meta.has_template,
+                    script_lang: snapshot.meta.script_lang.clone(),
+                    ..Default::default()
                 };
                 // A runtime-surface refusal is the absence of the render's
                 // whole subject (typed, same as the HostBacked route); every
@@ -3669,63 +3725,20 @@ impl VerterHost {
             }));
         }
 
-        // Assemble the `Main` runtime module host-side — the SAME
-        // byte-load-bearing [`assemble_vue_main_module`] `compile_entry`
-        // uses. A carrier that produced no runtime surface has no `Main`.
+        // Consume the compiler-owned assembled `Main`. A carrier that
+        // produced no runtime surface has no `Main`. Planted Vue topology
+        // reconstruction (blocks without a body) is refused.
         if !compiled.has_runtime_surface() {
             return Err(HostError::MissingVirtualNode {
                 canonical_id: snapshot.canonical_id.clone(),
             });
         }
-        let (main_code, main_source_map, main_lang) = match &compiled.main.body_code {
-            Some(body) => (
-                body.clone(),
-                (!compiled.main.source_map.is_empty())
-                    .then(|| Arc::from(compiled.main.source_map.clone())),
-                // The `Main` language, derived IDENTICALLY to the HostBacked
-                // `Main`-node path so the bundler consumer routes
-                // sub-requests the same way.
-                compiled.main.lang.clone().unwrap_or_else(|| {
-                    if profile.force_js {
-                        "js".to_string()
-                    } else {
-                        snapshot
-                            .meta
-                            .script_lang
-                            .as_deref()
-                            .unwrap_or("js")
-                            .to_string()
-                    }
-                }),
-            ),
-            // Vue: code and map are one result of the host's own assembly.
-            // `assembled.lang` is the SAME dialect the assembler derived
-            // once and validated every fragment/the final artifact under.
-            None => {
-                let assembled = assemble_vue_main_module(
-                    &snapshot.canonical_id,
-                    compiled,
-                    &snapshot.meta,
-                    profile,
-                )
-                .map_err(|failure| {
-                    fatal(assembled_map_failure_diagnostics(
-                        failure,
-                        snapshot.source.len() as u32,
-                    ))
-                })?;
-                (
-                    assembled.code,
-                    assembled.source_map.map(Arc::from),
-                    assembled.lang,
-                )
-            }
-        };
+        let taken = take_compiler_vue_main(compiled, snapshot, profile.force_js).map_err(fatal)?;
 
         Ok(RenderOnlyMain {
-            code: Arc::from(main_code),
-            source_map: main_source_map,
-            lang: Some(main_lang),
+            code: taken.code,
+            source_map: (!taken.source_map.is_empty()).then(|| Arc::from(taken.source_map)),
+            lang: Some(taken.lang),
             diagnostics: compile_diags
                 .diagnostics
                 .into_iter()
@@ -3754,10 +3767,8 @@ pub(super) struct RuntimeNodePublication {
     pub(super) publish_style: bool,
     /// Module specifier the composed template node imports from.
     pub(super) runtime_module_name: Option<String>,
-    /// The axes the host-side Vue `Main` assembly reads. Its `force_js`
-    /// is also the fallback dialect for a carrier-emitted body that
-    /// declares no `lang` of its own — ONE statement of that axis, so a
-    /// caller cannot set the two halves of one decision differently.
+    /// Request axes used as the fallback dialect for a carrier-emitted
+    /// body that declares no `lang` of its own.
     pub(super) assembly: crate::compile::VueMainAssemblyAxes,
 }
 
@@ -3796,58 +3807,25 @@ pub(super) fn publish_runtime_nodes(
     // for.
     if let Some(compiled) = products.runtime_bundle() {
         if publish_runtime_module && compiled.has_runtime_surface() {
-            let (main_code, main_source_map, main_lang) = match &compiled.main.body_code {
-                // A carrier that emits its own self-contained ESM body uses it
-                // verbatim (e.g. Svelte's official-shaped runtime output),
-                // paired with the map that carrier produced for it.
-                Some(body) => (
-                    body.clone(),
-                    (!compiled.main.source_map.is_empty())
-                        .then(|| Arc::from(compiled.main.source_map.clone())),
-                    compiled.main.lang.clone().unwrap_or_else(|| {
-                        if policy.assembly.force_js {
-                            "js".to_string()
-                        } else {
-                            snapshot
-                                .meta
-                                .script_lang
-                                .as_deref()
-                                .unwrap_or("js")
-                                .to_string()
-                        }
-                    }),
-                ),
-                // Vue: the host assembles the `_sfc_main` module from the
-                // neutral block fields (its virtual-file concern) — and the map
-                // it composed while assembling them. The code and the map are
-                // one result of one assembly, so the map here always describes
-                // the exact code beside it. `assembled.lang` is the SAME
-                // dialect the assembler derived once and validated every
-                // fragment/the final artifact under — reused here instead of
-                // independently re-deriving it a second time.
-                None => {
-                    let assembled = assemble_vue_main_module_with_axes(
-                        &snapshot.canonical_id,
-                        compiled,
-                        &snapshot.meta,
-                        &policy.assembly,
-                    )
-                    .map_err(|failure| {
-                        assembled_map_failure_diagnostics(failure, snapshot.source.len() as u32)
-                    })?;
-                    (
-                        assembled.code,
-                        assembled.source_map.map(Arc::from),
-                        assembled.lang,
-                    )
+            let taken = take_compiler_vue_main(compiled, snapshot, policy.assembly.force_js)?;
+            if matches!(products, BoundCompiledProducts::Vue(_)) {
+                let has_main_artifact = taken.artifacts.is_some_and(|set| {
+                    set.artifacts()
+                        .iter()
+                        .any(|artifact| artifact.name() == "main")
+                });
+                if !has_main_artifact {
+                    return Err(vue_main_reconstruction_diagnostics(
+                        snapshot.source.len() as u32
+                    ));
                 }
-            };
+            }
             outputs.insert(
                 VirtualNodeKind::Main,
                 CachedVirtualFile {
-                    code: Arc::from(main_code),
-                    source_map: main_source_map,
-                    lang: Some(main_lang),
+                    code: taken.code,
+                    source_map: (!taken.source_map.is_empty()).then(|| Arc::from(taken.source_map)),
+                    lang: Some(taken.lang),
                     meta: VirtualMeta {
                         scope_id: if compiled.scope_id.is_empty() {
                             None
@@ -3938,9 +3916,8 @@ pub(super) fn publish_runtime_nodes(
         }
 
         // Custom blocks have no target bit of their own. They ride with the
-        // runtime module: the host's `Main` assembly emits their virtual imports
-        // (`crate::compile::assemble_vue_main_module`), so a `Custom` node with
-        // no `Main` would have no importer.
+        // runtime module: compiler-owned Vue main assembly emits their virtual
+        // imports, so a `Custom` node with no `Main` would have no importer.
         for (i, block) in compiled
             .custom_blocks
             .iter()

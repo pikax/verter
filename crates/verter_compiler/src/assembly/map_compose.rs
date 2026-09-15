@@ -1,15 +1,16 @@
 //! Assembled-module source map support: lifting a decoded fragment map into
-//! the typed wire form [`crate::compile::assemble_vue_main_module`]'s own
-//! composition needs. The `__sfc__` → `_sfc_main` rewrite itself
-//! ([`verter_compiler::assembly::rewrite_script`], `pub(crate)` there) now
-//! lives in `verter_compiler` — the SAME algorithm both this crate's
-//! host-decorated composer and the direct one-shot core drive through
-//! [`verter_compiler::assembly::compose_main_module`]. This module's own
-//! remaining job is decode-regime-specific: only THIS crate's hardened,
-//! multi-fragment [`super::map_input::DecodedFragmentMap`] needs lifting
-//! into an `oxc_sourcemap::SourceMap` before it can cross that boundary.
+//! the typed wire form [`super::compose_main_module`]'s own composition
+//! needs. The `__sfc__` → `_sfc_main` rewrite itself
+//! ([`super::vue_module::rewrite_script`], `pub(crate)` there) lives in this
+//! crate — the SAME algorithm the session identifier/axes transport
+//! (`assemble_vue_main_module` → [`super::assemble_vue_runtime_main`]) and
+//! the direct one-shot core drive through [`super::compose_main_module`].
+//! This module's own remaining job is decode-regime-specific: only THIS
+//! crate's hardened, multi-fragment [`super::map_input::DecodedFragmentMap`]
+//! needs lifting into an `oxc_sourcemap::SourceMap` before it can cross
+//! that boundary.
 
-use verter_compiler::oxc_sourcemap::{SourceMap, Token};
+use crate::oxc_sourcemap::{SourceMap, Token};
 
 use super::map_input::DecodedFragmentMap;
 
@@ -23,11 +24,11 @@ use super::map_input::DecodedFragmentMap;
 /// only the single canonical spelling this encoder emits may cross that
 /// boundary safely). Tables ride along untouched; only the segment
 /// sequence is what chaining acts on.
-pub(crate) fn to_source_map(map: &DecodedFragmentMap) -> SourceMap<'static> {
+pub fn to_source_map(map: &DecodedFragmentMap) -> SourceMap<'static> {
     use std::borrow::Cow;
 
     let tokens: Vec<Token> = map
-        .segments
+        .segments()
         .iter()
         .map(|segment| match segment.payload {
             Some(payload) => Token::new(
@@ -51,17 +52,16 @@ pub(crate) fn to_source_map(map: &DecodedFragmentMap) -> SourceMap<'static> {
 
     let mut source_map = SourceMap::new(
         None,
-        map.names
+        map.names()
             .iter()
             .map(|name| Cow::Owned(name.clone()))
             .collect(),
-        map.source_root.clone().map(Cow::Owned),
-        map.sources
+        map.source_root().map(str::to_string).map(Cow::Owned),
+        map.sources()
             .iter()
             .map(|source| Cow::Owned(source.clone()))
             .collect(),
-        map.sources_content
-            .as_ref()
+        map.sources_content()
             .map(|rows| rows.iter().map(|row| row.clone().map(Cow::Owned)).collect())
             .unwrap_or_default(),
         tokens.into_boxed_slice(),
@@ -71,14 +71,17 @@ pub(crate) fn to_source_map(map: &DecodedFragmentMap) -> SourceMap<'static> {
     // (see `code_transform::chain`) — it must be set here, on the map fed
     // INTO the chain, or the rewritten script's re-encoded map would
     // silently lose every ignore-listed source row.
-    if !map.ignore_list.is_empty() {
-        source_map
-            .set_x_google_ignore_list(map.ignore_list.iter().map(|entry| *entry as u32).collect());
+    if !map.ignore_list().is_empty() {
+        source_map.set_x_google_ignore_list(
+            map.ignore_list()
+                .iter()
+                .map(|entry| *entry as u32)
+                .collect(),
+        );
     }
     source_map
 }
 
-#[cfg(test)]
 /// TEST-ONLY: derive an [`verter_compiler::assembly::SfcExportPlacement`]
 /// fact for a hand-authored fixture by literal-scanning it — mirroring what
 /// a real producer would have declared for that exact text. Legitimate here
@@ -91,9 +94,8 @@ pub(crate) fn to_source_map(map: &DecodedFragmentMap) -> SourceMap<'static> {
 /// simulating two is exercising the retired text-scan behaviour, not this
 /// fact-driven one, and is out of this helper's scope) and every literal
 /// `__sfc__` occurrence not already covered by it.
-pub(crate) fn literal_scan_placement_for_fixture(
-    code: &str,
-) -> Option<verter_compiler::assembly::SfcExportPlacement> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn literal_scan_placement_for_fixture(code: &str) -> Option<super::SfcExportPlacement> {
     const SFC_BINDING: &str = "__sfc__";
     const EXPORT_STATEMENT_TEXT: &str = "export default __sfc__;\n";
 
@@ -114,7 +116,7 @@ pub(crate) fn literal_scan_placement_for_fixture(
     if binding_ranges.is_empty() && export_statement_range.is_none() {
         return None;
     }
-    Some(verter_compiler::assembly::SfcExportPlacement {
+    Some(super::SfcExportPlacement {
         binding_ranges,
         export_statement_range,
     })

@@ -292,9 +292,12 @@ script/template/style/custom blocks + scope id + optional IDE `tsx`
 a `CarrierCompileOutcome::RuntimeSurfaceRefused` / `CompileUnsupported`
 refusal — never a silent empty. Vue uses `VerterCompileResult`
 INTERNALLY then re-expresses it neutrally
-(`vue_result_to_runtime_bundle`); it leaves `main.body_code = None` so
-the host assembles the `_sfc_main` module from the block fields
-(`assemble_vue_main_module`). A carrier that projects ONLY an IDE
+(`vue_result_to_runtime_bundle`); the Vue runtime compiler assembles
+the `_sfc_main` module and emits `main.body_code`. The host publishes
+that already-assembled body and refuses reconstruction with
+`HOST_VUE_MAIN_NOT_ASSEMBLED` when the body is missing. Map validation
+and composition live in `verter_compiler::assembly` (`map_input`,
+`map_compose`). A carrier that projects ONLY an IDE
 surface (Svelte today) returns a bundle with no runtime surface
 (`has_runtime_surface() == false`) carrying just the `tsx` — the host
 populates `CachedTsx` and emits NO `Main` virtual node.

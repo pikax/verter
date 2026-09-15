@@ -22,6 +22,9 @@
 pub mod compose;
 pub mod custom_block;
 pub mod fragment;
+pub mod map_compose;
+pub mod map_input;
+mod map_json;
 pub mod plan;
 pub mod publish;
 pub mod source_space;
@@ -48,6 +51,7 @@ pub use plan::{PlannedArtifact, ProductPlan};
 // (`vue_module::compose_main_module`, `standalone::StandaloneCompiler`)
 // reach them through `super::publish::{publish, ArtifactContribution}`
 // directly, not through this public re-export.
+pub use map_input::{AssembleMapFailure, MapFragment, UncomposableCode, UncomposableFamily};
 pub use publish::{
     ArtifactSchemaError, ArtifactSet, AssembledArtifact, AssemblyRefusal, CompileArtifactSet,
 };
@@ -59,9 +63,12 @@ pub use source_unit::{
     ArtifactSourceUnit, ContentId, SourceId, SourceRevision, SourceUnit, SourceUnitId,
 };
 pub use vue_module::{
-    compose_main_module, ExtraFragment, SfcRewriteRefusal, VueMainAssemblyFailure,
-    VueMainCompositionFailure, VueMainModuleRequest,
+    assemble_vue_runtime_main, compose_main_module, vue_main_compile_artifacts, ExtraFragment,
+    SfcRewriteRefusal, VueMainAssemblyFailure, VueMainCompositionFailure, VueMainDecoration,
+    VueMainModuleRequest, VueRuntimeMainAssembled, VueRuntimeMainRequest,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use vue_module::{reset_vue_main_assembly_count, vue_main_assembly_count};
 
 #[cfg(test)]
 mod artifact_schema_tests;

@@ -358,8 +358,8 @@ fn parse_options_for_accepted(accepted: &AcceptedRegisteredCarrierSource) -> Par
     }
 }
 
-#[cfg(test)]
-pub(crate) fn parse_registered_source_for_tests(
+#[cfg(any(test, feature = "test-support"))]
+pub fn parse_registered_source_for_tests(
     language: verter_language::FileLanguage,
     config: CarrierGrammarConfig,
     source: &str,

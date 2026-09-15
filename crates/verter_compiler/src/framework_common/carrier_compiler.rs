@@ -344,6 +344,9 @@ pub enum CompileUnsupported {
         /// The demanded product whose execution grant was absent or wrong.
         product: crate::compile_request::ProductKind,
     },
+    /// Vue main-module assembly refused after the runtime blocks were
+    /// produced. No partial main body is published.
+    VueMainAssemblyFailed(String),
 }
 
 /// The registry-dispatched routes' grant mint: the
@@ -487,6 +490,25 @@ pub struct RuntimeCompileOptions {
     /// Host-retained parsed style IRs, one slot per style block in inventory
     /// order. Excluded from request/cache identity.
     pub prepared_styles: Vec<Option<crate::style_planner::PreparedStyleIr>>,
+    /// Host-owned identifiers and request axes for Vue main-module assembly.
+    /// Topology is compiler-owned; empty identifiers skip host virtual imports.
+    pub vue_main: crate::assembly::VueMainDecoration,
+    /// Assemble and attach the Vue `_sfc_main` body. Independent of
+    /// [`want_runtime`]: STYLE-only runtime compilation does not publish Main.
+    pub want_main: bool,
+    /// Authored `<script>` inventory for map-required checks.
+    pub vue_has_script: bool,
+    /// Authored `<template>` inventory for map-required checks.
+    pub vue_has_template: bool,
+    /// Authored script lang (`"js"`/`"ts"`/`"jsx"`/`"tsx"`). `None` ⇒ JavaScript.
+    pub vue_script_lang: Option<String>,
+    /// Host canonical identity for `__file` and SSR registration fallback.
+    /// Distinct from [`Self::filename`].
+    pub vue_canonical_id: Option<String>,
+    /// Test-only: drop the generated script map before Main assembly so the
+    /// maps-on demand refuses as [`CompileUnsupported::VueMainAssemblyFailed`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub drop_required_script_map: bool,
     /// Admitted external preprocessing results, one slot per style block in
     /// inventory order. A present slot is the ONLY bytes that block's
     /// framework rewrite may consume: the authored block is never read in
@@ -563,6 +585,16 @@ impl Default for RuntimeCompileOptions {
             inline: None,
             vue_facts: None,
             prepared_styles: Vec::new(),
+            vue_main: crate::assembly::VueMainDecoration::default(),
+            // Unrequested Main is zero-work. Host publication
+            // sets this when `publishes_runtime_module()` is true.
+            want_main: false,
+            vue_has_script: true,
+            vue_has_template: true,
+            vue_script_lang: None,
+            vue_canonical_id: None,
+            #[cfg(any(test, feature = "test-support"))]
+            drop_required_script_map: false,
             style_continuations: Vec::new(),
         }
     }
@@ -681,21 +713,25 @@ pub struct RuntimeDiagnostic {
 
 /// The framework-OWNED ESM body the carrier emits for the runtime module.
 ///
-/// Vue's carrier currently produces NO standalone body here — the Vue
-/// `_sfc_main` shape is assembled host-side from the neutral block fields
-/// (host virtual-file concern: style/custom virtual imports + HMR), so Vue
-/// leaves `body_code` `None` and the host assembles. A framework whose
-/// runtime module is a single self-contained ESM (e.g. Svelte's official-shaped
-/// runtime output) returns `Some` here and the host emits it verbatim.
+/// Vue's runtime compiler now emits the assembled `_sfc_main` body here
+/// together with its compile artifact set. A framework whose runtime module
+/// is a single self-contained ESM (e.g. Svelte's official-shaped runtime
+/// output) also returns `Some` here. `None` means there is no runtime
+/// surface to publish — the host must not reconstruct Vue topology from
+/// block fields.
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeMainModule {
     /// The framework-owned ESM body, when the carrier emits one directly.
-    /// `None` ⇒ the host assembles the main module from the block fields.
-    pub body_code: Option<String>,
+    /// `None` ⇒ no runtime main to publish. Shared with the typed main
+    /// artifact when Vue assembly produced this body.
+    pub body_code: Option<std::sync::Arc<str>>,
     /// Source map for `body_code` (empty when none / disabled).
     pub source_map: String,
     /// The language id of the produced body (`"js"` / `"ts"`), when known.
     pub lang: Option<String>,
+    /// Compile-artifact schema for the assembled Vue main, when this body was
+    /// produced by Vue main-module assembly. Svelte leaves this `None`.
+    pub artifacts: Option<crate::assembly::CompileArtifactSet>,
 }
 
 /// A framework-neutral compiled `<script>` block.
@@ -845,8 +881,8 @@ pub struct RuntimeCustomBlock {
 #[derive(Debug, Default)]
 pub struct RuntimeCompileOutput {
     /// The framework-owned main module (body / map / lang). `body_code`
-    /// `None` ⇒ the host assembles from the block fields (Vue) OR there is
-    /// no runtime surface (Svelte).
+    /// `None` ⇒ there is no runtime surface to publish. Vue emits an
+    /// assembled body; the host must not reconstruct topology from blocks.
     pub main: RuntimeMainModule,
     /// The compiled `<script>` block, when present.
     pub script: Option<RuntimeScriptBlock>,

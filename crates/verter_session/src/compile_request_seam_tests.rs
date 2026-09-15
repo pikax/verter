@@ -1380,8 +1380,11 @@ fn the_route_decorates_main_from_the_requests_hmr_strategy() {
     };
 
     let vite = main_code(
-        vue_request(vec![runtime_client(false)])
-            .with_host_assembly_axes(None, RuntimeHmrStrategy::Vite),
+        vue_request(vec![runtime_client(false)]).with_host_assembly_axes(
+            None,
+            RuntimeHmrStrategy::Vite,
+            true,
+        ),
     );
     assert!(
         vite.contains("_sfc_main.__file"),
@@ -1408,7 +1411,7 @@ fn the_route_decorates_main_from_the_requests_hmr_strategy() {
             false,
         )
         .expect("the production demand constructs")
-        .with_host_assembly_axes(None, RuntimeHmrStrategy::Vite),
+        .with_host_assembly_axes(None, RuntimeHmrStrategy::Vite, true),
     );
     assert!(
         !production.contains("_sfc_main.__file") && !production.contains("import.meta.hot"),
@@ -1461,10 +1464,11 @@ fn the_route_registers_the_stated_ssr_manifest_key() {
             .to_string()
     };
 
-    let stated = main_code(
-        ssr_request()
-            .with_host_assembly_axes(Some("src/App.vue".to_string()), RuntimeHmrStrategy::None),
-    );
+    let stated = main_code(ssr_request().with_host_assembly_axes(
+        Some("src/App.vue".to_string()),
+        RuntimeHmrStrategy::None,
+        true,
+    ));
     assert!(
         stated.contains(".add(\"src/App.vue\")"),
         "a stated ssrModuleId is the registered manifest key:\n{stated}"

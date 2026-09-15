@@ -233,7 +233,9 @@ impl serde::Serialize for CompileArtifactSet {
             .collect();
         let artifacts: Vec<_> = self.artifacts.iter().map(|a| {
             let content = match &a.content {
-                ArtifactContent::Available(text) => json!({"availability": "available", "text": text}),
+                ArtifactContent::Available(text) => {
+                    json!({"availability": "available", "text": text.as_ref()})
+                }
                 ArtifactContent::Unavailable(reason) => json!({"availability": "unavailable", "reason": reason}),
             };
             let relations: Vec<_> = a.relations.iter().map(|r| json!({

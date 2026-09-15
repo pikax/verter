@@ -88,6 +88,7 @@ fn compile_body(canonical: &str, source: &str, svelte_options: SvelteOptionAttem
         .body_code
         .clone()
         .expect("a two-root static template must produce a runtime body")
+        .to_string()
 }
 
 /// A two-root template: `fragments: 'tree'` only changes emission when the

@@ -3953,8 +3953,10 @@ impl ExternalStyleContinuation {
         }
     }
 
-    /// Convert into the artifact this continuation describes, moving the
-    /// produced bytes rather than copying them.
+    /// Convert into the artifact this continuation describes, taking the
+    /// produced bytes rather than borrowing and re-copying them. The single
+    /// `String` → `Arc<str>` conversion the shared payload needs happens here,
+    /// once, so no consumer downstream copies the stylesheet again.
     ///
     /// The map family is [`crate::assembly::ArtifactMapFamily::SourceProjection`]:
     /// the anchors relate authored carrier bytes to generated stylesheet bytes,
@@ -3982,7 +3984,7 @@ impl ExternalStyleContinuation {
             verter_language::LanguageId::new(PREPROCESSED_STYLE_LANGUAGE),
             PREPROCESSED_STYLE_SLOT,
             provenance,
-            ArtifactContent::Available(code),
+            ArtifactContent::Available(code.into()),
         );
         if !anchors.is_empty() {
             artifact.maps.push(QualifiedArtifactMap {

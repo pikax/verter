@@ -25,10 +25,10 @@
 //! [`crate::compile_request::CompileRequest`]'s own doc). Vue's
 //! runtime-module composition (the `__sfc__` rewrite, script/template/
 //! import fragment minting, sequencing) is the SAME
-//! [`crate::assembly::vue_module`] machinery `verter_session`'s
-//! host-decorated `assemble_vue_main_module` shares — this route just
-//! supplies empty host-decoration extras (no host state exists for a
-//! one-shot compile). Svelte's client compile
+//! [`crate::assembly::vue_module`] machinery the session identifier/axes
+//! transport (`assemble_vue_main_module` → `assemble_vue_runtime_main`)
+//! uses — this route supplies empty decoration extras (no host state
+//! exists for a one-shot compile). Svelte's client compile
 //! ([`crate::svelte::runtime::compile_client`]) is likewise the SAME
 //! algorithm the host carrier drives.
 
@@ -1566,6 +1566,7 @@ fn compose_vue_runtime_legs(
         primary_kind,
         primary_bundle,
         want_maps,
+        vue_main_decoration_from_request(request),
     )
     .map_err(map_direct_runtime_err)?;
     let mut legs = vec![(composed, primary_kind, dialect, want_maps)];
@@ -1608,6 +1609,7 @@ fn compose_vue_runtime_legs(
             secondary_kind,
             &secondary_output.bundle,
             secondary_want_maps,
+            vue_main_decoration_from_request(&secondary_request),
         )
         .map_err(map_direct_runtime_err)?;
         legs.push((
@@ -2087,7 +2089,7 @@ impl SvelteRuntimeBackend {
         // a lowering option on `SvelteRuntimeOptions`).
         match compile_client(source, parsed, &runtime_opts, alloc, opts.ssr, opts.source_map) {
             Ok(module) => {
-                bundle.main.body_code = Some(module.code);
+                bundle.main.body_code = Some(std::sync::Arc::from(module.code));
                 bundle.main.source_map = module.source_map.unwrap_or_default();
                 bundle.main.lang = Some("js".to_string());
                 // The EXTERNAL scoped-css artifact (the official
@@ -2926,10 +2928,23 @@ fn single_runtime_product_request(
     .map_err(DirectCompileError::Vue)
 }
 
-/// Compose one Vue runtime artifact (`RuntimeClient` or `RuntimeServer`)
-/// from an already-produced [`RuntimeCompileOutput`] through the SAME
-/// shared [`compose_fragments`] machinery `verter_session`'s host composer
-/// uses — no host decoration (empty prelude/trailer extras).
+/// Direct/standalone composition carries no host decoration: empty
+/// prelude/trailer extras. Host HMR / `__file` / SSR-registration axes
+/// are supplied only on the host-bundle assembly path.
+fn vue_main_decoration_from_request(
+    _request: &CompileRequest,
+) -> crate::assembly::VueMainDecoration {
+    crate::assembly::VueMainDecoration {
+        hmr: crate::compile_request::RuntimeHmrStrategy::None,
+        is_production: false,
+        emit_ssr_module_registration: false,
+        ssr_module_id: None,
+        style_specifiers: Vec::new(),
+        custom_specifiers: Vec::new(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn compose_vue_runtime(
     source: &str,
     vue_request: &crate::compile_request::VueCompileRequest,
@@ -2938,6 +2953,7 @@ fn compose_vue_runtime(
     planned_kind: ProductKind,
     bundle: &RuntimeCompileOutput,
     want_maps: bool,
+    decoration: crate::assembly::VueMainDecoration,
 ) -> Result<ComposedFragments, DirectCompileError> {
     let runtime = if planned_kind == ProductKind::RuntimeServer {
         vue_request
@@ -2988,8 +3004,7 @@ fn compose_vue_runtime(
         source_root: None,
         script_map: script_map.as_ref(),
         template_map_json,
-        prelude_extra: Vec::new(),
-        trailer_extra: Vec::new(),
+        decoration,
     };
     let _ = source;
     compose_fragments(compose_request).map_err(DirectCompileError::VueComposition)

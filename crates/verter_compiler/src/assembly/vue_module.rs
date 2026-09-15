@@ -1,32 +1,46 @@
-//! Framework-neutral half of Vue main-module composition, shared by every
-//! caller that assembles a Vue `_sfc_main` runtime module from a
-//! [`RuntimeCompileOutput`] — `verter_session`'s host-decorated
-//! `assemble_vue_main_module` (style/custom-block virtual imports, HMR,
-//! `__file`, SSR-manifest wiring) and the borrowed one-shot
-//! [`super::super::standalone::StandaloneCompiler`] direct core alike. Host
-//! decoration rides in as [`ExtraFragment`] prelude/trailer content; this
-//! module owns everything else: the `__sfc__` → `_sfc_main` rewrite, script/
-//! template/style-import fragment minting, sequencing, and the final
-//! [`super::publish`] atomicity boundary. Never duplicated — a caller with no
-//! host decoration (the direct core) passes empty extra-fragment sets.
+//! Vue main-module composition owned by the Vue runtime compiler.
+//!
+//! One Vue request has one assembly authority: this module. It owns script/
+//! template contribution order, host-identifier topology (style/custom
+//! virtual imports, HMR, `__file`, SSR-manifest wiring), declared
+//! imports/exports, dialect, qualified maps, and compile-artifact-set
+//! [`super::publish::CompileArtifactSet`] emission. Callers supply only
+//! host-owned identifiers through [`VueMainDecoration`]; they do not infer
+//! framework module topology or reconstruct it from block fields.
 
+#[cfg(any(test, feature = "test-support"))]
+use std::cell::Cell;
 use std::ops::Range;
+use std::sync::Arc;
 
 use oxc_sourcemap::SourceMap;
 
 use super::compose::{assemble_sequence, ComposeRefusal};
 use super::fragment::{
+    ArtifactContent, ArtifactProvenance, ArtifactRelation, ArtifactRelationKind, CompileArtifact,
     DeclaredImport, DeclaredImportKind, Fragment, FragmentDialect, FragmentRefusal,
     FrameworkDomain, PlacementSlot, SfcExportPlacement, SyntacticContract, ValidatedFragment,
 };
+use super::map_compose::to_source_map;
+use super::map_input::{
+    agree_source_root, validate_and_decode, AssembleMapFailure, DecodedFragmentMap, MapFragment,
+};
 use super::plan::{PlannedArtifact, ProductPlan};
-use super::publish::{publish, ArtifactContribution, ArtifactSet, AssemblyRefusal};
-use super::source_space::SourceSpaceKind;
-use super::source_unit::source_unit_id;
+use super::publish::{
+    publish, ArtifactContribution, ArtifactSet, AssemblyRefusal, CompileArtifactSet,
+};
+use super::source_space::{
+    ArtifactMapFamily, ArtifactMapSegment, QualifiedArtifactMap, SourceSpaceKind,
+};
+use super::source_unit::{
+    source_unit_id, ArtifactSourceUnit, ContentId, SourceId, SourceRevision, SourceUnit,
+};
 use crate::code_transform::CodeTransform;
 use crate::compile::format_import_specifier;
-use crate::compile_request::ProductKind;
+use crate::compile_request::{ProductKind, RuntimeHmrStrategy};
 use crate::framework_common::{RuntimeCompileOutput, TemplateRenderExport};
+use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
+use verter_identity::identity::{InputBasisId, ResultContractId};
 
 /// Every `binding_ranges` entry's own bytes must equal this literal — the
 /// identifier every runtime-emission site writes before host assembly
@@ -179,11 +193,10 @@ pub(crate) fn rewrite_script(
     Ok((rewritten, chained))
 }
 
-/// One host- or caller-owned decoration piece contributed to the composed
+/// One compiler-owned decoration piece contributed to the composed
 /// module's prelude (ahead of the script) or trailer (before the terminal
-/// `export default`) — style/custom-block virtual imports, HMR, `__file`,
-/// SSR-manifest wiring for `verter_session`'s host composer; empty for the
-/// direct one-shot core (no host state exists for a one-shot compile).
+/// `export default`). Built only from [`VueMainDecoration`]; callers never
+/// mint these to reconstruct topology.
 #[derive(Debug, Clone, Default)]
 pub struct ExtraFragment {
     pub role: &'static str,
@@ -191,10 +204,150 @@ pub struct ExtraFragment {
     pub imports: Vec<DeclaredImport>,
 }
 
-/// Everything [`compose_main_module`] needs beyond a caller's own
-/// decoration: the compiled blocks, the resolved dialect/product kind/
-/// runtime specifier, whether a map was requested, and every ALREADY-
-/// DECODED contributing map. Never raw source or a
+/// Host-owned identifiers and request axes the Vue assembler consumes.
+/// Topology (when to emit style/custom imports, HMR, `__file`, SSR
+/// registration, and in what order) is compiler-owned; this struct carries
+/// only the identifiers and knobs the host is allowed to supply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VueMainDecoration {
+    /// Dev-server tooling flavour gating `__file` and hot-accept.
+    pub hmr: RuntimeHmrStrategy,
+    /// Production build: no `__file`, no HMR acceptance.
+    pub is_production: bool,
+    /// Emit the Vite SSR-manifest module registration on an SSR assembly.
+    /// Defaults true — official `transformMain` emits it on every SSR
+    /// compile.
+    pub emit_ssr_module_registration: bool,
+    /// Manifest key form the SSR registration records; `canonical_id` is
+    /// the fallback.
+    pub ssr_module_id: Option<String>,
+    /// Host-rendered style virtual-file specifiers, in inventory order.
+    pub style_specifiers: Vec<String>,
+    /// Host-rendered custom-block virtual-file specifiers, in inventory
+    /// order.
+    pub custom_specifiers: Vec<String>,
+}
+
+impl Default for VueMainDecoration {
+    fn default() -> Self {
+        Self {
+            hmr: RuntimeHmrStrategy::None,
+            is_production: false,
+            emit_ssr_module_registration: true,
+            ssr_module_id: None,
+            style_specifiers: Vec::new(),
+            custom_specifiers: Vec::new(),
+        }
+    }
+}
+
+impl VueMainDecoration {
+    fn prelude(&self, compiled: &RuntimeCompileOutput) -> ExtraFragment {
+        use std::fmt::Write;
+        let mut prelude = String::new();
+        let mut imports: Vec<DeclaredImport> = Vec::new();
+        for id in self.style_specifiers.iter().take(compiled.styles.len()) {
+            let _ = writeln!(prelude, "import \"{id}\"");
+            imports.push(DeclaredImport {
+                specifier: id.clone(),
+                kind: DeclaredImportKind::SideEffect,
+            });
+        }
+        for (idx, id) in self
+            .custom_specifiers
+            .iter()
+            .take(compiled.custom_blocks.len())
+            .enumerate()
+        {
+            let block_name = format!("block{idx}");
+            let _ = writeln!(prelude, "import {block_name} from \"{id}\"");
+            imports.push(DeclaredImport {
+                specifier: id.clone(),
+                kind: DeclaredImportKind::Default(block_name),
+            });
+        }
+        if !prelude.is_empty() {
+            prelude.push('\n');
+        }
+        ExtraFragment {
+            role: "prelude",
+            code: prelude,
+            imports,
+        }
+    }
+
+    fn trailer(
+        &self,
+        compiled: &RuntimeCompileOutput,
+        canonical_id: &str,
+        runtime: &str,
+        ssr: bool,
+    ) -> ExtraFragment {
+        use std::fmt::Write;
+        let mut trailer = String::new();
+        let custom_count = self
+            .custom_specifiers
+            .len()
+            .min(compiled.custom_blocks.len());
+        for idx in 0..custom_count {
+            let _ = writeln!(
+                trailer,
+                "if (typeof block{idx} === 'function') block{idx}(_sfc_main)"
+            );
+        }
+
+        if !self.is_production && self.hmr != RuntimeHmrStrategy::None {
+            let _ = writeln!(trailer, "_sfc_main.__file = {:?}", canonical_id);
+        }
+
+        if !self.is_production && !ssr {
+            match self.hmr {
+                RuntimeHmrStrategy::Vite => {
+                    trailer.push_str("/* HMR(vite) */\n");
+                    trailer.push_str("if (import.meta.hot) { import.meta.hot.accept(() => {}) }\n");
+                }
+                RuntimeHmrStrategy::Webpack => {
+                    trailer.push_str("/* HMR(webpack) */\n");
+                    trailer.push_str("if (module.hot) { module.hot.accept(() => {}) }\n");
+                }
+                RuntimeHmrStrategy::None => {}
+            }
+        }
+
+        let mut imports: Vec<DeclaredImport> = Vec::new();
+        if ssr && self.emit_ssr_module_registration {
+            let _ = writeln!(
+                trailer,
+                "import {{ useSSRContext as __vite_useSSRContext }} from \"{runtime}\""
+            );
+            imports.push(DeclaredImport {
+                specifier: runtime.to_string(),
+                kind: DeclaredImportKind::Named(vec!["__vite_useSSRContext".to_string()]),
+            });
+            trailer.push_str("const _sfc_setup = _sfc_main.setup\n");
+            trailer.push_str("_sfc_main.setup = (props, ctx) => {\n");
+            trailer.push_str("  const ssrContext = __vite_useSSRContext()\n");
+            let registered_id = self.ssr_module_id.as_deref().unwrap_or(canonical_id);
+            let _ = writeln!(
+                trailer,
+                "  ;(ssrContext.modules || (ssrContext.modules = new Set())).add({:?})",
+                registered_id
+            );
+            trailer.push_str("  return _sfc_setup ? _sfc_setup(props, ctx) : undefined\n");
+            trailer.push_str("}\n");
+        }
+        ExtraFragment {
+            role: "trailer",
+            code: trailer,
+            imports,
+        }
+    }
+}
+
+/// Everything [`compose_main_module`] needs: the compiled blocks, the
+/// resolved dialect/product kind/runtime specifier, whether a map was
+/// requested, every ALREADY-DECODED contributing map, and host-owned
+/// identifiers. Never raw source or a
 /// [`crate::compile_request::CompileRequest`] — a caller builds this from
 /// its own already-produced [`RuntimeCompileOutput`] plus its own validated
 /// maps.
@@ -217,12 +370,63 @@ pub struct VueMainModuleRequest<'a> {
     /// passed through verbatim when the caller's own template map is
     /// already canonical, as for a same-crate direct compile).
     pub template_map_json: Option<String>,
-    /// Extra fragments placed in the module prelude, ahead of the script.
-    pub prelude_extra: Vec<ExtraFragment>,
-    /// Extra raw text appended to the trailer, before the terminal
-    /// `export default` statement. Declared imports these lines need ride
-    /// along per fragment.
-    pub trailer_extra: Vec<ExtraFragment>,
+    /// Host-owned identifiers and request axes. Topology is compiler-owned.
+    pub decoration: VueMainDecoration,
+}
+
+/// Compiler-owned Vue main-module assembly request. Session code supplies
+/// host identifiers and authorship metadata; this crate owns dialect,
+/// map validation, composition, and compile-artifact-set emission.
+pub struct VueRuntimeMainRequest<'a> {
+    pub canonical_id: &'a str,
+    pub compiled: &'a RuntimeCompileOutput,
+    /// Authored `<script>` lang, `None` when no script block exists.
+    pub script_lang: Option<&'a str>,
+    /// Authored-fragment inventory: a synthesized script is not authored.
+    pub has_script: bool,
+    /// Authored-fragment inventory: a synthesized template is not authored.
+    pub has_template: bool,
+    pub force_js: bool,
+    pub source_map: bool,
+    pub runtime: &'a str,
+    pub ssr: bool,
+    pub decoration: VueMainDecoration,
+}
+
+/// Assembled Vue `_sfc_main` plus its compile-artifact-set relations.
+///
+/// `code` is the same allocation stored on the main artifact's
+/// [`ArtifactContent::Available`] payload.
+#[derive(Debug)]
+pub struct VueRuntimeMainAssembled {
+    pub code: Arc<str>,
+    pub source_map: Option<String>,
+    pub lang: String,
+    pub artifacts: CompileArtifactSet,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static VUE_MAIN_ASSEMBLY_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Assemblies observed on this thread. STYLE-only demand must stay at zero.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn vue_main_assembly_count() -> usize {
+    VUE_MAIN_ASSEMBLY_COUNT.with(Cell::get)
+}
+
+/// Reset this thread's assembly counter. Test-only observation of unrequested
+/// Main work.
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_vue_main_assembly_count() {
+    VUE_MAIN_ASSEMBLY_COUNT.with(|count| count.set(0));
+}
+
+fn record_vue_main_assembly() {
+    #[cfg(any(test, feature = "test-support"))]
+    VUE_MAIN_ASSEMBLY_COUNT.with(|count| count.set(count.get() + 1));
 }
 
 /// Every way [`compose_fragments`] can fail to compose a Main module's
@@ -286,8 +490,15 @@ impl std::error::Error for VueMainCompositionFailure {}
 /// ([`AssemblyRefusal`]). Never a panic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VueMainAssemblyFailure {
+    InputMap(AssembleMapFailure),
     Composition(VueMainCompositionFailure),
     Publication(AssemblyRefusal),
+}
+
+impl From<AssembleMapFailure> for VueMainAssemblyFailure {
+    fn from(failure: AssembleMapFailure) -> Self {
+        Self::InputMap(failure)
+    }
 }
 
 impl From<VueMainCompositionFailure> for VueMainAssemblyFailure {
@@ -305,6 +516,7 @@ impl From<AssemblyRefusal> for VueMainAssemblyFailure {
 impl std::fmt::Display for VueMainAssemblyFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InputMap(e) => write!(f, "{e}"),
             Self::Composition(e) => write!(f, "{e}"),
             Self::Publication(e) => write!(f, "Main-module publication failed: {e:?}"),
         }
@@ -357,8 +569,7 @@ fn mint_and_validate(
 /// [`crate::compile_request::CompileRequest`] atomically) can keep the
 /// fragments alive across that combination. [`compose_main_module`] is the
 /// single-artifact convenience that composes AND publishes in one call for a
-/// caller (`verter_session`'s host composer) that only ever publishes this
-/// one artifact.
+/// caller that only ever publishes this one artifact.
 pub(crate) struct ComposedFragments {
     pub fragments: Vec<ValidatedFragment>,
     pub code: String,
@@ -369,12 +580,13 @@ pub(crate) struct ComposedFragments {
 /// Compose the Vue `_sfc_main` runtime module's fragments from a
 /// framework-neutral [`RuntimeCompileOutput`] plus caller-owned decoration —
 /// EVERYTHING [`compose_main_module`] does except the final [`publish`] call.
-/// Shared by `verter_session`'s host-decorated `assemble_vue_main_module`
-/// (through [`compose_main_module`]) and the direct one-shot core (through
+/// Shared by the session identifier/axes transport (`assemble_vue_main_module`
+/// → [`assemble_vue_runtime_main`]) and the direct one-shot core (through
 /// this function directly, so it can publish this artifact atomically
 /// alongside sibling contributions from the SAME
-/// [`crate::compile_request::CompileRequest`]) — see this module's own doc
-/// for the split.
+/// [`crate::compile_request::CompileRequest`]). Decoration topology is
+/// compiler-owned ([`VueMainDecoration`]); the session adapter does not
+/// compose.
 ///
 /// Script rewrites (`__sfc__` → `_sfc_main`, then strip
 /// `export default _sfc_main;\n`) go through [`rewrite_script`] so the same
@@ -403,9 +615,11 @@ pub(crate) fn compose_fragments(
         source_root,
         script_map,
         template_map_json,
-        prelude_extra,
-        trailer_extra,
+        decoration,
     } = request;
+    let ssr = planned_kind == ProductKind::RuntimeServer;
+    let prelude_extra = vec![decoration.prelude(compiled)];
+    let trailer_extra = vec![decoration.trailer(compiled, canonical_id, runtime, ssr)];
 
     let rewritten_script = compiled
         .script
@@ -627,15 +841,14 @@ pub(crate) fn compose_fragments(
     Ok(ComposedFragments {
         fragments,
         code: sequenced.code,
-        source_map: sequenced.source_map,
+        source_map: sequenced.source_map.to_json_string(),
         emitted_imports,
     })
 }
 
 /// Compose AND publish a Main module in one call — the single-artifact
 /// convenience for a caller that only ever publishes the one artifact it
-/// composes (`verter_session`'s host-decorated `assemble_vue_main_module`).
-/// A caller publishing this artifact atomically alongside sibling
+/// composes. A caller publishing this artifact atomically alongside sibling
 /// contributions from the same request (the direct one-shot core) uses
 /// [`compose_fragments`] directly instead, so it can call [`publish`]
 /// exactly once over the FULL contribution set.
@@ -669,6 +882,592 @@ pub fn compose_main_module(
         runtime_source_map: want_maps.then_some(composed.source_map),
     };
     Ok(publish(&plan, vec![contribution])?)
+}
+
+/// Sole semantic Vue main-module assembler: map validation, dialect,
+/// composition, and compile-artifact-set emission. Session adapters transport
+/// identifiers only.
+pub fn assemble_vue_runtime_main(
+    request: VueRuntimeMainRequest<'_>,
+) -> Result<VueRuntimeMainAssembled, VueMainAssemblyFailure> {
+    let planned_kind = if request.ssr {
+        ProductKind::RuntimeServer
+    } else {
+        ProductKind::RuntimeClient
+    };
+    let dialect = resolve_vue_main_dialect(request.script_lang, request.force_js);
+    let validated = if request.source_map {
+        Some(validate_vue_main_maps(
+            request.compiled,
+            request.has_script,
+            request.has_template,
+        )?)
+    } else {
+        None
+    };
+    let want_maps = validated.is_some();
+    let source_root = validated
+        .as_ref()
+        .and_then(|inputs| inputs.source_root.clone());
+    let script_map = validated
+        .as_ref()
+        .and_then(|inputs| inputs.script.as_ref())
+        .map(to_source_map);
+    let template_map_json: Option<String> = validated
+        .as_ref()
+        .and_then(|inputs| inputs.template.as_ref())
+        .map(|map| to_source_map(map).to_json_string());
+
+    record_vue_main_assembly();
+
+    let composed = compose_fragments(VueMainModuleRequest {
+        canonical_id: request.canonical_id,
+        compiled: request.compiled,
+        dialect,
+        planned_kind,
+        runtime: request.runtime,
+        want_maps,
+        source_root: source_root.as_deref(),
+        script_map: script_map.as_ref(),
+        template_map_json,
+        decoration: request.decoration.clone(),
+    })?;
+    let fragment_refs: Vec<&ValidatedFragment> = composed.fragments.iter().collect();
+    let plan = ProductPlan::single(PlannedArtifact {
+        kind: planned_kind,
+        requires_source_projection_map: false,
+        requires_runtime_source_map: want_maps,
+    });
+    let source_map = want_maps.then(|| composed.source_map.clone());
+    let contribution = ArtifactContribution {
+        kind: planned_kind,
+        fragments: fragment_refs,
+        code: composed.code.clone(),
+        emitted_imports: composed.emitted_imports,
+        dialect,
+        source_projection_map: None,
+        runtime_source_map: source_map.clone(),
+    };
+    publish(&plan, vec![contribution]).map_err(VueMainAssemblyFailure::from)?;
+    let code: Arc<str> = Arc::from(composed.code);
+    let artifacts = vue_main_compile_artifacts(
+        request.canonical_id,
+        request.compiled,
+        planned_kind,
+        dialect,
+        Arc::clone(&code),
+        source_map.as_deref(),
+        &request.decoration,
+        want_maps,
+    )
+    .map_err(|err| {
+        VueMainAssemblyFailure::Publication(AssemblyRefusal::FinalParseFailed {
+            kind: planned_kind,
+            reason: err.to_string(),
+        })
+    })?;
+    Ok(VueRuntimeMainAssembled {
+        code,
+        source_map,
+        lang: dialect.lang_id().to_string(),
+        artifacts,
+    })
+}
+
+fn resolve_vue_main_dialect(script_lang: Option<&str>, force_js: bool) -> FragmentDialect {
+    let raw = script_lang.unwrap_or("js");
+    let is_tsx = raw.eq_ignore_ascii_case("tsx");
+    let is_jsx = is_tsx || raw.eq_ignore_ascii_case("jsx");
+    let is_ts = is_tsx || raw.eq_ignore_ascii_case("ts");
+    if force_js {
+        if is_jsx {
+            FragmentDialect::Jsx
+        } else {
+            FragmentDialect::JavaScript
+        }
+    } else if is_tsx {
+        FragmentDialect::Tsx
+    } else if is_jsx {
+        FragmentDialect::Jsx
+    } else if is_ts {
+        FragmentDialect::TypeScript
+    } else {
+        FragmentDialect::JavaScript
+    }
+}
+
+struct ValidatedVueMainMaps {
+    script: Option<DecodedFragmentMap>,
+    template: Option<DecodedFragmentMap>,
+    source_root: Option<String>,
+}
+
+fn validate_vue_main_maps(
+    compiled: &RuntimeCompileOutput,
+    has_script: bool,
+    has_template: bool,
+) -> Result<ValidatedVueMainMaps, AssembleMapFailure> {
+    let script_required = has_script && compiled.script.is_some();
+    let template_required = has_template && compiled.template.is_some();
+
+    if script_required
+        && compiled
+            .script
+            .as_ref()
+            .is_some_and(|script| script.source_map.is_empty())
+    {
+        return Err(AssembleMapFailure::MissingRequiredInputMap {
+            fragment: MapFragment::Script,
+        });
+    }
+    if template_required
+        && compiled
+            .template
+            .as_ref()
+            .is_some_and(|template| template.source_map.is_empty())
+    {
+        return Err(AssembleMapFailure::MissingRequiredInputMap {
+            fragment: MapFragment::Template,
+        });
+    }
+
+    let script = match &compiled.script {
+        Some(script) if !script.source_map.is_empty() => Some(
+            validate_and_decode(&script.source_map, &script.code).map_err(|code| {
+                AssembleMapFailure::UncomposableInputMap {
+                    fragment: MapFragment::Script,
+                    code,
+                }
+            })?,
+        ),
+        _ => None,
+    };
+    let template = match &compiled.template {
+        Some(template) if !template.source_map.is_empty() => Some(
+            validate_and_decode(&template.source_map, &template.code).map_err(|code| {
+                AssembleMapFailure::UncomposableInputMap {
+                    fragment: MapFragment::Template,
+                    code,
+                }
+            })?,
+        ),
+        _ => None,
+    };
+
+    let source_root = agree_source_root(
+        script
+            .iter()
+            .map(|map| (MapFragment::Script, map))
+            .chain(template.iter().map(|map| (MapFragment::Template, map))),
+    )?;
+
+    Ok(ValidatedVueMainMaps {
+        script,
+        template,
+        source_root,
+    })
+}
+
+struct VueAssemblyTag<'a>(&'a str);
+impl CanonicalEncode for VueAssemblyTag<'_> {
+    const DOMAIN_TAG: &'static str = "verter.compiler.vue.main.assembly.v1";
+    fn encode_fields(&self, e: &mut CanonicalEncoder) {
+        e.field_str(1, self.0);
+    }
+}
+
+fn content_digest(bytes: &[u8]) -> [u8; 32] {
+    *ContentId::from_content_bytes(bytes).digest().as_bytes()
+}
+
+struct VueMainInputBasis<'a> {
+    canonical_id: &'a str,
+    hmr: &'a str,
+    is_production: bool,
+    emit_ssr: bool,
+    ssr_module_id: &'a str,
+    want_maps: bool,
+    kind: &'a str,
+    order: &'a str,
+    script_digest: [u8; 32],
+    template_digest: [u8; 32],
+    main_digest: [u8; 32],
+    map_digest: [u8; 32],
+}
+impl CanonicalEncode for VueMainInputBasis<'_> {
+    const DOMAIN_TAG: &'static str = "verter.compiler.vue.main.input_basis.v1";
+    fn encode_fields(&self, e: &mut CanonicalEncoder) {
+        e.field_str(1, self.canonical_id);
+        e.field_str(2, self.hmr);
+        e.field_bool(3, self.is_production);
+        e.field_bool(4, self.emit_ssr);
+        e.field_str(5, self.ssr_module_id);
+        e.field_bool(6, self.want_maps);
+        e.field_str(7, self.kind);
+        e.field_str(8, self.order);
+        e.field_bytes(9, &self.script_digest);
+        e.field_bytes(10, &self.template_digest);
+        e.field_bytes(11, &self.main_digest);
+        e.field_bytes(12, &self.map_digest);
+    }
+}
+
+/// Compile-artifact schema for one assembled Vue main artifact and its
+/// contributing script/template units. Relations are typed; maps are
+/// qualified by family. Construction performs no compile work.
+#[allow(clippy::too_many_arguments)]
+pub fn vue_main_compile_artifacts(
+    canonical_id: &str,
+    compiled: &RuntimeCompileOutput,
+    kind: ProductKind,
+    dialect: FragmentDialect,
+    code: impl Into<Arc<str>>,
+    runtime_source_map: Option<&str>,
+    decoration: &VueMainDecoration,
+    want_maps: bool,
+) -> Result<CompileArtifactSet, super::publish::ArtifactSchemaError> {
+    let code = code.into();
+    use std::collections::BTreeSet;
+
+    let script_bytes = compiled
+        .script
+        .as_ref()
+        .map(|s| s.code.as_bytes())
+        .unwrap_or(&[]);
+    let template_bytes = compiled
+        .template
+        .as_ref()
+        .map(|t| t.code.as_bytes())
+        .unwrap_or(&[]);
+    let mut order = String::new();
+    if compiled.script.is_some() {
+        order.push_str("script");
+    }
+    if compiled.template.is_some() {
+        if !order.is_empty() {
+            order.push(',');
+        }
+        order.push_str("template");
+    }
+    let map_json = runtime_source_map.unwrap_or("");
+    let ssr_module_id = decoration.ssr_module_id.as_deref().unwrap_or(canonical_id);
+    let basis = VueMainInputBasis {
+        canonical_id,
+        hmr: decoration.hmr.wire_name(),
+        is_production: decoration.is_production,
+        emit_ssr: decoration.emit_ssr_module_registration,
+        ssr_module_id,
+        want_maps,
+        kind: kind.wire_tag(),
+        order: &order,
+        script_digest: content_digest(script_bytes),
+        template_digest: content_digest(template_bytes),
+        main_digest: content_digest(code.as_bytes()),
+        map_digest: content_digest(map_json.as_bytes()),
+    };
+    let source_id = SourceId::from_canonical(&VueAssemblyTag(canonical_id));
+    let revision = SourceRevision::from_canonical(&basis);
+    let mut source_units = Vec::new();
+    let mut inputs = BTreeSet::new();
+
+    let mut push_unit = |role: &str, bytes: &[u8], span: verter_span::Span| {
+        let unit = SourceUnit::mint(
+            source_id.clone(),
+            revision.clone(),
+            role,
+            ContentId::from_content_bytes(bytes),
+        );
+        inputs.insert(unit.id().clone());
+        source_units.push(ArtifactSourceUnit {
+            source_span: span,
+            unit,
+        });
+    };
+    push_unit(
+        "main",
+        code.as_bytes(),
+        verter_span::Span::new(0, code.len() as u32),
+    );
+
+    let authored = authored_contribution_units(compiled, runtime_source_map);
+    for unit in &authored {
+        push_unit(&unit.role, unit.content.as_bytes(), unit.span);
+    }
+
+    let producer = ResultContractId::from_canonical(&VueAssemblyTag("vue-runtime-main"));
+    let input_basis = InputBasisId::from_canonical(&basis);
+    let mut artifacts = Vec::new();
+    let mut main = CompileArtifact::new(
+        source_units[0].unit.id().clone(),
+        kind,
+        dialect.schema_language(),
+        "main",
+        ArtifactProvenance {
+            input_basis: input_basis.clone(),
+            producer,
+            inputs: inputs.clone(),
+        },
+        ArtifactContent::Available(Arc::clone(&code)),
+    );
+    for role in ["script", "template"] {
+        let Some(unit) = source_units.iter().find(|u| u.unit.logical_role() == role) else {
+            continue;
+        };
+        let fragment = CompileArtifact::new(
+            unit.unit.id().clone(),
+            kind,
+            dialect.schema_language(),
+            role,
+            ArtifactProvenance {
+                input_basis: input_basis.clone(),
+                producer: ResultContractId::from_canonical(&VueAssemblyTag(if role == "script" {
+                    "vue-runtime-script"
+                } else {
+                    "vue-runtime-template"
+                })),
+                inputs: BTreeSet::from([unit.unit.id().clone()]),
+            },
+            ArtifactContent::Unavailable(super::fragment::ArtifactUnavailableReason::NotProduced),
+        );
+        main.relations.insert(ArtifactRelation {
+            kind: ArtifactRelationKind::DependsOn,
+            target: fragment.id().clone(),
+        });
+        artifacts.push(fragment);
+    }
+    if let Some(map_json) = runtime_source_map {
+        let authored_ids: BTreeSet<_> = source_units
+            .iter()
+            .filter(|unit| unit.unit.logical_role() != "main")
+            .map(|unit| unit.unit.id().clone())
+            .collect();
+        if !authored_ids.is_empty() {
+            main.maps.push(QualifiedArtifactMap {
+                family: ArtifactMapFamily::RuntimeSourceMap,
+                generated: main.id().clone(),
+                generated_content: ContentId::from_content_bytes(code.as_bytes()),
+                input_basis,
+                sources: authored_ids,
+                segments: runtime_map_segments(map_json, code.as_ref(), &source_units, &authored),
+            });
+        }
+    }
+    artifacts.insert(0, main);
+    CompileArtifactSet::new(source_units, artifacts)
+}
+
+struct AuthoredContribution {
+    role: String,
+    content: String,
+    span: verter_span::Span,
+    /// Composed-map source-row index for this contribution. Script and
+    /// template maps can share a source name and overlapping local spans;
+    /// tokens bind through this identity, not the name or span alone.
+    composed_source_id: u32,
+}
+
+fn fragment_source_row_count(map_json: &str) -> u32 {
+    if map_json.is_empty() {
+        return 0;
+    }
+    SourceMap::from_json_string(map_json)
+        .map(|map| map.get_sources().count() as u32)
+        .unwrap_or(0)
+}
+
+fn authored_contribution_units(
+    compiled: &RuntimeCompileOutput,
+    runtime_source_map: Option<&str>,
+) -> Vec<AuthoredContribution> {
+    let mut units = Vec::new();
+    let mut source_base = 0u32;
+    let mut push_fragment = |role: &str, map_json: &str| {
+        let count = fragment_source_row_count(map_json);
+        if let Some(mut unit) = authored_unit_from_map(role, map_json) {
+            unit.composed_source_id = source_base.saturating_add(unit.composed_source_id);
+            units.push(unit);
+        }
+        source_base = source_base.saturating_add(count);
+    };
+    if let Some(script) = &compiled.script {
+        push_fragment("script", &script.source_map);
+    }
+    if let Some(template) = &compiled.template {
+        push_fragment("template", &template.source_map);
+    }
+    if units.is_empty() {
+        if let Some(map_json) = runtime_source_map {
+            if let Some(unit) = authored_unit_from_map("sfc", map_json) {
+                units.push(unit);
+            }
+        }
+    }
+    units
+}
+
+fn authored_unit_from_map(role: &str, map_json: &str) -> Option<AuthoredContribution> {
+    if map_json.is_empty() {
+        return None;
+    }
+    let map = SourceMap::from_json_string(map_json).ok()?;
+    let (source_id, content) = map.get_sources().enumerate().find_map(|(index, _)| {
+        let id = index as u32;
+        map.get_source_content(id)
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| (id, bytes.to_string()))
+    })?;
+    let line_starts = generated_line_starts(&content);
+    let mut start = u32::MAX;
+    let mut end = 0u32;
+    for token in map.get_tokens() {
+        if token.get_source_id() != Some(source_id) {
+            continue;
+        }
+        let Some(offset) = utf16_offset_to_bytes(
+            &content,
+            &line_starts,
+            token.get_src_line(),
+            token.get_src_col(),
+        ) else {
+            continue;
+        };
+        start = start.min(offset);
+        end = end.max(next_char_end(&content, offset));
+    }
+    if start == u32::MAX || start > end {
+        start = 0;
+        end = content.len() as u32;
+    }
+    let end = end.min(content.len() as u32);
+    Some(AuthoredContribution {
+        role: role.to_string(),
+        content,
+        span: verter_span::Span::new(start, end),
+        composed_source_id: source_id,
+    })
+}
+
+fn runtime_map_segments(
+    map_json: &str,
+    generated: &str,
+    source_units: &[ArtifactSourceUnit],
+    authored: &[AuthoredContribution],
+) -> Vec<ArtifactMapSegment> {
+    let Ok(map) = SourceMap::from_json_string(map_json) else {
+        return Vec::new();
+    };
+    if authored.is_empty() {
+        return Vec::new();
+    }
+    let source_contents: Vec<Option<String>> = map
+        .get_source_contents()
+        .map(|content| content.map(str::to_string))
+        .collect();
+    let source_line_starts: Vec<Option<Vec<u32>>> = source_contents
+        .iter()
+        .map(|content| content.as_deref().map(generated_line_starts))
+        .collect();
+    let gen_starts = generated_line_starts(generated);
+    let gen_len = generated.len() as u32;
+    let mut segments: Vec<ArtifactMapSegment> = map
+        .get_tokens()
+        .filter_map(|token| {
+            let source_id = token.get_source_id()?;
+            let content = source_contents.get(source_id as usize)?.as_deref()?;
+            let line_starts = source_line_starts.get(source_id as usize)?.as_ref()?;
+            let source_start = utf16_offset_to_bytes(
+                content,
+                line_starts,
+                token.get_src_line(),
+                token.get_src_col(),
+            )?;
+            let source_end = next_char_end(content, source_start);
+            if source_start > source_end {
+                return None;
+            }
+            let contribution = authored.iter().find(|unit| {
+                token.get_source_id() == Some(unit.composed_source_id)
+                    && source_start >= unit.span.start
+                    && source_end <= unit.span.end
+            })?;
+            let unit = source_units
+                .iter()
+                .find(|candidate| candidate.unit.logical_role() == contribution.role)?;
+            let start = utf16_offset_to_bytes(
+                generated,
+                &gen_starts,
+                token.get_dst_line(),
+                token.get_dst_col(),
+            )?;
+            if start >= gen_len {
+                return None;
+            }
+            let end = next_char_end(generated, start).min(gen_len);
+            generated.get(start as usize..end as usize)?;
+            Some(ArtifactMapSegment {
+                generated: start..end,
+                source_unit: unit.unit.id().clone(),
+                source_span: verter_span::Span::new(source_start, source_end),
+            })
+        })
+        .collect();
+    segments.sort_by_key(|segment| (segment.generated.start, segment.generated.end));
+    segments.dedup_by(|a, b| a.generated.start == b.generated.start);
+    let mut kept = Vec::with_capacity(segments.len());
+    for segment in segments {
+        if kept
+            .last()
+            .is_none_or(|prev: &ArtifactMapSegment| prev.generated.end <= segment.generated.start)
+        {
+            kept.push(segment);
+        }
+    }
+    kept
+}
+
+fn generated_line_starts(code: &str) -> Vec<u32> {
+    let mut starts = vec![0u32];
+    for (index, byte) in code.bytes().enumerate() {
+        if byte == b'\n' {
+            starts.push((index + 1) as u32);
+        }
+    }
+    starts
+}
+
+fn utf16_offset_to_bytes(code: &str, line_starts: &[u32], line: u32, column: u32) -> Option<u32> {
+    let start = *line_starts.get(line as usize)? as usize;
+    let end = line_starts
+        .get(line as usize + 1)
+        .map(|next| *next as usize)
+        .unwrap_or(code.len());
+    let line_bytes = code.get(start..end)?;
+    let mut utf16 = 0u32;
+    for (byte_off, ch) in line_bytes.char_indices() {
+        if utf16 == column {
+            return Some((start + byte_off) as u32);
+        }
+        utf16 = utf16.saturating_add(ch.len_utf16() as u32);
+        if utf16 > column {
+            return None;
+        }
+    }
+    if utf16 == column {
+        Some((start + line_bytes.len()) as u32)
+    } else {
+        None
+    }
+}
+
+fn next_char_end(code: &str, start: u32) -> u32 {
+    let start = start as usize;
+    let Some(rest) = code.get(start..) else {
+        return start as u32;
+    };
+    match rest.chars().next() {
+        Some(ch) => (start + ch.len_utf8()) as u32,
+        None => start as u32,
+    }
 }
 
 #[cfg(test)]
@@ -906,5 +1705,611 @@ mod tests {
             "the rewritten script has two lines, so no chained segment may remain on \
              line 2 — one that does means the removal never reached the map."
         );
+    }
+
+    fn assembled(
+        compiled: &RuntimeCompileOutput,
+        decoration: VueMainDecoration,
+        kind: ProductKind,
+    ) -> String {
+        let set = compose_main_module(VueMainModuleRequest {
+            canonical_id: "Comp.vue",
+            compiled,
+            dialect: FragmentDialect::JavaScript,
+            planned_kind: kind,
+            runtime: "vue",
+            want_maps: false,
+            source_root: None,
+            script_map: None,
+            template_map_json: None,
+            decoration,
+        })
+        .expect("assembly with maps disabled cannot fail");
+        set.artifact(kind)
+            .expect("publish returns the planned artifact")
+            .code()
+            .to_string()
+    }
+
+    fn empty_bundle() -> RuntimeCompileOutput {
+        RuntimeCompileOutput::default()
+    }
+
+    /// Host identifiers drive style/custom imports; the compiler owns the
+    /// import shape. Empty identifiers emit no host topology.
+    #[test]
+    fn decoration_emits_host_identifiers_and_skips_them_when_absent() {
+        use crate::framework_common::{
+            RuntimeCustomBlock, RuntimeOutputDescriptor, RuntimeStyleBlock, SourceMapFidelity,
+        };
+        let style = RuntimeStyleBlock {
+            code: ".x{}".to_string(),
+            source_map: None,
+            lang: Some("css".to_string()),
+            scope_hash: None,
+            has_global: false,
+            output_descriptor: RuntimeOutputDescriptor::generated(
+                ".x{}",
+                None,
+                &[("test:space", "test:artifact")],
+                SourceMapFidelity::Approximate,
+            ),
+        };
+        let compiled = RuntimeCompileOutput {
+            styles: vec![style],
+            custom_blocks: vec![RuntimeCustomBlock {
+                block_type: "i18n".to_string(),
+                content: "{}".to_string(),
+            }],
+            ..empty_bundle()
+        };
+        let bare = assembled(
+            &compiled,
+            VueMainDecoration::default(),
+            ProductKind::RuntimeClient,
+        );
+        assert!(
+            !bare.contains("import \""),
+            "empty host identifiers must not invent style/custom imports:\n{bare}"
+        );
+        let decorated = assembled(
+            &compiled,
+            VueMainDecoration {
+                style_specifiers: vec!["Comp.vue?vue&type=style&index=0&lang.css".to_string()],
+                custom_specifiers: vec!["Comp.vue?vue&type=i18n&index=0".to_string()],
+                ..VueMainDecoration::default()
+            },
+            ProductKind::RuntimeClient,
+        );
+        assert!(
+            decorated.contains("import \"Comp.vue?vue&type=style&index=0&lang.css\""),
+            "style specifier must appear as a side-effect import:\n{decorated}"
+        );
+        assert!(
+            decorated.contains("import block0 from \"Comp.vue?vue&type=i18n&index=0\""),
+            "custom specifier must appear as a default import:\n{decorated}"
+        );
+        assert!(
+            decorated.contains("if (typeof block0 === 'function') block0(_sfc_main)"),
+            "custom invocation is compiler-owned topology:\n{decorated}"
+        );
+    }
+
+    /// HMR / `__file` / SSR registration are compiler-owned, driven by
+    /// decoration axes — never reconstructed by scanning assembled bytes.
+    #[test]
+    fn decoration_owns_hmr_file_and_ssr_registration() {
+        let compiled = empty_bundle();
+        let vite = assembled(
+            &compiled,
+            VueMainDecoration {
+                hmr: RuntimeHmrStrategy::Vite,
+                ..VueMainDecoration::default()
+            },
+            ProductKind::RuntimeClient,
+        );
+        assert!(vite.contains("_sfc_main.__file = \"Comp.vue\""));
+        assert!(vite.contains("import.meta.hot"));
+        let ssr = assembled(
+            &compiled,
+            VueMainDecoration {
+                ssr_module_id: Some("src/Comp.vue".to_string()),
+                ..VueMainDecoration::default()
+            },
+            ProductKind::RuntimeServer,
+        );
+        assert!(ssr.contains("useSSRContext as __vite_useSSRContext"));
+        assert!(ssr.contains(".add(\"src/Comp.vue\")"));
+        assert!(!ssr.contains("import.meta.hot"));
+        let artifacts = vue_main_compile_artifacts(
+            "Comp.vue",
+            &compiled,
+            ProductKind::RuntimeClient,
+            FragmentDialect::JavaScript,
+            vite.as_str(),
+            None,
+            &VueMainDecoration {
+                hmr: RuntimeHmrStrategy::Vite,
+                ..VueMainDecoration::default()
+            },
+            false,
+        )
+        .expect("schema accepts the assembled main");
+        assert_eq!(artifacts.artifacts().len(), 1);
+        assert!(artifacts.artifacts().iter().any(|a| a.name() == "main"));
+    }
+
+    #[test]
+    fn main_artifact_identity_binds_revision_options_and_restores_on_revert() {
+        let compiled = empty_bundle();
+        let vite = VueMainDecoration {
+            hmr: RuntimeHmrStrategy::Vite,
+            ..VueMainDecoration::default()
+        };
+        let none = VueMainDecoration::default();
+        let code = assembled(&compiled, vite.clone(), ProductKind::RuntimeClient);
+        let first = vue_main_compile_artifacts(
+            "Comp.vue",
+            &compiled,
+            ProductKind::RuntimeClient,
+            FragmentDialect::JavaScript,
+            code.as_str(),
+            None,
+            &vite,
+            false,
+        )
+        .expect("schema accepts");
+        let option_changed = vue_main_compile_artifacts(
+            "Comp.vue",
+            &compiled,
+            ProductKind::RuntimeClient,
+            FragmentDialect::JavaScript,
+            code.as_str(),
+            None,
+            &none,
+            false,
+        )
+        .expect("schema accepts");
+        let edited = format!("{code}\n");
+        let after_edit = vue_main_compile_artifacts(
+            "Comp.vue",
+            &compiled,
+            ProductKind::RuntimeClient,
+            FragmentDialect::JavaScript,
+            edited.as_str(),
+            None,
+            &vite,
+            false,
+        )
+        .expect("schema accepts");
+        let reverted = vue_main_compile_artifacts(
+            "Comp.vue",
+            &compiled,
+            ProductKind::RuntimeClient,
+            FragmentDialect::JavaScript,
+            code.as_str(),
+            None,
+            &vite,
+            false,
+        )
+        .expect("schema accepts");
+        let first_main = first
+            .artifacts()
+            .iter()
+            .find(|a| a.name() == "main")
+            .expect("main");
+        let option_main = option_changed
+            .artifacts()
+            .iter()
+            .find(|a| a.name() == "main")
+            .expect("main");
+        let edited_main = after_edit
+            .artifacts()
+            .iter()
+            .find(|a| a.name() == "main")
+            .expect("main");
+        let reverted_main = reverted
+            .artifacts()
+            .iter()
+            .find(|a| a.name() == "main")
+            .expect("main");
+        assert_ne!(
+            first_main.provenance.input_basis, option_main.provenance.input_basis,
+            "option change must change input basis"
+        );
+        let first_rev = first
+            .source_units()
+            .find(|u| u.unit.logical_role() == "main")
+            .expect("main unit")
+            .unit
+            .revision()
+            .clone();
+        let edited_rev = after_edit
+            .source_units()
+            .find(|u| u.unit.logical_role() == "main")
+            .expect("main unit")
+            .unit
+            .revision()
+            .clone();
+        let reverted_rev = reverted
+            .source_units()
+            .find(|u| u.unit.logical_role() == "main")
+            .expect("main unit")
+            .unit
+            .revision()
+            .clone();
+        let first_content = first
+            .source_units()
+            .find(|u| u.unit.logical_role() == "main")
+            .expect("main unit")
+            .unit
+            .content()
+            .clone();
+        assert_ne!(first_rev, edited_rev, "edit must change source revision");
+        assert_eq!(
+            first_main.provenance.input_basis, reverted_main.provenance.input_basis,
+            "revert must restore input basis"
+        );
+        assert_eq!(first_rev, reverted_rev, "revert must restore revision");
+        assert_eq!(
+            first_content,
+            ContentId::from_content_bytes(code.as_bytes()),
+            "main unit content is the assembled bytes"
+        );
+        let _ = edited_main;
+    }
+
+    #[test]
+    fn qualified_runtime_map_binds_authored_units_not_generated_main() {
+        use crate::framework_common::{
+            RuntimeOutputDescriptor, RuntimeScriptBlock, SourceMapFidelity,
+        };
+        let script_map = r#"{"version":3,"file":"Comp.vue","sources":["Comp.vue"],"sourcesContent":["const n = 1\n"],"names":[],"mappings":"AAAA"}"#;
+        let compiled = RuntimeCompileOutput {
+            script: Some(RuntimeScriptBlock {
+                code: "const n = 1\n".to_string(),
+                source_map: script_map.to_string(),
+                setup: false,
+                output_descriptor: RuntimeOutputDescriptor::generated(
+                    "const n = 1\n",
+                    Some(script_map),
+                    &[("test:space", "test:artifact")],
+                    SourceMapFidelity::Approximate,
+                ),
+                generated_template_hole: None,
+                runtime_imports: Vec::new(),
+                sfc_export_placement: None,
+            }),
+            ..empty_bundle()
+        };
+        let generated = "const n = 1\nexport default n;\n";
+        let artifacts = vue_main_compile_artifacts(
+            "Comp.vue",
+            &compiled,
+            ProductKind::RuntimeClient,
+            FragmentDialect::JavaScript,
+            generated,
+            Some(script_map),
+            &VueMainDecoration::default(),
+            true,
+        )
+        .expect("schema accepts authored map geometry");
+        let main = artifacts
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.name() == "main")
+            .expect("main");
+        let map = main
+            .maps
+            .iter()
+            .find(|map| map.family == ArtifactMapFamily::RuntimeSourceMap)
+            .expect("runtime map");
+        let main_unit = artifacts
+            .source_units()
+            .find(|unit| unit.unit.logical_role() == "main")
+            .expect("main unit")
+            .unit
+            .id()
+            .clone();
+        let script_unit = artifacts
+            .source_units()
+            .find(|unit| unit.unit.logical_role() == "script")
+            .expect("script unit");
+        assert!(
+            !map.segments.is_empty(),
+            "authored tokens must produce segments"
+        );
+        assert!(
+            map.segments
+                .iter()
+                .all(|segment| segment.source_unit != main_unit),
+            "segments must not use the generated main unit as authored source"
+        );
+        assert!(
+            map.segments
+                .iter()
+                .any(|segment| segment.source_unit == *script_unit.unit.id()),
+            "a generated token must map onto the authored script unit"
+        );
+        assert!(
+            map.segments.iter().all(|segment| {
+                segment.source_span.start >= script_unit.source_span.start
+                    && segment.source_span.end <= script_unit.source_span.end
+            }),
+            "authored spans must stay inside the script unit extent"
+        );
+        assert!(
+            main.relations.iter().any(|relation| {
+                relation.kind == ArtifactRelationKind::DependsOn
+                    && artifacts.artifacts().iter().any(|artifact| {
+                        artifact.id() == &relation.target && artifact.name() == "script"
+                    })
+            }),
+            "main must retain a typed script dependency"
+        );
+    }
+
+    #[test]
+    fn overlapping_local_spans_bind_by_composed_source_row() {
+        use crate::framework_common::{
+            RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeTemplateBlock, SourceMapFidelity,
+            TemplateRenderExport,
+        };
+        fn map_json(source: &str, content: &str) -> String {
+            let token = oxc_sourcemap::Token::new(0, 0, 0, 0, Some(0), None);
+            SourceMap::new(
+                None,
+                Vec::new(),
+                None,
+                vec![source.into()],
+                vec![Some(content.into())],
+                Box::new([token]),
+                None,
+            )
+            .to_json_string()
+        }
+        let script_content = "const n = 1\n";
+        let template_content = "<div>{{ n }}</div>\n";
+        let script_map = map_json("Comp.vue", script_content);
+        let template_map = map_json("Comp.vue", template_content);
+        let composed = SourceMap::new(
+            None,
+            Vec::new(),
+            None,
+            vec!["Comp.vue".into(), "Comp.vue".into()],
+            vec![Some(script_content.into()), Some(template_content.into())],
+            Box::new([
+                oxc_sourcemap::Token::new(0, 0, 0, 0, Some(0), None),
+                oxc_sourcemap::Token::new(1, 0, 0, 0, Some(1), None),
+            ]),
+            None,
+        )
+        .to_json_string();
+        let compiled = RuntimeCompileOutput {
+            script: Some(RuntimeScriptBlock {
+                code: script_content.to_string(),
+                source_map: script_map,
+                setup: false,
+                output_descriptor: RuntimeOutputDescriptor::generated(
+                    script_content,
+                    None,
+                    &[("test:space", "test:artifact")],
+                    SourceMapFidelity::Approximate,
+                ),
+                generated_template_hole: None,
+                runtime_imports: Vec::new(),
+                sfc_export_placement: None,
+            }),
+            template: Some(RuntimeTemplateBlock {
+                code: "function render() {}\n".to_string(),
+                source_map: template_map,
+                imports: Vec::new(),
+                ssr_imports: Vec::new(),
+                render_export: TemplateRenderExport::Render,
+                output_descriptor: RuntimeOutputDescriptor::generated(
+                    "function render() {}\n",
+                    None,
+                    &[("test:space", "test:artifact")],
+                    SourceMapFidelity::Approximate,
+                ),
+            }),
+            ..empty_bundle()
+        };
+        let generated = "const n = 1\nfunction render() {}\n";
+        let artifacts = vue_main_compile_artifacts(
+            "Comp.vue",
+            &compiled,
+            ProductKind::RuntimeClient,
+            FragmentDialect::JavaScript,
+            generated,
+            Some(&composed),
+            &VueMainDecoration::default(),
+            true,
+        )
+        .expect("schema accepts overlapping local spans");
+        let script_unit = artifacts
+            .source_units()
+            .find(|unit| unit.unit.logical_role() == "script")
+            .expect("script unit");
+        let template_unit = artifacts
+            .source_units()
+            .find(|unit| unit.unit.logical_role() == "template")
+            .expect("template unit");
+        assert_eq!(
+            script_unit.source_span.start,
+            template_unit.source_span.start
+        );
+        let map = artifacts
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.name() == "main")
+            .expect("main")
+            .maps
+            .iter()
+            .find(|map| map.family == ArtifactMapFamily::RuntimeSourceMap)
+            .expect("runtime map");
+        let script_id = script_unit.unit.id().clone();
+        let template_id = template_unit.unit.id().clone();
+        let script_segments: Vec<_> = map
+            .segments
+            .iter()
+            .filter(|segment| segment.source_unit == script_id)
+            .collect();
+        let template_segments: Vec<_> = map
+            .segments
+            .iter()
+            .filter(|segment| segment.source_unit == template_id)
+            .collect();
+        assert!(
+            !script_segments.is_empty(),
+            "script tokens must bind to the script unit"
+        );
+        assert!(
+            !template_segments.is_empty(),
+            "template tokens must bind to the template unit, not the overlapping script span"
+        );
+        assert!(
+            template_segments
+                .iter()
+                .all(|segment| segment.source_unit != script_id),
+            "duplicate source names must not collapse template tokens onto script"
+        );
+    }
+
+    #[test]
+    fn input_basis_retains_content_digests_not_raw_bytes() {
+        let compiled = empty_bundle();
+        let huge = format!("export default {{ n: '{}' }}\n", "a".repeat(32 * 1024));
+        let artifacts = vue_main_compile_artifacts(
+            "Comp.vue",
+            &compiled,
+            ProductKind::RuntimeClient,
+            FragmentDialect::JavaScript,
+            huge.as_str(),
+            None,
+            &VueMainDecoration::default(),
+            false,
+        )
+        .expect("schema accepts");
+        let revision = artifacts
+            .source_units()
+            .find(|unit| unit.unit.logical_role() == "main")
+            .expect("main unit")
+            .unit
+            .revision()
+            .clone();
+        let main = artifacts
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.name() == "main")
+            .expect("main");
+        assert!(
+            revision.canonical_bytes().len() < huge.len() / 4,
+            "source revision must not retain the assembled payload, got {} vs {}",
+            revision.canonical_bytes().len(),
+            huge.len()
+        );
+        assert!(
+            main.provenance.input_basis.canonical_bytes().len() < huge.len() / 4,
+            "input basis must not retain the assembled payload"
+        );
+    }
+
+    #[test]
+    fn demanded_main_shares_one_payload_allocation() {
+        let compiled = empty_bundle();
+        let assembled = assemble_vue_runtime_main(VueRuntimeMainRequest {
+            canonical_id: "Comp.vue",
+            compiled: &compiled,
+            script_lang: Some("js"),
+            has_script: false,
+            has_template: false,
+            force_js: false,
+            source_map: false,
+            runtime: "vue",
+            ssr: false,
+            decoration: VueMainDecoration::default(),
+        })
+        .expect("template-less assembly still emits Main");
+        let main = assembled
+            .artifacts
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.name() == "main")
+            .expect("main");
+        let ArtifactContent::Available(content) = &main.content else {
+            panic!(
+                "produced Main must keep available content, got {:?}",
+                main.content
+            );
+        };
+        assert!(
+            Arc::ptr_eq(&assembled.code, content),
+            "body payload and typed artifact must share one allocation"
+        );
+        assert!(
+            assembled
+                .artifacts
+                .artifacts()
+                .iter()
+                .filter(|artifact| artifact.name() != "main")
+                .all(|artifact| matches!(artifact.content, ArtifactContent::Unavailable(_))),
+            "script/template artifacts must not copy fragment bytes"
+        );
+    }
+
+    #[test]
+    fn no_script_dialect_is_javascript() {
+        assert_eq!(
+            resolve_vue_main_dialect(None, false),
+            FragmentDialect::JavaScript
+        );
+        assert_eq!(
+            resolve_vue_main_dialect(Some("ts"), false),
+            FragmentDialect::TypeScript
+        );
+    }
+
+    #[test]
+    fn missing_authored_script_map_refuses() {
+        use crate::framework_common::{
+            RuntimeOutputDescriptor, RuntimeScriptBlock, SourceMapFidelity,
+        };
+        let compiled = RuntimeCompileOutput {
+            script: Some(RuntimeScriptBlock {
+                code: "const _sfc_main = {}\nexport default _sfc_main\n".to_string(),
+                source_map: String::new(),
+                setup: false,
+                output_descriptor: RuntimeOutputDescriptor::generated(
+                    "const _sfc_main = {}\n",
+                    None,
+                    &[("test:space", "test:artifact")],
+                    SourceMapFidelity::Approximate,
+                ),
+                generated_template_hole: None,
+                runtime_imports: Vec::new(),
+                sfc_export_placement: None,
+            }),
+            ..empty_bundle()
+        };
+        let err = assemble_vue_runtime_main(VueRuntimeMainRequest {
+            canonical_id: "Comp.vue",
+            compiled: &compiled,
+            script_lang: Some("js"),
+            has_script: true,
+            has_template: false,
+            force_js: false,
+            source_map: true,
+            runtime: "vue",
+            ssr: false,
+            decoration: VueMainDecoration::default(),
+        })
+        .expect_err("empty authored script map must refuse");
+        assert!(matches!(
+            err,
+            VueMainAssemblyFailure::InputMap(AssembleMapFailure::MissingRequiredInputMap {
+                fragment: MapFragment::Script,
+            })
+        ));
     }
 }

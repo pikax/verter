@@ -25,6 +25,7 @@
 //! Nothing routes a producer-supplied fragment through it unchecked.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Statement;
@@ -76,9 +77,12 @@ pub enum ArtifactUnavailableReason {
 }
 
 /// Empty available content is distinct from unavailable content.
+///
+/// Available bytes are `Arc<str>` so a publication payload and the typed
+/// artifact can share one allocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactContent {
-    Available(String),
+    Available(Arc<str>),
     Unavailable(ArtifactUnavailableReason),
 }
 
@@ -213,6 +217,27 @@ pub enum FragmentDialect {
 }
 
 impl FragmentDialect {
+    /// The language id a published Vue main module reports for this dialect.
+    pub const fn lang_id(self) -> &'static str {
+        match self {
+            FragmentDialect::JavaScript => "js",
+            FragmentDialect::Jsx => "jsx",
+            FragmentDialect::TypeScript => "ts",
+            FragmentDialect::Tsx => "tsx",
+            FragmentDialect::Declaration => "dts",
+        }
+    }
+
+    /// Schema language for [`CompileArtifact`] identity.
+    pub fn schema_language(self) -> verter_language::LanguageId {
+        verter_language::LanguageId::new(match self {
+            FragmentDialect::JavaScript | FragmentDialect::Jsx => "javascript",
+            FragmentDialect::TypeScript | FragmentDialect::Tsx | FragmentDialect::Declaration => {
+                "typescript"
+            }
+        })
+    }
+
     /// The base [`SourceType`] this dialect parses under — module-ness
     /// (`with_module`) is layered on top per [`SyntacticContract`], since
     /// that axis is orthogonal to the dialect itself.

@@ -783,7 +783,7 @@ fn source_bearing_positions(map: &str, code: &str) -> Vec<(u32, u32)> {
     let decoded = validate_and_decode(map, code)
         .unwrap_or_else(|error| panic!("the emitted map does not decode: {error:?}"));
     decoded
-        .segments
+        .segments()
         .iter()
         .filter_map(|segment| {
             segment
@@ -1178,7 +1178,7 @@ fn the_gate_detects_a_planted_defect_on_every_applicable_axis_family() {
     let pristine_decoded =
         validate_and_decode(&pristine_map, &pristine_code).expect("the golden's own map decodes");
     let kept: Vec<super::InSeg> = pristine_decoded
-        .segments
+        .segments()
         .iter()
         .filter(|segment| {
             segment
@@ -1200,7 +1200,7 @@ fn the_gate_detects_a_planted_defect_on_every_applicable_axis_family() {
             )
         })
         .collect();
-    let removed = pristine_decoded.segments.len() - kept.len();
+    let removed = pristine_decoded.segments().len() - kept.len();
     assert!(
         removed > 0,
         "the anchor plant removed no segment, so the golden's map does not satisfy the anchor \

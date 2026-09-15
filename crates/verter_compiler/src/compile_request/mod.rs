@@ -410,12 +410,15 @@ pub struct CompileRequest {
     component_id: Option<String>,
     is_production: bool,
     force_js: bool,
-    /// The `ssrContext.modules` manifest key form for the host Main
-    /// assembly; `None` falls back to the canonical id.
+    /// The `ssrContext.modules` manifest key form for compiler-owned Vue
+    /// Main assembly; `None` falls back to the canonical id.
     ssr_module_id: Option<String>,
-    /// Dev-server tooling flavour gating the host Main assembly's
+    /// Dev-server tooling flavour gating compiler-owned Vue Main
     /// `__file` and hot-accept trailer decoration.
     hmr_strategy: RuntimeHmrStrategy,
+    /// Emit the Vite SSR-manifest `useSSRContext` registration on an SSR
+    /// assembly. Defaults true; the host profile axis is the authority.
+    emit_ssr_module_registration: bool,
 }
 
 impl CompileRequest {
@@ -538,25 +541,29 @@ impl CompileRequest {
             force_js,
             ssr_module_id: None,
             hmr_strategy: RuntimeHmrStrategy::default(),
+            emit_ssr_module_registration: true,
         })
     }
 
     /// State the host Main-assembly decoration axes: the SSR-manifest key
     /// form (`ssrContext.modules` registration — root-relative under Vite;
-    /// `None` falls back to the canonical id) and the dev-server tooling
+    /// `None` falls back to the canonical id), the dev-server tooling
     /// flavour gating the natively composed `__file` and hot-accept
-    /// trailer.
+    /// trailer, and whether SSR assembly emits the `useSSRContext`
+    /// registration.
     ///
     /// These are host build knobs, not framework options; the legacy
-    /// `CompileProfile` carries the same pair and treats them as inert
+    /// `CompileProfile` carries the same axes and treats them as inert
     /// for Svelte, which this request preserves.
     pub fn with_host_assembly_axes(
         mut self,
         ssr_module_id: Option<String>,
         hmr_strategy: RuntimeHmrStrategy,
+        emit_ssr_module_registration: bool,
     ) -> Self {
         self.ssr_module_id = ssr_module_id;
         self.hmr_strategy = hmr_strategy;
+        self.emit_ssr_module_registration = emit_ssr_module_registration;
         self
     }
 
@@ -569,6 +576,11 @@ impl CompileRequest {
     /// decoration).
     pub fn hmr_strategy(&self) -> RuntimeHmrStrategy {
         self.hmr_strategy
+    }
+
+    /// Whether SSR assembly emits the Vite `useSSRContext` registration.
+    pub fn emit_ssr_module_registration(&self) -> bool {
+        self.emit_ssr_module_registration
     }
 
     pub fn products(&self) -> &[CompileProduct] {

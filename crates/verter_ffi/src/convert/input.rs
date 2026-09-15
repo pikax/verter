@@ -463,6 +463,7 @@ pub fn ffi_host_compile_request_to_compile_request(
             hmr_strategy.map_or(RuntimeHmrStrategy::None, |strategy| {
                 map_variants!(strategy, FfiHmrStrategy => RuntimeHmrStrategy { None, Vite, Webpack })
             }),
+            true,
         )
     })
 }

@@ -2492,6 +2492,314 @@ const x = 1
     );
 }
 
+#[test]
+fn template_only_sfc_main_lang_is_js() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = upsert_vue(&host, "/src/T.vue", "<template><div>hi</div></template>");
+    let result = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/src/T.vue".to_string()),
+            canonical_id: None,
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
+    assert_eq!(result.lang.as_deref(), Some("js"));
+}
+
+#[test]
+fn style_only_target_does_not_publish_main_and_succeeds() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = upsert_vue(
+        &host,
+        "/src/S.vue",
+        "<script setup>const x = 1</script><style>.x{color:red}</style><template><div/></template>",
+    );
+    verter_compiler::assembly::reset_vue_main_assembly_count();
+    let profile = CompileProfile {
+        target: CompileTarget::STYLE,
+        ..CompileProfile::default()
+    };
+    let style = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/S.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Style { index: 0 }),
+            compile_profile: profile.clone(),
+        })
+        .expect("STYLE-only must publish the style node");
+    assert!(!style.code.is_empty());
+    assert_eq!(
+        verter_compiler::assembly::vue_main_assembly_count(),
+        0,
+        "STYLE-only must not assemble Main"
+    );
+    let main = host.get_virtual_file(VirtualQuery {
+        raw_id: None,
+        canonical_id: Some("/src/S.vue".to_string()),
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile,
+    });
+    assert!(
+        matches!(main, Err(HostError::MissingVirtualNode { .. })),
+        "STYLE-only must not publish Main, got {main:?}"
+    );
+}
+
+#[test]
+fn vue_main_fresh_incremental_and_edit_revert_agree() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let src = r#"<script setup>
+const x = 1
+</script>
+<template><div>{{ x }}</div></template>"#;
+    let _ = upsert_vue(&host, "/src/Eq.vue", src);
+    let query = VirtualQuery {
+        raw_id: Some("/src/Eq.vue".to_string()),
+        canonical_id: None,
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile_dev(),
+    };
+    let fresh = host.get_virtual_file(query.clone()).unwrap();
+    let incremental = host.get_virtual_file(query.clone()).unwrap();
+    assert_eq!(fresh.code.as_ref(), incremental.code.as_ref());
+    let _ = upsert_vue(
+        &host,
+        "/src/Eq.vue",
+        r#"<script setup>
+const x = 2
+</script>
+<template><div>{{ x }}</div></template>"#,
+    );
+    let edited = host.get_virtual_file(query.clone()).unwrap();
+    assert_ne!(fresh.code.as_ref(), edited.code.as_ref());
+    let _ = upsert_vue(&host, "/src/Eq.vue", src);
+    let reverted = host.get_virtual_file(query).unwrap();
+    assert_eq!(fresh.code.as_ref(), reverted.code.as_ref());
+}
+
+#[test]
+fn syntax_error_does_not_warm_or_publish_main() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = upsert_vue(
+        &host,
+        "/src/Broken.vue",
+        "<script setup>const x =</script><template><div>{{ x }}</div></template>",
+    );
+    let query = VirtualQuery {
+        raw_id: Some("/src/Broken.vue".to_string()),
+        canonical_id: None,
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile_dev(),
+    };
+    let first = host.get_virtual_file(query.clone());
+    assert!(
+        first.as_ref().is_err() || first.as_ref().is_ok_and(|r| r.stale),
+        "syntax error must not publish a fresh Main, got {first:?}"
+    );
+    if let Ok(first) = first.as_ref() {
+        assert!(
+            !first.cache_hit,
+            "a refused/partial assembly must not warm: {first:?}"
+        );
+    }
+    let second = host.get_virtual_file(query);
+    match second {
+        Err(_) => {}
+        Ok(response) => {
+            assert!(
+                !response.cache_hit,
+                "a later read must not be a warm hit of the refused assembly"
+            );
+            assert!(
+                response.stale,
+                "a later successful Main must be last-known-good stale, got {response:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn explicit_no_hmr_request_does_not_emit_file_trailer() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = upsert_vue(
+        &host,
+        "/src/NoHmr.vue",
+        "<script setup>const x = 1</script><template><div>{{ x }}</div></template>",
+    );
+    let mut profile = profile_dev();
+    profile.hmr_strategy = HmrStrategy::None;
+    let result = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/src/NoHmr.vue".to_string()),
+            canonical_id: None,
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile,
+        })
+        .unwrap();
+    assert!(
+        !result.code.contains("_sfc_main.__file"),
+        "no-HMR request must not emit __file:\n{}",
+        result.code
+    );
+    assert!(
+        !result.code.contains("import.meta.hot"),
+        "no-HMR request must not emit HMR:\n{}",
+        result.code
+    );
+}
+
+#[test]
+fn host_main_uses_canonical_id_not_profile_filename() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/src/Canonical.vue";
+    let _ = upsert_vue(
+        &host,
+        canonical,
+        "<script setup>const x = 1</script><template><div>{{ x }}</div></template>",
+    );
+    let mut profile = profile_dev();
+    profile.filename = Some("Other.vue".to_string());
+    let result = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical.to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile,
+        })
+        .unwrap();
+    assert!(
+        result
+            .code
+            .contains("_sfc_main.__file = \"/src/Canonical.vue\""),
+        "__file must stay the canonical id, got:\n{}",
+        result.code
+    );
+    assert!(
+        !result.code.contains("Other.vue"),
+        "codegen filename override must not leak into Main bytes:\n{}",
+        result.code
+    );
+}
+
+#[test]
+fn host_ssr_registration_fallback_uses_canonical_id() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/src/Canonical.vue";
+    let _ = upsert_vue(
+        &host,
+        canonical,
+        "<script setup>const x = 1</script><template><div>{{ x }}</div></template>",
+    );
+    let mut profile = profile_dev();
+    profile.ssr = true;
+    profile.filename = Some("Other.vue".to_string());
+    profile.ssr_module_id = None;
+    let result = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical.to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile,
+        })
+        .unwrap();
+    assert!(
+        result.code.contains(".add(\"/src/Canonical.vue\")"),
+        "SSR fallback registration must use the canonical id, got:\n{}",
+        result.code
+    );
+}
+
+#[test]
+fn host_ssr_registration_opt_out_is_honored() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = upsert_vue(
+        &host,
+        "/src/SsrOff.vue",
+        "<script setup>const x = 1</script><template><div>{{ x }}</div></template>",
+    );
+    let mut profile = profile_dev();
+    profile.ssr = true;
+    profile.emit_ssr_module_registration = false;
+    let result = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/src/SsrOff.vue".to_string()),
+            canonical_id: None,
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile,
+        })
+        .unwrap();
+    assert!(
+        !result.code.contains("__vite_useSSRContext"),
+        "emit_ssr_module_registration=false must suppress useSSRContext:\n{}",
+        result.code
+    );
+    assert!(
+        !result.code.contains("ssrContext.modules"),
+        "emit_ssr_module_registration=false must suppress ssrContext.modules:\n{}",
+        result.code
+    );
+}
+
+#[test]
+fn compiler_assembly_map_refusal_does_not_publish_or_warm_main() {
+    use verter_compiler::compile_request::{CompileProduct, RuntimeProductRequest};
+    use verter_compiler::framework_common::FrameworkHostIntegrationBackend as _;
+    use verter_compiler::framework_common::{
+        CompileUnsupported, VueHostCompileRefusal, VueHostExecutionInputs,
+        VueHostIntegrationBackend, VueHostMultiProductDemand,
+    };
+
+    let artifact = verter_compiler::framework_common::registered_carrier_projection::parse_registered_source_for_tests(
+        FileLanguage::vue(),
+        verter_language::carrier_grammar::CarrierGrammarConfig::vue(
+            "{{",
+            "}}",
+            std::iter::empty::<&str>(),
+        )
+        .unwrap(),
+        "<script setup>const n = 1</script><template><div>{{ n }}</div></template>",
+    );
+    let alloc = oxc_allocator::Allocator::new();
+    let backend = VueHostIntegrationBackend::registered();
+    let admission = backend
+        .admit_host_products(
+            artifact.as_ref(),
+            VueHostMultiProductDemand {
+                products: vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
+                    runtime_source_map: true,
+                    ..Default::default()
+                })],
+                ..Default::default()
+            },
+        )
+        .expect("admits maps-on Main");
+    let refusal = backend
+        .compile_host_products(
+            admission,
+            artifact.as_ref(),
+            &VueHostExecutionInputs {
+                want_main: true,
+                has_script: true,
+                has_template: true,
+                canonical_id: "/src/Maps.vue".to_string(),
+                drop_required_script_map: true,
+                ..Default::default()
+            },
+            &alloc,
+        )
+        .expect_err("empty required script map must refuse host Main assembly");
+    match refusal {
+        VueHostCompileRefusal::Unsupported(CompileUnsupported::VueMainAssemblyFailed(reason)) => {
+            assert!(
+                reason.contains("source map") || reason.contains("script"),
+                "typed assembly reason must survive the host products lane, got {reason}"
+            );
+        }
+        other => panic!("expected VueMainAssemblyFailed, got {other:?}"),
+    }
+}
+
 /// @ai-generated - export type must be stripped from main module when force_js: true
 #[test]
 fn main_module_strips_export_type_when_force_js() {

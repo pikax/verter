@@ -134,7 +134,7 @@ fn completed_external_preprocessing_round_trips_as_a_qualified_style_artifact() 
     let artifact = &set.artifacts()[0];
     assert_eq!(
         artifact.content,
-        ArtifactContent::Available(PRODUCED.to_owned()),
+        ArtifactContent::Available(PRODUCED.into()),
         "the produced bytes reach the artifact verbatim, never re-emitted"
     );
     assert_eq!(

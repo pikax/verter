@@ -134,6 +134,9 @@ pub(crate) fn vue_host_products_demand(
         component_id: profile.component_id.clone(),
         is_production: profile.is_production,
         force_js: profile.force_js,
+        hmr_strategy: crate::compile::hmr_strategy(profile.hmr_strategy),
+        ssr_module_id: profile.ssr_module_id.clone(),
+        emit_ssr_module_registration: profile.emit_ssr_module_registration,
     }
 }
 
@@ -208,6 +211,7 @@ pub(crate) fn execute_bound_host_products(
     want_runtime: bool,
     want_ide: bool,
     want_template_data: bool,
+    want_main: bool,
     alloc: &oxc_allocator::Allocator,
 ) -> Result<BoundCompiledProducts, HostProductsFailure> {
     use super::native_host_binding::BoundNativeHostRequest;
@@ -241,12 +245,13 @@ pub(crate) fn execute_bound_host_products(
                 .unwrap_or(
                     crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::RuntimeBindingNames,
                 );
-            let inputs = prepare_vue_execution_inputs(
+            let mut inputs = prepare_vue_execution_inputs(
                 host,
                 snapshot,
                 macro_demand,
                 SharedDependencyAxis::Restate,
             )?;
+            inputs.want_main = want_main;
             let demand = vue_host_products_demand(
                 profile,
                 &snapshot.canonical_id,
@@ -370,6 +375,15 @@ enum SharedDependencyAxis {
 /// request and a profile-derived demand execute over identical resolved
 /// inputs; the routes differ only in the demand document they admit and
 /// in whether they own the shared dependency axis.
+//
+// `VueHostExecutionInputs` carries one `#[cfg(any(test, feature =
+// "test-support"))]` field, and that cfg is evaluated in `verter_compiler`,
+// not here: `verter_session/test-support` forwards to `verter_scheduler`, so
+// nothing this crate can spell predicts whether the field exists. The struct
+// update tail is what makes the literal correct in every combination --
+// `Default` supplies exactly the fields that were compiled. Naming the field
+// under a local cfg instead fails `cargo check --workspace` with E0560.
+#[allow(clippy::needless_update)]
 fn prepare_vue_execution_inputs(
     host: &crate::VerterHost,
     snapshot: &CompileInput,
@@ -406,10 +420,24 @@ fn prepare_vue_execution_inputs(
         runtime_inline_template_chunk: false,
         prepared_styles: snapshot.prepared_styles.clone(),
     };
+    let (style_specifiers, custom_specifiers) = crate::compile::vue_main_host_identifiers(
+        &snapshot.canonical_id,
+        snapshot.meta.style_langs.len(),
+        snapshot.meta.custom_types.len(),
+        &snapshot.meta,
+    );
     Ok(VueHostExecutionInputs {
         block_content: snapshot.block_content_inputs.clone(),
         vue_facts: Some(vue_facts),
         prepared_styles: snapshot.prepared_styles.clone(),
+        canonical_id: snapshot.canonical_id.clone(),
+        style_specifiers,
+        custom_specifiers,
+        want_main: true,
+        has_script: snapshot.meta.has_script,
+        has_template: snapshot.meta.has_template,
+        script_lang: snapshot.meta.script_lang.clone(),
+        ..Default::default()
     })
 }
 
@@ -752,6 +780,9 @@ pub(crate) fn vue_runtime_render_demand(
         component_id: profile.component_id.clone(),
         is_production: profile.is_production,
         force_js: profile.force_js,
+        hmr_strategy: crate::compile::hmr_strategy(profile.hmr_strategy),
+        ssr_module_id: profile.ssr_module_id.clone(),
+        emit_ssr_module_registration: profile.emit_ssr_module_registration,
     }
 }
 
@@ -1030,14 +1061,20 @@ pub(crate) fn runtime_bundle_unsupported_diagnostics(
     source_len: u32,
     unsupported: &verter_compiler::framework_common::CompileUnsupported,
 ) -> DiagnosticsSnapshot {
-    DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
-        severity: HostSeverity::Error,
-        code: compile_unsupported_code(unsupported).to_string(),
-        message: format!(
+    let message = match unsupported {
+        verter_compiler::framework_common::CompileUnsupported::VueMainAssemblyFailed(reason) => {
+            reason.clone()
+        }
+        _ => format!(
             "carrier '{}' cannot produce a runtime bundle for '{}'",
             artifact.adapter_id().as_str(),
             canonical_id
         ),
+    };
+    DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+        severity: HostSeverity::Error,
+        code: compile_unsupported_code(unsupported).to_string(),
+        message,
         arguments: Vec::new(),
         span: verter_span::Span::new(0, source_len),
     }])
@@ -1366,16 +1403,120 @@ pub(crate) fn compile_unsupported_code(
         verter_compiler::framework_common::CompileUnsupported::ProductExecutionUngranted {
             ..
         } => "HOST_COMPILE_PRODUCT_EXECUTION_UNGRANTED",
+        verter_compiler::framework_common::CompileUnsupported::VueMainAssemblyFailed(_) => {
+            "HOST_MAIN_MODULE_ASSEMBLY_FAILED"
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use verter_compiler::assembly::ContentId;
     use verter_compiler::framework_common::RuntimeBlockContentInput;
     use verter_compiler::style_planner::{ExternalStyleProducer, PreprocessorIdentity};
+
+    #[test]
+    fn vue_main_assembly_failure_keeps_the_stable_host_code() {
+        let unsupported =
+            verter_compiler::framework_common::CompileUnsupported::VueMainAssemblyFailed(
+                "the script fragment is authored and present but carries no source map".to_string(),
+            );
+        assert_eq!(
+            compile_unsupported_code(&unsupported),
+            "HOST_MAIN_MODULE_ASSEMBLY_FAILED"
+        );
+        let artifact = verter_compiler::framework_common::registered_carrier_projection::parse_registered_source_for_tests(
+            verter_language::FileLanguage::vue(),
+            verter_language::carrier_grammar::CarrierGrammarConfig::vue(
+                "{{",
+                "}}",
+                std::iter::empty::<&str>(),
+            )
+            .unwrap(),
+            "<script setup>const n = 1</script><template><div/></template>",
+        );
+        let snapshot =
+            runtime_bundle_unsupported_diagnostics(&artifact, "Comp.vue", 12, &unsupported);
+        assert_eq!(
+            snapshot.diagnostics[0].code,
+            "HOST_MAIN_MODULE_ASSEMBLY_FAILED"
+        );
+        assert!(
+            snapshot.diagnostics[0]
+                .message
+                .contains("carries no source map"),
+            "typed assembly reason must reach the host diagnostic, got {}",
+            snapshot.diagnostics[0].message
+        );
+    }
+
+    #[test]
+    fn compile_host_products_assembly_refusal_maps_to_the_stable_host_code() {
+        use verter_compiler::compile_request::{CompileProduct, RuntimeProductRequest};
+        use verter_compiler::framework_common::FrameworkHostIntegrationBackend as _;
+        use verter_compiler::framework_common::{
+            VueHostCompileRefusal, VueHostExecutionInputs, VueHostIntegrationBackend,
+            VueHostMultiProductDemand,
+        };
+
+        let artifact = verter_compiler::framework_common::registered_carrier_projection::parse_registered_source_for_tests(
+            verter_language::FileLanguage::vue(),
+            verter_language::carrier_grammar::CarrierGrammarConfig::vue(
+                "{{",
+                "}}",
+                std::iter::empty::<&str>(),
+            )
+            .unwrap(),
+            "<script setup>const n = 1</script><template><div>{{ n }}</div></template>",
+        );
+        let alloc = oxc_allocator::Allocator::new();
+        let backend = VueHostIntegrationBackend::registered();
+        let admission = backend
+            .admit_host_products(
+                artifact.as_ref(),
+                VueHostMultiProductDemand {
+                    products: vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
+                        runtime_source_map: true,
+                        ..Default::default()
+                    })],
+                    ..Default::default()
+                },
+            )
+            .expect("admits maps-on Main");
+        let refusal = backend
+            .compile_host_products(
+                admission,
+                artifact.as_ref(),
+                &VueHostExecutionInputs {
+                    want_main: true,
+                    has_script: true,
+                    has_template: true,
+                    canonical_id: "/src/Maps.vue".to_string(),
+                    drop_required_script_map: true,
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect_err("host products lane must refuse missing required script map");
+        let VueHostCompileRefusal::Unsupported(unsupported) = refusal else {
+            panic!("expected CompileUnsupported assembly refusal, got {refusal:?}");
+        };
+        let snapshot = runtime_bundle_unsupported_diagnostics(
+            artifact.as_ref(),
+            "/src/Maps.vue",
+            12,
+            &unsupported,
+        );
+        assert_eq!(
+            snapshot.diagnostics[0].code,
+            "HOST_MAIN_MODULE_ASSEMBLY_FAILED"
+        );
+        assert!(
+            !snapshot.diagnostics[0].message.is_empty(),
+            "typed assembly reason must reach the host diagnostic"
+        );
+    }
 
     const AUTHORED: &str = "$tone: red;\n.card { color: $tone; }";
     const PRODUCED: &str = ".card { color: red; }";
