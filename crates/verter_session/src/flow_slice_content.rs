@@ -7559,13 +7559,18 @@ impl Lowerer<'_> {
     /// expression as a gated value type plus the authored member path.
     ///
     /// `None` when there is no heritage context (not a direct class
-    /// member, or a heritage-less class) or the heritage expression is one
-    /// the shared shallow pass cannot model (a call, a mixin composition)
-    /// — the call then keeps the fail-closed rail. The heritage answer is
-    /// gated exactly like any leaf that names names: a frame that shadows
-    /// the heritage expression's root wraps the call in the
-    /// root-identifier gate's carrier, and the evaluator fails it closed
-    /// when the owner scope would answer the shadowed name.
+    /// member, or a heritage-less class), the heritage expression is one
+    /// the shared shallow pass cannot model (a call, a mixin composition),
+    /// or the heritage is GENERIC (`extends Base<Args>`) — the carrier
+    /// projects the base's PROTOTYPE side unbound, which would publish
+    /// the base's free type parameters instead of `Args`-instantiated
+    /// members; failing closed here is honest, an eager fabrication is
+    /// not. In every `None` case the call then keeps the fail-closed
+    /// rail. The heritage answer is gated exactly like any leaf that
+    /// names names: a frame that shadows the heritage expression's root
+    /// wraps the call in the root-identifier gate's carrier, and the
+    /// evaluator fails it closed when the owner scope would answer the
+    /// shadowed name.
     fn lower_super_call_on_heritage(
         &mut self,
         member: &[Arc<str>],
@@ -7573,6 +7578,9 @@ impl Lowerer<'_> {
         mode: ExprMode,
     ) -> Option<SliceExpr> {
         let heritage_access = self.enclosing_heritage?;
+        if heritage_access.super_type_arguments.is_some() {
+            return None;
+        }
         let super_class = heritage_access.super_class;
         // The heritage expression's gated value type, through the same
         // leaf lowering + frame gate any authored heritage read takes.

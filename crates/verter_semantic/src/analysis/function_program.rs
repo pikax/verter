@@ -2769,6 +2769,7 @@ fn discover_class_members<'ast>(
                         .as_ref()
                         .map(|super_class| EnclosingHeritage {
                             super_class,
+                            super_type_arguments: class.super_type_arguments.as_deref(),
                             static_side: method.r#static,
                         });
                 let member_path: Arc<[u32]> = Arc::from(vec![member_ordinal].into_boxed_slice());
@@ -2798,6 +2799,7 @@ fn discover_class_members<'ast>(
                         .as_ref()
                         .map(|super_class| EnclosingHeritage {
                             super_class,
+                            super_type_arguments: class.super_type_arguments.as_deref(),
                             static_side: prop.r#static,
                         });
                 match prop.value.as_ref() {
@@ -4073,6 +4075,9 @@ pub struct ResolvedFunctionNode<'a> {
 pub struct EnclosingHeritage<'a> {
     /// The class's authored `extends` expression.
     pub super_class: &'a oxc_ast::ast::Expression<'a>,
+    /// The class's authored `extends Base<Args>` type arguments, when the
+    /// heritage is generic (`None` for a non-generic `extends Base`).
+    pub super_type_arguments: Option<&'a oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
     /// Whether the member declaring the frame is STATIC — `super.x` in a
     /// static member reads the base CONSTRUCTOR's own (static) side; in an
     /// instance member it reads the base's PROTOTYPE side.
@@ -4205,6 +4210,7 @@ pub fn resolve_function_node<'a>(
                         .as_ref()
                         .map(|super_class| EnclosingHeritage {
                             super_class,
+                            super_type_arguments: class.super_type_arguments.as_deref(),
                             static_side: member_is_static,
                         });
                 if steps.len() == 0 {

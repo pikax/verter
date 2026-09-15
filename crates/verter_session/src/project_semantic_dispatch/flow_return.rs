@@ -12785,7 +12785,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         ));
                         return Positional::Unmodeled;
                     };
-                    current = member;
+                    // A declared-optional member (`b?: string`) folds its
+                    // absent-key `undefined` into THIS link's read — the
+                    // same authority `project_segments_navigate` uses for
+                    // a plain member path — regardless of whether the hop
+                    // itself used `?.` or `.`.
+                    let declared_optional =
+                        self.member_read_optionality(current, name.as_ref()) == Some(true);
+                    current = if declared_optional {
+                        self.fold_optional_read_undefined(member)
+                    } else {
+                        member
+                    };
                 }
                 if adds_undefined {
                     current = self.dispatch.intern_normalized_union_or_intersection(

@@ -48,7 +48,7 @@ use crate::semantic_query::{
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 use verter_type_expr::facts::FunctionPartIdentity;
-use verter_type_expr::{LiteralValue, PrimitiveName, TopLevelOwnerId, TypeExpr};
+use verter_type_expr::{LiteralValue, PrimitiveName, TopLevelOwnerId, TypeExpr, UnknownValue};
 
 // ──────────────────────────────────────────────────────────────────────
 // Fixtures
@@ -74,6 +74,28 @@ export class LeafSuperBase {
 export class LeafSuperDerived extends LeafSuperBase {
   m(): number {
     return super.m();
+  }
+}
+
+export class LeafSuperGenericBase<T> {
+  m(): T {
+    return null as unknown as T;
+  }
+}
+export class LeafSuperGenericDerived extends LeafSuperGenericBase<string> {
+  m(): string {
+    return super.m();
+  }
+}
+
+export class LeafSuperStaticBase {
+  static s(): string {
+    return "s";
+  }
+}
+export class LeafSuperStaticDerived extends LeafSuperStaticBase {
+  static s(): string {
+    return super.s();
   }
 }
 
@@ -243,6 +265,16 @@ export function callCtorSigNew() {
 export declare const maybeObj: { b: string } | undefined;
 export function callOptionalMemberRead() {
   return maybeObj?.b;
+}
+
+export declare const optProp: { b?: string };
+export function callOptionalDeclaredMemberRead() {
+  return optProp?.b;
+}
+
+export declare const optChainProp: { b?: { c: number } };
+export function callOptionalDeclaredChainMemberRead() {
+  return optChainProp?.b?.c;
 }
 "#;
 
@@ -1573,10 +1605,14 @@ fn assignment_expression_return_is_the_assigned_type() {
 #[test]
 fn class_expression_return_is_not_any() {
     let host = ts_host();
-    assert_ne!(
-        value_of(&host, LEAF, "leafClassExpr"),
-        TypeExpr::Primitive(PrimitiveName::Any),
-        "leafClassExpr must not be `any`"
+    assert_eq!(
+        eval(&host, LEAF, "leafClassExpr"),
+        Outcome::Value {
+            ty: TypeExpr::Unknown(UnknownValue::compatibility_projection("unmodeledPosition")),
+            degradation: Some(FlowReturnDegradation::FlowGap(FlowGap::UnmodeledExpression)),
+            candidates: 0,
+        },
+        "leafClassExpr"
     );
 }
 
@@ -1596,10 +1632,14 @@ fn class_expression_return_is_not_any() {
 #[test]
 fn dynamic_import_expression_return_is_not_any() {
     let host = ts_host();
-    assert_ne!(
-        value_of(&host, LEAF, "leafImportExpr"),
-        TypeExpr::Primitive(PrimitiveName::Any),
-        "leafImportExpr must not be `any`"
+    assert_eq!(
+        eval(&host, LEAF, "leafImportExpr"),
+        Outcome::Value {
+            ty: TypeExpr::Unknown(UnknownValue::compatibility_projection("unmodeledPosition")),
+            degradation: Some(FlowReturnDegradation::FlowGap(FlowGap::UnmodeledExpression)),
+            candidates: 0,
+        },
+        "leafImportExpr"
     );
 }
 
@@ -1619,10 +1659,14 @@ fn dynamic_import_expression_return_is_not_any() {
 #[test]
 fn meta_property_new_target_return_is_not_any() {
     let host = ts_host();
-    assert_ne!(
-        value_of(&host, LEAF, "leafNewTarget"),
-        TypeExpr::Primitive(PrimitiveName::Any),
-        "leafNewTarget must not be `any`"
+    assert_eq!(
+        eval(&host, LEAF, "leafNewTarget"),
+        Outcome::Value {
+            ty: TypeExpr::Unknown(UnknownValue::compatibility_projection("unmodeledPosition")),
+            degradation: Some(FlowReturnDegradation::FlowGap(FlowGap::UnmodeledExpression)),
+            candidates: 0,
+        },
+        "leafNewTarget"
     );
 }
 
@@ -1660,6 +1704,32 @@ fn optional_member_read_return_is_the_stripped_member_or_undefined() {
             TypeExpr::Primitive(PrimitiveName::Undefined),
         ]),
     );
+    // A DECLARED-optional member (`b?: string`) folds its own absent-key
+    // `undefined` into the read even over a NON-nullable base — the same
+    // fold `project_segments_navigate` applies to a plain member path.
+    // Before the per-link fold, this hop bypassed that authority and
+    // published the bare member type clean and warm.
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "callOptionalDeclaredMemberRead",
+        TypeExpr::union(vec![
+            string(),
+            TypeExpr::Primitive(PrimitiveName::Undefined),
+        ]),
+    );
+    // Chained declared-optional hops over a non-nullable root: each link
+    // folds its own optionality independently, so the terminal read still
+    // carries `| undefined` even though neither hop's base is nullish.
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "callOptionalDeclaredChainMemberRead",
+        TypeExpr::union(vec![
+            TypeExpr::Primitive(PrimitiveName::Undefined),
+            number(),
+        ]),
+    );
 }
 /// CANARY (landed) — a `super.m()` call in a derived class method
 /// resolves to the base member's declared return.
@@ -1693,6 +1763,60 @@ fn super_method_call_return_resolves_to_the_base_member() {
             candidates: 1,
         }
     );
+}
+
+/// CANARY — `super.s()` reaches the base's STATIC side (not the
+/// instance/prototype side) when the calling member is itself static.
+///
+/// Oracle: `ReturnType<typeof LeafSuperStaticDerived.s>` is `string`.
+#[test]
+fn super_static_method_call_return_resolves_to_the_base_static_member() {
+    let host = ts_host();
+    assert_eq!(
+        eval_part(&host, LEAF, "LeafSuperStaticDerived", member_part(0), 0),
+        Outcome::Value {
+            ty: string(),
+            degradation: None,
+            candidates: 1,
+        }
+    );
+}
+
+/// CANARY (fail-closed leg) — `super.m()` over a GENERIC base
+/// (`extends Base<string>`) does not publish the base's unbound type
+/// parameter (or any other uninstantiated answer) clean and warm. The
+/// heritage carrier only ever projects the base's PROTOTYPE side
+/// UNINSTANTIATED, so publishing through it here would hand back a free
+/// `T`, or whatever the unbound construct-signature instantiation
+/// yields — a wrong answer that is still typed and still not `any`.
+/// `lower_super_call_on_heritage` fails closed (no carrier) whenever the
+/// enclosing class's heritage carries `super_type_arguments`, so this
+/// falls to the shared fail-closed rail — the SAME `UnmodeledPosition`
+/// marker an unrepresentable callee root takes elsewhere — instead of
+/// fabricating an uninstantiated member type.
+///
+/// Oracle: `ReturnType<typeof LeafSuperGenericDerived.prototype.m>` is
+/// `string` (the checker instantiates `Base<string>` before projecting
+/// `m`) — an answer this form does not yet attempt to produce.
+#[test]
+fn super_method_call_over_generic_base_fails_closed_not_uninstantiated() {
+    let host = ts_host();
+    match eval_part(&host, LEAF, "LeafSuperGenericDerived", member_part(0), 0) {
+        Outcome::Value {
+            ty,
+            degradation,
+            candidates,
+        } => {
+            assert_ne!(ty, string(), "must not silently produce the checker's answer via an unmodeled/uninstantiated path");
+            assert_eq!(
+                degradation,
+                Some(FlowReturnDegradation::UnmodeledPosition),
+                "generic super call must fail closed with the typed gap"
+            );
+            assert_eq!(candidates, 0, "a fail-closed answer must not warm");
+        }
+        other => panic!("expected a degraded fail-closed value, got {other:?}"),
+    }
 }
 
 /// CANARY — a `PrivateInExpression` (`#x in o`) in return position is
