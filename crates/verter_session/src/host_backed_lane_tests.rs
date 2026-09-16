@@ -276,7 +276,7 @@ fn host_backed_multi_product_executes_exactly_the_admitted_population() {
     );
     assert_eq!(
         style.code.as_ref(),
-        oracle_bundle.styles[0].code.as_str(),
+        oracle_bundle.qualified_styles[0].result.code(),
         "the published Style bytes must be the bound backend's own admitted style product"
     );
     assert_eq!(

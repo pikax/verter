@@ -745,7 +745,7 @@ impl VerterHost {
             sourcemap_bytes = sourcemap_bytes.saturating_add(t.source_map.len() as u64);
         }
         for style in result.styles.iter() {
-            output_bytes = output_bytes.saturating_add(style.code.len() as u64);
+            output_bytes = output_bytes.saturating_add(style.code().len() as u64);
         }
         if let Some(tsx) = result.tsx.as_ref() {
             output_bytes = output_bytes.saturating_add(tsx.code.len() as u64);

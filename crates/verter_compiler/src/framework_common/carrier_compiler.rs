@@ -763,33 +763,6 @@ pub struct RuntimeTemplateBlock {
     pub output_descriptor: RuntimeOutputDescriptor,
 }
 
-/// A framework-neutral compiled `<style>` block.
-#[derive(Debug, Clone)]
-pub struct RuntimeStyleBlock {
-    /// The processed CSS code.
-    pub code: String,
-    /// Source map for [`code`](Self::code) — `Some` ONLY when the compile
-    /// demanded maps ([`RuntimeCompileOptions::source_map`]) AND the
-    /// framework produces one for its css artifact (Svelte's external
-    /// `css.map`, generated from the same transform that rendered the code).
-    /// `None` otherwise.
-    pub source_map: Option<String>,
-    /// Optional explicit language (`scss`, …); `None` ⇒ plain CSS.
-    pub lang: Option<String>,
-    /// The component SCOPE HASH the block's selectors are scoped under, when
-    /// the framework scopes by class (Svelte's `svelte-<djb2>` — the same hash
-    /// baked into the component's markup). `None` when the framework carries
-    /// its scope on [`RuntimeCompileOutput::scope_id`] instead (Vue's
-    /// `data-v-…` attribute scoping) or the block is unscoped.
-    pub scope_hash: Option<String>,
-    /// Whether the block's css includes GLOBAL css (Svelte's `:global(...)`
-    /// — the official `css.hasGlobal`). Always `false` for a framework whose
-    /// style pipeline carries no such fact (Vue).
-    pub has_global: bool,
-    /// Qualified identity and source-map chain for this emitted unit.
-    pub output_descriptor: RuntimeOutputDescriptor,
-}
-
 /// A compiled `<style>` output qualified by the stage identity of its bytes.
 ///
 /// The stylesheet travels as a [`verter_css_syntax::QualifiedStyleResult`],
@@ -801,7 +774,8 @@ pub struct RuntimeStyleBlock {
 /// [`Self::output_descriptor`] declares.
 #[derive(Debug, Clone)]
 pub struct QualifiedRuntimeStyle {
-    /// The published stylesheet: framework-rewritten plain CSS.
+    /// The published stage-qualified stylesheet — authored, preprocessed or
+    /// framework-rewritten, as the result's own stage says.
     pub result: verter_css_syntax::QualifiedStyleResult,
     /// The stage of the bytes the framework rewrite consumed.
     pub consumed_stage: verter_css_syntax::StyleStage,
@@ -869,10 +843,11 @@ pub struct RuntimeCompileOutput {
     pub script: Option<RuntimeScriptBlock>,
     /// The compiled template / render-function block, when present.
     pub template: Option<RuntimeTemplateBlock>,
-    /// Compiled `<style>` blocks in source order.
-    pub styles: Vec<RuntimeStyleBlock>,
-    /// Stage-qualified compiled `<style>` outputs in source order. A carrier
-    /// publishes its styles here or in [`Self::styles`], never both.
+    /// Stage-qualified compiled `<style>` outputs in source order. Every
+    /// carrier publishes every style here: a `<style>` output leaves the
+    /// carrier boundary carrying the stage, dialect and producer of its
+    /// bytes, so there is no shape in which an unqualified stylesheet
+    /// travels beside a qualified one.
     pub qualified_styles: Vec<QualifiedRuntimeStyle>,
     /// Custom blocks in source order.
     pub custom_blocks: Vec<RuntimeCustomBlock>,
@@ -928,7 +903,6 @@ impl RuntimeCompileOutput {
         self.main.is_some()
             || self.script.is_some()
             || self.template.is_some()
-            || !self.styles.is_empty()
             || !self.qualified_styles.is_empty()
             || !self.custom_blocks.is_empty()
     }

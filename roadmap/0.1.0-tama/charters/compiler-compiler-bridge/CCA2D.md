@@ -28,7 +28,7 @@ release_gating=none
 external_requirements=
 charter=charters/compiler-compiler-bridge/CCA2D.md
 max_production_loc=500
-max_production_files=5
+max_production_files=10
 max_related_packages=2
 rescope_loc=1500
 rescope_files=12
@@ -39,29 +39,44 @@ rescope_unrelated_packages=3
 
 ## Independently acceptable outcome and owners
 
-Delete the now-unused unqualified supplied/prepared-style transport, `RuntimeStyleBlock`, and compatibility helpers after Vue and Svelte independently consume the stage-qualified boundary. Current residual ownership is the legacy neutral DTO/input bucket; final style handoff ownership is CCA2D0's typed continuation. Reverting restores only unused compatibility declarations.
+Delete the unqualified style transport — `RuntimeStyleBlock`, the `styles` lists on `RuntimeCompileOutput` and `DirectCompileOutput`, and the bridge's compatibility population of them — so every carrier publishes every `<style>` output as one stage-qualified `QualifiedRuntimeStyle`. Final style handoff ownership is CCA2D0's typed continuation. Reverting restores the unqualified transport and the two defects named under the amendment.
 
-J4 owns deletion of style-owner-local unqualified preprocessor output. This node owns only the compiler bridge transport, `RuntimeStyleBlock`, and bridge compatibility population named below.
+J4 owns deletion of style-owner-local unqualified preprocessor output. This node owns the compiler bridge transport, `RuntimeStyleBlock`, the bridge compatibility population, and — by the amendment below — the unselected Vue carrier route that still depended on them.
 
-## Exact deletion population and boundary
+## Amendment (ratified scope)
 
-- `crates/verter_compiler/src/framework_common/carrier_compiler.rs` and `framework_common/mod.rs` — delete `RuntimeStyleBlock` and its exports.
-- `crates/verter_compiler/src/style_planner.rs`, `standalone.rs`, and bounded request/transport surfaces — delete only unqualified supplied/prepared-style fields and helpers with zero remaining consumer.
+The original charter assumed CCA2DV's contract held. It did not: CCA2DV moved only the *fully host-selected* Vue style route onto the qualified boundary. The plain Vue carrier route still published `RuntimeStyleBlock`, and `apply_selected_runtime_styles` kept a `selects_style_fully` dual-publication fallback. Deleting the transport therefore requires finishing that migration here, rather than reopening CCA2DV, because the completion and the deletion are the same change: the unqualified list is removed in the same edit that stops populating it.
+
+Two defects fall inside that change and are owned here:
+
+- The Vue main-module prelude counted the unqualified list, which a full host style selection had emptied, so a component whose every `<style>` block had host-selected content published no style import.
+- The route identity digest did not hash a qualified style's dialect, producer (kind, named identity, version, config fingerprint) or refusal flag, so routes could publish byte-identical CSS under different provenance and still compare equal.
+
+## Exact population and boundary
+
+- `crates/verter_compiler/src/framework_common/carrier_compiler.rs`, `framework_common/mod.rs` — delete `RuntimeStyleBlock`, `RuntimeCompileOutput::styles` and the export.
+- `crates/verter_compiler/src/compile/types.rs`, `compile/mod.rs` — `VerterStyleBlock` carries the Vue cascade's own `QualifiedStyleResult` instead of discarding it at `into_code()`; `None` exactly when the block's `lang` names no admitted dialect.
+- `crates/verter_compiler/src/framework_common/vue_bridge.rs` — hand that value on as one slot per block without re-deriving any stage; an unqualifiable block's slot stays empty.
+- `crates/verter_compiler/src/standalone.rs` — delete `DirectCompileOutput::styles` and the `selects_style_fully` fallback; fill slots from host selections, then publish the list once; the route identity digest hashes the whole qualified identity.
+- `crates/verter_compiler/src/assembly/vue_module.rs` — the prelude counts published styles.
+- `crates/verter_session/src/compile.rs`, `host_compile_audit.rs`, `host_resolve/virtual_file_pipeline.rs` — read the one published list.
 - Focused fixture/test construction is retargeted to qualified style artifacts using durable style identity/stage wording.
 
-Do not alter `StyleStage`, `QualifiedStyleResult`, the qualified continuation/artifact, CSS preprocessing/semantics, framework-specific output behavior, or facade/host publication.
+Do not alter `StyleStage`, `QualifiedStyleResult`, the qualified continuation/artifact, or CSS preprocessing/semantics. Never publish a qualified value whose stage, dialect or producer is not a fact of its bytes: where no truthful value exists, publish none.
 
 ## Exact predecessor contracts and binding laws
 
-- **CCA2DV:** all Vue style consumers use the qualified continuation; Vue-side unqualified fields/adapters are absent.
+- **CCA2DV:** Vue consumers on the host-selected route use the qualified continuation. The unselected carrier route's migration is completed by this node (see Amendment).
 - **CCA2DS:** all Svelte style consumers use the qualified continuation; Svelte-side unqualified fields/adapters are absent.
-- Every legacy declaration must have zero production consumer before deletion. Discovery of a live consumer reopens the owning migration; no compatibility fallback or dual DTO may be retained here.
+- Every legacy declaration has zero production consumer after this change. No compatibility fallback or dual DTO may be retained.
+- A Vue style block whose `lang` names no admitted dialect has no qualified value, whether or not it authored bytes, and no placeholder is manufactured to hold its ordinal. Its slot stays empty until host-selected content is applied, and the style list is published once afterwards, never with a hole — it is the index space the host's imports and virtual files are keyed by. An unfilled slot whose block authored bytes was already refused with an error, so that compile publishes no styles; one whose block authored none fails closed as block content unavailable.
 
 ## Acceptance, performance, aborts, and verification
 
 - **CCA2D-AC1:** repository-wide structural/type evidence finds no unqualified style input, `RuntimeStyleBlock`, export, constructor, helper, or fallback.
-- **CCA2D-AC2:** Vue/Svelte CSS bytes, qualified maps, diagnostics, provenance, stage/basis, source order, scoped/modules/global behavior remain equivalent.
-- **CCA2D-AC3:** fresh/incremental/cancellation/complete-only evidence from both migrations remains green.
+- **CCA2D-AC2:** Vue/Svelte CSS bytes, qualified maps, diagnostics, provenance, stage/basis, source order, scoped/modules/global behavior remain equivalent, except exactly: (a) an error-bearing Vue compile refusing an unnameable style dialect publishes no styles; (b) a fully host-selected Vue component imports its styles again; (c) a self-closing block in a `lang` naming no admitted dialect whose content the host did not supply fails closed as block content unavailable. A host-supplied result for an unnameable authored dialect still publishes its preprocessed result under the named producer.
+- **CCA2D-AC3:** fresh/incremental/cancellation/complete-only evidence from both migrations remains green; the direct, prepared-first, prepared-repeat and batch routes agree under the strengthened digest.
 - **CCA2D-AC4:** deletion adds no work; one qualified continuation remains per applicable style and absent/inapplicable style stays zero-work.
+- **CCA2D-AC5:** the route identity digest changes when only a qualified style's refusal, producer kind, producer identity, version, config fingerprint, dialect, result stage or consumed stage changes; its style-count plant still collides when the count is removed from the hasher.
 
-Ceiling: 500 production LOC, 5 production files, 2 crates. Abort on a live legacy consumer, CSS semantic/preprocessor change, qualified-boundary mutation, or a sixth production file. Run structural scans plus Vue/Svelte style/preprocessor/host/map suites and `targeted-domain`. CCA2F consumes the legacy-free qualified boundary.
+Ceiling: 500 production LOC, 10 production files, 2 crates. Abort on a CSS semantic/preprocessor change, a `StyleStage`/`QualifiedStyleResult`/continuation mutation, a fabricated qualification, or an eleventh production file. Run structural scans plus Vue/Svelte style/preprocessor/host/map suites and `targeted-domain`. CCA2F consumes the legacy-free qualified boundary.

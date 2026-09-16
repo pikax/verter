@@ -250,7 +250,11 @@ impl VueMainDecoration {
         use std::fmt::Write;
         let mut prelude = String::new();
         let mut imports: Vec<DeclaredImport> = Vec::new();
-        for id in self.style_specifiers.iter().take(compiled.styles.len()) {
+        for id in self
+            .style_specifiers
+            .iter()
+            .take(compiled.qualified_styles.len())
+        {
             let _ = writeln!(prelude, "import \"{id}\"");
             imports.push(DeclaredImport {
                 specifier: id.clone(),
@@ -1834,12 +1838,16 @@ mod tests {
     #[test]
     fn decoration_emits_host_identifiers_and_skips_them_when_absent() {
         use crate::framework_common::{
-            RuntimeCustomBlock, RuntimeOutputDescriptor, RuntimeStyleBlock, SourceMapFidelity,
+            QualifiedRuntimeStyle, RuntimeCustomBlock, RuntimeOutputDescriptor, SourceMapFidelity,
         };
-        let style = RuntimeStyleBlock {
-            code: ".x{}".to_string(),
+        let style = QualifiedRuntimeStyle {
+            result: verter_css_syntax::QualifiedStyleResult::framework_rewritten(
+                verter_css_syntax::CssDialect::Css,
+                ".x{}",
+                Vec::new(),
+            ),
+            consumed_stage: verter_css_syntax::StyleStage::Authored,
             source_map: None,
-            lang: Some("css".to_string()),
             scope_hash: None,
             has_global: false,
             output_descriptor: RuntimeOutputDescriptor::generated(
@@ -1850,7 +1858,7 @@ mod tests {
             ),
         };
         let compiled = RuntimeCompileOutput {
-            styles: vec![style],
+            qualified_styles: vec![style],
             custom_blocks: vec![RuntimeCustomBlock {
                 block_type: "i18n".to_string(),
                 content: "{}".to_string(),

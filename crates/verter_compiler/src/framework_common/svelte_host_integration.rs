@@ -1495,10 +1495,6 @@ mod tests {
              second compile produced it"
         );
         assert!(
-            bundle.styles.is_empty(),
-            "Svelte css publishes only as a stage-qualified style"
-        );
-        assert!(
             products.runtime_server_bundle().is_none(),
             "the server accessor never serves a bundle whose ssr compile did not run"
         );
@@ -1968,7 +1964,6 @@ mod tests {
             ))],
         )
         .expect("a continued block compiles");
-        assert!(bundle.styles.is_empty(), "no unqualified style publishes");
         let style = bundle
             .qualified_styles
             .first()
