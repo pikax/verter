@@ -2605,11 +2605,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Each distinct declaration is read at most once per walk
     /// (seen-guarded worklist, cycle-safe), a repeated QUESTION is a memo
     /// hit, and a hop whose own ancestry is already memoized is folded in
-    /// whole instead of re-walked — so the reads a second, longer chain
-    /// pays are only the hops above what is already known. An
-    /// `instanceof` guard over a union therefore pays one ancestry
-    /// question per arm per edge no matter how deep the hierarchies are
-    /// or how many arms share them.
+    /// whole instead of re-walked — so the reads a LONGER chain pays
+    /// after a shorter one is cached are only the hops above it. The
+    /// converse does not hold: a fresh walk memoizes the REQUESTED
+    /// declaration only, so a shorter chain asked after a longer one
+    /// re-walks the shared part. See
+    /// [`ProjectSemanticDispatch::heritage_ancestry`] for why that is
+    /// left alone.
+    ///
+    /// None of that is what bounds the caller. An `instanceof` guard over
+    /// a union pays one ancestry QUESTION per arm per edge whatever the
+    /// hierarchies look like, because the walk is on this side of the
+    /// question.
     ///
     /// Every visited declaration must be OBSERVABLE and READABLE, or the
     /// answer is not a proof — see [`ClassAncestryReading::decided`]. The

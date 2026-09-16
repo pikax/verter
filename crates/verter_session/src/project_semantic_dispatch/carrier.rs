@@ -591,10 +591,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    project that registers no lib declaring the name, which is
     ///    every project in the standard hosts (their ambient registry is
     ///    empty, yet `Record`, `Pick` and `Promise` all resolve, because
-    ///    verter reduces them natively). The same two providers answer
-    ///    an AUTHORED `x: Record<K, V>` through
-    ///    [`Self::plan_bare_ref_head`], so a guard narrow and an authored
-    ///    annotation can never disagree about whether the global exists.
+    ///    verter reduces them natively).
+    ///
+    /// This is NOT yet the single availability authority for the whole
+    /// dispatch. [`Self::plan_bare_ref_head`]'s builtin fast paths — the
+    /// route an AUTHORED `x: Record<K, V>` takes — recognise the same two
+    /// registries INDEPENDENTLY and never call this. The two agree today
+    /// only because provider 2 makes `Record` and `Function` available
+    /// unconditionally, so no configuration can make them disagree. The
+    /// moment a project-scoped lib SELECTION lands (see below), that
+    /// coincidence ends and both routes must ask this one authority, or a
+    /// guard narrow and an authored annotation will disagree about
+    /// whether the global exists. Converging them is the successor's
+    /// work, not D10's: it changes the authored carrier-resolution hot
+    /// path, which is outside this charter's mutation boundary.
     ///
     /// What this deliberately does NOT do is treat a non-empty ambient
     /// registry as AUTHORITATIVE. Registered ambient corpora here are
@@ -647,6 +657,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // declaration identity for semantic classifiers and reducers.
         // Userland shadowing wins via the same `name_resolution` /
         // `ScopeShadowing` gates the builtin utilities use.
+        //
+        // This path and the one below recognise the global registries
+        // DIRECTLY; they do not go through
+        // `Self::lib_global_is_available`, which is the compiler-internal
+        // route's availability authority. Harmless while provider 2 makes
+        // every such global unconditionally available — see that method
+        // for what has to converge here once a project-scoped lib
+        // selection can withdraw one.
         if !name_resolution.contains_key(name.as_ref())
             && !shadowing.is_shadowing_lib(name.as_ref())
             && self.runtime_nominal_global_name(name.as_ref()).is_some()
