@@ -711,28 +711,6 @@ pub struct RuntimeDiagnostic {
     pub span: verter_span::Span,
 }
 
-/// The framework-OWNED ESM body the carrier emits for the runtime module.
-///
-/// Vue's runtime compiler now emits the assembled `_sfc_main` body here
-/// together with its compile artifact set. Svelte's runtime compiler emits
-/// its self-contained ESM the same way. `None` means there is no runtime
-/// surface to publish — the host must not reconstruct framework topology
-/// from block fields.
-#[derive(Debug, Clone, Default)]
-pub struct RuntimeMainModule {
-    /// The framework-owned ESM body, when the carrier emits one directly.
-    /// `None` ⇒ no runtime main to publish. Shared with the typed main
-    /// artifact when compiler assembly produced this body.
-    pub body_code: Option<std::sync::Arc<str>>,
-    /// Source map for `body_code` (empty when none / disabled).
-    pub source_map: String,
-    /// The language id of the produced body (`"js"` / `"ts"`), when known.
-    pub lang: Option<String>,
-    /// Compile-artifact schema for the assembled main, when this body was
-    /// produced by compiler-owned main-module assembly.
-    pub artifacts: Option<crate::assembly::CompileArtifactSet>,
-}
-
 /// A framework-neutral compiled `<script>` block.
 #[derive(Debug, Clone)]
 pub struct RuntimeScriptBlock {
@@ -879,10 +857,14 @@ pub struct RuntimeCustomBlock {
 /// once by the host's virtual-file population.
 #[derive(Debug, Default)]
 pub struct RuntimeCompileOutput {
-    /// The framework-owned main module (body / map / lang). `body_code`
-    /// `None` ⇒ there is no runtime surface to publish. Vue and Svelte emit
-    /// an assembled body; the host must not reconstruct topology from blocks.
-    pub main: RuntimeMainModule,
+    /// The request's ONE staged compile handoff for the framework-owned
+    /// runtime module: the complete artifact set plus the typed identity,
+    /// dialect and map of the module artifact inside it. `None` ⇒ there is
+    /// no runtime surface to publish. Vue and Svelte both stage their
+    /// assembled module here; a consumer reads the published bytes,
+    /// language and map off the staged root artifact and never
+    /// reconstructs framework topology from block fields.
+    pub main: Option<crate::assembly::StagedCompileArtifacts>,
     /// The compiled `<script>` block, when present.
     pub script: Option<RuntimeScriptBlock>,
     /// The compiled template / render-function block, when present.
@@ -929,7 +911,7 @@ impl RuntimeCompileOutput {
     /// the `CachedTsx` slot and emits no `Main` virtual node.
     #[must_use]
     pub fn has_runtime_surface(&self) -> bool {
-        self.main.body_code.is_some()
+        self.main.is_some()
             || self.script.is_some()
             || self.template.is_some()
             || !self.styles.is_empty()

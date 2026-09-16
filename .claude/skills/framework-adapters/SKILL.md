@@ -286,16 +286,26 @@ host-integration backends. There is no registry left to serve: these
 routes carry no host-issued admission, so they mint their leg grants
 crate-privately at the route boundary (`ProductExecutionGrant`'s
 crate-private mint) and drive the SAME catalog backends. The neutral
-bundle is a `RuntimeMainModule` body + neutral
+bundle is an `Option<StagedCompileArtifacts>` main handoff + neutral
 script/template/style/custom blocks + scope id + optional IDE `tsx`
 (when `want_ide`) + optional template facts + neutral `diagnostics`, or
 a `CarrierCompileOutcome::RuntimeSurfaceRefused` / `CompileUnsupported`
-refusal — never a silent empty. Vue uses `VerterCompileResult`
-INTERNALLY then re-expresses it neutrally
+refusal — never a silent empty. `RuntimeCompileOutput.main` is the
+request's ONE staged compile-artifact handoff: the complete
+`CompileArtifactSet` plus the typed identity, dialect and runtime map of
+the module artifact inside it. The module's bytes live ON the staged
+root artifact, so a body without its typed artifact set is not
+representable, and the host reads the published bytes/language/map off
+the handoff instead of scanning for a `"main"`-named artifact or falling
+back to carrier script metadata for the dialect. Vue uses
+`VerterCompileResult` INTERNALLY then re-expresses it neutrally
 (`vue_result_to_runtime_bundle`); the Vue runtime compiler assembles
-the `_sfc_main` module and emits `main.body_code`. The host publishes
-that already-assembled body and refuses reconstruction with
-`HOST_VUE_MAIN_NOT_ASSEMBLED` when the body is missing. Map validation
+the `_sfc_main` module and stages it, Svelte stages its self-contained
+ESM the same way. The host publishes the staged root artifact and
+refuses reconstruction with `HOST_VUE_MAIN_NOT_ASSEMBLED` /
+`HOST_SVELTE_MAIN_NOT_ASSEMBLED` when nothing was staged — one shared
+`take_staged_main` consumption path whose only per-framework axis is
+that refusal code. Map validation
 and composition live in `verter_compiler::assembly` (`map_input`,
 `map_compose`). A carrier that projects ONLY an IDE
 surface (Svelte today) returns a bundle with no runtime surface

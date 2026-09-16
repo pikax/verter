@@ -1927,7 +1927,8 @@ mod tests {
             )
             .expect("compiles");
         let bundle = products.runtime_server_bundle().expect("server runtime");
-        let body = bundle.main.body_code.as_deref().expect("assembled");
+        let staged = bundle.main.as_ref().expect("staged main handoff");
+        let body = staged.code();
         assert!(
             !body.contains("__vite_useSSRContext"),
             "profile opt-out must suppress SSR registration:\n{body}"
@@ -1937,7 +1938,7 @@ mod tests {
                 || body.contains("_sfc_main.__file = \"/src/Canonical.vue\""),
             "canonical id must own host decoration identity:\n{body}"
         );
-        let set = bundle.main.artifacts.as_ref().expect("artifact set");
+        let set = staged.set();
         assert!(
             set.artifacts()
                 .iter()

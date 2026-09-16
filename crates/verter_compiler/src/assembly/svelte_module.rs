@@ -16,7 +16,7 @@ use super::fragment::{
     ArtifactContent, ArtifactProvenance, ArtifactRelation, ArtifactRelationKind, CompileArtifact,
     FragmentDialect,
 };
-use super::publish::CompileArtifactSet;
+use super::publish::{CompileArtifactSet, StagedCompileArtifacts};
 use super::source_space::{ArtifactMapFamily, ArtifactMapSegment, QualifiedArtifactMap};
 use super::source_unit::{ArtifactSourceUnit, ContentId, SourceId, SourceRevision, SourceUnit};
 use crate::compile_request::ProductKind;
@@ -128,11 +128,11 @@ impl CanonicalEncode for SvelteMainInputBasis<'_> {
     }
 }
 
-/// Compile-artifact schema for one self-contained Svelte main artifact.
-/// Construction performs no parse, compile, or map encode.
+/// Staged compile-artifact handoff for one self-contained Svelte main
+/// artifact. Construction performs no parse, compile, or map encode.
 pub fn svelte_main_compile_artifacts(
     request: SvelteMainCompileRequest<'_>,
-) -> Result<CompileArtifactSet, super::publish::ArtifactSchemaError> {
+) -> Result<StagedCompileArtifacts, super::publish::ArtifactSchemaError> {
     use std::collections::BTreeSet;
 
     record_svelte_main_assembly();
@@ -255,8 +255,10 @@ pub fn svelte_main_compile_artifacts(
         }
     }
 
+    let root = main.id().clone();
     artifacts.insert(0, main);
-    CompileArtifactSet::new(source_units, artifacts)
+    let set = CompileArtifactSet::new(source_units, artifacts)?;
+    StagedCompileArtifacts::stage(set, root, dialect, request.source_map.map(str::to_string))
 }
 
 fn runtime_map_segments(
@@ -408,11 +410,17 @@ mod tests {
             None,
         ))
         .expect("schema accepts");
-        let names: Vec<_> = artifacts.artifacts().iter().map(|a| a.name()).collect();
+        let names: Vec<_> = artifacts
+            .set()
+            .artifacts()
+            .iter()
+            .map(|a| a.name())
+            .collect();
         assert!(names.contains(&"main"));
         assert!(!names.contains(&"script"));
         assert!(!names.contains(&"template"));
         let main = artifacts
+            .set()
             .artifacts()
             .iter()
             .find(|a| a.name() == "main")
@@ -441,11 +449,13 @@ mod tests {
         ))
         .expect("schema accepts");
         let main = artifacts
+            .set()
             .artifacts()
             .iter()
             .find(|a| a.name() == "main")
             .expect("main");
         let style = artifacts
+            .set()
             .artifacts()
             .iter()
             .find(|a| a.name() == "style")
@@ -523,21 +533,25 @@ mod tests {
         ))
         .expect("schema accepts");
         let first_main = first
+            .set()
             .artifacts()
             .iter()
             .find(|a| a.name() == "main")
             .expect("main");
         let option_main = option_changed
+            .set()
             .artifacts()
             .iter()
             .find(|a| a.name() == "main")
             .expect("main");
         let ssr_main = ssr
+            .set()
             .artifacts()
             .iter()
             .find(|a| a.name() == "main")
             .expect("main");
         let reverted_main = reverted
+            .set()
             .artifacts()
             .iter()
             .find(|a| a.name() == "main")
@@ -551,6 +565,7 @@ mod tests {
             "runtime mode must change input basis"
         );
         let first_rev = first
+            .set()
             .source_units()
             .find(|u| u.unit.logical_role() == "main")
             .expect("main unit")
@@ -558,6 +573,7 @@ mod tests {
             .revision()
             .clone();
         let edited_rev = after_edit
+            .set()
             .source_units()
             .find(|u| u.unit.logical_role() == "main")
             .expect("main unit")
@@ -565,6 +581,7 @@ mod tests {
             .revision()
             .clone();
         let reverted_rev = reverted
+            .set()
             .source_units()
             .find(|u| u.unit.logical_role() == "main")
             .expect("main unit")
@@ -596,6 +613,7 @@ mod tests {
         ))
         .expect("schema accepts authored map geometry");
         let main = artifacts
+            .set()
             .artifacts()
             .iter()
             .find(|artifact| artifact.name() == "main")
@@ -606,6 +624,7 @@ mod tests {
             .find(|map| map.family == ArtifactMapFamily::RuntimeSourceMap)
             .expect("runtime map");
         let main_unit = artifacts
+            .set()
             .source_units()
             .find(|unit| unit.unit.logical_role() == "main")
             .expect("main unit")
@@ -613,6 +632,7 @@ mod tests {
             .id()
             .clone();
         let source_unit = artifacts
+            .set()
             .source_units()
             .find(|unit| unit.unit.logical_role() == "source")
             .expect("source unit");
@@ -646,6 +666,7 @@ mod tests {
         ))
         .expect("schema accepts");
         let main = artifacts
+            .set()
             .artifacts()
             .iter()
             .find(|artifact| artifact.name() == "main")
@@ -678,6 +699,7 @@ mod tests {
         ))
         .expect("schema accepts");
         let revision = artifacts
+            .set()
             .source_units()
             .find(|unit| unit.unit.logical_role() == "main")
             .expect("main unit")
@@ -685,6 +707,7 @@ mod tests {
             .revision()
             .clone();
         let main = artifacts
+            .set()
             .artifacts()
             .iter()
             .find(|artifact| artifact.name() == "main")

@@ -262,37 +262,6 @@ impl VerterHost {
             .iter()
             .map(CompileProduct::kind)
             .collect();
-        let assembly = crate::compile::VueMainAssemblyAxes {
-            force_js: request.force_js(),
-            source_map: request.products().iter().any(|product| match product {
-                CompileProduct::RuntimeClient(runtime) | CompileProduct::RuntimeServer(runtime) => {
-                    runtime.runtime_source_map
-                }
-                _ => false,
-            }),
-            runtime_module_name: request
-                .vue()
-                .and_then(|vue| vue.runtime_module_name.clone()),
-            ssr: requested.contains(&ProductKind::RuntimeServer),
-            is_production: request.is_production(),
-            // The dev-server tooling flavour and the SSR-manifest key form
-            // are host build knobs the canonical request carries as its own
-            // axes (`with_host_assembly_axes`) — the same pair the legacy
-            // `CompileProfile` states.
-            hmr_strategy: match request.hmr_strategy() {
-                verter_compiler::compile_request::RuntimeHmrStrategy::None => HmrStrategy::None,
-                verter_compiler::compile_request::RuntimeHmrStrategy::Vite => HmrStrategy::Vite,
-                verter_compiler::compile_request::RuntimeHmrStrategy::Webpack => {
-                    HmrStrategy::Webpack
-                }
-            },
-            // The official plugin emits the SSR-manifest registration
-            // unconditionally on an ssr build (dev AND production), so an
-            // ssr compile that omitted it would leave the bundler unable
-            // to collect this module's render-tree dependencies.
-            emit_ssr_module_registration: true,
-            ssr_module_id: request.ssr_module_id().map(str::to_owned),
-        };
         let policy = RuntimeNodePublication {
             // A runtime product is the whole runtime surface: its
             // separately addressed nodes are its published form, so every
@@ -301,8 +270,11 @@ impl VerterHost {
             publish_script: true,
             publish_template: true,
             publish_style: true,
-            runtime_module_name: assembly.runtime_module_name.clone(),
-            assembly,
+            // The composed template node imports its runtime helpers from
+            // the request's own module specifier.
+            runtime_module_name: request
+                .vue()
+                .and_then(|vue| vue.runtime_module_name.clone()),
         };
 
         let alloc = Allocator::new();
