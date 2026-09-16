@@ -1621,7 +1621,46 @@ const msg = 'hello'
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     assert_eq!(result.custom_blocks.len(), 1);
-    assert_eq!(result.custom_blocks[0].block_type, "i18n");
+    let block = &result.custom_blocks[0];
+    assert_eq!(block.block_type, "i18n");
+    assert_eq!(block.source_order, 0);
+    assert_eq!(block.lang, Some("json".to_string()));
+    assert_eq!(block.src, None);
+    let region = block.region;
+    assert_eq!(
+        &block.content[..],
+        "\n{ \"en\": { \"hello\": \"Hello\" } }\n"
+    );
+    assert_eq!(
+        (region.end - region.start) as usize,
+        block.content.len(),
+        "a locally-authored block's region must span exactly its content bytes"
+    );
+}
+
+#[test]
+fn custom_blocks_retain_document_order_and_src_facts() {
+    let result = compile_sfc(
+        r#"<script setup>
+const msg = 'hello'
+</script>
+
+<i18n lang="json">{}</i18n>
+<docs src="./docs.md"></docs>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.custom_blocks.len(), 2);
+    let i18n = &result.custom_blocks[0];
+    let docs = &result.custom_blocks[1];
+    assert_eq!(i18n.source_order, 0);
+    assert_eq!(docs.source_order, 1);
+    assert_eq!(docs.lang, None);
+    assert_eq!(docs.src, Some("./docs.md".to_string()));
+    assert!(
+        i18n.region.end <= docs.region.start,
+        "document-order blocks must not carry overlapping or reordered regions"
+    );
 }
 
 #[test]

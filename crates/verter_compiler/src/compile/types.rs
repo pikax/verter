@@ -466,10 +466,27 @@ pub struct VerterStyleBlock {
 }
 
 /// A custom block extracted from the SFC (e.g., `<i18n>`, `<docs>`).
+///
+/// Carries every fact [`crate::assembly::CustomBlockDescriptor`] construction
+/// needs: `region`/`source_order` are retained from the parser's own node
+/// spans (never rescanned), and `lang`/`src` are the same-named entries
+/// already present in `attrs`, looked up once here rather than re-derived by
+/// every consumer.
 pub struct VerterCustomBlock {
     pub block_type: String,
     pub content: String,
     pub attrs: Vec<(String, String)>,
+    /// SFC-absolute region in UTF-8 bytes: the exact content span for a
+    /// block with content, or a zero-length anchor at the tag's
+    /// content-start position for a self-closing/`src`-backed block.
+    pub region: crate::common::Span,
+    /// This block's position among all custom blocks in the SFC, in
+    /// document order.
+    pub source_order: u32,
+    /// The block's own `lang` attribute value, when present.
+    pub lang: Option<String>,
+    /// The block's own `src` attribute value, when present.
+    pub src: Option<String>,
 }
 
 /// A single destructured binding's source mapping.

@@ -894,6 +894,12 @@ pub struct RuntimeCompileOutput {
     pub qualified_styles: Vec<QualifiedRuntimeStyle>,
     /// Custom blocks in source order.
     pub custom_blocks: Vec<RuntimeCustomBlock>,
+    /// Source-backed custom-block descriptors, in source order — additive
+    /// alongside [`Self::custom_blocks`] (the legacy adapter), constructed
+    /// from the exact registered source/parse identity. Empty for Svelte
+    /// (no custom-block producer cell) and for a Vue compile with no custom
+    /// blocks; not yet consumed downstream.
+    pub custom_block_descriptors: Vec<crate::assembly::CustomBlockDescriptor>,
     /// The scope id (`data-v-xxxxxxxx`), empty when none.
     pub scope_id: String,
     /// The IDE (TSX/JSX) artifact, present when `want_ide` was requested AND

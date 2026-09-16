@@ -907,7 +907,8 @@ fn compile_inner(
     let custom_blocks: Vec<VerterCustomBlock> = parsed
         .unknown_nodes()
         .iter()
-        .map(|node| {
+        .enumerate()
+        .map(|(source_order, node)| {
             let tag_name = &input[node.tag_open.start as usize..node.tag_open.name_end as usize];
             // Extract tag name (skip the '<')
             let block_type = tag_name.strip_prefix('<').unwrap_or(tag_name).to_string();
@@ -916,10 +917,27 @@ fn compile_inner(
                 .map(|span| input[span.start as usize..span.end as usize].to_string())
                 .unwrap_or_default();
             let attrs = extract_attrs(&node.attributes, input);
+            let lang = attrs
+                .iter()
+                .find(|(key, _)| key.as_str() == "lang")
+                .map(|(_, value)| value.clone());
+            let src = attrs
+                .iter()
+                .find(|(key, _)| key.as_str() == "src")
+                .map(|(_, value)| value.clone());
+            // A self-closing block has no content span; anchor its region at
+            // the tag's content-start position instead of rescanning for one.
+            let region = node
+                .content
+                .unwrap_or_else(|| crate::common::Span::new(node.tag_open.end, node.tag_open.end));
             VerterCustomBlock {
                 block_type,
                 content,
                 attrs,
+                region,
+                source_order: source_order as u32,
+                lang,
+                src,
             }
         })
         .collect();

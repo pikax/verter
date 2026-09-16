@@ -19,12 +19,17 @@ use verter_span::Span;
 use verter_parser::parser::types::ParsedSfc;
 use verter_parser::types::NodeProp;
 
-use crate::assembly::{assemble_vue_runtime_main, VueRuntimeMainRequest};
-use crate::compile::types::{VueExecutionInputs, VueMacroSemanticInput};
+use crate::assembly::{
+    assemble_vue_runtime_main, ArtifactContent, ArtifactProvenance, ArtifactSourceUnit,
+    ArtifactUnavailableReason, CompileArtifact, CompileArtifactSet, ContentId, CustomBlockContent,
+    CustomBlockDescriptor, CustomBlockDescriptorRequest, CustomBlockLifecycle, SourceId,
+    SourceUnit, VueRuntimeMainRequest,
+};
+use crate::compile::types::{VerterCustomBlock, VueExecutionInputs, VueMacroSemanticInput};
 use crate::compile::{compile_from_parsed, parse_sfc};
 use crate::compile_request::{
     CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest,
-    IdeProductRequest, VueBackendRequest, VueCompileRequest,
+    IdeProductRequest, ProductKind, VueBackendRequest, VueCompileRequest,
 };
 use crate::framework_common::carrier_compiler::{
     CarrierCompileOutcome, CompileUnsupported, IdeCompileOptions, IdeOutput, RuntimeCompileOptions,
@@ -34,6 +39,8 @@ use crate::framework_common::carrier_compiler::{
 };
 use crate::framework_common::FrameworkParseArtifact;
 use crate::parser::types::{sfc_script_dialect, SfcScriptDialect};
+use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
+use verter_identity::identity::{InputBasisId, ResultContractId};
 use verter_language::ParseOptions;
 
 /// The concrete Vue carrier: the full parsed SFC behind the erasure
@@ -776,6 +783,137 @@ fn vue_script_lang_from_parsed(parsed: &ParsedSfc) -> Option<String> {
     }
 }
 
+/// The observation basis every minted identity in
+/// [`vue_custom_block_descriptors`] derives from: the exact bytes of the SFC
+/// this compile read. Two compiles of the same bytes name the same basis;
+/// any byte change names another.
+struct VueCustomBlockBasis<'a>(&'a ContentId);
+impl CanonicalEncode for VueCustomBlockBasis<'_> {
+    const DOMAIN_TAG: &'static str = "verter.compiler.vue.custom_block.basis.v1";
+    fn encode_fields(&self, e: &mut CanonicalEncoder) {
+        e.field_bytes(1, self.0.canonical_bytes());
+    }
+}
+
+/// This boundary's own logical-source anchor. [`vue_result_to_runtime_bundle`]
+/// carries no cross-file canonical identity in its signature (its callers
+/// span this crate and the Vue conformance seed in a sibling crate, so its
+/// signature does not change here) — every descriptor's `source_id` anchors
+/// to this fixed tag, while `revision`/`source_content` (content-derived)
+/// and the full per-block identity (role/order/region/attrs/content-state)
+/// still make two distinct SFCs mint distinct descriptor ids.
+struct VueCustomBlockAnchor;
+impl CanonicalEncode for VueCustomBlockAnchor {
+    const DOMAIN_TAG: &'static str = "verter.compiler.vue.custom_block.anchor.v1";
+    fn encode_fields(&self, _e: &mut CanonicalEncoder) {}
+}
+
+struct VueCustomBlockProducer;
+impl CanonicalEncode for VueCustomBlockProducer {
+    const DOMAIN_TAG: &'static str = "verter.compiler.vue.custom_block.producer.v1";
+    fn encode_fields(&self, _e: &mut CanonicalEncoder) {}
+}
+
+/// Construct every Vue custom block's source-backed descriptor from this
+/// compile's own retained parse facts ([`VerterCustomBlock::region`],
+/// `source_order`, `lang`, `src`, `attrs`) and the raw SFC bytes — the exact
+/// registered source/parse identity this compile already holds. Performs no
+/// source reload, transform, or second parse; `content` is read from the
+/// same bytes the legacy [`RuntimeCustomBlock`] conversion beside this
+/// reads, never duplicated beyond the one owned copy each state needs.
+///
+/// Descriptors are admitted through [`CompileArtifactSet::attach_custom_blocks`]
+/// (the CCA2A attachment surface `CustomBlockDescriptor` already validates
+/// against — no new semantics here). A set that fails validation (a
+/// malformed/aliased/overlapping fact) is dropped whole: nothing downstream
+/// consumes this field yet, so an empty result is a safe degrade, never a
+/// partial publish.
+fn vue_custom_block_descriptors(
+    source: &str,
+    blocks: &[VerterCustomBlock],
+) -> Vec<CustomBlockDescriptor> {
+    if blocks.is_empty() {
+        return Vec::new();
+    }
+    let source_id = SourceId::from_canonical(&VueCustomBlockAnchor);
+    let revision = crate::assembly::source_unit::carrier_revision(source);
+    let source_content = ContentId::from_content_bytes(source.as_bytes());
+    let sfc_unit = SourceUnit::mint(
+        source_id.clone(),
+        revision.clone(),
+        "sfc",
+        source_content.clone(),
+    );
+    let input_basis = InputBasisId::from_canonical(&VueCustomBlockBasis(&source_content));
+    let producer = ResultContractId::from_canonical(&VueCustomBlockProducer);
+    let sfc_artifact = CompileArtifact::new(
+        sfc_unit.id().clone(),
+        ProductKind::Analysis,
+        LanguageId::new("vue"),
+        "sfc",
+        ArtifactProvenance {
+            input_basis: input_basis.clone(),
+            producer: producer.clone(),
+            inputs: std::collections::BTreeSet::from([sfc_unit.id().clone()]),
+        },
+        ArtifactContent::Unavailable(ArtifactUnavailableReason::NotProduced),
+    );
+    let Ok(set) = CompileArtifactSet::new(
+        vec![ArtifactSourceUnit {
+            unit: sfc_unit.clone(),
+            source_span: Span::new(0, source.len() as u32),
+        }],
+        vec![sfc_artifact.clone()],
+    ) else {
+        return Vec::new();
+    };
+    let requests: Vec<CustomBlockDescriptorRequest> = blocks
+        .iter()
+        .map(|block| {
+            let content = if block.src.is_some() {
+                CustomBlockContent::SrcBacked
+            } else if block.content.is_empty() {
+                CustomBlockContent::Empty
+            } else {
+                CustomBlockContent::Local {
+                    content: ContentId::from_content_bytes(block.content.as_bytes()),
+                    text: block.content.clone(),
+                }
+            };
+            CustomBlockDescriptorRequest {
+                source_unit: sfc_unit.id().clone(),
+                source_id: source_id.clone(),
+                revision: revision.clone(),
+                source_content: source_content.clone(),
+                role: block.block_type.clone(),
+                lang: block.lang.clone(),
+                src: block.src.clone(),
+                attributes: block.attrs.clone(),
+                source_order: block.source_order,
+                region: block.region,
+                content,
+                provenance: ArtifactProvenance {
+                    input_basis: input_basis.clone(),
+                    producer: producer.clone(),
+                    inputs: std::collections::BTreeSet::from([sfc_unit.id().clone()]),
+                },
+                attached_to: sfc_artifact.id().clone(),
+                lifecycle: CustomBlockLifecycle::Complete,
+            }
+        })
+        .collect();
+    let Ok(descriptors) = requests
+        .into_iter()
+        .map(CustomBlockDescriptor::try_new)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return Vec::new();
+    };
+    set.attach_custom_blocks(descriptors)
+        .map(|set| set.custom_blocks().to_vec())
+        .unwrap_or_default()
+}
+
 /// Re-express a Vue [`VerterCompileResult`] as the framework-neutral
 /// [`RuntimeCompileOutput`]. Block fields are filled here; the assembled
 /// `_sfc_main` body is emitted by [`emit_assembled_vue_main`] on the
@@ -865,6 +1003,7 @@ pub fn vue_result_to_runtime_bundle(
             }
         })
         .collect();
+    let custom_block_descriptors = vue_custom_block_descriptors(source, &result.custom_blocks);
     let custom_blocks = result
         .custom_blocks
         .into_iter()
@@ -941,6 +1080,7 @@ pub fn vue_result_to_runtime_bundle(
         styles,
         qualified_styles: Vec::new(),
         custom_blocks,
+        custom_block_descriptors,
         scope_id: result.scope_id,
         tsx,
         template_data,
@@ -1423,6 +1563,102 @@ mod tests {
             before_ide_only,
             "a bundle request planning no runtime product must not touch the runtime backend"
         );
+    }
+
+    /// Every custom block gets exactly one complete, source-backed
+    /// descriptor bound to this compile's own SFC bytes — additive beside
+    /// the legacy [`RuntimeCustomBlock`] conversion, which stays byte-for-
+    /// byte the same regardless of the descriptors' presence.
+    #[test]
+    fn custom_blocks_produce_source_backed_descriptors_beside_the_legacy_adapter() {
+        let source = concat!(
+            "<i18n lang=\"json\">{\"a\":1}</i18n>",
+            "<docs src=\"./docs.md\"></docs>",
+            "<note></note>",
+        );
+        let compiler = VueCarrierCompiler;
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let output = compiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions::default(),
+                &alloc,
+            )
+            .expect("vue bundle with only custom blocks still produces");
+
+        // The legacy adapter is untouched: same three blocks, same shape it
+        // always had.
+        assert_eq!(output.custom_blocks.len(), 3);
+        assert_eq!(output.custom_blocks[0].block_type, "i18n");
+        assert_eq!(output.custom_blocks[0].content, "{\"a\":1}");
+        assert_eq!(output.custom_blocks[1].block_type, "docs");
+        assert_eq!(output.custom_blocks[2].block_type, "note");
+
+        let descriptors = &output.custom_block_descriptors;
+        assert_eq!(descriptors.len(), 3, "one descriptor per custom block");
+        for pair in descriptors.windows(2) {
+            assert!(
+                pair[0].source_order() < pair[1].source_order(),
+                "descriptors must stay in document order"
+            );
+            assert!(
+                pair[0].region().end <= pair[1].region().start,
+                "sibling regions must not overlap and must stay ordered"
+            );
+        }
+
+        let i18n = &descriptors[0];
+        assert_eq!(i18n.role(), "i18n");
+        assert_eq!(i18n.lang(), Some("json"));
+        assert_eq!(i18n.src(), None);
+        match i18n.content() {
+            crate::assembly::CustomBlockContent::Local { text, .. } => {
+                assert_eq!(text, "{\"a\":1}");
+            }
+            other => panic!("expected local content, got {other:?}"),
+        }
+
+        let docs = &descriptors[1];
+        assert_eq!(docs.role(), "docs");
+        assert_eq!(docs.src(), Some("./docs.md"));
+        assert!(matches!(
+            docs.content(),
+            crate::assembly::CustomBlockContent::SrcBacked
+        ));
+
+        let note = &descriptors[2];
+        assert_eq!(note.role(), "note");
+        assert!(matches!(
+            note.content(),
+            crate::assembly::CustomBlockContent::Empty
+        ));
+
+        assert_eq!(
+            output.custom_block_descriptors[0].lifecycle(),
+            crate::assembly::CustomBlockLifecycle::Complete
+        );
+    }
+
+    /// A carrier with no custom blocks performs zero descriptor-construction
+    /// work — the empty case is not a degraded one-descriptor-shaped miss.
+    #[test]
+    fn no_custom_blocks_produces_no_descriptors() {
+        let source = "<script setup>const n = 1</script><template><div>{{ n }}</div></template>";
+        let compiler = VueCarrierCompiler;
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let output = compiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions::default(),
+                &alloc,
+            )
+            .expect("vue runtime bundle");
+        assert!(output.custom_blocks.is_empty());
+        assert!(output.custom_block_descriptors.is_empty());
     }
 
     /// @ai-generated - Proves external template lowering receives the inline
