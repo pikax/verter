@@ -277,11 +277,9 @@ impl DirectCompileOutput {
         let Some(root) = self.runtime_root else {
             return Ok(None);
         };
-        let root_row = self
-            .sfc_artifacts
-            .iter()
-            .find(|row| row.artifact == root)
-            .expect("the runtime root is projected by its own row");
+        let Some(root_row) = self.sfc_artifacts.iter().find(|row| row.artifact == root) else {
+            return Err(ArtifactSchemaError::UnknownRootArtifact);
+        };
         let dialect = root_row.dialect;
         let source_map = root_row.runtime_source_map.clone();
         Ok(Some(StagedCompileArtifacts::stage(

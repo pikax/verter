@@ -60,7 +60,6 @@ fn compile_cell(surface: ValueWrapSurface, mode: WrapMode) -> String {
             )
         });
     output
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("the requested RuntimeClient artifact must be present")
         .code()
