@@ -1405,10 +1405,6 @@ mod tests {
         };
         let bundle = compile_bundle_expect_produced(source, &artifact, &opts, &alloc)
             .expect("svelte runtime bundle");
-        assert!(
-            bundle.styles.is_empty(),
-            "Svelte css publishes only as a stage-qualified style"
-        );
         let style = bundle
             .qualified_styles
             .first()
@@ -1517,7 +1513,7 @@ mod tests {
             compile_bundle_expect_produced(source_none, &artifact_none, &opts, &alloc)
                 .expect("svelte runtime bundle");
         assert!(
-            bundle_none.qualified_styles.is_empty() && bundle_none.styles.is_empty(),
+            bundle_none.qualified_styles.is_empty(),
             "no style block, no artifact"
         );
     }

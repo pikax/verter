@@ -1737,7 +1737,7 @@ const msg = 'hello'
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     assert_eq!(result.styles.len(), 1);
-    let css = &result.styles[0].code;
+    let css = result.styles[0].code();
     assert!(
         !css.contains("data-v-data-v-"),
         "CSS should not contain double data-v- prefix: {}",
@@ -5517,23 +5517,25 @@ const msg = 'hello'
 
     // CSS must use the same scope_id in its selectors
     let css_marker = "[data-v-";
-    let css_pos = style.code.find(css_marker).unwrap_or_else(|| {
+    let css_pos = style.code().find(css_marker).unwrap_or_else(|| {
         panic!(
             "CSS should contain [data-v-...] selector, got:\n{}",
-            style.code
+            style.code()
         )
     });
     let css_id_start = css_pos + 1; // skip '['
-    let css_id_end = style.code[css_id_start..]
+    let css_id_end = style.code()[css_id_start..]
         .find(']')
         .expect("should have closing ]")
         + css_id_start;
-    let css_scope_id = &style.code[css_id_start..css_id_end];
+    let css_scope_id = &style.code()[css_id_start..css_id_end];
 
     assert_eq!(
-        script_scope_id, css_scope_id,
+        script_scope_id,
+        css_scope_id,
         "Script __scopeId and CSS selector scope_id must match.\nScript: {}\nCSS: {}",
-        script.code, style.code
+        script.code,
+        style.code()
     );
 }
 
@@ -5588,7 +5590,7 @@ const x = 1
 .parent > .child { color: red; }
 </style>"#,
     );
-    let css = &result.styles[0].code;
+    let css = result.styles[0].code();
     // Must NOT have dangling > after the scope attr
     assert!(
         !css.contains("]>"),
@@ -7878,9 +7880,9 @@ fn template_only_scoped_style_css_is_scoped() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     assert_eq!(result.styles.len(), 1);
     assert!(
-        result.styles[0].code.contains("[data-v-"),
+        result.styles[0].code().contains("[data-v-"),
         "scoped CSS should contain [data-v-] selector, got:\n{}",
-        result.styles[0].code
+        result.styles[0].code()
     );
 }
 
@@ -8017,7 +8019,7 @@ fn template_only_scoped_style_grid_layout_scope_id_consistency() {
 
     // 4. CSS must have matching scope selectors
     assert_eq!(result.styles.len(), 1);
-    let css = &result.styles[0].code;
+    let css = result.styles[0].code();
     let css_scope_attr = format!("[{}]", script_scope_id);
     assert!(
         css.contains(&css_scope_attr),
@@ -8124,7 +8126,7 @@ fn template_heavy_vue_full_css_scoping() {
 
     // Must have exactly one scoped style block
     assert_eq!(result.styles.len(), 1, "expected 1 style block");
-    let css = &result.styles[0].code;
+    let css = result.styles[0].code();
 
     // Extract scope ID from script
     let script = result
