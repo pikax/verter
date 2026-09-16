@@ -572,7 +572,7 @@ fn normalized_projection_shape_equivalent(
             (
                 left @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
                 right @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
-            ) if left.discriminant_index() == right.discriminant_index() => {
+            ) if left.node_tag() == right.node_tag() => {
                 let left = left.composite_members().expect("composite arm");
                 let right = right.composite_members().expect("composite arm");
                 if left.len() != right.len() {

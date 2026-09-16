@@ -133,7 +133,12 @@ pub(crate) mod compat_spelling;
 /// readable only by the `ResolveOverloadSet` / `ResolveCall` consumers.
 pub mod deferred_callable;
 pub use deferred_callable::{DeferredCallable, ResolveCallConsumer, ResolveOverloadSetConsumer};
+
+/// The one per-variant vocabulary of [`SemanticNodeData`] and its central
+/// topology-only child walk.
+pub mod node_tag;
 pub use index_key::CanonicalIndexInt;
+pub use node_tag::{ChildWalk, SemanticNodeTag, SEMANTIC_NODE_TAG_BOUND};
 
 pub use demand::{
     apply_mask, backfill_points, cached_satisfies, demand_at_hop, relevant_demand_axes,
@@ -8707,26 +8712,32 @@ pub enum ObjectConstructionEffect {
 }
 
 impl ObjectConstructionEffect {
-    fn push_child_nodes(&self, children: &mut Vec<SemanticNodeId>) {
+    fn for_each_child_node(&self, visit: &mut impl FnMut(SemanticNodeId)) {
         match self {
             Self::DirectProperty(effect) => {
-                children.extend(authored_property_key_child(&effect.key));
-                children.push(effect.value);
+                if let Some(key) = authored_property_key_child(&effect.key) {
+                    visit(key);
+                }
+                visit(effect.value);
             }
             Self::DirectMethod(effect) => {
-                children.extend(authored_property_key_child(&effect.key));
-                children.push(effect.signature);
+                if let Some(key) = authored_property_key_child(&effect.key) {
+                    visit(key);
+                }
+                visit(effect.signature);
             }
             Self::DirectGet(effect) | Self::DirectSet(effect) => {
-                children.extend(authored_property_key_child(&effect.key));
-                children.push(effect.signature);
+                if let Some(key) = authored_property_key_child(&effect.key) {
+                    visit(key);
+                }
+                visit(effect.signature);
             }
             Self::DirectIndex(effect) => {
-                children.push(effect.key_type);
-                children.push(effect.value_type);
+                visit(effect.key_type);
+                visit(effect.value_type);
             }
             Self::DirectCall(node) | Self::DirectConstruct(node) | Self::Spread(node) => {
-                children.push(*node);
+                visit(*node);
             }
         }
     }
@@ -8742,10 +8753,15 @@ impl ObjectSpreadProgram {
     /// Iterate every semantic child in effect order.
     pub fn child_nodes(&self) -> impl Iterator<Item = SemanticNodeId> + '_ {
         let mut children = Vec::new();
-        for effect in self.effects.iter() {
-            effect.push_child_nodes(&mut children);
-        }
+        self.for_each_child_node(|child| children.push(child));
         children.into_iter()
+    }
+
+    /// Visit every semantic child in effect order, without allocating.
+    pub fn for_each_child_node(&self, mut visit: impl FnMut(SemanticNodeId)) {
+        for effect in self.effects.iter() {
+            effect.for_each_child_node(&mut visit);
+        }
     }
 
     /// Rebuild the program after applying `map` to every semantic child.
@@ -9223,56 +9239,6 @@ impl SemanticNodeData {
         }
     }
 
-    /// Stable discriminant index used by arena instrumentation
-    /// to bucket per-variant push counts on
-    /// [`crate::types::MetaProvenance::node_arena_pushes_per_discriminant`].
-    ///
-    /// Values are independent of the variant declaration order so that
-    /// variant additions / removals do not
-    /// renumber unrelated buckets. The returned index must stay below
-    /// [`crate::types::SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT`].
-    #[must_use]
-    pub fn discriminant_index(&self) -> usize {
-        match self {
-            Self::Alias(_) => 0,
-            Self::Object(_) => 1,
-            Self::ObjectSpreadProgram(_) => 30,
-            Self::Union(_) => 2,
-            Self::Intersection(_) => 3,
-            Self::Primitive(_) => 4,
-            Self::Literal(_) => 5,
-            Self::Opaque(_) => 6,
-            Self::Array { .. } => 7,
-            Self::Tuple { .. } => 8,
-            Self::TemplateLiteral { .. } => 9,
-            Self::KeyOf { .. } => 10,
-            Self::IndexedAccess { .. } => 11,
-            Self::Mapped { .. } => 12,
-            Self::TypeOf(_) => 13,
-            Self::TypeOfNominal(_) => 18,
-            Self::TypeParam { .. } => 14,
-            Self::Infer { .. } => 15,
-            Self::InferRef { .. } => 28,
-            Self::MergedDecl { .. } => 16,
-            Self::Conditional { .. } => 17,
-            // Indices 19 and 26 are intentionally unused so the
-            // surviving variants keep stable bucket indices independent of
-            // declaration order.
-            Self::Signature { .. } => 29,
-            Self::DeferredCallable(_) => 31,
-            Self::DeclRef { .. } => 20,
-            Self::InstantiationRef { .. } => 21,
-            Self::BareRef(_) => 22,
-            Self::ImportType(_) => 23,
-            Self::RawFallback { .. } => 24,
-            // Bucket 25 was held vacant so buckets stay stable across
-            // variant churn; the intrinsic application takes it, leaving every
-            // other bucket index and the discriminant COUNT unchanged.
-            Self::IntrinsicApplication { .. } => 25,
-            Self::SyntheticBinding { .. } => 27,
-        }
-    }
-
     /// Whether this node says its type meaning is not yet known.
     ///
     /// This is a semantic-state classification, not a traversal-state check:
@@ -9339,7 +9305,7 @@ impl SemanticNodeData {
 // do not collide.
 impl PartialEq for SemanticNodeData {
     fn eq(&self, other: &Self) -> bool {
-        if self.discriminant_index() != other.discriminant_index() {
+        if self.node_tag() != other.node_tag() {
             return false;
         }
         match (self, other) {
@@ -9537,7 +9503,7 @@ impl std::hash::Hash for SemanticNodeData {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         // Discriminant tag first so two variants with structurally-similar
         // payloads (e.g. `Alias(id)` vs `KeyOf { base: id }`) cannot collide.
-        (self.discriminant_index() as u8).hash(state);
+        self.node_tag().stable_id().hash(state);
         match self {
             Self::Alias(inner) => {
                 inner.hash(state);

@@ -85,8 +85,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::absorb::SpecialKind;
 use crate::semantic_query::{
-    authored_property_key_child, LiteralValue, NodeScopeId, PrimitiveKind, SemanticNodeData,
-    SemanticNodeId, SignatureReturnCarrier, SurfaceEntry,
+    authored_property_key_child, ChildWalk, LiteralValue, NodeScopeId, PrimitiveKind,
+    SemanticNodeData, SemanticNodeId, SignatureReturnCarrier, SurfaceEntry,
 };
 use crate::semantic_query_memo::{ObservedGraphSelfRoot, SemanticGraphStore};
 
@@ -751,161 +751,13 @@ const STRUCTURAL_PREHASH_MIN_ARMS: usize = 8;
 /// `false` when the payload's children are NOT enumerable from here (the
 /// sealed [`DeferredCallable`](SemanticNodeData::DeferredCallable)
 /// composition payload) — the caller must treat the walk as incomplete.
-/// EXHAUSTIVE (no wildcard): a new variant fails to compile here until its
-/// child topology is classified.
+/// The topology is the central [`SemanticNodeData::for_each_child`].
 #[must_use = "a `false` return means the walk did NOT enumerate this \
               payload's children — the caller MUST mark its evidence \
               incomplete, or the unwalked subtree is silently unrooted \
               and a stale warm read is served"]
 fn push_child_ids(data: &SemanticNodeData, out: &mut Vec<SemanticNodeId>) -> bool {
-    use SemanticNodeData as D;
-    match data {
-        D::Primitive(_)
-        | D::Literal(_)
-        | D::Opaque(_)
-        | D::RawFallback { .. }
-        | D::Infer { .. }
-        | D::InferRef { .. }
-        | D::DeclRef { .. }
-        // The nominal terminal's payload is a scalar declaring identity —
-        // no child node ids.
-        | D::TypeOfNominal(_) => true,
-        // An intrinsic application's operands are ordinary child ids.
-        D::IntrinsicApplication { args, .. } => {
-            out.extend(args.iter().copied());
-            true
-        }
-        D::Alias(inner) | D::KeyOf { base: inner } => {
-            out.push(*inner);
-            true
-        }
-        D::Object(view) => {
-            for entry in view.entries.iter() {
-                match entry {
-                    SurfaceEntry::Member(member) => {
-                        out.extend(authored_property_key_child(&member.key));
-                        out.push(member.value);
-                    }
-                    SurfaceEntry::CallSignature(node) | SurfaceEntry::ConstructSignature(node) => {
-                        out.push(*node);
-                    }
-                    SurfaceEntry::IndexSignature(signature) => {
-                        out.push(signature.key_type);
-                        out.push(signature.value_type);
-                    }
-                }
-            }
-            for member in view.positive_members() {
-                out.extend(authored_property_key_child(&member.key));
-                out.push(member.value);
-            }
-            out.extend(view.call_signatures.iter().copied());
-            out.extend(view.construct_signatures.iter().copied());
-            for signature in view.index_signatures.iter() {
-                out.push(signature.key_type);
-                out.push(signature.value_type);
-            }
-            out.extend(view.keyspace);
-            true
-        }
-        D::ObjectSpreadProgram(program) => {
-            out.extend(program.child_nodes());
-            true
-        }
-        composite @ (D::Union(_) | D::Intersection(_)) => {
-            let members = composite.composite_members().expect("composite arm");
-            out.extend(members.iter().copied());
-            true
-        }
-        D::MergedDecl {
-            contributors: members,
-        } => {
-            out.extend(members.iter().copied());
-            true
-        }
-        D::Array { element, .. } => {
-            out.push(*element);
-            true
-        }
-        D::Tuple { elements, .. } => {
-            out.extend(elements.iter().map(|element| element.value));
-            true
-        }
-        D::TemplateLiteral { expressions, .. } => {
-            out.extend(expressions.iter().copied());
-            true
-        }
-        D::IndexedAccess { object, index } => {
-            out.push(*object);
-            out.extend(authored_property_key_child(index));
-            true
-        }
-        D::Mapped { source, mapper } => {
-            out.push(*source);
-            out.push(mapper.parameter_node);
-            out.push(mapper.key_space);
-            out.push(mapper.value_expr);
-            out.extend(mapper.name_remap);
-            true
-        }
-        carrier @ (D::TypeOf(_) | D::BareRef(_) | D::ImportType(_)) => {
-            out.extend(carrier.carrier_type_args().iter().copied());
-            true
-        }
-        D::TypeParam {
-            constraint,
-            default,
-            ..
-        } => {
-            out.extend(*constraint);
-            out.extend(*default);
-            true
-        }
-        D::Conditional {
-            check,
-            extends,
-            true_branch_ref,
-            false_branch_ref,
-            pending,
-            ..
-        } => {
-            if let Some(pending) = pending {
-                out.extend(pending.argument_nodes());
-            }
-            out.extend([*check, *extends, *true_branch_ref, *false_branch_ref]);
-            true
-        }
-        D::Signature {
-            params,
-            return_type,
-            type_parameters,
-            return_carrier,
-            ..
-        } => {
-            out.extend(params.iter().map(|param| param.ty));
-            out.push(*return_type);
-            if let SignatureReturnCarrier::Declared(node) = return_carrier {
-                out.push(*node);
-            }
-            for decl in type_parameters.iter() {
-                out.push(decl.param);
-                out.extend(decl.constraint);
-                out.extend(decl.default);
-            }
-            true
-        }
-        // Sealed composition payload — its parts are readable only by a
-        // consumer witness, so its children cannot be enumerated here.
-        D::DeferredCallable(_) => false,
-        D::InstantiationRef { args, .. } => {
-            out.extend(args.iter().copied());
-            true
-        }
-        D::SyntheticBinding { value_node, .. } => {
-            out.push(SemanticNodeId(*value_node));
-            true
-        }
-    }
+    data.for_each_child(|child| out.push(child)) == ChildWalk::Enumerated
 }
 
 /// TypeScript numeric-literal identity for two f64 payloads — SameValueZero,
@@ -1612,7 +1464,7 @@ fn bucket_hash_of(
             continue;
         }
         let mut hasher = rustc_hash::FxHasher::default();
-        (data.discriminant_index() as u8).hash(&mut hasher);
+        data.node_tag().stable_id().hash(&mut hasher);
         if !descend || payload_is_childless(&data) {
             // Opaque composition payloads (`ObjectSpreadProgram`,
             // `DeferredCallable`) and childless payloads: comparator
@@ -2066,7 +1918,7 @@ fn compare_shallow(
     work: &mut Vec<(SemanticNodeId, SemanticNodeId)>,
 ) -> bool {
     use SemanticNodeData as D;
-    if dx.discriminant_index() != dy.discriminant_index() {
+    if dx.node_tag() != dy.node_tag() {
         return false;
     }
     // Option-pair helper: both absent is fine, both present descends,

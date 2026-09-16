@@ -8,8 +8,8 @@ use xxhash_rust::xxh3::xxh3_128;
 
 use crate::semantic_query::{
     AuthoredPropertyKey, DeclIdentity, IndexKey, IndexSignature, LiteralValue, NodeScopeId,
-    ObjectConstructionEffect, ScopeId, SemanticNodeData, SemanticNodeId, SurfaceMember,
-    ValueRootKey,
+    ObjectConstructionEffect, ScopeId, SemanticNodeData, SemanticNodeId, SemanticNodeTag,
+    SurfaceMember, ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::types::Hash16;
@@ -36,7 +36,7 @@ const STRUCTURAL_HASH_MAX_DEPTH: u32 = 64;
 ///
 /// Encoding shape:
 ///
-/// - Each variant emits a one-byte [`VariantTag`] discriminant, so two different
+/// - Each variant emits its one-byte [`SemanticNodeTag`] stable id, so two different
 ///   variants can never collide on equal payload bytes.
 /// - Scalars are emitted by their little-endian bytes; `Arc<str>` and string
 ///   collections are LENGTH-PREFIXED; child-reference fields are replaced by the
@@ -87,47 +87,6 @@ struct StructuralEncoder<'g> {
     /// `SemanticNodeId`s currently on the descent path. Used ONLY to detect a
     /// back-edge — never folded into the hash bytes.
     visited: Vec<SemanticNodeId>,
-}
-
-/// One-byte variant discriminants for the structural encoding. Each
-/// `SemanticNodeData` variant — plus the descent sentinels — occupies a distinct
-/// tag so disjoint variants live in disjoint hash-input spaces. Values are fixed
-/// and independent of source declaration order; a new variant takes the next
-/// free tag.
-#[repr(u8)]
-enum VariantTag {
-    Alias = 1,
-    Object = 2,
-    Union = 3,
-    Intersection = 4,
-    Primitive = 5,
-    Literal = 6,
-    Opaque = 7,
-    Array = 8,
-    Tuple = 9,
-    TemplateLiteral = 10,
-    KeyOf = 11,
-    IndexedAccess = 12,
-    Mapped = 13,
-    TypeOf = 14,
-    TypeOfNominal = 19,
-    TypeParam = 15,
-    Infer = 16,
-    Conditional = 17,
-    // Tag 18 is retired and stays unassigned so surviving variants keep
-    // stable tag values.
-    DeclRef = 20,
-    InstantiationRef = 21,
-    MergedDecl = 22,
-    BareRef = 23,
-    ImportType = 24,
-    RawFallback = 25,
-    SyntheticBinding = 27,
-    IntrinsicApplication = 26,
-    InferRef = 28,
-    Signature = 29,
-    ObjectSpreadProgram = 30,
-    DeferredCallable = 31,
 }
 
 /// Descent sentinel: a child id currently on the descent path (a graph cycle).
@@ -377,7 +336,8 @@ impl StructuralEncoder<'_> {
             // A compiler-native operation: the op identity discriminates, the
             // operands are encoded as ordinary children.
             SemanticNodeData::IntrinsicApplication { op, args } => {
-                self.buf.push(VariantTag::IntrinsicApplication as u8);
+                self.buf
+                    .push(SemanticNodeTag::IntrinsicApplication.stable_id());
                 // The FROZEN tag, never a rendered name: a structural hash
                 // must not depend on display text, and declaration order
                 // must not be able to move a content-addressed key.
@@ -390,35 +350,35 @@ impl StructuralEncoder<'_> {
             }
             // ── Single-child variants. ──
             SemanticNodeData::Alias(child) => {
-                self.buf.push(VariantTag::Alias as u8);
+                self.buf.push(SemanticNodeTag::Alias.stable_id());
                 self.encode_child(*child, depth);
             }
             SemanticNodeData::Array { element, readonly } => {
-                self.buf.push(VariantTag::Array as u8);
+                self.buf.push(SemanticNodeTag::Array.stable_id());
                 self.buf.push(u8::from(*readonly));
                 self.encode_child(*element, depth);
             }
             SemanticNodeData::KeyOf { base } => {
-                self.buf.push(VariantTag::KeyOf as u8);
+                self.buf.push(SemanticNodeTag::KeyOf.stable_id());
                 self.encode_child(*base, depth);
             }
             // ── Child-list variants. ──
             SemanticNodeData::Union(arms) => {
-                self.buf.push(VariantTag::Union as u8);
+                self.buf.push(SemanticNodeTag::Union.stable_id());
                 self.encode_child_slice(arms, depth);
             }
             SemanticNodeData::Intersection(arms) => {
-                self.buf.push(VariantTag::Intersection as u8);
+                self.buf.push(SemanticNodeTag::Intersection.stable_id());
                 self.encode_child_slice(arms, depth);
             }
             SemanticNodeData::MergedDecl { contributors } => {
-                self.buf.push(VariantTag::MergedDecl as u8);
+                self.buf.push(SemanticNodeTag::MergedDecl.stable_id());
                 self.encode_child_slice(contributors, depth);
             }
 
             // ── Compound-payload variants carrying child ids. ──
             SemanticNodeData::Object(surface) => {
-                self.buf.push(VariantTag::Object as u8);
+                self.buf.push(SemanticNodeTag::Object.stable_id());
                 self.buf
                     .extend_from_slice(&(surface.positive_members().len() as u64).to_le_bytes());
                 for m in surface.positive_members().iter() {
@@ -436,7 +396,8 @@ impl StructuralEncoder<'_> {
                 self.push_present(false);
             }
             SemanticNodeData::ObjectSpreadProgram(program) => {
-                self.buf.push(VariantTag::ObjectSpreadProgram as u8);
+                self.buf
+                    .push(SemanticNodeTag::ObjectSpreadProgram.stable_id());
                 self.buf
                     .extend_from_slice(&(program.effects.len() as u64).to_le_bytes());
                 for effect in program.effects.iter() {
@@ -521,7 +482,7 @@ impl StructuralEncoder<'_> {
                 }
             }
             SemanticNodeData::Tuple { elements, readonly } => {
-                self.buf.push(VariantTag::Tuple as u8);
+                self.buf.push(SemanticNodeTag::Tuple.stable_id());
                 self.buf.push(u8::from(*readonly));
                 self.buf
                     .extend_from_slice(&(elements.len() as u64).to_le_bytes());
@@ -542,17 +503,17 @@ impl StructuralEncoder<'_> {
                 quasis,
                 expressions,
             } => {
-                self.buf.push(VariantTag::TemplateLiteral as u8);
+                self.buf.push(SemanticNodeTag::TemplateLiteral.stable_id());
                 self.push_str_slice(quasis);
                 self.encode_child_slice(expressions, depth);
             }
             SemanticNodeData::IndexedAccess { object, index } => {
-                self.buf.push(VariantTag::IndexedAccess as u8);
+                self.buf.push(SemanticNodeTag::IndexedAccess.stable_id());
                 self.encode_child(*object, depth);
                 self.encode_index_key(index, depth);
             }
             SemanticNodeData::Mapped { source, mapper } => {
-                self.buf.push(VariantTag::Mapped as u8);
+                self.buf.push(SemanticNodeTag::Mapped.stable_id());
                 self.encode_child(*source, depth);
                 self.encode_child(mapper.parameter_node, depth);
                 self.encode_child(mapper.key_space, depth);
@@ -569,7 +530,7 @@ impl StructuralEncoder<'_> {
                 default,
                 display_name,
             } => {
-                self.buf.push(VariantTag::TypeParam as u8);
+                self.buf.push(SemanticNodeTag::TypeParam.stable_id());
                 self.encode_decl_identity(decl);
                 self.buf.extend_from_slice(&param_index.to_le_bytes());
                 self.encode_child_opt(*constraint, depth);
@@ -584,7 +545,7 @@ impl StructuralEncoder<'_> {
                 distributive,
                 pending,
             } => {
-                self.buf.push(VariantTag::Conditional as u8);
+                self.buf.push(SemanticNodeTag::Conditional.stable_id());
                 self.buf.push(u8::from(*distributive));
                 self.encode_child(*check, depth);
                 self.encode_child(*extends, depth);
@@ -622,7 +583,7 @@ impl StructuralEncoder<'_> {
                 signature_span,
                 return_type_span,
             } => {
-                self.buf.push(VariantTag::Signature as u8);
+                self.buf.push(SemanticNodeTag::Signature.stable_id());
                 self.buf.push(match kind {
                     crate::semantic_query::SignatureKind::Call => 0,
                     crate::semantic_query::SignatureKind::Construct => 1,
@@ -658,7 +619,7 @@ impl StructuralEncoder<'_> {
                 self.push_str(&format!("{return_type_span:?}"));
             }
             SemanticNodeData::InstantiationRef { base, args } => {
-                self.buf.push(VariantTag::InstantiationRef as u8);
+                self.buf.push(SemanticNodeTag::InstantiationRef.stable_id());
                 self.encode_decl_identity(base);
                 self.encode_child_slice(args, depth);
             }
@@ -667,7 +628,7 @@ impl StructuralEncoder<'_> {
             // NEVER `Debug`-render the carrier — its private `type_args` layout
             // is a representation detail; descend through the sole accessor. ──
             SemanticNodeData::TypeOf(_) => {
-                self.buf.push(VariantTag::TypeOf as u8);
+                self.buf.push(SemanticNodeTag::TypeOf.stable_id());
                 let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
                 self.encode_value_root(value_root);
                 self.push_str_slice(path);
@@ -683,7 +644,7 @@ impl StructuralEncoder<'_> {
             // `Debug` render is not a stability contract and can reorder
             // fields without the fingerprint contract noticing.
             SemanticNodeData::TypeOfNominal(_) => {
-                self.buf.push(VariantTag::TypeOfNominal as u8);
+                self.buf.push(SemanticNodeTag::TypeOfNominal.stable_id());
                 let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
                 self.encode_value_root(value_root);
                 self.push_str_slice(path);
@@ -693,7 +654,7 @@ impl StructuralEncoder<'_> {
                 self.encode_value_decl_identity(identity);
             }
             SemanticNodeData::BareRef(_) => {
-                self.buf.push(VariantTag::BareRef as u8);
+                self.buf.push(SemanticNodeTag::BareRef.stable_id());
                 let (name, scope) = data.bare_ref_head().expect("BareRef carrier head");
                 self.push_str(name);
                 self.encode_node_scope(scope);
@@ -701,7 +662,7 @@ impl StructuralEncoder<'_> {
                 self.encode_child_slice(&args, depth);
             }
             SemanticNodeData::ImportType(_) => {
-                self.buf.push(VariantTag::ImportType as u8);
+                self.buf.push(SemanticNodeTag::ImportType.stable_id());
                 let (specifier, qualifier, typeof_query) =
                     data.import_type_head().expect("ImportType carrier head");
                 self.push_str(specifier);
@@ -720,11 +681,11 @@ impl StructuralEncoder<'_> {
             // group: its `id` is scalar, but its `value_node` is a child node id
             // that is descended via `encode_child` — see that arm below.) ──
             SemanticNodeData::Primitive(p) => {
-                self.buf.push(VariantTag::Primitive as u8);
+                self.buf.push(SemanticNodeTag::Primitive.stable_id());
                 self.push_str(&format!("{p:?}"));
             }
             SemanticNodeData::Literal(lit) => {
-                self.buf.push(VariantTag::Literal as u8);
+                self.buf.push(SemanticNodeTag::Literal.stable_id());
                 match lit {
                     LiteralValue::String(s) => {
                         self.buf.push(0);
@@ -746,13 +707,13 @@ impl StructuralEncoder<'_> {
                 }
             }
             SemanticNodeData::Opaque(err) => {
-                self.buf.push(VariantTag::Opaque as u8);
+                self.buf.push(SemanticNodeTag::Opaque.stable_id());
                 // `QueryError` is an entirely scalar/string enum (no
                 // `SemanticNodeId` in any arm), so its `Debug` is content-only.
                 self.push_str(&format!("{err:?}"));
             }
             SemanticNodeData::Infer { name, binder } => {
-                self.buf.push(VariantTag::Infer as u8);
+                self.buf.push(SemanticNodeTag::Infer.stable_id());
                 self.push_str(name);
                 let fingerprint = binder.stable_fingerprint_bytes();
                 self.buf
@@ -760,7 +721,7 @@ impl StructuralEncoder<'_> {
                 self.buf.extend_from_slice(&fingerprint);
             }
             SemanticNodeData::InferRef { name, binder } => {
-                self.buf.push(VariantTag::InferRef as u8);
+                self.buf.push(SemanticNodeTag::InferRef.stable_id());
                 self.push_str(name);
                 let fingerprint = binder.stable_fingerprint_bytes();
                 self.buf
@@ -768,20 +729,20 @@ impl StructuralEncoder<'_> {
                 self.buf.extend_from_slice(&fingerprint);
             }
             SemanticNodeData::RawFallback { value } => {
-                self.buf.push(VariantTag::RawFallback as u8);
+                self.buf.push(SemanticNodeTag::RawFallback.stable_id());
                 self.push_str(value.raw());
             }
             SemanticNodeData::DeclRef { identity } => {
-                self.buf.push(VariantTag::DeclRef as u8);
+                self.buf.push(SemanticNodeTag::DeclRef.stable_id());
                 self.encode_decl_identity(identity);
             }
             // The sealed callable carrier: its composed parts are readable
             // only by its two consumers, so the encoding is the tag alone.
             SemanticNodeData::DeferredCallable(_) => {
-                self.buf.push(VariantTag::DeferredCallable as u8);
+                self.buf.push(SemanticNodeTag::DeferredCallable.stable_id());
             }
             SemanticNodeData::SyntheticBinding { id, value_node } => {
-                self.buf.push(VariantTag::SyntheticBinding as u8);
+                self.buf.push(SemanticNodeTag::SyntheticBinding.stable_id());
                 // `SyntheticBindingId` is content-free (canonical id + surface
                 // kind + slot/binding names); no `SemanticNodeId`.
                 self.push_str(&id.scope_canonical_id);
