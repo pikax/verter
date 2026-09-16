@@ -31,6 +31,11 @@ pub enum ArtifactSchemaError {
     InvalidGeneratedRange,
     InvalidSourceRange,
     OverlappingMappings,
+    /// A custom-block descriptor request failed validated construction or
+    /// set attachment (malformed fact, aliased attribute, order/region
+    /// conflict). Carries the precise cause rather than silently dropping
+    /// every sibling descriptor.
+    CustomBlockInvalid(CustomBlockDescriptorError),
 }
 
 impl std::fmt::Display for ArtifactSchemaError {

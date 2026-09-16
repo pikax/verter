@@ -19,17 +19,12 @@ use verter_span::Span;
 use verter_parser::parser::types::ParsedSfc;
 use verter_parser::types::NodeProp;
 
-use crate::assembly::{
-    assemble_vue_runtime_main, ArtifactContent, ArtifactProvenance, ArtifactSourceUnit,
-    ArtifactUnavailableReason, CompileArtifact, CompileArtifactSet, ContentId, CustomBlockContent,
-    CustomBlockDescriptor, CustomBlockDescriptorRequest, CustomBlockLifecycle, SourceId,
-    SourceUnit, VueRuntimeMainRequest,
-};
-use crate::compile::types::{VerterCustomBlock, VueExecutionInputs, VueMacroSemanticInput};
+use crate::assembly::{assemble_vue_runtime_main, VueRuntimeMainRequest};
+use crate::compile::types::{VueExecutionInputs, VueMacroSemanticInput};
 use crate::compile::{compile_from_parsed, parse_sfc};
 use crate::compile_request::{
     CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest,
-    IdeProductRequest, ProductKind, VueBackendRequest, VueCompileRequest,
+    IdeProductRequest, VueBackendRequest, VueCompileRequest,
 };
 use crate::framework_common::carrier_compiler::{
     CarrierCompileOutcome, CompileUnsupported, IdeCompileOptions, IdeOutput, RuntimeCompileOptions,
@@ -39,8 +34,6 @@ use crate::framework_common::carrier_compiler::{
 };
 use crate::framework_common::FrameworkParseArtifact;
 use crate::parser::types::{sfc_script_dialect, SfcScriptDialect};
-use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
-use verter_identity::identity::{InputBasisId, ResultContractId};
 use verter_language::ParseOptions;
 
 /// The concrete Vue carrier: the full parsed SFC behind the erasure
@@ -652,7 +645,7 @@ pub(crate) fn vue_carrier_bundle(
         }
     }
     if opts.want_main && !bundle.has_errors() {
-        emit_assembled_vue_main(&mut bundle, parsed, opts)
+        emit_assembled_vue_main(&mut bundle, parsed, opts, source)
             .map_err(|failure| CompileUnsupported::VueMainAssemblyFailed(failure.to_string()))?;
     }
     Ok(CarrierCompileOutcome::Produced(bundle))
@@ -742,6 +735,7 @@ pub(crate) fn emit_assembled_vue_main(
     bundle: &mut RuntimeCompileOutput,
     parsed: &ParsedSfc,
     opts: &RuntimeCompileOptions,
+    source: &str,
 ) -> Result<(), crate::assembly::VueMainAssemblyFailure> {
     let runtime = opts.runtime_module_name.as_deref().unwrap_or("vue");
     let canonical_id = opts
@@ -752,6 +746,9 @@ pub(crate) fn emit_assembled_vue_main(
         .unwrap_or("");
     let derived_lang = vue_script_lang_from_parsed(parsed);
     let script_lang = opts.vue_script_lang.as_deref().or(derived_lang.as_deref());
+    // Staged custom-block facts mint against Main's own real artifact set
+    // below (shared `source_id`/revision), never a second private lineage.
+    let custom_blocks = std::mem::take(&mut bundle.custom_block_facts);
     let assembled = assemble_vue_runtime_main(VueRuntimeMainRequest {
         canonical_id,
         compiled: bundle,
@@ -763,10 +760,13 @@ pub(crate) fn emit_assembled_vue_main(
         runtime,
         ssr: opts.ssr,
         decoration: opts.vue_main.clone(),
+        source,
+        custom_blocks: &custom_blocks,
     })?;
     bundle.main.body_code = Some(assembled.code);
     bundle.main.source_map = assembled.source_map.unwrap_or_default();
     bundle.main.lang = Some(assembled.lang);
+    bundle.custom_block_descriptors = assembled.artifacts.custom_blocks().to_vec();
     bundle.main.artifacts = Some(assembled.artifacts);
     Ok(())
 }
@@ -781,137 +781,6 @@ fn vue_script_lang_from_parsed(parsed: &ParsedSfc) -> Option<String> {
         SfcScriptDialect::TypeScript => Some("ts".to_string()),
         SfcScriptDialect::Tsx => Some("tsx".to_string()),
     }
-}
-
-/// The observation basis every minted identity in
-/// [`vue_custom_block_descriptors`] derives from: the exact bytes of the SFC
-/// this compile read. Two compiles of the same bytes name the same basis;
-/// any byte change names another.
-struct VueCustomBlockBasis<'a>(&'a ContentId);
-impl CanonicalEncode for VueCustomBlockBasis<'_> {
-    const DOMAIN_TAG: &'static str = "verter.compiler.vue.custom_block.basis.v1";
-    fn encode_fields(&self, e: &mut CanonicalEncoder) {
-        e.field_bytes(1, self.0.canonical_bytes());
-    }
-}
-
-/// This boundary's own logical-source anchor. [`vue_result_to_runtime_bundle`]
-/// carries no cross-file canonical identity in its signature (its callers
-/// span this crate and the Vue conformance seed in a sibling crate, so its
-/// signature does not change here) — every descriptor's `source_id` anchors
-/// to this fixed tag, while `revision`/`source_content` (content-derived)
-/// and the full per-block identity (role/order/region/attrs/content-state)
-/// still make two distinct SFCs mint distinct descriptor ids.
-struct VueCustomBlockAnchor;
-impl CanonicalEncode for VueCustomBlockAnchor {
-    const DOMAIN_TAG: &'static str = "verter.compiler.vue.custom_block.anchor.v1";
-    fn encode_fields(&self, _e: &mut CanonicalEncoder) {}
-}
-
-struct VueCustomBlockProducer;
-impl CanonicalEncode for VueCustomBlockProducer {
-    const DOMAIN_TAG: &'static str = "verter.compiler.vue.custom_block.producer.v1";
-    fn encode_fields(&self, _e: &mut CanonicalEncoder) {}
-}
-
-/// Construct every Vue custom block's source-backed descriptor from this
-/// compile's own retained parse facts ([`VerterCustomBlock::region`],
-/// `source_order`, `lang`, `src`, `attrs`) and the raw SFC bytes — the exact
-/// registered source/parse identity this compile already holds. Performs no
-/// source reload, transform, or second parse; `content` is read from the
-/// same bytes the legacy [`RuntimeCustomBlock`] conversion beside this
-/// reads, never duplicated beyond the one owned copy each state needs.
-///
-/// Descriptors are admitted through [`CompileArtifactSet::attach_custom_blocks`]
-/// (the CCA2A attachment surface `CustomBlockDescriptor` already validates
-/// against — no new semantics here). A set that fails validation (a
-/// malformed/aliased/overlapping fact) is dropped whole: nothing downstream
-/// consumes this field yet, so an empty result is a safe degrade, never a
-/// partial publish.
-fn vue_custom_block_descriptors(
-    source: &str,
-    blocks: &[VerterCustomBlock],
-) -> Vec<CustomBlockDescriptor> {
-    if blocks.is_empty() {
-        return Vec::new();
-    }
-    let source_id = SourceId::from_canonical(&VueCustomBlockAnchor);
-    let revision = crate::assembly::source_unit::carrier_revision(source);
-    let source_content = ContentId::from_content_bytes(source.as_bytes());
-    let sfc_unit = SourceUnit::mint(
-        source_id.clone(),
-        revision.clone(),
-        "sfc",
-        source_content.clone(),
-    );
-    let input_basis = InputBasisId::from_canonical(&VueCustomBlockBasis(&source_content));
-    let producer = ResultContractId::from_canonical(&VueCustomBlockProducer);
-    let sfc_artifact = CompileArtifact::new(
-        sfc_unit.id().clone(),
-        ProductKind::Analysis,
-        LanguageId::new("vue"),
-        "sfc",
-        ArtifactProvenance {
-            input_basis: input_basis.clone(),
-            producer: producer.clone(),
-            inputs: std::collections::BTreeSet::from([sfc_unit.id().clone()]),
-        },
-        ArtifactContent::Unavailable(ArtifactUnavailableReason::NotProduced),
-    );
-    let Ok(set) = CompileArtifactSet::new(
-        vec![ArtifactSourceUnit {
-            unit: sfc_unit.clone(),
-            source_span: Span::new(0, source.len() as u32),
-        }],
-        vec![sfc_artifact.clone()],
-    ) else {
-        return Vec::new();
-    };
-    let requests: Vec<CustomBlockDescriptorRequest> = blocks
-        .iter()
-        .map(|block| {
-            let content = if block.src.is_some() {
-                CustomBlockContent::SrcBacked
-            } else if block.content.is_empty() {
-                CustomBlockContent::Empty
-            } else {
-                CustomBlockContent::Local {
-                    content: ContentId::from_content_bytes(block.content.as_bytes()),
-                    text: block.content.clone(),
-                }
-            };
-            CustomBlockDescriptorRequest {
-                source_unit: sfc_unit.id().clone(),
-                source_id: source_id.clone(),
-                revision: revision.clone(),
-                source_content: source_content.clone(),
-                role: block.block_type.clone(),
-                lang: block.lang.clone(),
-                src: block.src.clone(),
-                attributes: block.attrs.clone(),
-                source_order: block.source_order,
-                region: block.region,
-                content,
-                provenance: ArtifactProvenance {
-                    input_basis: input_basis.clone(),
-                    producer: producer.clone(),
-                    inputs: std::collections::BTreeSet::from([sfc_unit.id().clone()]),
-                },
-                attached_to: sfc_artifact.id().clone(),
-                lifecycle: CustomBlockLifecycle::Complete,
-            }
-        })
-        .collect();
-    let Ok(descriptors) = requests
-        .into_iter()
-        .map(CustomBlockDescriptor::try_new)
-        .collect::<Result<Vec<_>, _>>()
-    else {
-        return Vec::new();
-    };
-    set.attach_custom_blocks(descriptors)
-        .map(|set| set.custom_blocks().to_vec())
-        .unwrap_or_default()
 }
 
 /// Re-express a Vue [`VerterCompileResult`] as the framework-neutral
@@ -1003,13 +872,17 @@ pub fn vue_result_to_runtime_bundle(
             }
         })
         .collect();
-    let custom_block_descriptors = vue_custom_block_descriptors(source, &result.custom_blocks);
-    let custom_blocks = result
-        .custom_blocks
-        .into_iter()
+    // Descriptors mint against Main's own real artifact set once assembled
+    // (`emit_assembled_vue_main`), sharing its `source_id`/revision — never
+    // a second, unrelated lineage. The raw facts stage here for that later
+    // step; the legacy adapter (below) reads the same facts by reference
+    // first, so this never re-derives them from source.
+    let custom_block_facts = result.custom_blocks;
+    let custom_blocks = custom_block_facts
+        .iter()
         .map(|b| RuntimeCustomBlock {
-            block_type: b.block_type,
-            content: b.content,
+            block_type: b.block_type.clone(),
+            content: b.content.clone(),
         })
         .collect();
     let tsx = result.tsx.map(|tsx| {
@@ -1080,7 +953,11 @@ pub fn vue_result_to_runtime_bundle(
         styles,
         qualified_styles: Vec::new(),
         custom_blocks,
-        custom_block_descriptors,
+        // Populated by `emit_assembled_vue_main` on the runtime-bundle path,
+        // against Main's own real artifact set; empty here (and permanently
+        // empty on the direct-conversion path, which never assembles Main).
+        custom_block_descriptors: Vec::new(),
+        custom_block_facts,
         scope_id: result.scope_id,
         tsx,
         template_data,
@@ -1566,12 +1443,15 @@ mod tests {
     }
 
     /// Every custom block gets exactly one complete, source-backed
-    /// descriptor bound to this compile's own SFC bytes — additive beside
-    /// the legacy [`RuntimeCustomBlock`] conversion, which stays byte-for-
-    /// byte the same regardless of the descriptors' presence.
+    /// descriptor bound to this compile's own registered source/parse
+    /// identity — attached to Main's own real artifact set (sharing its
+    /// `source_id`/revision), additive beside the legacy
+    /// [`RuntimeCustomBlock`] conversion, which stays byte-for-byte the
+    /// same regardless of the descriptors' presence.
     #[test]
     fn custom_blocks_produce_source_backed_descriptors_beside_the_legacy_adapter() {
         let source = concat!(
+            "<script setup>const n = 1</script>",
             "<i18n lang=\"json\">{\"a\":1}</i18n>",
             "<docs src=\"./docs.md\"></docs>",
             "<note></note>",
@@ -1583,10 +1463,27 @@ mod tests {
             .compile_bundle_expect_produced(
                 source,
                 &artifact,
-                &RuntimeCompileOptions::default(),
+                &RuntimeCompileOptions {
+                    want_main: true,
+                    ..Default::default()
+                },
                 &alloc,
             )
             .expect("vue bundle with only custom blocks still produces");
+
+        let main_unit = output
+            .main
+            .artifacts
+            .as_ref()
+            .expect("main assembles")
+            .source_units()
+            .find(|unit| unit.unit.logical_role() == "sfc")
+            .expect("sfc unit shares Main's real artifact set");
+        assert_eq!(
+            *main_unit.unit.source_id(),
+            *output.custom_block_descriptors[0].source_id(),
+            "descriptors share Main's own source_id, never a synthetic constant"
+        );
 
         // The legacy adapter is untouched: same three blocks, same shape it
         // always had.
@@ -1639,6 +1536,132 @@ mod tests {
             output.custom_block_descriptors[0].lifecycle(),
             crate::assembly::CustomBlockLifecycle::Complete
         );
+    }
+
+    /// Two distinct files with byte-identical custom-block content must
+    /// never mint the same descriptor identity: `source_id` is this
+    /// compile's own registered canonical id, never a synthetic constant
+    /// shared by every Vue SFC in existence.
+    #[test]
+    fn custom_block_descriptors_distinguish_two_files_with_identical_bytes() {
+        let source = "<script setup>const n = 1</script><i18n lang=\"json\">{\"a\":1}</i18n>";
+        let compiler = VueCarrierCompiler;
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let compile = |filename: &str| {
+            compiler
+                .compile_bundle_expect_produced(
+                    source,
+                    &artifact,
+                    &RuntimeCompileOptions {
+                        filename: Some(filename.to_string()),
+                        want_main: true,
+                        ..Default::default()
+                    },
+                    &alloc,
+                )
+                .expect("vue bundle with only custom blocks still produces")
+        };
+        let a = compile("A.vue");
+        let b = compile("B.vue");
+        assert_ne!(
+            a.custom_block_descriptors[0].source_id(),
+            b.custom_block_descriptors[0].source_id(),
+            "byte-identical custom blocks in two different files must not mint the same source_id"
+        );
+        assert_ne!(
+            a.custom_block_descriptors[0].id(),
+            b.custom_block_descriptors[0].id(),
+            "byte-identical custom blocks in two different files must not mint the same descriptor id"
+        );
+    }
+
+    /// AC2 span exactness: a descriptor's region is the exact byte-identical
+    /// slice backing its content, not merely equal-length — a producer bug
+    /// that anchors the region at a shifted equal-length window must fail
+    /// this.
+    #[test]
+    fn custom_block_descriptor_region_is_byte_exact() {
+        let source = "<script setup>const n = 1</script><i18n lang=\"json\">{\"a\":1}</i18n>";
+        let compiler = VueCarrierCompiler;
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let output = compiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions {
+                    want_main: true,
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("vue bundle produces");
+        let region = output.custom_block_descriptors[0].region();
+        assert_eq!(
+            &source[region.start as usize..region.end as usize],
+            "{\"a\":1}",
+            "region must be the exact backing byte slice, not an equal-length shifted window"
+        );
+    }
+
+    /// A self-closing custom block has no content span; its region anchors
+    /// at the tag's content-start position (a zero-length span there),
+    /// never a rescanned or approximated position.
+    #[test]
+    fn self_closing_custom_block_region_anchors_at_tag_open_end() {
+        let source = "<script setup>const n = 1</script><i18n lang=\"json\"/>";
+        let compiler = VueCarrierCompiler;
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let output = compiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions {
+                    want_main: true,
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("vue bundle with a self-closing custom block still produces");
+        let descriptor = &output.custom_block_descriptors[0];
+        let region = descriptor.region();
+        assert_eq!(
+            region.start, region.end,
+            "self-closing block anchors a zero-length region"
+        );
+        assert!(
+            region.start > 0,
+            "the anchor must be past the tag open, not a default zero position"
+        );
+        assert!(matches!(
+            descriptor.content(),
+            crate::assembly::CustomBlockContent::Empty
+        ));
+    }
+
+    /// A malformed custom block (e.g. an empty `lang` value) surfaces as a
+    /// typed compile failure — never a silent empty-descriptor degrade that
+    /// is indistinguishable from "no custom blocks in this file".
+    #[test]
+    fn malformed_custom_block_surfaces_as_compile_failure_not_silent_drop() {
+        let source = "<script setup>const n = 1</script><i18n lang=\"\">{}</i18n>";
+        let compiler = VueCarrierCompiler;
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let err = compiler
+            .compile_bundle(
+                source,
+                &artifact,
+                &RuntimeCompileOptions {
+                    want_main: true,
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect_err("a malformed custom block must fail the compile, not silently drop it");
+        assert!(matches!(err, CompileUnsupported::VueMainAssemblyFailed(_)));
     }
 
     /// A carrier with no custom blocks performs zero descriptor-construction
@@ -3590,7 +3613,7 @@ mod tests {
             .expect("admitted Vue parse");
         let mut refuse_opts = opts;
         refuse_opts.want_main = true;
-        let failure = emit_assembled_vue_main(&mut bundle, parsed, &refuse_opts)
+        let failure = emit_assembled_vue_main(&mut bundle, parsed, &refuse_opts, source)
             .expect_err("empty script map must refuse compiler Main assembly");
         assert!(bundle.main.body_code.is_none());
         assert!(bundle.main.artifacts.is_none());

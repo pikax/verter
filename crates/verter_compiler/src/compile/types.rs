@@ -472,6 +472,7 @@ pub struct VerterStyleBlock {
 /// spans (never rescanned), and `lang`/`src` are the same-named entries
 /// already present in `attrs`, looked up once here rather than re-derived by
 /// every consumer.
+#[derive(Debug)]
 pub struct VerterCustomBlock {
     pub block_type: String,
     pub content: String,

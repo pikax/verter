@@ -900,6 +900,14 @@ pub struct RuntimeCompileOutput {
     /// (no custom-block producer cell) and for a Vue compile with no custom
     /// blocks; not yet consumed downstream.
     pub custom_block_descriptors: Vec<crate::assembly::CustomBlockDescriptor>,
+    /// This compile's own retained custom-block facts, staged for
+    /// [`crate::framework_common::vue_bridge::emit_assembled_vue_main`] to
+    /// mint [`Self::custom_block_descriptors`] against Main's own real
+    /// artifact set once assembled. Never populated for Svelte. Consumed
+    /// (taken) by Main assembly; empty once assembly has run. `pub` only
+    /// for cross-crate struct-update construction (`..Default::default()`);
+    /// not a stable field for external callers to populate.
+    pub custom_block_facts: Vec<crate::compile::VerterCustomBlock>,
     /// The scope id (`data-v-xxxxxxxx`), empty when none.
     pub scope_id: String,
     /// The IDE (TSX/JSX) artifact, present when `want_ide` was requested AND

@@ -253,6 +253,8 @@ fn take_compiler_vue_main_preserves_artifact_relations() {
             Some(script_map),
             &VueMainDecoration::default(),
             true,
+            "",
+            &[],
         )
         .expect("schema accepts"),
     );
