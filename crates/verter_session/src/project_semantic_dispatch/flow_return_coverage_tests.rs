@@ -389,11 +389,11 @@ export async function* callAsyncGenReturnPromise() {
 }
 
 
-// A GENERIC body join with NO embedded `Promise<…>` carrier at all — the
-// join is the bare unbound type parameter `T` itself. The wrap must still
-// run the `Awaited` dispatch over it (an instantiation-time substitution
-// of `T` could still land a `Promise`-shaped value), so the signature is
-// `Promise<Awaited<T>>`, never the un-collapsed `Promise<T>`.
+// A GENERIC body join: the bare type parameter `T` itself. tsgo publishes
+// `Promise<T>` for this shape — it does NOT spell `Awaited<T>`, and
+// instantiating `T` with `Promise<string>` genuinely nests to
+// `Promise<Promise<string>>` — so the wrap must neither collapse the
+// parameter nor wrap it in a deferred `Awaited`.
 export async function asyncGenericIdentity<T>(value: T) {
   return value;
 }

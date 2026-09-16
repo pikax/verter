@@ -108,9 +108,11 @@ pub struct FlowReturnResult {
     /// BODY join — the equation fixed point, the post-convergence
     /// literal widening, the per-key substitution, and the pre-seal
     /// union re-close all operate on it unwrapped — and the publication
-    /// closure materializes the wrapper (`Promise<Awaited<join>>`,
-    /// `Generator<Y, join, N>`, `AsyncGenerator<Y, join, N>`) through
-    /// the shared lib instantiation surfaces exactly once. See
+    /// closure materializes the wrapper through the shared lib
+    /// instantiation surfaces exactly once: `Promise<join>` over a join
+    /// the shared `Awaited` surface already collapsed, the verbatim
+    /// `Generator<Y, join, N>`, and `AsyncGenerator<Y, join, N>` whose
+    /// two iteration parameters take the async iteration rule. See
     /// [`FlowReturnWrap`].
     wrap: Option<FlowReturnWrap>,
 }
@@ -120,8 +122,8 @@ pub struct FlowReturnResult {
 /// recorded by the evaluation and materialized at the publication
 /// closure (never inside the equation fixed point, whose lattice is the
 /// BODY join: a recursive async component converges on the body values
-/// and wraps once, exactly as the checker's own
-/// `Promise<Awaited<union>>` collapses the self-reference).
+/// and wraps once, exactly as the checker collapses the self-reference
+/// through its own awaited rule).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlowReturnWrap {
     /// The function's authored kind.

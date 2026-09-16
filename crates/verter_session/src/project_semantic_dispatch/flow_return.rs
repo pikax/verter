@@ -1905,11 +1905,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// The lib `Awaited` collapse every ASYNC surface applies to a value
-    /// it publishes — the async body join, and an async generator's yield
-    /// and return joins. A shape [`Self::flow_join_is_settled_non_thenable`]
-    /// proves can never be a thenable skips the dispatch (the shared
-    /// reducer would unwrap it to itself with no recursive work, so the
+    /// The awaited collapse an ASYNC FUNCTION body join and an `await`
+    /// operand take. It is NOT shared with the async generator, whose
+    /// iteration parameters follow their own rule
+    /// ([`Self::awaited_for_async_iteration`]): measured on tsc 7.0.2,
+    /// `async f<T>(v: T)` publishes `Promise<T>` while
+    /// `async* g<T>(v: T)` publishes `AsyncGenerator<Awaited<T>, …>`.
+    ///
+    /// A shape [`Self::flow_join_is_settled_non_thenable`] proves can
+    /// never be a thenable skips the dispatch (the shared reducer would
+    /// unwrap it to itself with no recursive work, so the
     /// one-instantiation-per-wrap bound holds for concrete joins);
     /// everything else pays the real dispatch. `None` is the refusal —
     /// the caller publishes the typed gap rather than a fabricated answer.
@@ -1979,20 +1984,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// publish channels see the WRAPPED value, so warm and replay carry
     /// it verbatim.
     ///
-    /// - `async`: `Promise<Awaited<join>>` — the `Awaited` dispatch runs
-    ///   over every join EXCEPT a shape [`Self::flow_join_is_settled_non_thenable`]
+    /// - `async`: `Promise<collapsed join>` — the collapse runs over
+    ///   every join EXCEPT a shape [`Self::flow_join_is_settled_non_thenable`]
     ///   proves can never be a thenable (a bare literal/primitive/tuple/
     ///   array/non-`then`-bearing-object join, or a union of only such
     ///   arms), which the shared reducer would unwrap to itself anyway
     ///   with no recursive work — that shortcut is NEGATIVE evidence only
-    ///   (never "does it look like `Promise`"), so an unbound generic
-    ///   body, an alias, or any other shape that COULD resolve to a
-    ///   `Promise` instantiation always pays the real dispatch; a refused
-    ///   `Awaited` executor over the join publishes the typed gap.
-    /// - generator kinds: `Generator<Y, join, unknown>` /
-    ///   `AsyncGenerator<Y, join, unknown>` over the RESOLVED lib head
-    ///   captured at the evaluation (`Y` is the yield join, `never` for
-    ///   a yield-less body).
+    ///   (never "does it look like `Promise`"), so an alias or any other
+    ///   shape that COULD resolve to a `Promise` instantiation always pays
+    ///   the real dispatch. A bare type parameter is published as itself
+    ///   (`Promise<T>`, the checker's answer), never wrapped in a spelled
+    ///   `Awaited`; a refused collapse publishes the typed gap.
+    /// - generator kinds: `Generator<Y, join, unknown>` verbatim, and
+    ///   `AsyncGenerator<Y, join, unknown>` whose two parameters take the
+    ///   async iteration rule, both over the RESOLVED lib head captured at
+    ///   the evaluation (`Y` is the yield join, `never` for a yield-less
+    ///   body).
     /// - an unresolvable lib head, a refused `Awaited` executor, or an
     ///   already-degraded body publishes the TYPED GAP — the rebuilt
     ///   result re-derives `UnresolvedValue` over the marker, so it is
