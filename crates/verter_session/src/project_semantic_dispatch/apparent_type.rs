@@ -248,7 +248,10 @@ impl ProjectSemanticDispatch<'_> {
 
     /// Resolve `canonical`'s owning project to the stable key the ambient
     /// registry is partitioned by.
-    fn project_stable_key_for_canonical(&self, canonical: &str) -> Option<ProjectStableKey> {
+    pub(super) fn project_stable_key_for_canonical(
+        &self,
+        canonical: &str,
+    ) -> Option<ProjectStableKey> {
         let host = self.ctx.host_for_fact_tracer_install();
         let project = host.resolve_project_for_canonical(canonical)?;
         host.workspace().project_stable_key(project)

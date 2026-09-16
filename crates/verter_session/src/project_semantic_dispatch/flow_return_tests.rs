@@ -7186,6 +7186,130 @@ function makeProps(x: object) {
     });
 }
 
+/// The FAIL-CLOSED half of the lib-global contract, at both guard mints:
+/// when the environment provides no such global, the narrow is not
+/// performed — the subject stays exactly as declared behind the typed
+/// `GuardNarrowing` gap and never warms. It is never a narrow fabricated
+/// over a global the environment did not provide.
+///
+/// This is the checker's own behaviour: `narrowByInKeyword` mints the
+/// intersection only `if recordSymbol != nil`, and a missing
+/// `globalFunctionType` leaves `typeof x === "function"` with nothing to
+/// narrow to.
+///
+/// Reaching the case needs the fault slot because the environment's two
+/// providers (a registered ambient declaration, or verter's own
+/// implementation) cannot BOTH be withdrawn by any project configuration
+/// this session models: verter reduces `Record<K, V>` natively and
+/// carries `Function` as a terminal runtime nominal, so they are
+/// available in every project today. When a project-scoped TS lib
+/// selection (tsconfig `lib` / `noLib`) is modelled, it becomes the
+/// production route into exactly this assertion.
+#[test]
+fn guard_narrows_gap_when_the_environment_provides_no_lib_global() {
+    const CANONICAL: &str = "/ws/lib-global-unavailable/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+function inKey(x: { a: number } | { b: string }) {
+  return { v: "c" in x ? x : 0 };
+}
+
+function typeofFunction(x: object) {
+  if (typeof x === "function") { return x; }
+  return 0 as const;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    host.flow_fault_injection
+        .lib_global_unavailable
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    with_dispatch(&host, |dispatch| {
+        for (function, global, narrowed) in [
+            ("inKey", "Record", "Intersection"),
+            ("typeofFunction", "Function", "Function"),
+        ] {
+            let key = whole_return_key(dispatch, CANONICAL, function);
+            let result = flow_result_value(dispatch, key.clone());
+            let expr = host
+                .project_node_to_type_expr_for_test(result.return_type())
+                .expect("return node must project to TypeExpr");
+            let printed = format!("{expr:?}");
+            assert!(
+                !printed.contains(global) && !printed.contains(narrowed),
+                "`{function}` must not mint `{global}` when the environment provides \
+                 none, got {expr:?}"
+            );
+            assert_eq!(
+                result.degradation(),
+                Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing
+                )),
+                "`{function}` keeps the typed guard gap when `{global}` is unavailable"
+            );
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0,
+                "a narrow that could not reach `{global}` never warms"
+            );
+        }
+    });
+}
+
+/// The availability question itself, at the one place that asks it: a
+/// name NO provider of the environment carries mints nothing at all — not
+/// a `__builtin__` carrier over a name verter does not implement, not an
+/// unresolved shell. `Record` and `Function` are the control: both
+/// providers-or-nothing, same call, same scope.
+///
+/// This pins the MINT arms, which is a weaker property than the
+/// availability gate itself — an unprovided name reaches neither arm and
+/// would fall through to `None` even without the gate. The discriminating
+/// control for the gate is
+/// [`guard_narrows_gap_when_the_environment_provides_no_lib_global`]:
+/// remove the gate and it mints `Record<"c", unknown>` clean over an
+/// environment that provides no `Record`.
+#[test]
+fn lower_lib_global_mints_only_a_global_the_environment_provides() {
+    const CANONICAL: &str = "/ws/lib-global-availability/main.ts";
+    const FIXTURE: &str = "export {};\n";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let lower = |name: &str, args: Vec<SemanticNodeId>| {
+            dispatch.lower_lib_global(
+                CANONICAL,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                &Arc::from(name),
+                Arc::from(args.into_boxed_slice()),
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+        };
+        let unknown =
+            dispatch
+                .graph()
+                .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+                    crate::semantic_query::PrimitiveKind::Unknown,
+                ));
+
+        assert!(
+            lower("Function", Vec::new()).is_some(),
+            "verter implements the `Function` global, so the environment provides it"
+        );
+        assert!(
+            lower("Record", vec![unknown, unknown]).is_some(),
+            "verter implements the `Record` utility, so the environment provides it"
+        );
+        assert!(
+            lower("NotALibGlobalAnywhere", Vec::new()).is_none(),
+            "a name no provider carries mints nothing — never a `__builtin__` carrier \
+             over a global that does not exist"
+        );
+    });
+}
+
 /// The D10 heritage controls for `instanceof` derivation: the
 /// declaration-identity chain decides both edges, a STRUCTURAL TWIN with
 /// no heritage relation takes the checker's OWN subtype fallback (clean,

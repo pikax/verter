@@ -2603,11 +2603,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// recursive walk and memoizing its answer for the dispatch.
     ///
     /// Each distinct declaration is read at most once per walk
-    /// (seen-guarded worklist, cycle-safe) and at most once per dispatch
-    /// (the [`ProjectSemanticDispatch::heritage_ancestry`] memo), so an
-    /// `instanceof` guard over a union pays one ancestry question per arm
-    /// per edge no matter how deep the hierarchies are or how many arms
-    /// share them.
+    /// (seen-guarded worklist, cycle-safe), a repeated QUESTION is a memo
+    /// hit, and a hop whose own ancestry is already memoized is folded in
+    /// whole instead of re-walked — so the reads a second, longer chain
+    /// pays are only the hops above what is already known. An
+    /// `instanceof` guard over a union therefore pays one ancestry
+    /// question per arm per edge no matter how deep the hierarchies are
+    /// or how many arms share them.
     ///
     /// Every visited declaration must be OBSERVABLE and READABLE, or the
     /// answer is not a proof — see [`ClassAncestryReading::decided`]. The
@@ -2631,6 +2633,44 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut decided = true;
         let mut queue: Vec<crate::semantic_query::DeclIdentity> = vec![root.clone()];
         while let Some(current) = queue.pop() {
+            // A hop whose OWN ancestry is already memoized is folded in
+            // whole rather than re-walked: its cached ancestors are
+            // exactly its transitive ancestors, its observations are the
+            // files that answer for them, and its proof status is the
+            // proof status of that whole suffix. This is what makes the
+            // per-declaration bound hold ACROSS questions — asking about
+            // `Chain3` after `Chain1` is already cached stops at
+            // `Chain1` instead of re-reading it.
+            let cached = self
+                .heritage_ancestry
+                .borrow()
+                .get(&(
+                    Arc::clone(&current.canonical_id),
+                    current.owner,
+                    Arc::clone(&current.decl_name),
+                ))
+                .map(Arc::clone);
+            if let Some(cached) = cached {
+                if !cached.decided {
+                    decided = false;
+                }
+                for observation in cached.observed.iter() {
+                    if !observed.contains(observation) {
+                        observed.push(observation.clone());
+                    }
+                }
+                for ancestor in cached.ancestors.iter() {
+                    if ancestors
+                        .iter()
+                        .chain(std::iter::once(root))
+                        .any(|seen| same_class_identity(seen, ancestor))
+                    {
+                        continue;
+                    }
+                    ancestors.push(ancestor.clone());
+                }
+                continue;
+            }
             match self
                 .ctx
                 .ensure_indexed_ready_serve(current.canonical_id.as_ref())

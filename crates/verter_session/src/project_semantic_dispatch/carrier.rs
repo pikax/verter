@@ -514,11 +514,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// — so the produced node is byte-identical to the unshadowed
     /// lowering and no second `Record` / `Function` spelling exists.
     ///
-    /// `None` when the lib environment declares no such global: the same
-    /// "the global is unavailable" answer `getGlobalRecordSymbol()`
-    /// returning `undefined` gives the checker, which then performs no
-    /// narrow at all. The caller keeps its typed gap and never fabricates
-    /// one.
+    /// `None` when the environment provides no such global — see
+    /// [`Self::lib_global_is_available`] for exactly what is asked. That
+    /// is the same "the global is unavailable" answer
+    /// `getGlobalRecordSymbol()` returning `undefined` gives the checker,
+    /// which then performs no narrow at all. The caller keeps its typed
+    /// gap and never fabricates one.
     pub(super) fn lower_lib_global(
         &self,
         scope_canonical_id: &str,
@@ -527,6 +528,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         args: Arc<[SemanticNodeId]>,
         context: ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
+        if !self.lib_global_is_available(scope_canonical_id, name.as_ref()) {
+            return None;
+        }
         let whole_hash = self
             .ctx
             .shallow_file_state(scope_canonical_id)
@@ -566,6 +570,63 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ));
         }
         None
+    }
+
+    /// Whether the ACTIVE environment provides the lib global `name` —
+    /// the availability question [`Self::lower_lib_global`] fails closed
+    /// on, and the session's answer to the checker's
+    /// `getGlobalRecordSymbol()` / `globalFunctionType` lookup.
+    ///
+    /// The environment has TWO providers and this asks both, in order:
+    ///
+    /// 1. A REGISTERED ambient lib of the consumer's project that
+    ///    declares the name. That is the environment's own declaration,
+    ///    and consulting it records the consumer → ambient reverse-dep
+    ///    edge, so re-registering the lib invalidates whatever was minted
+    ///    from it.
+    /// 2. Otherwise verter's OWN implementation of the global — the
+    ///    runtime-nominal registry for a lib type, the builtin-utility
+    ///    registry for a lib utility. This is not a fallback spelling of
+    ///    provider 1: it is what the environment CONSISTS of for a
+    ///    project that registers no lib declaring the name, which is
+    ///    every project in the standard hosts (their ambient registry is
+    ///    empty, yet `Record`, `Pick` and `Promise` all resolve, because
+    ///    verter reduces them natively). The same two providers answer
+    ///    an AUTHORED `x: Record<K, V>` through
+    ///    [`Self::plan_bare_ref_head`], so a guard narrow and an authored
+    ///    annotation can never disagree about whether the global exists.
+    ///
+    /// What this deliberately does NOT do is treat a non-empty ambient
+    /// registry as AUTHORITATIVE. Registered ambient corpora here are
+    /// partial by design — a framework shim, a callable-apparent
+    /// interface — so "this registry does not declare `Record`" is not
+    /// evidence that the project lacks `Record`; reading it that way
+    /// would withdraw `Record` from every project that registers a
+    /// framework shim. A project-scoped TS lib SELECTION (tsconfig
+    /// `lib`, `noLib`) is not modelled in this session at all — when it
+    /// is, it belongs here as provider 1's refinement, and it is the one
+    /// thing that could make this answer `false` in production.
+    fn lib_global_is_available(&self, scope_canonical_id: &str, name: &str) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .lib_global_unavailable
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
+        }
+        if let Some(project) = self.project_stable_key_for_canonical(scope_canonical_id) {
+            if let Some(hit) = self.ctx.lookup_ambient_symbol(project, name) {
+                self.ctx
+                    .record_ambient_dependency(scope_canonical_id, hit.virtual_id.as_ref());
+                return true;
+            }
+        }
+        self.runtime_nominal_global_name(name).is_some()
+            || verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name)
+                .is_some()
     }
 
     pub(super) fn plan_bare_ref_head(

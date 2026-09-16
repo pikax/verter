@@ -328,6 +328,24 @@ pub(crate) mod flow_admission_fault_injection {
         /// must refuse.
         pub(crate) strip_root_proof: AtomicBool,
 
+        /// When armed, `lower_lib_global` reports EVERY lib global as
+        /// unavailable, the way the checker's `getGlobalRecordSymbol()`
+        /// returns `undefined` for an environment that declares no
+        /// `Record`.
+        ///
+        /// The guard-narrow mints take their globals from the
+        /// environment's two providers — a registered ambient
+        /// declaration, or verter's OWN implementation of the global —
+        /// and verter implements `Record` (`build.rs`'s native
+        /// `Record<K, V>` reduction) and `Function` (a terminal runtime
+        /// nominal) unconditionally, so no project configuration this
+        /// session models can withdraw them. This slot is how the
+        /// fail-closed half of that contract is still PROVED: a mint that
+        /// cannot reach its global must leave the typed
+        /// `FlowGap(GuardNarrowing)` and never warm, never a narrow
+        /// fabricated over a global the environment did not provide.
+        pub(crate) lib_global_unavailable: AtomicBool,
+
         /// When armed, `finalize_flow_demand` applies the evaluator's
         /// discharge report with its LAST claim removed, leaving exactly
         /// one planned obligation pending at the seal.
