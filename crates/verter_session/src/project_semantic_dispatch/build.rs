@@ -5796,7 +5796,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // [`Self::reduce_awaited`] for the full per-shape contract and
             // the structural-thenable scope boundary.
             "Awaited" if args.len() == 1 => {
-                let result = self.reduce_awaited(args[0], context, 0);
+                let result = self.reduce_awaited(args[0], context, 0, AwaitedDisposition::Utility);
                 record_utility_edges(result);
                 (QueryResult::Value(result), fence, false)
             }
@@ -5949,6 +5949,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
+    /// The checker's awaited-type rule for a value about to be PUBLISHED,
+    /// as opposed to an authored `Awaited<T>` utility read. The two differ
+    /// on exactly one shape -- a naked type parameter -- and agree
+    /// everywhere else, so they share this reducer rather than forking it.
+    ///
+    /// `None` is the honest refusal (a circular carrier that exhausts the
+    /// unwrap budget, a structural thenable, any other unsettled shape):
+    /// the caller publishes the typed gap rather than a fabricated answer.
+    pub(super) fn awaited_for_publication(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        let reduced = self.reduce_awaited(
+            node,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            0,
+            AwaitedDisposition::Publication,
+        );
+        match self.graph().node_data(reduced).as_deref() {
+            Some(SemanticNodeData::Opaque(error)) if error.means_type_is_not_yet_known() => None,
+            _ => Some(reduced),
+        }
+    }
+
     /// `Awaited<T>` reduction over a SETTLED operand.
     ///
     /// Mirrors the lib conditional chain
@@ -5982,6 +6003,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         node: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
         depth: u32,
+        disposition: AwaitedDisposition,
     ) -> SemanticNodeId {
         use crate::project_semantic_dispatch::absorb::SpecialKind;
         use crate::semantic_query::PrimitiveKind;
@@ -6042,7 +6064,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 drop(data);
                 let mut reduced: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
                 for member in members.iter() {
-                    let arm = self.reduce_awaited(*member, context, depth + 1);
+                    let arm = self.reduce_awaited(*member, context, depth + 1, disposition);
                     if matches!(
                         self.graph().node_data(arm).as_deref(),
                         Some(SemanticNodeData::Opaque(QueryError::Miss))
@@ -6060,11 +6082,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
             {
                 let payload = args[0];
                 drop(data);
-                self.reduce_awaited(payload, context, depth + 1)
+                self.reduce_awaited(payload, context, depth + 1, disposition)
             }
-            // Everything else (type params, infer shells, conditionals,
-            // intersections, mapped carriers, opaque shells, decl refs the
-            // evaluator could not settle) keeps the deferred shell.
+            // A NAKED type parameter is the one shape whose answer depends on
+            // who is asking, because the checker itself answers it twice.
+            //
+            // The `Awaited<T>` UTILITY stays deferred: tsgo prints the
+            // unreduced `Awaited<T>` (it is exactly what an async
+            // generator's own signature spells), so a utility read must keep
+            // the shell and reduce later, at instantiation.
+            //
+            // A PUBLICATION read is the checker's internal awaited-type
+            // rule for a value it is about to publish, which returns a
+            // non-thenable operand unchanged -- measured on tsc 7.0.2:
+            // `async f<T>(v: T)` is `Promise<T>`, and instantiating T with
+            // `Promise<string>` genuinely nests to
+            // `Promise<Promise<string>>`. Returning the shell here instead
+            // would gap every generic async body.
+            SemanticNodeData::TypeParam { .. }
+                if matches!(disposition, AwaitedDisposition::Publication) =>
+            {
+                resolved
+            }
+            // Everything else (infer shells, conditionals, intersections,
+            // mapped carriers, opaque shells, decl refs the evaluator could
+            // not settle -- and a type param under a UTILITY read) keeps the
+            // deferred shell.
             _ => self.opaque(QueryError::Miss),
         }
     }
@@ -11109,4 +11152,18 @@ mod carrier_type_param_descent_tests {
             );
         }
     }
+}
+
+/// Which caller is asking [`ProjectSemanticDispatch::reduce_awaited`] for
+/// an awaited type. The two dispositions differ on a naked type parameter
+/// alone: an authored `Awaited<T>` keeps the deferred shell (the checker
+/// prints it unreduced -- it is what an async generator's own signature
+/// spells), while a value the flow authority is publishing takes the
+/// operand unchanged (the checker's own awaited rule for a non-thenable).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum AwaitedDisposition {
+    /// An authored `Awaited<T>` read.
+    Utility,
+    /// A value the flow authority is about to publish.
+    Publication,
 }

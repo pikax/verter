@@ -1915,10 +1915,61 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// the caller publishes the typed gap rather than a fabricated answer.
     fn awaited_for_async_surface(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
         if self.flow_join_is_settled_non_thenable(node) {
-            Some(node)
-        } else {
-            self.instantiate_awaited(node)
+            return Some(node);
         }
+        // The memoized lib dispatch answers every settled shape. It reports
+        // an unsettled one as the deferred `Opaque(Miss)` shell rather than
+        // an absent value, so the shell is filtered here: publishing it
+        // would bury the gap under a wrapper the evaluation never earned.
+        if let Some(dispatched) = self.instantiate_awaited(node) {
+            if !self.flow_node_is_deferred_shell(dispatched) {
+                return Some(dispatched);
+            }
+        }
+        // A generic operand the checker answers by passing through.
+        self.awaited_for_publication(node)
+    }
+
+    /// Whether `node` is the deferred `Opaque` shell a refused reduction
+    /// answers with, rather than a value.
+    fn flow_node_is_deferred_shell(&self, node: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::Opaque(error)) if error.means_type_is_not_yet_known()
+        )
+    }
+
+    /// An ASYNC GENERATOR's published yield / return parameter.
+    ///
+    /// It does NOT share the async function's rule: tsgo spells a generic
+    /// async generator `AsyncGenerator<Awaited<T>, void, unknown>` -- the
+    /// DEFERRED utility, which reduces at instantiation -- where the async
+    /// function publishes the bare `Promise<T>`. A settled operand
+    /// collapses identically in both.
+    fn awaited_for_async_iteration(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        if self.flow_join_is_settled_non_thenable(node) {
+            return Some(node);
+        }
+        if let Some(dispatched) = self.instantiate_awaited(node) {
+            if !self.flow_node_is_deferred_shell(dispatched) {
+                return Some(dispatched);
+            }
+        }
+        // Only a shape the checker would pass through earns the deferred
+        // spelling; a circular or structurally-thenable operand still gaps.
+        self.awaited_for_publication(node)?;
+        Some(
+            self.graph()
+                .intern_node(SemanticNodeData::InstantiationRef {
+                    base: crate::semantic_query::DeclIdentity {
+                        canonical_id: Arc::from("__builtin__"),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        whole_hash: crate::semantic_query::HashValue::default(),
+                        decl_name: Arc::from("Awaited"),
+                    },
+                    args: Arc::from(vec![node].into_boxed_slice()),
+                }),
+        )
     }
 
     /// Materialize the pending function-kind wrap — the LAST value
@@ -2002,8 +2053,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // body yielded and returned verbatim.
                 let (yield_join, body) = if wrap.kind == FunctionBodyKind::AsyncGenerator {
                     match (
-                        self.awaited_for_async_surface(yield_join),
-                        self.awaited_for_async_surface(body),
+                        self.awaited_for_async_iteration(yield_join),
+                        self.awaited_for_async_iteration(body),
                     ) {
                         (Some(yielded), Some(returned)) => (yielded, returned),
                         _ => return self.materialize_wrap_typed_gap(result),
@@ -10741,12 +10792,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     freshness,
                                     crate::flow_slice_content::SliceFreshness::Fresh
                                 );
-                                let fresh = bare_literal || self.reads_widening_literal_local(expr);
+                                let bare_fresh =
+                                    bare_literal || self.reads_widening_literal_local(expr);
                                 let holds_before = self.holds.len();
                                 let outcome = self.eval_expr(expr);
                                 self.holds.truncate(holds_before);
                                 match self.settle(outcome) {
                                     Some(node) => {
+                                        // A settled call DEPOSITS its fresh
+                                        // literal return the same way in a
+                                        // yield as in a return, so the
+                                        // widening rule reads it the same
+                                        // way: tsgo types
+                                        // `function* g() { yield idf(1) }`
+                                        // as `Generator<number, ...>`,
+                                        // while two such yields keep
+                                        // `1 | 2`.
+                                        let fresh = bare_fresh
+                                            || self
+                                                .fresh_call_return_for(expr, node)
+                                                .is_some_and(|call| call.values.contains(&node));
                                         self.yield_contributions.push((node, fresh));
                                     }
                                     None => {
@@ -13381,10 +13446,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // into the typed degradation — never a wrong warm answer.
             crate::flow_slice_content::SliceExpr::Awaited { operand } => {
                 match self.eval_expr(operand) {
-                    Positional::Value(node) => match self.dispatch.instantiate_awaited(node) {
-                        Some(awaited) => Positional::Value(awaited),
-                        None => Positional::Unmodeled,
-                    },
+                    Positional::Value(node) => {
+                        match self.dispatch.awaited_for_async_surface(node) {
+                            Some(awaited) => Positional::Value(awaited),
+                            None => Positional::Unmodeled,
+                        }
+                    }
                     Positional::Hold => Positional::Hold,
                     Positional::Unmodeled => Positional::Unmodeled,
                 }

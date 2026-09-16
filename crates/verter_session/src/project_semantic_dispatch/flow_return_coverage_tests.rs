@@ -139,6 +139,27 @@ export function* leafGeneratorYieldPromise() {
   return "done";
 }
 
+// A SYNC generator publishes its generic yield verbatim — no awaiting, and
+// no deferred `Awaited` spelling either (tsgo: `Generator<T, string, unknown>`).
+export function* leafGeneratorYieldParam<T>(v: T) {
+  yield v;
+  return "done";
+}
+
+// A YIELDED settled call deposits its fresh literal return exactly as a
+// RETURNED one does, so the lone-fresh-arm widening reads it the same way
+// (tsgo: `Generator<number, string, unknown>`); two such yields are two
+// distinct constituents and keep `1 | 2`.
+export function* leafGeneratorYieldCall() {
+  yield idf(1);
+  return "done";
+}
+export function* leafGeneratorYieldTwoCalls() {
+  yield idf(1);
+  yield idf(2);
+  return "done";
+}
+
 // A PARENTHESIZED statement-position yield: the outer node is a
 // `ParenthesizedExpression`, not a bare `YieldExpression` — the yield
 // classifier must unwrap it, or this contributor is silently dropped and
@@ -375,6 +396,28 @@ export async function* callAsyncGenReturnPromise() {
 // `Promise<Awaited<T>>`, never the un-collapsed `Promise<T>`.
 export async function asyncGenericIdentity<T>(value: T) {
   return value;
+}
+
+// The same generic body reached through a `Promise` parameter, a union of
+// the parameter and its promise, and an `await` — tsgo publishes
+// `Promise<T>` for all three, collapsing exactly one promise level.
+export async function asyncPromiseParam<T>(v: Promise<T>) {
+  return v;
+}
+export async function asyncUnionParam<T>(v: T | Promise<T>) {
+  return v;
+}
+export async function asyncAwaitParam<T>(v: T) {
+  return await v;
+}
+
+// An async GENERATOR does not share the async function's generic rule:
+// tsgo spells the DEFERRED `Awaited<T>` in both iteration parameters.
+export async function* asyncGenYieldParam<T>(v: T) {
+  yield v;
+}
+export async function* asyncGenReturnParam<T>(v: T) {
+  return v;
 }
 
 export declare function ovlAmbient(a: string): "S";
@@ -943,6 +986,16 @@ fn boolean() -> TypeExpr {
 
 fn string_lit(value: &str) -> TypeExpr {
     TypeExpr::Literal(LiteralValue::String(value.to_string()))
+}
+
+/// The published spelling of a naked type parameter.
+fn type_param(name: &str) -> TypeExpr {
+    TypeExpr::TypeParameter(verter_type_expr::TypeParam {
+        name: name.to_string(),
+        constraint: None,
+        default: None,
+        is_const: false,
+    })
 }
 
 /// A bare named type reference with no type arguments.
@@ -2468,42 +2521,205 @@ fn async_return_of_an_already_promise_typed_value_collapses_the_embedded_carrier
     );
 }
 
-/// A GENERIC body join with NO embedded `Promise<…>` carrier at its own
-/// declaration site: `asyncGenericIdentity`'s body is the bare unbound
-/// type parameter `T`. Gating the `Awaited` dispatch on "does the join
-/// look like a `Promise` right now" was unsound for this shape — an
-/// instantiation of `T` (e.g. `Promise<string>`) could still land a
-/// `Promise`-shaped value that an un-collapsed `Promise<T>` signature
-/// would then wrongly double-wrap (`Promise<Promise<string>>`).
+/// A GENERIC async body publishes `Promise<T>` — the parameter itself,
+/// never a spelled `Awaited<T>` and never a typed gap.
 ///
-/// `reduce_awaited` has no distributive arm over a bare `TypeParameter`
-/// yet (its catch-all keeps the deferred shell — see the "everything
-/// else" arm in `build.rs`), so running the dispatch unconditionally
-/// over this shape correctly degrades to the TYPED GAP rather than
-/// publishing the silently-wrong `Promise<T>` the un-gated code used to
-/// return — the D12 correctness budget forbids a wrong-complete result
-/// even where a partial one is available.
+/// Oracle (tsc 7.0.2): `asyncGenericIdentity` declares `Promise<T>`, and
+/// instantiating `T` with `Promise<string>` genuinely nests to
+/// `Promise<Promise<string>>` — the checker does NOT collapse an
+/// unresolved parameter, so publishing the collapse would be wrong and
+/// gapping it would lose an answer the checker has.
 #[test]
-fn async_wrap_awaited_dispatch_over_a_bare_generic_body_keeps_typed_gap_never_the_uncollapsed_promise_t(
-) {
+fn an_async_wrap_over_a_bare_generic_body_publishes_the_parameter() {
     let host = ts_host();
-    match eval(&host, CALLS, "asyncGenericIdentity") {
-        Outcome::Value {
-            degradation,
-            candidates,
-            ..
-        } => {
-            assert!(
-                degradation.is_some(),
-                "an Awaited dispatch with no distributive arm over a bare TypeParameter must degrade, never silently publish Promise<T>"
-            );
-            assert_eq!(
-                candidates, 0,
-                "a gapped async wrap is ReturnOnly — it must never warm"
-            );
-        }
-        other => panic!("asyncGenericIdentity must produce a degraded value, got {other:?}"),
-    }
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "asyncGenericIdentity",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![type_param("T")].into_boxed_slice()),
+        },
+    );
+}
+
+/// A `Promise`-typed generic body collapses exactly ONE promise level, to
+/// the same `Promise<T>` — tsgo: `asyncPromiseParam` is `Promise<T>`,
+/// never `Promise<Promise<T>>`.
+#[test]
+fn an_async_wrap_over_a_promise_typed_generic_body_collapses_one_level() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "asyncPromiseParam",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![type_param("T")].into_boxed_slice()),
+        },
+    );
+}
+
+/// A union of a parameter and its own promise collapses to the single
+/// parameter — tsgo: `asyncUnionParam` is `Promise<T>`.
+#[test]
+fn an_async_wrap_over_a_parameter_union_collapses_to_the_parameter() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "asyncUnionParam",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![type_param("T")].into_boxed_slice()),
+        },
+    );
+}
+
+/// `return await v` over a generic operand publishes the parameter
+/// unchanged — tsgo: `asyncAwaitParam` is `Promise<T>`.
+#[test]
+fn an_awaited_generic_operand_publishes_the_parameter_unchanged() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "asyncAwaitParam",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![type_param("T")].into_boxed_slice()),
+        },
+    );
+}
+
+/// An async GENERATOR spells the DEFERRED `Awaited<T>` for a generic yield
+/// — NOT the bare parameter the async function publishes. The two surfaces
+/// have different generic rules, and tsgo prints them differently:
+/// `AsyncGenerator<Awaited<T>, void, unknown>`.
+#[test]
+fn an_async_generator_over_a_generic_yield_spells_the_deferred_awaited() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "asyncGenYieldParam",
+        TypeExpr::Ref {
+            name: Arc::from("AsyncGenerator"),
+            type_arguments: Arc::from(
+                vec![
+                    TypeExpr::Ref {
+                        name: Arc::from("Awaited"),
+                        type_arguments: Arc::from(vec![type_param("T")].into_boxed_slice()),
+                    },
+                    TypeExpr::Primitive(PrimitiveName::Void),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
+    );
+}
+
+/// …and for a generic RETURN — tsgo:
+/// `AsyncGenerator<never, Awaited<T>, unknown>`.
+#[test]
+fn an_async_generator_over_a_generic_return_spells_the_deferred_awaited() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "asyncGenReturnParam",
+        TypeExpr::Ref {
+            name: Arc::from("AsyncGenerator"),
+            type_arguments: Arc::from(
+                vec![
+                    TypeExpr::Primitive(PrimitiveName::Never),
+                    TypeExpr::Ref {
+                        name: Arc::from("Awaited"),
+                        type_arguments: Arc::from(vec![type_param("T")].into_boxed_slice()),
+                    },
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
+    );
+}
+
+/// The SYNC control for both generic rules: a plain generator publishes the
+/// parameter verbatim, with no collapse and no deferred spelling — tsgo:
+/// `Generator<T, string, unknown>`.
+#[test]
+fn a_sync_generator_over_a_generic_yield_publishes_the_parameter_verbatim() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        LEAF,
+        "leafGeneratorYieldParam",
+        TypeExpr::Ref {
+            name: Arc::from("Generator"),
+            type_arguments: Arc::from(
+                vec![
+                    type_param("T"),
+                    string(),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
+    );
+}
+
+/// A YIELDED settled call widens its fresh literal return exactly as a
+/// RETURNED one does — tsgo: `Generator<number, string, unknown>`.
+/// Reading the freshness before evaluation, and never consulting the call's
+/// own fresh-literal deposit, published `1`.
+#[test]
+fn a_yielded_settled_call_widens_its_fresh_literal_as_a_returned_one_does() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        LEAF,
+        "leafGeneratorYieldCall",
+        TypeExpr::Ref {
+            name: Arc::from("Generator"),
+            type_arguments: Arc::from(
+                vec![
+                    number(),
+                    string(),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
+    );
+}
+
+/// The FALSIFICATION twin: two yielded settled calls are two distinct
+/// literal constituents, so the lone-fresh-arm widening must not fire —
+/// tsgo: `Generator<1 | 2, string, unknown>`.
+#[test]
+fn two_yielded_settled_calls_keep_both_literal_constituents() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        LEAF,
+        "leafGeneratorYieldTwoCalls",
+        TypeExpr::Ref {
+            name: Arc::from("Generator"),
+            type_arguments: Arc::from(
+                vec![
+                    TypeExpr::union(vec![
+                        TypeExpr::number_literal(1.0),
+                        TypeExpr::number_literal(2.0),
+                    ]),
+                    string(),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
+    );
 }
 
 /// `return await 1` — the AWAITED operand carries its own FRESHNESS.
@@ -2634,7 +2850,7 @@ fn a_sync_generator_yield_join_is_never_awaited() {
     );
 }
 
-/// D12-AC2 NEGATIVE LEG — a wrap whose lib head the environment cannot
+/// NEGATIVE LEG — a wrap whose lib head the environment cannot
 /// resolve keeps the TYPED GAP and never warms.
 ///
 /// `negGen`'s file declares no `Generator` surface, so the wrap's shared
@@ -2661,7 +2877,7 @@ fn generator_wrap_without_lib_surface_keeps_typed_gap_and_never_warms() {
     }
 }
 
-/// D12-AC2 NEGATIVE LEG (async) — the Promise-EMBEDDING collapse branch's
+/// NEGATIVE LEG (async) — the Promise-EMBEDDING collapse branch's
 /// OWN failure path: `instantiate_awaited` reaching a genuine deferred
 /// `Opaque(Miss)` answer keeps the TYPED GAP, never a wrong warm value.
 ///
@@ -2706,7 +2922,7 @@ fn async_wrap_awaited_collapse_over_a_thenable_payload_keeps_typed_gap_and_never
     }
 }
 
-/// D12-AC3 — wrapped results admit WARM and REPLAY equal to FRESH.
+/// Wrapped results admit WARM and REPLAY equal to FRESH.
 ///
 /// The wrap is materialized inside the sealed value (the proof covers the
 /// wrapped node), so the memo stores it and every later demand — the same
@@ -2726,7 +2942,7 @@ fn wrapped_async_return_admits_warm_and_replay_equal_to_fresh() {
     assert_clean_warm(&host, CALLS, "callAsyncPlain", expected);
 }
 
-/// D12-AC4 — BOUNDED WORK: one lib instantiation per awaited unwrap, and
+/// BOUNDED WORK: one lib instantiation per awaited unwrap, and
 /// identical warm demand adds ZERO instantiations.
 ///
 /// The wrap's `Promise` carrier is a registry-decided interning (no
@@ -3799,7 +4015,7 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// callTagged      tag`a${1}b`                     boolean
 /// ```
 ///
-/// `await asyncSrc()` LEFT this set with the D12 await arm: an awaited
+/// `await asyncSrc()` is NOT in this set: an awaited
 /// call is a modelled form (`ValueDescent::Awaited`) whose operand rides
 /// the call carrier, so `callAwait` publishes `Promise<number>` (see
 /// `awaited_call_return_is_the_awaited_value_wrapped_again`).
@@ -3834,7 +4050,7 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 /// the sequence context never converts an unmodeled call into a
 /// published value either. The delegation answers the CALL's own
 /// question; it invents no arm. An `await` last operand is a MODELLED
-/// form since the D12 await arm, so `(0, await asyncSrc())` surfaces
+/// form, so `(0, await asyncSrc())` surfaces
 /// `Promise<number>` clean and warm — the await's own verdict, kept by
 /// the sequence exactly as the resolved bare call's is.
 ///
@@ -3920,11 +4136,22 @@ fn non_call_forms_and_modeled_call_arms_are_untouched_by_the_call_position_gate(
 /// Before the fix, the hold `sccGenPartner`'s call registered while
 /// evaluating the yield argument was never dropped from the frame's hold
 /// list, so the SCC fixed point folded `sccGenPartner`'s resolved return
-/// (`"s"`) into `sccGenYield`'s own return-type join — publishing
-/// `Generator<"s", "s" | 1, unknown>` instead of the correct
-/// `Generator<"s", number, unknown>`. The yield parameter alone carries
-/// `sccGenPartner`'s contribution; the return parameter must stay exactly
-/// `sccGenYield`'s own (widened) return-position value.
+/// into `sccGenYield`'s own return-type join — publishing a return
+/// parameter of `"s" | 1` instead of the correct `number`. The yield
+/// parameter alone carries `sccGenPartner`'s contribution; the RETURN
+/// parameter — this row's subject — must stay exactly `sccGenYield`'s own
+/// widened return-position value.
+///
+/// No checker answer pins the YIELD parameter for this shape: tsgo declines
+/// the whole mutually-recursive pair with TS7023 (`implicitly has return
+/// type 'any' ... referenced directly or indirectly in one of its return
+/// expressions`), so this row is an internal contract about hold
+/// contamination rather than a checker comparison. The yield parameter
+/// follows the same rule a return position does — a yielded call's
+/// fresh-literal deposit widens as a lone arm — which the two shapes the
+/// checker CAN type do pin: an unrecursive twin publishes its callee's
+/// return verbatim (`ctlPartner(c): "s" | "t"`), and a single-literal
+/// callee widens inside its own return inference.
 #[test]
 fn yield_position_hold_does_not_contaminate_the_return_position_join() {
     let host = ts_host();
@@ -3933,7 +4160,7 @@ fn yield_position_hold_does_not_contaminate_the_return_position_join() {
         TypeExpr::Ref {
             name: Arc::from("Generator"),
             type_arguments: Arc::from(
-                vec![string_lit("s"), number(), TypeExpr::Primitive(PrimitiveName::Unknown)]
+                vec![string(), number(), TypeExpr::Primitive(PrimitiveName::Unknown)]
                     .into_boxed_slice()
             ),
         },

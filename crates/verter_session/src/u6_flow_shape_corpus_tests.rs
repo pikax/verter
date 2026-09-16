@@ -5017,7 +5017,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U6ContextualCore, 8, 7, 1),
     // B10's `as const` spread-modifier debt moved to the value-inference
     // owner with its B03/B04 class, so the substrate total drops by one
-    // from D13's 64 to 63. D12's async return wrap greens X18 (the
+    // from 64 to 63. The async return wrap greens X18 (the
     // `Promise<…>` carrier matches the checker), leaving two parked.
     (Owner::U6FlowReturnSubstrate, 63, 48, 2),
     (Owner::U6NarrowTypeof, 48, 28, 20),

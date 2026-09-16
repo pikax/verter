@@ -3891,7 +3891,7 @@ mod expectation_controls {
         // Generic-argument references: the acceptance arm introduced with
         // X18's async-wrap deep pin — an `InstantiationRef` with the exact
         // head name and argument list, with the wrong-head and wrong-arity
-        // negative legs. The D12-era fail-closed control was retired with
+        // negative legs. The earlier fail-closed control was retired with
         // the arm; the corpus mutation control discriminates the argument
         // clauses.
         with_flow_node(
