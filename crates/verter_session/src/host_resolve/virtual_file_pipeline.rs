@@ -3761,8 +3761,8 @@ impl VerterHost {
 }
 
 /// The publication policy for one admitted runtime bundle's virtual
-/// nodes: which nodes the caller's demand publishes, and the axes the
-/// host-side assembly reads.
+/// nodes: which nodes the caller's demand publishes, and the module
+/// specifier the composed template node imports the runtime from.
 ///
 /// The demand-derived route states these from a `CompileProfile`'s target
 /// bits; the caller-supplied-request route states them from the request's
