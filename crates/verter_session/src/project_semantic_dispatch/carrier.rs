@@ -489,6 +489,85 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Intern the LIB-ENVIRONMENT global `name` applied to `args`,
+    /// deliberately BYPASSING lexical scope and userland shadowing.
+    ///
+    /// This is the route a COMPILER-INTERNAL use of a global takes, and it
+    /// is the opposite of an authored annotation. The checker reads its
+    /// own global symbol table for these — `getGlobalRecordSymbol()` for
+    /// the unknown-key `in` intersection, `globalFunctionType` for the
+    /// `typeof x === "function"` narrow — and never resolves the
+    /// identifier `Record` or `Function` in the narrowed expression's
+    /// scope, so a module-local declaration of that name is IRRELEVANT to
+    /// the operation. An authored `x: Record<K, V>` is the opposite case
+    /// and keeps taking
+    /// [`ProjectSemanticDispatch::lower_type_expr_in_owner_scope_with_context`],
+    /// where `name_resolution` / [`ScopeShadowing`] make userland
+    /// shadowing win. Routing a compiler-internal global through that
+    /// lexical entry made a local `type Record` silently change (or, with
+    /// a shadow check bolted on, suppress) a narrow the checker performs
+    /// regardless.
+    ///
+    /// The mint is the SAME `__builtin__`-sentinel carrier the unshadowed
+    /// bare-name fast paths below produce — the runtime-nominal carrier
+    /// for a global lib type, the builtin-utility route for a lib utility
+    /// — so the produced node is byte-identical to the unshadowed
+    /// lowering and no second `Record` / `Function` spelling exists.
+    ///
+    /// `None` when the lib environment declares no such global: the same
+    /// "the global is unavailable" answer `getGlobalRecordSymbol()`
+    /// returning `undefined` gives the checker, which then performs no
+    /// narrow at all. The caller keeps its typed gap and never fabricates
+    /// one.
+    pub(super) fn lower_lib_global(
+        &self,
+        scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &Arc<str>,
+        args: Arc<[SemanticNodeId]>,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        let whole_hash = self
+            .ctx
+            .shallow_file_state(scope_canonical_id)
+            .map(|shallow| shallow.whole_hash)
+            .unwrap_or_default();
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::from(scope_canonical_id),
+            owner,
+            whole_hash,
+            local_scope: None,
+        };
+        let identity = DeclIdentity {
+            canonical_id: Arc::from("__builtin__"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::clone(name),
+        };
+        if self.runtime_nominal_global_name(name.as_ref()).is_some() {
+            return Some(self.intern_ref_head_carrier(
+                RefHeadResolution::Builtin(identity),
+                name,
+                &scope,
+                args,
+            ));
+        }
+        if verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name.as_ref())
+            .is_some()
+        {
+            return Some(self.finish_carrier_resolution(
+                CarrierArgsContinuation::Builtin {
+                    identity,
+                    name: Arc::clone(name),
+                    scope,
+                    context,
+                },
+                args,
+            ));
+        }
+        None
+    }
+
     pub(super) fn plan_bare_ref_head(
         &self,
         ctx: &CarrierResolverContext<'_>,

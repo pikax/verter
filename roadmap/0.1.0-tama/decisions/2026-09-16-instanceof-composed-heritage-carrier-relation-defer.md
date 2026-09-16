@@ -57,13 +57,20 @@ One arm direction stays gapped, for a reason that is not the heritage walk's.
   deciding narrowing outside them or standing up a second relation. D10 must not
   re-implement that reduction, and widening the charter to carry it would put
   public relation semantics in the same change as the guard-narrowing arms.
-- **Durable owner block:** the relation-authority block that next revises
-  intersection-operand reduction in
-  `crates/verter_session/src/project_semantic_dispatch/relation.rs` (to be named
-  by the maintainer at ratification).
-- **Resolution gate:** no later than plan close; it lands with the next revision
-  of the relation authority's intersection reduction, so the relation semantics
-  change once.
+- **Durable owner block:** `rev11.flow:sole shared flow authority` — the owner
+  declared by `D3R — Nominal relation authority`
+  (`roadmap/0.1.0-tama/charters/rev11-flow/D3R.md`), the DAG node that owns
+  `crates/verter_session/src/project_semantic_dispatch/relation.rs`, its
+  intersection-operand reduction, and the nominal relation facts D10 names as a
+  boundary. D10 declares the SAME owner, which is why this row can be assigned
+  now rather than left unowned: it stays inside the authority that already owns
+  the surface, and only its resolution gate waits on ratification. The row is
+  NOT assigned to any diagnostics consumer of the relation (the
+  `expansion.native-checker` families consume `Relate` outcomes and explicitly
+  leave relation facts with their existing semantic authority).
+- **Resolution gate:** the next `rev11.flow` node that revises the relation
+  authority's intersection-operand reduction, and no later than plan close — so
+  the relation semantics change once.
 - **Acceptance ID/test:** the retirement flips case (5) `carrierTwin` of
   `instanceof_heritage_decides_both_edges_and_bounds_its_reads`
   (`crates/verter_session/src/project_semantic_dispatch/flow_return_tests.rs`)
@@ -81,5 +88,8 @@ One arm direction stays gapped, for a reason that is not the heritage walk's.
 2. D10's own acceptance is met by the heritage-free twin control (fallback,
    clean, warm) and the undecidable-heritage controls (gap, never warm); this
    row records the arm the relation authority still cannot decide.
-3. Ratification assigns the row its owner block; until then it is an open
-   deferral counted at plan close.
+3. The row is OWNED as of this decision — `rev11.flow:sole shared flow
+   authority`, D3R's owner — satisfying D10's "P2 needs a named owner when
+   deferred". Ratification fixes its resolution gate against a specific
+   successor; until then it is an open deferral counted at plan close, but not
+   an unowned one.

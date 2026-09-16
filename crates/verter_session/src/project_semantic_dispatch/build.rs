@@ -163,6 +163,53 @@ impl ClassHeritageReading {
     }
 }
 
+/// One declaration's TRANSITIVE class ancestry — the nominal derivation
+/// fact behind every `instanceof` decision, answered in ONE read
+/// ([`ProjectSemanticDispatch::class_heritage_ancestry`]).
+///
+/// The recursive walk over the base chain belongs to this authority, not
+/// to its callers: an asker states a declaration and gets its whole
+/// ancestry, its proof status, and the observations it must root.
+pub(crate) struct ClassAncestryReading {
+    /// Every declaration identity the chain reaches, base-first, each
+    /// distinct declaration listed once.
+    pub(super) ancestors: Vec<crate::semantic_query::DeclIdentity>,
+    /// Every declaration file the walk read, at the whole-hash it was
+    /// served at. The walk reads prepared decls through a `ReturnOnly`
+    /// accessor that records no fact of its own, so the ASKER must fold
+    /// these into its own self-roots or a warm result built on this
+    /// ancestry can survive an edit to an intermediate base class.
+    pub(super) observed: Vec<(Arc<str>, crate::semantic_query::HashValue)>,
+    /// Whether the ancestry is a PROOF. A reachability claim needs only
+    /// the hops the walk found — a truncated chain can never fabricate a
+    /// derivation — but the NEGATIVE claim ("not in that family") is only
+    /// as strong as the walk's completeness. `false` when any visited
+    /// declaration could not be SERVED (its edits would be invisible to a
+    /// warm result) or could not be READ as a class with fully-named
+    /// heritage (see [`ClassHeritageReading`]).
+    pub(super) decided: bool,
+}
+
+/// The dispatch-scoped memo behind [`ProjectSemanticDispatch::class_heritage_ancestry`],
+/// keyed by the rooted declaration identity (canonical, owner, name).
+pub(crate) type HeritageAncestryMemo = std::cell::RefCell<
+    rustc_hash::FxHashMap<
+        (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>),
+        Arc<ClassAncestryReading>,
+    >,
+>;
+
+/// Whether two declaration identities name the SAME declaration:
+/// canonical, owner, and name — the content hash is generation-local and
+/// never distinguishes two spellings of one declaration inside a single
+/// evaluation.
+pub(super) fn same_class_identity(
+    a: &crate::semantic_query::DeclIdentity,
+    b: &crate::semantic_query::DeclIdentity,
+) -> bool {
+    a.canonical_id == b.canonical_id && a.owner == b.owner && a.decl_name == b.decl_name
+}
+
 /// Upper bound on the template-literal keyspace product width
 /// `∏ |choice_set_i|` enumerated by
 /// [`ProjectSemanticDispatch::reduce_template_literal_nodes`]. A finite
@@ -2549,6 +2596,92 @@ impl<'a> ProjectSemanticDispatch<'a> {
             bases,
             decidable: !prepared.heritage_undecidable,
         }
+    }
+
+    /// The TRANSITIVE class ancestry of one declaration — ONE heritage
+    /// read from the asker's side, with this authority owning the
+    /// recursive walk and memoizing its answer for the dispatch.
+    ///
+    /// Each distinct declaration is read at most once per walk
+    /// (seen-guarded worklist, cycle-safe) and at most once per dispatch
+    /// (the [`ProjectSemanticDispatch::heritage_ancestry`] memo), so an
+    /// `instanceof` guard over a union pays one ancestry question per arm
+    /// per edge no matter how deep the hierarchies are or how many arms
+    /// share them.
+    ///
+    /// Every visited declaration must be OBSERVABLE and READABLE, or the
+    /// answer is not a proof — see [`ClassAncestryReading::decided`]. The
+    /// observations are returned rather than recorded here because the
+    /// self-root set belongs to the asking computation, not to this
+    /// authority.
+    pub(super) fn class_heritage_ancestry(
+        &self,
+        root: &crate::semantic_query::DeclIdentity,
+    ) -> Arc<ClassAncestryReading> {
+        let key = (
+            Arc::clone(&root.canonical_id),
+            root.owner,
+            Arc::clone(&root.decl_name),
+        );
+        if let Some(memo) = self.heritage_ancestry.borrow().get(&key) {
+            return Arc::clone(memo);
+        }
+        let mut ancestors: Vec<crate::semantic_query::DeclIdentity> = Vec::new();
+        let mut observed: Vec<(Arc<str>, crate::semantic_query::HashValue)> = Vec::new();
+        let mut decided = true;
+        let mut queue: Vec<crate::semantic_query::DeclIdentity> = vec![root.clone()];
+        while let Some(current) = queue.pop() {
+            match self
+                .ctx
+                .ensure_indexed_ready_serve(current.canonical_id.as_ref())
+            {
+                Some(serve) => {
+                    let observation = (Arc::clone(&current.canonical_id), serve.indexed.whole_hash);
+                    if !observed.contains(&observation) {
+                        observed.push(observation);
+                    }
+                }
+                // A file that cannot be served still contributes whatever
+                // bases a request memo or a validated bundle cache answers
+                // with, so the miss cannot be ignored: it leaves the answer
+                // unrooted, which makes it no proof.
+                None => decided = false,
+            }
+            let reading = self.class_heritage_reading(
+                &current.canonical_id,
+                current.owner,
+                &current.decl_name,
+            );
+            if !reading.decidable {
+                decided = false;
+            }
+            for (base_canonical, base_owner, base_name, _args) in reading.bases {
+                let base = crate::semantic_query::DeclIdentity {
+                    canonical_id: base_canonical,
+                    owner: base_owner,
+                    whole_hash: crate::semantic_query::HashValue::default(),
+                    decl_name: base_name,
+                };
+                if ancestors
+                    .iter()
+                    .chain(std::iter::once(root))
+                    .any(|seen| same_class_identity(seen, &base))
+                {
+                    continue;
+                }
+                ancestors.push(base.clone());
+                queue.push(base);
+            }
+        }
+        let reading = Arc::new(ClassAncestryReading {
+            ancestors,
+            observed,
+            decided,
+        });
+        self.heritage_ancestry
+            .borrow_mut()
+            .insert(key, Arc::clone(&reading));
+        reading
     }
 
     /// Merge a class's own static surface with ONE base class's composed

@@ -398,6 +398,22 @@ pub struct ProjectSemanticDispatch<'a> {
     /// dispatch-wide in-flight set refuses (`Unavailable` — never a proof),
     /// while sibling diamonds stay fine (entries pop on exit).
     pub(super) closedness_active: std::cell::RefCell<smallvec::SmallVec<[InstantiateIdentity; 8]>>,
+    /// Memoized transitive CLASS ANCESTRY, keyed by the rooted declaration
+    /// identity ([`build::ClassAncestryReading`],
+    /// [`Self::class_heritage_ancestry`]).
+    ///
+    /// The `instanceof` guard asks ONE ancestry question per union arm per
+    /// cold edge; the recursive walk over that arm's base chain lives here,
+    /// behind that one question, not in the evaluator. So a deep hierarchy
+    /// is walked ONCE per dispatch rather than once per arm that shares it,
+    /// a second arm over the same chain is a map hit, and the negated edge
+    /// re-asks nothing it already answered.
+    ///
+    /// Dispatch-scoped and never a query key (R6): the ancestry is derived
+    /// from prepared declarations whose files the ASKER self-roots at the
+    /// whole-hash they were served at, so the answer is valid exactly as
+    /// long as the dispatch that built it.
+    pub(super) heritage_ancestry: build::HeritageAncestryMemo,
     /// Cold-build-LOCAL taint accumulator stack (universal read-boundary
     /// fold).
     ///
@@ -607,6 +623,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             instantiate_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
             closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            heritage_ancestry: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
             active_operand_evidence: std::cell::RefCell::new(smallvec::SmallVec::new()),
             lexical_demand_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),

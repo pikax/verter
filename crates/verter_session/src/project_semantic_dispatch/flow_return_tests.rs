@@ -7076,16 +7076,21 @@ function f(x: A | B, A: typeof B) {
     });
 }
 
-/// D10 shadow control for the `"k" in x` unknown-key positive edge: a
-/// userland `type Record<K, V>` shadows the ambient lib `Record` in
-/// scope, so `mint_in_key_record_intersection`'s owner-scope lowering
-/// resolves the SHADOWING declaration (a `DeclRef`/`InstantiationRef`
-/// whose base names this file, never the `"__builtin__"` sentinel) —
-/// the mint must reject it and keep the typed `GuardNarrowing` gap
-/// rather than publish `(subject) & Record<"c", unknown>` against the
-/// user's own `Record`.
+/// D10 lib-global control for the `"k" in x` unknown-key positive edge:
+/// a module-local `type Record<K, V>` is IRRELEVANT to it.
+///
+/// `in`-narrowing is a compiler-internal operation. The checker reaches
+/// its own global symbol table for the utility
+/// (`getGlobalRecordSymbol()`, then a type-alias instantiation over that
+/// symbol) and never resolves the identifier `Record` in the narrowed
+/// expression's scope, so the narrow is the same `(subject) &
+/// Record<"c", unknown>` whether or not the module declares a type of
+/// that name. Routing the mint through owner scope made a local
+/// declaration change the operation — and rejecting the shadowed
+/// resolution (the first repair) suppressed a narrow the checker still
+/// performs. `lower_lib_global` takes the lib environment directly.
 #[test]
-fn in_key_unknown_key_positive_edge_gaps_when_record_is_shadowed() {
+fn in_key_unknown_key_positive_edge_ignores_a_userland_record_shadow() {
     const CANONICAL: &str = "/ws/in-key-record-shadow/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -7103,36 +7108,42 @@ function makeProps(x: { a: number } | { b: string }) {
         let expr = host
             .project_node_to_type_expr_for_test(result.return_type())
             .expect("return node must project to TypeExpr");
+        let printed = format!("{expr:?}");
         assert!(
-            !format!("{expr:?}").contains("\"Record\""),
-            "a shadowed `Record` must never mint into the published narrow, got {expr:?}"
+            printed.contains("Record"),
+            "the lib `Record` mints regardless of a same-named local type, got {expr:?}"
+        );
+        assert!(
+            !printed.contains("shadowed"),
+            "the LOCAL `Record` must never be the utility that mints, got {expr:?}"
         );
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing
-            )),
-            "the shadowed lib utility keeps the typed guard-narrowing gap"
+            None,
+            "a compiler-internal global is not shadowable, so the narrow is exact"
         );
         assert_eq!(
             dispatch
                 .graph()
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
-            0,
-            "a shadow-gapped narrow never warms"
+            1,
+            "the exact unknown-key narrow warms"
         );
     });
 }
 
-/// D10 shadow control for the `typeof x === "function"` positive edge
-/// over `object`: a module-scoped `interface Function` shadows the
-/// ambient lib `Function` in scope, so `lower_global_function_surface`
-/// resolves the SHADOWING declaration instead of the lib global — the
-/// narrow must reject it, keep the arm possible, and record the typed
-/// `GuardNarrowing` gap rather than publish the checker's `Function`
-/// against the user's own shadowing interface.
+/// D10 lib-global control for the `typeof x === "function"` positive edge
+/// over `object`: a module-scoped `interface Function` is IRRELEVANT to
+/// it.
+///
+/// The checker narrows against `globalFunctionType`, read from its own
+/// global symbol table, not by resolving the identifier `Function` in the
+/// narrowed expression's scope — so `x: object` still reads the lib
+/// `Function` inside the guard. The shadowing interface remains the type
+/// an AUTHORED `x: Function` annotation would mean; the two routes are
+/// deliberately different, and only the authored one is lexical.
 #[test]
-fn typeof_function_over_object_gaps_when_function_is_shadowed() {
+fn typeof_function_over_object_ignores_a_userland_function_shadow() {
     const CANONICAL: &str = "/ws/typeof-function-shadow/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -7151,23 +7162,26 @@ function makeProps(x: object) {
         let expr = host
             .project_node_to_type_expr_for_test(result.return_type())
             .expect("return node must project to TypeExpr");
+        let printed = format!("{expr:?}");
         assert!(
-            !format!("{expr:?}").contains("\"Function\""),
-            "a shadowed `Function` must never mint into the published narrow, got {expr:?}"
+            printed.contains("Function"),
+            "the lib `Function` narrows regardless of a same-named local interface, got {expr:?}"
+        );
+        assert!(
+            !printed.contains("shadowed"),
+            "the LOCAL `Function` must never be the narrowed surface, got {expr:?}"
         );
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing
-            )),
-            "the shadowed lib global keeps the typed guard-narrowing gap"
+            None,
+            "a compiler-internal global is not shadowable, so the narrow is exact"
         );
         assert_eq!(
             dispatch
                 .graph()
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
-            0,
-            "a shadow-gapped narrow never warms"
+            1,
+            "the exact typeof-function narrow warms"
         );
     });
 }
@@ -7360,16 +7374,15 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
             "a structurally-undecided arm never warms"
         );
 
-        // (6) BOUNDED WORK, the COLD half. `Chain3 | string` under
-        // `instanceof Chain1` over a three-level chain: the walk reads
-        // ONE heritage bundle per DISTINCT declaration it visits, and
-        // nothing per member, per relation or per re-ask. The bound is
-        // per ANCESTOR, not per arm — the arm's own walk costs one read
-        // for every ancestor between it and the root — and it is paid
-        // once per arm per edge: the `string` arm carries no
-        // declaration and costs zero reads, while `Chain3` costs its
-        // own three (`Chain3`, `Chain2`, `Chain1`) and the tested class
-        // costs one, on each of the two edges the guard applies.
+        // (6) D10-AC4, the COLD half: ONE heritage read per arm per cold
+        // edge. `Chain3 | string` under `instanceof Chain1` runs the
+        // guard over a THREE-level hierarchy, and the depth is invisible
+        // to the bound — the recursive walk lives in the heritage
+        // authority behind the single read and is memoized per dispatch,
+        // so the guard pays one read for `Chain3`, one for the tested
+        // class, and NONE for the declaration-less `string` arm, on each
+        // of the two edges the guard applies. Nothing is charged per
+        // ancestor, per member, per relation, or per re-ask.
         let key = whole_return_key(dispatch, CANONICAL, "chain");
         INSTANCEOF_HERITAGE_READS.with(|reads| reads.set(0));
         let result = flow_result_value(dispatch, key.clone());
@@ -7381,7 +7394,7 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
         );
         assert_eq!(
             cold_reads, COLD_CHAIN_HERITAGE_READS,
-            "the cold walk reads one heritage bundle per visited ancestor"
+            "the cold guard reads heritage once per arm per edge"
         );
         assert_eq!(
             dispatch
@@ -7427,13 +7440,18 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
     });
 }
 
-/// The measured cold heritage-bundle count of case (6) in
-/// [`instanceof_heritage_decides_both_edges_and_bounds_its_reads`]: the
-/// `Chain3 | string` subject's own walk plus the tested class's, on each
-/// of the two edges the guard applies. Pinned so a walk that starts
-/// re-reading per member, per relation, or per re-ask fails here rather
+/// D10-AC4's cold bound, as case (6) of
+/// [`instanceof_heritage_decides_both_edges_and_bounds_its_reads`]
+/// measures it: one heritage read per ARM per cold EDGE.
+///
+/// Two edges × (the `Chain3` arm + the tested class `Chain1`) = 4; the
+/// `string` arm carries no declaration and asks nothing. The subject's
+/// three-level hierarchy does NOT appear in this number — that is the
+/// point of the bound, and of putting the recursive ancestry walk behind
+/// one memoized heritage-authority read. A guard that starts charging per
+/// ancestor, per member, per relation or per re-ask fails here rather
 /// than silently paying for it.
-const COLD_CHAIN_HERITAGE_READS: usize = 8;
+const COLD_CHAIN_HERITAGE_READS: usize = 4;
 
 /// A heritage hop this generation can neither ROOT nor READ — a
 /// cross-file base whose declaration the walk's `ReturnOnly` accessor

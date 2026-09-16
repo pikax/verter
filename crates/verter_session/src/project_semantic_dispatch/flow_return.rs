@@ -5263,13 +5263,17 @@ enum ArmFilter {
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    /// COLD heritage-bundle reads made by the `instanceof` chain walk
-    /// ([`FlowEvaluator::class_heritage_chain_of`]) — one per DISTINCT
-    /// declaration the walk visits, which is the shape of the bound the
-    /// evaluator actually offers: per ancestor of the node being read,
-    /// not per arm. A warm demand re-walks nothing, so the counter does
-    /// not move at all on a warm re-demand. Test-only observation; the
-    /// walk's behavior does not depend on it.
+    /// COLD heritage-authority reads made by the `instanceof` guard
+    /// ([`FlowEvaluator::node_heritage_reading`]) — D10-AC4's counter.
+    ///
+    /// One per union ARM per cold EDGE, plus one for the tested class per
+    /// edge, and none at all for an arm that carries no declaration. The
+    /// ancestry walk behind each read is the authority's
+    /// ([`ProjectSemanticDispatch::class_heritage_ancestry`]) and is
+    /// memoized per dispatch, so chain DEPTH and arms SHARING a chain cost
+    /// the guard nothing extra. A warm demand asks nothing, so the counter
+    /// does not move at all on a warm re-demand. Test-only observation;
+    /// no behavior depends on it.
     pub(super) static INSTANCEOF_HERITAGE_READS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
@@ -5284,34 +5288,41 @@ thread_local! {
 /// walk's completeness, so a walk that could not root or read every
 /// declaration it visited reports `decided: false` and its consumers
 /// record the typed guard gap instead of publishing the negative.
-struct HeritageReading {
-    ancestors: Vec<crate::semantic_query::DeclIdentity>,
-    decided: bool,
+enum HeritageReading {
+    /// A node that carries no declaration at all — an object surface, a
+    /// primitive, a literal, an array or tuple, a bare signature. PROVED
+    /// outside every class family, with nothing to read: the checker's
+    /// own `hasBaseType` answers `false` for it without reading anything.
+    ProvedFree,
+    /// A carrier whose ancestry cannot be seen from here — a generic
+    /// instantiation carrier, a deferred shell, an intersection, an
+    /// opaque or missing node. It could stand for a class whose heritage
+    /// this reading cannot reach, so its empty ancestry is NOT a proof.
+    Undecided,
+    /// The heritage authority's ancestry answer for this node's own
+    /// declaration.
+    Declared(Arc<super::build::ClassAncestryReading>),
 }
 
 impl HeritageReading {
-    /// A node that carries no declaration at all: PROVED outside every
-    /// class family, with nothing to read.
-    fn proved_free() -> Self {
-        Self {
-            ancestors: Vec::new(),
-            decided: true,
-        }
-    }
-
-    /// A carrier whose ancestry this walk cannot see: no ancestors AND
-    /// no proof that there are none.
-    fn undecided() -> Self {
-        Self {
-            ancestors: Vec::new(),
-            decided: false,
+    /// Whether the reading is a PROOF — see
+    /// [`ClassAncestryReading::decided`](super::build::ClassAncestryReading::decided).
+    fn decided(&self) -> bool {
+        match self {
+            Self::ProvedFree => true,
+            Self::Undecided => false,
+            Self::Declared(ancestry) => ancestry.decided,
         }
     }
 
     fn reaches(&self, target: &crate::semantic_query::DeclIdentity) -> bool {
-        self.ancestors
-            .iter()
-            .any(|ancestor| FlowEvaluator::same_class_identity(ancestor, target))
+        match self {
+            Self::ProvedFree | Self::Undecided => false,
+            Self::Declared(ancestry) => ancestry
+                .ancestors
+                .iter()
+                .any(|ancestor| super::build::same_class_identity(ancestor, target)),
+        }
     }
 }
 
@@ -8897,52 +8908,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         GuardNarrowing::Narrowed(subject.clone(), node)
     }
 
-    /// The global `Function` surface, lowered through the owner scope the
-    /// way an `instanceof` constructor reference is. `None` when the lib
-    /// surface is unavailable — including a lowering that only reaches an
-    /// UNRESOLVED bare reference or an opaque carrier, which must never
-    /// publish as a resolved narrow — so the caller keeps the arm
-    /// possible, degraded, never proved off an edge. A userland shadow
-    /// (`interface Function { … }`, an imported alias named `Function`)
-    /// is likewise rejected: see [`Self::is_unshadowed_builtin_carrier`].
+    /// The checker's `globalFunctionType` — the lib-environment global
+    /// `Function`, read out of the lib environment and NOT by resolving
+    /// the identifier `Function` in owner scope. `typeof x === "function"`
+    /// is a compiler-internal operation: the checker narrows against its
+    /// own `globalFunctionType` no matter what the narrowed expression's
+    /// scope calls `Function`, so a module-local `interface Function { … }`
+    /// does not change (and does not suppress) this narrow. See
+    /// [`ProjectSemanticDispatch::lower_lib_global`].
+    ///
+    /// `None` only when the lib environment declares no such global — the
+    /// checker's own "the global is unavailable" case — so the caller
+    /// keeps the arm possible, degraded, never proved off an edge.
     fn lower_global_function_surface(&mut self) -> Option<SemanticNodeId> {
-        let ty = verter_type_expr::TypeExpr::Ref {
-            name: Arc::from("Function"),
-            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
-        };
-        let node = self.dispatch.lower_type_expr_in_owner_scope_with_context(
+        self.dispatch.lower_lib_global(
             self.canonical,
             self.owner,
-            &ty,
+            &Arc::from("Function"),
+            Arc::from(Vec::new().into_boxed_slice()),
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
-        )?;
-        self.is_unshadowed_builtin_carrier(node).then_some(node)
-    }
-
-    /// Whether `node` is a resolved reference-head carrier
-    /// (`DeclRef` / `InstantiationRef`) whose declaration identity is
-    /// the `"__builtin__"` sentinel `resolve_bare_ref_head` stamps on
-    /// an UNSHADOWED ambient lib global or utility — never a userland
-    /// declaration that happens to share the name. `false` for an
-    /// unresolved `BareRef`, an `Opaque` miss, a missing node, AND a
-    /// resolved carrier whose base names a real workspace/lib file (the
-    /// shadow case: the bare-name walk found the user's own
-    /// declaration instead of routing through the builtin fast path).
-    /// Shared by the two lib-global guard-narrow mints
-    /// ([`Self::mint_in_key_record_intersection`],
-    /// [`Self::lower_global_function_surface`]) so a userland shadow of
-    /// `Record` or `Function` never mints as the checker's resolved
-    /// narrow — it stays the typed `GuardNarrowing` gap.
-    fn is_unshadowed_builtin_carrier(&self, node: SemanticNodeId) -> bool {
-        match self.dispatch.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::DeclRef { identity }) => {
-                identity.canonical_id.as_ref() == "__builtin__"
-            }
-            Some(SemanticNodeData::InstantiationRef { base, .. }) => {
-                base.canonical_id.as_ref() == "__builtin__"
-            }
-            _ => false,
-        }
+        )
     }
 
     /// One union arm's verdict against the runtime type a `typeof`
@@ -9937,7 +9922,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 return InstanceofHeritage::InstanceDerivesFromArm;
             }
         }
-        if arm_heritage.decided && instance_heritage.decided {
+        if arm_heritage.decided() && instance_heritage.decided() {
             InstanceofHeritage::Unrelated
         } else {
             InstanceofHeritage::Undecidable
@@ -9958,94 +9943,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// Whether two declaration identities name the SAME declaration:
-    /// canonical, owner, and name — the content hash is generation-local
-    /// and never distinguishes two spellings of one declaration inside a
-    /// single evaluation.
-    fn same_class_identity(
-        a: &crate::semantic_query::DeclIdentity,
-        b: &crate::semantic_query::DeclIdentity,
-    ) -> bool {
-        a.canonical_id == b.canonical_id && a.owner == b.owner && a.decl_name == b.decl_name
-    }
-
-    /// The heritage ancestors of a class declaration — its own
-    /// declaration identity chain, read through the SAME heritage
-    /// authority the static composer uses
-    /// (`class_heritage_reading`, one prepared-decl read per visited
-    /// declaration), each distinct declaration read at most once
-    /// (seen-guarded worklist, cycle-safe).
-    ///
-    /// The walk carries its own PROOF status. A reachability claim needs
-    /// only the hops it found — a shorter chain can never fabricate a
-    /// derivation — but the NEGATIVE claim ("this arm is not in that
-    /// family") is exactly as strong as the walk's completeness, and an
-    /// empty or truncated chain has four possible causes with only one
-    /// of them a proof (see [`ClassHeritageReading`]). So a hop this
-    /// walk could not ROOT (an unservable declaration file, whose base
-    /// edit a warm narrow would then never see) or could not READ as a
-    /// class with fully-named heritage leaves
-    /// [`HeritageReading::decided`] false, and every consumer of a
-    /// negative answer degrades instead of publishing it.
-    fn class_heritage_chain_of(
-        &mut self,
-        root: &crate::semantic_query::DeclIdentity,
-    ) -> HeritageReading {
-        let mut ancestors: Vec<crate::semantic_query::DeclIdentity> = Vec::new();
-        let mut decided = true;
-        let mut queue: Vec<crate::semantic_query::DeclIdentity> = vec![root.clone()];
-        while let Some(current) = queue.pop() {
-            #[cfg(any(test, feature = "test-support"))]
-            INSTANCEOF_HERITAGE_READS.with(|reads| reads.set(reads.get() + 1));
-            let rooted = self.record_heritage_self_root(current.canonical_id.as_ref());
-            let reading = self.dispatch.class_heritage_reading(
-                &current.canonical_id,
-                current.owner,
-                &current.decl_name,
-            );
-            if !rooted || !reading.decidable {
-                decided = false;
-            }
-            for (base_canonical, base_owner, base_name, _args) in reading.bases {
-                let base = crate::semantic_query::DeclIdentity {
-                    canonical_id: base_canonical,
-                    owner: base_owner,
-                    whole_hash: crate::semantic_query::HashValue::default(),
-                    decl_name: base_name,
-                };
-                if ancestors
-                    .iter()
-                    .chain(std::iter::once(root))
-                    .any(|seen| Self::same_class_identity(seen, &base))
-                {
-                    continue;
-                }
-                ancestors.push(base.clone());
-                queue.push(base);
-            }
-        }
-        HeritageReading { ancestors, decided }
-    }
-
     /// The heritage reading of ONE union arm or instance node — the
     /// nominal fact behind every `instanceof` decision this evaluator
-    /// makes. One bounded walk per node; a warm demand never asks it at
-    /// all.
+    /// makes.
     ///
-    /// A node that carries no declaration at all — an object surface, a
-    /// primitive, a literal, an array or tuple, a bare signature — is
-    /// PROVED outside every class family: the checker's own
-    /// `hasBaseType` answers `false` for it without reading anything, so
-    /// the empty chain is a proof. Every OTHER carrier (a generic
-    /// instantiation carrier, a deferred shell, an intersection, an
-    /// opaque or missing node) could stand for a class whose heritage
-    /// this walk cannot reach, and its empty chain is NOT a proof.
+    /// Exactly ONE heritage-authority read per node that carries a
+    /// declaration, and none at all for a node that carries none: the
+    /// recursive walk over a declaration's base chain belongs to
+    /// [`ProjectSemanticDispatch::class_heritage_ancestry`], which
+    /// memoizes it for the dispatch. That is what makes the guard's cold
+    /// cost one heritage read per arm per edge regardless of how deep the
+    /// hierarchies are. A warm demand asks nothing at all.
+    ///
+    /// The ancestry's observations are folded into this frame's self-roots
+    /// HERE, because the self-root set belongs to the asking computation:
+    /// the authority reads each declaration file through a `ReturnOnly`
+    /// accessor that records no fact of its own, so without this fold a
+    /// warm `instanceof` narrow could survive an edit to an intermediate
+    /// base class.
     fn node_heritage_reading(&mut self, node: SemanticNodeId) -> HeritageReading {
-        match self.dispatch.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::DeclRef { identity }) => {
-                let identity = identity.clone();
-                self.class_heritage_chain_of(&identity)
-            }
+        let identity = match self.dispatch.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
             Some(
                 SemanticNodeData::Object(_)
                 | SemanticNodeData::Primitive(_)
@@ -10053,34 +9971,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 | SemanticNodeData::Array { .. }
                 | SemanticNodeData::Tuple { .. }
                 | SemanticNodeData::Signature { .. },
-            ) => HeritageReading::proved_free(),
-            _ => HeritageReading::undecided(),
-        }
-    }
-
-    /// Observe one heritage-chain hop's declaration file at the whole-hash
-    /// it was served at — the same self-root the static composer records
-    /// before its own `class_heritage_bases` read (`build.rs`
-    /// `ensure_indexed_ready_serve` push). The heritage reader reads the
-    /// file's prepared decl through a `ReturnOnly` accessor that records no
-    /// fact of its own, so every canonical this walk visits must be rooted
-    /// explicitly or a warm `instanceof` narrow can survive an edit to an
-    /// intermediate base class.
-    ///
-    /// Returns whether the hop was rooted. A file that cannot be served
-    /// still contributes whatever bases a request memo or a validated
-    /// bundle cache can answer with, so the miss cannot be ignored: the
-    /// caller marks the whole walk undecided, which is what keeps the
-    /// enclosing narrow off the warm slot.
-    fn record_heritage_self_root(&mut self, canonical: &str) -> bool {
-        let Some(serve) = self.dispatch.ctx.ensure_indexed_ready_serve(canonical) else {
-            return false;
+            ) => return HeritageReading::ProvedFree,
+            _ => return HeritageReading::Undecided,
         };
-        let root = (Arc::<str>::from(canonical), serve.indexed.whole_hash);
-        if !self.heritage_self_roots.contains(&root) {
-            self.heritage_self_roots.push(root);
+        #[cfg(any(test, feature = "test-support"))]
+        INSTANCEOF_HERITAGE_READS.with(|reads| reads.set(reads.get() + 1));
+        let ancestry = self.dispatch.class_heritage_ancestry(&identity);
+        for observation in ancestry.observed.iter() {
+            if !self.heritage_self_roots.contains(observation) {
+                self.heritage_self_roots.push(observation.clone());
+            }
         }
-        true
+        HeritageReading::Declared(ancestry)
     }
 
     /// Whether one union arm is beyond `instanceof` classification
@@ -10216,49 +10118,50 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     }
 
     /// The checker's unknown-key positive edge: `subject &
-    /// Record<key, unknown>`. The `Record` utility lowers through the
-    /// shared owner-scope lowering — the same builtin-shadowing-aware
-    /// carrier an authored `Record<key, unknown>` annotation mints, so
-    /// the intersection's utility arm is the shared `Instantiate`
-    /// identity, never a private spelling — and the whole AUTHORED
-    /// subject node is kept as the intersection's subject arm,
-    /// preserving its spelling. `None` when the utility does not
-    /// resolve (a userland shadow, an unresolvable reference): the
-    /// caller keeps the typed gap. The resolved carrier is accepted
-    /// ONLY when its head identity is the `"__builtin__"` sentinel —
-    /// the SAME shadow-detection identity `resolve_bare_ref_head`
-    /// stamps on the ambient lib global. A userland `type Record = …`
-    /// (or an imported alias of that name) resolves through the
-    /// ordinary bare-name walk instead, landing a `DeclRef` /
-    /// `InstantiationRef` whose `base.canonical_id` names the
-    /// shadowing file — never `"__builtin__"` — so it is rejected here
-    /// rather than minted as the checker's narrow.
+    /// Record<key, unknown>`.
+    ///
+    /// The utility comes from the LIB ENVIRONMENT, the way the checker
+    /// takes it (`getGlobalRecordSymbol()`, then a type-alias
+    /// instantiation over that global symbol) — not by resolving the
+    /// identifier `Record` in owner scope. `in`-narrowing is a
+    /// compiler-internal operation, so a module-local `type Record<K, V>`
+    /// does not change (and does not suppress) it. See
+    /// [`ProjectSemanticDispatch::lower_lib_global`]. The mint is still
+    /// the shared builtin-utility carrier — the same `Instantiate`
+    /// identity an unshadowed authored `Record<key, unknown>` annotation
+    /// produces, never a private spelling — and the whole AUTHORED
+    /// subject node is kept as the intersection's subject arm, preserving
+    /// its spelling.
+    ///
+    /// `None` when the lib environment declares no `Record` at all: the
+    /// checker's own `getGlobalRecordSymbol()`-returns-`undefined` case,
+    /// where it narrows nothing. The caller keeps the typed gap.
     fn mint_in_key_record_intersection(
         &mut self,
         subject: SemanticNodeId,
         key: &str,
     ) -> Option<SemanticNodeId> {
-        let record = verter_type_expr::TypeExpr::Ref {
-            name: Arc::from("Record"),
-            type_arguments: Arc::from(
-                vec![
-                    verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
-                        key.to_string(),
-                    )),
-                    verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Unknown),
-                ]
-                .into_boxed_slice(),
-            ),
-        };
-        let utility = self.dispatch.lower_type_expr_in_owner_scope_with_context(
+        let key_node = self.dispatch.lower_type_expr_in_owner_scope_with_context(
             self.canonical,
             self.owner,
-            &record,
+            &verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+                key.to_string(),
+            )),
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
         )?;
-        if !self.is_unshadowed_builtin_carrier(utility) {
-            return None;
-        }
+        let unknown_node = self.dispatch.lower_type_expr_in_owner_scope_with_context(
+            self.canonical,
+            self.owner,
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Unknown),
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )?;
+        let utility = self.dispatch.lower_lib_global(
+            self.canonical,
+            self.owner,
+            &Arc::from("Record"),
+            Arc::from(vec![key_node, unknown_node].into_boxed_slice()),
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )?;
         Some(
             self.dispatch
                 .intern_normalized_union_or_intersection(&[subject, utility], false),
