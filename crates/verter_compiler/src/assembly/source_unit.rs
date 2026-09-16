@@ -94,16 +94,20 @@ pub(crate) fn carrier_source_id(canonical_id: &str) -> SourceId {
 /// The revision of a carrier whose exact bytes are `source`: two compiles of
 /// the same bytes name the same revision, and any byte change names another.
 pub(crate) fn carrier_revision(source: &str) -> SourceRevision {
-    struct CarrierBytes(ContentId);
-    impl CanonicalEncode for CarrierBytes {
+    carrier_revision_of(&ContentId::from_content_bytes(source.as_bytes()))
+}
+
+/// [`carrier_revision`] for a caller that already holds the carrier bytes'
+/// [`ContentId`], so the bytes are hashed once.
+pub(crate) fn carrier_revision_of(content: &ContentId) -> SourceRevision {
+    struct CarrierBytes<'a>(&'a ContentId);
+    impl CanonicalEncode for CarrierBytes<'_> {
         const DOMAIN_TAG: &'static str = "verter.compiler.assembly.carrier_revision.v1";
         fn encode_fields(&self, e: &mut CanonicalEncoder) {
             e.field_bytes(1, self.0.canonical_bytes());
         }
     }
-    SourceRevision::from_canonical(&CarrierBytes(ContentId::from_content_bytes(
-        source.as_bytes(),
-    )))
+    SourceRevision::from_canonical(&CarrierBytes(content))
 }
 
 #[cfg(test)]
