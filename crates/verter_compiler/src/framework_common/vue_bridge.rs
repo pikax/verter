@@ -827,18 +827,26 @@ pub fn vue_result_to_runtime_bundle(
             output_descriptor,
         }
     });
+    // A block the rewrite refused as an unnameable dialect has no qualified
+    // value, and its compile already carries that refusal as an error. The
+    // other blocks are not published without it: the style list is an index
+    // space the host's style imports and virtual files are keyed by, so a
+    // list with a hole in it would attach every later block's bytes to the
+    // wrong specifier. An error-bearing compile publishes its diagnostics and
+    // no styles.
     let qualified_styles = result
         .styles
         .into_iter()
         .zip(parsed.style_nodes())
         .map(|(s, node)| {
+            let result = s.result?;
             let exact_map = node.content.as_ref().and_then(|content| {
                 let authored = &source[content.start as usize..content.end as usize];
-                (authored == s.code())
+                (authored == result.code())
                     .then(|| exact_slice_source_map(source, content.start, authored))
             });
             let output_descriptor = RuntimeOutputDescriptor::generated(
-                s.code(),
+                result.code(),
                 exact_map.as_deref(),
                 &declared,
                 if exact_map.is_some() {
@@ -847,11 +855,11 @@ pub fn vue_result_to_runtime_bundle(
                     SourceMapFidelity::Approximate
                 },
             );
-            QualifiedRuntimeStyle {
+            Some(QualifiedRuntimeStyle {
                 // The cascade that minted these bytes named their stage,
                 // dialect and producer; this conversion carries that value
                 // rather than re-deriving any of it from the bytes.
-                result: s.result,
+                result,
                 // The carrier's own authored block is the space the rewrite
                 // read — this route admits no external continuation, so
                 // there is no produced space it could have consumed.
@@ -865,9 +873,10 @@ pub fn vue_result_to_runtime_bundle(
                 scope_hash: None,
                 has_global: false,
                 output_descriptor,
-            }
+            })
         })
-        .collect();
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default();
     let custom_blocks = result
         .custom_blocks
         .into_iter()
@@ -3327,6 +3336,58 @@ mod tests {
             "the selected style's host specifier must still be imported, got:\n{body}"
         );
     }
+    /// The bundler route for a `lang` the rewrite cannot name: the host runs
+    /// the tool and supplies its CSS, and the published style states exactly
+    /// that — preprocessed bytes from the named tool, with no refusal.
+    #[test]
+    fn unnameable_authored_dialect_with_supplied_css_publishes_the_preprocessed_result() {
+        let source =
+            "<template><div class=\"x\"/></template><style lang=\"postcss\">.x { color: red; }</style>";
+        let css = ".x { color: red; }";
+        let alloc = oxc_allocator::Allocator::new();
+        let output = VueCarrierCompiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact_for(source),
+                &RuntimeCompileOptions {
+                    filename: Some("PostCss.vue".to_string()),
+                    component_id: Some("scope123".to_string()),
+                    want_runtime: true,
+                    block_content: RuntimeBlockContentInputs {
+                        styles: vec![Some(RuntimeBlockContentInput {
+                            code: Arc::from(css),
+                            source_map: None,
+                            lang: "css".to_string(),
+                            content_artifact_token: "artifact:postcss-output".to_string(),
+                            source_space_token: "space:postcss-output".to_string(),
+                            parsed: Some(supplied_style(css)),
+                            producer: Some(supplied_producer()),
+                            authored_basis: None,
+                            diagnostics: Vec::new(),
+                        })],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("a supplied result for an unnameable dialect compiles");
+        assert!(!output.has_errors(), "{:?}", output.diagnostics);
+        assert_eq!(output.qualified_styles.len(), 1);
+        let style = &output.qualified_styles[0];
+        assert_eq!(
+            style.result.stage(),
+            verter_css_syntax::StyleStage::Preprocessed
+        );
+        assert_eq!(
+            style.consumed_stage,
+            verter_css_syntax::StyleStage::Preprocessed
+        );
+        assert!(style.result.producer().is_external());
+        assert!(!style.result.is_refused());
+        assert_eq!(style.result.code(), css);
+    }
+
     #[test]
     fn style_only_demand_does_not_assemble_main() {
         let source = "<style>.x{color:red}</style><template><div/></template>";

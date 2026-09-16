@@ -953,15 +953,14 @@ fn compile_inner(
                             ),
                             *content,
                         ));
-                        // No rewrite ran, so nothing but the authoring
-                        // claims these bytes: they are published at the
-                        // authored stage, read under the only grammar this
-                        // compiler will admit for a `lang` it cannot name —
-                        // the same base-CSS reading `class_extraction_dialect`
-                        // gives an unrecognised block. The refusal itself is
-                        // the error diagnostic pushed just above, which fails
-                        // the compile; it is not re-stated as a stage.
-                        QualifiedStyleResult::authored(CssDialect::Css, style_source, Vec::new())
+                        // The rewrite cannot claim to understand these bytes,
+                        // so no qualified statement about them is made: every
+                        // one names a dialect, and none of those would be
+                        // true. The refusal is the error pushed just above.
+                        // (`class_extraction_dialect` may read such a block
+                        // as CSS only because completion is advisory; a
+                        // published result is not.)
+                        None
                     }
                     Some(authored_dialect) => {
                         let source_name = options.filename.as_deref().unwrap_or("<style>");
@@ -1035,14 +1034,22 @@ fn compile_inner(
                             }
                         }
 
-                        outcome.result
+                        Some(outcome.result)
                     }
                 }
             } else {
-                // A `<style>` with no content span authored no bytes. An
-                // empty authored block is a legitimate result, not a
-                // refusal — see `QualifiedStyleResult::refused`.
-                QualifiedStyleResult::authored(CssDialect::Css, "", Vec::new())
+                // A `<style>` with no content span authored no bytes here —
+                // a host-selected block's content is blanked on the carrier
+                // view and replaced after this compile. An empty authored
+                // block is a legitimate result, not a refusal (see
+                // `QualifiedStyleResult::refused`), recorded in the dialect
+                // the block declares. With no bytes to characterise, a `lang`
+                // this compiler cannot name falls back to the base grammar.
+                Some(QualifiedStyleResult::authored(
+                    style_dialect(style.lang).unwrap_or(CssDialect::Css),
+                    "",
+                    Vec::new(),
+                ))
             };
 
             let style_duration_ms = style_start.elapsed().as_secs_f64() * 1000.0;

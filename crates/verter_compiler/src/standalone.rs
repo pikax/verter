@@ -3777,6 +3777,38 @@ mod tests {
     }
 
     #[test]
+    fn vue_unnameable_style_dialect_publishes_no_qualified_style() {
+        // `postcss` names no dialect the rewrite admits. The compile reports
+        // that refusal as an error and must not also publish those bytes
+        // under a stage and dialect that would be false — nor publish the
+        // component's other styles with a hole in their index space.
+        let source = "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div></template>\n<style>\n.ok { color: blue; }\n</style>\n<style lang=\"postcss\">\n.foo { color: red; }\n</style>\n";
+        let request = vue_request(vec![CompileProduct::RuntimeClient(
+            RuntimeProductRequest::default(),
+        )]);
+        let output = StandaloneCompiler
+            .compile(source, &request, vue_inputs())
+            .expect("Vue reports a refused style dialect as a diagnostic, not a refusal");
+        assert!(
+            output.diagnostics.iter().any(|d| {
+                d.severity == crate::compile::types::CompileDiagnosticSeverity::Error
+                    && d.message.contains("refused unknown dialect")
+            }),
+            "the refusal is reported: {:?}",
+            output.diagnostics
+        );
+        assert!(
+            output.qualified_styles.is_empty(),
+            "no qualified style is published beside the refusal, got {:?}",
+            output
+                .qualified_styles
+                .iter()
+                .map(|style| (style.result.stage(), style.lang(), style.result.code()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn vue_styled_component_publishes_non_empty_styles() {
         let request = vue_request(vec![CompileProduct::RuntimeClient(
             RuntimeProductRequest::default(),

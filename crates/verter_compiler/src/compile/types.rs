@@ -459,7 +459,13 @@ pub struct VerterStyleBlock {
     /// VueStyleCascadeOutcome::result`]); nothing downstream re-derives the
     /// stage from the bytes, which is why the bare `code` string this field
     /// replaced could not be carried across the compiler bridge.
-    pub result: verter_css_syntax::QualifiedStyleResult,
+    ///
+    /// `None` when the block authored bytes in a `lang` that names no dialect
+    /// this compiler admits (`postcss`, an unknown spelling). The rewrite
+    /// refused them and the compile carries that refusal as an error; there is
+    /// no stage-and-dialect statement about those bytes that would be true, so
+    /// none is made. A block that authored no bytes is never `None`.
+    pub result: Option<verter_css_syntax::QualifiedStyleResult>,
     pub scoped: bool,
     pub lang: Option<String>,
     pub duration_ms: f64,
@@ -475,9 +481,12 @@ impl VerterStyleBlock {
     /// The published bytes. A reader that only wants the text takes them
     /// from the qualified result rather than from a second copy kept beside
     /// it, so the bytes and the stage that produced them cannot disagree.
+    /// Empty when there is no qualified result, as for any refusal.
     #[must_use]
     pub fn code(&self) -> &str {
-        self.result.code()
+        self.result
+            .as_ref()
+            .map_or("", verter_css_syntax::QualifiedStyleResult::code)
     }
 }
 
