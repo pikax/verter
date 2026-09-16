@@ -204,3 +204,15 @@ fn synthetic_carrier_slot_name_present_vs_absent_distinct() {
     assert_ne!(with_slot, without_slot);
     assert_ne!(hash_one(&with_slot), hash_one(&without_slot));
 }
+
+/// Exact layout record for the compiler-intrinsic migration. Measured at the
+/// migration's `main` merge base (before `TypeExpr::IntrinsicApplication`
+/// existed) and after it: 56 bytes both times. The `<= 64` budget above
+/// would silently absorb an 8-byte widening; this pins that the new arm did
+/// not widen the enum. 64-bit targets only — the value is pointer-width
+/// dependent.
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn type_expr_layout_is_unchanged_by_the_intrinsic_application_arm() {
+    assert_eq!(std::mem::size_of::<TypeExpr>(), 56);
+}
