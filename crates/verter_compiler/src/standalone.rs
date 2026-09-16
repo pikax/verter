@@ -3439,6 +3439,32 @@ fn style_stage_rank(stage: verter_css_syntax::StyleStage) -> usize {
     }
 }
 
+fn css_dialect_rank(dialect: verter_css_syntax::CssDialect) -> usize {
+    match dialect {
+        verter_css_syntax::CssDialect::Css => 0,
+        verter_css_syntax::CssDialect::Scss => 1,
+        verter_css_syntax::CssDialect::Sass => 2,
+        verter_css_syntax::CssDialect::Less => 3,
+        verter_css_syntax::CssDialect::Stylus => 4,
+    }
+}
+
+/// Every fact a [`verter_css_syntax::StyleProducer`] carries, behind a kind
+/// tag: two tools that emitted byte-identical CSS are different producers,
+/// and so are two runs of one tool at different versions or configurations.
+fn hash_style_producer(hasher: &mut blake3::Hasher, producer: &verter_css_syntax::StyleProducer) {
+    match producer {
+        verter_css_syntax::StyleProducer::Verter => hash_usize(hasher, 0),
+        verter_css_syntax::StyleProducer::ExternalAnonymous => hash_usize(hasher, 1),
+        verter_css_syntax::StyleProducer::External(external) => {
+            hash_usize(hasher, 2);
+            hash_len_prefixed_str(hasher, external.identity());
+            hash_len_prefixed_opt_str(hasher, external.version());
+            hash_len_prefixed_opt_str(hasher, external.config_fingerprint());
+        }
+    }
+}
+
 fn hash_opt_span(hasher: &mut blake3::Hasher, span: Option<verter_span::Span>) {
     match span {
         Some(span) => {
@@ -3458,12 +3484,15 @@ fn hash_opt_span(hasher: &mut blake3::Hasher, span: Option<verter_span::Span>) {
 /// slots, hashed in the order [`crate::assembly::ArtifactSet::artifacts`]
 /// exposes them — publication order is part of the observable result, so a
 /// route that reordered artifacts must produce a different digest, not the
-/// same one, then `qualified_styles`' `code`/both stages/`lang`/
-/// `source_map`/`scope_hash`/`has_global`/`output_descriptor` (via
+/// same one, then `qualified_styles`' whole result identity — `code`,
+/// stage, dialect, producer (kind, and a named tool's identity/version/config
+/// fingerprint), the refusal flag and its own diagnostics — plus the consumed
+/// stage, `source_map`/`scope_hash`/`has_global`/`output_descriptor` (via
 /// [`hash_output_descriptor`] — itself derived purely from `code`/the raw
 /// map/declared-source identity, but hashed explicitly rather than assumed
-/// redundant) and the result's own diagnostics, then the compile's
-/// `diagnostics`' `severity`/`code`/`message`/`span`. Lets a result-identity comparison
+/// redundant), then the compile's `diagnostics`' `severity`/`code`/
+/// `message`/`span`. Byte-identical output under different provenance is a
+/// different result. Lets a result-identity comparison
 /// across routes (direct / prepared-first / prepared-repeat / batch) report
 /// ONE short mismatching digest per fixture/route instead of a giant string
 /// diff. Shared verbatim by this module's own tests and the
@@ -3489,13 +3518,10 @@ pub fn direct_compile_output_digest(output: &DirectCompileOutput) -> [u8; 32] {
     for style in &output.qualified_styles {
         hash_len_prefixed_str(&mut hasher, style.result.code());
         hash_usize(&mut hasher, style_stage_rank(style.result.stage()));
+        hash_usize(&mut hasher, css_dialect_rank(style.result.dialect()));
+        hash_style_producer(&mut hasher, style.result.producer());
+        hasher.update(&[style.result.is_refused() as u8]);
         hash_usize(&mut hasher, style_stage_rank(style.consumed_stage));
-        // The published dialect, in the one spelling the result's own
-        // dialect maps to. The deleted unqualified block hashed a `lang`
-        // string beside its bytes; dropping the field must not drop the
-        // fact, or two routes that published the same CSS under different
-        // dialects would compare equal.
-        hash_len_prefixed_str(&mut hasher, style.lang());
         hash_len_prefixed_opt_str(&mut hasher, style.source_map.as_deref());
         hash_len_prefixed_opt_str(&mut hasher, style.scope_hash.as_deref());
         hasher.update(&[style.has_global as u8]);

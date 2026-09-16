@@ -608,6 +608,190 @@ fn identity_digest_changes_when_the_style_count_changes() {
     );
 }
 
+// The stage-qualified style section. A `QualifiedStyleResult` is identity as
+// much as bytes — its stage, dialect, producer and refusal are the facts the
+// type exists to keep exact — so two routes that published the same bytes
+// under different provenance are different results, and each fact needs a
+// test that fails if the hasher stops covering it.
+
+/// The one baseline every qualified-style test varies exactly one field of.
+fn qualified_style(
+    result: verter_css_syntax::QualifiedStyleResult,
+) -> crate::framework_common::QualifiedRuntimeStyle {
+    crate::framework_common::QualifiedRuntimeStyle {
+        result,
+        consumed_stage: verter_css_syntax::StyleStage::Authored,
+        source_map: None,
+        scope_hash: None,
+        has_global: false,
+        output_descriptor: crate::framework_common::RuntimeOutputDescriptor::generated(
+            BASE_STYLE_DESCRIPTOR_SOURCE,
+            None,
+            &[("space", "artifact")],
+            crate::framework_common::SourceMapFidelity::Approximate,
+        ),
+    }
+}
+
+fn rewritten_css(code: &str) -> verter_css_syntax::QualifiedStyleResult {
+    verter_css_syntax::QualifiedStyleResult::framework_rewritten(
+        verter_css_syntax::CssDialect::Css,
+        code,
+        Vec::new(),
+    )
+}
+
+/// CSS bytes a named tool produced. Every test holds all three identity
+/// fields but the one it varies.
+fn preprocessed_by(
+    identity: &str,
+    version: Option<&str>,
+    config_fingerprint: Option<&str>,
+) -> verter_css_syntax::QualifiedStyleResult {
+    verter_css_syntax::QualifiedStyleResult::preprocessed(
+        verter_css_syntax::PreprocessorIdentity::Named(
+            verter_css_syntax::ExternalStyleProducer::new(identity, version, config_fingerprint)
+                .expect("a fixture names its tool"),
+        ),
+        ".a {}",
+        Vec::new(),
+    )
+}
+
+#[test]
+fn identity_digest_changes_when_a_qualified_style_is_refused() {
+    // The same stage, dialect, producer, bytes (none) and diagnostics (none):
+    // an authored `<style></style>` and a stage that refused to produce
+    // anything differ ONLY in the refusal fact.
+    let empty = verter_css_syntax::QualifiedStyleResult::authored(
+        verter_css_syntax::CssDialect::Css,
+        "",
+        Vec::new(),
+    );
+    let refused = verter_css_syntax::QualifiedStyleResult::refused(
+        verter_css_syntax::StyleStage::Authored,
+        verter_css_syntax::CssDialect::Css,
+        Vec::new(),
+    );
+    assert_eq!(
+        empty.code(),
+        refused.code(),
+        "the fixture holds the bytes equal"
+    );
+    assert_eq!(
+        empty.stage(),
+        refused.stage(),
+        "the fixture holds the stage equal"
+    );
+    assert_ne!(
+        digest_with_style(qualified_style(empty)),
+        digest_with_style(qualified_style(refused)),
+        "a digest that skipped the refusal would equate an empty stylesheet with one the \
+         pipeline refused to produce"
+    );
+}
+
+#[test]
+fn identity_digest_changes_when_a_qualified_style_producer_kind_changes() {
+    let anonymous = verter_css_syntax::QualifiedStyleResult::preprocessed(
+        verter_css_syntax::PreprocessorIdentity::Anonymous,
+        ".a {}",
+        Vec::new(),
+    );
+    assert_ne!(
+        digest_with_style(qualified_style(anonymous)),
+        digest_with_style(qualified_style(preprocessed_by("sass", None, None))),
+        "a digest that skipped the producer kind would equate an unnamed tool with a named one"
+    );
+}
+
+#[test]
+fn identity_digest_changes_when_a_qualified_style_is_produced_by_another_named_tool() {
+    assert_ne!(
+        digest_with_style(qualified_style(preprocessed_by("sass", None, None))),
+        digest_with_style(qualified_style(preprocessed_by("less", None, None))),
+        "a digest that skipped the producer identity would equate byte-identical CSS from two \
+         different preprocessors"
+    );
+}
+
+#[test]
+fn identity_digest_changes_when_a_qualified_style_producer_version_changes() {
+    assert_ne!(
+        digest_with_style(qualified_style(preprocessed_by(
+            "sass",
+            Some("1.77.0"),
+            None
+        ))),
+        digest_with_style(qualified_style(preprocessed_by(
+            "sass",
+            Some("1.78.0"),
+            None
+        ))),
+        "a digest that skipped the producer version would leave these equal"
+    );
+}
+
+#[test]
+fn identity_digest_changes_when_a_qualified_style_producer_config_fingerprint_changes() {
+    assert_ne!(
+        digest_with_style(qualified_style(preprocessed_by(
+            "sass",
+            Some("1.77.0"),
+            Some("config-a")
+        ))),
+        digest_with_style(qualified_style(preprocessed_by(
+            "sass",
+            Some("1.77.0"),
+            Some("config-b")
+        ))),
+        "a digest that skipped the producer config fingerprint would leave these equal"
+    );
+}
+
+#[test]
+fn identity_digest_changes_when_a_qualified_style_result_stage_changes() {
+    let authored = verter_css_syntax::QualifiedStyleResult::authored(
+        verter_css_syntax::CssDialect::Css,
+        ".a {}",
+        Vec::new(),
+    );
+    assert_ne!(
+        digest_with_style(qualified_style(rewritten_css(".a {}"))),
+        digest_with_style(qualified_style(authored)),
+        "a digest that skipped the result stage would equate rewritten bytes with authored ones"
+    );
+}
+
+#[test]
+fn identity_digest_changes_when_a_qualified_style_consumed_stage_changes() {
+    let mut preprocessed_input = qualified_style(rewritten_css(".a {}"));
+    preprocessed_input.consumed_stage = verter_css_syntax::StyleStage::Preprocessed;
+    assert_ne!(
+        digest_with_style(qualified_style(rewritten_css(".a {}"))),
+        digest_with_style(preprocessed_input),
+        "a digest that skipped the consumed stage would leave these equal"
+    );
+}
+
+#[test]
+fn identity_digest_changes_when_qualified_style_diagnostics_change() {
+    let diagnosed = verter_css_syntax::QualifiedStyleResult::framework_rewritten(
+        verter_css_syntax::CssDialect::Css,
+        ".a {}",
+        vec![verter_css_syntax::StyleDiagnostic::new(
+            verter_css_syntax::StyleStage::Authored,
+            "refused",
+            None,
+        )],
+    );
+    assert_ne!(
+        digest_with_style(qualified_style(rewritten_css(".a {}"))),
+        digest_with_style(qualified_style(diagnosed)),
+        "a digest that skipped the result's own diagnostics would leave these equal"
+    );
+}
+
 fn diagnostic(
     severity: crate::compile::types::CompileDiagnosticSeverity,
     code: &str,
@@ -833,19 +1017,20 @@ fn empty_output_descriptor() -> crate::framework_common::carrier_compiler::Runti
 /// One style block whose `code` is 24 bytes is re-read as a 24-diagnostic
 /// count; the code's first sixteen NUL bytes are re-read as the first
 /// diagnostic's `Error` severity and its zero-length code; the code's last
-/// eight bytes spell 261 little-endian (`\u{5}\u{1}` then six NULs), re-read
-/// as that diagnostic's message length; and the style's own 129 trailing
-/// bytes — two stage ranks, the `css` dialect spelling behind its length, the
-/// two option tags and the `has_global` flag, the 91-byte all-empty output
-/// descriptor and the style's own zero diagnostic count — plus the arm's
-/// 28-diagnostic count and its first 124 blank-diagnostic bytes are re-read
-/// as those 261 message bytes.
+/// eight bytes spell 267 little-endian (`\u{b}\u{1}` then six NULs), re-read
+/// as that diagnostic's message length; and the style's own 135 trailing zero
+/// bytes — the result stage, dialect and producer ranks, the refusal flag, the
+/// consumed stage, the two option tags and the `has_global` flag, the 91-byte
+/// all-empty output descriptor and the style's own zero diagnostic count —
+/// plus the arm's 28-diagnostic count and its first 124 blank-diagnostic bytes
+/// are re-read as those 267 message bytes.
 ///
-/// Every literal is load-bearing — the 24, the 261, the 16/2/6 NUL split,
+/// Every literal is load-bearing — the 24, the 267, the 16/2/6 NUL split,
 /// `Error` on every diagnostic, `span: None` throughout, an all-empty
-/// descriptor with both `utf8_byte_len` zero, both stages `Authored`, a `css`
-/// dialect and no style-result diagnostics. 24 diagnostics against 28 is what
-/// balances the two tails: 600 + 261 = 161 + 25 × 28. Change one and re-run
+/// descriptor with both `utf8_byte_len` zero, both stages `Authored`, a CSS
+/// result Verter produced and did not refuse, and no style-result
+/// diagnostics. 24 diagnostics against 28 is what balances the two tails:
+/// 600 + 267 = 167 + 25 × 28. Change one and re-run
 /// the plant before believing the test — an `assert_ne!` over a plant that no
 /// longer aligns passes while proving nothing.
 #[test]
@@ -860,18 +1045,18 @@ fn identity_digest_changes_when_a_style_block_is_replaced_by_diagnostic_bytes() 
         }
     }
     // No styles; the first diagnostic carries the bytes the other arm spends on
-    // a style block. The message is the style's 129-byte tail, then the
+    // a style block. The message is the style's 135-byte tail, then the
     // 28-diagnostic count, then 124 zero bytes of blank diagnostics.
     let mut absorbed_message = String::new();
-    absorbed_message.push_str(&"\u{0}".repeat(16)); // both stage ranks
-    absorbed_message.push_str("\u{3}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}"); // `css`.len()
-    absorbed_message.push_str("css");
+    absorbed_message.push_str(&"\u{0}".repeat(24)); // result stage, dialect and producer ranks
+    absorbed_message.push('\u{0}'); // not refused
+    absorbed_message.push_str(&"\u{0}".repeat(8)); // consumed stage
     absorbed_message.push_str(&"\u{0}".repeat(3)); // source map, scope hash, has_global
     absorbed_message.push_str(&"\u{0}".repeat(91)); // the all-empty output descriptor
     absorbed_message.push_str(&"\u{0}".repeat(8)); // the style result's own diagnostic count
     absorbed_message.push_str("\u{1c}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}"); // 28 diagnostics
     absorbed_message.push_str(&"\u{0}".repeat(124)); // four blank diagnostics, then 24 bytes
-    assert_eq!(absorbed_message.len(), 261, "the plant is byte-counted");
+    assert_eq!(absorbed_message.len(), 267, "the plant is byte-counted");
 
     let mut without_style = DigestFixture::runtime();
     let mut absorbed = vec![CompileDiagnostic {
@@ -888,7 +1073,7 @@ fn identity_digest_changes_when_a_style_block_is_replaced_by_diagnostic_bytes() 
     with_style.qualified_styles = vec![crate::framework_common::QualifiedRuntimeStyle {
         result: verter_css_syntax::QualifiedStyleResult::authored(
             verter_css_syntax::CssDialect::Css,
-            format!("{}\u{5}\u{1}{}", "\u{0}".repeat(16), "\u{0}".repeat(6)),
+            format!("{}\u{b}\u{1}{}", "\u{0}".repeat(16), "\u{0}".repeat(6)),
             Vec::new(),
         ),
         consumed_stage: verter_css_syntax::StyleStage::Authored,
