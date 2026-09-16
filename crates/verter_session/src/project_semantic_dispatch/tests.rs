@@ -17205,6 +17205,83 @@ fn mapped_key_domain_judges_instantiations_per_argument_not_by_arg_openness() {
     }
 }
 
+/// A deferred intrinsic application is KNOWN-SYMBOLIC, never TERMINAL.
+///
+/// `means_type_is_not_yet_known()` answers `false` for
+/// `IntrinsicApplication(Awaited, [T])`: the operation is decided, so the
+/// node is not an unknown. That `false` must never be read as "fully
+/// materialized". The same node still carries its unreduced operand, is not
+/// a settled value the awaited relation may pass through, and is not a
+/// provably closed domain. Each of those three readers is pinned here beside
+/// the known-ness, with a settled primitive as the control that flips the
+/// terminal half.
+#[test]
+fn intrinsic_application_is_known_symbolic_and_not_terminal() {
+    use crate::semantic_query::{
+        ChildWalk, CompilerIntrinsicTypeOp, DeclIdentity, HashValue, LiteralValue, PrimitiveKind,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let awaited_t = graph.intern_node(SemanticNodeData::IntrinsicApplication {
+        op: CompilerIntrinsicTypeOp::Awaited,
+        args: Arc::from(vec![t_param].into_boxed_slice()),
+    });
+    let settled = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let key_lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "x".to_string(),
+    )));
+    let builtin_pick = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Pick"),
+    };
+
+    let data = graph.node_data(awaited_t).expect("interned");
+    assert!(
+        !data.means_type_is_not_yet_known(),
+        "a decided operation over an open binder is KNOWN, not an unknown"
+    );
+
+    let mut children = Vec::new();
+    assert_eq!(
+        data.for_each_child(|child| children.push(child)),
+        ChildWalk::Enumerated
+    );
+    assert_eq!(
+        children,
+        vec![t_param],
+        "known-symbolic, not terminal: the unreduced operand is still a child"
+    );
+    assert!(
+        !dispatch.settled_non_thenable(awaited_t),
+        "not terminal: the awaited relation must not pass the application through as settled"
+    );
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &dispatch,
+            &builtin_pick,
+            &[awaited_t, key_lit],
+        ),
+        "not terminal: an unreduced application is not a provably closed domain"
+    );
+
+    // Control: a settled primitive is terminal on every reader above.
+    let settled_data = graph.node_data(settled).expect("interned");
+    assert!(!settled_data.means_type_is_not_yet_known());
+    let mut settled_children = Vec::new();
+    assert_eq!(
+        settled_data.for_each_child(|child| settled_children.push(child)),
+        ChildWalk::Enumerated
+    );
+    assert!(settled_children.is_empty());
+    assert!(dispatch.settled_non_thenable(settled));
+}
+
 /// Hash-consed repeated open node: `Pick<Foo<T, T>, …>` interns BOTH type
 /// arguments as the SAME `TypeParam` node id. The per-argument openness
 /// collect must see `open_args = [true, true]` — a visited-set walk that
