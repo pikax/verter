@@ -774,7 +774,8 @@ pub struct RuntimeTemplateBlock {
 /// [`Self::output_descriptor`] declares.
 #[derive(Debug, Clone)]
 pub struct QualifiedRuntimeStyle {
-    /// The published stylesheet: framework-rewritten plain CSS.
+    /// The published stage-qualified stylesheet — authored, preprocessed or
+    /// framework-rewritten, as the result's own stage says.
     pub result: verter_css_syntax::QualifiedStyleResult,
     /// The stage of the bytes the framework rewrite consumed.
     pub consumed_stage: verter_css_syntax::StyleStage,

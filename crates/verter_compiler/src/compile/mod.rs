@@ -1038,18 +1038,16 @@ fn compile_inner(
                     }
                 }
             } else {
-                // A `<style>` with no content span authored no bytes here —
-                // a host-selected block's content is blanked on the carrier
-                // view and replaced after this compile. An empty authored
-                // block is a legitimate result, not a refusal (see
+                // A `<style>` with no content span authored no bytes here: a
+                // self-closing block, or a host-selected one whose content the
+                // carrier view blanked. An empty authored block is a
+                // legitimate result, not a refusal (see
                 // `QualifiedStyleResult::refused`), recorded in the dialect
-                // the block declares. With no bytes to characterise, a `lang`
-                // this compiler cannot name falls back to the base grammar.
-                Some(QualifiedStyleResult::authored(
-                    style_dialect(style.lang).unwrap_or(CssDialect::Css),
-                    "",
-                    Vec::new(),
-                ))
+                // the block declares. A declared `lang` this compiler cannot
+                // name has no such dialect, so the slot stays empty rather
+                // than borrowing one; a host selection fills it later.
+                style_dialect(style.lang)
+                    .map(|dialect| QualifiedStyleResult::authored(dialect, "", Vec::new()))
             };
 
             let style_duration_ms = style_start.elapsed().as_secs_f64() * 1000.0;

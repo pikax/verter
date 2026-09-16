@@ -99,6 +99,29 @@ fn animation_value_identifiers(source: &str) -> Vec<&str> {
     identifiers
 }
 
+/// A block that authored no bytes in a `lang` naming no admitted dialect
+/// gets no qualified value: an empty stylesheet still has its declared
+/// dialect, and `postcss` is not one this compiler can state. A block in a
+/// nameable dialect keeps its empty authored result.
+#[test]
+fn empty_unnameable_dialect_block_is_not_qualified() {
+    let result =
+        compile_style("<style lang=\"postcss\" src=\"./theme.css\" /><style lang=\"scss\" />");
+    assert_eq!(result.styles.len(), 2, "one slot per authored block");
+    assert!(
+        result.styles[0].result.is_none(),
+        "an unnameable dialect borrows no dialect, got {:?}",
+        result.styles[0].result
+    );
+    let scss = result.styles[1]
+        .result
+        .as_ref()
+        .expect("a nameable empty block is an authored result");
+    assert_eq!(scss.stage(), verter_css_syntax::StyleStage::Authored);
+    assert_eq!(scss.dialect(), verter_css_syntax::CssDialect::Scss);
+    assert!(scss.code().is_empty() && !scss.is_refused());
+}
+
 fn compile_style(source: &str) -> crate::compile::VerterCompileResult {
     // Style-planner tests need a valid carrier around the authored style. A style-only SFC is
     // intentionally diagnosed as missing its template/script entry, which is unrelated to the

@@ -460,11 +460,11 @@ pub struct VerterStyleBlock {
     /// stage from the bytes, which is why the bare `code` string this field
     /// replaced could not be carried across the compiler bridge.
     ///
-    /// `None` when the block authored bytes in a `lang` that names no dialect
-    /// this compiler admits (`postcss`, an unknown spelling). The rewrite
-    /// refused them and the compile carries that refusal as an error; there is
-    /// no stage-and-dialect statement about those bytes that would be true, so
-    /// none is made. A block that authored no bytes is never `None`.
+    /// `None` when the block's `lang` names no dialect this compiler admits
+    /// (`postcss`, an unknown spelling), whether or not it authored bytes:
+    /// every qualified value names a dialect, and none would be true. The slot
+    /// stays empty until a route that applies host-selected block content
+    /// fills it or decides what its emptiness means.
     pub result: Option<verter_css_syntax::QualifiedStyleResult>,
     pub scoped: bool,
     pub lang: Option<String>,
