@@ -29,8 +29,8 @@ use crate::compile_request::{
 };
 use crate::framework_common::carrier_compiler::{
     CarrierCompileOutcome, CompileUnsupported, IdeCompileOptions, IdeOutput, QualifiedRuntimeStyle,
-    RuntimeCompileOptions, RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic,
-    RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeTemplateBlock, SourceMapFidelity,
+    RuntimeCompileOptions, RuntimeCompileOutput, RuntimeDiagnostic, RuntimeOutputDescriptor,
+    RuntimeScriptBlock, RuntimeTemplateBlock, SourceMapFidelity,
 };
 use crate::framework_common::FrameworkParseArtifact;
 use crate::parser::types::{sfc_script_dialect, SfcScriptDialect};
@@ -1075,17 +1075,11 @@ pub(crate) fn vue_result_to_runtime_parts(
             })
         })
         .collect();
-    // One set of parse facts feeds both products: the legacy adapter reads
-    // them by reference here, and the Vue bridge takes them to mint
-    // descriptors against the admitted artifact (`stage_custom_block_artifacts`).
+    // The parse facts feed the descriptor mint: the Vue bridge takes them
+    // to mint `custom_block_artifacts` against the admitted artifact
+    // (`stage_custom_block_artifacts`). The retired legacy adapter no
+    // longer receives a converted copy.
     let custom_block_facts = result.custom_blocks;
-    let custom_blocks = custom_block_facts
-        .iter()
-        .map(|b| RuntimeCustomBlock {
-            block_type: b.block_type.clone(),
-            content: b.content.clone(),
-        })
-        .collect();
     let tsx = result.tsx.map(|tsx| {
         let output_descriptor = RuntimeOutputDescriptor::generated(
             &tsx.code,
@@ -1152,7 +1146,9 @@ pub(crate) fn vue_result_to_runtime_parts(
         script,
         template,
         qualified_styles: Vec::new(),
-        custom_blocks,
+        // Legacy adapter declaration retained unfilled for terminal
+        // deletion; consumers read `custom_block_descriptors`.
+        custom_blocks: Vec::new(),
         // Minted by the Vue bridge, which holds the registered artifact; a
         // direct conversion has none and publishes no descriptors.
         custom_block_artifacts: None,
@@ -1676,10 +1672,11 @@ mod tests {
     /// AC1/AC2: every custom block gets exactly one complete, source-backed
     /// descriptor, minted by the Vue bridge without a Main demand, bound to
     /// one `"sfc"` unit over the registered carrier bytes and attached to
-    /// that unit's `"sfc"` artifact. The legacy [`RuntimeCustomBlock`]
-    /// adapter keeps its shape beside them.
+    /// that unit's `"sfc"` artifact. The retired legacy
+    /// [`RuntimeCustomBlock`] adapter stays empty — the descriptors are the
+    /// bundle's only custom-block surface.
     #[test]
-    fn custom_blocks_produce_source_backed_descriptors_beside_the_legacy_adapter() {
+    fn custom_blocks_produce_source_backed_descriptors_and_no_legacy_copy() {
         use crate::assembly::{
             ArtifactContent, ContentId, CustomBlockContent, CustomBlockLifecycle,
         };
@@ -1692,11 +1689,11 @@ mod tests {
         let output = compile_registered(source, &RuntimeCompileOptions::default());
         assert!(output.main.is_none(), "Main is not demanded here");
 
-        assert_eq!(output.custom_blocks.len(), 3);
-        assert_eq!(output.custom_blocks[0].block_type, "i18n");
-        assert_eq!(output.custom_blocks[0].content, "{\"a\":1}");
-        assert_eq!(output.custom_blocks[1].block_type, "docs");
-        assert_eq!(output.custom_blocks[2].block_type, "note");
+        assert!(
+            output.custom_blocks.is_empty(),
+            "the legacy adapter stays unfilled; descriptors are the only surface"
+        );
+        assert_eq!(output.custom_block_descriptors().len(), 3);
 
         let set = custom_block_set(&output);
         let units: Vec<_> = set.source_units().collect();

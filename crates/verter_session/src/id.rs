@@ -378,7 +378,6 @@ mod tests {
             script_lang: Some("ts".to_string()),
             style_langs: vec![Some("scss".to_string()), None],
             custom_types: vec!["i18n".to_string()],
-            custom_langs: vec![None],
             ..FileMeta::default()
         };
         let cases: Vec<VirtualNodeKind> = vec![
@@ -435,7 +434,6 @@ mod tests {
     fn render_ids_custom_block_uses_block_type_as_type_param() {
         let meta = FileMeta {
             custom_types: vec!["route".to_string(), "i18n".to_string()],
-            custom_langs: vec![None, Some("json".to_string())],
             ..FileMeta::default()
         };
 
@@ -489,7 +487,6 @@ mod tests {
     fn render_parse_roundtrip_new_custom_format() {
         let meta = FileMeta {
             custom_types: vec!["route".to_string(), "i18n".to_string(), "docs".to_string()],
-            custom_langs: vec![None, Some("json".to_string()), None],
             ..FileMeta::default()
         };
 

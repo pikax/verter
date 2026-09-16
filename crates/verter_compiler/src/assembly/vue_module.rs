@@ -243,7 +243,7 @@ impl Default for VueMainDecoration {
 }
 
 impl VueMainDecoration {
-    fn prelude(&self, compiled: &RuntimeCompileOutput) -> ExtraFragment {
+    fn prelude(&self, compiled: &RuntimeCompileOutput, custom_bound: usize) -> ExtraFragment {
         use std::fmt::Write;
         let mut prelude = String::new();
         let mut imports: Vec<DeclaredImport> = Vec::new();
@@ -258,12 +258,12 @@ impl VueMainDecoration {
                 kind: DeclaredImportKind::SideEffect,
             });
         }
-        for (idx, id) in self
-            .custom_specifiers
-            .iter()
-            .take(compiled.custom_blocks.len())
-            .enumerate()
-        {
+        // The custom import/invocation bound is the descriptor set's
+        // identity/order — the same source-backed facts the bundle's
+        // consumers publish from. A bundle without descriptors carries no
+        // custom-block authority, so no import is emitted for it even when
+        // host identifiers were minted from a parse inventory.
+        for (idx, id) in self.custom_specifiers.iter().take(custom_bound).enumerate() {
             let block_name = format!("block{idx}");
             let _ = writeln!(prelude, "import {block_name} from \"{id}\"");
             imports.push(DeclaredImport {
@@ -283,17 +283,14 @@ impl VueMainDecoration {
 
     fn trailer(
         &self,
-        compiled: &RuntimeCompileOutput,
+        custom_bound: usize,
         canonical_id: &str,
         runtime: &str,
         ssr: bool,
     ) -> ExtraFragment {
         use std::fmt::Write;
         let mut trailer = String::new();
-        let custom_count = self
-            .custom_specifiers
-            .len()
-            .min(compiled.custom_blocks.len());
+        let custom_count = self.custom_specifiers.len().min(custom_bound);
         for idx in 0..custom_count {
             let _ = writeln!(
                 trailer,
@@ -611,8 +608,12 @@ pub(crate) fn compose_fragments(
         decoration,
     } = request;
     let ssr = planned_kind == ProductKind::RuntimeServer;
-    let prelude_extra = vec![decoration.prelude(compiled)];
-    let trailer_extra = vec![decoration.trailer(compiled, canonical_id, runtime, ssr)];
+    // Descriptor-bound custom import/invocation count: the bundle's
+    // custom-block authority is its descriptor set, never the retired
+    // legacy adapter list.
+    let custom_bound = compiled.custom_block_descriptors().len();
+    let prelude_extra = vec![decoration.prelude(compiled, custom_bound)];
+    let trailer_extra = vec![decoration.trailer(custom_bound, canonical_id, runtime, ssr)];
 
     let rewritten_script = compiled
         .script
@@ -1729,11 +1730,14 @@ mod tests {
     }
 
     /// Host identifiers drive style/custom imports; the compiler owns the
-    /// import shape. Empty identifiers emit no host topology.
+    /// import shape. Empty identifiers emit no host topology. The custom
+    /// import/invocation BOUND is the bundle's descriptor set — the same
+    /// identity/order its consumers publish from.
     #[test]
     fn decoration_emits_host_identifiers_and_skips_them_when_absent() {
+        use crate::assembly::custom_block_fixture_set;
         use crate::framework_common::{
-            QualifiedRuntimeStyle, RuntimeCustomBlock, RuntimeOutputDescriptor, SourceMapFidelity,
+            QualifiedRuntimeStyle, RuntimeOutputDescriptor, SourceMapFidelity,
         };
         let style = QualifiedRuntimeStyle {
             result: verter_css_syntax::QualifiedStyleResult::framework_rewritten(
@@ -1754,10 +1758,13 @@ mod tests {
         };
         let compiled = RuntimeCompileOutput {
             qualified_styles: vec![style],
-            custom_blocks: vec![RuntimeCustomBlock {
-                block_type: "i18n".to_string(),
-                content: "{}".to_string(),
-            }],
+            custom_block_artifacts: Some(
+                custom_block_fixture_set(
+                    "<i18n>{}</i18n>",
+                    vec![crate::assembly::CustomBlockFixture::local("i18n", "{}")],
+                )
+                .expect("fixture descriptors mint"),
+            ),
             ..empty_bundle()
         };
         let bare = assembled(
@@ -1789,6 +1796,38 @@ mod tests {
         assert!(
             decorated.contains("if (typeof block0 === 'function') block0(_sfc_main)"),
             "custom invocation is compiler-owned topology:\n{decorated}"
+        );
+    }
+
+    /// A bundle whose custom-block authority is only host-minted
+    /// identifiers — descriptors absent — emits NO custom import or
+    /// invocation: the retired legacy reconstruction path must fail closed,
+    /// not silently fall back to identifier-driven topology.
+    #[test]
+    fn custom_imports_without_descriptors_fail_closed() {
+        let compiled = empty_bundle();
+        assert!(
+            compiled.custom_block_descriptors().is_empty(),
+            "fixture premise: no descriptor authority"
+        );
+        let decorated = assembled(
+            &compiled,
+            VueMainDecoration {
+                custom_specifiers: vec![
+                    "Comp.vue?vue&type=i18n&index=0".to_string(),
+                    "Comp.vue?vue&type=docs&index=1".to_string(),
+                ],
+                ..VueMainDecoration::default()
+            },
+            ProductKind::RuntimeClient,
+        );
+        assert!(
+            !decorated.contains("import block"),
+            "identifiers without descriptors must not emit custom imports:\n{decorated}"
+        );
+        assert!(
+            !decorated.contains("block0(_sfc_main)"),
+            "identifiers without descriptors must not emit custom invocations:\n{decorated}"
         );
     }
 

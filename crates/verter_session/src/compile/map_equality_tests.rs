@@ -20,8 +20,8 @@ use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 use verter_compiler::framework_common::{
-    QualifiedRuntimeStyle, RuntimeCompileOutput, RuntimeCustomBlock, RuntimeOutputDescriptor,
-    RuntimeScriptBlock, RuntimeTemplateBlock, SourceMapFidelity, TemplateRenderExport,
+    QualifiedRuntimeStyle, RuntimeCompileOutput, RuntimeOutputDescriptor, RuntimeScriptBlock,
+    RuntimeTemplateBlock, SourceMapFidelity, TemplateRenderExport,
 };
 
 use super::map_input::{validate_and_decode, UncomposableCode, UncomposableFamily};
@@ -186,8 +186,8 @@ impl AssembleInput {
     }
 
     /// Same inputs as the production triple. Style/custom blocks are
-    /// placeholders: assembler reads COUNT; ids come from `meta`. Lengths
-    /// may differ (§3.3 note 1).
+    /// placeholders: the assembler reads the descriptor COUNT; ids come
+    /// from `meta`. Lengths may differ (§3.3 note 1).
     fn to_production_inputs(&self) -> (RuntimeCompileOutput, FileMeta, CompileProfile) {
         let compiled = RuntimeCompileOutput {
             script: self.script.as_ref().map(|script| RuntimeScriptBlock {
@@ -216,12 +216,20 @@ impl AssembleInput {
             qualified_styles: (0..self.style_count)
                 .map(|_| qualified_style("", descriptor("")))
                 .collect(),
-            custom_blocks: (0..self.custom_block_count)
-                .map(|_| RuntimeCustomBlock {
-                    block_type: String::new(),
-                    content: String::new(),
-                })
-                .collect(),
+            custom_block_artifacts: (self.custom_block_count > 0).then(|| {
+                verter_compiler::assembly::custom_block_fixture_set(
+                    "<custom></custom>",
+                    (0..self.custom_block_count)
+                        .map(|index| {
+                            verter_compiler::assembly::CustomBlockFixture::local(
+                                "custom",
+                                &index.to_string(),
+                            )
+                        })
+                        .collect(),
+                )
+                .expect("fixture descriptors mint")
+            }),
             scope_id: self.scope_id.clone(),
             ..RuntimeCompileOutput::default()
         };
@@ -262,7 +270,7 @@ impl AssembleInput {
             canonical_id: canonical_id.to_string(),
             style_count: u32::try_from(compiled.qualified_styles.len())
                 .expect("style count fits a uint32"),
-            custom_block_count: u32::try_from(compiled.custom_blocks.len())
+            custom_block_count: u32::try_from(compiled.custom_block_descriptors().len())
                 .expect("custom-block count fits a uint32"),
             style_langs: meta.style_langs.clone(),
             custom_types: meta.custom_types.clone(),

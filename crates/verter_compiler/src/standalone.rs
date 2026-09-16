@@ -2014,7 +2014,7 @@ impl VueRuntimeBackend {
                 opts.prepared_styles.clone()
             },
         };
-        let mut bundle = lower_vue_parsed_runtime(
+        let bundle = lower_vue_parsed_runtime(
             source,
             parsed,
             &core_opts,
@@ -2043,16 +2043,10 @@ impl VueRuntimeBackend {
             }
         })?
         .bundle;
-        for (slot, selected) in opts
-            .block_content
-            .custom_blocks
-            .iter()
-            .zip(bundle.custom_blocks.iter_mut())
-        {
-            if let Some(input) = slot {
-                selected.content = input.code.to_string();
-            }
-        }
+        // Host-selected custom-block bytes no longer splice into the
+        // retired legacy adapter: the session publishes them from its own
+        // sealed block-content selection, beside the source-backed
+        // descriptors the bridge mints from the authored facts.
         Ok(bundle)
     }
 }

@@ -1035,7 +1035,6 @@ fn build_svelte_snapshot_from_eval_source(
         template_lang: None,
         style_langs,
         custom_types: Vec::new(),
-        custom_langs: Vec::new(),
     };
     snapshot.preprocessor_requests = preprocessor_requests;
     if !artifact.diagnostics().is_empty() {
@@ -1584,7 +1583,6 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     let mut custom_hashes = Vec::new();
     let mut custom_attrs_fp = Vec::new();
     let mut custom_types = Vec::new();
-    let mut custom_langs = Vec::new();
     // Content spans for custom blocks (used for preprocessor request content extraction)
     let mut custom_content_spans: Vec<Option<(u32, u32)>> = Vec::new();
 
@@ -1603,7 +1601,6 @@ pub(crate) fn build_vue_snapshot_from_parsed(
         let mut attrs = extract_attrs(&custom.attributes, source);
         attrs.push(("type", block_type));
 
-        custom_langs.push(find_attr(&attrs, "lang"));
         custom_content_spans.push(custom.content.map(|span| (span.start, span.end)));
 
         custom_attrs_fp.push(normalize_attr_map(&attrs, &["type", "lang", "src"]));
@@ -1753,7 +1750,6 @@ pub(crate) fn build_vue_snapshot_from_parsed(
             template_lang,
             style_langs,
             custom_types,
-            custom_langs,
         },
         external_requests,
         src_blocks,
