@@ -130,6 +130,15 @@ export function* leafGenerator() {
   return "done";
 }
 
+// The SYNC negative control for the async-generator await: a plain
+// generator does NOT await what it yields — tsgo:
+// `Generator<Promise<number>, string, unknown>`.
+export declare function leafAsyncSrc(): Promise<number>;
+export function* leafGeneratorYieldPromise() {
+  yield leafAsyncSrc();
+  return "done";
+}
+
 // A PARENTHESIZED statement-position yield: the outer node is a
 // `ParenthesizedExpression`, not a bare `YieldExpression` — the yield
 // classifier must unwrap it, or this contributor is silently dropped and
@@ -327,6 +336,37 @@ export async function* callAsyncGen() {
 export async function callAsyncPassthrough() {
   return asyncSrc();
 }
+
+// `return await 1`: the lib `Awaited` surface passes a SETTLED literal
+// through verbatim, so the operand's FRESHNESS is the await's own and the
+// lone fresh arm widens exactly as a bare `return 1` does — tsgo:
+// `Promise<number>`, never `Promise<1>`.
+export async function callAwaitFreshLiteral() {
+  return await 1;
+}
+
+// The FALSIFICATION twin: TWO awaited fresh arms are two DISTINCT literal
+// constituents, so the lone-fresh-arm widening must NOT fire — tsgo:
+// `Promise<1 | 2>`.
+export async function callAwaitFreshTernary(c: boolean) {
+  return c ? await 1 : await 2;
+}
+
+// An async generator AWAITS what it yields: the yield parameter rides the
+// same lib `Awaited` surface the async wrap's body join does — tsgo:
+// `AsyncGenerator<number, void, unknown>`, never
+// `AsyncGenerator<Promise<number>, …>`.
+export async function* callAsyncGenYieldPromise() {
+  yield asyncSrc();
+}
+
+// …and what it RETURNS: the same collapse applies to the body join —
+// tsgo: `AsyncGenerator<number, number, unknown>`.
+export async function* callAsyncGenReturnPromise() {
+  yield 1;
+  return asyncSrc();
+}
+
 
 // A GENERIC body join with NO embedded `Promise<…>` carrier at all — the
 // join is the bare unbound type parameter `T` itself. The wrap must still
@@ -2464,6 +2504,134 @@ fn async_wrap_awaited_dispatch_over_a_bare_generic_body_keeps_typed_gap_never_th
         }
         other => panic!("asyncGenericIdentity must produce a degraded value, got {other:?}"),
     }
+}
+
+/// `return await 1` — the AWAITED operand carries its own FRESHNESS.
+///
+/// The lib `Awaited` surface passes a SETTLED literal through verbatim,
+/// so `return await 1` contributes exactly the fresh literal arm
+/// `return 1` does and the lone-fresh-arm widening fires. Oracle:
+/// `ReturnType<typeof callAwaitFreshLiteral>` is `Promise<number>`.
+///
+/// Classifying the whole `AwaitExpression` as PINNED (the freshness
+/// mirror had no await arm) published `Promise<1>` — wrong-complete,
+/// and warm.
+#[test]
+fn an_awaited_fresh_literal_return_widens_exactly_as_the_bare_literal_does() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "callAwaitFreshLiteral",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+        },
+    );
+}
+
+/// The FALSIFICATION twin of the widening above: TWO awaited fresh arms
+/// are two DISTINCT literal constituents, so the lone-fresh-arm rule must
+/// NOT fire. Oracle: `ReturnType<typeof callAwaitFreshTernary>` is
+/// `Promise<1 | 2>` — recursing freshness through `await` must not become
+/// blanket widening.
+#[test]
+fn two_awaited_fresh_literal_arms_keep_both_literal_constituents() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "callAwaitFreshTernary",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(
+                vec![TypeExpr::union(vec![
+                    TypeExpr::number_literal(1.0),
+                    TypeExpr::number_literal(2.0),
+                ])]
+                .into_boxed_slice(),
+            ),
+        },
+    );
+}
+
+/// An async generator AWAITS what it YIELDS: the yield parameter rides the
+/// same shared lib `Awaited` surface the async wrap applies to its body
+/// join. Oracle: `ReturnType<typeof callAsyncGenYieldPromise>` is
+/// `AsyncGenerator<number, void, unknown>` — never
+/// `AsyncGenerator<Promise<number>, void, unknown>`.
+#[test]
+fn an_async_generator_yield_join_is_awaited_through_the_shared_lib_surface() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "callAsyncGenYieldPromise",
+        TypeExpr::Ref {
+            name: Arc::from("AsyncGenerator"),
+            type_arguments: Arc::from(
+                vec![
+                    number(),
+                    TypeExpr::Primitive(PrimitiveName::Void),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
+    );
+}
+
+/// …and what it RETURNS: the same collapse applies to the body join, so
+/// the wrap never publishes a `Promise`-shaped TReturn. Oracle:
+/// `ReturnType<typeof callAsyncGenReturnPromise>` is
+/// `AsyncGenerator<number, number, unknown>`.
+#[test]
+fn an_async_generator_return_join_is_awaited_through_the_same_surface() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "callAsyncGenReturnPromise",
+        TypeExpr::Ref {
+            name: Arc::from("AsyncGenerator"),
+            type_arguments: Arc::from(
+                vec![
+                    number(),
+                    number(),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
+    );
+}
+
+/// The SYNC negative control: a plain generator does NOT await what it
+/// yields — the collapse belongs to the ASYNC kinds alone. Oracle:
+/// `ReturnType<typeof leafGeneratorYieldPromise>` is
+/// `Generator<Promise<number>, string, unknown>`.
+#[test]
+fn a_sync_generator_yield_join_is_never_awaited() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        LEAF,
+        "leafGeneratorYieldPromise",
+        TypeExpr::Ref {
+            name: Arc::from("Generator"),
+            type_arguments: Arc::from(
+                vec![
+                    TypeExpr::Ref {
+                        name: Arc::from("Promise"),
+                        type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+                    },
+                    string(),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
+    );
 }
 
 /// D12-AC2 NEGATIVE LEG — a wrap whose lib head the environment cannot

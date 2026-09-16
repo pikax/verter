@@ -1905,6 +1905,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// The lib `Awaited` collapse every ASYNC surface applies to a value
+    /// it publishes — the async body join, and an async generator's yield
+    /// and return joins. A shape [`Self::flow_join_is_settled_non_thenable`]
+    /// proves can never be a thenable skips the dispatch (the shared
+    /// reducer would unwrap it to itself with no recursive work, so the
+    /// one-instantiation-per-wrap bound holds for concrete joins);
+    /// everything else pays the real dispatch. `None` is the refusal —
+    /// the caller publishes the typed gap rather than a fabricated answer.
+    fn awaited_for_async_surface(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        if self.flow_join_is_settled_non_thenable(node) {
+            Some(node)
+        } else {
+            self.instantiate_awaited(node)
+        }
+    }
+
     /// Materialize the pending function-kind wrap — the LAST value
     /// transformation before the seal, run exactly where the value
     /// leaves the frame for publication (the root close, the SCC member
@@ -1949,13 +1965,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let wrapper = match wrap.kind {
             FunctionBodyKind::Plain => return result,
             FunctionBodyKind::Async => {
-                let awaited = if self.flow_join_is_settled_non_thenable(body) {
-                    body
-                } else {
-                    match self.instantiate_awaited(body) {
-                        Some(awaited) => awaited,
-                        None => return self.materialize_wrap_typed_gap(result),
-                    }
+                let Some(awaited) = self.awaited_for_async_surface(body) else {
+                    return self.materialize_wrap_typed_gap(result);
                 };
                 graph.intern_node(SemanticNodeData::InstantiationRef {
                     base: crate::semantic_query::DeclIdentity {
@@ -1983,6 +1994,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
                 let yield_join = wrap.yield_join.unwrap_or(never);
                 let next = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
+                // An ASYNC generator awaits BOTH published joins, through
+                // the same shared surface the async wrap's body join takes
+                // (tsgo: `async function* g() { yield p; return q }` is
+                // `AsyncGenerator<Awaited<p>, Awaited<q>, unknown>`). A
+                // SYNC generator awaits neither — it publishes what the
+                // body yielded and returned verbatim.
+                let (yield_join, body) = if wrap.kind == FunctionBodyKind::AsyncGenerator {
+                    match (
+                        self.awaited_for_async_surface(yield_join),
+                        self.awaited_for_async_surface(body),
+                    ) {
+                        (Some(yielded), Some(returned)) => (yielded, returned),
+                        _ => return self.materialize_wrap_typed_gap(result),
+                    }
+                } else {
+                    (yield_join, body)
+                };
                 graph.intern_node(SemanticNodeData::InstantiationRef {
                     base,
                     args: Arc::from(vec![yield_join, body, next].into_boxed_slice()),
@@ -13353,23 +13381,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // into the typed degradation — never a wrong warm answer.
             crate::flow_slice_content::SliceExpr::Awaited { operand } => {
                 match self.eval_expr(operand) {
-                    Positional::Value(node) => {
-                        let read = self.dispatch.execute_read(SemanticQueryKey::Instantiate(
-                            crate::semantic_query::InstantiateKey::new(
-                                self.dispatch.builtin_type_slot("Awaited"),
-                                Arc::from(vec![node].into_boxed_slice()),
-                                self.dispatch.instantiate_context_for(
-                                    "__builtin__",
-                                    crate::semantic_query::ProjectionReductionContext::structural_transit(
-                                    ),
-                                ),
-                            ),
-                        ));
-                        match read.value {
-                            QueryResult::Value(awaited) => Positional::Value(awaited),
-                            _ => Positional::Unmodeled,
-                        }
-                    }
+                    Positional::Value(node) => match self.dispatch.instantiate_awaited(node) {
+                        Some(awaited) => Positional::Value(awaited),
+                        None => Positional::Unmodeled,
+                    },
                     Positional::Hold => Positional::Hold,
                     Positional::Unmodeled => Positional::Unmodeled,
                 }

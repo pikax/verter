@@ -2672,6 +2672,14 @@ impl SliceFreshness {
 fn expression_freshness(expression: &Expression<'_>) -> SliceFreshness {
     match expression {
         Expression::ParenthesizedExpression(paren) => expression_freshness(&paren.expression),
+        // An `await x` publishes its OPERAND's value through the lib
+        // `Awaited` surface, which passes a settled literal through
+        // verbatim — so the operand's freshness is the await's own. tsgo
+        // types `async function f() { return await 1 }` as
+        // `Promise<number>`, exactly as `return 1` is; the pinned-wins
+        // fold and the per-arm rule below still apply unchanged, so two
+        // awaited fresh arms keep `1 | 2`.
+        Expression::AwaitExpression(awaited) => expression_freshness(&awaited.argument),
         Expression::ConditionalExpression(conditional) => SliceFreshness::PerArm(Arc::from([
             expression_freshness(&conditional.consequent),
             expression_freshness(&conditional.alternate),
