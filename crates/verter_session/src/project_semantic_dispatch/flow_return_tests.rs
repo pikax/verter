@@ -7076,6 +7076,754 @@ function f(x: A | B, A: typeof B) {
     });
 }
 
+/// D10 lib-global control for the `"k" in x` unknown-key positive edge:
+/// a module-local `type Record<K, V>` is IRRELEVANT to it.
+///
+/// `in`-narrowing is a compiler-internal operation. The checker reaches
+/// its own global symbol table for the utility
+/// (`getGlobalRecordSymbol()`, then a type-alias instantiation over that
+/// symbol) and never resolves the identifier `Record` in the narrowed
+/// expression's scope, so the narrow is the same `(subject) &
+/// Record<"c", unknown>` whether or not the module declares a type of
+/// that name. Routing the mint through owner scope made a local
+/// declaration change the operation — and rejecting the shadowed
+/// resolution (the first repair) suppressed a narrow the checker still
+/// performs. `lower_lib_global` takes the lib environment directly.
+#[test]
+fn in_key_unknown_key_positive_edge_ignores_a_userland_record_shadow() {
+    const CANONICAL: &str = "/ws/in-key-record-shadow/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+type Record<K extends string, V> = { shadowed: true };
+
+function makeProps(x: { a: number } | { b: string }) {
+  return { v: "c" in x ? x : 0 };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "makeProps");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let printed = format!("{expr:?}");
+        assert!(
+            printed.contains("Record"),
+            "the lib `Record` mints regardless of a same-named local type, got {expr:?}"
+        );
+        assert!(
+            !printed.contains("shadowed"),
+            "the LOCAL `Record` must never be the utility that mints, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            None,
+            "a compiler-internal global is not shadowable, so the narrow is exact"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the exact unknown-key narrow warms"
+        );
+    });
+}
+
+/// D10 lib-global control for the `typeof x === "function"` positive edge
+/// over `object`: a module-scoped `interface Function` is IRRELEVANT to
+/// it.
+///
+/// The checker narrows against `globalFunctionType`, read from its own
+/// global symbol table, not by resolving the identifier `Function` in the
+/// narrowed expression's scope — so `x: object` still reads the lib
+/// `Function` inside the guard. The shadowing interface remains the type
+/// an AUTHORED `x: Function` annotation would mean; the two routes are
+/// deliberately different, and only the authored one is lexical.
+#[test]
+fn typeof_function_over_object_ignores_a_userland_function_shadow() {
+    const CANONICAL: &str = "/ws/typeof-function-shadow/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+interface Function { shadowed: true }
+
+function makeProps(x: object) {
+  if (typeof x === "function") { return x; }
+  return 0 as const;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "makeProps");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let printed = format!("{expr:?}");
+        assert!(
+            printed.contains("Function"),
+            "the lib `Function` narrows regardless of a same-named local interface, got {expr:?}"
+        );
+        assert!(
+            !printed.contains("shadowed"),
+            "the LOCAL `Function` must never be the narrowed surface, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            None,
+            "a compiler-internal global is not shadowable, so the narrow is exact"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the exact typeof-function narrow warms"
+        );
+    });
+}
+
+/// The FAIL-CLOSED half of the lib-global contract, at both guard mints:
+/// when the environment provides no such global, the narrow is not
+/// performed — the subject stays exactly as declared behind the typed
+/// `GuardNarrowing` gap and never warms. It is never a narrow fabricated
+/// over a global the environment did not provide.
+///
+/// This is the checker's own behaviour: `narrowByInKeyword` mints the
+/// intersection only `if recordSymbol != nil`, and a missing
+/// `globalFunctionType` leaves `typeof x === "function"` with nothing to
+/// narrow to.
+///
+/// Reaching the case needs the fault slot because the environment's two
+/// providers (a registered ambient declaration, or verter's own
+/// implementation) cannot BOTH be withdrawn by any project configuration
+/// this session models: verter reduces `Record<K, V>` natively and
+/// carries `Function` as a terminal runtime nominal, so they are
+/// available in every project today. When a project-scoped TS lib
+/// selection (tsconfig `lib` / `noLib`) is modelled, it becomes the
+/// production route into exactly this assertion.
+#[test]
+fn guard_narrows_gap_when_the_environment_provides_no_lib_global() {
+    const CANONICAL: &str = "/ws/lib-global-unavailable/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+function inKey(x: { a: number } | { b: string }) {
+  return { v: "c" in x ? x : 0 };
+}
+
+function typeofFunction(x: object) {
+  if (typeof x === "function") { return x; }
+  return 0 as const;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    host.flow_fault_injection
+        .lib_global_unavailable
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    with_dispatch(&host, |dispatch| {
+        for (function, global, narrowed) in [
+            ("inKey", "Record", "Intersection"),
+            ("typeofFunction", "Function", "Function"),
+        ] {
+            let key = whole_return_key(dispatch, CANONICAL, function);
+            let result = flow_result_value(dispatch, key.clone());
+            let expr = host
+                .project_node_to_type_expr_for_test(result.return_type())
+                .expect("return node must project to TypeExpr");
+            let printed = format!("{expr:?}");
+            assert!(
+                !printed.contains(global) && !printed.contains(narrowed),
+                "`{function}` must not mint `{global}` when the environment provides \
+                 none, got {expr:?}"
+            );
+            assert_eq!(
+                result.degradation(),
+                Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing
+                )),
+                "`{function}` keeps the typed guard gap when `{global}` is unavailable"
+            );
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0,
+                "a narrow that could not reach `{global}` never warms"
+            );
+        }
+    });
+}
+
+/// The availability question itself, at the one place that asks it: a
+/// name NO provider of the environment carries mints nothing at all — not
+/// a `__builtin__` carrier over a name verter does not implement, not an
+/// unresolved shell. `Record` and `Function` are the control: both
+/// providers-or-nothing, same call, same scope.
+///
+/// This pins the MINT arms, which is a weaker property than the
+/// availability gate itself — an unprovided name reaches neither arm and
+/// would fall through to `None` even without the gate. The discriminating
+/// control for the gate is
+/// [`guard_narrows_gap_when_the_environment_provides_no_lib_global`]:
+/// remove the gate and it mints `Record<"c", unknown>` clean over an
+/// environment that provides no `Record`.
+#[test]
+fn lower_lib_global_mints_only_a_global_the_environment_provides() {
+    const CANONICAL: &str = "/ws/lib-global-availability/main.ts";
+    const FIXTURE: &str = "export {};\n";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let lower = |name: &str, args: Vec<SemanticNodeId>| {
+            dispatch.lower_lib_global(
+                CANONICAL,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                &Arc::from(name),
+                Arc::from(args.into_boxed_slice()),
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+        };
+        let unknown =
+            dispatch
+                .graph()
+                .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+                    crate::semantic_query::PrimitiveKind::Unknown,
+                ));
+
+        assert!(
+            lower("Function", Vec::new()).is_some(),
+            "verter implements the `Function` global, so the environment provides it"
+        );
+        assert!(
+            lower("Record", vec![unknown, unknown]).is_some(),
+            "verter implements the `Record` utility, so the environment provides it"
+        );
+        assert!(
+            lower("NotALibGlobalAnywhere", Vec::new()).is_none(),
+            "a name no provider carries mints nothing — never a `__builtin__` carrier \
+             over a global that does not exist"
+        );
+    });
+}
+
+/// The D10 heritage controls for `instanceof` derivation: the
+/// declaration-identity chain decides both edges, a STRUCTURAL TWIN with
+/// no heritage relation takes the checker's OWN subtype fallback (clean,
+/// warm), a twin whose carrier the relation authority cannot decide
+/// stays behind the typed guard gap, the cold walk reads one heritage
+/// bundle per visited ancestor, and an identical warm demand adds zero
+/// dispatches of any class.
+#[test]
+fn instanceof_heritage_decides_both_edges_and_bounds_its_reads() {
+    use super::flow_return::INSTANCEOF_HERITAGE_READS;
+    use super::semantic_operand_tests::{class_count, dispatch_classes_since, trace_len};
+
+    const CANONICAL: &str = "/ws/instanceof-heritage/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+class K { k = 1 }
+class KSub extends K { s = 1 }
+class Twin { k = 1; s = 1 }
+class Solo { p = 1 }
+class SoloTwin { p = 1 }
+class Chain1 { c = 1 }
+class Chain2 extends Chain1 { d = 1 }
+class Chain3 extends Chain2 { e = 1 }
+
+function keep(x: K | KSub) { if (x instanceof K) return x; return 0; }
+function down(x: K) { if (x instanceof KSub) return x; return 0; }
+function negated(x: K | KSub) { if (!(x instanceof K)) return x; return 0; }
+function twin(x: SoloTwin) { if (x instanceof Solo) return x; return 0; }
+function carrierTwin(x: Twin) { if (x instanceof KSub) return x; return 0; }
+function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0; }
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        // (1) The subclass arm survives as itself: `K | KSub` under
+        // `instanceof K` keeps the whole union, CLEAN, warm.
+        let key = whole_return_key(dispatch, CANONICAL, "keep");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert!(
+            matches!(&expr, verter_type_expr::TypeExpr::Union(arms)
+            if arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "KSub"
+            ))),
+            "the subclass arm survives the matching-family test, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the matching-family test is clean"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean matching-family result warms"
+        );
+
+        // (2) The base arm downcasts: `K` under `instanceof KSub`
+        // publishes `KSub`, CLEAN, warm.
+        let key = whole_return_key(dispatch, CANONICAL, "down");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert!(
+            matches!(&expr, verter_type_expr::TypeExpr::Union(arms)
+            if arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "KSub"
+            )) && !arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "K"
+            ))),
+            "the base arm narrows TO the subclass instance type, got {expr:?}"
+        );
+        assert_eq!(result.degradation(), None, "the downcast is clean");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean downcast warms"
+        );
+
+        // (3) The negated edge drops the whole tested family: both `K`
+        // and `KSub` are instances of `K`, so the guarded subject reads
+        // `never` and ONLY the fall-through `return 0` contributes —
+        // the published result is exactly that literal, not a union.
+        let key = whole_return_key(dispatch, CANONICAL, "negated");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert!(
+            matches!(
+                &expr,
+                verter_type_expr::TypeExpr::Literal(
+                    verter_type_expr::LiteralValue::Number(value)
+                ) if *value == 0.0
+            ),
+            "the negated family drop leaves only the fall-through arm, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the heritage-proved family drop is clean"
+        );
+
+        // (4) STRUCTURAL TWIN control: `SoloTwin` is shape-identical to
+        // `Solo` with NO heritage relation, and heritage PROVES that in
+        // both directions (two readable, heritage-free classes). The
+        // checker's per-arm derivation map is therefore empty and its
+        // union-level fallback decides: `isTypeSubtypeOf(Solo,
+        // SoloTwin)` holds, so the positive edge publishes `Solo` — the
+        // checker's own subtype fallback, CLEAN and warm, never a gap.
+        let key = whole_return_key(dispatch, CANONICAL, "twin");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert!(
+            matches!(&expr, verter_type_expr::TypeExpr::Union(arms)
+            if arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "Solo"
+            )) && !arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "SoloTwin"
+            ))),
+            "the heritage-free twin takes the checker's subtype fallback, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            None,
+            "a heritage-PROVED unrelated pair decided by the relation authority is clean"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean subtype fallback warms"
+        );
+
+        // (5) The same fallback over a tested class that HAS heritage:
+        // `Twin` is shape-identical to `KSub`'s composed instance
+        // surface and heritage proves the two unrelated, but `KSub`'s
+        // carrier unwraps to the heritage INTERSECTION (`K & { s }`) and
+        // the shared relation authority answers that pair undecided in
+        // one direction. An undecided relation is no fact: the fallback
+        // is never entered on a guess, so the subject stays possible
+        // behind the typed guard gap and never warms. The missing
+        // capability is the relation authority's, not this evaluator's —
+        // deciding a class-vs-class structural pair through a composed
+        // heritage carrier is outside D10's mutation boundary.
+        let key = whole_return_key(dispatch, CANONICAL, "carrierTwin");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert!(
+            matches!(&expr, verter_type_expr::TypeExpr::Union(arms)
+            if arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "Twin"
+            ))),
+            "an undecided structural relation never narrows the arm away, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing
+            )),
+            "the undecided structural relation stays behind the typed guard gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a structurally-undecided arm never warms"
+        );
+
+        // (6) D10-AC4, the COLD half: ONE heritage read per arm per cold
+        // edge. `Chain3 | string` under `instanceof Chain1` runs the
+        // guard over a THREE-level hierarchy, and the depth is invisible
+        // to the bound — the recursive walk lives in the heritage
+        // authority behind the single read and is memoized per dispatch,
+        // so the guard pays one read for `Chain3`, one for the tested
+        // class, and NONE for the declaration-less `string` arm, on each
+        // of the two edges the guard applies. Nothing is charged per
+        // ancestor, per member, per relation, or per re-ask.
+        let key = whole_return_key(dispatch, CANONICAL, "chain");
+        INSTANCEOF_HERITAGE_READS.with(|reads| reads.set(0));
+        let result = flow_result_value(dispatch, key.clone());
+        let cold_reads = INSTANCEOF_HERITAGE_READS.with(|reads| reads.get());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the three-level chain decides the arm cleanly"
+        );
+        assert_eq!(
+            cold_reads, COLD_CHAIN_HERITAGE_READS,
+            "the cold guard reads heritage once per arm per edge"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean chain result warms"
+        );
+    });
+
+    // (7) Bounded work, the WARM half, measured over a FRESH dispatch so
+    // the memo's warm path is the one under test. The `chain` demand is
+    // the discriminating one: its cold evaluation pays both heritage
+    // walks AND the `string` arm's relation reads, so a warm replay that
+    // adds ZERO of either is a real measurement, not a shape that could
+    // not have moved the counters anyway.
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "chain");
+        INSTANCEOF_HERITAGE_READS.with(|reads| reads.set(0));
+        let warm_start = trace_len();
+        let warm = execute_flow(dispatch, key);
+        assert!(
+            matches!(
+                &warm,
+                QueryResult::Value(SemanticQueryOutput {
+                    value: SemanticQueryValue::FlowReturn(_),
+                    ..
+                })
+            ),
+            "the warm re-demand must serve the completed result"
+        );
+        let warm_window = dispatch_classes_since(warm_start);
+        let relation_reads = class_count(&warm_window, "Relate");
+        assert_eq!(
+            (
+                INSTANCEOF_HERITAGE_READS.with(|reads| reads.get()),
+                relation_reads,
+            ),
+            (0, 0),
+            "an identical warm demand re-walks no heritage and adds zero relation \
+             reads, recorded {warm_window:?}"
+        );
+    });
+}
+
+/// D10-AC4's cold bound, as case (6) of
+/// [`instanceof_heritage_decides_both_edges_and_bounds_its_reads`]
+/// measures it: one heritage read per ARM per cold EDGE.
+///
+/// Two edges × (the `Chain3` arm + the tested class `Chain1`) = 4; the
+/// `string` arm carries no declaration and asks nothing. The subject's
+/// three-level hierarchy does NOT appear in this number — that is the
+/// point of the bound, and of putting the recursive ancestry walk behind
+/// one memoized heritage-authority read. A guard that starts charging per
+/// ancestor, per member, per relation or per re-ask fails here rather
+/// than silently paying for it.
+const COLD_CHAIN_HERITAGE_READS: usize = 4;
+
+/// A heritage hop this generation can neither ROOT nor READ — a
+/// cross-file base whose declaration the walk's `ReturnOnly` accessor
+/// does not serve — leaves the walk undecided, so the narrow degrades
+/// and never warms.
+///
+/// This is the shape behind the `N39_instanceof_imported_class` open
+/// debt, pinned here from the heritage walk's side: the imported
+/// intermediate's bases are not readable, so the instance chain
+/// `KSub -> Mid -> Base` cannot be completed. Publishing the downcast
+/// anyway would be a warm entry rooted on nothing that carries an edit
+/// to `mid.ts`, and publishing the NEGATIVE ("the arm is not in that
+/// family") would be a fabricated proof — both excluded, so the typed
+/// `GuardNarrowing` gap is the only honest answer.
+///
+/// The gap here is OVER-DETERMINED and this case is not the
+/// discriminating control for the walk's decidability gate: a class with
+/// heritage unwraps to a composed heritage carrier the relation
+/// authority also answers undecided (see the D10 deferral under
+/// `roadmap/0.1.0-tama/decisions`), so the structural route degrades
+/// too. The discriminating control for the decidability gate is
+/// [`instanceof_undecidable_heritage_stays_gapped_and_never_warms`],
+/// whose arms ARE structurally decidable: without the gate those publish
+/// the unrelated-arm intersection clean and warm. What this case pins is
+/// that an unreadable cross-file hop reaches neither publication.
+#[test]
+fn instanceof_unreadable_cross_file_heritage_gaps_and_never_warms() {
+    const BASE: &str = "/ws/instanceof-heritage-crossfile/base.ts";
+    const MID: &str = "/ws/instanceof-heritage-crossfile/mid.ts";
+    const MAIN: &str = "/ws/instanceof-heritage-crossfile/main.ts";
+    const BASE_FIXTURE: &str = r#"
+export class Base { b = 1 }
+"#;
+    const MID_FIXTURE: &str = r#"
+import { Base } from "./base";
+export class Mid extends Base { m = 1 }
+"#;
+    const MAIN_FIXTURE: &str = r#"
+import { Mid } from "./mid";
+import { Base } from "./base";
+class KSub extends Mid { s = 1 }
+
+function f(x: Base) { if (x instanceof KSub) return x; return 0; }
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, BASE, BASE_FIXTURE);
+    upsert_ts(&host, MID, MID_FIXTURE);
+    upsert_ts(&host, MAIN, MAIN_FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, MAIN, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let printed = format!("{expr:?}");
+        assert!(
+            printed.contains("Base"),
+            "an unreadable heritage hop leaves the arm exactly as declared, got {expr:?}"
+        );
+        assert!(
+            !printed.contains("KSub") && !printed.contains("Intersection"),
+            "an unreadable heritage hop publishes neither the downcast nor the \
+             unrelated-arm intersection, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing
+            )),
+            "an unreadable heritage hop leaves the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a narrow the heritage walk could not root never warms"
+        );
+    });
+}
+
+/// The lib `Function` global's carrier is TERMINAL for the relation
+/// authority — its `"__builtin__"` base names no declaration the
+/// `Instantiate` dispatch can serve, so the carrier is handed through
+/// unexpanded and would otherwise reach the deferred-shell gate and
+/// answer `Unknown` for the two judgements the checker decides by tag:
+/// `Function` IS an object, and every callable inhabits `Function`.
+/// Deciding them keeps the carrier terminal — no `Instantiate`, no body
+/// it does not have — and the controls prove the decision is not a
+/// blanket accept.
+#[test]
+fn the_global_function_carrier_relates_to_object_and_accepts_callables() {
+    const CANONICAL: &str = "/ws/global-function-relation/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+type Callable = (a: number) => string;
+interface CallableSurface { (a: number): string; extra: number }
+interface PlainSurface { extra: number }
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let named = |name: &str| {
+            dispatch
+                .lower_type_expr_in_owner_scope_with_context(
+                    CANONICAL,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    &verter_type_expr::TypeExpr::Ref {
+                        name: Arc::from(name),
+                        type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+                    },
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                )
+                .unwrap_or_else(|| panic!("`{name}` must lower in owner scope"))
+        };
+        let graph = host.project_type_store().semantic_graph();
+        let function = named("Function");
+        let callable = named("Callable");
+        let callable_surface = named("CallableSurface");
+        let plain_surface = named("PlainSurface");
+        let object = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Object,
+        ));
+        let number = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Number,
+        ));
+        let assignable = |source, target| {
+            matches!(
+                dispatch.execute_relate_pair_as_result_for_tests(source, target),
+                crate::semantic_query::RelationResult::Assignable { .. }
+            )
+        };
+
+        assert!(
+            assignable(function, object),
+            "the global `Function` IS an object"
+        );
+        assert!(
+            assignable(callable, function),
+            "a bare call signature inhabits the global `Function` surface"
+        );
+        assert!(
+            assignable(callable_surface, function),
+            "an object surface carrying a call signature inhabits `Function`"
+        );
+
+        // Controls: the terminal arm decides exactly those judgements and
+        // nothing else — a NON-callable surface and a primitive are never
+        // accepted into `Function`, and `Function` is not accepted into an
+        // unrelated primitive.
+        assert!(
+            !assignable(plain_surface, function),
+            "a surface with no call or construct signature is not a `Function`"
+        );
+        assert!(
+            !assignable(number, function),
+            "a primitive is never a `Function`"
+        );
+        assert!(
+            !assignable(function, number),
+            "`Function` is not assignable to an unrelated primitive"
+        );
+    });
+}
+
+/// D10's UNDECIDABLE-heritage control, the other half of D10-AC2. An
+/// `instanceof` arm whose class ancestry the fact producer could not
+/// name (`class X extends mixin(K) {}` — a call-expression base folds no
+/// heritage arm into the body) or whose base declaration this generation
+/// cannot read at all (an unresolved heritage import) proves NOTHING in
+/// either direction.
+///
+/// Both fixtures are the dangerous shape: the arm is structurally
+/// UNRELATED to the tested class, so a walk that read the empty base
+/// list as a proof of no heritage would classify the arm unrelated, mint
+/// the whole-subject intersection, and publish it clean and warm — while
+/// the checker resolves the mixin's base instance type (and the import's
+/// declaration) and keeps the arm. That is the wrong-complete result the
+/// charter's correctness budget excludes, so the arm must stay behind
+/// the typed `GuardNarrowing` gap and never warm.
+#[test]
+fn instanceof_undecidable_heritage_stays_gapped_and_never_warms() {
+    const EXPRESSION_CANONICAL: &str = "/ws/instanceof-undecidable/expression.ts";
+    const EXPRESSION_FIXTURE: &str = r#"
+export {};
+declare function mixin<T>(base: T): T;
+class K { k = 1 }
+class Mixed extends mixin(K) { extra = 1 }
+
+function f(x: Mixed | string) { if (x instanceof K) return x; return 0; }
+"#;
+    const UNRESOLVED_CANONICAL: &str = "/ws/instanceof-undecidable/unresolved.ts";
+    const UNRESOLVED_FIXTURE: &str = r#"
+import { Absent } from "./absent";
+class K { k = 1 }
+class Derived extends Absent { extra = 1 }
+
+function f(x: Derived | string) { if (x instanceof K) return x; return 0; }
+"#;
+    for (canonical, fixture, arm, what) in [
+        (
+            EXPRESSION_CANONICAL,
+            EXPRESSION_FIXTURE,
+            "Mixed",
+            "an expression base the fact producer could not name",
+        ),
+        (
+            UNRESOLVED_CANONICAL,
+            UNRESOLVED_FIXTURE,
+            "Derived",
+            "an unresolved heritage import",
+        ),
+    ] {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        upsert_ts(&host, canonical, fixture);
+        with_dispatch(&host, |dispatch| {
+            let key = whole_return_key(dispatch, canonical, "f");
+            let result = flow_result_value(dispatch, key.clone());
+            let expr = host
+                .project_node_to_type_expr_for_test(result.return_type())
+                .expect("return node must project to TypeExpr");
+            let printed = format!("{expr:?}");
+            assert!(
+                printed.contains(arm),
+                "{what} must leave the arm possible, got {expr:?}"
+            );
+            assert!(
+                !printed.contains("Intersection"),
+                "{what} must never mint the unrelated-arm intersection, got {expr:?}"
+            );
+            assert_eq!(
+                result.degradation(),
+                Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing
+                )),
+                "{what} leaves the typed guard-narrowing gap"
+            );
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0,
+                "{what} never warms"
+            );
+        });
+    }
+}
+
 /// Assert that an `instanceof` test over `A | B` establishes no narrowing
 /// and never warms: the join keeps BOTH class arms, the demand carries
 /// the typed `GuardNarrowing` gap, and the family slot holds zero

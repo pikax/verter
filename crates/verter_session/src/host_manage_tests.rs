@@ -1708,8 +1708,10 @@ fn prepared_type_decl_mints_content_free_class_heritage_base_facts() {
     ws.inject_file(
         "/src/derived.ts",
         "import { Base } from './base'\n\
+         declare function mixin<T>(base: T): T;\n\
          export class Derived extends Base<string, number> {}\n\
          export class Plain { static own: number = 1 }\n\
+         export class Mixed extends mixin(Plain) { own2: number = 2 }\n\
          interface LocalIface { y: number }\n\
          export interface NotAClass extends LocalIface { x: string }\n\
          export type AliasIx = LocalIface & { z: boolean }\n",
@@ -1791,6 +1793,38 @@ fn prepared_type_decl_mints_content_free_class_heritage_base_facts() {
         alias.heritage_bases.is_empty(),
         "an alias intersection is authored composition, not heritage: {:?}",
         alias.heritage_bases
+    );
+
+    // The UNNAMED-heritage fact. A class whose `extends` clause is an
+    // EXPRESSION folds no heritage `Ref` arm into its body, so it mints the
+    // SAME empty base list a heritage-free class does — and a NOMINAL
+    // consumer reading that emptiness as a proof of "no heritage" would
+    // publish a fabricated negative. `heritage_undecidable` separates the
+    // two; it is meaningless on a non-class declaration and stays false
+    // there.
+    let mixed = host
+        .prepared_type_decl("/src/derived.ts", "Mixed")
+        .expect("prepared decl should materialize the mixin-based class");
+    assert!(
+        mixed.heritage_bases.is_empty(),
+        "a call-expression base folds no heritage Ref arm: {:?}",
+        mixed.heritage_bases
+    );
+    assert!(
+        mixed.heritage_undecidable,
+        "a class whose base the producer could not NAME is heritage-undecidable"
+    );
+    assert!(
+        !plain.heritage_undecidable,
+        "a heritage-free class is a PROOF of no heritage, not an undecidable one"
+    );
+    assert!(
+        !prepared.heritage_undecidable,
+        "a class whose every base minted a fact is decidable"
+    );
+    assert!(
+        !iface.heritage_undecidable && !alias.heritage_undecidable,
+        "the unnamed-heritage fact is class-only and never set on another kind"
     );
 }
 

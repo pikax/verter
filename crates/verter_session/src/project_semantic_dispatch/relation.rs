@@ -6241,6 +6241,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
+        // ── The lib `Function` global, BEFORE the deferred gate ────────
+        //    Its carrier is a TERMINAL nominal: the `__builtin__` base
+        //    names no declaration the `Instantiate` dispatch can serve,
+        //    so `unwrap_identity_carrier*` hands the carrier through
+        //    verbatim and the gate below would answer `Unknown` for the
+        //    two pairs the checker decides by tag alone. Deciding them
+        //    here keeps the carrier terminal — no `Instantiate`, no body
+        //    it does not have.
+        if let Some(result) =
+            self.relate_global_function_carrier(&source_data, &target_data, bindings)
+        {
+            results.push(result);
+            return;
+        }
+
         // ── Deferred shells on either side → Unknown ───────────────────
         if !nominal_defers_gate && (is_deferred(&source_data) || is_deferred(&target_data)) {
             results.push(RelationResult::Unknown);
@@ -6755,6 +6770,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         drop(data);
         let transit = ProjectionReductionContext::structural_transit();
+        // The lib `Function` global's carrier is its own terminal
+        // identity: the `__builtin__` base names no declaration the
+        // Instantiate dispatch can serve, so the dispatch would MISS
+        // non-cacheably and taint every enclosing build's warm admission
+        // for a carrier the checker publishes as an ordinary type
+        // (`typeof x === "function"` over `object` narrows to
+        // `Function`). Relations decide it by identity / tag, never by a
+        // body it does not have. Every other base keeps dispatching.
+        if self.runtime_nominal_identity(&identity)
+            == Some(crate::intrinsic_registry::RuntimeNominal::Function)
+        {
+            return IdentityCarrierUnwrap::Concrete(id);
+        }
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
             self.type_slot_for(
                 Arc::clone(&identity.canonical_id),
@@ -6779,6 +6807,63 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             IdentityCarrierUnwrap::Concrete(unwrapped)
         }
+    }
+
+    /// Whether a node carries the lib-declared global `Function` — the
+    /// `"__builtin__"`-sentinel carrier the bare-name fast path interns
+    /// for an UNSHADOWED global reference, never a userland declaration
+    /// that happens to share the name.
+    fn is_global_function_carrier(&self, data: &SemanticNodeData) -> bool {
+        let identity = match data {
+            SemanticNodeData::DeclRef { identity } => identity,
+            SemanticNodeData::InstantiationRef { base, .. } => base,
+            _ => return false,
+        };
+        self.runtime_nominal_identity(identity)
+            == Some(crate::intrinsic_registry::RuntimeNominal::Function)
+    }
+
+    /// The two relation judgements the lib `Function` global's TERMINAL
+    /// carrier has to answer by tag, because it has no declaration body
+    /// the `Instantiate` dispatch could expand into an object surface:
+    ///
+    /// * `Function` IS an object, so it is assignable to the `object`
+    ///   non-primitive (and to another spelling of the same global);
+    /// * every CALLABLE source inhabits the global `Function` surface —
+    ///   a bare signature, or an object surface carrying a call or
+    ///   construct signature.
+    ///
+    /// `None` for every other pair, which then takes the ordinary arms:
+    /// the deferred gate's `Unknown` is the honest answer for a carrier
+    /// whose structure is genuinely unavailable here.
+    fn relate_global_function_carrier(
+        &self,
+        source_data: &SemanticNodeData,
+        target_data: &SemanticNodeData,
+        bindings: &[InferBinding],
+    ) -> Option<RelationResult> {
+        let source_is_function = self.is_global_function_carrier(source_data);
+        let target_is_function = self.is_global_function_carrier(target_data);
+        if source_is_function && target_is_function {
+            return Some(assignable(bindings));
+        }
+        if source_is_function {
+            return matches!(
+                target_data,
+                SemanticNodeData::Primitive(PrimitiveKind::Object)
+            )
+            .then(|| assignable(bindings));
+        }
+        if target_is_function {
+            return match source_data {
+                SemanticNodeData::Signature { .. } => Some(assignable(bindings)),
+                SemanticNodeData::Object(surface) => (!surface.call_signatures.is_empty()
+                    || !surface.construct_signatures.is_empty())
+                .then(|| assignable(bindings)),
+                _ => None,
+            };
+        }
+        None
     }
 
     /// Fully unwrap an identity carrier for ordinary structural relation.
@@ -6860,6 +6945,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 _ => return IdentityCarrierUnwrap::Concrete(current),
             };
             drop(data);
+            // The lib `Function` global's carrier is its own terminal
+            // identity for relations: the `__builtin__` base names no
+            // declaration the Instantiate dispatch can serve, so the
+            // dispatch would MISS non-cacheably and taint every
+            // enclosing build's warm admission for a carrier the
+            // checker publishes as an ordinary type (`typeof x ===
+            // "function"` over `object` narrows to `Function`). Relations
+            // decide it by identity / tag, never by a body it does not
+            // have. Every OTHER non-file base (the remaining runtime
+            // nominals, the global sentinel) keeps dispatching — its
+            // Unresolvable verdict is the measured relation behavior
+            // those carriers' consumers pin.
+            if self.runtime_nominal_identity(&identity)
+                == Some(crate::intrinsic_registry::RuntimeNominal::Function)
+            {
+                return IdentityCarrierUnwrap::Concrete(current);
+            }
             let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
                 self.type_slot_for(
                     Arc::clone(&identity.canonical_id),

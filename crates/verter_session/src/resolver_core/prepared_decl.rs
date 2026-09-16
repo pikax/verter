@@ -564,6 +564,7 @@ fn finish_prepared_type_decl(
     prepared.wrapper_shape = lowered.wrapper_shape.clone();
     prepared.projection_class = lowered.projection_class.clone();
     prepared.heritage_bases = Arc::clone(&lowered.heritage_bases);
+    prepared.heritage_undecidable = lowered.has_unnamed_class_heritage;
     prepared.key_domain_closedness = lowered.key_domain_closedness.clone();
     Ok(prepared)
 }

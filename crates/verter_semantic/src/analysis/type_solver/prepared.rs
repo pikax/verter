@@ -208,6 +208,18 @@ pub struct PreparedTypeDecl {
     /// declarations and heritage-free classes.
     pub heritage_bases: Arc<[HeritageBaseFact]>,
 
+    /// Whether this CLASS declaration authors a heritage clause the fact
+    /// producer could NOT name (`class X extends mixin(K) {}` — a call
+    /// expression, not an identifier or static member path), copied from
+    /// the producing declaration facts. [`heritage_bases`](Self::heritage_bases)
+    /// is EMPTY for such a class exactly as it is for a heritage-free one,
+    /// so a NOMINAL consumer — anything that reads an empty base list as a
+    /// proof of no heritage — must consult this fact before concluding
+    /// anything from that emptiness. `false` for every non-class
+    /// declaration and for a class whose every heritage clause minted a
+    /// base fact.
+    pub heritage_undecidable: bool,
+
     /// The producer-minted per-declaration KEY-DOMAIN closedness fact —
     /// the closed-object SHAPE verdict plus one [`ClosednessRecipe`] per
     /// contributor body. Minted ONCE at lazy decl-body lowering by
@@ -533,6 +545,7 @@ impl PreparedTypeDecl {
             wrapper_shape: unclassified_wrapper_shape(),
             projection_class: PreparedProjectionClassFact::Opaque,
             heritage_bases: Arc::from([]),
+            heritage_undecidable: false,
             key_domain_closedness: None,
         }
     }

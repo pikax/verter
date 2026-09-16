@@ -72,6 +72,12 @@ pub enum RuntimeNominal {
     WeakSet,
     Promise,
     Error,
+    /// The lib-declared global `Function` interface — the surface the
+    /// checker's `typeof x === "function"` narrow publishes over the
+    /// non-primitive `object`. Same lib-decl-identity rail as `Promise`:
+    /// the carrier fast path interns the nominal carrier only for an
+    /// unshadowed global reference.
+    Function,
 }
 
 impl RuntimeNominal {
@@ -85,6 +91,7 @@ impl RuntimeNominal {
             "WeakSet" => Some(Self::WeakSet),
             "Promise" => Some(Self::Promise),
             "Error" => Some(Self::Error),
+            "Function" => Some(Self::Function),
             _ => None,
         }
     }

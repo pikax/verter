@@ -328,6 +328,24 @@ pub(crate) mod flow_admission_fault_injection {
         /// must refuse.
         pub(crate) strip_root_proof: AtomicBool,
 
+        /// When armed, `lower_lib_global` reports EVERY lib global as
+        /// unavailable, the way the checker's `getGlobalRecordSymbol()`
+        /// returns `undefined` for an environment that declares no
+        /// `Record`.
+        ///
+        /// The guard-narrow mints take their globals from the
+        /// environment's two providers — a registered ambient
+        /// declaration, or verter's OWN implementation of the global —
+        /// and verter implements `Record` (`build.rs`'s native
+        /// `Record<K, V>` reduction) and `Function` (a terminal runtime
+        /// nominal) unconditionally, so no project configuration this
+        /// session models can withdraw them. This slot is how the
+        /// fail-closed half of that contract is still PROVED: a mint that
+        /// cannot reach its global must leave the typed
+        /// `FlowGap(GuardNarrowing)` and never warm, never a narrow
+        /// fabricated over a global the environment did not provide.
+        pub(crate) lib_global_unavailable: AtomicBool,
+
         /// When armed, `finalize_flow_demand` applies the evaluator's
         /// discharge report with its LAST claim removed, leaving exactly
         /// one planned obligation pending at the seal.
@@ -3695,7 +3713,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let FlowSliceDemandSite {
             indexed,
-            self_roots,
+            mut self_roots,
             slice_key_function,
             slice_key,
             demanded_member,
@@ -4100,6 +4118,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             expression_write_nodes: rustc_hash::FxHashMap::default(),
             capture_write_lookahead: rustc_hash::FxHashMap::default(),
             executed_walk: ExecutedSliceWalk::default(),
+            heritage_self_roots: Vec::new(),
         };
         let holds;
         let degradation;
@@ -4136,6 +4155,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             degradation = evaluator.degradation;
             frame_bindings = Arc::clone(&evaluator.bindings);
             frame_products = evaluator.products.clone();
+            // Fold in every cross-file heritage hop the `instanceof`
+            // narrowing observed (see the field doc on
+            // `FlowEvaluator::heritage_self_roots`): a `class_heritage_bases`
+            // read is `ReturnOnly` and records no fact of its own, so those
+            // reads must join the frame's published self-roots explicitly.
+            for root in std::mem::take(&mut evaluator.heritage_self_roots) {
+                if !self_roots.contains(&root) {
+                    self_roots.push(root);
+                }
+            }
             (outcome, body_falls_through)
         };
         // A call the lowering DECIDED ABOVE (folded into a surviving
@@ -5250,6 +5279,92 @@ enum ArmFilter {
     NoSurvivor,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// COLD heritage-authority reads made by the `instanceof` guard
+    /// ([`FlowEvaluator::node_heritage_reading`]) — D10-AC4's counter.
+    ///
+    /// One per union ARM per cold EDGE, plus one for the tested class per
+    /// edge, and none at all for an arm that carries no declaration. The
+    /// ancestry walk behind each read is the authority's
+    /// ([`ProjectSemanticDispatch::class_heritage_ancestry`]) and is
+    /// memoized per dispatch, so chain DEPTH and arms SHARING a chain cost
+    /// the guard nothing extra. A warm demand asks nothing, so the counter
+    /// does not move at all on a warm re-demand. Test-only observation;
+    /// no behavior depends on it.
+    pub(super) static INSTANCEOF_HERITAGE_READS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// One node's CLASS-HERITAGE reading: the declaration identities its
+/// nominal ancestry reaches, plus whether that reading is a PROOF.
+///
+/// `decided` is the whole point. A reachability claim (`ancestors`
+/// contains the tested class) needs only the hops the walk found — a
+/// truncated chain can never fabricate a derivation. The NEGATIVE claim
+/// is the fragile one: "not in that family" is only as strong as the
+/// walk's completeness, so a walk that could not root or read every
+/// declaration it visited reports `decided: false` and its consumers
+/// record the typed guard gap instead of publishing the negative.
+enum HeritageReading {
+    /// A node that carries no declaration at all — an object surface, a
+    /// primitive, a literal, an array or tuple, a bare signature. PROVED
+    /// outside every class family, with nothing to read: the checker's
+    /// own `hasBaseType` answers `false` for it without reading anything.
+    ProvedFree,
+    /// A carrier whose ancestry cannot be seen from here — a generic
+    /// instantiation carrier, a deferred shell, an intersection, an
+    /// opaque or missing node. It could stand for a class whose heritage
+    /// this reading cannot reach, so its empty ancestry is NOT a proof.
+    Undecided,
+    /// The heritage authority's ancestry answer for this node's own
+    /// declaration.
+    Declared(Arc<super::build::ClassAncestryReading>),
+}
+
+impl HeritageReading {
+    /// Whether the reading is a PROOF — see
+    /// [`ClassAncestryReading::decided`](super::build::ClassAncestryReading::decided).
+    fn decided(&self) -> bool {
+        match self {
+            Self::ProvedFree => true,
+            Self::Undecided => false,
+            Self::Declared(ancestry) => ancestry.decided,
+        }
+    }
+
+    fn reaches(&self, target: &crate::semantic_query::DeclIdentity) -> bool {
+        match self {
+            Self::ProvedFree | Self::Undecided => false,
+            Self::Declared(ancestry) => ancestry
+                .ancestors
+                .iter()
+                .any(|ancestor| super::build::same_class_identity(ancestor, target)),
+        }
+    }
+}
+
+/// One union arm's nominal verdict against an `instanceof` test's
+/// instance type — the checker's `isTypeDerivedFrom` question, answered
+/// by class heritage on the declaration-identity chain.
+///
+/// `Unrelated` is a PROOF that neither declaration is in the other's
+/// family, so the caller may publish the checker's structural fallback
+/// over it; `Undecidable` is no fact at all and always degrades.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InstanceofHeritage {
+    /// The arm IS the tested class's family: its own chain reaches the
+    /// instance type's declaration.
+    ArmInFamily,
+    /// The tested class is derived FROM the arm — the checker's downcast
+    /// reading, which narrows the arm TO the instance type.
+    InstanceDerivesFromArm,
+    /// Both readings are complete and neither reaches the other.
+    Unrelated,
+    /// At least one side's ancestry could not be decided.
+    Undecidable,
+}
+
 /// One union arm's verdict against a runtime guard test. `NoMatch` is
 /// PROVED non-inhabitance of the tested edge — never "unrecognized". An
 /// arm the graph cannot classify (`any`, `unknown`, a memberless `{}`
@@ -5632,6 +5747,20 @@ struct FlowEvaluator<'d, 'b> {
     /// see [`ExecutedSliceWalk`]. The execution witness yields an
     /// executed selection only from a complete, unaborted ledger.
     executed_walk: ExecutedSliceWalk,
+    /// Cross-file self-roots observed by the `instanceof` heritage-chain
+    /// walk ([`Self::class_heritage_chain_of`]): each declaration file the
+    /// walk reads through `class_heritage_reading` (a `ReturnOnly` read
+    /// that records no fact of its own), keyed at the whole-hash it was
+    /// served at — the same observation the static composer makes before
+    /// its own `class_heritage_bases` hop (`build.rs`'s
+    /// `ensure_indexed_ready_serve` self-root push). Folded into the
+    /// frame's published self-roots at frame close so an edit to an
+    /// intermediate heritage file (a base class gaining or losing an
+    /// `extends` clause) invalidates a warm `instanceof` narrow instead of
+    /// silently surviving it. A hop that cannot be SERVED contributes no
+    /// root and instead marks the whole walk undecided, so the narrow it
+    /// feeds degrades and never reaches the warm slot unrooted.
+    heritage_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
 }
 
 /// The evaluator-recorded structural execution ledger of one run: how
@@ -8797,27 +8926,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         GuardNarrowing::Narrowed(subject.clone(), node)
     }
 
-    /// The global `Function` surface, lowered through the owner scope the
-    /// way an `instanceof` constructor reference is. `None` when the lib
-    /// surface is unavailable — including a lowering that only reaches an
-    /// UNRESOLVED bare reference or an opaque carrier, which must never
-    /// publish as a resolved narrow — so the caller keeps the arm
-    /// possible, degraded, never proved off an edge.
+    /// The checker's `globalFunctionType` — the lib-environment global
+    /// `Function`, read out of the lib environment and NOT by resolving
+    /// the identifier `Function` in owner scope. `typeof x === "function"`
+    /// is a compiler-internal operation: the checker narrows against its
+    /// own `globalFunctionType` no matter what the narrowed expression's
+    /// scope calls `Function`, so a module-local `interface Function { … }`
+    /// does not change (and does not suppress) this narrow. See
+    /// [`ProjectSemanticDispatch::lower_lib_global`].
+    ///
+    /// `None` only when the lib environment declares no such global — the
+    /// checker's own "the global is unavailable" case — so the caller
+    /// keeps the arm possible, degraded, never proved off an edge.
     fn lower_global_function_surface(&mut self) -> Option<SemanticNodeId> {
-        let ty = verter_type_expr::TypeExpr::Ref {
-            name: Arc::from("Function"),
-            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
-        };
-        let node = self.dispatch.lower_type_expr_in_owner_scope_with_context(
+        self.dispatch.lower_lib_global(
             self.canonical,
             self.owner,
-            &ty,
+            &Arc::from("Function"),
+            Arc::from(Vec::new().into_boxed_slice()),
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
-        )?;
-        match self.dispatch.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::BareRef(_)) | Some(SemanticNodeData::Opaque(_)) | None => None,
-            _ => Some(node),
-        }
+        )
     }
 
     /// One union arm's verdict against the runtime type a `typeof`
@@ -9510,18 +9638,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     }
 
     /// `subject instanceof Ctor`, applying the checker's own per-arm
-    /// narrowing (the same rule [`Self::narrow_to_predicate_target`]
-    /// applies to `x is T`): on the positive edge an arm assignable to
-    /// the constructor's instance type survives as itself, an arm the
-    /// instance type is assignable to narrows TO the instance type (the
-    /// downcast reading), and an unrelated arm keeps the checker's
-    /// intersection unless provably disjoint — the one proved dead
-    /// reading. The negated edge drops only an arm proved to BE the
-    /// tested class (node identity with the instance type); structural
-    /// assignability alone cannot prove derivation, so an assignable
-    /// but non-identical arm stays possible, degraded. The instance
-    /// type resolves as a bare type reference in owner scope — the same
-    /// lowering any authored annotation of that name takes. The
+    /// narrowing. Derivation is decided by CLASS HERITAGE — the
+    /// declaration-identity chain the class surface already carries
+    /// ([`Self::class_heritage_chain_reaches`]) — before structural
+    /// assignability is consulted: on the positive edge an arm that IS
+    /// the tested class or a subclass of it survives as itself, an arm
+    /// the tested class is derived from narrows TO the instance type (the
+    /// downcast reading), and an arm PROVED unrelated in both directions
+    /// by heritage is dropped when a related arm survives and otherwise
+    /// falls to the checker's own union-level fallback — the instance
+    /// type when it is a subtype of the remaining subject (the
+    /// heritage-free structural twin), the remaining subject when that
+    /// subject is assignable to the instance type, the whole-subject
+    /// intersection otherwise. An arm whose heritage cannot be DECIDED
+    /// (an opaque carrier, a generic instantiation carrier, an
+    /// unresolved heritage import, a base the fact producer could not
+    /// name such as `extends mixin(K)`) proves nothing in either
+    /// direction: structure never stands in for the missing nominal
+    /// fact, so the arm stays gapped and never warms. The negated edge
+    /// drops only an arm proved to be within the tested class's family
+    /// by heritage, and keeps a proved-unrelated arm cleanly. The
+    /// instance type resolves as a bare type reference in owner scope —
+    /// the same lowering any authored annotation of that name takes. The
     /// lowering mints this fact only for a constructor name it proved
     /// to be the module's single same-file `class` declaration left
     /// free by the frame, which is exactly when that type reference IS
@@ -9546,36 +9684,45 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         ) else {
             return GuardNarrowing::Unchanged;
         };
+        let instance_identity = self.node_class_identity(instance);
+        // The tested class's own heritage reading, taken ONCE for the
+        // whole guard application: every arm's derivation question
+        // consults this same reading, and the per-arm survivor question
+        // walks the ARM's own chain.
+        let instance_heritage = self.node_heritage_reading(instance);
         if negated {
             // The checker's negated edge drops only an arm PROVED to be
-            // the tested class family; every other arm stays exactly as
-            // declared. Structural assignability over-approximates that
-            // proof — a same-shape but underived arm is assignable yet
-            // the checker keeps it — so the only structural proof of
-            // "this arm IS the tested class" is node identity with the
-            // instance type. An assignable-but-not-identical arm may or
-            // may not be derived: it stays possible, degraded.
+            // within the tested class's family — the tested class itself
+            // or a subclass of it, by heritage; every other arm stays
+            // exactly as declared. An arm PROVED unrelated by heritage
+            // stays exactly as declared and the edge stays clean; only an
+            // arm whose ancestry could not be decided at all leaves the
+            // typed gap behind.
             let mut gapped = false;
             let fact = self.narrow_arms_by(subject, |this, arm| {
                 if this.instanceof_arm_is_unclassifiable(arm) {
                     gapped = true;
                     return Some(true);
                 }
-                Some(match this.assignable(arm, instance) {
-                    Some(true) => {
-                        if arm == instance {
-                            false
-                        } else {
-                            gapped = true;
-                            true
-                        }
+                if arm == instance {
+                    return Some(false);
+                }
+                match this.instanceof_heritage_verdict(
+                    arm,
+                    instance_identity.as_ref(),
+                    &instance_heritage,
+                ) {
+                    InstanceofHeritage::ArmInFamily => Some(false),
+                    // A BASE of the tested class is not itself within
+                    // that class's family: the checker keeps it.
+                    InstanceofHeritage::InstanceDerivesFromArm | InstanceofHeritage::Unrelated => {
+                        Some(true)
                     }
-                    Some(false) => true,
-                    None => {
+                    InstanceofHeritage::Undecidable => {
                         gapped = true;
-                        true
+                        Some(true)
                     }
-                })
+                }
             });
             if gapped {
                 self.record_degradation(FlowReturnDegradation::FlowGap(
@@ -9583,8 +9730,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ));
             }
             return match fact {
-                // Every arm IS the tested class: excluding it empties the
-                // subject — `never`, on a still-alive edge.
+                // Every arm IS within the tested class's family: excluding
+                // it empties the subject — `never`, on a still-alive edge.
                 ArmFilter::NoSurvivor => {
                     GuardNarrowing::Narrowed(subject.clone(), self.never_node())
                 }
@@ -9603,35 +9750,50 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         //   and with any surviving arm every unrelated arm is DROPPED
         //   (`string | K` narrows to `K`; `K | L` to `K` — never to
         //   `K | (K & L)`).
-        // * when NO arm is related in EITHER direction, the checker
-        //   intersects the WHOLE remaining subject with the instance
-        //   type (`string | L` narrows to `(string | L) & K`) — a
-        //   primitive arm stays INSIDE the intersection, never dropped;
-        //   dropping it published a strict subset of the checker's
-        //   type, clean and warm.
-        // * an arm ASSIGNABLE to the instance type without being it —
-        //   or one the instance type is assignable to — is the
-        //   direction structural assignability cannot decide: a genuine
-        //   subclass relationship and a same-shape underived
-        //   constructor are indistinguishable, and the checker treats
-        //   them differently (the derived arm survives or downcasts;
-        //   the underived twin routes through the subtype fallback).
-        //   The subject stays UNCHANGED behind the typed guard gap — a
-        //   superset, ReturnOnly, never a partial narrow that could
-        //   drop a real contributor.
-        //
-        // Each unrelated-arm proof is per-arm and the instance type is
-        // a class instance (not a union), so the checker's union-level
-        // fallback clauses (candidate-subtype-of-subject,
-        // subject-assignable-to-candidate) are provably closed off when
-        // every remaining arm is unrelated in both directions: the
-        // whole-subject intersection is exact, not an approximation.
+        // * an arm PROVED derived from the tested class by heritage (a
+        //   subclass) survives as itself (`K | KSub` under `instanceof K`
+        //   keeps `K | KSub`, clean); an arm the tested class is proved
+        //   derived from (a base) narrows TO the instance type (the
+        //   downcast: `K` under `instanceof KSub` publishes `KSub`).
+        // * when NO arm is related in EITHER direction — every arm
+        //   PROVED unrelated by heritage, and no survivor — the
+        //   checker's UNION-LEVEL fallback decides the whole remaining
+        //   subject, in the checker's own order: the instance type when
+        //   it is a SUBTYPE of that subject (the shape-identical,
+        //   heritage-free twin: `x: Twin` under `instanceof K` reads
+        //   `K`), the subject itself when the subject is ASSIGNABLE to
+        //   the instance type, and otherwise the WHOLE remaining
+        //   subject intersected with the instance type (`string | L`
+        //   narrows to `(string | L) & K`) — a primitive arm stays
+        //   INSIDE the intersection, never dropped; dropping it
+        //   published a strict subset of the checker's type, clean and
+        //   warm. A relation the authority answers UNDECIDED is no fact
+        //   at all: the fallback is never entered on a guess.
+        // * an arm whose ANCESTRY could not be decided — an opaque or
+        //   generic-instantiation carrier, an unresolved heritage
+        //   import, a base the producer could not name
+        //   (`class X extends mixin(K) {}`) — proves nothing in either
+        //   direction. Structural assignability cannot stand in for the
+        //   missing nominal fact (a genuine subclass and a same-shape
+        //   underived twin are indistinguishable to it), so the subject
+        //   stays UNCHANGED behind the typed guard gap — a superset,
+        //   ReturnOnly, never a partial narrow that could drop a real
+        //   contributor and never warm.
         let Some(current) = self.subject_current_node(subject) else {
             return GuardNarrowing::Unchanged;
         };
         let arms = self.enumerated_union_arms_or_self(current);
         let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         let mut remainder: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        let mut changed = false;
+        // The checker's union-level fallback clauses, accumulated from
+        // the SAME per-arm relation reads the unrelated arms already
+        // pay for: a source relates to a union target when it relates to
+        // SOME arm, and a union source relates to a target when EVERY
+        // arm does.
+        let mut instance_into_some_arm = false;
+        let mut every_arm_into_instance = true;
+        let mut structurally_undecided = false;
         for arm in &arms {
             if self.instanceof_arm_is_unclassifiable(*arm) {
                 self.record_degradation(FlowReturnDegradation::FlowGap(
@@ -9645,6 +9807,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     PrimitiveKind::Null | PrimitiveKind::Undefined | PrimitiveKind::Never,
                 ))
             ) {
+                changed = true;
                 continue;
             }
             if *arm == instance {
@@ -9652,12 +9815,41 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 remainder.push(*arm);
                 continue;
             }
-            match (
-                self.assignable(*arm, instance),
-                self.assignable(instance, *arm),
+            match self.instanceof_heritage_verdict(
+                *arm,
+                instance_identity.as_ref(),
+                &instance_heritage,
             ) {
-                (Some(false), Some(false)) => remainder.push(*arm),
-                _ => {
+                // The arm's OWN heritage chain proves it a subclass of
+                // the tested class: every value of the arm is an
+                // instance of the tested class, so the positive edge
+                // keeps the arm exactly as declared.
+                InstanceofHeritage::ArmInFamily => {
+                    survivors.push(*arm);
+                    remainder.push(*arm);
+                }
+                // The tested class is proved derived from the arm: the
+                // checker's downcast reading narrows the arm TO the
+                // instance type.
+                InstanceofHeritage::InstanceDerivesFromArm => {
+                    survivors.push(instance);
+                    remainder.push(instance);
+                    changed = true;
+                }
+                InstanceofHeritage::Unrelated => {
+                    match self.assignable(instance, *arm) {
+                        Some(true) => instance_into_some_arm = true,
+                        Some(false) => {}
+                        None => structurally_undecided = true,
+                    }
+                    match self.assignable(*arm, instance) {
+                        Some(true) => {}
+                        Some(false) => every_arm_into_instance = false,
+                        None => structurally_undecided = true,
+                    }
+                    remainder.push(*arm);
+                }
+                InstanceofHeritage::Undecidable => {
                     self.record_degradation(FlowReturnDegradation::FlowGap(
                         crate::semantic_query::FlowGap::GuardNarrowing,
                     ));
@@ -9666,7 +9858,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
         }
         if !survivors.is_empty() {
-            if survivors.len() == arms.len() {
+            if !changed && survivors.len() == arms.len() {
                 return GuardNarrowing::Unchanged;
             }
             let node = self
@@ -9680,20 +9872,135 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // alive — a non-subject contributor on it keeps its own type.
             return GuardNarrowing::Narrowed(subject.clone(), self.never_node());
         }
-        // No survivor and every remaining arm proved unrelated: the
-        // whole remaining subject intersects the instance type. When
-        // nothing was stripped the AUTHORED subject node is kept as the
-        // intersection's subject arm, preserving its spelling.
+        // No survivor: the checker's per-arm derivation map is empty, so
+        // its UNION-LEVEL fallback decides the whole remaining subject.
+        // A relation the authority could not decide is no fact at all —
+        // the fallback is not entered on a guess.
+        if structurally_undecided {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+            return GuardNarrowing::Unchanged;
+        }
+        if instance_into_some_arm {
+            // The instance type is a subtype of the remaining subject:
+            // the checker publishes the instance type itself.
+            return GuardNarrowing::Narrowed(subject.clone(), instance);
+        }
+        // When nothing was stripped or downcasted the AUTHORED subject
+        // node is kept, preserving its spelling.
         let subject_node = if remainder.len() == arms.len() {
             current
         } else {
             self.dispatch
                 .intern_normalized_union_or_intersection(&remainder, true)
         };
+        if every_arm_into_instance {
+            // The remaining subject is assignable to the instance type:
+            // the checker keeps the subject, never the intersection.
+            return if changed {
+                GuardNarrowing::Narrowed(subject.clone(), subject_node)
+            } else {
+                GuardNarrowing::Unchanged
+            };
+        }
+        // Unrelated in both directions: the whole remaining subject
+        // intersects the instance type.
         let node = self
             .dispatch
             .intern_normalized_union_or_intersection(&[subject_node, instance], false);
         GuardNarrowing::Narrowed(subject.clone(), node)
+    }
+
+    /// One union arm's nominal verdict against the `instanceof` test's
+    /// instance type: the checker's `isTypeDerivedFrom` question in both
+    /// directions, answered by CLASS HERITAGE on the declaration-identity
+    /// chain and never by structural assignability — a genuine subclass
+    /// and a same-shape underived twin are indistinguishable to
+    /// structure, and the checker treats them differently.
+    ///
+    /// The instance side's reading is taken ONCE per guard application
+    /// and threaded in; only the arm's own chain is walked here, which is
+    /// what keeps the cold cost one heritage walk per arm per edge.
+    fn instanceof_heritage_verdict(
+        &mut self,
+        arm: SemanticNodeId,
+        instance_identity: Option<&crate::semantic_query::DeclIdentity>,
+        instance_heritage: &HeritageReading,
+    ) -> InstanceofHeritage {
+        let arm_identity = self.node_class_identity(arm);
+        let arm_heritage = self.node_heritage_reading(arm);
+        if let Some(instance_identity) = instance_identity {
+            if arm_heritage.reaches(instance_identity) {
+                return InstanceofHeritage::ArmInFamily;
+            }
+        }
+        if let Some(arm_identity) = arm_identity.as_ref() {
+            if instance_heritage.reaches(arm_identity) {
+                return InstanceofHeritage::InstanceDerivesFromArm;
+            }
+        }
+        if arm_heritage.decided() && instance_heritage.decided() {
+            InstanceofHeritage::Unrelated
+        } else {
+            InstanceofHeritage::Undecidable
+        }
+    }
+
+    /// The CLASS declaration identity a node carries, or `None` for any
+    /// node that is not a plain `DeclRef` carrier (an inline object, a
+    /// generic instantiation carrier, an opaque or unresolved node): no
+    /// declaration identity, no heritage question.
+    fn node_class_identity(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<crate::semantic_query::DeclIdentity> {
+        match self.dispatch.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => Some(identity.clone()),
+            _ => None,
+        }
+    }
+
+    /// The heritage reading of ONE union arm or instance node — the
+    /// nominal fact behind every `instanceof` decision this evaluator
+    /// makes.
+    ///
+    /// Exactly ONE heritage-authority read per node that carries a
+    /// declaration, and none at all for a node that carries none: the
+    /// recursive walk over a declaration's base chain belongs to
+    /// [`ProjectSemanticDispatch::class_heritage_ancestry`], which
+    /// memoizes it for the dispatch. That is what makes the guard's cold
+    /// cost one heritage read per arm per edge regardless of how deep the
+    /// hierarchies are. A warm demand asks nothing at all.
+    ///
+    /// The ancestry's observations are folded into this frame's self-roots
+    /// HERE, because the self-root set belongs to the asking computation:
+    /// the authority reads each declaration file through a `ReturnOnly`
+    /// accessor that records no fact of its own, so without this fold a
+    /// warm `instanceof` narrow could survive an edit to an intermediate
+    /// base class.
+    fn node_heritage_reading(&mut self, node: SemanticNodeId) -> HeritageReading {
+        let identity = match self.dispatch.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
+            Some(
+                SemanticNodeData::Object(_)
+                | SemanticNodeData::Primitive(_)
+                | SemanticNodeData::Literal(_)
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Signature { .. },
+            ) => return HeritageReading::ProvedFree,
+            _ => return HeritageReading::Undecided,
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        INSTANCEOF_HERITAGE_READS.with(|reads| reads.set(reads.get() + 1));
+        let ancestry = self.dispatch.class_heritage_ancestry(&identity);
+        for observation in ancestry.observed.iter() {
+            if !self.heritage_self_roots.contains(observation) {
+                self.heritage_self_roots.push(observation.clone());
+            }
+        }
+        HeritageReading::Declared(ancestry)
     }
 
     /// Whether one union arm is beyond `instanceof` classification
@@ -9725,10 +10032,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     ///   subject to `never` on a still-alive edge.
     /// * an UNKNOWN key — NO arm proves it present — never filters: the
     ///   checker's positive edge is the WHOLE subject intersected with
-    ///   `Record<key, unknown>`, a carrier the substrate cannot mint, so
-    ///   the subject stays unchanged as a typed superset behind the guard
-    ///   gap — never a dropped edge; the negated edge keeps the subject
-    ///   unchanged exactly.
+    ///   `Record<key, unknown>`, minted through the shared lowering of
+    ///   the lib utility ([`Self::mint_in_key_record_intersection`]); a
+    ///   utility that does not resolve keeps the subject unchanged as a
+    ///   typed superset behind the guard gap — never a dropped edge; the
+    ///   negated edge keeps the subject unchanged exactly.
     ///
     /// An arm whose key set the graph cannot decide — a type parameter,
     /// an index-signature surface, an unresolvable carrier — stays
@@ -9783,10 +10091,30 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 GuardNarrowing::Narrowed(subject.clone(), node)
             }
         } else if !negated {
-            // Unknown key, positive edge: the unmintable
-            // `(subject) & Record<key, unknown>` stays a typed superset.
-            gapped = true;
-            GuardNarrowing::Unchanged
+            // Unknown key, positive edge: the checker's answer is the
+            // WHOLE subject intersected with `Record<key, unknown>` —
+            // minted through the shared lowering of the lib utility (the
+            // same builtin-shadowing-aware route an authored
+            // `Record<key, unknown>` annotation takes), never a second
+            // Record resolver. An arm whose presence is undecided keeps
+            // the regime undecided — the typed gap; a lib utility that
+            // does not resolve (shadowed, unresolvable) keeps the gap
+            // too, never a dropped edge.
+            if presences
+                .iter()
+                .any(|presence| matches!(presence, InArmPresence::Unknown))
+            {
+                gapped = true;
+                GuardNarrowing::Unchanged
+            } else {
+                match self.mint_in_key_record_intersection(current, key) {
+                    Some(node) => GuardNarrowing::Narrowed(subject.clone(), node),
+                    None => {
+                        gapped = true;
+                        GuardNarrowing::Unchanged
+                    }
+                }
+            }
         } else {
             // Unknown key, negated edge: the checker keeps the subject
             // unchanged — exact when every arm's absence is proved; an
@@ -9805,6 +10133,57 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             ));
         }
         fact
+    }
+
+    /// The checker's unknown-key positive edge: `subject &
+    /// Record<key, unknown>`.
+    ///
+    /// The utility comes from the LIB ENVIRONMENT, the way the checker
+    /// takes it (`getGlobalRecordSymbol()`, then a type-alias
+    /// instantiation over that global symbol) — not by resolving the
+    /// identifier `Record` in owner scope. `in`-narrowing is a
+    /// compiler-internal operation, so a module-local `type Record<K, V>`
+    /// does not change (and does not suppress) it. See
+    /// [`ProjectSemanticDispatch::lower_lib_global`]. The mint is still
+    /// the shared builtin-utility carrier — the same `Instantiate`
+    /// identity an unshadowed authored `Record<key, unknown>` annotation
+    /// produces, never a private spelling — and the whole AUTHORED
+    /// subject node is kept as the intersection's subject arm, preserving
+    /// its spelling.
+    ///
+    /// `None` when the lib environment declares no `Record` at all: the
+    /// checker's own `getGlobalRecordSymbol()`-returns-`undefined` case,
+    /// where it narrows nothing. The caller keeps the typed gap.
+    fn mint_in_key_record_intersection(
+        &mut self,
+        subject: SemanticNodeId,
+        key: &str,
+    ) -> Option<SemanticNodeId> {
+        let key_node = self.dispatch.lower_type_expr_in_owner_scope_with_context(
+            self.canonical,
+            self.owner,
+            &verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+                key.to_string(),
+            )),
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )?;
+        let unknown_node = self.dispatch.lower_type_expr_in_owner_scope_with_context(
+            self.canonical,
+            self.owner,
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Unknown),
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )?;
+        let utility = self.dispatch.lower_lib_global(
+            self.canonical,
+            self.owner,
+            &Arc::from("Record"),
+            Arc::from(vec![key_node, unknown_node].into_boxed_slice()),
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )?;
+        Some(
+            self.dispatch
+                .intern_normalized_union_or_intersection(&[subject, utility], false),
+        )
     }
 
     /// One union arm's key-presence verdict for `"key" in subject`,
@@ -12339,6 +12718,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 expression_write_nodes: rustc_hash::FxHashMap::default(),
                 capture_write_lookahead: rustc_hash::FxHashMap::default(),
                 executed_walk: ExecutedSliceWalk::default(),
+                heritage_self_roots: Vec::new(),
             };
             nested_evaluator.seed_hoisted_var_declarations(body);
             let (outcome, nested_body_falls_through) = nested_evaluator.eval_region(body);
@@ -12428,6 +12808,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.call_evidence
                 .append(&mut nested_evaluator.call_evidence);
             self.executed_walk.absorb(nested_evaluator.executed_walk);
+            // A heritage hop the NESTED body's `instanceof` narrowing read
+            // is still a cross-file observation of THIS run: it rides the
+            // enclosing self-roots exactly as the nested holds do.
+            for root in nested_evaluator.heritage_self_roots.drain(..) {
+                if !self.heritage_self_roots.contains(&root) {
+                    self.heritage_self_roots.push(root);
+                }
+            }
             (outcome, nested_body_falls_through)
         };
         // A degraded nested body degrades the enclosing value that
