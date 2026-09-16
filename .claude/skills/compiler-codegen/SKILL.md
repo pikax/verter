@@ -184,6 +184,17 @@ segments. JSON/V3/LSP adapters own UTF-16 conversion using source documents.
 The schema does not replace the live `ArtifactSet` publication boundary or
 `VerterCompileResult` routes.
 
+Vue custom-block parsing (`compile/mod.rs`, `extract_block_ranges` /
+the `unknown_nodes()` walk) retains one `VerterCustomBlock` per source
+block: `block_type`, `content`, `attrs` (exact authored order — attrs
+are never sorted or deduped, since `CustomBlockDescriptorId::mint`
+hashes them in order), `region` (SFC-absolute; a self-closing tag with
+no content span anchors at `tag_open.end`, a zero-length region),
+`source_order`, `lang`, `src`. These facts stage on
+`RuntimeCompileOutput.custom_block_facts` for
+`vue_main_compile_artifacts` to mint `CustomBlockDescriptor`s from
+directly — no re-parse, no re-scan of source text.
+
 `assembly::StagedCompileArtifacts` is the request's ONE handoff from a
 framework host-integration backend into session lifecycle/publication code:
 a validated `CompileArtifactSet`, the `ArtifactId` of the runtime-module

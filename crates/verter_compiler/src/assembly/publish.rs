@@ -60,7 +60,7 @@ pub struct CompileArtifactSet {
         super::source_unit::ArtifactSourceUnit,
     >,
     artifacts: Vec<super::fragment::CompileArtifact>,
-    custom_blocks: Vec<CustomBlockDescriptor>,
+    custom_blocks: std::sync::Arc<[CustomBlockDescriptor]>,
 }
 
 impl CompileArtifactSet {
@@ -152,12 +152,20 @@ impl CompileArtifactSet {
         Ok(Self {
             source_units: sources,
             artifacts,
-            custom_blocks: Vec::new(),
+            custom_blocks: std::sync::Arc::from(Vec::new()),
         })
     }
 
     pub fn custom_blocks(&self) -> &[CustomBlockDescriptor] {
         &self.custom_blocks
+    }
+
+    /// The same descriptors as [`Self::custom_blocks`], as a shared
+    /// allocation: cloning this handle bumps a refcount instead of
+    /// re-cloning every descriptor's content (each local block's full text
+    /// included, which can be large for i18n catalogs).
+    pub fn custom_blocks_shared(&self) -> std::sync::Arc<[CustomBlockDescriptor]> {
+        std::sync::Arc::clone(&self.custom_blocks)
     }
 
     /// Attach validated descriptors with typed `attachedTo` relations.
@@ -168,13 +176,14 @@ impl CompileArtifactSet {
         mut self,
         descriptors: Vec<CustomBlockDescriptor>,
     ) -> Result<Self, CustomBlockDescriptorError> {
-        let mut combined = std::mem::take(&mut self.custom_blocks);
+        let mut combined = self.custom_blocks.to_vec();
         combined.extend(descriptors);
         self.custom_blocks = super::custom_block::validate_attachment(
             &self.source_units,
             &self.artifacts,
             combined,
-        )?;
+        )?
+        .into();
         Ok(self)
     }
 

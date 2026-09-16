@@ -763,7 +763,7 @@ pub(crate) fn emit_assembled_vue_main(
         source,
         custom_blocks: &custom_blocks,
     })?;
-    bundle.custom_block_descriptors = assembled.set().custom_blocks().to_vec();
+    bundle.custom_block_descriptors = assembled.set().custom_blocks_shared();
     bundle.main = Some(assembled);
     Ok(())
 }
@@ -984,7 +984,7 @@ pub(crate) fn vue_result_to_runtime_parts(
         // Populated by `emit_assembled_vue_main` on the runtime-bundle path,
         // against Main's own real artifact set; empty here (and permanently
         // empty on the direct-conversion path, which never assembles Main).
-        custom_block_descriptors: Vec::new(),
+        custom_block_descriptors: std::sync::Arc::from(Vec::new()),
         custom_block_facts,
         scope_id: result.scope_id,
         tsx,
@@ -1605,6 +1605,96 @@ mod tests {
         assert_eq!(
             output.custom_block_descriptors[0].lifecycle(),
             crate::assembly::CustomBlockLifecycle::Complete
+        );
+    }
+
+    /// The bundle-level `custom_block_descriptors` field must be the SAME
+    /// allocation as the validated copy attached inside `bundle.main`'s
+    /// artifact set — a shared `Arc` handle, never a second `.to_vec()`
+    /// clone of every descriptor's content (AC4: no duplicate content copy).
+    #[test]
+    fn bundle_custom_block_descriptors_share_the_staged_sets_allocation() {
+        let source = concat!(
+            "<script setup>const n = 1</script>",
+            "<i18n lang=\"json\">{\"a\":1}</i18n>",
+        );
+        let compiler = VueCarrierCompiler;
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let output = compiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions {
+                    want_main: true,
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("vue bundle with a custom block still produces");
+
+        let staged = output
+            .main
+            .as_ref()
+            .expect("main assembles")
+            .set()
+            .custom_blocks_shared();
+        assert!(
+            std::sync::Arc::ptr_eq(&output.custom_block_descriptors, &staged),
+            "bundle.custom_block_descriptors must share the staged set's \
+             allocation, not a re-cloned copy"
+        );
+    }
+
+    /// AC2 'ordered attrs' is identity-bearing (`CustomBlockDescriptorId::mint`
+    /// hashes attributes in order): a producer that sorted, deduped, or
+    /// otherwise reordered attrs would still pass a find-first lang/src
+    /// check, so this pins the full ordered vector exactly and proves
+    /// reordering remints the descriptor id.
+    #[test]
+    fn custom_block_descriptor_attributes_preserve_exact_authored_order() {
+        let compiler = VueCarrierCompiler;
+        let alloc = oxc_allocator::Allocator::new();
+        let compile = |source: &str| {
+            let artifact = artifact_for(source);
+            compiler
+                .compile_bundle_expect_produced(
+                    source,
+                    &artifact,
+                    &RuntimeCompileOptions {
+                        filename: Some("Same.vue".to_string()),
+                        want_main: true,
+                        ..Default::default()
+                    },
+                    &alloc,
+                )
+                .expect("vue bundle with a custom block still produces")
+        };
+
+        let forward =
+            compile("<script setup>const n = 1</script><i18n foo=\"1\" bar=\"2\">{}</i18n>");
+        assert_eq!(
+            forward.custom_block_descriptors[0].attributes(),
+            &[
+                ("foo".to_string(), "1".to_string()),
+                ("bar".to_string(), "2".to_string())
+            ],
+            "attributes must reach the descriptor in exact authored order, not sorted or deduped"
+        );
+
+        let reversed =
+            compile("<script setup>const n = 1</script><i18n bar=\"2\" foo=\"1\">{}</i18n>");
+        assert_eq!(
+            reversed.custom_block_descriptors[0].attributes(),
+            &[
+                ("bar".to_string(), "2".to_string()),
+                ("foo".to_string(), "1".to_string())
+            ],
+        );
+        assert_ne!(
+            forward.custom_block_descriptors[0].id(),
+            reversed.custom_block_descriptors[0].id(),
+            "swapping attribute order must remint the descriptor id (order is identity-bearing)"
         );
     }
 

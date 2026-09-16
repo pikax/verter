@@ -290,7 +290,24 @@ bundle is an `Option<StagedCompileArtifacts>` main handoff + neutral
 script/template/style/custom blocks + scope id + optional IDE `tsx`
 (when `want_ide`) + optional template facts + neutral `diagnostics`, or
 a `CarrierCompileOutcome::RuntimeSurfaceRefused` / `CompileUnsupported`
-refusal — never a silent empty. `RuntimeCompileOutput.main` is the
+refusal — never a silent empty. For Vue, `RuntimeCompileOutput` also
+carries `custom_block_descriptors: Arc<[CustomBlockDescriptor]>` —
+source-backed descriptors (role, `lang`, `src`, ordered attrs, source
+order, SFC-absolute region, content state, provenance) minted once,
+additively alongside the legacy `custom_blocks` adapter, by
+`vue_main_compile_artifacts` (`assembly/vue_module.rs`) from Main's own
+registered `source_id`/revision and attached to the SAME
+`CompileArtifactSet` Main publishes — never a second private lineage.
+`emit_assembled_vue_main` (`framework_common/vue_bridge.rs`) reads the
+finished set's descriptors back onto the bundle as a shared `Arc`
+handle (`CompileArtifactSet::custom_blocks_shared`), not a re-cloned
+copy. A single malformed block (e.g. an empty `lang` attribute) or a
+set-level attachment refusal fails the WHOLE compile closed
+(`ArtifactSchemaError::CustomBlockInvalid` →
+`VueMainAssemblyFailure` → `CompileUnsupported::VueMainAssemblyFailed`)
+rather than silently dropping the descriptor set. Empty for Svelte (no
+custom-block producer cell) and for a Vue compile with no custom
+blocks. `RuntimeCompileOutput.main` is the
 request's ONE staged compile-artifact handoff: the complete
 `CompileArtifactSet` plus the typed identity, dialect and runtime map of
 the module artifact inside it. The module's bytes live ON the staged

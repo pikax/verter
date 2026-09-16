@@ -855,8 +855,10 @@ pub struct RuntimeCompileOutput {
     /// alongside [`Self::custom_blocks`] (the legacy adapter), constructed
     /// from the exact registered source/parse identity. Empty for Svelte
     /// (no custom-block producer cell) and for a Vue compile with no custom
-    /// blocks; not yet consumed downstream.
-    pub custom_block_descriptors: Vec<crate::assembly::CustomBlockDescriptor>,
+    /// blocks; not yet consumed downstream. A shared allocation with the
+    /// validated copy attached inside [`Self::main`]'s artifact set — never
+    /// a re-cloned second copy of block content.
+    pub custom_block_descriptors: std::sync::Arc<[crate::assembly::CustomBlockDescriptor]>,
     /// This compile's own retained custom-block facts, staged for
     /// [`crate::framework_common::vue_bridge::emit_assembled_vue_main`] to
     /// mint [`Self::custom_block_descriptors`] against Main's own real
