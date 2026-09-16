@@ -5158,7 +5158,9 @@ impl Lowerer<'_> {
                     // shared classifier documents). `yield*` delegation
                     // keeps the fail-closed marker: the delegated
                     // sequence's yield surface is not modelled.
-                    if let Expression::YieldExpression(yield_expr) = &expression.expression {
+                    if let Expression::YieldExpression(yield_expr) =
+                        unwrap_parenthesized(&expression.expression)
+                    {
                         let argument = yield_expr.argument.as_ref().map(|arg| {
                             if yield_expr.delegate {
                                 SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression)

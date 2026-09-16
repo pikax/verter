@@ -1844,30 +1844,41 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Whether the builtin-sentinel carrier identity is the registry's
-    /// `Promise` global — the same registry lookup
-    /// [`Self::runtime_nominal_global_name`] answers for an authored
-    /// unshadowed `Promise<…>` reference.
-    fn is_promise_carrier_identity(&self, identity: &crate::semantic_query::DeclIdentity) -> bool {
-        identity.canonical_id.as_ref() == "__builtin__"
-            && matches!(
-                self.runtime_nominal_global_name(identity.decl_name.as_ref()),
-                Some(crate::intrinsic_registry::RuntimeNominal::Promise)
-            )
-    }
-
-    /// Whether a joined body type embeds a `Promise<…>` carrier at its
-    /// top level (the whole join or any union member) — the shapes the
-    /// async wrap must `Awaited`-collapse before re-wrapping, exactly as
-    /// the checker's `Promise<Awaited<union>>` return rule does.
-    fn flow_join_embeds_promise_carrier(&self, node: SemanticNodeId) -> bool {
+    /// Whether `node` is a SETTLED shape that the shared `Awaited`
+    /// reducer (`reduce_awaited`'s settled-passthrough arms) provably
+    /// unwraps to itself with NO recursive work — a cheap LOCAL mirror
+    /// of those arms, never a dispatch. This is a NEGATIVE-evidence
+    /// short-circuit only (skip the `Awaited` dispatch because the shape
+    /// cannot possibly be a thenable), the inverse polarity of the
+    /// retired POSITIVE-evidence "does it look like Promise" gate: that
+    /// gate defaulted to "skip" for anything it did not recognise —
+    /// including an unresolved type parameter or alias, which CAN still
+    /// resolve to a `Promise` shape once substituted, silently publishing
+    /// the wrong `Promise<T>`. Returning `false` here always falls
+    /// through to the real dispatch, never fabricates an answer — the
+    /// caller still runs the shared `Awaited` executor and inherits its
+    /// typed-gap fallback.
+    fn flow_join_is_settled_non_thenable(&self, node: SemanticNodeId) -> bool {
+        use crate::semantic_query::PrimitiveKind;
         match self.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::InstantiationRef { base, .. }) => {
-                self.is_promise_carrier_identity(base)
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined)) => {
+                true
             }
+            Some(
+                SemanticNodeData::Primitive(_)
+                | SemanticNodeData::Literal(_)
+                | SemanticNodeData::TemplateLiteral { .. }
+                | SemanticNodeData::Signature { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Array { .. },
+            ) => true,
+            Some(SemanticNodeData::Object(surface)) => !surface
+                .positive_members()
+                .iter()
+                .any(|member| member.string_name() == Some("then")),
             Some(SemanticNodeData::Union(members)) => members
                 .iter()
-                .any(|member| self.flow_join_embeds_promise_carrier(*member)),
+                .all(|member| self.flow_join_is_settled_non_thenable(*member)),
             _ => false,
         }
     }
@@ -1901,11 +1912,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// publish channels see the WRAPPED value, so warm and replay carry
     /// it verbatim.
     ///
-    /// - `async`: `Promise<Awaited<join>>` — the `Awaited` dispatch
-    ///   fires only when the join embeds a `Promise` carrier at its top
-    ///   level (one lib instantiation per wrap otherwise: the `Promise`
-    ///   identity is registry-decided and interns directly, the same
-    ///   identity an authored unshadowed `Promise<…>` reference takes).
+    /// - `async`: `Promise<Awaited<join>>` — the `Awaited` dispatch runs
+    ///   over every join EXCEPT a shape [`Self::flow_join_is_settled_non_thenable`]
+    ///   proves can never be a thenable (a bare literal/primitive/tuple/
+    ///   array/non-`then`-bearing-object join, or a union of only such
+    ///   arms), which the shared reducer would unwrap to itself anyway
+    ///   with no recursive work — that shortcut is NEGATIVE evidence only
+    ///   (never "does it look like `Promise`"), so an unbound generic
+    ///   body, an alias, or any other shape that COULD resolve to a
+    ///   `Promise` instantiation always pays the real dispatch; a refused
+    ///   `Awaited` executor over the join publishes the typed gap.
     /// - generator kinds: `Generator<Y, join, unknown>` /
     ///   `AsyncGenerator<Y, join, unknown>` over the RESOLVED lib head
     ///   captured at the evaluation (`Y` is the yield join, `never` for
@@ -1933,13 +1949,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let wrapper = match wrap.kind {
             FunctionBodyKind::Plain => return result,
             FunctionBodyKind::Async => {
-                let awaited = if self.flow_join_embeds_promise_carrier(body) {
+                let awaited = if self.flow_join_is_settled_non_thenable(body) {
+                    body
+                } else {
                     match self.instantiate_awaited(body) {
                         Some(awaited) => awaited,
                         None => return self.materialize_wrap_typed_gap(result),
                     }
-                } else {
-                    body
                 };
                 graph.intern_node(SemanticNodeData::InstantiationRef {
                     base: crate::semantic_query::DeclIdentity {

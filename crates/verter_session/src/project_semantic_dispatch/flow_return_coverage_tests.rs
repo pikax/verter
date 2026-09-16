@@ -130,6 +130,15 @@ export function* leafGenerator() {
   return "done";
 }
 
+// A PARENTHESIZED statement-position yield: the outer node is a
+// `ParenthesizedExpression`, not a bare `YieldExpression` — the yield
+// classifier must unwrap it, or this contributor is silently dropped and
+// the generator's yield parameter collapses to `never`.
+export function* leafGeneratorParenthesizedYield() {
+  (yield 1);
+  return "done";
+}
+
 export function leafAssign() {
   let a = 1;
   return (a = 2);
@@ -195,8 +204,10 @@ export function jsxAttrCall() {
 const NEG: &str = "/ws/cov/nolib.ts";
 const NEG_SRC: &str = r#"
 // NO lib generator surface: this file deliberately declares neither
-// `Generator` nor `AsyncGenerator`, so the wrap's lib-head resolution
-// fails and the wrap must keep the typed gap.
+// `Generator` nor `AsyncGenerator`, so the GENERATOR paths' wrap
+// lib-head resolution fails and the wrap must keep the typed gap.
+// `negAsync` below is unaffected — the async wrap's `Promise` carrier is
+// a registry-decided interning with no lib-head lookup of its own.
 export function* negGen() {
   return 1;
 }
@@ -204,12 +215,11 @@ export async function negAsync() {
   return 1;
 }
 
-// A SELF-REFERENTIAL Promise-embedding return: `negAsyncSelfRef`'s
-// authored `Promise<T>` return still interns the builtin-sentinel Promise
-// carrier identity (an unshadowed `Promise<...>` reference always does),
-// so the async wrap DOES take the Awaited-collapse branch — over an
-// operand whose own type argument is the SAME self-referential alias the
-// `Awaited` dispatch is asked to reduce.
+// A SELF-REFERENTIAL (directly-circular, not valid authored TS) alias:
+// `negAsyncSelfRef`'s operand recurses back through the SAME alias every
+// `Awaited` unwrap step, so the dispatch exhausts its unwrap budget and
+// must publish the TYPED GAP rather than loop forever or fabricate a
+// resolved-looking answer.
 type NegSelfProm = Promise<NegSelfProm>;
 export declare function negAsyncSrc(): NegSelfProm;
 export async function negAsyncSelfRef() {
@@ -316,6 +326,15 @@ export async function* callAsyncGen() {
 // published type is `Promise<number>` — never `Promise<Promise<number>>`.
 export async function callAsyncPassthrough() {
   return asyncSrc();
+}
+
+// A GENERIC body join with NO embedded `Promise<…>` carrier at all — the
+// join is the bare unbound type parameter `T` itself. The wrap must still
+// run the `Awaited` dispatch over it (an instantiation-time substitution
+// of `T` could still land a `Promise`-shaped value), so the signature is
+// `Promise<Awaited<T>>`, never the un-collapsed `Promise<T>`.
+export async function asyncGenericIdentity<T>(value: T) {
+  return value;
 }
 
 export declare function ovlAmbient(a: string): "S";
@@ -1990,6 +2009,30 @@ fn generator_return_is_wrapped_in_generator() {
     );
 }
 
+/// A PARENTHESIZED statement-position `(yield 1);` must classify exactly
+/// like the bare `yield 1;` form — the outer `ParenthesizedExpression`
+/// node must not hide the yield contributor from the generator's yield
+/// join, or the parameter silently collapses to `never`.
+#[test]
+fn parenthesized_statement_position_yield_still_contributes_to_the_yield_join() {
+    let host = ts_host();
+    assert_eq!(
+        value_of(&host, LEAF, "leafGeneratorParenthesizedYield"),
+        TypeExpr::Ref {
+            name: Arc::from("Generator"),
+            type_arguments: Arc::from(
+                vec![
+                    number(),
+                    string(),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice()
+            ),
+        },
+        "a parenthesized yield must contribute number to the yield join, not collapse it to never"
+    );
+}
+
 /// CANARY (landed) — a JSX element / fragment in return position is the
 /// configured `JSX.Element`.
 ///
@@ -2365,9 +2408,9 @@ fn awaited_call_return_is_the_awaited_value_wrapped_again() {
 /// arm: `callAwait` covers an `await` operand (the value is unwrapped
 /// BEFORE the re-wrap), but a body that returns an already-`Promise`-typed
 /// value directly (no `await`) exercises `materialize_flow_return_wrap`'s
-/// OTHER branch — `flow_join_embeds_promise_carrier` sees the body ITSELF
-/// carries `Promise<…>`, so the wrap collapses it through the same
-/// `Awaited` dispatch before re-wrapping.
+/// unconditional `Awaited` dispatch over the body ITSELF — the join
+/// carries `Promise<…>` at its top level, so the dispatch collapses it
+/// before re-wrapping.
 ///
 /// Oracle: `ReturnType<typeof callAsyncPassthrough>` is `Promise<number>`
 /// for `async function callAsyncPassthrough() { return asyncSrc(); }` —
@@ -2383,6 +2426,44 @@ fn async_return_of_an_already_promise_typed_value_collapses_the_embedded_carrier
         },
         "a bare Promise-typed passthrough must collapse to Promise<number>, not Promise<Promise<number>>",
     );
+}
+
+/// A GENERIC body join with NO embedded `Promise<…>` carrier at its own
+/// declaration site: `asyncGenericIdentity`'s body is the bare unbound
+/// type parameter `T`. Gating the `Awaited` dispatch on "does the join
+/// look like a `Promise` right now" was unsound for this shape — an
+/// instantiation of `T` (e.g. `Promise<string>`) could still land a
+/// `Promise`-shaped value that an un-collapsed `Promise<T>` signature
+/// would then wrongly double-wrap (`Promise<Promise<string>>`).
+///
+/// `reduce_awaited` has no distributive arm over a bare `TypeParameter`
+/// yet (its catch-all keeps the deferred shell — see the "everything
+/// else" arm in `build.rs`), so running the dispatch unconditionally
+/// over this shape correctly degrades to the TYPED GAP rather than
+/// publishing the silently-wrong `Promise<T>` the un-gated code used to
+/// return — the D12 correctness budget forbids a wrong-complete result
+/// even where a partial one is available.
+#[test]
+fn async_wrap_awaited_dispatch_over_a_bare_generic_body_keeps_typed_gap_never_the_uncollapsed_promise_t(
+) {
+    let host = ts_host();
+    match eval(&host, CALLS, "asyncGenericIdentity") {
+        Outcome::Value {
+            degradation,
+            candidates,
+            ..
+        } => {
+            assert!(
+                degradation.is_some(),
+                "an Awaited dispatch with no distributive arm over a bare TypeParameter must degrade, never silently publish Promise<T>"
+            );
+            assert_eq!(
+                candidates, 0,
+                "a gapped async wrap is ReturnOnly — it must never warm"
+            );
+        }
+        other => panic!("asyncGenericIdentity must produce a degraded value, got {other:?}"),
+    }
 }
 
 /// D12-AC2 NEGATIVE LEG — a wrap whose lib head the environment cannot
@@ -3710,32 +3791,36 @@ fn plain_async_wrap_is_unaffected_by_a_missing_generator_lib_surface() {
     );
 }
 
-/// The Promise-embedding collapse arm over a SELF-REFERENTIAL operand:
-/// `negAsyncSrc`'s declared return is the alias `NegSelfProm = Promise<
-/// NegSelfProm>`, so the async wrap's `flow_join_embeds_promise_carrier`
-/// check sees a genuine embedded `Promise<…>` carrier and dispatches the
-/// SAME `Awaited` instantiation `callAsyncPassthrough` exercises — over an
-/// operand whose own type argument recurses back through the identical
-/// alias. The shared type-argument carrier-stop keeps the embedded
-/// self-reference shallow (never inlined, never an infinite unwrap), so
-/// the wrap still resolves CLEAN and WARM — the collapse arm is safe over
-/// a self-referential operand, not merely over a settled one.
+/// The `Awaited` dispatch over a SELF-REFERENTIAL operand:
+/// `negAsyncSrc`'s declared return is the directly-circular alias
+/// `NegSelfProm = Promise<NegSelfProm>` (not valid authored TS — real
+/// `tsc` rejects this alias with TS2456 — but a fixture-only shape this
+/// substrate must still fail closed over rather than hang or fabricate
+/// an answer). The async wrap's unconditional `Awaited` dispatch resolves
+/// the alias to `Promise<NegSelfProm>` and recurses over the SAME
+/// identical alias every step (`reduce_awaited`'s `Promise<V>` payload
+/// arm), so it never settles and exhausts `AWAITED_UNWRAP_BUDGET` — the
+/// dispatch correctly refuses (`Opaque(Miss)`) rather than looping
+/// forever or answering a resolved-looking but meaningless carrier, and
+/// the wrap publishes the TYPED GAP, never warming.
 #[test]
-fn async_wrap_awaited_collapse_stays_clean_over_a_self_referential_operand() {
+fn async_wrap_awaited_dispatch_over_a_self_referential_operand_keeps_typed_gap_never_warms() {
     let host = ts_host();
-    assert_clean_warm(
-        &host,
-        NEG,
-        "negAsyncSelfRef",
-        TypeExpr::Ref {
-            name: Arc::from("Promise"),
-            type_arguments: Arc::from(
-                vec![TypeExpr::Ref {
-                    name: Arc::from("NegSelfProm"),
-                    type_arguments: Arc::from(Vec::new().into_boxed_slice()),
-                }]
-                .into_boxed_slice(),
-            ),
-        },
-    );
+    match eval(&host, NEG, "negAsyncSelfRef") {
+        Outcome::Value {
+            degradation,
+            candidates,
+            ..
+        } => {
+            assert!(
+                degradation.is_some(),
+                "a directly-circular Awaited operand must degrade, never resolve to a fabricated answer"
+            );
+            assert_eq!(
+                candidates, 0,
+                "a gapped async wrap is ReturnOnly — it must never warm"
+            );
+        }
+        other => panic!("negAsyncSelfRef must produce a degraded value, got {other:?}"),
+    }
 }

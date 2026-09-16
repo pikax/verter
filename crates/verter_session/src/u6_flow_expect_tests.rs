@@ -3910,7 +3910,15 @@ mod expectation_controls {
                 );
                 assert!(
                     !accepts(dispatch, node, "Promise<{ label: string; }>[]"),
-                    "a wrong arity SHAPE must be rejected"
+                    "a wrong node KIND (Array-wrapped) must be rejected"
+                );
+                assert!(
+                    !accepts(
+                        dispatch,
+                        node,
+                        "Promise<{ label: string; }, { label: string; }>"
+                    ),
+                    "a wrong generic ARGUMENT COUNT must be rejected"
                 );
             },
         );

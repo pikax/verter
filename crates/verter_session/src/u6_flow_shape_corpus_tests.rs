@@ -3497,7 +3497,7 @@ mod corpus_suite {
             ),
             (
                 "X18_async_return",
-                "checker prints `Promise<{ label: string; }>`; the renderer spells the unwrapped inner object `{ label: string }` — the async-wrapper divergence the KnownOwed arm pins",
+                "checker prints `Promise<{ label: string; }>`; the renderer prints the raw construction-plan discriminant `InstantiationRef(Promise)` — the semantic comparison composes the wrap through the InstantiationRef matching arm",
             ),
             (
                 "X19_generator_yield",
