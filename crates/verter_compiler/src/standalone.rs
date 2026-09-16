@@ -2043,10 +2043,10 @@ impl VueRuntimeBackend {
             }
         })?
         .bundle;
-        // Host-selected custom-block bytes no longer splice into the
-        // retired legacy adapter: the session publishes them from its own
-        // sealed block-content selection, beside the source-backed
-        // descriptors the bridge mints from the authored facts.
+        // Host-selected custom-block bytes are published by the session
+        // from its own sealed block-content selection, beside the
+        // source-backed descriptors the bridge mints from the authored
+        // facts.
         Ok(bundle)
     }
 }

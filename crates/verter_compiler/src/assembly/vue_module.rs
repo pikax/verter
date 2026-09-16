@@ -609,8 +609,7 @@ pub(crate) fn compose_fragments(
     } = request;
     let ssr = planned_kind == ProductKind::RuntimeServer;
     // Descriptor-bound custom import/invocation count: the bundle's
-    // custom-block authority is its descriptor set, never the retired
-    // legacy adapter list.
+    // custom-block authority is its descriptor set.
     let custom_bound = compiled.custom_block_descriptors().len();
     let prelude_extra = vec![decoration.prelude(compiled, custom_bound)];
     let trailer_extra = vec![decoration.trailer(custom_bound, canonical_id, runtime, ssr)];

@@ -261,9 +261,8 @@ pub(crate) fn assemble_vue_main_module_with_axes(
     let runtime = profile.runtime_module_name.as_deref().unwrap_or("vue");
     // Custom import/invocation identifiers are bounded by the descriptor
     // set's identity/order — the same source-backed authority the compiler
-    // bounds its own assembly against. The retired legacy adapter list is
-    // not consulted; a bundle without descriptors mints no custom
-    // identifiers even when the session parse recorded blocks.
+    // bounds its own assembly against; a bundle without descriptors mints
+    // no custom identifiers even when the session parse recorded blocks.
     let custom_count = compiled.custom_block_descriptors().len();
     let assembled = assemble_vue_runtime_main(VueRuntimeMainRequest {
         canonical_id,
