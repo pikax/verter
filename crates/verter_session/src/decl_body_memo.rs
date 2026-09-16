@@ -231,6 +231,12 @@ struct DeclDependencyFacts {
     value_queries: FxHashSet<TypeDependencyPathFact>,
     value_positions: FxHashSet<TypeDependencyPathFact>,
     has_unroutable_value_position: bool,
+    /// The heritage-specific half of `has_unroutable_value_position`: a
+    /// class `extends` clause whose base is an EXPRESSION the dependency
+    /// walk could not name. Kept apart from the collapsed bool so a
+    /// nominal heritage consumer is not also gated by an unrelated
+    /// computed key.
+    has_unnamed_class_heritage: bool,
 }
 
 impl DeclDependencyFacts {
@@ -243,6 +249,9 @@ impl DeclDependencyFacts {
         self.value_queries.extend(dependencies.value_query_paths);
         self.value_positions
             .extend(dependencies.value_position_paths);
+        self.has_unnamed_class_heritage |= dependencies
+            .unsupported_value_positions
+            .contains(&verter_type_expr_oxc::UnsupportedValuePositionKind::ClassHeritageExpression);
         self.has_unroutable_value_position |= !dependencies.unsupported_value_positions.is_empty();
     }
 }
@@ -3037,6 +3046,10 @@ fn lowered_type_decl_from_group(
         wrapper_shape: scratch.wrapper_shape,
         projection_class: scratch.projection_class,
         heritage_bases,
+        // Only a CLASS can author heritage; the walk's unnamed-base fact is
+        // meaningless on any other kind and must never gate one.
+        has_unnamed_class_heritage: primary.kind == TypeDeclKind::Class
+            && dependencies.has_unnamed_class_heritage,
         key_domain_closedness,
     }
 }

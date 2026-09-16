@@ -141,6 +141,28 @@ type HeritageBase = (
     Arc<[verter_type_expr::locators::TypeArgLocator]>,
 );
 
+/// One class declaration's heritage answer plus the PROOF status of that
+/// answer ([`ProjectSemanticDispatch::class_heritage_reading`]): `decidable`
+/// is `true` only when the declaration IS a readable class whose every
+/// authored `extends` clause minted a base fact, so an empty `bases` under
+/// it is a proof that the class has no heritage at all.
+pub(super) struct ClassHeritageReading {
+    pub(super) bases: Vec<HeritageBase>,
+    pub(super) decidable: bool,
+}
+
+impl ClassHeritageReading {
+    /// No readable class heritage AND no proof of its absence — an
+    /// unpreparable declaration, a non-class declaration, or an `extends`
+    /// clause the fact producer could not name.
+    fn undecidable() -> Self {
+        Self {
+            bases: Vec::new(),
+            decidable: false,
+        }
+    }
+}
+
 /// Upper bound on the template-literal keyspace product width
 /// `∏ |choice_set_i|` enumerated by
 /// [`ProjectSemanticDispatch::reduce_template_literal_nodes`]. A finite
@@ -2463,16 +2485,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol: &str,
     ) -> Vec<HeritageBase> {
+        self.class_heritage_reading(canonical, owner, symbol).bases
+    }
+
+    /// [`Self::class_heritage_bases`] with the PROOF status of its own
+    /// answer, read through ONE prepared-decl read.
+    ///
+    /// The base list alone is ambiguous: the SAME empty list stands for a
+    /// heritage-free class, a declaration this generation cannot prepare at
+    /// all (an unresolved heritage import), a NON-class declaration (the
+    /// producer mints heritage facts only for classes, so an interface's
+    /// `extends` arms are simply absent), and a class whose `extends`
+    /// clause is an EXPRESSION the fact producer could not name
+    /// (`class X extends mixin(K) {}`). Only the first is a proof of
+    /// absence. A NOMINAL consumer — anything that concludes "not derived"
+    /// from a chain that failed to reach its target — must gate on
+    /// `decidable` before publishing that conclusion; reading the emptiness
+    /// alone turns an undecidable heritage into a fabricated negative. The
+    /// STRUCTURAL composer needs no such gate: it composes exactly the
+    /// bases it can read and never asserts a negative, which is why
+    /// [`Self::class_heritage_bases`] keeps the bare list.
+    pub(super) fn class_heritage_reading(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol: &str,
+    ) -> ClassHeritageReading {
         let Some(prepared) = self
             .ctx
             .prepared_type_decl_return_only(canonical, owner, symbol)
         else {
-            return Vec::new();
+            return ClassHeritageReading::undecidable();
         };
         if prepared.kind != verter_semantic::analysis::type_eval::TypeDeclKind::Class {
-            return Vec::new();
+            return ClassHeritageReading::undecidable();
         }
-        prepared
+        let bases = prepared
             .heritage_bases
             .iter()
             .map(|fact| {
@@ -2496,7 +2544,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ),
                 }
             })
-            .collect()
+            .collect();
+        ClassHeritageReading {
+            bases,
+            decidable: !prepared.heritage_undecidable,
+        }
     }
 
     /// Merge a class's own static surface with ONE base class's composed
