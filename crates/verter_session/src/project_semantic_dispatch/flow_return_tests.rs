@@ -7448,6 +7448,17 @@ const COLD_CHAIN_HERITAGE_READS: usize = 8;
 /// to `mid.ts`, and publishing the NEGATIVE ("the arm is not in that
 /// family") would be a fabricated proof — both excluded, so the typed
 /// `GuardNarrowing` gap is the only honest answer.
+///
+/// The gap here is OVER-DETERMINED and this case is not the
+/// discriminating control for the walk's decidability gate: a class with
+/// heritage unwraps to a composed heritage carrier the relation
+/// authority also answers undecided (see the D10 deferral under
+/// `roadmap/0.1.0-tama/decisions`), so the structural route degrades
+/// too. The discriminating control for the decidability gate is
+/// [`instanceof_undecidable_heritage_stays_gapped_and_never_warms`],
+/// whose arms ARE structurally decidable: without the gate those publish
+/// the unrelated-arm intersection clean and warm. What this case pins is
+/// that an unreadable cross-file hop reaches neither publication.
 #[test]
 fn instanceof_unreadable_cross_file_heritage_gaps_and_never_warms() {
     const BASE: &str = "/ws/instanceof-heritage-crossfile/base.ts";
