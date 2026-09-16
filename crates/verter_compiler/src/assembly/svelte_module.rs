@@ -262,9 +262,9 @@ pub fn svelte_main_compile_artifacts(
 }
 
 /// Mint byte-qualified segments for one JSON map over a single authored
-/// source unit, dropping tokens that fall outside the unit's span. Shared
-/// by every set conversion that binds a produced map to the authored
-/// carrier bytes it was compiled from.
+/// source unit, dropping tokens that fall outside the unit's span — the
+/// conversion for a produced map whose every token addresses the carrier
+/// bytes it was compiled from.
 pub(crate) fn runtime_map_segments(
     map_json: &str,
     generated: &str,
@@ -323,7 +323,7 @@ pub(crate) fn runtime_map_segments(
     kept
 }
 
-fn generated_line_starts(code: &str) -> Vec<u32> {
+pub(crate) fn generated_line_starts(code: &str) -> Vec<u32> {
     let mut starts = vec![0u32];
     for (index, byte) in code.bytes().enumerate() {
         if byte == b'\n' {
@@ -333,7 +333,12 @@ fn generated_line_starts(code: &str) -> Vec<u32> {
     starts
 }
 
-fn utf16_offset_to_bytes(code: &str, line_starts: &[u32], line: u32, column: u32) -> Option<u32> {
+pub(crate) fn utf16_offset_to_bytes(
+    code: &str,
+    line_starts: &[u32],
+    line: u32,
+    column: u32,
+) -> Option<u32> {
     let start = *line_starts.get(line as usize)? as usize;
     let end = line_starts
         .get(line as usize + 1)
@@ -357,7 +362,7 @@ fn utf16_offset_to_bytes(code: &str, line_starts: &[u32], line: u32, column: u32
     }
 }
 
-fn next_char_end(code: &str, start: u32) -> u32 {
+pub(crate) fn next_char_end(code: &str, start: u32) -> u32 {
     let start = start as usize;
     let Some(rest) = code.get(start..) else {
         return start as u32;

@@ -44,12 +44,16 @@ use crate::assembly::fragment::{
 };
 use crate::assembly::plan::ProductPlan;
 use crate::assembly::publish::{
-    publish, ArtifactContribution, ArtifactSchemaError, CompileArtifactSet, StagedCompileArtifacts,
+    publish, ArtifactContribution, ArtifactSchemaError, AssembledArtifact, CompileArtifactSet,
+    StagedCompileArtifacts,
 };
-use crate::assembly::source_space::{ArtifactMapFamily, QualifiedArtifactMap, SourceSpaceKind};
+use crate::assembly::source_space::{
+    ArtifactMapFamily, ArtifactMapSegment, QualifiedArtifactMap, SourceSpaceKind,
+};
 use crate::assembly::source_unit::source_unit_id;
 use crate::assembly::svelte_module::{
-    runtime_map_segments, svelte_main_compile_artifacts, SvelteMainCompileRequest,
+    generated_line_starts, next_char_end, svelte_main_compile_artifacts, utf16_offset_to_bytes,
+    SvelteMainCompileRequest,
 };
 use crate::assembly::vue_module::{
     compose_fragments, ComposedFragments, VueMainCompositionFailure, VueMainModuleRequest,
@@ -381,10 +385,11 @@ fn set_content_digest(bytes: &[u8]) -> [u8; 32] {
 /// admits its already-published facts to the schema, moving each artifact's
 /// bytes into the set exactly once (rows read the same allocation back).
 ///
-/// Each artifact is minted against two source units: the authored carrier
-/// bytes (the space every produced map addresses) and the artifact's own
-/// produced bytes; a demanded map qualifies inside the set with segments
-/// minted from its own JSON, binding the authored source unit.
+/// Each artifact is minted against the authored carrier bytes, its own
+/// produced bytes, and one further unit per content-bearing source space
+/// its demanded map declares; map segments resolve against each token's
+/// own declared source content, so a selected-unit space keeps its own
+/// identity instead of being rebased onto the carrier.
 pub(crate) fn stage_published_products(
     source: &str,
     request: &CompileRequest,
@@ -397,7 +402,7 @@ pub(crate) fn stage_published_products(
     use crate::assembly::source_unit::{
         ArtifactSourceUnit, ContentId, SourceId, SourceRevision, SourceUnit,
     };
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     let canonical_id = request.filename().unwrap_or("");
     let mut products_hasher = blake3::Hasher::new();
@@ -425,7 +430,6 @@ pub(crate) fn stage_published_products(
     });
     let revision = SourceRevision::from_canonical(&basis);
     let mut source_units = Vec::new();
-    let mut inputs = BTreeSet::new();
 
     let mut push_unit = |role: &str, bytes: &[u8], span: verter_span::Span| {
         let unit = SourceUnit::mint(
@@ -434,7 +438,6 @@ pub(crate) fn stage_published_products(
             role,
             ContentId::from_content_bytes(bytes),
         );
-        inputs.insert(unit.id().clone());
         source_units.push(ArtifactSourceUnit {
             source_span: span,
             unit,
@@ -463,11 +466,35 @@ pub(crate) fn stage_published_products(
     let input_basis = verter_identity::identity::InputBasisId::from_canonical(&basis);
     let authored_unit = &source_units[0];
     let authored_unit_id = authored_unit.unit.id().clone();
-    let authored_span = authored_unit.source_span;
+
+    // Map staging runs before artifact construction so every source unit a
+    // produced map declares exists when each artifact's provenance names
+    // the units its own map binds.
+    let mut mint = DeclaredSourceMint {
+        source_id: &source_id,
+        revision: &revision,
+        minted_by_digest: BTreeMap::new(),
+        source_units: &mut source_units,
+    };
+    let mut staged_maps = Vec::new();
+    for artifact in published.artifacts() {
+        let staged = artifact_map_json(artifact).map(|(family, map_json)| {
+            stage_map_over_declared_sources(
+                map_json,
+                artifact.code(),
+                source,
+                &authored_unit_id,
+                &mut mint,
+            )
+            .map(|(sources, segments)| (family, sources, segments))
+        });
+        staged_maps.push(staged.transpose()?);
+    }
+    drop(mint);
 
     let mut artifacts = Vec::new();
     let mut rows = Vec::new();
-    for (artifact, code) in published.artifacts().iter().zip(row_codes) {
+    for ((artifact, code), staged) in published.artifacts().iter().zip(row_codes).zip(staged_maps) {
         let kind = artifact.kind();
         let unit_id = source_units
             .iter()
@@ -476,6 +503,13 @@ pub(crate) fn stage_published_products(
             .unit
             .id()
             .clone();
+        // An artifact's inputs are the authored carrier, its own product
+        // unit, and the declared source spaces its own map binds — never a
+        // sibling product's unit.
+        let mut inputs = BTreeSet::from([authored_unit_id.clone(), unit_id.clone()]);
+        if let Some((_, map_sources, _)) = staged.as_ref() {
+            inputs.extend(map_sources.iter().cloned());
+        }
         let mut compiled = CompileArtifact::new(
             unit_id,
             kind,
@@ -484,35 +518,18 @@ pub(crate) fn stage_published_products(
             ArtifactProvenance {
                 input_basis: input_basis.clone(),
                 producer: producer.clone(),
-                inputs: inputs.clone(),
+                inputs,
             },
             ArtifactContent::Available(Arc::clone(&code)),
         );
-        let (family, map_json) = match kind {
-            ProductKind::RuntimeClient | ProductKind::RuntimeServer => (
-                ArtifactMapFamily::RuntimeSourceMap,
-                artifact.runtime_source_map(),
-            ),
-            ProductKind::IdeCompanion => (
-                ArtifactMapFamily::SourceProjection,
-                artifact.source_projection_map(),
-            ),
-            _ => (ArtifactMapFamily::SourceProjection, None),
-        };
-        if let Some(map_json) = map_json.filter(|json| !json.is_empty()) {
+        if let Some((family, map_sources, segments)) = staged {
             compiled.maps.push(QualifiedArtifactMap {
                 family,
                 generated: compiled.id().clone(),
                 generated_content: ContentId::from_content_bytes(code.as_bytes()),
                 input_basis: input_basis.clone(),
-                sources: BTreeSet::from([authored_unit_id.clone()]),
-                segments: runtime_map_segments(
-                    map_json,
-                    code.as_ref(),
-                    source,
-                    &authored_unit_id,
-                    authored_span,
-                ),
+                sources: map_sources,
+                segments,
             });
         }
         rows.push(SfcArtifactProjection {
@@ -544,6 +561,167 @@ pub(crate) fn stage_published_products(
         "every projection row must share the allocation of the artifact it names"
     );
     Ok(output)
+}
+
+/// The mapping product `artifact` demands, with its produced JSON — `None`
+/// when this product carries no map or its map string is empty.
+fn artifact_map_json(artifact: &AssembledArtifact) -> Option<(ArtifactMapFamily, &str)> {
+    match artifact.kind() {
+        ProductKind::RuntimeClient | ProductKind::RuntimeServer => artifact
+            .runtime_source_map()
+            .filter(|json| !json.is_empty())
+            .map(|json| (ArtifactMapFamily::RuntimeSourceMap, json)),
+        ProductKind::IdeCompanion => artifact
+            .source_projection_map()
+            .filter(|json| !json.is_empty())
+            .map(|json| (ArtifactMapFamily::SourceProjection, json)),
+        _ => None,
+    }
+}
+
+/// Shared minting state for one conversion's map-declared source units:
+/// the lineage every minted unit descends from, plus the
+/// content-keyed reuse table so two artifacts' maps over the same declared
+/// space share one unit and a conversion never mints duplicates.
+struct DeclaredSourceMint<'a> {
+    source_id: &'a crate::assembly::source_unit::SourceId,
+    revision: &'a crate::assembly::source_unit::SourceRevision,
+    minted_by_digest:
+        std::collections::BTreeMap<[u8; 32], crate::assembly::source_unit::SourceUnitId>,
+    source_units: &'a mut Vec<crate::assembly::source_unit::ArtifactSourceUnit>,
+}
+
+impl DeclaredSourceMint<'_> {
+    /// Mint (or reuse) the source unit for one map-declared source space.
+    fn unit_for(&mut self, content: &str) -> crate::assembly::source_unit::SourceUnitId {
+        use crate::assembly::source_unit::{ArtifactSourceUnit, ContentId, SourceUnit};
+
+        let digest = set_content_digest(content.as_bytes());
+        if let Some(id) = self.minted_by_digest.get(&digest) {
+            return id.clone();
+        }
+        let role = format!("map-source-{}", &hex::encode(digest)[..16]);
+        let unit = SourceUnit::mint(
+            self.source_id.clone(),
+            self.revision.clone(),
+            role,
+            ContentId::from_content_bytes(content.as_bytes()),
+        );
+        let id = unit.id().clone();
+        self.source_units.push(ArtifactSourceUnit {
+            source_span: verter_span::Span::new(0, content.len() as u32),
+            unit,
+        });
+        self.minted_by_digest.insert(digest, id.clone());
+        id
+    }
+}
+
+/// Resolve one produced map's segments against the source spaces its own
+/// JSON declares. A row whose content is the authored carrier bytes binds
+/// to the carrier's already-minted unit; every other content-bearing row
+/// gets one minted unit per conversion, shared across artifacts by content.
+/// A token addressing a row with no declared content has no representable
+/// source identity and refuses the whole conversion
+/// ([`ArtifactSchemaError::MapSourceWithoutContent`]) — it is never
+/// rebound to the carrier bytes nor silently dropped. Tokens whose
+/// coordinates do not resolve inside their own declared content, or whose
+/// generated position falls outside the produced code, stay omitted, as
+/// any out-of-range map token is.
+fn stage_map_over_declared_sources(
+    map_json: &str,
+    generated: &str,
+    carrier: &str,
+    authored_unit_id: &crate::assembly::source_unit::SourceUnitId,
+    mint: &mut DeclaredSourceMint<'_>,
+) -> Result<
+    (
+        std::collections::BTreeSet<crate::assembly::source_unit::SourceUnitId>,
+        Vec<ArtifactMapSegment>,
+    ),
+    ArtifactSchemaError,
+> {
+    use std::collections::BTreeSet;
+
+    let mut sources = BTreeSet::from([authored_unit_id.clone()]);
+    let Ok(map) = oxc_sourcemap::SourceMap::from_json_string(map_json) else {
+        return Ok((sources, Vec::new()));
+    };
+    let row_contents: Vec<&str> = (0..map.get_sources().count())
+        .map(|index| {
+            map.get_source_content(index as u32)
+                .map(str::as_ref)
+                .unwrap_or("")
+        })
+        .collect();
+    let row_starts: Vec<Vec<u32>> = row_contents
+        .iter()
+        .map(|content| generated_line_starts(content))
+        .collect();
+    let gen_starts = generated_line_starts(generated);
+    let gen_len = generated.len() as u32;
+    let mut segments = Vec::new();
+    for token in map.get_tokens() {
+        let Some(row) = token.get_source_id() else {
+            continue;
+        };
+        let Some(&content) = row_contents.get(row as usize) else {
+            return Err(ArtifactSchemaError::MapSourceWithoutContent);
+        };
+        if content.is_empty() {
+            return Err(ArtifactSchemaError::MapSourceWithoutContent);
+        }
+        let unit_id = if content == carrier {
+            authored_unit_id.clone()
+        } else {
+            mint.unit_for(content)
+        };
+        let Some(source_start) = utf16_offset_to_bytes(
+            content,
+            &row_starts[row as usize],
+            token.get_src_line(),
+            token.get_src_col(),
+        ) else {
+            continue;
+        };
+        let source_end = next_char_end(content, source_start);
+        if source_start > source_end {
+            continue;
+        }
+        let Some(start) = utf16_offset_to_bytes(
+            generated,
+            &gen_starts,
+            token.get_dst_line(),
+            token.get_dst_col(),
+        ) else {
+            continue;
+        };
+        if start >= gen_len {
+            continue;
+        }
+        let end = next_char_end(generated, start).min(gen_len);
+        if generated.get(start as usize..end as usize).is_none() {
+            continue;
+        }
+        segments.push(ArtifactMapSegment {
+            generated: start..end,
+            source_unit: unit_id.clone(),
+            source_span: verter_span::Span::new(source_start, source_end),
+        });
+        sources.insert(unit_id);
+    }
+    segments.sort_by_key(|segment| (segment.generated.start, segment.generated.end));
+    segments.dedup_by(|a, b| a.generated.start == b.generated.start);
+    let mut kept = Vec::with_capacity(segments.len());
+    for segment in segments {
+        if kept
+            .last()
+            .is_none_or(|prev: &ArtifactMapSegment| prev.generated.end <= segment.generated.start)
+        {
+            kept.push(segment);
+        }
+    }
+    Ok((sources, kept))
 }
 
 /// Every way [`StandaloneCompiler::compile`] can fail. No variant carries a
