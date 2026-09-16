@@ -1079,7 +1079,7 @@ fn validate_vue_main_maps(
     })
 }
 
-struct VueAssemblyTag<'a>(&'a str);
+pub(crate) struct VueAssemblyTag<'a>(pub(crate) &'a str);
 impl CanonicalEncode for VueAssemblyTag<'_> {
     const DOMAIN_TAG: &'static str = "verter.compiler.vue.main.assembly.v1";
     fn encode_fields(&self, e: &mut CanonicalEncoder) {

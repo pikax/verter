@@ -1485,6 +1485,47 @@ mod tests {
             "descriptors share Main's own source_id, never a synthetic constant"
         );
 
+        // AC2 provenance: a descriptor's lineage must name the real
+        // producer/attachment, never Main's own artifact/contract, so a
+        // producer bug that misattaches descriptors to Main fails a test.
+        let main_artifacts = output.main.artifacts.as_ref().expect("main assembles");
+        let sfc_artifact = main_artifacts
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.name() == "sfc")
+            .expect("the sfc artifact exists in Main's real artifact set");
+        let main_artifact = main_artifacts
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.name() == "main")
+            .expect("the main artifact exists in Main's real artifact set");
+        let provenance = output.custom_block_descriptors[0].provenance();
+        assert_eq!(
+            provenance.producer,
+            verter_identity::identity::ResultContractId::from_canonical(
+                &crate::assembly::vue_module::VueAssemblyTag("vue-runtime-custom-blocks")
+            ),
+            "descriptor provenance must be stamped with the vue-runtime-custom-blocks contract id"
+        );
+        assert_ne!(
+            provenance.producer, main_artifact.provenance.producer,
+            "descriptor provenance must never be stamped with Main's own producer contract id"
+        );
+        assert_eq!(
+            provenance.input_basis, main_artifact.provenance.input_basis,
+            "descriptor provenance must share Main's own input_basis"
+        );
+        assert_eq!(
+            provenance.inputs,
+            std::collections::BTreeSet::from([main_unit.unit.id().clone()]),
+            "descriptor provenance inputs must be exactly the sfc source unit"
+        );
+        assert_eq!(
+            output.custom_block_descriptors[0].attached_to(),
+            sfc_artifact.id(),
+            "descriptor must attach to the sfc artifact, never Main's own artifact"
+        );
+
         // The legacy adapter is untouched: same three blocks, same shape it
         // always had.
         assert_eq!(output.custom_blocks.len(), 3);
@@ -1576,6 +1617,49 @@ mod tests {
         );
     }
 
+    /// AC2 identity determinism: compiling byte-identical source under the
+    /// same canonical id twice must mint the same descriptor id (never a
+    /// nondeterministic value that would also satisfy a distinctness-only
+    /// check), and editing only the custom block's own content must remint
+    /// it — even though `VueMainInputBasis`'s revision is otherwise blind to
+    /// custom-block bytes.
+    #[test]
+    fn custom_block_descriptor_id_is_deterministic_and_remints_on_edit() {
+        let compiler = VueCarrierCompiler;
+        let alloc = oxc_allocator::Allocator::new();
+        let compile = |source: &str| {
+            let artifact = artifact_for(source);
+            compiler
+                .compile_bundle_expect_produced(
+                    source,
+                    &artifact,
+                    &RuntimeCompileOptions {
+                        filename: Some("Same.vue".to_string()),
+                        want_main: true,
+                        ..Default::default()
+                    },
+                    &alloc,
+                )
+                .expect("vue bundle with only custom blocks still produces")
+        };
+        let source = "<script setup>const n = 1</script><i18n lang=\"json\">{\"a\":1}</i18n>";
+        let first = compile(source);
+        let second = compile(source);
+        assert_eq!(
+            first.custom_block_descriptors[0].id(),
+            second.custom_block_descriptors[0].id(),
+            "compiling identical bytes under the same canonical id twice must mint the same descriptor id"
+        );
+
+        let edited = "<script setup>const n = 1</script><i18n lang=\"json\">{\"a\":2}</i18n>";
+        let third = compile(edited);
+        assert_ne!(
+            first.custom_block_descriptors[0].id(),
+            third.custom_block_descriptors[0].id(),
+            "editing only the custom block's own content must remint the descriptor id"
+        );
+    }
+
     /// AC2 span exactness: a descriptor's region is the exact byte-identical
     /// slice backing its content, not merely equal-length — a producer bug
     /// that anchors the region at a shifted equal-length window must fail
@@ -1631,9 +1715,14 @@ mod tests {
             region.start, region.end,
             "self-closing block anchors a zero-length region"
         );
-        assert!(
-            region.start > 0,
-            "the anchor must be past the tag open, not a default zero position"
+        // The `<i18n .../>` tag is the last thing in the source, so the
+        // exclusive position just past its own `>` is `source.len()`. A
+        // producer anchoring at `tag_open.start` or `tag_open.name_end`
+        // (or any other in-tag offset) would land short of this exact byte.
+        assert_eq!(
+            region.start as usize,
+            source.len(),
+            "the anchor must land exactly at the tag_open end (just past the tag's own `>`), not any other in-tag position"
         );
         assert!(matches!(
             descriptor.content(),
