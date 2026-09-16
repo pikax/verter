@@ -105,6 +105,19 @@ pub fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
                 ),
             )))
         }
+        "intrinsicApplication" => {
+            // An unrecognised op is a HARD decode failure: guessing would turn
+            // a newer producer's operation into the wrong one.
+            let op = crate::CompilerIntrinsicTypeOp::from_wire_str(v.get("op")?.as_str()?)?;
+            let arguments = v
+                .get("arguments")
+                .and_then(json_array_to_type_exprs)
+                .unwrap_or_default();
+            Some(TypeExpr::IntrinsicApplication {
+                op,
+                arguments: Arc::from(arguments),
+            })
+        }
         "ref" => {
             let name = v.get("name")?.as_str()?.to_string();
             let args = v
@@ -631,6 +644,14 @@ impl TypeExpr {
                 "kind": "ref",
                 "name": name,
                 "typeArguments": type_arguments.iter().map(|a| a.to_json_value()).collect::<Vec<_>>()
+            }),
+            // The wire form carries the OP IDENTITY as a closed token, never a
+            // free-form name, so no decoder can mistake it for a declaration
+            // reference — and an unknown op fails the decode outright.
+            Self::IntrinsicApplication { op, arguments } => json!({
+                "kind": "intrinsicApplication",
+                "op": op.wire_str(),
+                "arguments": arguments.iter().map(|a| a.to_json_value()).collect::<Vec<_>>()
             }),
             Self::ImportType {
                 specifier,

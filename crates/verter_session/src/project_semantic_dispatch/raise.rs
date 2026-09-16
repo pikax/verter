@@ -787,7 +787,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         stack: &mut Vec<ReduceFrame>,
     ) {
         match data {
-            SemanticNodeData::Primitive(_)
+            // Reduced by the owning family, never pre-resolved as a demand
+            // child here.
+            SemanticNodeData::IntrinsicApplication { .. }
+            | SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
@@ -1108,7 +1111,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
 
             // --- terminal shapes ---
-            SemanticNodeData::Primitive(_)
+            // Returned unchanged: reducing an intrinsic application is the
+            // owning family's job, not the demand reducer's.
+            SemanticNodeData::IntrinsicApplication { .. }
+            | SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::TypeParam { .. }
             | SemanticNodeData::Opaque(_)
@@ -3778,6 +3784,11 @@ impl<'a> OpenWalk<'a> {
             // the bound mapper binder `K` (added to `bound_params` by the
             // value-body policy) is a closed local and does NOT open.
             SemanticNodeData::TypeParam { .. } => !self.bound_params.contains(&node),
+            // An unreduced operation is not PROVABLY closed: its value depends
+            // on an operand this walk has not settled.
+            SemanticNodeData::IntrinsicApplication { .. } => {
+                self.role.question().undecidable_is_open()
+            }
 
             // A `DeclPlaceholder` is a RESOLVED-but-deferred declaration
             // reference (canonical + name) — semantically identical to a

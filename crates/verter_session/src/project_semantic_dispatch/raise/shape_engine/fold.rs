@@ -328,6 +328,21 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
         SemanticNodeData::DeclRef { identity } => {
             alg.reference(Arc::clone(&identity.decl_name), Vec::new())
         }
+        // Raised as a FIRST-CLASS operation over its raised operands. NOT
+        // `alg.reference(...)`: an intrinsic names no declaration, and
+        // raising it as one would conflate it with a userland type spelled
+        // the same way.
+        SemanticNodeData::IntrinsicApplication { op, args } => {
+            let raised_args: Vec<A::Out> = args
+                .iter()
+                .map(|id| {
+                    fold_node(alg, dispatch, *id, active).unwrap_or_else(|| {
+                        alg.opaque_sentinel(&QueryError::UnrepresentableSurfaceMember)
+                    })
+                })
+                .collect();
+            alg.intrinsic(*op, raised_args)
+        }
         SemanticNodeData::InstantiationRef { base, args } => {
             let raised_args: Vec<A::Out> = args
                 .iter()

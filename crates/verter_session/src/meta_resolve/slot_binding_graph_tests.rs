@@ -170,6 +170,13 @@ fn count_type_expr_nodes(ty: &TypeExpr) -> usize {
                 }
             }
             TypeExpr::Array { element, .. } => walk(element, n),
+            // The application is one node; its operands are recursive
+            // children like any other.
+            TypeExpr::IntrinsicApplication { arguments, .. } => {
+                for argument in arguments.iter() {
+                    walk(argument, n);
+                }
+            }
             TypeExpr::Tuple { elements, .. } => {
                 for el in elements.iter() {
                     walk(&el.ty, n);

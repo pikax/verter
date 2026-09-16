@@ -113,6 +113,9 @@ pub const SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS: &[u32] = &[
     // Schema 6 remains accepted for requests that do not require the canonical
     // object-spread-program node introduced by schema 7.
     6,
+    // Schema 7 remains accepted for requests that do not require the
+    // compiler-intrinsic application node introduced by schema 8.
+    7,
     TYPEINFO_GRAPH_SCHEMA_VERSION,
 ];
 

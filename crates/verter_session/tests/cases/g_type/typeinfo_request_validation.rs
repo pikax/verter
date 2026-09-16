@@ -609,10 +609,10 @@ fn every_legacy_operation_accepts_schema_two_and_three_op_by_op() {
 }
 
 #[test]
-fn schema_versions_one_and_eight_are_rejected_with_typed_errors() {
-    // 1 is below the floor; 8 is the first version ABOVE the current supported
-    // set ([2, 3, 4, 5, 6, 7]). Both are outside the closed set and rejected.
-    for version in [1u32, 8u32] {
+fn schema_versions_one_and_nine_are_rejected_with_typed_errors() {
+    // 1 is below the floor; 9 is the first version ABOVE the current supported
+    // set ([2, 3, 4, 5, 6, 7, 8]). Both are outside the closed set and rejected.
+    for version in [1u32, 9u32] {
         let err = validate_type_info_graph_request(&legacy_envelope(
             wire::Operation::ResolveSymbol,
             version,
@@ -710,7 +710,7 @@ fn framework_surface_envelope_payload_version_mismatch_is_malformed_payload() {
 }
 
 #[test]
-fn supported_schema_version_set_is_exactly_two_through_seven() {
+fn supported_schema_version_set_is_exactly_two_through_eight() {
     assert_eq!(
         SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
         &[
@@ -719,6 +719,7 @@ fn supported_schema_version_set_is_exactly_two_through_seven() {
             4,
             5,
             6,
+            7,
             TYPEINFO_GRAPH_SCHEMA_VERSION
         ],
         "the supported set holds every version some operation still accepts: \
@@ -728,7 +729,7 @@ fn supported_schema_version_set_is_exactly_two_through_seven() {
          and schema 7 (current — the canonical object-spread-program node)",
     );
     assert_eq!(MIN_TYPEINFO_GRAPH_SCHEMA_VERSION, 2);
-    assert_eq!(TYPEINFO_GRAPH_SCHEMA_VERSION, 7);
+    assert_eq!(TYPEINFO_GRAPH_SCHEMA_VERSION, 8);
     assert_eq!(FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION, 3);
 }
 
@@ -736,12 +737,12 @@ fn supported_schema_version_set_is_exactly_two_through_seven() {
 /// error payload's `server_supported_versions`, populated from
 /// `SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS` via
 /// `wire_error_unknown_schema_version` — the single advertisement
-/// source. It reports `[2, 3, 4, 5, 6, 7]`.
+/// source. It reports `[2, 3, 4, 5, 6, 7, 8]`.
 #[test]
-fn unknown_schema_version_error_advertises_two_through_seven() {
-    // Version 8 is the first version OUTSIDE the supported set — it triggers
-    // the UnknownSchemaVersion rejection (7 is now supported).
-    let err = validate_type_info_graph_request(&legacy_envelope(wire::Operation::ResolveSymbol, 8))
+fn unknown_schema_version_error_advertises_two_through_eight() {
+    // Version 9 is the first version OUTSIDE the supported set — it triggers
+    // the UnknownSchemaVersion rejection (8 is now supported).
+    let err = validate_type_info_graph_request(&legacy_envelope(wire::Operation::ResolveSymbol, 9))
         .unwrap_err();
     let payload = match err.kind.as_ref().expect("error kind") {
         type_info_request_error::Kind::UnknownSchemaVersion(p) => p,
@@ -749,8 +750,8 @@ fn unknown_schema_version_error_advertises_two_through_seven() {
     };
     assert_eq!(
         payload.server_supported_versions,
-        vec![2, 3, 4, 5, 6, 7],
-        "the advertisement surface must report exactly [2, 3, 4, 5, 6, 7]",
+        vec![2, 3, 4, 5, 6, 7, 8],
+        "the advertisement surface must report exactly [2, 3, 4, 5, 6, 7, 8]",
     );
     assert_eq!(
         payload.server_supported_versions,
@@ -760,13 +761,13 @@ fn unknown_schema_version_error_advertises_two_through_seven() {
 
     // The constructor itself is the single advertisement source.
     let wire_payload = wire::wire_error_unknown_schema_version(
-        8,
+        9,
         TYPEINFO_GRAPH_SCHEMA_VERSION,
         SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
     );
     assert_eq!(
         wire_payload.server_supported_versions,
-        vec![2, 3, 4, 5, 6, 7]
+        vec![2, 3, 4, 5, 6, 7, 8]
     );
 }
 
@@ -838,8 +839,8 @@ fn op_minimum_gate_walks_every_operation_discriminant() {
 
         // Outside the global set: UnknownSchemaVersion regardless of
         // the operation (global membership runs first). 1 is below the
-        // floor; 8 is the first version above the current set ([2, 3, 4, 5, 6, 7]).
-        for version in [1u32, 8u32] {
+        // floor; 9 is the first version above the current set ([2, 3, 4, 5, 6, 7, 8]).
+        for version in [1u32, 9u32] {
             let err = validate_schema_version_for_operation(operation, version).unwrap_err();
             assert_eq!(
                 err_variant_label(&err),

@@ -584,6 +584,15 @@ fn write_type_expr(buf: &mut String, expr: &TypeExpr) {
                 buf.push('>');
             }
         }
+        TypeExpr::IntrinsicApplication { op, arguments } => {
+            buf.push_str(op.display_name());
+            if !arguments.is_empty() {
+                buf.push('<');
+                let parts: Vec<String> = arguments.iter().map(render_type_signature).collect();
+                buf.push_str(&parts.join(", "));
+                buf.push('>');
+            }
+        }
         TypeExpr::TypeParameter(param) => buf.push_str(&param.name),
         TypeExpr::KeyOf(inner) => {
             buf.push_str("keyof ");

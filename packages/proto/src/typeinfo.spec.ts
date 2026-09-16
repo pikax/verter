@@ -12,6 +12,7 @@ import {
   FrameworkSurfacePayloadSchema,
   FrameworkSurfaceRequestSchema,
   GraphDiagnosticSeverity,
+  GraphCompilerIntrinsicTypeOp,
   GraphPrimitiveKind,
   GraphProjectionMode,
   GraphReductionDemand,
@@ -468,9 +469,21 @@ describe("typeinfo proto TS bindings", () => {
           },
         },
       },
+      // Schema 8, tag 34. The op is a closed enum and the operands are node
+      // ids — no symbol id, no string id, so an intrinsic can never decode as
+      // a reference or an alias instantiation.
+      {
+        kind: {
+          case: "intrinsicApplication",
+          value: {
+            op: GraphCompilerIntrinsicTypeOp.AWAITED,
+            argumentNodeIds: [17],
+          },
+        },
+      },
     ];
 
-    expect(cases.length).toBe(32);
+    expect(cases.length).toBe(33);
 
     const seen = new Set<string>();
     for (const init of cases) {
@@ -483,7 +496,7 @@ describe("typeinfo proto TS bindings", () => {
       expect(decoded).toEqual(node);
       seen.add(decoded.kind.case as string);
     }
-    expect(seen.size).toBe(32);
+    expect(seen.size).toBe(33);
   });
 
   it("TypeInfoGraphRequest roundtrips every payload arm", () => {
@@ -797,7 +810,7 @@ describe("typeinfo proto TS bindings", () => {
     expect(decodedUnsupported.status?.diagnostics.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("wire schema version is 7 with canonical object-spread programs", () => {
+  it("wire schema version is 8 with applied compiler intrinsics", () => {
     // Schema 4→5: the `GraphTypeNode.relation_proof = 28` oneof arm is
     // retired (tag + name reserved at message scope) and the relation-proof
     // witness relocated OFF the type-values surface to the payload-side
@@ -805,8 +818,10 @@ describe("typeinfo proto TS bindings", () => {
     // facade constant tracks the Rust `TYPEINFO_GRAPH_SCHEMA_VERSION` in
     // lock-step.
     // Schema 6 added typed member keys; schema 7 reserves tag 33 for the
-    // canonical source-ordered object-spread program.
-    expect(TYPEINFO_GRAPH_SCHEMA_VERSION).toBe(7);
+    // canonical source-ordered object-spread program; schema 8 adds tag 34,
+    // the applied compiler intrinsic (`Awaited<T>`), carrying a closed op
+    // enum and operand node ids rather than a declaration symbol.
+    expect(TYPEINFO_GRAPH_SCHEMA_VERSION).toBe(8);
   });
 
   it("SemanticTypeGraph roundtrips the payload-side relation_proofs table (field 13)", () => {

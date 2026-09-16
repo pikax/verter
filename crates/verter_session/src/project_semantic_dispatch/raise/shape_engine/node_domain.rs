@@ -196,6 +196,17 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
             summary::reference_leaf(),
         )
     }
+    fn intrinsic(
+        &mut self,
+        op: verter_type_expr::CompilerIntrinsicTypeOp,
+        arguments: Vec<RaisedShapeResult>,
+    ) -> RaisedShapeResult {
+        let arguments = arguments.into_iter().map(|a| a.key).collect();
+        self.result(
+            RaisedTerm::IntrinsicApplication { op, arguments },
+            summary::intrinsic_operator(),
+        )
+    }
     fn synthetic_slot_binding(
         &mut self,
         carrier: Arc<verter_type_expr::SyntheticCarrierKey>,
@@ -635,6 +646,13 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
     ) -> RaisedShapeSummary {
         summary::reference_leaf()
     }
+    fn intrinsic(
+        &mut self,
+        _op: verter_type_expr::CompilerIntrinsicTypeOp,
+        _arguments: Vec<RaisedShapeSummary>,
+    ) -> RaisedShapeSummary {
+        summary::intrinsic_operator()
+    }
     fn synthetic_slot_binding(
         &mut self,
         _carrier: Arc<verter_type_expr::SyntheticCarrierKey>,
@@ -978,6 +996,13 @@ impl RaisedShapeAlgebra for DeclarationFactsAlg {
     ) -> DeclarationOut {
         DeclarationOut::combine(DeclarationTag::Other, type_arguments)
     }
+    fn intrinsic(
+        &mut self,
+        _op: verter_type_expr::CompilerIntrinsicTypeOp,
+        arguments: Vec<DeclarationOut>,
+    ) -> DeclarationOut {
+        DeclarationOut::combine(DeclarationTag::Other, arguments)
+    }
     fn synthetic_slot_binding(
         &mut self,
         _carrier: Arc<verter_type_expr::SyntheticCarrierKey>,
@@ -1261,6 +1286,13 @@ pub(super) fn type_expr_to_key(interner: &mut ShapeInterner, expr: &TypeExpr) ->
         } => RaisedTerm::Ref {
             name: Arc::clone(name),
             type_arguments: type_arguments
+                .iter()
+                .map(|a| type_expr_to_key(interner, a))
+                .collect(),
+        },
+        TypeExpr::IntrinsicApplication { op, arguments } => RaisedTerm::IntrinsicApplication {
+            op: *op,
+            arguments: arguments
                 .iter()
                 .map(|a| type_expr_to_key(interner, a))
                 .collect(),
@@ -1562,7 +1594,8 @@ pub(super) fn project_root_summary(
 
         // The `Ref` carriers + the `DeclPlaceholder` carrier raise to
         // `TypeExpr::Ref` (a published-operator surface root).
-        SemanticNodeData::DeclRef { .. }
+        SemanticNodeData::IntrinsicApplication { .. }
+        | SemanticNodeData::DeclRef { .. }
         | SemanticNodeData::InstantiationRef { .. }
         | SemanticNodeData::BareRef(_)
         | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. }) => {

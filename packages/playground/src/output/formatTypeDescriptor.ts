@@ -1,4 +1,5 @@
 import type { TypeDescriptor } from "@verter/component-meta/browser";
+import { intrinsicDisplayName } from "@verter/component-meta/browser";
 
 export function formatTypeDescriptor(td: TypeDescriptor): string {
   switch (td.kind) {
@@ -36,6 +37,12 @@ export function formatTypeDescriptor(td: TypeDescriptor): string {
         return `${td.name}<${td.typeArguments.map(formatTypeDescriptor).join(", ")}>`;
       }
       return td.name;
+    }
+    case "intrinsicApplication": {
+      if (td.arguments.length) {
+        return `${intrinsicDisplayName(td.op)}<${td.arguments.map(formatTypeDescriptor).join(", ")}>`;
+      }
+      return intrinsicDisplayName(td.op);
     }
     case "unknown":
       return td.rawType;

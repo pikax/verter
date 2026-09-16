@@ -394,6 +394,15 @@ fn lower_node(
         // A solver-minted recursive back-edge is never produced by fresh OXC
         // lowering and cannot be reconstructed without the resolution context
         // that minted it.
+        // This producer lowers WITHOUT resolution, and a compiler
+        // intrinsic's identity is established only BY resolution. A typed
+        // refusal is the honest answer — interning one here would assert an
+        // identity this producer cannot have established.
+        TypeExpr::IntrinsicApplication { .. } => {
+            Err(StructuralLowerError::UnsupportedWithoutResolution {
+                shape: "IntrinsicApplication",
+            })
+        }
         TypeExpr::RecursiveRef { .. } => Err(StructuralLowerError::UnsupportedWithoutResolution {
             shape: "RecursiveRef",
         }),

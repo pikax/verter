@@ -770,6 +770,11 @@ fn push_child_ids(data: &SemanticNodeData, out: &mut Vec<SemanticNodeId>) -> boo
         // The nominal terminal's payload is a scalar declaring identity —
         // no child node ids.
         | D::TypeOfNominal(_) => true,
+        // An intrinsic application's operands are ordinary child ids.
+        D::IntrinsicApplication { args, .. } => {
+            out.extend(args.iter().copied());
+            true
+        }
         D::Alias(inner) | D::KeyOf { base: inner } => {
             out.push(*inner);
             true
@@ -1442,6 +1447,8 @@ fn payload_is_childless(data: &SemanticNodeData) -> bool {
     match data {
         D::Primitive(_) | D::Literal(_) | D::Opaque(_) | D::RawFallback { .. } => true,
         D::Infer { .. } | D::InferRef { .. } | D::DeclRef { .. } => true,
+        // Carries its operand ids — payload equality is NOT identity.
+        D::IntrinsicApplication { .. } => false,
         // The nominal terminal's declaring identity is a scalar facts record.
         D::TypeOfNominal(_) => true,
         // A TypeParam without constraint/default has no children.
@@ -1693,6 +1700,12 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
     }
     match data {
         D::Alias(_) | D::KeyOf { .. } => {}
+        // The op identity participates; the operand ids are hashed by the
+        // shared child walk, exactly as for an instantiation.
+        D::IntrinsicApplication { op, .. } => {
+            use std::hash::Hash;
+            op.hash(hasher);
+        }
         D::Object(view) => {
             view.entries.len().hash(hasher);
             for entry in view.entries.iter() {

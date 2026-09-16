@@ -922,6 +922,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 continue;
             };
             match data.as_ref() {
+                SemanticNodeData::IntrinsicApplication { args, .. } => {
+                    stack.extend(args.iter().copied());
+                }
                 SemanticNodeData::TypeParam {
                     decl,
                     param_index,

@@ -82,6 +82,13 @@ export function descriptorToNative(d: TypeDescriptor): NativeTypeExpr {
         name: d.name,
         typeArguments: (d.typeArguments ?? []).map(descriptorToNative),
       };
+    // Round-trips the closed op identity — NOT a `ref` named after it.
+    case "intrinsicApplication":
+      return {
+        kind: "intrinsicApplication",
+        op: d.op,
+        arguments: d.arguments.map(descriptorToNative),
+      };
     case "recursiveRef":
       return {
         kind: "recursiveRef",

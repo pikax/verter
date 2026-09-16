@@ -69,6 +69,11 @@ pub(crate) enum NormalizeReject {
     /// unresolved dynamic-import carrier with no hover-comparable canonical
     /// form (the resolver, not the normalizer, resolves it cross-file).
     ImportTypeCarrier,
+    /// A `TypeExpr::IntrinsicApplication` — an applied compiler-native
+    /// operation. The normalizer holds no resolver and performs no
+    /// reduction, so a deferred intrinsic has no hover-comparable
+    /// canonical form; it is rejected rather than compared unreduced.
+    CompilerIntrinsicApplication,
 }
 
 /// Normalize `expr` to its canonical form, then emit the pinned canonical JSON
@@ -213,6 +218,7 @@ fn normalize_node(
         TypeExpr::SyntheticSlotBinding(_) => Err(NormalizeReject::SyntheticSlotBinding),
         // A dynamic-import carrier has no hover-comparable canonical form.
         TypeExpr::ImportType { .. } => Err(NormalizeReject::ImportTypeCarrier),
+        TypeExpr::IntrinsicApplication { .. } => Err(NormalizeReject::CompilerIntrinsicApplication),
 
         // Step 6: TemplateLiteral cosmetic axis is default-rejected in the
         // initial scope (un-enumerated canonicalization).

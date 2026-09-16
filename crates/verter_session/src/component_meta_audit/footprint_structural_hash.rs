@@ -123,6 +123,7 @@ enum VariantTag {
     ImportType = 24,
     RawFallback = 25,
     SyntheticBinding = 27,
+    IntrinsicApplication = 26,
     InferRef = 28,
     Signature = 29,
     ObjectSpreadProgram = 30,
@@ -373,6 +374,20 @@ impl StructuralEncoder<'_> {
     /// whose ids are descended). `depth` is the current descent depth.
     fn encode_node_data(&mut self, data: &SemanticNodeData, depth: u32) {
         match data {
+            // A compiler-native operation: the op identity discriminates, the
+            // operands are encoded as ordinary children.
+            SemanticNodeData::IntrinsicApplication { op, args } => {
+                self.buf.push(VariantTag::IntrinsicApplication as u8);
+                // The FROZEN tag, never a rendered name: a structural hash
+                // must not depend on display text, and declaration order
+                // must not be able to move a content-addressed key.
+                self.buf.push(op.stable_hash_tag());
+                self.buf
+                    .extend_from_slice(&(args.len() as u64).to_le_bytes());
+                for arg in args.iter() {
+                    self.encode_child(*arg, depth);
+                }
+            }
             // ── Single-child variants. ──
             SemanticNodeData::Alias(child) => {
                 self.buf.push(VariantTag::Alias as u8);

@@ -132,6 +132,16 @@ function benchmarkTypeDescriptorToString(type: any): string {
       // user-visible `bindingName`. The bench refiner MUST NOT attempt to
       // resolve the carrier through any registry.
       return String(type.bindingName ?? "unknown");
+    case "intrinsicApplication": {
+      // Rendered locally: this package deliberately does not depend on
+      // `@verter/type-ir`, and the bench MUST NOT resolve the op as a name.
+      const op = String(type.op ?? "");
+      const spelled = op === "awaited" ? "Awaited" : op;
+      const args: any[] = Array.isArray(type.arguments) ? type.arguments : [];
+      return args.length > 0
+        ? `${spelled}<${args.map(benchmarkTypeDescriptorToString).join(", ")}>`
+        : spelled;
+    }
     default:
       return String(type.name ?? type.kind ?? "unknown");
   }

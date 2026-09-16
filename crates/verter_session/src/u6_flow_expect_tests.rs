@@ -566,6 +566,13 @@ pub(crate) fn render_node(
         }
         SemanticNodeData::DeferredCallable(_) => "DeferredCallable(…)".to_owned(),
         SemanticNodeData::DeclRef { identity } => format!("DeclRef({})", identity.decl_name),
+        SemanticNodeData::IntrinsicApplication { op, args } => {
+            let rendered: Vec<String> = args
+                .iter()
+                .map(|arg| render_node(dispatch, *arg, depth + 1))
+                .collect();
+            format!("{}<{}>", op.display_name(), rendered.join(", "))
+        }
         SemanticNodeData::InstantiationRef { base, .. } => {
             format!("InstantiationRef({})", base.decl_name)
         }

@@ -67,6 +67,7 @@ import {
   ref,
   tuple,
   typeParameter,
+  intrinsicDisplayName,
   union,
   unknown,
   type FunctionParameter,
@@ -694,6 +695,8 @@ function brief(descriptor: TypeDescriptor): string {
       return JSON.stringify(descriptor.value);
     case "ref":
       return descriptor.name;
+    case "intrinsicApplication":
+      return intrinsicDisplayName(descriptor.op);
     default:
       return descriptor.kind;
   }

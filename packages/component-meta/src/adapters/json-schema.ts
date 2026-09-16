@@ -3,6 +3,7 @@
  */
 
 import type { TypeDescriptor } from "@verter/type-ir";
+import { intrinsicDisplayName } from "@verter/type-ir";
 import type { ComponentMeta } from "../types.js";
 
 export interface JSONSchema {
@@ -108,6 +109,10 @@ export function typeToJsonSchema(type: TypeDescriptor): JSONSchema {
     case "recursiveRef":
       // Named type reference — cannot resolve without context
       return { description: type.name };
+
+    // A deferred compiler operation: describe it, never resolve it.
+    case "intrinsicApplication":
+      return { description: intrinsicDisplayName(type.op) };
 
     case "indexedAccess":
       // Indexed-access types (`T['K']`) cannot be resolved without

@@ -62,6 +62,7 @@ message TypeNode {
     RestNode rest = 20;
     RecursiveRefNode recursive_ref = 21;
     SyntheticSlotBindingNode synthetic_slot_binding = 22;
+    IntrinsicApplicationNode intrinsic_application = 23;
   }
 }
 
@@ -173,6 +174,24 @@ message FunctionParameter {
 message RefNode {
   uint32 name_id = 1;
   repeated uint32 type_argument_node_ids = 2;
+}
+
+// An applied compiler-native type operation. NOT a `RefNode`: the op is a
+// closed enum rather than a `name_id`, so it never enters the string table
+// and can never be resolved as a declaration name.
+//
+// `op` numbering is shared with the typeinfo graph's
+// `GraphCompilerIntrinsicTypeOp`, so one op code flows through both wire
+// surfaces and the snapshot unchanged.
+message IntrinsicApplicationNode {
+  IntrinsicTypeOp op = 1;
+  repeated uint32 argument_node_ids = 2;
+}
+
+// UNSPECIFIED owns zero: an unknown op must never decode as a real one.
+enum IntrinsicTypeOp {
+  INTRINSIC_TYPE_OP_UNSPECIFIED = 0;
+  INTRINSIC_TYPE_OP_AWAITED = 1;
 }
 
 message TypeParameterNode {

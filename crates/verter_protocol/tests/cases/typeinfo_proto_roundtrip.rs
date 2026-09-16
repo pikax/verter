@@ -20,8 +20,8 @@ fn graph_type_node_roundtrip_covers_every_oneof_variant() {
     let variants = build_every_type_node_variant();
     assert_eq!(
         variants.len(),
-        32,
-        "GraphTypeNode covers exactly 32 oneof variants — the audited closed taxonomy \
+        33,
+        "GraphTypeNode covers exactly 33 oneof variants — the audited closed taxonomy \
          (the tag-28 relation_proof arm is retired + reserved; proofs ride the payload-side \
          relation_proofs table)",
     );
@@ -111,7 +111,7 @@ fn semantic_type_graph_roundtrip_preserves_envelope_shape() {
         g::SemanticTypeGraph::decode(bytes.as_slice()).expect("SemanticTypeGraph must roundtrip");
     assert_eq!(decoded, graph);
     assert_eq!(decoded.schema_version, g::TYPEINFO_GRAPH_SCHEMA_VERSION);
-    assert_eq!(decoded.nodes.len(), 32);
+    assert_eq!(decoded.nodes.len(), 33);
     assert_eq!(
         decoded.relation_proofs.len(),
         4,
@@ -141,7 +141,7 @@ fn semantic_type_graph_v4_payload_decodes_under_v5_with_empty_relation_proofs() 
         decoded.relation_proofs.is_empty(),
         "a v4 payload carries no relation_proofs — the v5 table decodes as empty"
     );
-    assert_eq!(decoded.nodes.len(), 32);
+    assert_eq!(decoded.nodes.len(), 33);
 }
 
 /// One `GraphRelationProofEntry` of each of the four proof shapes — the
@@ -535,11 +535,12 @@ fn supported_empty_and_unsupported_empty_decode_to_distinct_states() {
 fn closed_taxonomies_have_the_documented_cardinalities() {
     // Any drop / unintended add lights up immediately because the
     // variant constructors below must match these numbers. The
-    // GraphTypeNode taxonomy is 32: the tag-28 `relation_proof` arm is
+    // GraphTypeNode taxonomy is 33: the tag-28 `relation_proof` arm is
     // retired + reserved (schema 5) — proofs ride the payload-side
     // `relation_proofs` table, never the type-values surface; tag 33 is the
-    // canonical ordered object-spread program (schema 7).
-    assert_eq!(build_every_type_node_variant().len(), 32);
+    // canonical ordered object-spread program (schema 7); tag 34 is the
+    // applied compiler intrinsic (schema 8).
+    assert_eq!(build_every_type_node_variant().len(), 33);
     assert_eq!(build_every_structured_type_expression_variant().len(), 22);
 
     // Primitive kinds: 12 (ANY..OBJECT).
@@ -908,6 +909,10 @@ fn build_every_type_node_variant() -> Vec<g::TypeNode> {
                     ),
                 },
             ],
+        }),
+        K::IntrinsicApplication(g::IntrinsicApplicationNode {
+            op: g::CompilerIntrinsicTypeOp::Awaited as i32,
+            argument_node_ids: vec![14],
         }),
     ];
 

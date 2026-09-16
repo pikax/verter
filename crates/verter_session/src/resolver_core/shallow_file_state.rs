@@ -2779,6 +2779,7 @@ fn push_type_expr_children<'a>(expr: &'a TypeExpr, pending: &mut Vec<&'a TypeExp
         TypeExpr::Ref { type_arguments, .. } | TypeExpr::ImportType { type_arguments, .. } => {
             pending.extend(type_arguments.iter())
         }
+        TypeExpr::IntrinsicApplication { arguments, .. } => pending.extend(arguments.iter()),
         TypeExpr::TypeParameter(parameter) => push_type_param(parameter, pending),
         TypeExpr::RecursiveRef {
             type_arguments,

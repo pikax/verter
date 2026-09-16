@@ -51,6 +51,16 @@ pub(super) fn reference_leaf() -> RaisedShapeSummary {
     s
 }
 
+/// An applied compiler intrinsic (`Awaited<T>`): materialized + expanded
+/// like a reference leaf, but its own root kind — it raises to
+/// `TypeExpr::IntrinsicApplication`, not to a `Ref`, so it must not be
+/// mistaken for a reference root by the published-operator mirrors.
+pub(super) fn intrinsic_operator() -> RaisedShapeSummary {
+    let mut s = summary(true, true, FactShapeTag::Other);
+    s.root_kind = RaisedRootKind::IntrinsicApplication;
+    s
+}
+
 /// A GENUINE [`UnknownValue`](verter_type_expr::UnknownValue) (unrepresentable
 /// authored/raw syntax — the `RawFallback` carrier): ALWAYS a materialized,
 /// expanded leaf with no special tag and no root-sentinel flags. There is NO

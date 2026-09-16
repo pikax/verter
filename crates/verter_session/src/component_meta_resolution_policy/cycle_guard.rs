@@ -306,6 +306,17 @@ fn hash_node_rec<H: std::hash::Hasher>(
             hasher.write_u8(2);
             identity.hash(hasher);
         }
+        // Discriminator 21: measured free against this switch (0-20, 22-27,
+        // 29, 30 are taken). It must not collide — two node shapes sharing a
+        // byte would conflate in the cycle guard with nothing to catch it.
+        SemanticNodeData::IntrinsicApplication { op, args } => {
+            hasher.write_u8(21);
+            op.hash(hasher);
+            hasher.write_u64(args.len() as u64);
+            for arg in args.iter() {
+                hash_node_rec(ctx, *arg, hasher, seen, depth + 1);
+            }
+        }
         SemanticNodeData::InstantiationRef { base, args } => {
             hasher.write_u8(3);
             base.hash(hasher);

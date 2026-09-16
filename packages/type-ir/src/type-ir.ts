@@ -138,6 +138,27 @@ export interface RefType {
   typeArguments?: TypeDescriptor[];
 }
 
+// ── IntrinsicApplication (compiler-native type operation) ───────
+
+/**
+ * An applied compiler intrinsic — `Awaited<T>` once the checker has resolved
+ * its identity as compiler-native rather than as a declaration reference.
+ *
+ * Deliberately NOT a {@link RefType}. The two render identically, but a `ref`
+ * NAMES something a consumer may resolve through a registry, while an
+ * intrinsic names no declaration at all. Collapsing them would let a userland
+ * type spelled `Awaited` capture a compiler operation.
+ *
+ * `op` is the stable WIRE token (`"awaited"`), mirroring the Rust
+ * `CompilerIntrinsicTypeOp::wire_str`. Render it via
+ * {@link intrinsicDisplayName} — never surface the raw token to a user.
+ */
+export interface IntrinsicApplicationType {
+  kind: "intrinsicApplication";
+  op: string;
+  arguments: TypeDescriptor[];
+}
+
 // ── RecursiveRef (recursive type back-reference) ────────────────
 
 export interface RecursiveRefConditionalFrame {
@@ -215,6 +236,7 @@ export type TypeDescriptor =
   | TypeParameterType
   | EnumType
   | RefType
+  | IntrinsicApplicationType
   | RecursiveRefType
   | SyntheticSlotBindingType
   | IndexedAccessType
@@ -299,6 +321,36 @@ export function func(
 
 export function ref(name: string, typeArguments?: TypeDescriptor[]): RefType {
   return typeArguments ? { kind: "ref", name, typeArguments } : { kind: "ref", name };
+}
+
+/**
+ * Build an applied compiler intrinsic. `op` is the stable wire token, not a
+ * display spelling — see {@link IntrinsicApplicationType}.
+ */
+export function intrinsicApplication(
+  op: string,
+  args: TypeDescriptor[] = [],
+): IntrinsicApplicationType {
+  return { kind: "intrinsicApplication", op, arguments: args };
+}
+
+/**
+ * Display spellings for compiler intrinsic wire tokens, mirroring the Rust
+ * `CompilerIntrinsicTypeOp::display_name`. Kept separate from the token for
+ * the same reason Rust keeps them separate: a rendering change must never
+ * move the wire form.
+ */
+const INTRINSIC_DISPLAY_NAMES: Readonly<Record<string, string>> = {
+  awaited: "Awaited",
+};
+
+/**
+ * The display spelling for an intrinsic wire token. An unrecognised op falls
+ * back to the raw token rather than throwing — a newer producer's operation
+ * should degrade to an honest spelling, not a crash.
+ */
+export function intrinsicDisplayName(op: string): string {
+  return INTRINSIC_DISPLAY_NAMES[op] ?? op;
 }
 
 export function recursiveRef(

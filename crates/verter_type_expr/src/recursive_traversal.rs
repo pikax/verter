@@ -172,6 +172,9 @@ fn drain_children(node: &mut TypeExpr, worklist: &mut Vec<TypeExpr>) {
 
         TypeExpr::Ref { type_arguments, .. } => drain_slice(type_arguments, worklist),
 
+        // Operands are owned recursive children; the op is a scalar.
+        TypeExpr::IntrinsicApplication { arguments, .. } => drain_slice(arguments, worklist),
+
         // `import("m").X<Arg>` — `type_arguments` are the only owned
         // recursive children; `specifier` / `qualifier` are leaf strings.
         TypeExpr::ImportType { type_arguments, .. } => drain_slice(type_arguments, worklist),
@@ -449,6 +452,9 @@ fn type_expr_discriminant(node: &TypeExpr) -> isize {
         // Added after the original derive: a new variant takes the next free
         // discriminant (NOT its declaration-order index) so 0..=22 stay frozen.
         TypeExpr::ImportType { .. } => 23,
+        // Appended: every existing stream is unchanged, so the byte-stream
+        // contract needs a NEW corpus row, not a rebaseline.
+        TypeExpr::IntrinsicApplication { .. } => 24,
     }
 }
 
@@ -519,6 +525,17 @@ fn hash_node<'a, H: Hasher>(node: &'a TypeExpr, state: &mut H, stack: &mut Vec<H
             name.hash(state);
             type_arguments.len().hash(state);
             push_nodes_reverse(type_arguments, stack);
+        }
+
+        // -- IntrinsicApplication: op (leaf) then arguments slice, mirroring
+        //    `Ref`'s shape. The op hashes as its closed identity, never as
+        //    text, so a rendering change cannot move the stream. --
+        TypeExpr::IntrinsicApplication { op, arguments } => {
+            // FROZEN tag, never the derived discriminant — see
+            // `CompilerIntrinsicTypeOp::stable_hash_tag`.
+            op.stable_hash_tag().hash(state);
+            arguments.len().hash(state);
+            push_nodes_reverse(arguments, stack);
         }
 
         // -- ImportType: specifier / qualifier / typeof_query leaves, then
@@ -940,6 +957,15 @@ pub fn referenced_names(ty: &TypeExpr) -> ReferencedNames {
             } => {
                 push_type_reference(&mut out, &binders, name.as_ref());
                 for arg in type_arguments.iter() {
+                    stack.push(NameStep::Node(arg));
+                }
+            }
+
+            // A compiler operation NAMES NOTHING resolvable: it contributes no
+            // referenced type name (unlike the identically-rendered
+            // `Ref("Awaited")`). Its operands still traverse.
+            TypeExpr::IntrinsicApplication { arguments, .. } => {
+                for arg in arguments.iter() {
                     stack.push(NameStep::Node(arg));
                 }
             }

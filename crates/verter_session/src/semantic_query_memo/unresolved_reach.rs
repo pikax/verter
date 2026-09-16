@@ -218,6 +218,12 @@ impl SemanticGraphStore {
                 }
             }
             SemanticNodeData::InstantiationRef { args, .. } => children.extend_from_slice(args),
+            // A deferred intrinsic application is a KNOWN value whose operands
+            // are locally-supplied structure: descend them, and never set the
+            // unresolved bit for the application itself.
+            SemanticNodeData::IntrinsicApplication { args, .. } => {
+                children.extend_from_slice(args);
+            }
             // A sealed callable carrier opens only to its two sanctioned
             // consumers — terminal, and decided by construction.
             SemanticNodeData::DeferredCallable(_) => {}

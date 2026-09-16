@@ -1,6 +1,6 @@
 import type { TypeDescriptor } from "@verter/type-ir";
 
-export const GRAPH_FORMAT_VERSION = 11;
+export const GRAPH_FORMAT_VERSION = 12;
 
 export const NODE_PRIMITIVE = 1;
 export const NODE_LITERAL = 2;
@@ -24,6 +24,21 @@ export const NODE_INFER = 19;
 export const NODE_REST = 20;
 export const NODE_RECURSIVE_REF = 21;
 export const NODE_SYNTHETIC_SLOT_BINDING = 22;
+export const NODE_INTRINSIC_APPLICATION = 23;
+
+// Mirrors the proto `IntrinsicTypeOp`. 0 is UNSPECIFIED and is never a real
+// operation — an unknown op must not decode as `Awaited`.
+export const INTRINSIC_OP_UNSPECIFIED = 0;
+export const INTRINSIC_OP_AWAITED = 1;
+
+/**
+ * Display spelling for a wire op code. Mirrors the Rust
+ * `CompilerIntrinsicTypeOp::display_name`; UNSPECIFIED and unknown codes
+ * render as an explicit marker rather than silently becoming `Awaited`.
+ */
+export function intrinsicOpDisplayName(op: number): string {
+  return op === INTRINSIC_OP_AWAITED ? "Awaited" : "unknown intrinsic";
+}
 
 export const SYNTHETIC_CARRIER_SURFACE_SLOT_BINDING = 0;
 export const SYNTHETIC_CARRIER_SURFACE_BINDING = 1;
@@ -182,6 +197,7 @@ export type GraphNodeRecord =
       typeParameterNodeIds: number[];
     }
   | { kind: typeof NODE_REF; nameId: number; typeArgumentNodeIds: number[] }
+  | { kind: typeof NODE_INTRINSIC_APPLICATION; op: number; argumentNodeIds: number[] }
   | {
       kind: typeof NODE_TYPE_PARAMETER;
       nameId: number;

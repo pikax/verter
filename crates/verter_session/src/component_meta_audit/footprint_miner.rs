@@ -440,6 +440,10 @@ fn build_node_record(graph: &SemanticGraphStore, data: Option<&SemanticNodeData>
 
 fn map_node_kind(data: &SemanticNodeData) -> SemanticNodeKind {
     match data {
+        // A compiler-native operation is named by its op, not by a declaration.
+        SemanticNodeData::IntrinsicApplication { op, .. } => SemanticNodeKind::Other {
+            name: Arc::from(op.display_name()),
+        },
         SemanticNodeData::Alias(_) => SemanticNodeKind::Alias,
         SemanticNodeData::Object(_) => SemanticNodeKind::Object,
         SemanticNodeData::ObjectSpreadProgram(_) => SemanticNodeKind::Object,
@@ -498,6 +502,7 @@ fn map_node_kind(data: &SemanticNodeData) -> SemanticNodeKind {
 
 fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
     match data {
+        SemanticNodeData::IntrinsicApplication { op, .. } => Arc::from(op.display_name()),
         SemanticNodeData::Alias(_) => Arc::from("Alias"),
         SemanticNodeData::Object(_) => Arc::from("Object"),
         SemanticNodeData::ObjectSpreadProgram(program) => {

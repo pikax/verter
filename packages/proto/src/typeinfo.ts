@@ -32,6 +32,7 @@ export {
   StructuredTypeExpressionSchema,
   GraphTypeNodeSchema,
   GraphObjectSpreadProgramSchema,
+  GraphIntrinsicApplicationSchema,
   GraphObjectConstructionEffectSchema,
   GraphObjectNamedEffectSchema,
   GraphObjectIndexEffectSchema,
@@ -79,6 +80,7 @@ export {
   GraphObjectMemberKind,
   GraphOperation,
   GraphOriginEdgeKind,
+  GraphCompilerIntrinsicTypeOp,
   GraphPrimitiveKind,
   GraphProjectionKind,
   GraphProjectionMode,
@@ -169,4 +171,4 @@ export type {
  * Schema 2 stays accepted for the legacy
  * operations; the framework-surface operation requires 3.
  */
-export const TYPEINFO_GRAPH_SCHEMA_VERSION = 7;
+export const TYPEINFO_GRAPH_SCHEMA_VERSION = 8;

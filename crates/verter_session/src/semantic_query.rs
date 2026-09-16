@@ -44,6 +44,7 @@ pub use verter_semantic::analysis::type_solver::arena::PrimitiveKind;
 // so callers working with the semantic graph can match on exact literal
 // shapes (`"idle"` vs `"busy"`) without collapsing them to the broader
 // `Primitive(String)`.
+pub use verter_type_expr::CompilerIntrinsicTypeOp;
 pub use verter_type_expr::LiteralValue;
 
 // Reuse the existing structured failure shape from the resolver — there is no
@@ -8671,6 +8672,19 @@ impl ObjectSpreadProgram {
 
 #[derive(Debug, Clone)]
 pub enum SemanticNodeData {
+    /// A compiler-native intrinsic operation applied to its operands, kept
+    /// DEFERRED because the answer depends on a binder the substitution has
+    /// not supplied yet (`Awaited<T>` for an unconstrained `T`).
+    ///
+    /// This is a settled semantic VALUE: the checker prints exactly this for
+    /// a generic async generator's iteration parameters, and substituting the
+    /// binder later reduces it through the owning query family. It must never
+    /// be confused with [`Self::Opaque`] (a refusal) or with an
+    /// [`Self::InstantiationRef`] of a lib alias (a declaration application).
+    IntrinsicApplication {
+        op: CompilerIntrinsicTypeOp,
+        args: Arc<[SemanticNodeId]>,
+    },
     Alias(SemanticNodeId),
     Object(SurfaceView),
     ObjectSpreadProgram(ObjectSpreadProgram),
@@ -9112,8 +9126,10 @@ impl SemanticNodeData {
             Self::BareRef(_) => 22,
             Self::ImportType(_) => 23,
             Self::RawFallback { .. } => 24,
-            // Index 25 is intentionally unused so the surviving variants
-            // keep stable bucket indices independent of declaration order.
+            // Bucket 25 was held vacant so buckets stay stable across
+            // variant churn; the intrinsic application takes it, leaving every
+            // other bucket index and the discriminant COUNT unchanged.
+            Self::IntrinsicApplication { .. } => 25,
             Self::SyntheticBinding { .. } => 27,
         }
     }
@@ -9159,6 +9175,9 @@ impl SemanticNodeData {
             | Self::DeferredCallable(_)
             | Self::DeclRef { .. }
             | Self::InstantiationRef { .. }
+            // A deferred intrinsic application is a KNOWN value — the operation
+            // is decided, only the operand's binder is still open.
+            | Self::IntrinsicApplication { .. }
             | Self::SyntheticBinding { .. } => false,
         }
     }
@@ -9350,6 +9369,10 @@ impl PartialEq for SemanticNodeData {
                 Self::InstantiationRef { base: ab, args: aa },
                 Self::InstantiationRef { base: bb, args: ba },
             ) => ab == bb && aa == ba,
+            (
+                Self::IntrinsicApplication { op: ao, args: aa },
+                Self::IntrinsicApplication { op: bo, args: ba },
+            ) => ao == bo && aa == ba,
             (Self::MergedDecl { contributors: a }, Self::MergedDecl { contributors: b }) => a == b,
             (Self::BareRef(a), Self::BareRef(b)) => a == b,
             (Self::ImportType(a), Self::ImportType(b)) => a == b,
@@ -9502,6 +9525,12 @@ impl std::hash::Hash for SemanticNodeData {
             }
             Self::InstantiationRef { base, args } => {
                 base.hash(state);
+                args.hash(state);
+            }
+            Self::IntrinsicApplication { op, args } => {
+                // The FROZEN tag, for the same reason the TypeExpr stream uses
+                // it: structural hashing must not depend on enum derive order.
+                op.stable_hash_tag().hash(state);
                 args.hash(state);
             }
             Self::MergedDecl { contributors } => {

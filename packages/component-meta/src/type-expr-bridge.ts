@@ -17,6 +17,8 @@ import {
   func,
   typeParameter,
   ref as typeRef,
+  intrinsicApplication,
+  intrinsicDisplayName,
   recursiveRef,
   indexedAccess,
   unknown,
@@ -42,6 +44,7 @@ import {
   NODE_INDEXED_ACCESS,
   NODE_INFER,
   NODE_INTERSECTION,
+  NODE_INTRINSIC_APPLICATION,
   NODE_KEY_OF,
   NODE_LITERAL,
   NODE_MAPPED,
@@ -60,6 +63,7 @@ import {
   NODE_TYPE_PARAMETER,
   NODE_UNION,
   NODE_UNKNOWN,
+  intrinsicOpDisplayName,
   type GraphNodeRecord,
   type GraphTypeExprRef,
 } from "./type-graph-core.js";
@@ -184,6 +188,10 @@ export type NativeTypeExpr =
       typeParameters?: NativeTypeParameter[];
     }
   | { kind: "ref"; name: string; typeArguments: NativeTypeExpr[] }
+  // A compiler-native type OPERATION whose identity the checker has already
+  // resolved (`Awaited<T>`). Never a `ref`: it names no declaration, so it
+  // must not be resolved through any registry.
+  | { kind: "intrinsicApplication"; op: string; arguments: NativeTypeExpr[] }
   | {
       kind: "recursiveRef";
       name: string;
@@ -468,6 +476,18 @@ export function typeExprToDescriptor(
         );
       }
       return typeRef(expr.name);
+
+    // A compiler intrinsic is NOT a reference: it must never route through
+    // `resolveRegistryRefDescriptor`, because there is no declaration to
+    // resolve and a userland type spelled `Awaited` must not capture the
+    // operation. Only the OPERANDS are lowered.
+    case "intrinsicApplication":
+      return intrinsicApplication(
+        expr.op,
+        expr.arguments.map((argument) =>
+          typeExprToDescriptor(argument, nativeRegistry, visiting, graphVisiting),
+        ),
+      );
 
     case "recursiveRef":
       return recursiveRef(
@@ -811,6 +831,11 @@ function collectDescriptorTypeParameterNames(descriptor: TypeDescriptor): string
       case "ref":
         current.typeArguments?.forEach(visit);
         return;
+      // A type parameter can hide inside an intrinsic's OPERAND (`Awaited<T>`)
+      // exactly as it can inside a reference's type arguments.
+      case "intrinsicApplication":
+        current.arguments.forEach(visit);
+        return;
       case "indexedAccess":
         // A mapped key parameter can hide in EITHER position of an indexed
         // access (`T[P]` is `{ objectType: T, indexType: P }`); walk both.
@@ -902,6 +927,9 @@ function descriptorContainsUnknown(descriptor: TypeDescriptor): boolean {
       );
     case "ref":
       return descriptor.typeArguments?.some(descriptorContainsUnknown) ?? false;
+    // The application itself is fully known; only an operand can carry one.
+    case "intrinsicApplication":
+      return descriptor.arguments.some(descriptorContainsUnknown);
     case "indexedAccess":
       return (
         descriptorContainsUnknown(descriptor.objectType) ||
@@ -951,6 +979,16 @@ function substituteDescriptorTypeParameters(
       );
     case "array":
       return array(substituteDescriptorTypeParameters(descriptor.element, bindings));
+    // Substitution MUST descend into the operands, or `Awaited<T>` would keep
+    // an unsubstituted `T` after instantiation. The op is a closed identity
+    // and is never itself a binder, so it passes through untouched.
+    case "intrinsicApplication":
+      return intrinsicApplication(
+        descriptor.op,
+        descriptor.arguments.map((argument) =>
+          substituteDescriptorTypeParameters(argument, bindings),
+        ),
+      );
     case "tuple": {
       const t = tuple(
         descriptor.elements.map((element) => substituteDescriptorTypeParameters(element, bindings)),
@@ -2692,6 +2730,15 @@ function graphTypeExprToString(expr: GraphTypeExprRef): string {
       // Synthetic carriers display as their `bindingName` (the user-visible
       // identity) — they MUST NOT resolve through `TypeRegistry`.
       return expr.graph.getString(node.bindingNameId);
+    case NODE_INTRINSIC_APPLICATION: {
+      // Renders like a named application but resolves NOTHING: the op is a
+      // closed enum, so there is no string id and no registry lookup.
+      const operands = node.argumentNodeIds.map((id) =>
+        graphTypeExprToString(createGraphTypeExprRef(expr.graph, id)),
+      );
+      const spelled = intrinsicOpDisplayName(node.op);
+      return operands.length > 0 ? `${spelled}<${operands.join(", ")}>` : spelled;
+    }
     default: {
       const _exhaustive: never = node;
       throw new Error(
@@ -2725,6 +2772,10 @@ function nativeTypeExprToString(expr: NativeTypeExpr): string {
       return String(expr.value);
     case "ref":
       return expr.name;
+    case "intrinsicApplication":
+      return expr.arguments.length > 0
+        ? `${intrinsicDisplayName(expr.op)}<${expr.arguments.map(nativeTypeExprToString).join(", ")}>`
+        : intrinsicDisplayName(expr.op);
     case "recursiveRef":
       return expr.typeArguments.length > 0
         ? `${expr.name}<${expr.typeArguments.map(nativeTypeExprToString).join(", ")}>`

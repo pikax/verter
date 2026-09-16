@@ -168,6 +168,9 @@ fn pattern_declares_infer(
             SemanticNodeData::TemplateLiteral { expressions, .. }
             | SemanticNodeData::InstantiationRef {
                 args: expressions, ..
+            }
+            | SemanticNodeData::IntrinsicApplication {
+                args: expressions, ..
             } => children.extend(expressions.iter().copied()),
             SemanticNodeData::Object(surface) => {
                 children.extend(surface.positive_members().iter().map(|member| member.value));
@@ -812,6 +815,15 @@ fn display_resolved_type_node(
         SemanticNodeData::DeclRef { identity } => {
             qualified_name(needs, &identity.canonical_id, &identity.decl_name)
         }
+        // A compiler-native operation renders by its OP name — there is no
+        // declaration to qualify, because none was applied.
+        SemanticNodeData::IntrinsicApplication { op, args } => {
+            let rendered: Vec<String> = args
+                .iter()
+                .map(|a| display_type_node(store, *a, needs, child_depth, visited).0)
+                .collect();
+            format!("{}<{}>", op.display_name(), rendered.join(", "))
+        }
         SemanticNodeData::InstantiationRef { base, args } => {
             let name = qualified_name(needs, &base.canonical_id, &base.decl_name);
             if args.is_empty() {
@@ -1093,6 +1105,7 @@ fn back_ref_token(data: &SemanticNodeData) -> String {
     match data {
         SemanticNodeData::DeclRef { identity } => identity.decl_name.to_string(),
         SemanticNodeData::InstantiationRef { base, .. } => base.decl_name.to_string(),
+        SemanticNodeData::IntrinsicApplication { op, .. } => op.display_name().to_string(),
         SemanticNodeData::TypeParam { display_name, .. } => display_name.to_string(),
         _ => TRUNCATION_TOKEN.to_string(),
     }
@@ -1356,6 +1369,7 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
         | SemanticNodeData::MergedDecl { .. }
         | SemanticNodeData::DeclRef { .. }
         | SemanticNodeData::InstantiationRef { .. }
+        | SemanticNodeData::IntrinsicApplication { .. }
         // Unresolved bare-name / dynamic-import / raw-fallback /
         // synthetic-binding carriers all render as atomic references.
         | SemanticNodeData::BareRef(_)

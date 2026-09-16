@@ -294,6 +294,9 @@ impl TypeExpr {
             Self::Ref { type_arguments, .. } => {
                 shift_arc_slice(type_arguments, delta);
             }
+            Self::IntrinsicApplication { arguments, .. } => {
+                shift_arc_slice(arguments, delta);
+            }
             Self::ImportType { type_arguments, .. } => {
                 shift_arc_slice(type_arguments, delta);
             }
@@ -391,6 +394,9 @@ impl TypeExpr {
             }
             Self::Ref { type_arguments, .. } => {
                 clear_arc_slice(type_arguments);
+            }
+            Self::IntrinsicApplication { arguments, .. } => {
+                clear_arc_slice(arguments);
             }
             Self::ImportType { type_arguments, .. } => {
                 clear_arc_slice(type_arguments);

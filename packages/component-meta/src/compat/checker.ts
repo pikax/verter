@@ -19,6 +19,7 @@ import {
 import { projectDeclaredOnlyNativeResult } from "./native-projection.js";
 import { compatSlotSurvives } from "../published-surface.js";
 import type { TypeDescriptor } from "@verter/type-ir";
+import { intrinsicDisplayName } from "@verter/type-ir";
 import type { VerterHostAdapter } from "../host-adapter.js";
 import type {
   ComponentMeta,
@@ -555,6 +556,16 @@ function descriptorsStructurallyEquivalent(left: TypeDescriptor, right: TypeDesc
       return (
         right.kind === "array" && descriptorsStructurallyEquivalent(left.element, right.element)
       );
+    // Equivalent only to another application of the SAME op with
+    // pairwise-equivalent operands. The `right.kind` guard is what keeps a
+    // resolved intrinsic from ever comparing equal to an authored
+    // `Ref("Awaited")` that renders identically.
+    case "intrinsicApplication":
+      return (
+        right.kind === "intrinsicApplication" &&
+        left.op === right.op &&
+        descriptorListsStructurallyEquivalent(left.arguments, right.arguments)
+      );
     case "tuple":
       return (
         right.kind === "tuple" &&
@@ -1084,6 +1095,10 @@ function typeDescriptorHasStructuredObjectSurface(type: TypeDescriptor): boolean
     case "union":
     case "intersection":
       return type.types.some((entry) => typeDescriptorHasStructuredObjectSurface(entry));
+    // A deferred compiler operation exposes NO structured object surface
+    // until it reduces — stated, not reached through `default`.
+    case "intrinsicApplication":
+      return false;
     default:
       return false;
   }
@@ -1322,6 +1337,22 @@ function typeDescriptorToCompatDisplay(
       // name happens to match a binding identifier would shadow the
       // carrier's intended identity).
       return descriptor.bindingName;
+    // Compat display keeps the intrinsic DISTINCT and never resolves it
+    // through `typeRegistry`: no declaration stands behind it.
+    case "intrinsicApplication":
+      return descriptor.arguments.length > 0
+        ? `${intrinsicDisplayName(descriptor.op)}<${descriptor.arguments
+            .map((argument) =>
+              typeDescriptorToCompatDisplay(
+                argument,
+                typeRegistry,
+                visited,
+                registryResolutionDepth,
+              ),
+            )
+            .join(", ")}>`
+        : intrinsicDisplayName(descriptor.op);
+
     case "ref": {
       if (
         typeRegistry &&

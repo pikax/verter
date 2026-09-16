@@ -142,6 +142,20 @@ mod combine {
     /// A reference carrier (`Ref` / `ImportType` / `BareRef` / `DeclPlaceholder`):
     /// a symbolic carrier (`+1`) plus its type-argument carriers; non-structural
     /// root; not unknown.
+    /// An applied compiler intrinsic: a symbolic carrier (`+1`) plus its
+    /// operand carriers, non-structural root, not unknown. Scored like
+    /// [`reference`] because both defer, but kept SEPARATE so the two can
+    /// diverge without one silently inheriting the other.
+    pub(super) fn intrinsic(args: impl Iterator<Item = PublicationScore>) -> PublicationScore {
+        let (sym, gen) = sum_children(args);
+        PublicationScore {
+            symbolic_carriers: 1 + sym,
+            generic_detail: gen,
+            structural_top_level: false,
+            exact_unknown_root: false,
+        }
+    }
+
     pub(super) fn reference(args: impl Iterator<Item = PublicationScore>) -> PublicationScore {
         let (sym, gen) = sum_children(args);
         PublicationScore {
@@ -447,6 +461,16 @@ impl RaisedShapeAlgebra for PublicationScoreAlg {
             tag: FactShapeTag::Other,
         }
     }
+    fn intrinsic(
+        &mut self,
+        _op: verter_type_expr::CompilerIntrinsicTypeOp,
+        arguments: Vec<ScoredOut>,
+    ) -> ScoredOut {
+        ScoredOut {
+            score: combine::intrinsic(arguments.iter().map(|a| a.score)),
+            tag: FactShapeTag::Other,
+        }
+    }
     fn synthetic_slot_binding(
         &mut self,
         _carrier: Arc<verter_type_expr::SyntheticCarrierKey>,
@@ -749,6 +773,11 @@ pub(in crate::project_semantic_dispatch) fn type_expr_publication_score(
         }
         TypeExpr::Ref { type_arguments, .. } | TypeExpr::ImportType { type_arguments, .. } => {
             combine::reference(type_arguments.iter().map(type_expr_publication_score))
+        }
+        // The SAME `combine::intrinsic` the node-domain algebra uses, so
+        // both fronts of the shared formula stay byte-identical.
+        TypeExpr::IntrinsicApplication { arguments, .. } => {
+            combine::intrinsic(arguments.iter().map(type_expr_publication_score))
         }
         TypeExpr::TypeParameter(parameter) => combine::type_parameter(
             parameter

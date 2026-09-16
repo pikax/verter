@@ -955,6 +955,9 @@ pub fn audit_key_for_node(
         return Arc::from(format!("<unknown:{}>", id.0));
     };
     let label = match data.as_ref() {
+        SemanticNodeData::IntrinsicApplication { op, args } => {
+            format!("{}[{}]", op.display_name(), args.len())
+        }
         SemanticNodeData::Alias(inner) => format!("Alias({})", inner.0),
         SemanticNodeData::Object(_) => format!("Object#{}", id.0),
         SemanticNodeData::ObjectSpreadProgram(program) => {

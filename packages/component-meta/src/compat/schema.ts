@@ -5,6 +5,7 @@
  */
 
 import type { TypeDescriptor } from "@verter/type-ir";
+import { intrinsicDisplayName } from "@verter/type-ir";
 import type { PropertyMetaSchema, MetaCheckerOptions } from "./types.js";
 
 const MAX_SCHEMA_REGISTRY_RESOLUTION_DEPTH = 1;
@@ -186,6 +187,11 @@ function convertType(
         schema: td.members.map((m) => (m.value !== undefined ? String(m.value) : m.name)),
       };
     }
+
+    // A compiler intrinsic renders like a named application but MUST NOT
+    // resolve through `typeRegistry` — no declaration stands behind it.
+    case "intrinsicApplication":
+      return typeDescriptorToString(td);
 
     case "ref": {
       const name = td.typeArguments
@@ -393,6 +399,15 @@ function schemaDescriptorToString(
       // Synthetic carriers render as `bindingName` — they MUST NOT route
       // through `typeRegistry`.
       return td.bindingName;
+    case "intrinsicApplication":
+      return td.arguments.length > 0
+        ? `${intrinsicDisplayName(td.op)}<${td.arguments
+            .map((argument) =>
+              schemaDescriptorToString(argument, typeRegistry, visited, registryResolutionDepth),
+            )
+            .join(", ")}>`
+        : intrinsicDisplayName(td.op);
+
     case "ref": {
       if (
         typeRegistry &&
@@ -490,6 +505,10 @@ export function typeDescriptorToString(td: TypeDescriptor): string {
       return td.typeArguments
         ? `${td.name}<${td.typeArguments.map(typeDescriptorToString).join(", ")}>`
         : td.name;
+    case "intrinsicApplication":
+      return td.arguments.length > 0
+        ? `${intrinsicDisplayName(td.op)}<${td.arguments.map(typeDescriptorToString).join(", ")}>`
+        : intrinsicDisplayName(td.op);
     case "recursiveRef":
       return td.typeArguments.length > 0
         ? `${td.name}<${td.typeArguments.map(typeDescriptorToString).join(", ")}>`
