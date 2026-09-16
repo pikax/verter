@@ -1923,3 +1923,73 @@ defineProps<{ setupOnly: string }>()
         "the unresolved exact-head reason must remain typed"
     );
 }
+
+// ── B22. IMPORTED `Awaited` — the import is the declaration, not the relation ─
+//
+// A userland type NAMED `Awaited`, brought in by an import, is an ordinary
+// declaration: `X = Awaited<string>` is `{ user: string }` and never dispatches
+// the compiler-native awaited relation. The invariant is declaration identity,
+// not spelling, so the rows cover the direct import, a renamed import of the
+// userland `Awaited`, and an unrelated export imported UNDER the builtin name.
+//
+// Discrimination: the dispatch builtin gate (`DispatchHost::utility_source`)
+// consulted only scope-local type names and type bindings, so an import
+// binding named `Awaited` classified `Builtin` and `resolved_builtin_utility`
+// handed builders the compiler-native identity — the gate rows below FAIL on
+// that shape. The canonical `ScopeShadowing` authority includes imports.
+#[test]
+fn imported_builtin_named_awaited_resolves_userland_and_never_the_awaited_relation() {
+    let rows: [(&str, &str); 3] = [
+        (
+            "import type { Awaited } from \"./user\";\nexport type X = Awaited<string>;\n",
+            "Awaited",
+        ),
+        (
+            "import type { Awaited as UserAwaited } from \"./user\";\nexport type X = UserAwaited<string>;\n",
+            "UserAwaited",
+        ),
+        (
+            "import type { Box as Awaited } from \"./user\";\nexport type X = Awaited<string>;\n",
+            "Awaited",
+        ),
+    ];
+    for (consumer, local) in rows {
+        let host = host();
+        upsert_ts(
+            &host,
+            "/user.ts",
+            "export type Awaited<T> = { user: T };\nexport type Box<T> = { user: T };\n",
+        );
+        upsert_ts(&host, "/consumer.ts", consumer);
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let scope = file_scope(&dispatch, "/consumer.ts");
+        let carrier = bare_ref_carrier(&dispatch, local, scope, &[PrimitiveKind::String]);
+
+        let adapter = super::SessionDispatchHost::new(&host);
+        assert!(
+            !matches!(
+                super::DispatchHost::utility_source(&adapter, carrier, local),
+                super::UtilitySource::Builtin
+            ),
+            "{local:?} imported in {consumer:?} must not classify as the builtin utility"
+        );
+        assert!(
+            super::DispatchHost::resolved_builtin_utility(&adapter, carrier, local).is_none(),
+            "{local:?} imported in {consumer:?} must not yield a builtin identity"
+        );
+
+        let before = dispatch.graph().stats_snapshot().awaited_normalize_count;
+        let (member, kind) = first_member_primitive(&dispatch, carrier)
+            .unwrap_or_else(|| panic!("{consumer:?}: X must expand to `{{ user: string }}`"));
+        assert_eq!(
+            member, "user",
+            "{consumer:?}: the imported declaration wins"
+        );
+        assert_eq!(kind, PrimitiveKind::String);
+        assert_eq!(
+            dispatch.graph().stats_snapshot().awaited_normalize_count,
+            before,
+            "{consumer:?}: an imported userland `Awaited` never enters the awaited relation"
+        );
+    }
+}

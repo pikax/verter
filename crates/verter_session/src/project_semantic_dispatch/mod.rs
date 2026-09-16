@@ -4275,14 +4275,16 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
     fn utility_source(&self, base: SemanticNodeId, name: &str) -> UtilitySource {
         use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
         let (_scope, payload) = self.scope_payload_for_base(base);
-        // Scope-local shadowing takes priority: a userland `type Partial`
-        // in scope wins over the built-in utility.
-        if let Some(payload) = payload.as_ref() {
-            if payload.scope_type_names().contains(name)
-                || payload.scope_type_bindings().contains_key(name)
-            {
-                return UtilitySource::Shadowed;
-            }
+        // Scope shadowing takes priority: a userland `type Partial` in scope,
+        // or an import bound to that name, wins over the built-in utility.
+        // The canonical shadow set decides it, so this gate and the lowering
+        // paths agree on which names are shadowed.
+        if crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            payload.as_ref(),
+        )
+        .is_shadowing_lib(name)
+        {
+            return UtilitySource::Shadowed;
         }
         // SDK-declared intrinsics always classify as `Builtin` regardless
         // of shadowing.

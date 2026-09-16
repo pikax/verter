@@ -5141,7 +5141,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   singleton surviving sets canonicalise to `Never` / the lone
     ///   member respectively. This closes the literal-type reduction;
     ///   non-literal arms still fall through to the deferred shell.
-    /// - **Opaque** (`NonNullable`, `Awaited`, function-signature
+    /// - **Awaited**: routed by the proven `BuiltinUtility::Awaited`
+    ///   identity to the shared `AwaitedNormalize` family, so an authored
+    ///   `Awaited<T>` and an `await` position share one memo entry.
+    /// - **Opaque** (`NonNullable`, function-signature
     ///   utilities when the argument shape does not match, string
     ///   intrinsics with a broad/open carrier): return a shell anchored
     ///   to the utility + arg identity with `Instantiate` +
@@ -5163,8 +5166,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         base: SemanticNodeId,
         name: &str,
         // The PROVEN builtin identity, resolved by the caller AFTER the
-        // shadowing/resolution gate. Semantic routing reads this; `name`
-        // survives only for the origin-edge parameter labels.
+        // shadowing/resolution gate. The `Awaited` relation routes on this
+        // identity; the other utilities still route on `name` below (they
+        // sit behind the same gate), and `name` also labels the origin-edge
+        // type parameters.
         utility: Option<BuiltinUtility>,
         args: &Arc<[SemanticNodeId]>,
         context: crate::semantic_query::ProjectionReductionContext,
