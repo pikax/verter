@@ -510,3 +510,66 @@ fn a_map_source_without_content_refuses_the_conversion() {
         crate::assembly::publish::ArtifactSchemaError::MapSourceWithoutContent
     );
 }
+
+/// A host-supplied selected-template map may carry valid positions without
+/// the bytes its rows address (`sourcesContent` absent). Chaining through
+/// such rows would publish tokens over rows no staged artifact can resolve,
+/// so the supplied map is never admitted for chaining: the compile still
+/// succeeds and publishes the compiler's own map over the selected bytes,
+/// every declared row of which carries content.
+#[test]
+fn a_contentless_host_supplied_selected_template_map_is_omitted_not_chained() {
+    let source = "<template><p>hi</p></template>\n";
+    let selected = "<p>{{ count }}</p>";
+    let request = vue_request(vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
+        runtime_source_map: true,
+        ..Default::default()
+    })]);
+    // Positions the host holds without the bytes they address: one
+    // token-addressed row declaring no `sourcesContent` entry.
+    let host_map = r#"{"version":3,"sources":["Comp.vue"],"names":[],"mappings":"AAAA"}"#;
+    let parsed = crate::compile::parse_sfc(source, None, None);
+    let block_content = RuntimeBlockContentInputs {
+        template: Some(RuntimeBlockContentInput {
+            code: std::sync::Arc::from(selected),
+            source_map: Some(std::sync::Arc::from(host_map)),
+            lang: "html".to_string(),
+            content_artifact_token: "content:template".to_string(),
+            source_space_token: "space:template".to_string(),
+            parsed: None,
+            producer: None,
+            authored_basis: None,
+            diagnostics: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    let output = compile_vue_parsed_runtime(
+        source,
+        &parsed,
+        &request,
+        LEAKED_VUE_EXECUTION_INPUTS,
+        LEAKED_VUE_MACROS,
+        &block_content,
+        &[],
+    )
+    .expect("a contentless host map over the selected bytes must not fail the compile");
+
+    let row = output
+        .artifact(ProductKind::RuntimeClient)
+        .expect("the runtime client product must project");
+    let map_json = row
+        .runtime_source_map()
+        .expect("the demanded runtime map is still published over the selected bytes");
+    let published = oxc_sourcemap::SourceMap::from_json_string(map_json)
+        .expect("the published map is valid JSON");
+    assert!(
+        (0..published.get_sources().count()).all(|index| published
+            .get_source_content(index as u32)
+            .is_some_and(|content| !content.is_empty())),
+        "every declared row of the published map carries its own content"
+    );
+    output
+        .into_staged_main()
+        .expect("the set conversion must validate")
+        .expect("a runtime product must stage a handoff");
+}

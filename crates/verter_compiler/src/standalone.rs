@@ -1646,10 +1646,33 @@ fn correct_selected_unit_map(
         return Ok(String::new());
     }
     match supplied.filter(|map| !map.is_empty()) {
-        Some(supplied) => chain_generated_map_json(generated, supplied)
-            .ok_or(VueParsedRuntimeError::BlockContentUnavailable),
+        Some(supplied) => match SourceMap::from_json_string(supplied) {
+            Ok(input_map) if map_tokens_address_content_backed(&input_map) => {
+                chain_generated_map_json(generated, supplied)
+                    .ok_or(VueParsedRuntimeError::BlockContentUnavailable)
+            }
+            // A host may hold a block's positions without the bytes they
+            // address. A map chained through such rows publishes tokens no
+            // staged artifact can resolve, so it is omitted rather than
+            // chained: the compiler's own map over the selected bytes stands.
+            Ok(_) => Ok(generated.to_string()),
+            Err(_) => Err(VueParsedRuntimeError::BlockContentUnavailable),
+        },
         None => Ok(generated.to_string()),
     }
+}
+
+/// Whether every token-addressed row of a host-supplied map declares the
+/// content of the source space it names. Rows no token addresses are
+/// irrelevant — only a mapped row without its bytes makes a chained map
+/// unstageable.
+fn map_tokens_address_content_backed(map: &SourceMap) -> bool {
+    map.get_tokens().all(|token| {
+        token.get_source_id().is_none_or(|row| {
+            map.get_source_content(row)
+                .is_some_and(|content| !content.is_empty())
+        })
+    })
 }
 
 fn chain_generated_map_json(generated: &str, input: &str) -> Option<String> {
