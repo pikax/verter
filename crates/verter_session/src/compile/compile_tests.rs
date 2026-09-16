@@ -10,9 +10,27 @@ use super::*;
 // assemble_main_module tests
 
 use verter_compiler::framework_common::{
-    RuntimeCompileOutput, RuntimeCustomBlock, RuntimeOutputDescriptor, RuntimeScriptBlock,
-    RuntimeStyleBlock, RuntimeTemplateBlock, SourceMapFidelity, TemplateRenderExport,
+    QualifiedRuntimeStyle, RuntimeCompileOutput, RuntimeCustomBlock, RuntimeOutputDescriptor,
+    RuntimeScriptBlock, RuntimeTemplateBlock, SourceMapFidelity, TemplateRenderExport,
 };
+use verter_css_syntax::{CssDialect, QualifiedStyleResult, StyleStage};
+
+/// A published stylesheet in `dialect`, carrying no source map and no
+/// scoping class — the shape a Vue block arrives in at this boundary.
+fn qualified_style(
+    code: &str,
+    dialect: CssDialect,
+    output_descriptor: RuntimeOutputDescriptor,
+) -> QualifiedRuntimeStyle {
+    QualifiedRuntimeStyle {
+        result: QualifiedStyleResult::framework_rewritten(dialect, code, Vec::new()),
+        consumed_stage: StyleStage::Authored,
+        source_map: None,
+        scope_hash: None,
+        has_global: false,
+        output_descriptor,
+    }
+}
 
 fn test_output_descriptor(code: &str) -> RuntimeOutputDescriptor {
     RuntimeOutputDescriptor::generated(
@@ -371,23 +389,9 @@ fn assemble_main_module_dev_with_hmr_strategy_keeps_file() {
 #[test]
 fn assemble_main_module_with_styles_produces_import_lines() {
     let compiled = RuntimeCompileOutput {
-        styles: vec![
-            RuntimeStyleBlock {
-                code: ".a{}".to_string(),
-                source_map: None,
-                lang: None,
-                scope_hash: None,
-                has_global: false,
-                output_descriptor: test_output_descriptor(".a{}"),
-            },
-            RuntimeStyleBlock {
-                code: ".b{}".to_string(),
-                source_map: None,
-                lang: Some("scss".to_string()),
-                scope_hash: None,
-                has_global: false,
-                output_descriptor: test_output_descriptor(".b{}"),
-            },
+        qualified_styles: vec![
+            qualified_style(".a{}", CssDialect::Css, test_output_descriptor(".a{}")),
+            qualified_style(".b{}", CssDialect::Scss, test_output_descriptor(".b{}")),
         ],
         ..RuntimeCompileOutput::default()
     };

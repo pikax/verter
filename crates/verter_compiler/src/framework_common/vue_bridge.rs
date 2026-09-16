@@ -27,9 +27,9 @@ use crate::compile_request::{
     IdeProductRequest, VueBackendRequest, VueCompileRequest,
 };
 use crate::framework_common::carrier_compiler::{
-    CarrierCompileOutcome, CompileUnsupported, IdeCompileOptions, IdeOutput, RuntimeCompileOptions,
-    RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic, RuntimeOutputDescriptor,
-    RuntimeScriptBlock, RuntimeStyleBlock, RuntimeTemplateBlock, SourceMapFidelity,
+    CarrierCompileOutcome, CompileUnsupported, IdeCompileOptions, IdeOutput, QualifiedRuntimeStyle,
+    RuntimeCompileOptions, RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic,
+    RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeTemplateBlock, SourceMapFidelity,
 };
 use crate::framework_common::FrameworkParseArtifact;
 use crate::parser::types::{sfc_script_dialect, SfcScriptDialect};
@@ -827,18 +827,18 @@ pub fn vue_result_to_runtime_bundle(
             output_descriptor,
         }
     });
-    let styles = result
+    let qualified_styles = result
         .styles
         .into_iter()
         .zip(parsed.style_nodes())
         .map(|(s, node)| {
             let exact_map = node.content.as_ref().and_then(|content| {
                 let authored = &source[content.start as usize..content.end as usize];
-                (authored == s.code)
+                (authored == s.code())
                     .then(|| exact_slice_source_map(source, content.start, authored))
             });
             let output_descriptor = RuntimeOutputDescriptor::generated(
-                &s.code,
+                s.code(),
                 exact_map.as_deref(),
                 &declared,
                 if exact_map.is_some() {
@@ -847,13 +847,19 @@ pub fn vue_result_to_runtime_bundle(
                     SourceMapFidelity::Approximate
                 },
             );
-            RuntimeStyleBlock {
-                code: s.code,
+            QualifiedRuntimeStyle {
+                // The cascade that minted these bytes named their stage,
+                // dialect and producer; this conversion carries that value
+                // rather than re-deriving any of it from the bytes.
+                result: s.result,
+                // The carrier's own authored block is the space the rewrite
+                // read — this route admits no external continuation, so
+                // there is no produced space it could have consumed.
+                consumed_stage: verter_css_syntax::StyleStage::Authored,
                 // Vue's style pipeline produces no per-block css map here (style
                 // post-processing happens host/JS-side), and carries no
                 // `:global` fact.
                 source_map: None,
-                lang: s.lang,
                 // Vue scoping rides the `data-v-…` attribute on `scope_id`, not a
                 // per-block class hash.
                 scope_hash: None,
@@ -935,8 +941,7 @@ pub fn vue_result_to_runtime_bundle(
         main: None,
         script,
         template,
-        styles,
-        qualified_styles: Vec::new(),
+        qualified_styles,
         custom_blocks,
         scope_id: result.scope_id,
         tsx,
@@ -1964,10 +1969,6 @@ mod tests {
                 &alloc,
             )
             .expect("supplied external style compiles");
-        assert!(
-            output.styles.is_empty(),
-            "the selected style must publish qualified"
-        );
         let style = &output.qualified_styles[0];
 
         assert!(
@@ -2042,10 +2043,6 @@ mod tests {
             panic!("this fixture produces a runtime surface");
         };
         assert!(
-            output.styles.is_empty(),
-            "the selected style must publish qualified"
-        );
-        assert!(
             output.qualified_styles[0]
                 .result
                 .code()
@@ -2101,7 +2098,7 @@ mod tests {
             Err(CompileUnsupported::BlockContentRuntimeUnavailable { .. }) => {}
             Ok(CarrierCompileOutcome::Produced(output)) => panic!(
                 "unknown selected lang must not produce a CSS cascade rewrite: {}",
-                output.styles[0].code
+                output.qualified_styles[0].result.code()
             ),
             other => panic!("expected BlockContentRuntimeUnavailable, got {other:?}"),
         }
@@ -2141,10 +2138,6 @@ mod tests {
                 &alloc,
             )
             .expect("supplied external style compiles");
-        assert!(
-            output.styles.is_empty(),
-            "the selected style must publish qualified"
-        );
         let style = &output.qualified_styles[0];
 
         assert!(
@@ -2258,10 +2251,6 @@ mod tests {
             1,
             "an unchanged modules stage must hand its retained IR into \
              scoping, not force a second parse"
-        );
-        assert!(
-            output.styles.is_empty(),
-            "the selected style must publish qualified"
         );
         let style = &output.qualified_styles[0];
         assert!(
@@ -2567,7 +2556,7 @@ mod tests {
 
         let script = output.script.expect("script output");
         let template = output.template.expect("template output");
-        let style = output.styles.first().expect("style output");
+        let style = output.qualified_styles.first().expect("style output");
         let ide = output.tsx.expect("IDE output");
 
         for descriptor in [
@@ -3282,6 +3271,62 @@ mod tests {
         );
     }
 
+    /// A host that selects content for every `<style>` block still gets its
+    /// style imports: the main module's prelude counts the published styles,
+    /// and a selected block is published like any other. Counting a separate
+    /// list that a full selection emptied dropped every `import` silently —
+    /// the component rendered with no CSS and nothing refused.
+    #[test]
+    fn fully_selected_styles_still_drive_the_main_module_style_imports() {
+        let source = "<template><div class=\"x\"/></template><style>.x { color: red; }</style>";
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let bundle = VueCarrierCompiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions {
+                    filename: Some("Selected.vue".to_string()),
+                    component_id: Some("scope123".to_string()),
+                    want_runtime: true,
+                    want_main: true,
+                    vue_has_template: true,
+                    block_content: RuntimeBlockContentInputs {
+                        styles: vec![Some(RuntimeBlockContentInput {
+                            code: Arc::from(".x { color: red; }"),
+                            source_map: None,
+                            lang: "css".to_string(),
+                            content_artifact_token: "artifact:theme-css".to_string(),
+                            source_space_token: "space:theme-css".to_string(),
+                            parsed: None,
+                            producer: None,
+                            authored_basis: None,
+                            diagnostics: Vec::new(),
+                        })],
+                        ..Default::default()
+                    },
+                    vue_main: crate::assembly::VueMainDecoration {
+                        style_specifiers: vec![
+                            "Selected.vue?vue&type=style&index=0&lang.css".to_string()
+                        ],
+                        ..crate::assembly::VueMainDecoration::default()
+                    },
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("a fully selected style compiles");
+        assert_eq!(
+            bundle.qualified_styles.len(),
+            1,
+            "the selected block publishes exactly one style"
+        );
+        let body = bundle.main.as_ref().expect("staged main handoff").code();
+        assert!(
+            body.contains("import \"Selected.vue?vue&type=style&index=0&lang.css\""),
+            "the selected style's host specifier must still be imported, got:\n{body}"
+        );
+    }
     #[test]
     fn style_only_demand_does_not_assemble_main() {
         let source = "<style>.x{color:red}</style><template><div/></template>";

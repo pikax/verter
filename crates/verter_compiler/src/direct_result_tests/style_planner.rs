@@ -211,7 +211,7 @@ fn vue_stage_two_refusal_is_fail_closed_per_rule() {
         "missing typed refusal: {:?}",
         result.errors
     );
-    let code = &result.styles[0].code;
+    let code = result.styles[0].code();
     assert!(code.contains(".good[data-v-sc100000]"), "{code}");
     assert!(!code.contains(".bad"), "unsafe rule shipped: {code}");
     assert!(!code.contains("color red"), "unsafe rule shipped: {code}");
@@ -221,7 +221,7 @@ fn vue_stage_two_refusal_is_fail_closed_per_rule() {
 #[test]
 fn vue_unknown_style_lang_does_not_produce_a_css_cascade_rewrite() {
     let v_bind = compile_style("<style lang=\"postcss\">.a { color: v-bind(t) }</style>");
-    let v_bind_code = &v_bind.styles[0].code;
+    let v_bind_code = v_bind.styles[0].code();
     assert!(
         !v_bind_code.contains("var(--"),
         "unknown lang must not rewrite v-bind as CSS: {v_bind_code}"
@@ -239,7 +239,7 @@ fn vue_unknown_style_lang_does_not_produce_a_css_cascade_rewrite() {
     );
 
     let scoped = compile_style("<style lang=\"postcss\" scoped>.a { color: red }</style>");
-    let scoped_code = &scoped.styles[0].code;
+    let scoped_code = scoped.styles[0].code();
     assert!(
         !scoped_code.contains("[data-v-"),
         "unknown lang must not receive a CSS scoped rewrite: {scoped_code}"
@@ -296,7 +296,11 @@ fn vue_scoped_non_css_never_publishes_unscoped_css() {
     // And the refusal reaches a real consumer through the public compile
     // boundary, cleared rather than published.
     let less = compile_style("<style lang=\"less\" scoped>.a { color: red }</style>");
-    assert!(less.styles[0].code.is_empty(), "{}", less.styles[0].code);
+    assert!(
+        less.styles[0].code().is_empty(),
+        "{}",
+        less.styles[0].code()
+    );
     assert!(
         less.errors
             .iter()
@@ -323,7 +327,7 @@ fn vue_style_module_hashes_emitted_classes() {
 
     let result = compile_style("<style module>.active { color: red }</style>");
     assert!(result.errors.is_empty(), "{:?}", result.errors);
-    assert_eq!(result.styles[0].code, ".active_20fc662e { color: red }");
+    assert_eq!(result.styles[0].code(), ".active_20fc662e { color: red }");
 }
 
 // @ai-generated - SP-06 refuses dialect interpolation inside the v-bind argument.
@@ -446,7 +450,7 @@ fn vue_scoping_preserves_quoted_animation_names() {
 fn vue_scoping_handles_native_css_nesting() {
     let result = compile_style("<style scoped>.a { &:hover { color: blue } }</style>");
     assert!(result.errors.is_empty(), "{:?}", result.errors);
-    let code = &result.styles[0].code;
+    let code = result.styles[0].code();
     assert!(code.contains("&[data-v-sc100000]:hover"), "{code}");
     assert!(!code.contains("&:hover"), "{code}");
 }
@@ -686,7 +690,7 @@ fn vue_compile_routes_authored_styles_through_the_ir_planner() {
         "planner refusal missing: {:?}",
         result.errors
     );
-    assert_eq!(result.styles[0].code, ".bad { color: v-bind(tone; }");
+    assert_eq!(result.styles[0].code(), ".bad { color: v-bind(tone; }");
 }
 
 /// A refusal planned beside an earlier edit still addresses authored bytes.
@@ -884,7 +888,7 @@ fn v_bind_js_key_and_css_var_reference_agree() {
     )
     .expect("a plain RuntimeClient compile must not be refused");
 
-    let css = &result.styles[0].code;
+    let css = result.styles[0].code();
     assert!(css.contains("var(--sc100000-color)"), "CSS side: {css}");
 
     let script = &result.script.expect("script block emitted").code;
@@ -2812,10 +2816,10 @@ fn production_compile_analyzes_module_classes_for_scss_dialect() {
         "hashed class name must not pass the authored name through unhashed"
     );
     assert!(
-        style.code.contains(".active"),
+        style.code().contains(".active"),
         "the byte-level rewrite stays CSS-only; SCSS output is left for \
          external preprocessing: {}",
-        style.code
+        style.code()
     );
 }
 

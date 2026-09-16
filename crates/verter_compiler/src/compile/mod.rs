@@ -54,7 +54,7 @@ use crate::tokenizer::byte::{
     tokenize, tokenize_sfc, tokenize_sfc_with_delimiters, tokenize_with_delimiters,
 };
 use crate::tsc;
-use verter_css_syntax::{CssDialect, StyleDiagnostic, StyleStage};
+use verter_css_syntax::{CssDialect, QualifiedStyleResult, StyleDiagnostic, StyleStage};
 
 use helpers::{empty_sfc_script_block, extract_attrs, extract_block_ranges};
 use macro_scope_check::collect_invalid_options_scope_diagnostics;
@@ -933,7 +933,7 @@ fn compile_inner(
         for (style_index, style) in parsed.style_nodes().iter().enumerate() {
             let style_start = Instant::now();
             let mut style_module_classes = Vec::new();
-            let style_code = if let Some(content) = &style.content {
+            let style_result = if let Some(content) = &style.content {
                 let style_source = &input[content.start as usize..content.end as usize];
                 match style_dialect(style.lang) {
                     None => {
@@ -953,7 +953,15 @@ fn compile_inner(
                             ),
                             *content,
                         ));
-                        style_source.to_string()
+                        // No rewrite ran, so nothing but the authoring
+                        // claims these bytes: they are published at the
+                        // authored stage, read under the only grammar this
+                        // compiler will admit for a `lang` it cannot name —
+                        // the same base-CSS reading `class_extraction_dialect`
+                        // gives an unrecognised block. The refusal itself is
+                        // the error diagnostic pushed just above, which fails
+                        // the compile; it is not re-stated as a stage.
+                        QualifiedStyleResult::authored(CssDialect::Css, style_source, Vec::new())
                     }
                     Some(authored_dialect) => {
                         let source_name = options.filename.as_deref().unwrap_or("<style>");
@@ -1027,11 +1035,14 @@ fn compile_inner(
                             }
                         }
 
-                        outcome.result.into_code()
+                        outcome.result
                     }
                 }
             } else {
-                String::new()
+                // A `<style>` with no content span authored no bytes. An
+                // empty authored block is a legitimate result, not a
+                // refusal — see `QualifiedStyleResult::refused`.
+                QualifiedStyleResult::authored(CssDialect::Css, "", Vec::new())
             };
 
             let style_duration_ms = style_start.elapsed().as_secs_f64() * 1000.0;
@@ -1047,7 +1058,7 @@ fn compile_inner(
             });
 
             style_blocks.push(VerterStyleBlock {
-                code: style_code,
+                result: style_result,
                 scoped: style.scoped,
                 lang: lang_str,
                 duration_ms: style_duration_ms,

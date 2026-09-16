@@ -71,8 +71,7 @@ use crate::framework_common::vue_runtime_backend::{
 use crate::framework_common::{
     CompileUnsupported, IdeOutput, QualifiedRuntimeStyle, RuntimeBlockContentInput,
     RuntimeBlockContentInputs, RuntimeCompileOptions, RuntimeCompileOutput, RuntimeDiagnostic,
-    RuntimeDiagnosticSeverity, RuntimeOutputDescriptor, RuntimeStyleBlock, RuntimeSurfaceRefusal,
-    SourceMapFidelity,
+    RuntimeDiagnosticSeverity, RuntimeOutputDescriptor, RuntimeSurfaceRefusal, SourceMapFidelity,
 };
 use crate::parser::types::{sfc_script_dialect, ParsedSfc, SfcScriptDialect};
 use crate::style_planner::{
@@ -148,7 +147,7 @@ pub enum DirectExecutionInputs<'a> {
 /// [`ArtifactSet`] every planned product publishes into, plus two siblings
 /// the sealed publication model carries no slot for.
 ///
-/// `styles` is the style/CSS content a compiled `RuntimeClient`/
+/// `qualified_styles` is the style/CSS content a compiled `RuntimeClient`/
 /// `RuntimeServer` product's own `<style>` block(s) produce — in every
 /// registered host route this rides as a SEPARATE virtual file the
 /// `RuntimeClient`/`RuntimeServer` artifact only `import`s by reference
@@ -165,10 +164,9 @@ pub enum DirectExecutionInputs<'a> {
 #[derive(Debug)]
 pub struct DirectCompileOutput {
     pub artifacts: ArtifactSet,
-    pub styles: Vec<RuntimeStyleBlock>,
-    /// Stage-qualified style outputs — Svelte's external scoped-css
-    /// artifact. A compile publishes its styles here or in
-    /// [`Self::styles`], never both.
+    /// Stage-qualified style outputs — Vue's rewritten block stylesheets and
+    /// Svelte's external scoped-css artifact. Every compile publishes every
+    /// style here, carrying the stage, dialect and producer of its bytes.
     pub qualified_styles: Vec<QualifiedRuntimeStyle>,
     pub diagnostics: Vec<CompileDiagnostic>,
 }
@@ -1325,25 +1323,16 @@ fn apply_selected_runtime_styles(
         .strip_prefix("data-v-")
         .unwrap_or(&bundle.scope_id)
         .to_string();
-    // Every style in this carrier consumed the qualified continuation
-    // boundary: the whole carrier's published styles move together into
-    // `bundle.qualified_styles` below, never split across it and the legacy
-    // `bundle.styles` list (see `RuntimeCompileOutput::qualified_styles`).
-    // A partial selection (a sibling block still unavailable, or none
-    // selected at all) keeps publishing through the legacy list unchanged —
-    // there is no fact to qualify an untouched sibling's stage with.
-    let selects_style_fully =
-        !block_content.styles.is_empty() && block_content.styles.iter().all(Option::is_some);
-    let mut qualified_meta: Vec<
-        Option<(
-            verter_css_syntax::StyleStage,
-            verter_css_syntax::QualifiedStyleResult,
-        )>,
-    > = (0..bundle.styles.len()).map(|_| None).collect();
+    // The bundle already carries every style qualified — the carrier's own
+    // authored bytes, minted by the cascade that named their stage. A slot
+    // the host selected content for replaces that block's published value
+    // in place with the continuation's own result; an unselected sibling
+    // keeps the authored one it arrived with. Neither travels unqualified,
+    // so a partial selection needs no second list to fall back to.
     for (style_index, ((slot, selected), node)) in block_content
         .styles
         .iter()
-        .zip(bundle.styles.iter_mut())
+        .zip(bundle.qualified_styles.iter_mut())
         .zip(parsed.style_nodes())
         .enumerate()
     {
@@ -1438,7 +1427,7 @@ fn apply_selected_runtime_styles(
         .filter(|applied| *applied)
         .count();
 
-        let (current, current_map, mut descriptor) = if stage_count > 0 {
+        let (current_map, mut descriptor) = if stage_count > 0 {
             let current = outcome.result.code().to_string();
             let current_map = compose_selected_style_map(
                 verter_options.source_map,
@@ -1454,7 +1443,7 @@ fn apply_selected_runtime_styles(
                 )],
                 SourceMapFidelity::Exact,
             );
-            (current, current_map, descriptor)
+            (current_map, descriptor)
         } else {
             let current_map = if verter_options.source_map {
                 input.source_map.as_deref().map(str::to_string)
@@ -1466,46 +1455,28 @@ fn apply_selected_runtime_styles(
                 &input.source_space_token,
                 &input.content_artifact_token,
             );
-            (current_input.clone(), current_map, descriptor)
+            (current_map, descriptor)
         };
         if stage_count > 1 {
             descriptor.source_map.fidelity = SourceMapFidelity::Approximate;
         }
 
-        if selects_style_fully {
-            let consumed_stage = if supplied_by_external_tool {
-                verter_css_syntax::StyleStage::Preprocessed
-            } else {
-                verter_css_syntax::StyleStage::Authored
-            };
-            qualified_meta[style_index] = Some((
-                consumed_stage,
-                requalify_vue_style(outcome.result, input.producer.as_ref(), &input.diagnostics),
-            ));
-        }
-
-        selected.code = current;
+        // The selected continuation replaces this block's published value.
+        // Its `lang` is no longer carried beside the bytes: the dialect is
+        // the result's own, read off it through the one spelling authority
+        // (`QualifiedRuntimeStyle::lang`), so a selected block cannot report
+        // a language its bytes are not in.
+        selected.result =
+            requalify_vue_style(outcome.result, input.producer.as_ref(), &input.diagnostics);
+        selected.consumed_stage = if supplied_by_external_tool {
+            verter_css_syntax::StyleStage::Preprocessed
+        } else {
+            verter_css_syntax::StyleStage::Authored
+        };
         selected.source_map = current_map;
-        selected.lang = Some(input.lang.clone());
         selected.output_descriptor = descriptor;
     }
 
-    if selects_style_fully {
-        let mut qualified = Vec::with_capacity(bundle.styles.len());
-        for (style, meta) in bundle.styles.drain(..).zip(qualified_meta) {
-            let (consumed_stage, result) =
-                meta.expect("selects_style_fully guarantees every style slot was qualified above");
-            qualified.push(QualifiedRuntimeStyle {
-                result,
-                consumed_stage,
-                source_map: style.source_map,
-                scope_hash: style.scope_hash,
-                has_global: style.has_global,
-                output_descriptor: style.output_descriptor,
-            });
-        }
-        bundle.qualified_styles = qualified;
-    }
     Ok(())
 }
 
@@ -1736,7 +1707,6 @@ pub(crate) fn compile_vue_parsed_runtime(
         .map_err(|err| VueParsedRuntimeError::Direct(DirectCompileError::Publish(err)))?;
     Ok(DirectCompileOutput {
         artifacts,
-        styles: primary.bundle.styles,
         qualified_styles: primary.bundle.qualified_styles,
         diagnostics,
     })
@@ -2476,7 +2446,7 @@ impl StandaloneCompiler {
         let diagnostics = std::mem::take(&mut result.errors);
 
         let mut contributions: Vec<ArtifactContribution<'_>> = Vec::new();
-        let mut styles: Vec<RuntimeStyleBlock> = Vec::new();
+        let mut qualified_styles: Vec<QualifiedRuntimeStyle> = Vec::new();
 
         if plan.wants(ProductKind::IdeCompanion) {
             let tsx = tsx.ok_or(DirectCompileError::UnsupportedProduct(
@@ -2546,7 +2516,7 @@ impl StandaloneCompiler {
             // Style content is ssr-mode-independent — taken from this
             // (primary) bundle only, never duplicated from a secondary
             // compile.
-            styles.extend(bundle.styles.iter().cloned());
+            qualified_styles.extend(bundle.qualified_styles.iter().cloned());
 
             let composed = backend
                 .compile_runtime_legs_from_parse(
@@ -2588,8 +2558,7 @@ impl StandaloneCompiler {
         let artifacts = publish(&plan, contributions)?;
         Ok(DirectCompileOutput {
             artifacts,
-            styles,
-            qualified_styles: Vec::new(),
+            qualified_styles,
             diagnostics,
         })
     }
@@ -2739,7 +2708,6 @@ impl StandaloneCompiler {
         let artifacts = publish(&plan, contributions)?;
         Ok(DirectCompileOutput {
             artifacts,
-            styles: Vec::new(),
             qualified_styles: styles,
             diagnostics: Vec::new(),
         })
@@ -3485,16 +3453,17 @@ fn hash_opt_span(hasher: &mut blake3::Hasher, span: Option<verter_span::Span>) {
 }
 
 /// A canonical, length-prefixed blake3 digest over every field
-/// [`AssembledArtifact`]/[`RuntimeStyleBlock`]/[`CompileDiagnostic`] actually
-/// expose: per-artifact `kind`/`code`/`dialect`/both source-map slots, hashed
-/// in the order [`crate::assembly::ArtifactSet::artifacts`] exposes them —
-/// publication order is part of the observable result, so a route that
-/// reordered artifacts must produce a different digest, not the same one, then
-/// `styles`' `code`/`source_map`/`lang`/`scope_hash`/`has_global`/
-/// `output_descriptor` (via [`hash_output_descriptor`] — itself derived
-/// purely from `code`/the raw map/declared-source identity, but hashed
-/// explicitly rather than assumed redundant), then `diagnostics`'
-/// `severity`/`code`/`message`/`span`. Lets a result-identity comparison
+/// [`AssembledArtifact`]/[`QualifiedRuntimeStyle`]/[`CompileDiagnostic`]
+/// actually expose: per-artifact `kind`/`code`/`dialect`/both source-map
+/// slots, hashed in the order [`crate::assembly::ArtifactSet::artifacts`]
+/// exposes them — publication order is part of the observable result, so a
+/// route that reordered artifacts must produce a different digest, not the
+/// same one, then `qualified_styles`' `code`/both stages/`lang`/
+/// `source_map`/`scope_hash`/`has_global`/`output_descriptor` (via
+/// [`hash_output_descriptor`] — itself derived purely from `code`/the raw
+/// map/declared-source identity, but hashed explicitly rather than assumed
+/// redundant) and the result's own diagnostics, then the compile's
+/// `diagnostics`' `severity`/`code`/`message`/`span`. Lets a result-identity comparison
 /// across routes (direct / prepared-first / prepared-repeat / batch) report
 /// ONE short mismatching digest per fixture/route instead of a giant string
 /// diff. Shared verbatim by this module's own tests and the
@@ -3516,21 +3485,17 @@ pub fn direct_compile_output_digest(output: &DirectCompileOutput) -> [u8; 32] {
         hash_len_prefixed_opt_str(&mut hasher, artifact.runtime_source_map());
     }
 
-    hash_usize(&mut hasher, output.styles.len());
-    for style in &output.styles {
-        hash_len_prefixed_str(&mut hasher, &style.code);
-        hash_len_prefixed_opt_str(&mut hasher, style.source_map.as_deref());
-        hash_len_prefixed_opt_str(&mut hasher, style.lang.as_deref());
-        hash_len_prefixed_opt_str(&mut hasher, style.scope_hash.as_deref());
-        hasher.update(&[style.has_global as u8]);
-        hash_output_descriptor(&mut hasher, &style.output_descriptor);
-    }
-
     hash_usize(&mut hasher, output.qualified_styles.len());
     for style in &output.qualified_styles {
         hash_len_prefixed_str(&mut hasher, style.result.code());
         hash_usize(&mut hasher, style_stage_rank(style.result.stage()));
         hash_usize(&mut hasher, style_stage_rank(style.consumed_stage));
+        // The published dialect, in the one spelling the result's own
+        // dialect maps to. The deleted unqualified block hashed a `lang`
+        // string beside its bytes; dropping the field must not drop the
+        // fact, or two routes that published the same CSS under different
+        // dialects would compare equal.
+        hash_len_prefixed_str(&mut hasher, style.lang());
         hash_len_prefixed_opt_str(&mut hasher, style.source_map.as_deref());
         hash_len_prefixed_opt_str(&mut hasher, style.scope_hash.as_deref());
         hasher.update(&[style.has_global as u8]);
@@ -3689,7 +3654,7 @@ mod tests {
             "the composed module must contain the real script content, got:\n{code}"
         );
         assert!(
-            output.styles.is_empty(),
+            output.qualified_styles.is_empty(),
             "a style-less component must publish an EMPTY styles list, not a missing one"
         );
     }
@@ -3819,11 +3784,18 @@ mod tests {
         let output = StandaloneCompiler
             .compile(VUE_STYLED_SOURCE, &request, vue_inputs())
             .expect("a styled RuntimeClient compile must not be refused");
-        assert_eq!(output.styles.len(), 1, "the one <style> block must publish");
+        assert_eq!(
+            output.qualified_styles.len(),
+            1,
+            "the one <style> block must publish"
+        );
         assert!(
-            output.styles[0].code.contains("color: red"),
+            output.qualified_styles[0]
+                .result
+                .code()
+                .contains("color: red"),
             "got:\n{}",
-            output.styles[0].code
+            output.qualified_styles[0].result.code()
         );
     }
 
@@ -3884,7 +3856,7 @@ mod tests {
             "the composed module must contain the real script content, got:\n{code}"
         );
         assert!(
-            output.styles.is_empty(),
+            output.qualified_styles.is_empty(),
             "a style-less component must publish an EMPTY styles list, not a missing one"
         );
     }
@@ -3897,10 +3869,6 @@ mod tests {
         let output = StandaloneCompiler
             .compile(SVELTE_STYLED_SOURCE, &request, svelte_inputs())
             .expect("a styled Svelte RuntimeClient compile must not be refused");
-        assert!(
-            output.styles.is_empty(),
-            "Svelte css publishes only as a stage-qualified style"
-        );
         assert_eq!(
             output.qualified_styles.len(),
             1,

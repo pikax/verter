@@ -3872,36 +3872,17 @@ pub(super) fn publish_runtime_nodes(
             );
         }
 
-        for (i, style) in compiled.styles.iter().enumerate().filter(|_| publish_style) {
-            // The compiler-produced CSS and map already reflect the single
-            // host-selected block artifact. There is no ordinal override
-            // layer at this boundary.
-            let style_source_map: Option<Arc<str>> =
-                style.source_map.as_ref().map(|map| Arc::from(map.as_str()));
-            outputs.insert(
-                VirtualNodeKind::Style { index: i },
-                CachedVirtualFile {
-                    code: Arc::from(style.code.as_str()),
-                    source_map: style_source_map,
-                    lang: Some(style.lang.clone().unwrap_or_else(|| "css".to_string())),
-                    meta: VirtualMeta {
-                        style_index: Some(i),
-                        ..VirtualMeta::default()
-                    },
-                },
-            );
-        }
-
-        // Stage-qualified styles continue the same source-order index space;
-        // a carrier publishes into one of the two lists, never both.
-        let qualified_base = compiled.styles.len();
-        for (offset, style) in compiled
+        // Every carrier's styles arrive stage-qualified in source order, so
+        // this is the whole style index space — there is no second list to
+        // offset past. The compiler-produced CSS and map already reflect the
+        // single host-selected block artifact; there is no ordinal override
+        // layer at this boundary.
+        for (i, style) in compiled
             .qualified_styles
             .iter()
             .enumerate()
             .filter(|_| publish_style)
         {
-            let i = qualified_base + offset;
             outputs.insert(
                 VirtualNodeKind::Style { index: i },
                 CachedVirtualFile {

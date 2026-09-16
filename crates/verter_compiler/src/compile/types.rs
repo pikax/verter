@@ -453,7 +453,13 @@ pub struct VerterTemplateBlock {
 
 /// Generated output for a single `<style>` block (CSS with scoping/modules applied).
 pub struct VerterStyleBlock {
-    pub code: String,
+    /// The published stylesheet, carrying the stage, dialect, producer and
+    /// diagnostics of the bytes the Vue style cascade actually minted. The
+    /// cascade is the sole producer of this value ([`crate::style_planner::
+    /// VueStyleCascadeOutcome::result`]); nothing downstream re-derives the
+    /// stage from the bytes, which is why the bare `code` string this field
+    /// replaced could not be carried across the compiler bridge.
+    pub result: verter_css_syntax::QualifiedStyleResult,
     pub scoped: bool,
     pub lang: Option<String>,
     pub duration_ms: f64,
@@ -463,6 +469,16 @@ pub struct VerterStyleBlock {
     /// *analysis* is dialect-unconditional); the byte-level class-name
     /// *rewrite* stays CSS-only (row 19, `css/modules.rs`, untouched).
     pub module_classes: Vec<(String, String)>,
+}
+
+impl VerterStyleBlock {
+    /// The published bytes. A reader that only wants the text takes them
+    /// from the qualified result rather than from a second copy kept beside
+    /// it, so the bytes and the stage that produced them cannot disagree.
+    #[must_use]
+    pub fn code(&self) -> &str {
+        self.result.code()
+    }
 }
 
 /// A custom block extracted from the SFC (e.g., `<i18n>`, `<docs>`).

@@ -228,7 +228,6 @@ fn digest_of(
     };
     crate::standalone::direct_compile_output_digest(&crate::standalone::DirectCompileOutput {
         artifacts: publish(&plan, vec![contribution]).expect("publish"),
-        styles: Vec::new(),
         qualified_styles: Vec::new(),
         diagnostics,
     })
@@ -331,7 +330,7 @@ struct DigestFixture {
     dialect: FragmentDialect,
     source_projection_map: Option<String>,
     runtime_source_map: Option<String>,
-    styles: Vec<crate::framework_common::carrier_compiler::RuntimeStyleBlock>,
+    qualified_styles: Vec<crate::framework_common::QualifiedRuntimeStyle>,
     diagnostics: Vec<crate::compile::types::CompileDiagnostic>,
 }
 
@@ -344,7 +343,7 @@ impl DigestFixture {
             dialect: FragmentDialect::Tsx,
             source_projection_map: None,
             runtime_source_map: None,
-            styles: Vec::new(),
+            qualified_styles: Vec::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -374,8 +373,7 @@ impl DigestFixture {
         };
         crate::standalone::direct_compile_output_digest(&crate::standalone::DirectCompileOutput {
             artifacts: publish(&plan, vec![contribution]).expect("publish"),
-            styles: self.styles.clone(),
-            qualified_styles: Vec::new(),
+            qualified_styles: self.qualified_styles.clone(),
             diagnostics: self.diagnostics.clone(),
         })
     }
@@ -419,6 +417,10 @@ fn identity_digest_changes_when_the_source_projection_map_changes() {
 /// `code` on purpose: `RuntimeOutputDescriptor::generated` derives
 /// itself from the bytes it is given, so deriving it from `code` would
 /// make every `code` test also move the descriptor and prove neither.
+///
+/// `lang` names the published DIALECT, which is where the qualified style
+/// keeps its language — there is no `lang` string beside the bytes to set
+/// independently of them.
 fn style_block(
     code: &str,
     source_map: Option<&str>,
@@ -426,12 +428,19 @@ fn style_block(
     scope_hash: Option<&str>,
     has_global: bool,
     descriptor_source: &str,
-) -> crate::framework_common::carrier_compiler::RuntimeStyleBlock {
-    use crate::framework_common::carrier_compiler::{RuntimeOutputDescriptor, RuntimeStyleBlock};
-    RuntimeStyleBlock {
-        code: code.to_string(),
+) -> crate::framework_common::QualifiedRuntimeStyle {
+    use crate::framework_common::{QualifiedRuntimeStyle, RuntimeOutputDescriptor};
+    let dialect = lang.map_or(verter_css_syntax::CssDialect::Css, |lang| {
+        verter_css_syntax::CssDialect::from_lang(lang).expect("a fixture names a native dialect")
+    });
+    QualifiedRuntimeStyle {
+        result: verter_css_syntax::QualifiedStyleResult::framework_rewritten(
+            dialect,
+            code,
+            Vec::new(),
+        ),
+        consumed_stage: verter_css_syntax::StyleStage::Authored,
         source_map: source_map.map(str::to_string),
-        lang: lang.map(str::to_string),
         scope_hash: scope_hash.map(str::to_string),
         has_global,
         output_descriptor: RuntimeOutputDescriptor::generated(
@@ -443,11 +452,9 @@ fn style_block(
     }
 }
 
-fn digest_with_style(
-    style: crate::framework_common::carrier_compiler::RuntimeStyleBlock,
-) -> [u8; 32] {
+fn digest_with_style(style: crate::framework_common::QualifiedRuntimeStyle) -> [u8; 32] {
     let mut fixture = DigestFixture::runtime();
-    fixture.styles = vec![style];
+    fixture.qualified_styles = vec![style];
     fixture.digest()
 }
 
@@ -593,7 +600,7 @@ fn identity_digest_changes_when_the_style_count_changes() {
         BASE_STYLE_DESCRIPTOR_SOURCE,
     );
     let mut two = DigestFixture::runtime();
-    two.styles = vec![one.clone(), one.clone()];
+    two.qualified_styles = vec![one.clone(), one.clone()];
     assert_ne!(
         digest_with_style(one),
         two.digest(),
@@ -822,18 +829,25 @@ fn empty_output_descriptor() -> crate::framework_common::carrier_compiler::Runti
 
 /// The style-COUNT prefix, isolated, by the same section-boundary argument.
 ///
-/// Both arms encode to exactly 786 bytes once the style count is deleted. One
-/// style block whose `code` is 24 bytes is re-read as a 24-diagnostic count;
-/// that code's ninth byte is `g` (0x67 = 103), re-read as the length of the
-/// first diagnostic's code; the style's remaining bytes plus its four
-/// option/flag bytes plus its 91-byte all-empty output descriptor are re-read
-/// as that code's 103 zero content bytes; and the arm's own diagnostic count
-/// is re-read as the first diagnostic's message length.
+/// Both arms encode to the same byte stream once the style count is deleted.
+/// One style block whose `code` is 24 bytes is re-read as a 24-diagnostic
+/// count; the code's first sixteen NUL bytes are re-read as the first
+/// diagnostic's `Error` severity and its zero-length code; the code's last
+/// eight bytes spell 261 little-endian (`\u{5}\u{1}` then six NULs), re-read
+/// as that diagnostic's message length; and the style's own 129 trailing
+/// bytes — two stage ranks, the `css` dialect spelling behind its length, the
+/// two option tags and the `has_global` flag, the 91-byte all-empty output
+/// descriptor and the style's own zero diagnostic count — plus the arm's
+/// 28-diagnostic count and its first 124 blank-diagnostic bytes are re-read
+/// as those 261 message bytes.
 ///
-/// Every literal is load-bearing — the 103, the 24, the `g`, the 8/15 NUL
-/// split, `Error` on all twenty-four, `span: None` throughout, and an
-/// all-empty descriptor with both `utf8_byte_len` zero. Change one and re-run
-/// the plant before believing the test.
+/// Every literal is load-bearing — the 24, the 261, the 16/2/6 NUL split,
+/// `Error` on every diagnostic, `span: None` throughout, an all-empty
+/// descriptor with both `utf8_byte_len` zero, both stages `Authored`, a `css`
+/// dialect and no style-result diagnostics. 24 diagnostics against 28 is what
+/// balances the two tails: 600 + 261 = 161 + 25 × 28. Change one and re-run
+/// the plant before believing the test — an `assert_ne!` over a plant that no
+/// longer aligns passes while proving nothing.
 #[test]
 fn identity_digest_changes_when_a_style_block_is_replaced_by_diagnostic_bytes() {
     use crate::compile::types::{CompileDiagnostic, CompileDiagnosticSeverity};
@@ -846,34 +860,48 @@ fn identity_digest_changes_when_a_style_block_is_replaced_by_diagnostic_bytes() 
         }
     }
     // No styles; the first diagnostic carries the bytes the other arm spends on
-    // a style block.
+    // a style block. The message is the style's 129-byte tail, then the
+    // 28-diagnostic count, then 124 zero bytes of blank diagnostics.
+    let mut absorbed_message = String::new();
+    absorbed_message.push_str(&"\u{0}".repeat(16)); // both stage ranks
+    absorbed_message.push_str("\u{3}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}"); // `css`.len()
+    absorbed_message.push_str("css");
+    absorbed_message.push_str(&"\u{0}".repeat(3)); // source map, scope hash, has_global
+    absorbed_message.push_str(&"\u{0}".repeat(91)); // the all-empty output descriptor
+    absorbed_message.push_str(&"\u{0}".repeat(8)); // the style result's own diagnostic count
+    absorbed_message.push_str("\u{1c}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}"); // 28 diagnostics
+    absorbed_message.push_str(&"\u{0}".repeat(124)); // four blank diagnostics, then 24 bytes
+    assert_eq!(absorbed_message.len(), 261, "the plant is byte-counted");
+
     let mut without_style = DigestFixture::runtime();
     let mut absorbed = vec![CompileDiagnostic {
         severity: CompileDiagnosticSeverity::Error,
-        code: "\u{0}".repeat(103),
-        message: "\u{0}".repeat(24),
+        code: String::new(),
+        message: absorbed_message,
         span: None,
     }];
     absorbed.extend(std::iter::repeat_with(blank_diagnostic).take(23));
     without_style.diagnostics = absorbed;
 
-    // One style block, twenty-four minimal diagnostics.
+    // One style block, twenty-eight minimal diagnostics.
     let mut with_style = DigestFixture::runtime();
-    with_style.styles = vec![
-        crate::framework_common::carrier_compiler::RuntimeStyleBlock {
-            code: format!("{}g{}", "\u{0}".repeat(8), "\u{0}".repeat(15)),
-            source_map: None,
-            lang: None,
-            scope_hash: None,
-            has_global: false,
-            // Built as a literal, NOT through `RuntimeOutputDescriptor::generated`:
-            // that constructor derives sha256 tokens from the bytes it is handed,
-            // and a 71-character token in any slot destroys the alignment. Every
-            // string here must be empty and every length zero.
-            output_descriptor: empty_output_descriptor(),
-        },
-    ];
-    with_style.diagnostics = std::iter::repeat_with(blank_diagnostic).take(24).collect();
+    with_style.qualified_styles = vec![crate::framework_common::QualifiedRuntimeStyle {
+        result: verter_css_syntax::QualifiedStyleResult::authored(
+            verter_css_syntax::CssDialect::Css,
+            format!("{}\u{5}\u{1}{}", "\u{0}".repeat(16), "\u{0}".repeat(6)),
+            Vec::new(),
+        ),
+        consumed_stage: verter_css_syntax::StyleStage::Authored,
+        source_map: None,
+        scope_hash: None,
+        has_global: false,
+        // Built as a literal, NOT through `RuntimeOutputDescriptor::generated`:
+        // that constructor derives sha256 tokens from the bytes it is handed,
+        // and a 71-character token in any slot destroys the alignment. Every
+        // string here must be empty and every length zero.
+        output_descriptor: empty_output_descriptor(),
+    }];
+    with_style.diagnostics = std::iter::repeat_with(blank_diagnostic).take(28).collect();
 
     assert_ne!(
         without_style.digest(),
