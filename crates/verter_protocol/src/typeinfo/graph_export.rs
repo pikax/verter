@@ -78,16 +78,17 @@ use crate::typeinfo::graph::{
 };
 use crate::verter::v1::{
     graph_literal_value, graph_object_construction_effect, graph_property_key, graph_query_error,
-    graph_type_node, GraphAliasInstantiation, GraphArray, GraphCompilerIntrinsicTypeOp,
-    GraphConditional, GraphCycle, GraphDiagnostic, GraphIndexSignature, GraphIndexedAccess,
-    GraphInfer, GraphIntersection, GraphIntrinsicApplication, GraphKeyOf, GraphLiteral,
-    GraphLiteralValue, GraphMapped, GraphObject, GraphObjectConstructionEffect,
-    GraphObjectIndexEffect, GraphObjectMember, GraphObjectNamedEffect, GraphObjectSignatureEffect,
-    GraphObjectSpreadEffect, GraphObjectSpreadProgram, GraphOpaque, GraphPrimitive,
-    GraphPropertyKey, GraphQueryError, GraphQueryErrorBudgetExceeded, GraphQueryErrorOther,
-    GraphReference, GraphSignature, GraphSignatureParameter, GraphStringTable, GraphSymbolNode,
-    GraphTemplateLiteral, GraphTuple, GraphTupleElement, GraphTypeNode, GraphTypeOf,
-    GraphTypeParameter, GraphUnion, SemanticTypeGraph,
+    graph_type_node, CompilerIntrinsicTypeOp as CompilerIntrinsicTypeOpWire,
+    GraphAliasInstantiation, GraphArray, GraphConditional, GraphCycle, GraphDiagnostic,
+    GraphIndexSignature, GraphIndexedAccess, GraphInfer, GraphIntersection,
+    GraphIntrinsicApplication, GraphKeyOf, GraphLiteral, GraphLiteralValue, GraphMapped,
+    GraphObject, GraphObjectConstructionEffect, GraphObjectIndexEffect, GraphObjectMember,
+    GraphObjectNamedEffect, GraphObjectSignatureEffect, GraphObjectSpreadEffect,
+    GraphObjectSpreadProgram, GraphOpaque, GraphPrimitive, GraphPropertyKey, GraphQueryError,
+    GraphQueryErrorBudgetExceeded, GraphQueryErrorOther, GraphReference, GraphSignature,
+    GraphSignatureParameter, GraphStringTable, GraphSymbolNode, GraphTemplateLiteral, GraphTuple,
+    GraphTupleElement, GraphTypeNode, GraphTypeOf, GraphTypeParameter, GraphUnion,
+    SemanticTypeGraph,
 };
 
 /// Hard ceiling on the node axis of a validated bounded export. A budget
@@ -1075,9 +1076,9 @@ impl<'a> GraphExporter<'a> {
 /// Exhaustive on purpose: a new compiler intrinsic must fail to compile here
 /// until its wire identity is stated. UNSPECIFIED is never produced — it
 /// exists so a missing op cannot decode as a real one.
-fn intrinsic_op_kind(op: CompilerIntrinsicTypeOp) -> GraphCompilerIntrinsicTypeOp {
+fn intrinsic_op_kind(op: CompilerIntrinsicTypeOp) -> CompilerIntrinsicTypeOpWire {
     match op {
-        CompilerIntrinsicTypeOp::Awaited => GraphCompilerIntrinsicTypeOp::Awaited,
+        CompilerIntrinsicTypeOp::Awaited => CompilerIntrinsicTypeOpWire::Awaited,
     }
 }
 

@@ -83,7 +83,10 @@ pub use wire::GraphAmbientNamespace as AmbientNamespaceNode;
 pub use wire::GraphArray as ArrayNode;
 pub use wire::GraphBudgetExceededKind as BudgetExceededKindWire;
 pub use wire::GraphClass as ClassNode;
-pub use wire::GraphCompilerIntrinsicTypeOp as CompilerIntrinsicTypeOp;
+// The SHARED compiler-intrinsic op vocabulary (compiler_intrinsics.proto),
+// referenced by both this graph and component-meta. Re-exported under its own
+// name — there is no `Graph*` prefix to strip.
+pub use wire::CompilerIntrinsicTypeOp;
 pub use wire::GraphConditional as ConditionalNode;
 pub use wire::GraphConditionalResolution as ConditionalResolution;
 pub use wire::GraphContextualType as ContextualTypeNode;

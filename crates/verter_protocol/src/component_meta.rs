@@ -2257,9 +2257,9 @@ fn graph_node_to_proto(node: GraphNode) -> TypeNode {
         }),
         // The op rides as a closed enum, never a `name_id` — an intrinsic
         // must not reach the string table or be resolvable as a name.
-        // `GraphNode` already carries the shared op code, and the
-        // component-meta `IntrinsicTypeOp` numbering matches the typeinfo
-        // graph's, so the code flows through unchanged.
+        // `GraphNode` already carries the shared op code, and both wire
+        // surfaces reference the SAME `CompilerIntrinsicTypeOp`, so the code
+        // flows through unchanged.
         GraphNode::IntrinsicApplication { op, arguments } => {
             type_node::Kind::IntrinsicApplication(IntrinsicApplicationNode {
                 op: op as i32,

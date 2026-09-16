@@ -12,7 +12,7 @@ import {
   FrameworkSurfacePayloadSchema,
   FrameworkSurfaceRequestSchema,
   GraphDiagnosticSeverity,
-  GraphCompilerIntrinsicTypeOp,
+  CompilerIntrinsicTypeOp,
   GraphPrimitiveKind,
   GraphProjectionMode,
   GraphReductionDemand,
@@ -476,7 +476,7 @@ describe("typeinfo proto TS bindings", () => {
         kind: {
           case: "intrinsicApplication",
           value: {
-            op: GraphCompilerIntrinsicTypeOp.AWAITED,
+            op: CompilerIntrinsicTypeOp.AWAITED,
             argumentNodeIds: [17],
           },
         },

@@ -26,7 +26,8 @@ export const NODE_RECURSIVE_REF = 21;
 export const NODE_SYNTHETIC_SLOT_BINDING = 22;
 export const NODE_INTRINSIC_APPLICATION = 23;
 
-// Mirrors the proto `IntrinsicTypeOp`. 0 is UNSPECIFIED and is never a real
+// Mirrors the shared proto `CompilerIntrinsicTypeOp`. 0 is UNSPECIFIED and is
+// never a real
 // operation — an unknown op must not decode as `Awaited`.
 export const INTRINSIC_OP_UNSPECIFIED = 0;
 export const INTRINSIC_OP_AWAITED = 1;

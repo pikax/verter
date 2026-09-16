@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package verter.v1;
 
+import "verter/v1/compiler_intrinsics.proto";
+
 // ---------------------------------------------------------------------------
 // FFI request/response DTOs for typeinfo session entry points.
 //
@@ -284,18 +286,8 @@ message GraphObjectSpreadProgram {
 //
 // Operands are graph node ids, preserving DAG identity and sharing.
 message GraphIntrinsicApplication {
-  GraphCompilerIntrinsicTypeOp op = 1;
+  CompilerIntrinsicTypeOp op = 1;
   repeated uint32 argument_node_ids = 2;
-}
-
-// Mirrors the Rust `verter_type_expr::CompilerIntrinsicTypeOp` vocabulary.
-//
-// UNSPECIFIED owns zero deliberately: a missing or unknown operation identity
-// must never decode as a real operation. Producers never emit UNSPECIFIED;
-// decoders treat it as malformed rather than guessing.
-enum GraphCompilerIntrinsicTypeOp {
-  GRAPH_COMPILER_INTRINSIC_TYPE_OP_UNSPECIFIED = 0;
-  GRAPH_COMPILER_INTRINSIC_TYPE_OP_AWAITED = 1;
 }
 
 // One lossless source-ordered object-construction effect.

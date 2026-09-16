@@ -80,7 +80,6 @@ export {
   GraphObjectMemberKind,
   GraphOperation,
   GraphOriginEdgeKind,
-  GraphCompilerIntrinsicTypeOp,
   GraphPrimitiveKind,
   GraphProjectionKind,
   GraphProjectionMode,
@@ -97,6 +96,11 @@ export {
   GraphUnsupportedConstruct,
   GraphVariance,
 } from "./gen/verter/v1/typeinfo_pb.js";
+
+// The SHARED compiler-intrinsic op vocabulary lives in its own generated
+// module (compiler_intrinsics.proto) and is referenced by BOTH envelopes, so
+// it is re-exported from there rather than through either envelope.
+export { CompilerIntrinsicTypeOp } from "./gen/verter/v1/compiler_intrinsics_pb.js";
 
 export type {
   SemanticTypeGraph,
