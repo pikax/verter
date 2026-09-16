@@ -309,10 +309,8 @@ bounds its custom import/invocation count by them, and session
 publication populates `Custom` virtual nodes from their role/lang/
 content state (bytes from the host's sealed block-content selection
 when one was admitted; a content-less state publishes no node, never an
-empty-text fallback). The legacy `RuntimeCustomBlock` list is an
-unfilled declaration retained only for terminal deletion. A malformed
-block (e.g. an empty `lang`), facts read
-from bytes other than the registered carrier, or an attachment refusal
+empty-text fallback). A malformed block (e.g. an empty `lang`), facts
+read from bytes other than the registered carrier, or an attachment refusal
 publishes no descriptor and adds an error diagnostic
 (`vue-runtime-custom-block-refused`, located on the block when it names
 one), which fails the compile rather than silently dropping the set.
