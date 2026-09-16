@@ -244,10 +244,6 @@ fn assert_runtime_parity(via_backend: &DirectCompileOutput, via_standalone: &Dir
         assert_eq!(backend.dialect(), standalone.dialect());
     }
     assert_eq!(via_backend.diagnostics, via_standalone.diagnostics);
-    assert!(
-        via_backend.styles.is_empty() && via_standalone.styles.is_empty(),
-        "Svelte css publishes only as a stage-qualified style"
-    );
     assert_eq!(
         via_backend.qualified_styles.len(),
         via_standalone.qualified_styles.len()
@@ -940,7 +936,7 @@ fn injected_css_request_inlines_styles_and_publishes_no_external_artifact() {
         "injected css must emit append_styles:\n{js}"
     );
     assert!(
-        output.qualified_styles.is_empty() && output.styles.is_empty(),
+        output.qualified_styles.is_empty(),
         "injected css must not publish an external style artifact, got {:?}",
         output.qualified_styles
     );

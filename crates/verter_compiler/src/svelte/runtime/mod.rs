@@ -19,9 +19,9 @@
 //!
 //! [`compile_client`] drives this end-to-end and is wired into the Svelte carrier's
 //! `compile_bundle` (`crate::svelte::carrier`): a supported runes component
-//! populates `bundle.main.body_code` and the compile artifact set (so
+//! stages `bundle.main` as the complete compile-artifact handoff (so
 //! `has_runtime_surface()` becomes true and the host emits the `Main` virtual
-//! node from the already-assembled body), and every unsupported surface FAILS
+//! node from its staged root artifact), and every unsupported surface FAILS
 //! CLOSED with a typed [`client::UnsupportedSvelteRuntimeSurface`] carrying its
 //! owning vertical. The expression / script emission routes its source-derived
 //! rewrites through [`CodeTransform`](crate::code_transform::CodeTransform); the

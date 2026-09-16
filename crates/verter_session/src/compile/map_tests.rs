@@ -706,17 +706,21 @@ fn a_fragment_not_ending_in_a_newline_receives_no_boundary_segment() {
 /// carries exactly the fragment segments plus the boundary.
 #[test]
 fn assembly_owned_scaffolding_contributes_no_segments() {
-    use verter_compiler::framework_common::{RuntimeCustomBlock, RuntimeStyleBlock};
+    use verter_compiler::framework_common::{QualifiedRuntimeStyle, RuntimeCustomBlock};
 
     let compiled = RuntimeCompileOutput {
         script: Some(script(
             "const x = 1\n",
             &map_json("[\"Comp.vue\"]", "[]", "AACA"),
         )),
-        styles: vec![RuntimeStyleBlock {
-            code: ".a{}".to_string(),
+        qualified_styles: vec![QualifiedRuntimeStyle {
+            result: verter_css_syntax::QualifiedStyleResult::framework_rewritten(
+                verter_css_syntax::CssDialect::Css,
+                ".a{}",
+                Vec::new(),
+            ),
+            consumed_stage: verter_css_syntax::StyleStage::Authored,
             source_map: None,
-            lang: None,
             scope_hash: None,
             has_global: false,
             output_descriptor: descriptor(".a{}"),

@@ -271,15 +271,15 @@ pub(crate) fn assemble_vue_main_module_with_axes(
         ssr: profile.ssr,
         decoration: vue_main_decoration_from_axes(
             canonical_id,
-            compiled.styles.len(),
+            compiled.qualified_styles.len(),
             compiled.custom_blocks.len(),
             meta,
             profile,
         ),
     })?;
     Ok(AssembledVueModule {
-        code: assembled.code.to_string(),
-        source_map: assembled.source_map,
-        lang: assembled.lang,
+        code: assembled.code().to_string(),
+        source_map: assembled.source_map().map(str::to_string),
+        lang: assembled.lang().to_string(),
     })
 }

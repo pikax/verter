@@ -161,11 +161,10 @@ fn run_pass() -> PassResult {
         hasher.update([0]);
         hasher.update(code.as_bytes());
         hasher.update([0]);
-        let style_count = output.styles.len() + output.qualified_styles.len();
+        let style_count = output.qualified_styles.len();
         hasher.update(style_count.to_string().as_bytes());
         hasher.update(*b"\n");
         black_box(code);
-        black_box(&output.styles);
         black_box(&output.qualified_styles);
     }
     PassResult {
