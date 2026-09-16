@@ -296,6 +296,8 @@ fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
         SemanticQueryKey::FlowReturn(_) => "FlowReturn",
         SemanticQueryKey::ResolveCall(_) => "ResolveCall",
         SemanticQueryKey::ClassifyTruthinessDomain { .. } => "ClassifyTruthinessDomain",
+        SemanticQueryKey::AwaitedNormalize { .. } => "AwaitedNormalize",
+        SemanticQueryKey::AsyncReturnPayload { .. } => "AsyncReturnPayload",
     }
 }
 

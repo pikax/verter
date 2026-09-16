@@ -2753,7 +2753,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return self.build_project_object_spread(*program, selector, *context);
             }
             let build_node = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-            if matches!(&key_for_build, SemanticQueryKey::Instantiate(_)) {
+            if semantic_query_consumes_connected_work(&key_for_build) {
                 if let Err(reasons) = self.charge_connected_work() {
                     let carrier = self.connected_limit_carrier(&key_for_build, reasons);
                     self.fold_local_partial_completeness(reasons);
@@ -2890,6 +2890,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     args,
                     context,
                 } => self.build_template_literal_reduce(pattern, args, *context),
+                // AwaitedNormalize / AsyncReturnPayload — LIVE producers,
+                // the two awaited relations the checker actually has. They
+                // are node-domain builds like TemplateLiteralReduce, NOT
+                // typed-value classifiers, so they route here and their
+                // composite arms re-enter their own family through
+                // `execute_read`.
+                SemanticQueryKey::AwaitedNormalize { operand, context } => {
+                    self.build_awaited_normalize(*operand, *context)
+                }
+                SemanticQueryKey::AsyncReturnPayload { operand, context } => {
+                    self.build_async_return_payload(*operand, *context)
+                }
                 // ResolveOverloadSet — LIVE producer. Projects the callee's
                 // ordered VISIBLE signature group (build_typeof's visibility
                 // rule already hid trailing implementations where the callee
@@ -3559,6 +3571,28 @@ fn finalise_traced_build_output<T>(
     output
 }
 
+/// Which query kinds consume a unit of the CONNECTED-WORK envelope on
+/// every cold build.
+///
+/// `Instantiate` has always charged here: a generic expansion storm is
+/// bounded by the connected envelope, not by any per-kind fuse. The two
+/// awaited relations join it because their composite arms RE-ENTER their
+/// own family — a union of N arms over a carrier that nests M deep is
+/// N x M dispatches, exactly the shape the envelope exists to bound.
+///
+/// Charging at the QUERY level is deliberate, and is why the recursive
+/// arms carry no local [`ConnectedWorkCredit`]: that type is for a local
+/// explicit structural worklist, and pairing it with a per-arm family
+/// re-entry would charge the same work twice.
+fn semantic_query_consumes_connected_work(key: &SemanticQueryKey) -> bool {
+    matches!(
+        key,
+        SemanticQueryKey::Instantiate(_)
+            | SemanticQueryKey::AwaitedNormalize { .. }
+            | SemanticQueryKey::AsyncReturnPayload { .. }
+    )
+}
+
 /// Aggregate request work budget gate.
 ///
 /// Returns `true` for every `SemanticQueryKey` kind that counts toward
@@ -3601,6 +3635,11 @@ fn semantic_query_counts_toward_projection_budget(key: &SemanticQueryKey) -> boo
             | SemanticQueryKey::TemplateLiteralReduce { .. }
             | SemanticQueryKey::TypeOf { .. }
             | SemanticQueryKey::ProjectObjectSpread { .. }
+            // Both awaited relations distribute over unions and unwrap
+            // nested carriers by re-entering their own family, so an
+            // awaited-dominated storm is the same expansion shape.
+            | SemanticQueryKey::AwaitedNormalize { .. }
+            | SemanticQueryKey::AsyncReturnPayload { .. }
     )
 }
 
@@ -4075,6 +4114,25 @@ pub trait DispatchHost {
     /// scope A can shadow a built-in that is not shadowed in scope B.
     fn utility_source(&self, base: SemanticNodeId, name: &str) -> UtilitySource;
 
+    /// The PROVEN builtin-utility identity for `name` in `base`'s scope —
+    /// `None` when the name is shadowed by a userland declaration or is not
+    /// a builtin utility at all.
+    ///
+    /// The TYPED peer of [`Self::utility_source`]. The adapter already
+    /// resolves name -> identity behind the shadowing gate to answer that
+    /// method, so this hands dispatch builders a DECIDED identity and they
+    /// never re-decide on a spelling. Builders are forbidden from calling
+    /// `BuiltinUtility::from_name` themselves — the
+    /// `ax_hybrid_carrier_stop_uses_demand_context_not_name_predicate`
+    /// guard fails `build.rs` for using a nominal carrier predicate — and
+    /// this is the seam that makes that unnecessary rather than merely
+    /// inconvenient.
+    fn resolved_builtin_utility(
+        &self,
+        base: SemanticNodeId,
+        name: &str,
+    ) -> Option<verter_semantic::analysis::type_solver::builtin::BuiltinUtility>;
+
     /// Classify whether `name` resolves locally or through an import in
     /// `base`'s scope. Used by lazy field expansion to keep imported
     /// object-like refs symbolic until a deeper route is requested.
@@ -4240,6 +4298,26 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
             UtilitySource::Builtin
         } else {
             UtilitySource::Unknown
+        }
+    }
+
+    fn resolved_builtin_utility(
+        &self,
+        base: SemanticNodeId,
+        name: &str,
+    ) -> Option<verter_semantic::analysis::type_solver::builtin::BuiltinUtility> {
+        use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+        // Gated on the SAME classification, so a shadowed name can never
+        // yield an identity: a userland `type Awaited<T>` classifies
+        // `Shadowed` and resolves to `None` here, which is what stops a
+        // declaration acquiring compiler-native semantics by spelling.
+        //
+        // An SDK-declared `= intrinsic` classifies `Builtin` without having a
+        // `BuiltinUtility` variant; `from_name` answers `None` for those and
+        // the caller falls through to its ordinary utility handling.
+        match self.utility_source(base, name) {
+            UtilitySource::Builtin => BuiltinUtility::from_name(name),
+            UtilitySource::Shadowed | UtilitySource::Unknown => None,
         }
     }
 

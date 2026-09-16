@@ -81,7 +81,7 @@
     {
       "file": "typescript_rules.rs",
       "function": "typescript_rules_awaited_recursively_unwraps_promises",
-      "block": "U2.QUERY_VALUE_DOMAIN",
+      "block": "U2.UTILITIES",
       "capability": "TypeScriptRules",
       "status": "lifted"
     },
@@ -109,28 +109,28 @@
     {
       "file": "utility_top_bottom.rs",
       "function": "utility_top_bottom_utb15_awaited_unknown_is_unknown",
-      "block": "U2.QUERY_VALUE_DOMAIN",
+      "block": "U2.UTILITIES",
       "capability": "UtilityComposition",
       "status": "lifted"
     },
     {
       "file": "utility_top_bottom.rs",
       "function": "utility_top_bottom_utb17_awaited_null_is_null",
-      "block": "U2.QUERY_VALUE_DOMAIN",
+      "block": "U2.UTILITIES",
       "capability": "UtilityComposition",
       "status": "lifted"
     },
     {
       "file": "utility_top_bottom.rs",
       "function": "utility_top_bottom_utb18_awaited_undefined_is_undefined",
-      "block": "U2.QUERY_VALUE_DOMAIN",
+      "block": "U2.UTILITIES",
       "capability": "UtilityComposition",
       "status": "lifted"
     },
     {
       "file": "utility_top_bottom.rs",
       "function": "utility_top_bottom_utb19_awaited_nested_promise_is_inner_primitive",
-      "block": "U2.QUERY_VALUE_DOMAIN",
+      "block": "U2.UTILITIES",
       "capability": "UtilityComposition",
       "status": "lifted"
     },

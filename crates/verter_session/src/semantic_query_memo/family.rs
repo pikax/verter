@@ -545,6 +545,37 @@ pub(super) enum FamilyKey {
     ClassifyTruthinessDomain {
         subject: SemanticNodeId,
     },
+    /// Mode-erased `AwaitedNormalize` identity. The interned `operand` is
+    /// the identity core; the context's `{R, T, L, J}` env dims ride here ON
+    /// the family key (env hashes, R6-clean — no content or version hash).
+    /// LIVE producer.
+    ///
+    /// INLINE, not boxed: the five fields measure well under the enum's
+    /// 136B envelope, which is driven by the env-heavy `Instantiate`
+    /// variant. `family_key_does_not_embed_relate_memo_key_by_value` is the
+    /// guard that holds that line.
+    AwaitedNormalize {
+        operand: SemanticNodeId,
+        resolve_env_hash: crate::semantic_query::HashValue,
+        type_env_hash: crate::semantic_query::HashValue,
+        lib_env_hash: crate::semantic_query::HashValue,
+        project_identity: u32,
+    },
+    /// Mode-erased `AsyncReturnPayload` identity — the same shape as
+    /// [`Self::AwaitedNormalize`] and deliberately a SEPARATE variant.
+    ///
+    /// The two relations answer the same operand differently (a naked type
+    /// parameter reduces to `Awaited<T>` under normalize and to `T` under
+    /// payload), so one family identity for both would let an async
+    /// function's published return warm-hit an `await` expression's answer.
+    /// The separation IS the correctness property, not a naming choice.
+    AsyncReturnPayload {
+        operand: SemanticNodeId,
+        resolve_env_hash: crate::semantic_query::HashValue,
+        type_env_hash: crate::semantic_query::HashValue,
+        lib_env_hash: crate::semantic_query::HashValue,
+        project_identity: u32,
+    },
     /// Mode-erased `FlowReturn` identity. The family fields are EXACTLY
     /// the full [`crate::semantic_query::FlowReturnKey`] — function slot
     /// identity (declaration slot + part + overload ordinal), normalized
@@ -717,6 +748,8 @@ impl FamilyKey {
             FamilyKey::FlowReturn { .. } => "FlowReturn",
             FamilyKey::ResolveCall { .. } => "ResolveCall",
             FamilyKey::ClassifyTruthinessDomain { .. } => "ClassifyTruthinessDomain",
+            FamilyKey::AwaitedNormalize { .. } => "AwaitedNormalize",
+            FamilyKey::AsyncReturnPayload { .. } => "AsyncReturnPayload",
         }
     }
 
@@ -774,6 +807,9 @@ impl FamilyKey {
             FamilyKey::ClassifyMaterializationCycleGate { .. } => 4,
             FamilyKey::ClassifyTruthinessDomain { .. } => 4,
             FamilyKey::ResolveCall { .. } => 4,
+            // Content-light modeless reduction families keep the floor.
+            FamilyKey::AwaitedNormalize { .. } => 4,
+            FamilyKey::AsyncReturnPayload { .. } => 4,
         }
     }
 }
@@ -1994,6 +2030,32 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         // slot.
         SemanticQueryKey::ClassifyTruthinessDomain { subject } => (
             FamilyKey::ClassifyTruthinessDomain { subject: *subject },
+            ModeSlot::Single,
+        ),
+        // AwaitedNormalize / AsyncReturnPayload — LIVE producers. Neither
+        // carries a projection mode → the `Single` slot. The interned
+        // operand is the identity core and the `{R, T, L, J}` env dims ride
+        // on the family key (neither key has a slot to carry them). The two
+        // map to DISTINCT families by construction: same operand, same env,
+        // different relation, different answer.
+        SemanticQueryKey::AwaitedNormalize { operand, context } => (
+            FamilyKey::AwaitedNormalize {
+                operand: *operand,
+                resolve_env_hash: context.resolve_env_hash,
+                type_env_hash: context.type_env_hash,
+                lib_env_hash: context.lib_env_hash,
+                project_identity: context.project_identity,
+            },
+            ModeSlot::Single,
+        ),
+        SemanticQueryKey::AsyncReturnPayload { operand, context } => (
+            FamilyKey::AsyncReturnPayload {
+                operand: *operand,
+                resolve_env_hash: context.resolve_env_hash,
+                type_env_hash: context.type_env_hash,
+                lib_env_hash: context.lib_env_hash,
+                project_identity: context.project_identity,
+            },
             ModeSlot::Single,
         ),
     }

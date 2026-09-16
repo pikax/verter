@@ -1771,6 +1771,20 @@ impl SemanticGraphStore {
     pub fn record_instantiate(&self) {
         self.stats.instantiate_count.fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped by `build_awaited_normalize` on a COLD build only. A warm
+    /// family hit returns before the builder runs, so this counter is the
+    /// evidence that the awaited relation memoizes.
+    pub fn record_awaited_normalize(&self) {
+        self.stats
+            .awaited_normalize_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Bumped by `build_async_return_payload` on a COLD build only.
+    pub fn record_async_return_payload(&self) {
+        self.stats
+            .async_return_payload_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
     pub fn record_conditional_decided(&self) {
         self.stats
             .conditional_decided_count

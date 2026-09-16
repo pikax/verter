@@ -458,6 +458,8 @@ semantic_query_names! {
     FlowReturn,
     ResolveCall,
     ClassifyTruthinessDomain,
+    AwaitedNormalize,
+    AsyncReturnPayload,
 }
 
 /// Deterministic identifier for a generated TS7 oracle snapshot. Closed
@@ -715,7 +717,18 @@ struct BlockContractRow {
 /// - the locator-shape body lowering (`LowerLocator`) at
 ///   `U2.QUERY_VALUE_DOMAIN` — it extends the foundational decl/value key
 ///   surface that block owns (the strictly-unsubstituted authored-body
-///   shape `Instantiate` composes; no manifest row consumes it).
+///   shape `Instantiate` composes; no manifest row consumes it);
+/// - the awaited-type normalization (`AwaitedNormalize`) at
+///   `U2.UTILITIES` — `Awaited<T>` is a builtin utility and this key IS
+///   its reduction relation, so the utility-graph reduction mechanism
+///   produces it (the block's prereqs — value domain, relation,
+///   indexed access, mapped/template — are exactly what the reducer
+///   consumes); no manifest row consumes it;
+/// - the async-function return payload (`AsyncReturnPayload`) at
+///   `U6.FLOW_RETURN_SUBSTRATE` — there is no TS `AsyncReturnPayload<T>`
+///   utility: this is the checker's async publication rule, produced by
+///   the flow return wrap materialization alongside `FlowReturn` itself;
+///   no manifest row consumes it.
 fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
     use SemanticQueryName::*;
     use TypeInfoParityBlockId::*;
@@ -752,6 +765,10 @@ fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
         // type algebra's own key: the algebra layer owns truthiness-domain
         // classification, and the flow narrowing frames CONSUME the fact.
         ClassifyTruthinessDomain => U2CanonicalTypeAlgebra,
+        // `Awaited<T>` is a builtin utility; this key is its reduction.
+        AwaitedNormalize => U2Utilities,
+        // The async publication rule, produced by the return wrap.
+        AsyncReturnPayload => U6FlowReturnSubstrate,
     }
 }
 
@@ -2078,6 +2095,19 @@ fn key_owning_block_owner_mapping_is_pinned_closed_set() {
         // truthiness-domain classification; the flow narrowing
         // truthiness frame consumes the fact and holds no private rule.
         (ClassifyTruthinessDomain, U2CanonicalTypeAlgebra),
+        // The awaited-type normalization at U2.UTILITIES — the utility-graph
+        // reduction mechanism produces it (`Awaited<T>` is a builtin utility
+        // and this key is its relation). NOT U2.QUERY_VALUE_DOMAIN: that is
+        // where the reduction USED to live, inside `Instantiate`'s builtin
+        // arm, and this table pins the PRODUCING mechanism, not the prior
+        // home.
+        (AwaitedNormalize, U2Utilities),
+        // The async-function return payload at U6.FLOW_RETURN_SUBSTRATE —
+        // the flow return wrap produces it. NOT U2.UTILITIES: it has no
+        // utility spelling, and NOT U6.ASYNC_GENERATOR: the async GENERATOR
+        // takes `AwaitedNormalize` for its iteration parameters, which is
+        // exactly the distinction these two families exist to keep.
+        (AsyncReturnPayload, U6FlowReturnSubstrate),
     ];
 
     // DISCRIMINATING per-key pin: a wrong `key_owning_block` arm FAILS here.

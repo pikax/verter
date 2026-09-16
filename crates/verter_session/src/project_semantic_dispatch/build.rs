@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
 use verter_semantic::analysis::type_solver::host::{ResolvedRootIdentity, UtilitySource};
 use verter_semantic::analysis::type_solver::PreparedTypeDecl;
 use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
@@ -3202,9 +3203,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // direct-decl case: CarrierProps's own body is stamped below
             // and only its `extends`-reached members go through this
             // utility path as structural.)
+            // The typed builtin identity, decided by the ADAPTER behind the
+            // same shadowing/resolution gate that just proved this name is the
+            // compiler-provided utility. Builders never resolve a spelling
+            // themselves; carrying the proof is the whole point.
+            let builtin_utility = adapter.resolved_builtin_utility(base, decl_name.as_ref());
             let (utility_result, utility_fence, utility_is_partial) = self.build_builtin_utility(
                 base,
                 decl_name.as_ref(),
+                builtin_utility,
                 args,
                 context.into_structural_provenance(),
             );
@@ -5155,6 +5162,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         base: SemanticNodeId,
         name: &str,
+        // The PROVEN builtin identity, resolved by the caller AFTER the
+        // shadowing/resolution gate. Semantic routing reads this; `name`
+        // survives only for the origin-edge parameter labels.
+        utility: Option<BuiltinUtility>,
         args: &Arc<[SemanticNodeId]>,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> (QueryResult<SemanticNodeId>, DepSignature, bool) {
@@ -5218,6 +5229,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 );
             }
         };
+
+        // ---- the Awaited relation, by PROVEN IDENTITY ----
+        // Decided by the typed `BuiltinUtility` the caller proved after the
+        // shadowing/resolution gate — never by spelling. A userland
+        // `type Awaited<T>` never reaches here at all (the gate classifies it
+        // `UtilitySource::Shadowed`), and the literal-string arm that used to
+        // own this reduction is gone, so a declaration cannot acquire
+        // compiler-native semantics by being named `Awaited`.
+        //
+        // The reduction itself belongs to the shared family, so an authored
+        // `Awaited<T>` read and an `await x` position resolve through the SAME
+        // memo entry instead of two reducers that have to agree.
+        if matches!(utility, Some(BuiltinUtility::Awaited)) && args.len() == 1 {
+            let read = self.execute_read(SemanticQueryKey::AwaitedNormalize {
+                operand: args[0],
+                context: self.structural_reduce_context(),
+            });
+            let result = match read.value {
+                QueryResult::Value(node) => node,
+                _ => self.opaque(QueryError::Miss),
+            };
+            record_utility_edges(result);
+            return (QueryResult::Value(result), fence, false);
+        }
 
         // Mapper-based utilities route through `SemanticQueryKey::MappedType`.
         // The mapper's `value_expr` is an `Opaque(Miss)` shell marker, never
@@ -6019,20 +6054,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (QueryResult::Value(result), fence, false)
             }
 
-            // ---- Promise utility ----
-            // `Awaited<T>` recursively unwraps `Promise<...>` carriers
-            // (recognised by registry lookup on the carrier's declaration
-            // identity), preserves nullish inputs (the first conditional
-            // clause `T extends null | undefined ? T : ...`), distributes
-            // over unions, and passes settled non-thenables through. See
-            // [`Self::reduce_awaited`] for the full per-shape contract and
-            // the structural-thenable scope boundary.
-            "Awaited" if args.len() == 1 => {
-                let result = self.reduce_awaited(args[0], context, 0, AwaitedDisposition::Utility);
-                record_utility_edges(result);
-                (QueryResult::Value(result), fence, false)
-            }
-
             // ---- Deferred utilities ----
             // Unknown / not-yet-implemented utilities emit an
             // `Opaque(Miss)` shell anchored to the instantiate identity so
@@ -6179,169 +6200,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.runtime_nominal_identity(identity),
             Some(crate::intrinsic_registry::RuntimeNominal::Promise)
         )
-    }
-
-    /// The checker's awaited-type rule for a value about to be PUBLISHED,
-    /// as opposed to an authored `Awaited<T>` utility read. The two differ
-    /// on exactly one shape -- a naked type parameter -- and agree
-    /// everywhere else, so they share this reducer rather than forking it.
-    ///
-    /// `None` is the honest refusal (a circular carrier that exhausts the
-    /// unwrap budget, a structural thenable, any other unsettled shape):
-    /// the caller publishes the typed gap rather than a fabricated answer.
-    pub(super) fn awaited_for_publication(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        let reduced = self.reduce_awaited(
-            node,
-            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-            0,
-            AwaitedDisposition::Publication,
-        );
-        match self.graph().node_data(reduced).as_deref() {
-            Some(SemanticNodeData::Opaque(error)) if error.means_type_is_not_yet_known() => None,
-            _ => Some(reduced),
-        }
-    }
-
-    /// `Awaited<T>` reduction over a SETTLED operand.
-    ///
-    /// Mirrors the lib conditional chain
-    /// `T extends null | undefined ? T :
-    ///  T extends object & { then(...): any } ? ... Awaited<V> ... : T`:
-    ///
-    /// - lattice extremes: `any` ⇒ `any`, `never` ⇒ `never`, `unknown` ⇒
-    ///   `unknown` (no thenable branch matches; the final fallthrough
-    ///   returns `T`); an `error` carrier dominates and passes through.
-    /// - `null` / `undefined` pass through (the first conditional clause).
-    /// - a union distributes per arm and renormalises; any undecidable arm
-    ///   defers the whole reduction (partial distribution would silently
-    ///   drop information).
-    /// - a `Promise<V>` carrier — the builtin-sentinel `InstantiationRef`
-    ///   whose declaration identity the registry classifies as
-    ///   `PromiseGlobal` — recursively unwraps `V`, bounded by
-    ///   [`AWAITED_UNWRAP_BUDGET`](Self::reduce_awaited) (budget exhaustion
-    ///   defers to the `Opaque(Miss)` shell, never a wrong answer).
-    /// - settled non-thenables (primitives, literals, template literals,
-    ///   functions, tuples, arrays, objects WITHOUT a `then` member) pass
-    ///   through unchanged.
-    ///
-    /// **Structural thenables are out of scope.** TS unwraps any object
-    /// whose callable `then` member matches the awaited protocol; no
-    /// corpus row requires that, so an Object surface that carries a
-    /// `then` member (and every other unsettled shape — type params,
-    /// conditionals, intersections, opaque carriers) keeps the deferred
-    /// `Opaque(Miss)` shell rather than risking a wrong passthrough.
-    fn reduce_awaited(
-        &self,
-        node: SemanticNodeId,
-        context: crate::semantic_query::ProjectionReductionContext,
-        depth: u32,
-        disposition: AwaitedDisposition,
-    ) -> SemanticNodeId {
-        use crate::project_semantic_dispatch::absorb::SpecialKind;
-        use crate::semantic_query::PrimitiveKind;
-
-        /// Nested `Promise<Promise<...>>` unwrap ceiling. Real-world
-        /// nesting is shallow (2–3 levels); the bound is a runaway fuse
-        /// for adversarial self-referential carriers. Exhaustion defers.
-        const AWAITED_UNWRAP_BUDGET: u32 = 32;
-
-        if depth >= AWAITED_UNWRAP_BUDGET {
-            return self.opaque(QueryError::Miss);
-        }
-        let resolved = self
-            .evaluate_deferred_semantic_node_with_context(node, context)
-            .into_active_query_build_node(self);
-        if let Some((kind, special)) = self.peek_special(resolved) {
-            return match kind {
-                // `any` / `never` / `unknown` and the dominating error
-                // carrier all return the resolved operand verbatim.
-                SpecialKind::Any
-                | SpecialKind::Never
-                | SpecialKind::Unknown
-                | SpecialKind::Error => special,
-            };
-        }
-        let Some(data) = self.graph().node_data(resolved) else {
-            return self.opaque(QueryError::Miss);
-        };
-        match data.as_ref() {
-            // Nullish passthrough — the first conditional clause.
-            SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined) => resolved,
-            // Settled non-thenable passthrough.
-            SemanticNodeData::Primitive(_)
-            | SemanticNodeData::Literal(_)
-            | SemanticNodeData::TemplateLiteral { .. }
-            | SemanticNodeData::Signature { .. }
-            | SemanticNodeData::Tuple { .. }
-            | SemanticNodeData::Array { .. } => resolved,
-            // An object surface unwraps only when it provably carries NO
-            // `then` member — a `then`-bearing surface may be a structural
-            // thenable (out of scope), so it defers instead of passing
-            // through a wrong answer.
-            SemanticNodeData::Object(surface) => {
-                if surface
-                    .positive_members()
-                    .iter()
-                    .any(|member| member.string_name() == Some("then"))
-                {
-                    self.opaque(QueryError::Miss)
-                } else {
-                    resolved
-                }
-            }
-            // Union distribution: every arm must reduce; renormalise the
-            // results through the shared union intern.
-            SemanticNodeData::Union(members) => {
-                let members = members.clone();
-                drop(data);
-                let mut reduced: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
-                for member in members.iter() {
-                    let arm = self.reduce_awaited(*member, context, depth + 1, disposition);
-                    if matches!(
-                        self.graph().node_data(arm).as_deref(),
-                        Some(SemanticNodeData::Opaque(QueryError::Miss))
-                    ) {
-                        return self.opaque(QueryError::Miss);
-                    }
-                    reduced.push(arm);
-                }
-                self.intern_normalized_union_or_intersection(&reduced, true)
-            }
-            // `Promise<V>` carrier — registry-recognised declaration
-            // identity — recursively unwraps its payload.
-            SemanticNodeData::InstantiationRef { base, args }
-                if args.len() == 1 && self.is_promise_global_identity(base) =>
-            {
-                let payload = args[0];
-                drop(data);
-                self.reduce_awaited(payload, context, depth + 1, disposition)
-            }
-            // A NAKED type parameter is the one shape whose answer depends on
-            // who is asking, because the checker itself answers it twice.
-            //
-            // The `Awaited<T>` UTILITY stays deferred: tsgo prints the
-            // unreduced `Awaited<T>` (it is exactly what an async
-            // generator's own signature spells), so a utility read must keep
-            // the shell and reduce later, at instantiation.
-            //
-            // A PUBLICATION read is the checker's internal awaited-type
-            // rule for a value it is about to publish, which returns a
-            // non-thenable operand unchanged -- measured on tsc 7.0.2:
-            // `async f<T>(v: T)` is `Promise<T>`, and instantiating T with
-            // `Promise<string>` genuinely nests to
-            // `Promise<Promise<string>>`. Returning the shell here instead
-            // would gap every generic async body.
-            SemanticNodeData::TypeParam { .. }
-                if matches!(disposition, AwaitedDisposition::Publication) =>
-            {
-                resolved
-            }
-            // Everything else (infer shells, conditionals, intersections,
-            // mapped carriers, opaque shells, decl refs the evaluator could
-            // not settle -- and a type param under a UTILITY read) keeps the
-            // deferred shell.
-            _ => self.opaque(QueryError::Miss),
-        }
     }
 
     /// Resolve `node` to the SELECTED `SemanticNodeData::Signature` node via
@@ -10461,6 +10319,321 @@ impl<'a> ProjectSemanticDispatch<'a> {
         output
     }
 
+    /// Whether `node` is a SETTLED shape the awaited relations provably
+    /// reduce to ITSELF — it cannot be a thenable, so there is nothing to
+    /// unwrap.
+    ///
+    /// This is the ONE authority for "provably non-thenable", and both
+    /// relations ask it: `AwaitedNormalize`'s settled-passthrough arm asks
+    /// it of the OPERAND, and its type-parameter arm asks the same question
+    /// of the parameter's CONSTRAINT — which is the whole `<T extends
+    /// string>` ⇒ `T` versus `<T extends Promise<string>>` ⇒ `Awaited<T>`
+    /// distinction, falling out of one predicate rather than four special
+    /// cases.
+    ///
+    /// NEGATIVE EVIDENCE ONLY. `false` means "not proven settled", never
+    /// "is a thenable": the caller falls through to the real reduction or to
+    /// the canonical deferred intrinsic, and never fabricates an answer. An
+    /// unresolved carrier (a `DeclRef`, an alias, an open parameter) answers
+    /// `false` and defers, because it CAN still resolve to a `Promise` once
+    /// substituted — the inverse polarity of a "does it look like Promise"
+    /// gate, which would default to passthrough for anything it did not
+    /// recognise and silently publish the wrong type.
+    pub(super) fn settled_non_thenable(&self, node: SemanticNodeId) -> bool {
+        match self.graph().node_data(node).as_deref() {
+            // Nullish passes through — the lib conditional's first clause.
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined)) => {
+                true
+            }
+            Some(
+                SemanticNodeData::Primitive(_)
+                | SemanticNodeData::Literal(_)
+                | SemanticNodeData::TemplateLiteral { .. }
+                | SemanticNodeData::Signature { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Array { .. },
+            ) => true,
+            // An object surface settles only when it provably carries NO
+            // `then` member: a `then`-bearing surface may be a structural
+            // thenable, which is out of scope and must defer.
+            Some(SemanticNodeData::Object(surface)) => !surface
+                .positive_members()
+                .iter()
+                .any(|member| member.string_name() == Some("then")),
+            // A union settles only if EVERY arm does.
+            Some(SemanticNodeData::Union(members)) => members
+                .iter()
+                .all(|member| self.settled_non_thenable(*member)),
+            _ => false,
+        }
+    }
+
+    /// The canonical deferred form of the awaited relation over an operand
+    /// whose binder is still open: `IntrinsicApplication(Awaited, [operand])`.
+    ///
+    /// A settled, memoizable SYMBOLIC value — NOT a refusal and NOT an
+    /// `InstantiationRef` of a lib alias. Minting it as a declaration
+    /// application (the shape this replaced) would let a userland `Awaited`
+    /// declaration capture a compiler-native operation by spelling.
+    fn deferred_awaited(&self, operand: SemanticNodeId) -> SemanticNodeId {
+        self.graph()
+            .intern_node(SemanticNodeData::IntrinsicApplication {
+                op: crate::semantic_query::CompilerIntrinsicTypeOp::Awaited,
+                args: Arc::from(vec![operand].into_boxed_slice()),
+            })
+    }
+
+    /// Re-enter [`SemanticQueryKey::AwaitedNormalize`] on a composite arm.
+    /// Going back through the query — rather than recursing privately — is
+    /// what puts nested unwraps under the family memo, the singleflight, the
+    /// same-path cycle guard and the connected-work budget.
+    fn awaited_normalize_read(
+        &self,
+        operand: SemanticNodeId,
+        context: crate::semantic_query::StructuralReduceContext,
+    ) -> Option<SemanticNodeId> {
+        match self
+            .execute_read(SemanticQueryKey::AwaitedNormalize { operand, context })
+            .value
+        {
+            QueryResult::Value(node) => Some(node),
+            _ => None,
+        }
+    }
+
+    /// Re-enter [`SemanticQueryKey::AsyncReturnPayload`] on a composite arm.
+    /// Deliberately its OWN relation: an async return payload never
+    /// re-enters `AwaitedNormalize`, or a nested naked type parameter would
+    /// come back as `Awaited<T>` instead of `T`.
+    fn async_return_payload_read(
+        &self,
+        operand: SemanticNodeId,
+        context: crate::semantic_query::StructuralReduceContext,
+    ) -> Option<SemanticNodeId> {
+        match self
+            .execute_read(SemanticQueryKey::AsyncReturnPayload { operand, context })
+            .value
+        {
+            QueryResult::Value(node) => Some(node),
+            _ => None,
+        }
+    }
+
+    /// Settle the operand once, through the shared deferred evaluator, and
+    /// answer the lattice extremes both relations share. `Err(())` is the
+    /// honest refusal; `Ok(Some(node))` a decided answer; `Ok(None)` means
+    /// "keep going, inspect the structure".
+    fn awaited_operand_prelude(
+        &self,
+        operand: SemanticNodeId,
+    ) -> (SemanticNodeId, Option<SemanticNodeId>) {
+        use crate::project_semantic_dispatch::absorb::SpecialKind;
+        let resolved = self
+            .evaluate_deferred_semantic_node_with_context(
+                operand,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+            .into_active_query_build_node(self);
+        // `any` / `never` / `unknown` and the dominating error carrier all
+        // answer with the resolved operand verbatim.
+        if let Some((kind, special)) = self.peek_special(resolved) {
+            let decided = match kind {
+                SpecialKind::Any
+                | SpecialKind::Never
+                | SpecialKind::Unknown
+                | SpecialKind::Error => special,
+            };
+            return (resolved, Some(decided));
+        }
+        // Settled non-thenable (including nullish, and a union of only such
+        // arms): both relations are the identity here.
+        if self.settled_non_thenable(resolved) {
+            return (resolved, Some(resolved));
+        }
+        (resolved, None)
+    }
+
+    /// The awaited-type normalization — the LIVE producer for
+    /// [`SemanticQueryKey::AwaitedNormalize`]. See that variant for the full
+    /// per-shape contract and the tsc 7.0.2 rows it is measured against.
+    ///
+    /// An honest refusal is `QueryResult::Error(QueryError::Miss)`, which is
+    /// never warm-published — a structural thenable, a carrier the evaluator
+    /// could not settle, or an arm whose own family read refused, all land
+    /// there rather than fabricating a passthrough.
+    pub(super) fn build_awaited_normalize(
+        &self,
+        operand: SemanticNodeId,
+        context: crate::semantic_query::StructuralReduceContext,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        self.graph().record_awaited_normalize();
+        let reduced = self.awaited_normalize_node(operand, context);
+        self.awaited_relation_output(operand, reduced)
+    }
+
+    fn awaited_normalize_node(
+        &self,
+        operand: SemanticNodeId,
+        context: crate::semantic_query::StructuralReduceContext,
+    ) -> Option<SemanticNodeId> {
+        let (resolved, decided) = self.awaited_operand_prelude(operand);
+        if let Some(node) = decided {
+            return Some(node);
+        }
+        let data = self.graph().node_data(resolved)?;
+        match data.as_ref() {
+            // `Promise<V>` — recognised by RESOLVED declaration identity
+            // through the registry, never by spelling — unwraps its payload
+            // by RE-ENTERING this family.
+            SemanticNodeData::InstantiationRef { base, args }
+                if args.len() == 1 && self.is_promise_global_identity(base) =>
+            {
+                let payload = args[0];
+                drop(data);
+                self.awaited_normalize_read(payload, context)
+            }
+            // Union distribution: every arm re-enters the family and the
+            // results renormalise canonically. An arm that refuses defers the
+            // WHOLE reduction — a partial distribution would silently drop
+            // information.
+            SemanticNodeData::Union(members) => {
+                let members = members.clone();
+                drop(data);
+                let mut reduced: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
+                for member in members.iter() {
+                    reduced.push(self.awaited_normalize_read(*member, context)?);
+                }
+                Some(self.intern_normalized_union_or_intersection(&reduced, true))
+            }
+            // A type parameter whose constraint PROVES it non-thenable is its
+            // own awaited type; every other open parameter is the canonical
+            // deferred intrinsic — a settled symbolic value, not a refusal.
+            SemanticNodeData::TypeParam { constraint, .. } => {
+                let constraint = *constraint;
+                drop(data);
+                if constraint.is_some_and(|bound| self.settled_non_thenable(bound)) {
+                    Some(resolved)
+                } else {
+                    Some(self.deferred_awaited(resolved))
+                }
+            }
+            // Structural thenables, conditionals, intersections, mapped
+            // carriers, infer shells, unsettled decl refs: honest refusal.
+            _ => None,
+        }
+    }
+
+    /// The async-function return payload — the LIVE producer for
+    /// [`SemanticQueryKey::AsyncReturnPayload`].
+    ///
+    /// The ONE shape where this deliberately disagrees with
+    /// [`Self::build_awaited_normalize`] is a naked type parameter, which is
+    /// its own payload whatever its constraint. That disagreement is the
+    /// architecture: `async f<T>(v: T)` publishes `Promise<T>`, so
+    /// instantiating `T` with `Promise<string>` genuinely nests.
+    pub(super) fn build_async_return_payload(
+        &self,
+        operand: SemanticNodeId,
+        context: crate::semantic_query::StructuralReduceContext,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        self.graph().record_async_return_payload();
+        let reduced = self.async_return_payload_node(operand, context);
+        self.awaited_relation_output(operand, reduced)
+    }
+
+    fn async_return_payload_node(
+        &self,
+        operand: SemanticNodeId,
+        context: crate::semantic_query::StructuralReduceContext,
+    ) -> Option<SemanticNodeId> {
+        let (resolved, decided) = self.awaited_operand_prelude(operand);
+        if let Some(node) = decided {
+            return Some(node);
+        }
+        let data = self.graph().node_data(resolved)?;
+        match data.as_ref() {
+            // THE DISCRIMINATOR. A naked type parameter is its own payload
+            // REGARDLESS of constraint — no constraint test here, deliberately.
+            SemanticNodeData::TypeParam { .. } => {
+                drop(data);
+                Some(resolved)
+            }
+            // An awaited operand contributes NOTHING to the published
+            // payload: measured on tsc 7.0.2, `async f<T>(v: T) { return await
+            // v }` is `Promise<T>`, and so is `async f<T>(v: Awaited<T>) {
+            // return v }` — the wrapper strips whether it came from an `await`
+            // expression or was authored, and whatever the constraint.
+            //
+            // Top level ONLY. `async f<T>(v: Array<Awaited<T>>)` is
+            // `Promise<Awaited<T>[]>`, so stripping must not reach under a type
+            // constructor — it does not, because an array operand settles in
+            // the prelude and never reaches this arm. And a SYNC function does
+            // not strip at all (`g8` returns `Awaited<T>`), which is why this
+            // belongs to the publication relation rather than to a general
+            // `Awaited` simplifier.
+            SemanticNodeData::IntrinsicApplication { op, args }
+                if matches!(op, crate::semantic_query::CompilerIntrinsicTypeOp::Awaited)
+                    && args.len() == 1 =>
+            {
+                let inner = args[0];
+                drop(data);
+                self.async_return_payload_read(inner, context)
+            }
+            SemanticNodeData::InstantiationRef { base, args }
+                if args.len() == 1 && self.is_promise_global_identity(base) =>
+            {
+                let payload = args[0];
+                drop(data);
+                self.async_return_payload_read(payload, context)
+            }
+            SemanticNodeData::Union(members) => {
+                let members = members.clone();
+                drop(data);
+                let mut reduced: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
+                for member in members.iter() {
+                    reduced.push(self.async_return_payload_read(*member, context)?);
+                }
+                Some(self.intern_normalized_union_or_intersection(&reduced, true))
+            }
+            _ => None,
+        }
+    }
+
+    /// Shared output shape for both relations: the reduced node rooted on the
+    /// operand's file-derived version, or a non-admitting honest refusal.
+    fn awaited_relation_output(
+        &self,
+        operand: SemanticNodeId,
+        reduced: Option<SemanticNodeId>,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let observed_self_roots = self.observed_self_roots_from_nodes([operand]);
+        let result = match reduced {
+            Some(node) => QueryResult::Value(node),
+            None => QueryResult::Error(QueryError::Miss),
+        };
+        let output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+            (result, self.project_generation_signature()).into();
+        output.with_observed_self_roots(observed_self_roots)
+    }
+
+    /// Production constructor for the env-bearing
+    /// [`StructuralReduceContext`](crate::semantic_query::StructuralReduceContext)
+    /// both awaited relations carry. Neither key has a decl slot; the
+    /// already-lowered operand carries the content roots, so the context
+    /// carries ONLY the R/T/L/J environment (R21). No content/version hash
+    /// enters the query-identity key (R6).
+    pub(crate) fn structural_reduce_context(
+        &self,
+    ) -> crate::semantic_query::StructuralReduceContext {
+        let host = self.ctx.host_for_fact_tracer_install();
+        let env = host.host_view_env_hashes();
+        crate::semantic_query::StructuralReduceContext {
+            resolve_env_hash: env.resolve_env_hash,
+            type_env_hash: env.type_env_hash,
+            lib_env_hash: env.lib_env_hash,
+            project_identity: host.host_view_project_identity().fold_u32(),
+        }
+    }
     /// Production constructor for the env-bearing
     /// [`TemplateLiteralReduceContext`](crate::semantic_query::TemplateLiteralReduceContext).
     /// The key has no decl slot; the already-lowered arg nodes carry the
@@ -11384,18 +11557,4 @@ mod carrier_type_param_descent_tests {
             );
         }
     }
-}
-
-/// Which caller is asking [`ProjectSemanticDispatch::reduce_awaited`] for
-/// an awaited type. The two dispositions differ on a naked type parameter
-/// alone: an authored `Awaited<T>` keeps the deferred shell (the checker
-/// prints it unreduced -- it is what an async generator's own signature
-/// spells), while a value the flow authority is publishing takes the
-/// operand unchanged (the checker's own awaited rule for a non-thenable).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum AwaitedDisposition {
-    /// An authored `Awaited<T>` read.
-    Utility,
-    /// A value the flow authority is about to publish.
-    Publication,
 }

@@ -48,7 +48,9 @@ use crate::semantic_query::{
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 use verter_type_expr::facts::FunctionPartIdentity;
-use verter_type_expr::{LiteralValue, PrimitiveName, TopLevelOwnerId, TypeExpr, UnknownValue};
+use verter_type_expr::{
+    CompilerIntrinsicTypeOp, LiteralValue, PrimitiveName, TopLevelOwnerId, TypeExpr, UnknownValue,
+};
 
 // ──────────────────────────────────────────────────────────────────────
 // Fixtures
@@ -256,13 +258,12 @@ export async function negAsyncSelfRef() {
   return negAsyncSrc();
 }
 
-// A THENABLE Promise payload: the shared `Awaited` reducer defers a
+// A THENABLE Promise payload: the awaited relations defer a
 // `then`-bearing object surface (structural thenables are out of scope —
-// see `reduce_awaited`'s object arm), so the async wrap's
-// Promise-embedding branch must reach `instantiate_awaited`'s deferred
-// `Opaque(Miss)` answer for the collapse, and the wrap must publish the
-// TYPED GAP rather than a fabricated `Promise<Thenable>` or a bare
-// unwrapped `Thenable`.
+// see the object arm of `settled_non_thenable`), so the async wrap's
+// Promise-embedding branch must reach the family's honest refusal, and
+// the wrap must publish the TYPED GAP rather than a fabricated
+// `Promise<Thenable>` or a bare unwrapped `Thenable`.
 interface NegThenable {
   then(cb: (v: number) => void): void;
 }
@@ -2594,8 +2595,16 @@ fn an_awaited_generic_operand_publishes_the_parameter_unchanged() {
 
 /// An async GENERATOR spells the DEFERRED `Awaited<T>` for a generic yield
 /// — NOT the bare parameter the async function publishes. The two surfaces
-/// have different generic rules, and tsgo prints them differently:
-/// `AsyncGenerator<Awaited<T>, void, unknown>`.
+/// have different generic rules, and tsc 7.0.2 prints them differently:
+/// `AsyncGenerator<Awaited<T>, void, unknown>` here versus `Promise<T>` for
+/// the async function (measured by declaration emit).
+///
+/// The deferred `Awaited<T>` is a `TypeExpr::IntrinsicApplication` — a
+/// compiler-native operation — NOT a `Ref` spelled `Awaited`. The generator
+/// used to fabricate an `InstantiationRef` carrier over a `__builtin__`
+/// canonical for this; a `Ref` contributes its name to referenced-name
+/// traversal, so that shape let a userland `Awaited` declaration collide
+/// with the intrinsic.
 #[test]
 fn an_async_generator_over_a_generic_yield_spells_the_deferred_awaited() {
     let host = ts_host();
@@ -2607,9 +2616,9 @@ fn an_async_generator_over_a_generic_yield_spells_the_deferred_awaited() {
             name: Arc::from("AsyncGenerator"),
             type_arguments: Arc::from(
                 vec![
-                    TypeExpr::Ref {
-                        name: Arc::from("Awaited"),
-                        type_arguments: Arc::from(vec![type_param("T")].into_boxed_slice()),
+                    TypeExpr::IntrinsicApplication {
+                        op: CompilerIntrinsicTypeOp::Awaited,
+                        arguments: Arc::from(vec![type_param("T")].into_boxed_slice()),
                     },
                     TypeExpr::Primitive(PrimitiveName::Void),
                     TypeExpr::Primitive(PrimitiveName::Unknown),
@@ -2634,9 +2643,9 @@ fn an_async_generator_over_a_generic_return_spells_the_deferred_awaited() {
             type_arguments: Arc::from(
                 vec![
                     TypeExpr::Primitive(PrimitiveName::Never),
-                    TypeExpr::Ref {
-                        name: Arc::from("Awaited"),
-                        type_arguments: Arc::from(vec![type_param("T")].into_boxed_slice()),
+                    TypeExpr::IntrinsicApplication {
+                        op: CompilerIntrinsicTypeOp::Awaited,
+                        arguments: Arc::from(vec![type_param("T")].into_boxed_slice()),
                     },
                     TypeExpr::Primitive(PrimitiveName::Unknown),
                 ]
@@ -2878,23 +2887,23 @@ fn generator_wrap_without_lib_surface_keeps_typed_gap_and_never_warms() {
 }
 
 /// NEGATIVE LEG (async) — the Promise-EMBEDDING collapse branch's
-/// OWN failure path: `instantiate_awaited` reaching a genuine deferred
-/// `Opaque(Miss)` answer keeps the TYPED GAP, never a wrong warm value.
+/// OWN failure path: the awaited-relation read reaching a genuine honest
+/// refusal keeps the TYPED GAP, never a wrong warm value.
 ///
 /// `negAsyncThenable`'s declared return is `Promise<NegThenable>` where
-/// `NegThenable` carries a `then` member — the shared `Awaited` reducer
-/// (`reduce_awaited` in `build.rs`) has no structural arm that settles a
-/// resolved-but-unrecognised carrier (measured: the un-expanded interface
-/// reference falls through its catch-all default, not its dedicated
-/// `then`-bearing-object arm — both keep the same deferred shell), so
-/// `Awaited<Promise<NegThenable>>` resolves to the deferred `Opaque(Miss)`
+/// `NegThenable` carries a `then` member — the payload relation
+/// (`build_async_return_payload` in `build.rs`) has no structural arm that
+/// settles a resolved-but-unrecognised carrier (measured: the un-expanded
+/// interface reference falls through its catch-all default, not the
+/// `then`-bearing-object arm of `settled_non_thenable` — both keep the
+/// same refusal), so the relation refuses and the read is the deferred
 /// shell. `FlowReturnResult::new_with_fresh_literal_arms`'s unresolved-reach
 /// backstop then folds `FlowReturnDegradation::UnresolvedValue` into the
 /// wrap's materialized result, so the whole `negAsyncThenable` return is a
 /// degraded success — unlike `negAsyncSelfRef`'s self-referential collapse
 /// (which resolves CLEAN), this row never warms. Verified by mutation: with
-/// `reduce_awaited`'s catch-all arm forced to pass its operand through
-/// instead of deferring, this test fails on a clean `Promise<NegThenable>`
+/// the payload relation's catch-all arm forced to pass its operand through
+/// instead of refusing, this test fails on a clean `Promise<NegThenable>`
 /// with `degradation=None`. Contrast with
 /// `generator_wrap_without_lib_surface_keeps_typed_gap_and_never_warms`:
 /// that row's gap comes from an unresolvable lib HEAD; this row's comes
@@ -2942,13 +2951,29 @@ fn wrapped_async_return_admits_warm_and_replay_equal_to_fresh() {
     assert_clean_warm(&host, CALLS, "callAsyncPlain", expected);
 }
 
-/// BOUNDED WORK: one lib instantiation per awaited unwrap, and
-/// identical warm demand adds ZERO instantiations.
+/// BOUNDED WORK: one awaited-relation build PER UNWRAP LEVEL, and
+/// identical warm demand adds ZERO builds.
 ///
-/// The wrap's `Promise` carrier is a registry-decided interning (no
-/// `Instantiate` dispatch); the ONE dispatch an awaited operand costs is
-/// the lib `Awaited` instantiation, memoized like every other — so the
-/// cold demand pays it exactly once and warm repeats pay nothing.
+/// `callAwait` is `return await asyncSrc()` where `asyncSrc(): Promise<number>`,
+/// so the cold demand measures 2: `AwaitedNormalize(Promise<number>)` and, via
+/// that arm's re-entry on the payload, `AwaitedNormalize(number)`. Two is the
+/// CORRECT bound, not an accounting slip — the composite arms re-enter the
+/// family rather than recursing privately, which is what puts every unwrap
+/// level under its own memo entry. The predecessor did the whole chain inside
+/// one `Instantiate` and cost 1; the second entry here is independently
+/// reusable by any other await of `number`, which the private recursion could
+/// never offer.
+///
+/// The load-bearing half is the SECOND assertion: warm repeats add ZERO. A
+/// warm family hit returns before the builder runs, so the per-family counter
+/// is what makes that observable at all.
+///
+/// This counts `awaited_normalize_count`, NOT `instantiate_count`: the
+/// unwrap used to be a lib `Instantiate` of `Awaited<T>` and is now its own
+/// family, so the instantiate counter no longer moves for it. The claim
+/// under test is unchanged — bounded cold work, zero warm work — and the
+/// per-family counter is what makes "zero warm work" observable at all,
+/// since a warm family hit returns before the builder runs.
 #[test]
 fn wrapped_await_demand_adds_one_cold_instantiation_and_zero_warm() {
     let host = ts_host();
@@ -2956,7 +2981,7 @@ fn wrapped_await_demand_adds_one_cold_instantiation_and_zero_warm() {
         .project_type_store()
         .semantic_graph()
         .stats_snapshot()
-        .instantiate_count;
+        .awaited_normalize_count;
     assert_clean_warm(
         &host,
         CALLS,
@@ -2970,11 +2995,11 @@ fn wrapped_await_demand_adds_one_cold_instantiation_and_zero_warm() {
         .project_type_store()
         .semantic_graph()
         .stats_snapshot()
-        .instantiate_count;
+        .awaited_normalize_count;
     assert_eq!(
         cold - before,
-        1,
-        "the cold awaited-unwrap demand pays exactly one lib instantiation"
+        2,
+        "the cold awaited-unwrap demand pays exactly one build per unwrap level"
     );
     // bounded-loop: three warm repeats, a fixed demand count
     for _ in 0..3 {
@@ -2992,10 +3017,10 @@ fn wrapped_await_demand_adds_one_cold_instantiation_and_zero_warm() {
         .project_type_store()
         .semantic_graph()
         .stats_snapshot()
-        .instantiate_count;
+        .awaited_normalize_count;
     assert_eq!(
         warm, cold,
-        "identical warm demand must add ZERO instantiations"
+        "identical warm demand must add ZERO awaited-relation builds"
     );
 }
 
@@ -4192,10 +4217,13 @@ fn plain_async_wrap_is_unaffected_by_a_missing_generator_lib_surface() {
 /// `tsc` rejects this alias with TS2456 — but a fixture-only shape this
 /// substrate must still fail closed over rather than hang or fabricate
 /// an answer). The async wrap's unconditional `Awaited` dispatch resolves
-/// the alias to `Promise<NegSelfProm>` and recurses over the SAME
-/// identical alias every step (`reduce_awaited`'s `Promise<V>` payload
-/// arm), so it never settles and exhausts `AWAITED_UNWRAP_BUDGET` — the
-/// dispatch correctly refuses (`Opaque(Miss)`) rather than looping
+/// the alias to `Promise<NegSelfProm>` and RE-ENTERS the family over the
+/// SAME identical alias every step (the `Promise<V>` payload arm of
+/// `AwaitedNormalize`), so it never settles. The refusal is now the
+/// FAMILY's own cycle handling, not a private unwrap counter: re-entry
+/// produces the identical query key, which the same-path guard stops —
+/// the retired `AWAITED_UNWRAP_BUDGET` constant is gone with the private
+/// recursion it bounded. The dispatch refuses rather than looping
 /// forever or answering a resolved-looking but meaningless carrier, and
 /// the wrap publishes the TYPED GAP, never warming.
 #[test]

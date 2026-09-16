@@ -22197,6 +22197,8 @@ fn semantic_query_key_variant_set_is_structurally_pinned() {
             FlowReturn(_) => "FlowReturn",
             ResolveCall(_) => "ResolveCall",
             ClassifyTruthinessDomain { .. } => "ClassifyTruthinessDomain",
+            AwaitedNormalize { .. } => "AwaitedNormalize",
+            AsyncReturnPayload { .. } => "AsyncReturnPayload",
         }
     }
     // Sanity probe: each variant carries a distinct label and the

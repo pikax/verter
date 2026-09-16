@@ -4972,6 +4972,18 @@ pub struct SemanticGraphStats {
     pub branch_selections_true: u64,
     pub branch_selections_false: u64,
     pub budget_fallback_count: u64,
+    /// Cold `AwaitedNormalize` builds — one per family MISS that actually
+    /// ran the reducer. A warm family hit never enters the builder, so a
+    /// warm replay of an already-reduced operand leaves this UNCHANGED:
+    /// that is the discriminating signal for awaited-relation memoization
+    /// (a count that climbs on replay means the family is not being hit).
+    pub awaited_normalize_count: u64,
+    /// Cold `AsyncReturnPayload` builds. Counted SEPARATELY from
+    /// `awaited_normalize_count` because the two relations are distinct
+    /// families: one operand reduced under both relations is two cold
+    /// builds, and collapsing the counters would hide exactly the
+    /// cross-family aliasing the separation exists to prevent.
+    pub async_return_payload_count: u64,
     // ── Path / projection histogram percentiles (B2 baseline:
     // reservoir-sampled by C-phase builders; F3 corpus consumes p50/p95).
     pub path_length_p50: u32,
@@ -6586,6 +6598,44 @@ pub struct TemplateLiteralReduceContext {
     pub project_identity: u32,
 }
 
+/// Env a structural REDUCTION over already-lowered nodes depends on (env
+/// dims `R T L J`) — shared by
+/// [`SemanticQueryKey::AwaitedNormalize`] and
+/// [`SemanticQueryKey::AsyncReturnPayload`].
+///
+/// Neither key has a slot (the identity core is the interned `operand`
+/// node), so the R21 env dimensions ride here IN the context. Per R21 this
+/// carries `R T L J`:
+///
+/// - `resolve_env_hash` (`R`) — the operand's `Promise` carrier is
+///   recognised by RESOLVED declaration identity through the intrinsic
+///   registry, which is a name-resolution question: the same authored
+///   operand resolves to a different carrier under a different resolve env.
+/// - `type_env_hash` (`T`), `lib_env_hash` (`L`) — the standard structural
+///   reduction env (both relations read the lib's `Promise` declaration).
+/// - `project_identity` (`J`) — project isolation.
+///
+/// There is deliberately NO `parse_env_hash` (`P`): both relations operate
+/// over an already-lowered interned operand (content-version rooted via
+/// `ReadSetSignature`), never a fresh parsed body skeleton.
+///
+/// The context SHAPE is shared but the two families are NOT: they are
+/// distinct `SemanticQueryKey` variants with distinct `FamilyKey` variants,
+/// so one operand under one env is two different query identities with two
+/// different answers. That separation is the point — see
+/// [`SemanticQueryKey::AsyncReturnPayload`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StructuralReduceContext {
+    /// Import / name-resolution dimension (`R`).
+    pub resolve_env_hash: HashValue,
+    /// Type-env dimension (`T`).
+    pub type_env_hash: HashValue,
+    /// Lib-env dimension (`L`).
+    pub lib_env_hash: HashValue,
+    /// Project-isolation dimension (`J`).
+    pub project_identity: u32,
+}
+
 /// A point in a program — the identity core of
 /// [`SemanticQueryKey::FlowNarrowingAt`] and
 /// [`SemanticQueryKey::ContextualTypeAt`].
@@ -8054,6 +8104,87 @@ pub enum SemanticQueryKey {
     ClassifyTruthinessDomain {
         subject: SemanticNodeId,
     },
+    /// Normalize `operand` through the checker's AWAITED-TYPE relation —
+    /// the relation `await x` applies to its operand, an async generator
+    /// applies to its iteration parameters, and a resolved lib
+    /// `Awaited<T>` read applies to its argument.
+    ///
+    /// **LIVE producer** ([`AdmissionSpec::Singleflight`]). Per-shape
+    /// contract, measured against tsc 7.0.2:
+    ///
+    /// - a settled NON-THENABLE operand (primitive, literal, template
+    ///   literal, signature, tuple, array, an object surface that provably
+    ///   carries no `then` member) reduces to the operand itself;
+    /// - `null` / `undefined` pass through (the lib conditional's first
+    ///   clause);
+    /// - a `Promise<V>` carrier — recognised by RESOLVED declaration
+    ///   identity through the intrinsic registry, never by spelling —
+    ///   RE-ENTERS this family on `V`, so nesting unwraps through the
+    ///   memo / singleflight / cycle machinery rather than a private
+    ///   recursion;
+    /// - a union DISTRIBUTES by re-entering this family per arm and
+    ///   renormalising through the canonical union; any undecidable arm
+    ///   defers the whole reduction (partial distribution would silently
+    ///   drop information);
+    /// - a type parameter whose constraint PROVES it non-thenable reduces
+    ///   to the parameter itself (`<T extends string>` ⇒ `T`);
+    /// - every other naked / open type parameter reduces to the canonical
+    ///   [`SemanticNodeData::IntrinsicApplication`] over the `Awaited`
+    ///   compiler intrinsic — a settled, memoizable SYMBOLIC value, not a
+    ///   refusal (`<T>` ⇒ `Awaited<T>`, and `<T extends Promise<string>>`
+    ///   ⇒ `Awaited<T>`, because that constraint does NOT prove
+    ///   non-thenable);
+    /// - a structural thenable, a cyclic carrier, an exhausted budget, or
+    ///   any other unsettled shape is an HONEST REFUSAL (the deferred
+    ///   `Opaque(Miss)` shell), never a fabricated passthrough.
+    ///
+    /// Value domain: [`SemanticQueryValueTag::TypeNode`].
+    ///
+    /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
+    AwaitedNormalize {
+        operand: SemanticNodeId,
+        context: StructuralReduceContext,
+    },
+    /// Reduce `operand` to the PAYLOAD an async function publishes — the
+    /// `X` in the `Promise<X>` an async function's joined return is
+    /// wrapped in.
+    ///
+    /// **LIVE producer** ([`AdmissionSpec::Singleflight`]). This is a
+    /// GENUINELY DIFFERENT RELATION from [`Self::AwaitedNormalize`], not
+    /// the same reducer under a disposition flag, and the difference is
+    /// observable:
+    ///
+    /// | operand | `AwaitedNormalize` | `AsyncReturnPayload` |
+    /// |---|---|---|
+    /// | `<T>` | `Awaited<T>` | `T` |
+    /// | `<T extends string>` | `T` | `T` |
+    /// | `<T extends Promise<string>>` | `Awaited<T>` | `T` |
+    /// | `<T extends { then(…): … }>` | `Awaited<T>` | `T` |
+    ///
+    /// The first and last rows are the ARCHITECTURAL DISCRIMINATORS: any
+    /// implementation that collapses these two relations into one gets at
+    /// least one of them wrong. Measured on tsc 7.0.2: `async f<T>(v: T)`
+    /// publishes `Promise<T>` for every constraint — instantiating `T`
+    /// with `Promise<string>` genuinely nests to `Promise<Promise<string>>`
+    /// — while `async* g<T>(v: T)` publishes `AsyncGenerator<Awaited<T>, …>`.
+    ///
+    /// Per-shape contract:
+    ///
+    /// - a NAKED type parameter reduces to ITSELF, regardless of its
+    ///   constraint (the whole discriminator above);
+    /// - a settled operand reduces to itself;
+    /// - a concrete `Promise` carrier and a union reduce through THIS
+    ///   family's own recursive relation (re-entering `AsyncReturnPayload`,
+    ///   never `AwaitedNormalize`);
+    /// - anything else is an honest refusal.
+    ///
+    /// Value domain: [`SemanticQueryValueTag::TypeNode`].
+    ///
+    /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
+    AsyncReturnPayload {
+        operand: SemanticNodeId,
+        context: StructuralReduceContext,
+    },
 }
 
 /// Content-free discriminant for [`SemanticQueryKey`] — the variant identity
@@ -8099,6 +8230,8 @@ pub enum SemanticQueryKeyTag {
     FlowReturn,
     ResolveCall,
     ClassifyTruthinessDomain,
+    AwaitedNormalize,
+    AsyncReturnPayload,
 }
 
 impl SemanticQueryKeyTag {
@@ -8134,6 +8267,8 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::FlowReturn,
         SemanticQueryKeyTag::ResolveCall,
         SemanticQueryKeyTag::ClassifyTruthinessDomain,
+        SemanticQueryKeyTag::AwaitedNormalize,
+        SemanticQueryKeyTag::AsyncReturnPayload,
     ];
 
     /// The EXACT `SemanticQueryKey` variant identifier this tag names. The
@@ -8173,6 +8308,8 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::FlowReturn => "FlowReturn",
             SemanticQueryKeyTag::ResolveCall => "ResolveCall",
             SemanticQueryKeyTag::ClassifyTruthinessDomain => "ClassifyTruthinessDomain",
+            SemanticQueryKeyTag::AwaitedNormalize => "AwaitedNormalize",
+            SemanticQueryKeyTag::AsyncReturnPayload => "AsyncReturnPayload",
         }
     }
 
@@ -8267,6 +8404,8 @@ impl SemanticQueryKey {
             SemanticQueryKey::ClassifyTruthinessDomain { .. } => {
                 SemanticQueryKeyTag::ClassifyTruthinessDomain
             }
+            SemanticQueryKey::AwaitedNormalize { .. } => SemanticQueryKeyTag::AwaitedNormalize,
+            SemanticQueryKey::AsyncReturnPayload { .. } => SemanticQueryKeyTag::AsyncReturnPayload,
         }
     }
 }
@@ -10175,6 +10314,8 @@ mod tests {
             "substitute_memo_misses",
             "evaluate_deferred_memo_hits",
             "evaluate_deferred_memo_misses",
+            "awaited_normalize_count",
+            "async_return_payload_count",
         ];
         for field in expected_to_fire {
             assert!(

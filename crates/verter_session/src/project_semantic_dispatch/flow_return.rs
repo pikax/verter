@@ -1862,139 +1862,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Whether `node` is a SETTLED shape that the shared `Awaited`
-    /// reducer (`reduce_awaited`'s settled-passthrough arms) provably
-    /// unwraps to itself with NO recursive work — a cheap LOCAL mirror
-    /// of those arms, never a dispatch. This is a NEGATIVE-evidence
-    /// short-circuit only (skip the `Awaited` dispatch because the shape
-    /// cannot possibly be a thenable), the inverse polarity of the
-    /// retired POSITIVE-evidence "does it look like Promise" gate: that
-    /// gate defaulted to "skip" for anything it did not recognise —
-    /// including an unresolved type parameter or alias, which CAN still
-    /// resolve to a `Promise` shape once substituted, silently publishing
-    /// the wrong `Promise<T>`. Returning `false` here always falls
-    /// through to the real dispatch, never fabricates an answer — the
-    /// caller still runs the shared `Awaited` executor and inherits its
-    /// typed-gap fallback.
-    fn flow_join_is_settled_non_thenable(&self, node: SemanticNodeId) -> bool {
-        use crate::semantic_query::PrimitiveKind;
-        match self.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined)) => {
-                true
-            }
-            Some(
-                SemanticNodeData::Primitive(_)
-                | SemanticNodeData::Literal(_)
-                | SemanticNodeData::TemplateLiteral { .. }
-                | SemanticNodeData::Signature { .. }
-                | SemanticNodeData::Tuple { .. }
-                | SemanticNodeData::Array { .. },
-            ) => true,
-            Some(SemanticNodeData::Object(surface)) => !surface
-                .positive_members()
-                .iter()
-                .any(|member| member.string_name() == Some("then")),
-            Some(SemanticNodeData::Union(members)) => members
-                .iter()
-                .all(|member| self.flow_join_is_settled_non_thenable(*member)),
-            _ => false,
-        }
-    }
-
-    /// Dispatch the lib `Awaited<T>` instantiation over `node` — the ONE
-    /// shared `Instantiate` executor, memoized like every other — and
-    /// the unwrap arm both `await x` positions and the async return wrap
-    /// share. `None` when the executor refused (the caller publishes the
-    /// typed gap).
-    fn instantiate_awaited(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        let read = self.execute_read(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
-                self.builtin_type_slot("Awaited"),
-                Arc::from(vec![node].into_boxed_slice()),
-                self.instantiate_context_for(
-                    "__builtin__",
-                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                ),
-            ),
-        ));
-        match read.value {
-            QueryResult::Value(awaited) => Some(awaited),
+    /// Read the AWAITED-TYPE relation for a flow position — the relation
+    /// `await x` applies to its operand and an async generator applies to
+    /// its iteration parameters.
+    ///
+    /// ONE `execute_read` against the shared family: memoized,
+    /// singleflighted and cycle-guarded like every other query, with no
+    /// local settled-shape short-circuit — the family owns that arm now, so
+    /// there is no second classifier here to drift from it.
+    ///
+    /// `None` is the family's honest refusal; the caller publishes the typed
+    /// gap rather than a fabricated answer.
+    fn awaited_normalize_for_flow(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        match self
+            .execute_read(SemanticQueryKey::AwaitedNormalize {
+                operand: node,
+                context: self.structural_reduce_context(),
+            })
+            .value
+        {
+            QueryResult::Value(reduced) => Some(reduced),
             _ => None,
         }
     }
 
-    /// The awaited collapse an ASYNC FUNCTION body join and an `await`
-    /// operand take. It is NOT shared with the async generator, whose
-    /// iteration parameters follow their own rule
-    /// ([`Self::awaited_for_async_iteration`]): measured on tsc 7.0.2,
-    /// `async f<T>(v: T)` publishes `Promise<T>` while
-    /// `async* g<T>(v: T)` publishes `AsyncGenerator<Awaited<T>, …>`.
+    /// Read the async-function RETURN PAYLOAD relation — the `X` the joined
+    /// return contributes to the published `Promise<X>`.
     ///
-    /// A shape [`Self::flow_join_is_settled_non_thenable`] proves can
-    /// never be a thenable skips the dispatch (the shared reducer would
-    /// unwrap it to itself with no recursive work, so the
-    /// one-instantiation-per-wrap bound holds for concrete joins);
-    /// everything else pays the real dispatch. `None` is the refusal —
-    /// the caller publishes the typed gap rather than a fabricated answer.
-    fn awaited_for_async_surface(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        if self.flow_join_is_settled_non_thenable(node) {
-            return Some(node);
+    /// Deliberately NOT [`Self::awaited_normalize_for_flow`]: measured on
+    /// tsc 7.0.2, `async f<T>(v: T)` publishes `Promise<T>`, never
+    /// `Promise<Awaited<T>>`, while `async* g<T>(v: T)` publishes
+    /// `AsyncGenerator<Awaited<T>, …>`. The two flow positions take two
+    /// different relations, which is why they are two families.
+    fn async_return_payload_for_flow(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        match self
+            .execute_read(SemanticQueryKey::AsyncReturnPayload {
+                operand: node,
+                context: self.structural_reduce_context(),
+            })
+            .value
+        {
+            QueryResult::Value(payload) => Some(payload),
+            _ => None,
         }
-        // The memoized lib dispatch answers every settled shape. It reports
-        // an unsettled one as the deferred `Opaque(Miss)` shell rather than
-        // an absent value, so the shell is filtered here: publishing it
-        // would bury the gap under a wrapper the evaluation never earned.
-        if let Some(dispatched) = self.instantiate_awaited(node) {
-            if !self.flow_node_is_deferred_shell(dispatched) {
-                return Some(dispatched);
-            }
-        }
-        // A generic operand the checker answers by passing through.
-        self.awaited_for_publication(node)
     }
-
-    /// Whether `node` is the deferred `Opaque` shell a refused reduction
-    /// answers with, rather than a value.
-    fn flow_node_is_deferred_shell(&self, node: SemanticNodeId) -> bool {
-        matches!(
-            self.graph().node_data(node).as_deref(),
-            Some(SemanticNodeData::Opaque(error)) if error.means_type_is_not_yet_known()
-        )
-    }
-
-    /// An ASYNC GENERATOR's published yield / return parameter.
-    ///
-    /// It does NOT share the async function's rule: tsgo spells a generic
-    /// async generator `AsyncGenerator<Awaited<T>, void, unknown>` -- the
-    /// DEFERRED utility, which reduces at instantiation -- where the async
-    /// function publishes the bare `Promise<T>`. A settled operand
-    /// collapses identically in both.
-    fn awaited_for_async_iteration(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        if self.flow_join_is_settled_non_thenable(node) {
-            return Some(node);
-        }
-        if let Some(dispatched) = self.instantiate_awaited(node) {
-            if !self.flow_node_is_deferred_shell(dispatched) {
-                return Some(dispatched);
-            }
-        }
-        // Only a shape the checker would pass through earns the deferred
-        // spelling; a circular or structurally-thenable operand still gaps.
-        self.awaited_for_publication(node)?;
-        Some(
-            self.graph()
-                .intern_node(SemanticNodeData::InstantiationRef {
-                    base: crate::semantic_query::DeclIdentity {
-                        canonical_id: Arc::from("__builtin__"),
-                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        whole_hash: crate::semantic_query::HashValue::default(),
-                        decl_name: Arc::from("Awaited"),
-                    },
-                    args: Arc::from(vec![node].into_boxed_slice()),
-                }),
-        )
-    }
-
     /// Materialize the pending function-kind wrap — the LAST value
     /// transformation before the seal, run exactly where the value
     /// leaves the frame for publication (the root close, the SCC member
@@ -2002,23 +1913,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// publish channels see the WRAPPED value, so warm and replay carry
     /// it verbatim.
     ///
-    /// - `async`: `Promise<collapsed join>` — the collapse runs over
-    ///   every join EXCEPT a shape [`Self::flow_join_is_settled_non_thenable`]
-    ///   proves can never be a thenable (a bare literal/primitive/tuple/
-    ///   array/non-`then`-bearing-object join, or a union of only such
-    ///   arms), which the shared reducer would unwrap to itself anyway
-    ///   with no recursive work — that shortcut is NEGATIVE evidence only
-    ///   (never "does it look like `Promise`"), so an alias or any other
-    ///   shape that COULD resolve to a `Promise` instantiation always pays
-    ///   the real dispatch. A bare type parameter is published as itself
-    ///   (`Promise<T>`, the checker's answer), never wrapped in a spelled
-    ///   `Awaited`; a refused collapse publishes the typed gap.
+    /// - `async`: `Promise<payload>`, where the payload is the
+    ///   [`SemanticQueryKey::AsyncReturnPayload`] relation over the joined
+    ///   return ([`Self::async_return_payload_for_flow`]). There is no
+    ///   local settled-shape short-circuit here any more: the family owns
+    ///   that arm, so a settled join is answered by the same memoized
+    ///   query as everything else and there is no second classifier to
+    ///   drift from it. A bare type parameter is still published as itself
+    ///   (`Promise<T>`, the checker's answer) — now because the PAYLOAD
+    ///   relation returns a naked type parameter unchanged whatever its
+    ///   constraint, which is exactly what makes it a different relation
+    ///   from the normalization one. A refused read publishes the typed gap.
     /// - generator kinds: `Generator<Y, join, unknown>` verbatim, and
     ///   `AsyncGenerator<Y, join, unknown>` whose two parameters take the
-    ///   async iteration rule, both over the RESOLVED lib head captured at
-    ///   the evaluation (`Y` is the yield join, `never` for a yield-less
-    ///   body).
-    /// - an unresolvable lib head, a refused `Awaited` executor, or an
+    ///   [`SemanticQueryKey::AwaitedNormalize`] relation
+    ///   ([`Self::awaited_normalize_for_flow`]) — NOT the payload relation,
+    ///   because tsgo spells a generic async generator
+    ///   `AsyncGenerator<Awaited<T>, …>` where an async function publishes
+    ///   the bare `Promise<T>`. Both run over the RESOLVED lib head
+    ///   captured at the evaluation (`Y` is the yield join, `never` for a
+    ///   yield-less body).
+    /// - an unresolvable lib head, a refused awaited-relation read, or an
     ///   already-degraded body publishes the TYPED GAP — the rebuilt
     ///   result re-derives `UnresolvedValue` over the marker, so it is
     ///   `ReturnOnly` and never warms.
@@ -2041,7 +1956,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let wrapper = match wrap.kind {
             FunctionBodyKind::Plain => return result,
             FunctionBodyKind::Async => {
-                let Some(awaited) = self.awaited_for_async_surface(body) else {
+                // The PAYLOAD relation, not the normalize relation: a naked
+                // type parameter publishes `Promise<T>`, never
+                // `Promise<Awaited<T>>`.
+                let Some(payload) = self.async_return_payload_for_flow(body) else {
                     return self.materialize_wrap_typed_gap(result);
                 };
                 graph.intern_node(SemanticNodeData::InstantiationRef {
@@ -2051,7 +1969,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         whole_hash: crate::semantic_query::HashValue::default(),
                         decl_name: Arc::from("Promise"),
                     },
-                    args: Arc::from(vec![awaited].into_boxed_slice()),
+                    args: Arc::from(vec![payload].into_boxed_slice()),
                 })
             }
             FunctionBodyKind::Generator | FunctionBodyKind::AsyncGenerator => {
@@ -2078,8 +1996,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // body yielded and returned verbatim.
                 let (yield_join, body) = if wrap.kind == FunctionBodyKind::AsyncGenerator {
                     match (
-                        self.awaited_for_async_iteration(yield_join),
-                        self.awaited_for_async_iteration(body),
+                        self.awaited_normalize_for_flow(yield_join),
+                        self.awaited_normalize_for_flow(body),
                     ) {
                         (Some(yielded), Some(returned)) => (yielded, returned),
                         _ => return self.materialize_wrap_typed_gap(result),
@@ -13842,7 +13760,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             crate::flow_slice_content::SliceExpr::Awaited { operand } => {
                 match self.eval_expr(operand) {
                     Positional::Value(node) => {
-                        match self.dispatch.awaited_for_async_surface(node) {
+                        match self.dispatch.awaited_normalize_for_flow(node) {
                             Some(awaited) => Positional::Value(awaited),
                             None => Positional::Unmodeled,
                         }

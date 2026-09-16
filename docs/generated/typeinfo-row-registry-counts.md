@@ -25,14 +25,14 @@ preserved by a named equivalent-or-stronger successor row).
 | Block | Total | Ignored | Running unratified | Lifted | Superseded |
 | --- | --- | --- | --- | --- | --- |
 | U0.MANIFEST_SUBSTRATE | 0 | 0 | 0 | 0 | 0 |
-| U2.QUERY_VALUE_DOMAIN | 22 | 0 | 0 | 22 | 0 |
+| U2.QUERY_VALUE_DOMAIN | 17 | 0 | 0 | 17 | 0 |
 | U2.CANONICAL_TYPE_ALGEBRA | 0 | 0 | 0 | 0 | 0 |
 | U2.BINDER_IDENTITY_FACTS | 0 | 0 | 0 | 0 | 0 |
 | U8.WIRE_SURFACE_CLOSURE | 0 | 0 | 0 | 0 | 0 |
 | U12.EXPORTER | 0 | 0 | 0 | 0 | 0 |
 | U13.PROJECTION | 0 | 0 | 0 | 0 | 0 |
 | U2.RELATION_INFER | 20 | 19 | 1 | 0 | 0 |
-| U2.UTILITIES | 32 | 32 | 0 | 0 | 0 |
+| U2.UTILITIES | 37 | 32 | 0 | 5 | 0 |
 | U2.INDEXED_ACCESS | 24 | 9 | 0 | 15 | 0 |
 | U2.MAPPED_TEMPLATE | 18 | 13 | 0 | 5 | 0 |
 | U2.CLASS_SURFACES | 38 | 29 | 4 | 5 | 0 |
