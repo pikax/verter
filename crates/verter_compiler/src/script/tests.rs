@@ -2753,7 +2753,7 @@ mod css_variable_registration {
         let css = result
             .styles
             .first()
-            .map(|style| style.code.as_str())
+            .map(|style| style.code())
             .unwrap_or("");
         let script = result
             .script

@@ -85,9 +85,9 @@ fn compile_body(canonical: &str, source: &str, svelte_options: SvelteOptionAttem
     rendered
         .runtime_bundle()
         .main
-        .body_code
-        .clone()
+        .as_ref()
         .expect("a two-root static template must produce a runtime body")
+        .code()
         .to_string()
 }
 

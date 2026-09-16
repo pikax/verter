@@ -706,32 +706,40 @@ fn a_fragment_not_ending_in_a_newline_receives_no_boundary_segment() {
 /// carries exactly the fragment segments plus the boundary.
 #[test]
 fn assembly_owned_scaffolding_contributes_no_segments() {
-    use verter_compiler::framework_common::{RuntimeCustomBlock, RuntimeStyleBlock};
+    use verter_compiler::framework_common::QualifiedRuntimeStyle;
 
     let compiled = RuntimeCompileOutput {
         script: Some(script(
             "const x = 1\n",
             &map_json("[\"Comp.vue\"]", "[]", "AACA"),
         )),
-        styles: vec![RuntimeStyleBlock {
-            code: ".a{}".to_string(),
+        qualified_styles: vec![QualifiedRuntimeStyle {
+            result: verter_css_syntax::QualifiedStyleResult::framework_rewritten(
+                verter_css_syntax::CssDialect::Css,
+                ".a{}",
+                Vec::new(),
+            ),
+            consumed_stage: verter_css_syntax::StyleStage::Authored,
             source_map: None,
-            lang: None,
             scope_hash: None,
             has_global: false,
             output_descriptor: descriptor(".a{}"),
         }],
-        custom_blocks: vec![RuntimeCustomBlock {
-            block_type: "i18n".to_string(),
-            content: "{}".to_string(),
-        }],
+        custom_block_artifacts: Some(
+            verter_compiler::assembly::custom_block_fixture_set(
+                "<i18n>{}</i18n>",
+                vec![verter_compiler::assembly::CustomBlockFixture::local(
+                    "i18n", "{}",
+                )],
+            )
+            .expect("fixture descriptors mint"),
+        ),
         ..RuntimeCompileOutput::default()
     };
     let meta = FileMeta {
         has_script: true,
         style_langs: vec![None],
         custom_types: vec!["i18n".to_string()],
-        custom_langs: vec![None],
         ..FileMeta::default()
     };
     let profile = CompileProfile {

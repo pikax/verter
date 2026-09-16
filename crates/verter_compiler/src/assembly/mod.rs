@@ -18,6 +18,13 @@
 //! artifacts, with canonical identities, typed relations, input provenance
 //! and qualified byte maps. Schema validation is independent of compilation
 //! and does not mint an [`ArtifactSet`] publication receipt.
+//!
+//! [`StagedCompileArtifacts`] is what a framework host-integration backend
+//! hands to session lifecycle/publication code: ONE complete artifact set
+//! per request, plus the typed identity, dialect and map of the
+//! runtime-module artifact inside it. Consumers read the published module's
+//! bytes, language and map off the staged handoff rather than locating its
+//! artifact by name or re-deriving its dialect from carrier metadata.
 
 pub mod compose;
 pub mod custom_block;
@@ -36,6 +43,8 @@ pub use compose::{
     assemble_sequence, prepend_preamble, splice_into_hole, ComposeRefusal, ComposedOutput,
     SequencedOutput,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use custom_block::{custom_block_fixture_set, CustomBlockFixture};
 pub use custom_block::{
     CustomBlockContent, CustomBlockDescriptor, CustomBlockDescriptorError, CustomBlockDescriptorId,
     CustomBlockDescriptorRequest, CustomBlockLifecycle,
@@ -55,6 +64,7 @@ pub use plan::{PlannedArtifact, ProductPlan};
 pub use map_input::{AssembleMapFailure, MapFragment, UncomposableCode, UncomposableFamily};
 pub use publish::{
     ArtifactSchemaError, ArtifactSet, AssembledArtifact, AssemblyRefusal, CompileArtifactSet,
+    StagedCompileArtifacts,
 };
 pub use source_space::{
     ArtifactMapFamily, ArtifactMapSegment, AssembledOffset, FragmentOffset, FragmentRange,
@@ -69,7 +79,7 @@ pub use svelte_module::{svelte_main_compile_artifacts, SvelteMainCompileRequest}
 pub use vue_module::{
     assemble_vue_runtime_main, compose_main_module, vue_main_compile_artifacts, ExtraFragment,
     SfcRewriteRefusal, VueMainAssemblyFailure, VueMainCompositionFailure, VueMainDecoration,
-    VueMainModuleRequest, VueRuntimeMainAssembled, VueRuntimeMainRequest,
+    VueMainModuleRequest, VueRuntimeMainRequest,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use vue_module::{reset_vue_main_assembly_count, vue_main_assembly_count};

@@ -1,7 +1,8 @@
-//! Unused compiler-owned `CustomBlockDescriptor`: opaque source-backed
+//! Compiler-owned `CustomBlockDescriptor`: opaque source-backed
 //! attachments with validated identity, content state, and staged relations.
-//! Construction is metadata-only. No producer, transform, plugin ABI, source
-//! load, or framework branch lives here.
+//! The consumer authority for custom-block facts on the neutral bundle and
+//! in session publication. Construction is metadata-only. No producer,
+//! transform, plugin ABI, source load, or framework branch lives here.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -438,4 +439,158 @@ fn check_against_set(
 
 fn spans_overlap(left: Span, right: Span) -> bool {
     left.start < right.end && right.start < left.end
+}
+
+/// One fixture block for [`custom_block_fixture_set`]: the source facts a
+/// consumer characterizes, minus the set scaffolding the mint owns.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub struct CustomBlockFixture {
+    pub role: String,
+    pub lang: Option<String>,
+    pub src: Option<String>,
+    /// Authored inline bytes. `None` with `src` mints [`CustomBlockContent::SrcBacked`];
+    /// `None` without `src` mints [`CustomBlockContent::Empty`].
+    pub text: Option<String>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl CustomBlockFixture {
+    pub fn local(role: &str, text: &str) -> Self {
+        Self {
+            role: role.to_string(),
+            lang: None,
+            src: None,
+            text: Some(text.to_string()),
+        }
+    }
+
+    pub fn src_backed(role: &str, src: &str) -> Self {
+        Self {
+            role: role.to_string(),
+            lang: None,
+            src: Some(src.to_string()),
+            text: None,
+        }
+    }
+
+    pub fn empty(role: &str) -> Self {
+        Self {
+            role: role.to_string(),
+            lang: None,
+            src: None,
+            text: None,
+        }
+    }
+}
+
+/// Test-only mint of a descriptor set over `source`: one `"sfc"` source
+/// unit, one `"sfc"` analysis artifact, and one attached descriptor per
+/// fixture in the given order, with regions anchored sequentially inside
+/// the staged source span. Production mints go through the producing
+/// bridge, which binds registered source lineage this fixture cannot know.
+#[cfg(any(test, feature = "test-support"))]
+pub fn custom_block_fixture_set(
+    source: &str,
+    blocks: Vec<CustomBlockFixture>,
+) -> Result<super::publish::CompileArtifactSet, CustomBlockDescriptorError> {
+    use super::fragment::{
+        ArtifactContent, ArtifactProvenance, ArtifactUnavailableReason, CompileArtifact,
+    };
+    use super::publish::CompileArtifactSet;
+    use super::source_unit::{carrier_revision_of, ArtifactSourceUnit, SourceUnit};
+    use verter_identity::identity::{InputBasisId, ResultContractId};
+    use verter_language::LanguageId;
+
+    struct FixtureBasis;
+    impl verter_identity::encoding::CanonicalEncode for FixtureBasis {
+        const DOMAIN_TAG: &'static str = "verter.compiler.custom_block.fixture.basis.v1";
+        fn encode_fields(&self, e: &mut verter_identity::encoding::CanonicalEncoder) {
+            e.field_str(1, "fixture");
+        }
+    }
+    struct FixtureProducer;
+    impl verter_identity::encoding::CanonicalEncode for FixtureProducer {
+        const DOMAIN_TAG: &'static str = "verter.compiler.custom_block.fixture.producer.v1";
+        fn encode_fields(&self, e: &mut verter_identity::encoding::CanonicalEncoder) {
+            e.field_str(1, "fixture-custom-blocks");
+        }
+    }
+
+    let content = ContentId::from_content_bytes(source.as_bytes());
+    let unit = SourceUnit::mint(
+        SourceId::from_canonical(&FixtureBasis),
+        carrier_revision_of(&content),
+        "sfc",
+        content.clone(),
+    );
+    let provenance = ArtifactProvenance {
+        input_basis: InputBasisId::from_canonical(&FixtureBasis),
+        producer: ResultContractId::from_canonical(&FixtureProducer),
+        inputs: std::collections::BTreeSet::from([unit.id().clone()]),
+    };
+    let sfc = CompileArtifact::new(
+        unit.id().clone(),
+        crate::compile_request::ProductKind::Analysis,
+        LanguageId::new("vue"),
+        "sfc",
+        provenance.clone(),
+        ArtifactContent::Unavailable(ArtifactUnavailableReason::NotProduced),
+    );
+    let mut anchor = 0u32;
+    let descriptors = blocks
+        .into_iter()
+        .enumerate()
+        .map(|(order, fixture)| {
+            let (block_content, region_len) = match (&fixture.text, fixture.src.as_deref()) {
+                (Some(text), None) => (
+                    CustomBlockContent::Local {
+                        content: ContentId::from_content_bytes(text.as_bytes()),
+                        text: text.clone(),
+                    },
+                    text.len() as u32,
+                ),
+                (None, Some(_)) => (CustomBlockContent::SrcBacked, 0),
+                (None, None) => (CustomBlockContent::Empty, 0),
+                (Some(_), Some(_)) => return Err(CustomBlockDescriptorError::Malformed),
+            };
+            let mut attributes: Vec<(String, String)> = Vec::new();
+            if let Some(lang) = fixture.lang.as_deref() {
+                attributes.push(("lang".to_string(), lang.to_string()));
+            }
+            if let Some(src) = fixture.src.as_deref() {
+                attributes.push(("src".to_string(), src.to_string()));
+            }
+            let region = Span::new(anchor, anchor + region_len);
+            // Zero-length regions anchor at strictly increasing positions so
+            // sibling order validation holds for content-less blocks.
+            anchor += region_len.max(1);
+            let descriptor = CustomBlockDescriptor::try_new(CustomBlockDescriptorRequest {
+                source_unit: unit.id().clone(),
+                source_id: unit.source_id().clone(),
+                revision: unit.revision().clone(),
+                source_content: content.clone(),
+                role: fixture.role,
+                lang: fixture.lang,
+                src: fixture.src,
+                attributes,
+                source_order: order as u32,
+                region,
+                content: block_content,
+                provenance: provenance.clone(),
+                attached_to: sfc.id().clone(),
+                lifecycle: CustomBlockLifecycle::Complete,
+            })?;
+            Ok(descriptor)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    CompileArtifactSet::new(
+        vec![ArtifactSourceUnit {
+            unit,
+            source_span: Span::new(0, source.len() as u32),
+        }],
+        vec![sfc],
+    )
+    .map_err(|_| CustomBlockDescriptorError::Malformed)?
+    .attach_custom_blocks(descriptors)
 }

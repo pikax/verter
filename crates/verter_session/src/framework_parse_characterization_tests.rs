@@ -967,8 +967,8 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
             rehoused.template.as_ref().map(|t| &t.code),
             "template code drifted between direct and rehoused-dispatch compile for:\n{source}"
         );
-        let direct_styles: Vec<&String> = direct.styles.iter().map(|s| &s.code).collect();
-        let rehoused_styles: Vec<&String> = rehoused.styles.iter().map(|s| &s.code).collect();
+        let direct_styles: Vec<&str> = direct.styles.iter().map(|s| s.code()).collect();
+        let rehoused_styles: Vec<&str> = rehoused.styles.iter().map(|s| s.code()).collect();
         assert_eq!(
             direct_styles, rehoused_styles,
             "style code drifted between direct and rehoused-dispatch compile for:\n{source}"

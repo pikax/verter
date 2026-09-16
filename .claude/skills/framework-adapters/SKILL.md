@@ -286,16 +286,54 @@ host-integration backends. There is no registry left to serve: these
 routes carry no host-issued admission, so they mint their leg grants
 crate-privately at the route boundary (`ProductExecutionGrant`'s
 crate-private mint) and drive the SAME catalog backends. The neutral
-bundle is a `RuntimeMainModule` body + neutral
-script/template/style/custom blocks + scope id + optional IDE `tsx`
+bundle is an `Option<StagedCompileArtifacts>` main handoff + neutral
+script/template/style blocks + custom-block descriptors + scope id +
+optional IDE `tsx`
 (when `want_ide`) + optional template facts + neutral `diagnostics`, or
 a `CarrierCompileOutcome::RuntimeSurfaceRefused` / `CompileUnsupported`
-refusal — never a silent empty. Vue uses `VerterCompileResult`
-INTERNALLY then re-expresses it neutrally
+refusal — never a silent empty. For Vue, `RuntimeCompileOutput` also
+carries `custom_block_artifacts: Option<CompileArtifactSet>`: source-backed
+descriptors (role, `lang`,
+`src`, ordered attrs, source order, SFC-absolute region, content state,
+provenance) minted once per runtime compile by the Vue bridge
+(`stage_custom_block_artifacts` in `framework_common/vue_bridge.rs`),
+whether or not Main is demanded. The set holds one `"sfc"` source unit
+over the admitted artifact's registered carrier bytes — lineage from the
+registered canonical file and incarnation (never a host filename or the
+session-scoped authority), revision `carrier_revision_of` those bytes
+(never Main's generated-output basis) — one `"sfc"` analysis artifact,
+and the descriptors attached to it. Main's own staged set carries no
+custom-block material. Consumers take the descriptors directly through
+`RuntimeCompileOutput::custom_block_descriptors()`: Vue main assembly
+bounds its custom import/invocation count by them, and session
+publication populates `Custom` virtual nodes from their role/lang/
+content state (bytes from the host's sealed block-content selection
+when one was admitted; a content-less state publishes no node, never an
+empty-text fallback). The legacy `RuntimeCustomBlock` list is an
+unfilled declaration retained only for terminal deletion. A malformed
+block (e.g. an empty `lang`), facts read
+from bytes other than the registered carrier, or an attachment refusal
+publishes no descriptor and adds an error diagnostic
+(`vue-runtime-custom-block-refused`, located on the block when it names
+one), which fails the compile rather than silently dropping the set.
+`None` for Svelte (no custom-block producer cell), for a Vue compile with
+no custom blocks, and on direct conversions that never hold the
+registered artifact. `RuntimeCompileOutput.main` is the
+request's ONE staged compile-artifact handoff: the complete
+`CompileArtifactSet` plus the typed identity, dialect and runtime map of
+the module artifact inside it. The module's bytes live ON the staged
+root artifact, so a body without its typed artifact set is not
+representable, and the host reads the published bytes/language/map off
+the handoff instead of scanning for a `"main"`-named artifact or falling
+back to carrier script metadata for the dialect. Vue uses
+`VerterCompileResult` INTERNALLY then re-expresses it neutrally
 (`vue_result_to_runtime_bundle`); the Vue runtime compiler assembles
-the `_sfc_main` module and emits `main.body_code`. The host publishes
-that already-assembled body and refuses reconstruction with
-`HOST_VUE_MAIN_NOT_ASSEMBLED` when the body is missing. Map validation
+the `_sfc_main` module and stages it, Svelte stages its self-contained
+ESM the same way. The host publishes the staged root artifact and
+refuses reconstruction with `HOST_VUE_MAIN_NOT_ASSEMBLED` /
+`HOST_SVELTE_MAIN_NOT_ASSEMBLED` when nothing was staged — one shared
+`take_staged_main` consumption path whose only per-framework axis is
+that refusal code. Map validation
 and composition live in `verter_compiler::assembly` (`map_input`,
 `map_compose`). A carrier that projects ONLY an IDE
 surface (Svelte today) returns a bundle with no runtime surface

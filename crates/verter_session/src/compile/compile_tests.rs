@@ -10,9 +10,27 @@ use super::*;
 // assemble_main_module tests
 
 use verter_compiler::framework_common::{
-    RuntimeCompileOutput, RuntimeCustomBlock, RuntimeOutputDescriptor, RuntimeScriptBlock,
-    RuntimeStyleBlock, RuntimeTemplateBlock, SourceMapFidelity, TemplateRenderExport,
+    QualifiedRuntimeStyle, RuntimeCompileOutput, RuntimeOutputDescriptor, RuntimeScriptBlock,
+    RuntimeTemplateBlock, SourceMapFidelity, TemplateRenderExport,
 };
+use verter_css_syntax::{CssDialect, QualifiedStyleResult, StyleStage};
+
+/// A published stylesheet in `dialect`, carrying no source map and no
+/// scoping class — the shape a Vue block arrives in at this boundary.
+fn qualified_style(
+    code: &str,
+    dialect: CssDialect,
+    output_descriptor: RuntimeOutputDescriptor,
+) -> QualifiedRuntimeStyle {
+    QualifiedRuntimeStyle {
+        result: QualifiedStyleResult::framework_rewritten(dialect, code, Vec::new()),
+        consumed_stage: StyleStage::Authored,
+        source_map: None,
+        scope_hash: None,
+        has_global: false,
+        output_descriptor,
+    }
+}
 
 fn test_output_descriptor(code: &str) -> RuntimeOutputDescriptor {
     RuntimeOutputDescriptor::generated(
@@ -275,20 +293,26 @@ fn assemble_main_module_no_script_no_template() {
     assert!(result.contains("const _sfc_main = {}"));
 }
 
-/// @ai-generated - Custom blocks produce import + invocation lines
+/// @ai-generated - Custom blocks produce import + invocation lines, bounded
+/// by the bundle's source-backed descriptors
 #[test]
 fn assemble_main_module_custom_blocks() {
     let compiled = RuntimeCompileOutput {
-        custom_blocks: vec![RuntimeCustomBlock {
-            block_type: "i18n".to_string(),
-            content: "{\"en\":{}}".to_string(),
-        }],
+        custom_block_artifacts: Some(
+            verter_compiler::assembly::custom_block_fixture_set(
+                "<i18n>{\"en\":{}}</i18n>",
+                vec![verter_compiler::assembly::CustomBlockFixture::local(
+                    "i18n",
+                    "{\"en\":{}}",
+                )],
+            )
+            .expect("fixture descriptors mint"),
+        ),
         ..RuntimeCompileOutput::default()
     };
     let profile = CompileProfile::default();
     let meta = FileMeta {
         custom_types: vec!["i18n".to_string()],
-        custom_langs: vec![None],
         ..FileMeta::default()
     };
     let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile)
@@ -296,6 +320,24 @@ fn assemble_main_module_custom_blocks() {
         .code;
     assert!(result.contains("import block0 from"));
     assert!(result.contains("if (typeof block0 === 'function') block0(_sfc_main)"));
+}
+
+/// A bundle with host identifiers but NO descriptor authority emits no
+/// custom import/invocation — the identifier list alone must not
+/// reconstruct custom-block topology.
+#[test]
+fn assemble_main_module_custom_imports_require_descriptors() {
+    let compiled = RuntimeCompileOutput::default();
+    let profile = CompileProfile::default();
+    let meta = FileMeta {
+        custom_types: vec!["i18n".to_string()],
+        ..FileMeta::default()
+    };
+    let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile)
+        .expect("assembly with maps disabled cannot fail")
+        .code;
+    assert!(!result.contains("import block"));
+    assert!(!result.contains("block0(_sfc_main)"));
 }
 
 /// @ai-generated - Production mode skips __file
@@ -371,23 +413,9 @@ fn assemble_main_module_dev_with_hmr_strategy_keeps_file() {
 #[test]
 fn assemble_main_module_with_styles_produces_import_lines() {
     let compiled = RuntimeCompileOutput {
-        styles: vec![
-            RuntimeStyleBlock {
-                code: ".a{}".to_string(),
-                source_map: None,
-                lang: None,
-                scope_hash: None,
-                has_global: false,
-                output_descriptor: test_output_descriptor(".a{}"),
-            },
-            RuntimeStyleBlock {
-                code: ".b{}".to_string(),
-                source_map: None,
-                lang: Some("scss".to_string()),
-                scope_hash: None,
-                has_global: false,
-                output_descriptor: test_output_descriptor(".b{}"),
-            },
+        qualified_styles: vec![
+            qualified_style(".a{}", CssDialect::Css, test_output_descriptor(".a{}")),
+            qualified_style(".b{}", CssDialect::Scss, test_output_descriptor(".b{}")),
         ],
         ..RuntimeCompileOutput::default()
     };

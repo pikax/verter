@@ -106,6 +106,17 @@ pub struct LoweredTypeDecl {
     /// and lowers demanded arguments on demand — no query-time body re-walk.
     /// Empty for non-class declarations and heritage-free classes.
     pub heritage_bases: Arc<[HeritageBaseFact]>,
+    /// Whether this CLASS declaration authors a heritage clause the fact
+    /// producer could NOT name — `class X extends mixin(K) {}`, whose base
+    /// is a call expression rather than an identifier or a static member
+    /// path, so the clause folds no `Ref` arm into the body and
+    /// [`heritage_bases`](Self::heritage_bases) stays EMPTY. Without this
+    /// fact an unnamed base is indistinguishable from a genuinely
+    /// heritage-free class, and a nominal consumer would read the empty
+    /// base list as a PROOF of no heritage. `false` for every non-class
+    /// declaration and for a class whose every heritage clause minted a
+    /// base fact.
+    pub has_unnamed_class_heritage: bool,
     /// The producer-minted per-declaration KEY-DOMAIN closedness fact
     /// (closed-object SHAPE verdict + one recipe per contributor body),
     /// extracted ONCE at this lazy lowering from the same transient

@@ -259,6 +259,12 @@ pub(crate) fn assemble_vue_main_module_with_axes(
     profile: &VueMainAssemblyAxes,
 ) -> Result<AssembledVueModule, VueMainAssemblyFailure> {
     let runtime = profile.runtime_module_name.as_deref().unwrap_or("vue");
+    // Custom import/invocation identifiers are bounded by the descriptor
+    // set's identity/order — the same source-backed authority the compiler
+    // bounds its own assembly against. The retired legacy adapter list is
+    // not consulted; a bundle without descriptors mints no custom
+    // identifiers even when the session parse recorded blocks.
+    let custom_count = compiled.custom_block_descriptors().len();
     let assembled = assemble_vue_runtime_main(VueRuntimeMainRequest {
         canonical_id,
         compiled,
@@ -271,15 +277,15 @@ pub(crate) fn assemble_vue_main_module_with_axes(
         ssr: profile.ssr,
         decoration: vue_main_decoration_from_axes(
             canonical_id,
-            compiled.styles.len(),
-            compiled.custom_blocks.len(),
+            compiled.qualified_styles.len(),
+            custom_count,
             meta,
             profile,
         ),
     })?;
     Ok(AssembledVueModule {
-        code: assembled.code.to_string(),
-        source_map: assembled.source_map,
-        lang: assembled.lang,
+        code: assembled.code().to_string(),
+        source_map: assembled.source_map().map(str::to_string),
+        lang: assembled.lang().to_string(),
     })
 }

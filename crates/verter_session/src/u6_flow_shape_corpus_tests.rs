@@ -1736,8 +1736,16 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "6283bce4221d024df9396e470284aed4f60e8b26ebde3287ef8618b51d6e48b0",
     ),
     (
+        "N88_in_unknown_key_keeps_subject_as_typed_superset",
+        "c3ca87e7026e7e7e133ba6e098b4afdbda4fdacd6347a95cb126069c8f35ddea",
+    ),
+    (
         "N89_in_known_key_filters_arms_exactly",
         "1491c269e3bf8a82857f8c06d2169180b8e21d1536c7ce7da633be31efeaf37a",
+    ),
+    (
+        "N90_typeof_function_over_object_narrows_to_function",
+        "eb72b445761ff476470d2376b97b7c8b42accdb8b962b1db46eefe0c1271cdf7",
     ),
     (
         "N91_typeof_function_over_member_surface_reads_never",
@@ -1750,6 +1758,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "N93_instanceof_strips_nullish_before_the_intersection",
         "67a7ac428ba6b57aefdd4a9d249f5298cff4aaf9f50e449cc010f2c6bee808ee",
+    ),
+    (
+        "N94_instanceof_subclass_test_over_base_gaps",
+        "0403c653f27263da928191eec38914390a88fca8c8cee0c98db79272e0d457ca",
     ),
     (
         "N95_instanceof_related_arm_drops_unrelated_class_arm",
@@ -1914,6 +1926,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "N137_declared_union_sentinel_collision_number",
         "0a1000522c8efa91cd1a60610a7af32c5d38ac1e038b3aa49b17b29f4cf10c31",
+    ),
+    (
+        "N138_instanceof_matching_union_subject_loses_warm_only",
+        "8ac63905da4fae486c58ed26234883fb33f0e7c01d219c09fdc1bbf1a2a15834",
     ),
     (
         "N139_flow_callee_authored_fresh_arm_widens_at_member",
@@ -3271,7 +3287,7 @@ mod corpus_suite {
             ),
             (
                 "N90_typeof_function_over_object_narrows_to_function",
-                "the renderer spells the (KnownOwed-divergent) node `Union(object | 0)` where the checker prints `0 | Function` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `0 | Function`; the renderer spells the same union `Union(DeclRef(Function) | 0)` — constituent order and the DeclRef carrier spelling differ",
             ),
             (
                 "N07_branch_join_widens",
@@ -3319,7 +3335,7 @@ mod corpus_suite {
             ),
             (
                 "N94_instanceof_subclass_test_over_base_gaps",
-                "the renderer spells the (KnownOwed-divergent) node `Union({ v: DeclRef(K) } | { v: number })` where the checker prints `{ v: KSub; } | { v: number; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: KSub; } | { v: number; }`; the renderer spells the same node `Union({ v: DeclRef(KSub) } | { v: number })` — union and DeclRef spellings and member terminators differ",
             ),
             (
                 "N95_instanceof_related_arm_drops_unrelated_class_arm",
@@ -3513,7 +3529,7 @@ mod corpus_suite {
             ),
             (
                 "N88_in_unknown_key_keeps_subject_as_typed_superset",
-                "checker prints `{ v: number | (({ a: number; } | { b: string; }) & Record<\"c\", unknown>); }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(number | { a: number } | { b: string }) }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: number | (({ a: number; } | { b: string; }) & Record<\"c\", unknown>); }`; the renderer spells the same node `{ v: Union(number | Intersection(Union({ a: number } | { b: string }) & InstantiationRef(Record))) }` — union/intersection spelling, member terminators, and the Record carrier spelling differ",
             ),
         ];
         let mut failures = Vec::new();
@@ -4864,16 +4880,6 @@ const OPEN_DEBTS: &[&str] = &[
     // pin — the root `v: Union` member pin could not see it.
     "N25_impossible_predicate_statement_keeps_dead_contributor",
     "N55_in_operator_nonliteral_key",
-    // The checker narrows `"k" in x` for an undeclared key to
-    // `(subject) & Record<key, unknown>` on the positive edge; that
-    // intersection carrier is not mintable, so the subject publishes
-    // unchanged behind the typed guard gap (superset, ReturnOnly).
-    "N88_in_unknown_key_keeps_subject_as_typed_superset",
-    // The positive `typeof x === "function"` edge over `object` narrows to
-    // the checker's global `Function` surface; the flow environment has no
-    // resolvable lib `Function`, so the arm stays `object` behind the
-    // typed guard gap (superset, ReturnOnly).
-    "N90_typeof_function_over_object_narrows_to_function",
     // ── CALL RESOLUTION — context-sensitive callback inference ──────────
     // A callback argument's un-annotated parameter is never contextually
     // typed: withheld from the first inference pass and never re-typed
@@ -4926,12 +4932,6 @@ const OPEN_DEBTS: &[&str] = &[
     "N37_destructured_local_discriminant",
     "N39_instanceof_imported_class",
     "N41_instanceof_member_expression_constructor",
-    // The `instanceof` arm direction the graph cannot prove derived: a
-    // subclass test over a base-typed subject is assignable in exactly
-    // one direction, and structural assignability cannot separate a
-    // genuine subclass from a same-shape underived constructor. The
-    // subject publishes unnarrowed behind the typed guard gap.
-    "N94_instanceof_subclass_test_over_base_gaps",
     "N42_comma_sequence_guard",
     "N43_boolean_wrapped_guard",
     "N44_typeof_over_unknown",
@@ -5017,20 +5017,22 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U6ContextualCore, 8, 7, 1),
     // B10's `as const` spread-modifier debt moved to the value-inference
     // owner with its B03/B04 class, so the substrate total drops by one
-    // from 64 to 63. The async return wrap greens X18 (the
-    // `Promise<…>` carrier matches the checker), leaving two parked.
+    // from D13's 64 to 63. The async return wrap greens X18 (the
+    // `Promise<…>` carrier matches the checker).
     (Owner::U6FlowReturnSubstrate, 63, 48, 2),
-    (Owner::U6NarrowTypeof, 48, 28, 20),
-    // The `instanceof` arm rule: derived-arm selection with nullish
-    // stripping and the whole-subject intersection fallback are exact;
-    // the assignable-but-unproven-derived arm direction (a subclass test
-    // over a base-typed subject, a structural twin constructor) publishes
-    // the unnarrowed subject behind the typed guard gap and is parked.
-    (Owner::U6NarrowInstanceof, 5, 4, 1),
+    (Owner::U6NarrowTypeof, 48, 29, 19),
+    // The `instanceof` arm rule: derivation decided by class heritage on
+    // both edges (the subclass arm survives, the base arm downcasts, the
+    // negated edge drops the tested class's family) with nullish
+    // stripping and the whole-subject intersection fallback exact; every
+    // row here matches the checker.
+    (Owner::U6NarrowInstanceof, 5, 5, 0),
     // N25's MatchesChecker label predated the recursive expect pin; the
     // deep measurement showed the dead contributor SURVIVES (wrong-and-
-    // warm), so the row is parked against its narrowing block.
-    (Owner::U6NarrowLattice, 38, 24, 14),
+    // warm), so the row is parked against its narrowing block. D10
+    // closed N88's unknown-key intersection (the Record mint), moving
+    // this owner to 25 matching.
+    (Owner::U6NarrowLattice, 38, 25, 13),
     (Owner::U6NarrowSubstitution, 12, 6, 6),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     (Owner::SharedTypeResolution, 14, 9, 3),

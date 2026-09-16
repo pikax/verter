@@ -20,8 +20,8 @@ use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 use verter_compiler::framework_common::{
-    RuntimeCompileOutput, RuntimeCustomBlock, RuntimeOutputDescriptor, RuntimeScriptBlock,
-    RuntimeStyleBlock, RuntimeTemplateBlock, SourceMapFidelity, TemplateRenderExport,
+    QualifiedRuntimeStyle, RuntimeCompileOutput, RuntimeOutputDescriptor, RuntimeScriptBlock,
+    RuntimeTemplateBlock, SourceMapFidelity, TemplateRenderExport,
 };
 
 use super::map_input::{validate_and_decode, UncomposableCode, UncomposableFamily};
@@ -186,8 +186,8 @@ impl AssembleInput {
     }
 
     /// Same inputs as the production triple. Style/custom blocks are
-    /// placeholders: assembler reads COUNT; ids come from `meta`. Lengths
-    /// may differ (§3.3 note 1).
+    /// placeholders: the assembler reads the descriptor COUNT; ids come
+    /// from `meta`. Lengths may differ (§3.3 note 1).
     fn to_production_inputs(&self) -> (RuntimeCompileOutput, FileMeta, CompileProfile) {
         let compiled = RuntimeCompileOutput {
             script: self.script.as_ref().map(|script| RuntimeScriptBlock {
@@ -213,22 +213,23 @@ impl AssembleInput {
                 },
                 output_descriptor: descriptor(&template.code),
             }),
-            styles: (0..self.style_count)
-                .map(|_| RuntimeStyleBlock {
-                    code: String::new(),
-                    source_map: None,
-                    lang: None,
-                    scope_hash: None,
-                    has_global: false,
-                    output_descriptor: descriptor(""),
-                })
+            qualified_styles: (0..self.style_count)
+                .map(|_| qualified_style("", descriptor("")))
                 .collect(),
-            custom_blocks: (0..self.custom_block_count)
-                .map(|_| RuntimeCustomBlock {
-                    block_type: String::new(),
-                    content: String::new(),
-                })
-                .collect(),
+            custom_block_artifacts: (self.custom_block_count > 0).then(|| {
+                verter_compiler::assembly::custom_block_fixture_set(
+                    "<custom></custom>",
+                    (0..self.custom_block_count)
+                        .map(|index| {
+                            verter_compiler::assembly::CustomBlockFixture::local(
+                                "custom",
+                                &index.to_string(),
+                            )
+                        })
+                        .collect(),
+                )
+                .expect("fixture descriptors mint")
+            }),
             scope_id: self.scope_id.clone(),
             ..RuntimeCompileOutput::default()
         };
@@ -267,8 +268,9 @@ impl AssembleInput {
     ) -> Self {
         Self {
             canonical_id: canonical_id.to_string(),
-            style_count: u32::try_from(compiled.styles.len()).expect("style count fits a uint32"),
-            custom_block_count: u32::try_from(compiled.custom_blocks.len())
+            style_count: u32::try_from(compiled.qualified_styles.len())
+                .expect("style count fits a uint32"),
+            custom_block_count: u32::try_from(compiled.custom_block_descriptors().len())
                 .expect("custom-block count fits a uint32"),
             style_langs: meta.style_langs.clone(),
             custom_types: meta.custom_types.clone(),
@@ -293,6 +295,25 @@ impl AssembleInput {
             authored_script: meta.has_script,
             authored_template: meta.has_template,
         }
+    }
+}
+
+/// A published plain-CSS stylesheet with no map and no scoping class.
+fn qualified_style(
+    code: &str,
+    output_descriptor: RuntimeOutputDescriptor,
+) -> QualifiedRuntimeStyle {
+    QualifiedRuntimeStyle {
+        result: verter_css_syntax::QualifiedStyleResult::framework_rewritten(
+            verter_css_syntax::CssDialect::Css,
+            code,
+            Vec::new(),
+        ),
+        consumed_stage: verter_css_syntax::StyleStage::Authored,
+        source_map: None,
+        scope_hash: None,
+        has_global: false,
+        output_descriptor,
     }
 }
 

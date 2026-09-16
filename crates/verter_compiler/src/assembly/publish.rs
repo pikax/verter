@@ -31,6 +31,10 @@ pub enum ArtifactSchemaError {
     InvalidGeneratedRange,
     InvalidSourceRange,
     OverlappingMappings,
+    /// A staged handoff named a root artifact the set does not contain.
+    UnknownRootArtifact,
+    /// A staged handoff's root artifact carries no produced content.
+    UnavailableRootArtifact,
 }
 
 impl std::fmt::Display for ArtifactSchemaError {
@@ -314,6 +318,111 @@ impl serde::Serialize for CompileArtifactSet {
         // preserve_order feature through Cargo feature unification.
         terminal.sort_all_objects();
         terminal.serialize(serializer)
+    }
+}
+
+/// One request's COMPLETE staged compile handoff — the single value a
+/// framework host-integration backend passes to session lifecycle and
+/// publication code.
+///
+/// It carries the validated [`CompileArtifactSet`], the typed identity of
+/// the runtime-module artifact inside it, the dialect that artifact's
+/// bytes are written in, and the runtime source map produced with them.
+/// Every fact the host needs in order to publish the runtime module is
+/// read off THIS value: a consumer neither locates the module's artifact
+/// by scanning names nor re-derives its language from carrier metadata.
+///
+/// The module bytes live ON the root artifact rather than beside it, so
+/// "a published body without its typed artifact set" is not representable.
+/// [`Self::stage`] is the only mint site and validates the root, so
+/// "a staged handoff whose root is absent or unproduced" is not
+/// representable either.
+#[derive(Debug, Clone)]
+pub struct StagedCompileArtifacts {
+    artifacts: CompileArtifactSet,
+    root: super::fragment::ArtifactId,
+    dialect: FragmentDialect,
+    source_map: Option<String>,
+}
+
+impl StagedCompileArtifacts {
+    /// Stage `artifacts` for host handoff with `root` as its runtime module.
+    ///
+    /// An empty `source_map` stages as absent: downstream carries the map
+    /// demand by presence alone, so an empty JSON payload would read as a
+    /// produced-but-empty map rather than as "no map was requested".
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactSchemaError::UnknownRootArtifact`] when `root` names no
+    /// artifact in `artifacts`; [`ArtifactSchemaError::UnavailableRootArtifact`]
+    /// when the named artifact carries no produced content.
+    pub fn stage(
+        artifacts: CompileArtifactSet,
+        root: super::fragment::ArtifactId,
+        dialect: FragmentDialect,
+        source_map: Option<String>,
+    ) -> Result<Self, ArtifactSchemaError> {
+        use super::fragment::ArtifactContent;
+        match artifacts.artifact(&root).map(|artifact| &artifact.content) {
+            None => return Err(ArtifactSchemaError::UnknownRootArtifact),
+            Some(ArtifactContent::Unavailable(_)) => {
+                return Err(ArtifactSchemaError::UnavailableRootArtifact)
+            }
+            Some(ArtifactContent::Available(_)) => {}
+        }
+        Ok(Self {
+            artifacts,
+            root,
+            dialect,
+            source_map: source_map.filter(|json| !json.is_empty()),
+        })
+    }
+
+    /// The complete staged artifact set, with every source unit, typed
+    /// relation and qualified map the compiler produced for this request.
+    pub fn set(&self) -> &CompileArtifactSet {
+        &self.artifacts
+    }
+
+    /// The runtime-module artifact this handoff publishes.
+    pub fn root(&self) -> &super::fragment::CompileArtifact {
+        self.artifacts
+            .artifact(&self.root)
+            .expect("`stage` rejects a root absent from the set, which is immutable afterwards")
+    }
+
+    /// The runtime module's bytes — the SAME allocation the root artifact
+    /// stores, so publishing shares it rather than copying the source.
+    pub fn code(&self) -> &std::sync::Arc<str> {
+        match &self.root().content {
+            super::fragment::ArtifactContent::Available(code) => code,
+            super::fragment::ArtifactContent::Unavailable(_) => unreachable!(
+                "`stage` rejects an unavailable root, and the set is immutable afterwards"
+            ),
+        }
+    }
+
+    /// The exact dialect [`Self::code`] is written in, declared by the
+    /// producing assembly rather than inferred downstream.
+    pub fn dialect(&self) -> FragmentDialect {
+        self.dialect
+    }
+
+    /// The language id (`"js"`/`"jsx"`/`"ts"`/`"tsx"`) of [`Self::code`].
+    pub fn lang(&self) -> &'static str {
+        self.dialect.lang_id()
+    }
+
+    /// The product this runtime module was compiled as.
+    pub fn product(&self) -> ProductKind {
+        self.root().product()
+    }
+
+    /// The runtime source map for [`Self::code`]; `None` when no map was
+    /// demanded or produced.
+    pub fn source_map(&self) -> Option<&str> {
+        self.source_map.as_deref()
     }
 }
 

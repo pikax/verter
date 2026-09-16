@@ -1292,7 +1292,7 @@ fn svelte_style_virtual_node_carries_the_demanded_css_source_map() {
     // A Svelte SFC with a scoped `<style>`, compiled under a profile that
     // DEMANDS maps (`CompileProfile.source_map = true`), must surface the css
     // map on the `VirtualNodeKind::Style` response: the compiler produces
-    // `RuntimeStyleBlock.source_map` (the official `css.map`, generated from
+    // `QualifiedRuntimeStyle.source_map` (the official `css.map`, generated from
     // the same transform that rendered the code) and the session must CARRY
     // it into the cached virtual file — not drop it on the floor.
     let host = host();

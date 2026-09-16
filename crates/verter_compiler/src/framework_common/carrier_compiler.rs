@@ -711,28 +711,6 @@ pub struct RuntimeDiagnostic {
     pub span: verter_span::Span,
 }
 
-/// The framework-OWNED ESM body the carrier emits for the runtime module.
-///
-/// Vue's runtime compiler now emits the assembled `_sfc_main` body here
-/// together with its compile artifact set. Svelte's runtime compiler emits
-/// its self-contained ESM the same way. `None` means there is no runtime
-/// surface to publish — the host must not reconstruct framework topology
-/// from block fields.
-#[derive(Debug, Clone, Default)]
-pub struct RuntimeMainModule {
-    /// The framework-owned ESM body, when the carrier emits one directly.
-    /// `None` ⇒ no runtime main to publish. Shared with the typed main
-    /// artifact when compiler assembly produced this body.
-    pub body_code: Option<std::sync::Arc<str>>,
-    /// Source map for `body_code` (empty when none / disabled).
-    pub source_map: String,
-    /// The language id of the produced body (`"js"` / `"ts"`), when known.
-    pub lang: Option<String>,
-    /// Compile-artifact schema for the assembled main, when this body was
-    /// produced by compiler-owned main-module assembly.
-    pub artifacts: Option<crate::assembly::CompileArtifactSet>,
-}
-
 /// A framework-neutral compiled `<script>` block.
 #[derive(Debug, Clone)]
 pub struct RuntimeScriptBlock {
@@ -785,33 +763,6 @@ pub struct RuntimeTemplateBlock {
     pub output_descriptor: RuntimeOutputDescriptor,
 }
 
-/// A framework-neutral compiled `<style>` block.
-#[derive(Debug, Clone)]
-pub struct RuntimeStyleBlock {
-    /// The processed CSS code.
-    pub code: String,
-    /// Source map for [`code`](Self::code) — `Some` ONLY when the compile
-    /// demanded maps ([`RuntimeCompileOptions::source_map`]) AND the
-    /// framework produces one for its css artifact (Svelte's external
-    /// `css.map`, generated from the same transform that rendered the code).
-    /// `None` otherwise.
-    pub source_map: Option<String>,
-    /// Optional explicit language (`scss`, …); `None` ⇒ plain CSS.
-    pub lang: Option<String>,
-    /// The component SCOPE HASH the block's selectors are scoped under, when
-    /// the framework scopes by class (Svelte's `svelte-<djb2>` — the same hash
-    /// baked into the component's markup). `None` when the framework carries
-    /// its scope on [`RuntimeCompileOutput::scope_id`] instead (Vue's
-    /// `data-v-…` attribute scoping) or the block is unscoped.
-    pub scope_hash: Option<String>,
-    /// Whether the block's css includes GLOBAL css (Svelte's `:global(...)`
-    /// — the official `css.hasGlobal`). Always `false` for a framework whose
-    /// style pipeline carries no such fact (Vue).
-    pub has_global: bool,
-    /// Qualified identity and source-map chain for this emitted unit.
-    pub output_descriptor: RuntimeOutputDescriptor,
-}
-
 /// A compiled `<style>` output qualified by the stage identity of its bytes.
 ///
 /// The stylesheet travels as a [`verter_css_syntax::QualifiedStyleResult`],
@@ -823,7 +774,8 @@ pub struct RuntimeStyleBlock {
 /// [`Self::output_descriptor`] declares.
 #[derive(Debug, Clone)]
 pub struct QualifiedRuntimeStyle {
-    /// The published stylesheet: framework-rewritten plain CSS.
+    /// The published stage-qualified stylesheet — authored, preprocessed or
+    /// framework-rewritten, as the result's own stage says.
     pub result: verter_css_syntax::QualifiedStyleResult,
     /// The stage of the bytes the framework rewrite consumed.
     pub consumed_stage: verter_css_syntax::StyleStage,
@@ -852,6 +804,12 @@ impl QualifiedRuntimeStyle {
 }
 
 /// A framework-neutral custom block (`<i18n>`, `<docs>`, …).
+///
+/// Legacy declaration, retained unreferenced for terminal deletion: the
+/// legacy adapter's conversion helpers were removed when consumers moved
+/// to [`RuntimeCompileOutput::custom_block_descriptors`], and no
+/// production route fills this shape anymore. Nothing may read it —
+/// custom-block facts travel on the source-backed descriptors only.
 #[derive(Debug, Clone)]
 pub struct RuntimeCustomBlock {
     /// The block tag (e.g. `"i18n"`).
@@ -879,21 +837,43 @@ pub struct RuntimeCustomBlock {
 /// once by the host's virtual-file population.
 #[derive(Debug, Default)]
 pub struct RuntimeCompileOutput {
-    /// The framework-owned main module (body / map / lang). `body_code`
-    /// `None` ⇒ there is no runtime surface to publish. Vue and Svelte emit
-    /// an assembled body; the host must not reconstruct topology from blocks.
-    pub main: RuntimeMainModule,
+    /// The request's ONE staged compile handoff for the framework-owned
+    /// runtime module: the complete artifact set plus the typed identity,
+    /// dialect and map of the module artifact inside it. `None` ⇒ there is
+    /// no runtime surface to publish. Vue and Svelte both stage their
+    /// assembled module here; a consumer reads the published bytes,
+    /// language and map off the staged root artifact and never
+    /// reconstructs framework topology from block fields.
+    pub main: Option<crate::assembly::StagedCompileArtifacts>,
     /// The compiled `<script>` block, when present.
     pub script: Option<RuntimeScriptBlock>,
     /// The compiled template / render-function block, when present.
     pub template: Option<RuntimeTemplateBlock>,
-    /// Compiled `<style>` blocks in source order.
-    pub styles: Vec<RuntimeStyleBlock>,
-    /// Stage-qualified compiled `<style>` outputs in source order. A carrier
-    /// publishes its styles here or in [`Self::styles`], never both.
+    /// Stage-qualified compiled `<style>` outputs in source order. Every
+    /// carrier publishes every style here: a `<style>` output leaves the
+    /// carrier boundary carrying the stage, dialect and producer of its
+    /// bytes, so there is no shape in which an unqualified stylesheet
+    /// travels beside a qualified one.
     pub qualified_styles: Vec<QualifiedRuntimeStyle>,
-    /// Custom blocks in source order.
+    /// Custom blocks, legacy adapter shape. Retained as an unreferenced
+    /// declaration for terminal deletion; no production route fills it.
+    /// Consumers take [`Self::custom_block_descriptors`] instead.
     pub custom_blocks: Vec<RuntimeCustomBlock>,
+    /// Source-backed custom-block descriptors beside the retired legacy
+    /// adapter, admitted to their own compile-artifact set: one `"sfc"`
+    /// source unit bound to the registered carrier (registered file
+    /// lineage, carrier-bytes revision), one `"sfc"` analysis artifact, and
+    /// one attached descriptor per block in source order. Minted once by the
+    /// Vue bridge from the admitted artifact, whether or not Main is
+    /// demanded. `None` for a carrier without custom blocks, for Svelte (no
+    /// custom-block producer cell), and on routes that never hold the
+    /// registered artifact.
+    pub custom_block_artifacts: Option<crate::assembly::CompileArtifactSet>,
+    /// Retained parse facts in transit from the runtime leg to the Vue
+    /// bridge, which takes them to mint [`Self::custom_block_artifacts`].
+    /// Opaque outside the bridge; `pub` only so cross-crate struct-update
+    /// construction (`..Default::default()`) still compiles.
+    pub custom_block_facts: super::vue_bridge::StagedCustomBlockFacts,
     /// The scope id (`data-v-xxxxxxxx`), empty when none.
     pub scope_id: String,
     /// The IDE (TSX/JSX) artifact, present when `want_ide` was requested AND
@@ -923,18 +903,36 @@ pub struct RuntimeCompileOutput {
 }
 
 impl RuntimeCompileOutput {
+    /// The source-backed custom-block descriptors this bundle carries, in
+    /// source order — the single consumer authority for custom-block
+    /// identity, order, role/tag, language, source identity and typed
+    /// content state. The descriptors travel unreduced inside their
+    /// staged compile-artifact set ([`Self::custom_block_artifacts`]), so
+    /// their relations and provenance stay reachable beside them. Empty
+    /// when the producing route minted none (no custom blocks, Svelte's
+    /// bounded-inapplicable cell, or a descriptor-less direct conversion);
+    /// a consumer that finds none publishes none and never falls back to
+    /// reconstructing facts from carrier metadata.
+    #[must_use]
+    pub fn custom_block_descriptors(
+        &self,
+    ) -> &[crate::assembly::custom_block::CustomBlockDescriptor] {
+        self.custom_block_artifacts
+            .as_ref()
+            .map_or(&[], |set| set.custom_blocks())
+    }
+
     /// Whether this bundle carries a RUNTIME surface (a directly-emitted
     /// body OR host-assemblable block side-files). A carrier that produced
     /// only an IDE artifact (Svelte) returns `false` — the host populates
     /// the `CachedTsx` slot and emits no `Main` virtual node.
     #[must_use]
     pub fn has_runtime_surface(&self) -> bool {
-        self.main.body_code.is_some()
+        self.main.is_some()
             || self.script.is_some()
             || self.template.is_some()
-            || !self.styles.is_empty()
             || !self.qualified_styles.is_empty()
-            || !self.custom_blocks.is_empty()
+            || !self.custom_block_descriptors().is_empty()
     }
 
     /// Whether any diagnostic in the bundle is an error.

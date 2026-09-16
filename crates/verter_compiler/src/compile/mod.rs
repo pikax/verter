@@ -54,7 +54,7 @@ use crate::tokenizer::byte::{
     tokenize, tokenize_sfc, tokenize_sfc_with_delimiters, tokenize_with_delimiters,
 };
 use crate::tsc;
-use verter_css_syntax::{CssDialect, StyleDiagnostic, StyleStage};
+use verter_css_syntax::{CssDialect, QualifiedStyleResult, StyleDiagnostic, StyleStage};
 
 use helpers::{empty_sfc_script_block, extract_attrs, extract_block_ranges};
 use macro_scope_check::collect_invalid_options_scope_diagnostics;
@@ -903,11 +903,15 @@ fn compile_inner(
     // Collect block ranges for inter-block gap removal
     let block_ranges = extract_block_ranges(parsed, input);
 
-    // Collect custom blocks before taking template ast
+    // Collect custom blocks before taking template ast. The bytes' digest is
+    // taken once, on the first block, so a carrier without custom blocks
+    // hashes nothing.
+    let source_content = std::cell::OnceCell::new();
     let custom_blocks: Vec<VerterCustomBlock> = parsed
         .unknown_nodes()
         .iter()
-        .map(|node| {
+        .enumerate()
+        .map(|(source_order, node)| {
             let tag_name = &input[node.tag_open.start as usize..node.tag_open.name_end as usize];
             // Extract tag name (skip the '<')
             let block_type = tag_name.strip_prefix('<').unwrap_or(tag_name).to_string();
@@ -916,10 +920,35 @@ fn compile_inner(
                 .map(|span| input[span.start as usize..span.end as usize].to_string())
                 .unwrap_or_default();
             let attrs = extract_attrs(&node.attributes, input);
+            // Exact-case names, as Vue's own `createBlock` reads them and as
+            // the descriptor contract binds `lang`/`src` to their attribute:
+            // `LANG="json"` stays an ordinary attribute.
+            let lang = attrs
+                .iter()
+                .find(|(key, _)| key.as_str() == "lang")
+                .map(|(_, value)| value.clone());
+            let src = attrs
+                .iter()
+                .find(|(key, _)| key.as_str() == "src")
+                .map(|(_, value)| value.clone());
+            // A self-closing block has no content span; anchor its region at
+            // the tag's content-start position instead of rescanning for one.
+            let region = node
+                .content
+                .unwrap_or_else(|| crate::common::Span::new(node.tag_open.end, node.tag_open.end));
             VerterCustomBlock {
                 block_type,
                 content,
                 attrs,
+                region,
+                source_order: source_order as u32,
+                lang,
+                src,
+                source_content: source_content
+                    .get_or_init(|| {
+                        verter_identity::identity::ContentId::from_content_bytes(input.as_bytes())
+                    })
+                    .clone(),
             }
         })
         .collect();
@@ -933,7 +962,7 @@ fn compile_inner(
         for (style_index, style) in parsed.style_nodes().iter().enumerate() {
             let style_start = Instant::now();
             let mut style_module_classes = Vec::new();
-            let style_code = if let Some(content) = &style.content {
+            let style_result = if let Some(content) = &style.content {
                 let style_source = &input[content.start as usize..content.end as usize];
                 match style_dialect(style.lang) {
                     None => {
@@ -953,7 +982,14 @@ fn compile_inner(
                             ),
                             *content,
                         ));
-                        style_source.to_string()
+                        // The rewrite cannot claim to understand these bytes,
+                        // so no qualified statement about them is made: every
+                        // one names a dialect, and none of those would be
+                        // true. The refusal is the error pushed just above.
+                        // (`class_extraction_dialect` may read such a block
+                        // as CSS only because completion is advisory; a
+                        // published result is not.)
+                        None
                     }
                     Some(authored_dialect) => {
                         let source_name = options.filename.as_deref().unwrap_or("<style>");
@@ -1027,11 +1063,20 @@ fn compile_inner(
                             }
                         }
 
-                        outcome.result.into_code()
+                        Some(outcome.result)
                     }
                 }
             } else {
-                String::new()
+                // A `<style>` with no content span authored no bytes here: a
+                // self-closing block, or a host-selected one whose content the
+                // carrier view blanked. An empty authored block is a
+                // legitimate result, not a refusal (see
+                // `QualifiedStyleResult::refused`), recorded in the dialect
+                // the block declares. A declared `lang` this compiler cannot
+                // name has no such dialect, so the slot stays empty rather
+                // than borrowing one; a host selection fills it later.
+                style_dialect(style.lang)
+                    .map(|dialect| QualifiedStyleResult::authored(dialect, "", Vec::new()))
             };
 
             let style_duration_ms = style_start.elapsed().as_secs_f64() * 1000.0;
@@ -1047,7 +1092,7 @@ fn compile_inner(
             });
 
             style_blocks.push(VerterStyleBlock {
-                code: style_code,
+                result: style_result,
                 scoped: style.scoped,
                 lang: lang_str,
                 duration_ms: style_duration_ms,

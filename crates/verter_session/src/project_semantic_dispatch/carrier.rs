@@ -489,6 +489,156 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Intern the LIB-ENVIRONMENT global `name` applied to `args`,
+    /// deliberately BYPASSING lexical scope and userland shadowing.
+    ///
+    /// This is the route a COMPILER-INTERNAL use of a global takes, and it
+    /// is the opposite of an authored annotation. The checker reads its
+    /// own global symbol table for these — `getGlobalRecordSymbol()` for
+    /// the unknown-key `in` intersection, `globalFunctionType` for the
+    /// `typeof x === "function"` narrow — and never resolves the
+    /// identifier `Record` or `Function` in the narrowed expression's
+    /// scope, so a module-local declaration of that name is IRRELEVANT to
+    /// the operation. An authored `x: Record<K, V>` is the opposite case
+    /// and keeps taking
+    /// [`ProjectSemanticDispatch::lower_type_expr_in_owner_scope_with_context`],
+    /// where `name_resolution` / [`ScopeShadowing`] make userland
+    /// shadowing win. Routing a compiler-internal global through that
+    /// lexical entry made a local `type Record` silently change (or, with
+    /// a shadow check bolted on, suppress) a narrow the checker performs
+    /// regardless.
+    ///
+    /// The mint is the SAME `__builtin__`-sentinel carrier the unshadowed
+    /// bare-name fast paths below produce — the runtime-nominal carrier
+    /// for a global lib type, the builtin-utility route for a lib utility
+    /// — so the produced node is byte-identical to the unshadowed
+    /// lowering and no second `Record` / `Function` spelling exists.
+    ///
+    /// `None` when the environment provides no such global — see
+    /// [`Self::lib_global_is_available`] for exactly what is asked. That
+    /// is the same "the global is unavailable" answer
+    /// `getGlobalRecordSymbol()` returning `undefined` gives the checker,
+    /// which then performs no narrow at all. The caller keeps its typed
+    /// gap and never fabricates one.
+    pub(super) fn lower_lib_global(
+        &self,
+        scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &Arc<str>,
+        args: Arc<[SemanticNodeId]>,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        if !self.lib_global_is_available(scope_canonical_id, name.as_ref()) {
+            return None;
+        }
+        let whole_hash = self
+            .ctx
+            .shallow_file_state(scope_canonical_id)
+            .map(|shallow| shallow.whole_hash)
+            .unwrap_or_default();
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::from(scope_canonical_id),
+            owner,
+            whole_hash,
+            local_scope: None,
+        };
+        let identity = DeclIdentity {
+            canonical_id: Arc::from("__builtin__"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::clone(name),
+        };
+        if self.runtime_nominal_global_name(name.as_ref()).is_some() {
+            return Some(self.intern_ref_head_carrier(
+                RefHeadResolution::Builtin(identity),
+                name,
+                &scope,
+                args,
+            ));
+        }
+        if verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name.as_ref())
+            .is_some()
+        {
+            return Some(self.finish_carrier_resolution(
+                CarrierArgsContinuation::Builtin {
+                    identity,
+                    name: Arc::clone(name),
+                    scope,
+                    context,
+                },
+                args,
+            ));
+        }
+        None
+    }
+
+    /// Whether the ACTIVE environment provides the lib global `name` —
+    /// the availability question [`Self::lower_lib_global`] fails closed
+    /// on, and the session's answer to the checker's
+    /// `getGlobalRecordSymbol()` / `globalFunctionType` lookup.
+    ///
+    /// The environment has TWO providers and this asks both, in order:
+    ///
+    /// 1. A REGISTERED ambient lib of the consumer's project that
+    ///    declares the name. That is the environment's own declaration,
+    ///    and consulting it records the consumer → ambient reverse-dep
+    ///    edge, so re-registering the lib invalidates whatever was minted
+    ///    from it.
+    /// 2. Otherwise verter's OWN implementation of the global — the
+    ///    runtime-nominal registry for a lib type, the builtin-utility
+    ///    registry for a lib utility. This is not a fallback spelling of
+    ///    provider 1: it is what the environment CONSISTS of for a
+    ///    project that registers no lib declaring the name, which is
+    ///    every project in the standard hosts (their ambient registry is
+    ///    empty, yet `Record`, `Pick` and `Promise` all resolve, because
+    ///    verter reduces them natively).
+    ///
+    /// This is NOT yet the single availability authority for the whole
+    /// dispatch. [`Self::plan_bare_ref_head`]'s builtin fast paths — the
+    /// route an AUTHORED `x: Record<K, V>` takes — recognise the same two
+    /// registries INDEPENDENTLY and never call this. The two agree today
+    /// only because provider 2 makes `Record` and `Function` available
+    /// unconditionally, so no configuration can make them disagree. The
+    /// moment a project-scoped lib SELECTION lands (see below), that
+    /// coincidence ends and both routes must ask this one authority, or a
+    /// guard narrow and an authored annotation will disagree about
+    /// whether the global exists. Converging them is the successor's
+    /// work, not D10's: it changes the authored carrier-resolution hot
+    /// path, which is outside this charter's mutation boundary.
+    ///
+    /// What this deliberately does NOT do is treat a non-empty ambient
+    /// registry as AUTHORITATIVE. Registered ambient corpora here are
+    /// partial by design — a framework shim, a callable-apparent
+    /// interface — so "this registry does not declare `Record`" is not
+    /// evidence that the project lacks `Record`; reading it that way
+    /// would withdraw `Record` from every project that registers a
+    /// framework shim. A project-scoped TS lib SELECTION (tsconfig
+    /// `lib`, `noLib`) is not modelled in this session at all — when it
+    /// is, it belongs here as provider 1's refinement, and it is the one
+    /// thing that could make this answer `false` in production.
+    fn lib_global_is_available(&self, scope_canonical_id: &str, name: &str) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .lib_global_unavailable
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
+        }
+        if let Some(project) = self.project_stable_key_for_canonical(scope_canonical_id) {
+            if let Some(hit) = self.ctx.lookup_ambient_symbol(project, name) {
+                self.ctx
+                    .record_ambient_dependency(scope_canonical_id, hit.virtual_id.as_ref());
+                return true;
+            }
+        }
+        self.runtime_nominal_global_name(name).is_some()
+            || verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name)
+                .is_some()
+    }
+
     pub(super) fn plan_bare_ref_head(
         &self,
         ctx: &CarrierResolverContext<'_>,
@@ -507,6 +657,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // declaration identity for semantic classifiers and reducers.
         // Userland shadowing wins via the same `name_resolution` /
         // `ScopeShadowing` gates the builtin utilities use.
+        //
+        // This path and the one below recognise the global registries
+        // DIRECTLY; they do not go through
+        // `Self::lib_global_is_available`, which is the compiler-internal
+        // route's availability authority. Harmless while provider 2 makes
+        // every such global unconditionally available — see that method
+        // for what has to converge here once a project-scoped lib
+        // selection can withdraw one.
         if !name_resolution.contains_key(name.as_ref())
             && !shadowing.is_shadowing_lib(name.as_ref())
             && self.runtime_nominal_global_name(name.as_ref()).is_some()

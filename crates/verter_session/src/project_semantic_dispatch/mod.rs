@@ -398,6 +398,36 @@ pub struct ProjectSemanticDispatch<'a> {
     /// dispatch-wide in-flight set refuses (`Unavailable` — never a proof),
     /// while sibling diamonds stay fine (entries pop on exit).
     pub(super) closedness_active: std::cell::RefCell<smallvec::SmallVec<[InstantiateIdentity; 8]>>,
+    /// Memoized transitive CLASS ANCESTRY, keyed by the rooted declaration
+    /// identity ([`build::ClassAncestryReading`],
+    /// [`Self::class_heritage_ancestry`]).
+    ///
+    /// The `instanceof` guard asks ONE ancestry question per union arm per
+    /// cold edge; the recursive walk over that arm's base chain lives here,
+    /// behind that one question, not in the evaluator. A repeated QUESTION
+    /// is a map hit — a second arm naming the same declaration, and the
+    /// negated edge re-asking what the positive edge answered, both cost
+    /// nothing.
+    ///
+    /// Sharing BETWEEN different questions is one-directional, and the
+    /// wording matters because the obvious stronger claim is false. A
+    /// fresh walk memoizes only the declaration that was REQUESTED, not
+    /// every declaration it passed through, while the walk itself folds
+    /// any hop that is already memoized instead of re-walking it. So
+    /// asking `Chain3` after `Chain1` is cached stops at `Chain1`, but
+    /// asking `Chain3` and then `Chain2` re-walks `Chain2 -> Chain1`: a
+    /// deep hierarchy is NOT "walked once per dispatch" in general. Making
+    /// it so needs a post-order fold that mints a correct per-ancestor
+    /// entry (its own subtree's `decided` and `observed`, which are not a
+    /// suffix of the root's once heritage branches), and nothing has shown
+    /// it to be worth that. None of this touches D10-AC4, which bounds the
+    /// EVALUATOR's questions, not this authority's internal reads.
+    ///
+    /// Dispatch-scoped and never a query key (R6): the ancestry is derived
+    /// from prepared declarations whose files the ASKER self-roots at the
+    /// whole-hash they were served at, so the answer is valid exactly as
+    /// long as the dispatch that built it.
+    pub(super) heritage_ancestry: build::HeritageAncestryMemo,
     /// Cold-build-LOCAL taint accumulator stack (universal read-boundary
     /// fold).
     ///
@@ -607,6 +637,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             instantiate_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
             closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            heritage_ancestry: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
             active_operand_evidence: std::cell::RefCell::new(smallvec::SmallVec::new()),
             lexical_demand_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),

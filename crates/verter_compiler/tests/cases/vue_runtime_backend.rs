@@ -332,16 +332,6 @@ fn assert_runtime_parity(
         assert_eq!(backend.dialect(), standalone.dialect());
     }
     assert_eq!(via_backend.diagnostics, via_standalone.diagnostics);
-    assert_eq!(via_backend.styles.len(), via_standalone.styles.len());
-    for (backend_style, standalone_style) in
-        via_backend.styles.iter().zip(via_standalone.styles.iter())
-    {
-        assert_eq!(backend_style.code, standalone_style.code);
-        assert_eq!(backend_style.source_map, standalone_style.source_map);
-        assert_eq!(backend_style.lang, standalone_style.lang);
-        assert_eq!(backend_style.scope_hash, standalone_style.scope_hash);
-        assert_eq!(backend_style.has_global, standalone_style.has_global);
-    }
     assert_eq!(
         via_backend.qualified_styles.len(),
         via_standalone.qualified_styles.len()
@@ -972,14 +962,14 @@ fn vue_runtime_backend_preserves_selected_style_bytes() {
     let via_empty = compile_via_backend(source, &artifact, &request).expect("carrier-only style");
     assert!(
         via_empty
-            .styles
+            .qualified_styles
             .iter()
-            .all(|style| !style.code.contains("color: red")),
+            .all(|style| !style.result.code().contains("color: red")),
         "carrier src-only style must not invent selected CSS: {:?}",
         via_empty
-            .styles
+            .qualified_styles
             .iter()
-            .map(|style| style.code.as_str())
+            .map(|style| style.result.code())
             .collect::<Vec<_>>()
     );
 
@@ -996,10 +986,6 @@ fn vue_runtime_backend_preserves_selected_style_bytes() {
         },
     )
     .expect("selected style");
-    assert!(
-        via_backend.styles.is_empty(),
-        "the selected style must publish qualified"
-    );
     assert!(
         !via_backend.qualified_styles.is_empty(),
         "selected style must publish a qualified style block"
@@ -1562,10 +1548,6 @@ fn rewritten_selected_style_composes_cascade_map_with_supplied_source_map() {
         },
     )
     .expect("rewritten selected style");
-    assert!(
-        via_backend.styles.is_empty(),
-        "the selected style must publish qualified"
-    );
     assert!(
         !via_backend.qualified_styles.is_empty(),
         "selected style must publish a qualified style block"

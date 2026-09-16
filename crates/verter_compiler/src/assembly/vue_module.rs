@@ -28,6 +28,7 @@ use super::map_input::{
 use super::plan::{PlannedArtifact, ProductPlan};
 use super::publish::{
     publish, ArtifactContribution, ArtifactSet, AssemblyRefusal, CompileArtifactSet,
+    StagedCompileArtifacts,
 };
 use super::source_space::{
     ArtifactMapFamily, ArtifactMapSegment, QualifiedArtifactMap, SourceSpaceKind,
@@ -242,23 +243,27 @@ impl Default for VueMainDecoration {
 }
 
 impl VueMainDecoration {
-    fn prelude(&self, compiled: &RuntimeCompileOutput) -> ExtraFragment {
+    fn prelude(&self, compiled: &RuntimeCompileOutput, custom_bound: usize) -> ExtraFragment {
         use std::fmt::Write;
         let mut prelude = String::new();
         let mut imports: Vec<DeclaredImport> = Vec::new();
-        for id in self.style_specifiers.iter().take(compiled.styles.len()) {
+        for id in self
+            .style_specifiers
+            .iter()
+            .take(compiled.qualified_styles.len())
+        {
             let _ = writeln!(prelude, "import \"{id}\"");
             imports.push(DeclaredImport {
                 specifier: id.clone(),
                 kind: DeclaredImportKind::SideEffect,
             });
         }
-        for (idx, id) in self
-            .custom_specifiers
-            .iter()
-            .take(compiled.custom_blocks.len())
-            .enumerate()
-        {
+        // The custom import/invocation bound is the descriptor set's
+        // identity/order — the same source-backed facts the bundle's
+        // consumers publish from. A bundle without descriptors carries no
+        // custom-block authority, so no import is emitted for it even when
+        // host identifiers were minted from a parse inventory.
+        for (idx, id) in self.custom_specifiers.iter().take(custom_bound).enumerate() {
             let block_name = format!("block{idx}");
             let _ = writeln!(prelude, "import {block_name} from \"{id}\"");
             imports.push(DeclaredImport {
@@ -278,17 +283,14 @@ impl VueMainDecoration {
 
     fn trailer(
         &self,
-        compiled: &RuntimeCompileOutput,
+        custom_bound: usize,
         canonical_id: &str,
         runtime: &str,
         ssr: bool,
     ) -> ExtraFragment {
         use std::fmt::Write;
         let mut trailer = String::new();
-        let custom_count = self
-            .custom_specifiers
-            .len()
-            .min(compiled.custom_blocks.len());
+        let custom_count = self.custom_specifiers.len().min(custom_bound);
         for idx in 0..custom_count {
             let _ = writeln!(
                 trailer,
@@ -391,18 +393,6 @@ pub struct VueRuntimeMainRequest<'a> {
     pub runtime: &'a str,
     pub ssr: bool,
     pub decoration: VueMainDecoration,
-}
-
-/// Assembled Vue `_sfc_main` plus its compile-artifact-set relations.
-///
-/// `code` is the same allocation stored on the main artifact's
-/// [`ArtifactContent::Available`] payload.
-#[derive(Debug)]
-pub struct VueRuntimeMainAssembled {
-    pub code: Arc<str>,
-    pub source_map: Option<String>,
-    pub lang: String,
-    pub artifacts: CompileArtifactSet,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -618,8 +608,12 @@ pub(crate) fn compose_fragments(
         decoration,
     } = request;
     let ssr = planned_kind == ProductKind::RuntimeServer;
-    let prelude_extra = vec![decoration.prelude(compiled)];
-    let trailer_extra = vec![decoration.trailer(compiled, canonical_id, runtime, ssr)];
+    // Descriptor-bound custom import/invocation count: the bundle's
+    // custom-block authority is its descriptor set, never the retired
+    // legacy adapter list.
+    let custom_bound = compiled.custom_block_descriptors().len();
+    let prelude_extra = vec![decoration.prelude(compiled, custom_bound)];
+    let trailer_extra = vec![decoration.trailer(custom_bound, canonical_id, runtime, ssr)];
 
     let rewritten_script = compiled
         .script
@@ -885,11 +879,15 @@ pub fn compose_main_module(
 }
 
 /// Sole semantic Vue main-module assembler: map validation, dialect,
-/// composition, and compile-artifact-set emission. Session adapters transport
-/// identifiers only.
+/// composition, and staged compile-artifact emission. Session adapters
+/// transport identifiers only.
+///
+/// The result is the request's ONE staged handoff: the module's bytes, its
+/// dialect and its map are read off the staged root artifact, never carried
+/// beside it.
 pub fn assemble_vue_runtime_main(
     request: VueRuntimeMainRequest<'_>,
-) -> Result<VueRuntimeMainAssembled, VueMainAssemblyFailure> {
+) -> Result<StagedCompileArtifacts, VueMainAssemblyFailure> {
     let planned_kind = if request.ssr {
         ProductKind::RuntimeServer
     } else {
@@ -950,13 +948,13 @@ pub fn assemble_vue_runtime_main(
     };
     publish(&plan, vec![contribution]).map_err(VueMainAssemblyFailure::from)?;
     let code: Arc<str> = Arc::from(composed.code);
-    let artifacts = vue_main_compile_artifacts(
+    vue_main_compile_artifacts(
         request.canonical_id,
         request.compiled,
         planned_kind,
         dialect,
-        Arc::clone(&code),
-        source_map.as_deref(),
+        code,
+        source_map,
         &request.decoration,
         want_maps,
     )
@@ -965,12 +963,6 @@ pub fn assemble_vue_runtime_main(
             kind: planned_kind,
             reason: err.to_string(),
         })
-    })?;
-    Ok(VueRuntimeMainAssembled {
-        code,
-        source_map,
-        lang: dialect.lang_id().to_string(),
-        artifacts,
     })
 }
 
@@ -1112,8 +1104,8 @@ impl CanonicalEncode for VueMainInputBasis<'_> {
     }
 }
 
-/// Compile-artifact schema for one assembled Vue main artifact and its
-/// contributing script/template units. Relations are typed; maps are
+/// Staged compile-artifact handoff for one assembled Vue main artifact and
+/// its contributing script/template units. Relations are typed; maps are
 /// qualified by family. Construction performs no compile work.
 #[allow(clippy::too_many_arguments)]
 pub fn vue_main_compile_artifacts(
@@ -1122,10 +1114,10 @@ pub fn vue_main_compile_artifacts(
     kind: ProductKind,
     dialect: FragmentDialect,
     code: impl Into<Arc<str>>,
-    runtime_source_map: Option<&str>,
+    runtime_source_map: Option<String>,
     decoration: &VueMainDecoration,
     want_maps: bool,
-) -> Result<CompileArtifactSet, super::publish::ArtifactSchemaError> {
+) -> Result<StagedCompileArtifacts, super::publish::ArtifactSchemaError> {
     let code = code.into();
     use std::collections::BTreeSet;
 
@@ -1149,7 +1141,7 @@ pub fn vue_main_compile_artifacts(
         }
         order.push_str("template");
     }
-    let map_json = runtime_source_map.unwrap_or("");
+    let map_json = runtime_source_map.as_deref().unwrap_or("");
     let ssr_module_id = decoration.ssr_module_id.as_deref().unwrap_or(canonical_id);
     let basis = VueMainInputBasis {
         canonical_id,
@@ -1189,7 +1181,7 @@ pub fn vue_main_compile_artifacts(
         verter_span::Span::new(0, code.len() as u32),
     );
 
-    let authored = authored_contribution_units(compiled, runtime_source_map);
+    let authored = authored_contribution_units(compiled, runtime_source_map.as_deref());
     for unit in &authored {
         push_unit(&unit.role, unit.content.as_bytes(), unit.span);
     }
@@ -1235,7 +1227,7 @@ pub fn vue_main_compile_artifacts(
         });
         artifacts.push(fragment);
     }
-    if let Some(map_json) = runtime_source_map {
+    if let Some(map_json) = runtime_source_map.as_deref() {
         let authored_ids: BTreeSet<_> = source_units
             .iter()
             .filter(|unit| unit.unit.logical_role() != "main")
@@ -1252,8 +1244,10 @@ pub fn vue_main_compile_artifacts(
             });
         }
     }
+    let root = main.id().clone();
     artifacts.insert(0, main);
-    CompileArtifactSet::new(source_units, artifacts)
+    let set = CompileArtifactSet::new(source_units, artifacts)?;
+    StagedCompileArtifacts::stage(set, root, dialect, runtime_source_map)
 }
 
 struct AuthoredContribution {
@@ -1736,16 +1730,23 @@ mod tests {
     }
 
     /// Host identifiers drive style/custom imports; the compiler owns the
-    /// import shape. Empty identifiers emit no host topology.
+    /// import shape. Empty identifiers emit no host topology. The custom
+    /// import/invocation BOUND is the bundle's descriptor set — the same
+    /// identity/order its consumers publish from.
     #[test]
     fn decoration_emits_host_identifiers_and_skips_them_when_absent() {
+        use crate::assembly::custom_block_fixture_set;
         use crate::framework_common::{
-            RuntimeCustomBlock, RuntimeOutputDescriptor, RuntimeStyleBlock, SourceMapFidelity,
+            QualifiedRuntimeStyle, RuntimeOutputDescriptor, SourceMapFidelity,
         };
-        let style = RuntimeStyleBlock {
-            code: ".x{}".to_string(),
+        let style = QualifiedRuntimeStyle {
+            result: verter_css_syntax::QualifiedStyleResult::framework_rewritten(
+                verter_css_syntax::CssDialect::Css,
+                ".x{}",
+                Vec::new(),
+            ),
+            consumed_stage: verter_css_syntax::StyleStage::Authored,
             source_map: None,
-            lang: Some("css".to_string()),
             scope_hash: None,
             has_global: false,
             output_descriptor: RuntimeOutputDescriptor::generated(
@@ -1756,11 +1757,14 @@ mod tests {
             ),
         };
         let compiled = RuntimeCompileOutput {
-            styles: vec![style],
-            custom_blocks: vec![RuntimeCustomBlock {
-                block_type: "i18n".to_string(),
-                content: "{}".to_string(),
-            }],
+            qualified_styles: vec![style],
+            custom_block_artifacts: Some(
+                custom_block_fixture_set(
+                    "<i18n>{}</i18n>",
+                    vec![crate::assembly::CustomBlockFixture::local("i18n", "{}")],
+                )
+                .expect("fixture descriptors mint"),
+            ),
             ..empty_bundle()
         };
         let bare = assembled(
@@ -1792,6 +1796,38 @@ mod tests {
         assert!(
             decorated.contains("if (typeof block0 === 'function') block0(_sfc_main)"),
             "custom invocation is compiler-owned topology:\n{decorated}"
+        );
+    }
+
+    /// A bundle whose custom-block authority is only host-minted
+    /// identifiers — descriptors absent — emits NO custom import or
+    /// invocation: the retired legacy reconstruction path must fail closed,
+    /// not silently fall back to identifier-driven topology.
+    #[test]
+    fn custom_imports_without_descriptors_fail_closed() {
+        let compiled = empty_bundle();
+        assert!(
+            compiled.custom_block_descriptors().is_empty(),
+            "fixture premise: no descriptor authority"
+        );
+        let decorated = assembled(
+            &compiled,
+            VueMainDecoration {
+                custom_specifiers: vec![
+                    "Comp.vue?vue&type=i18n&index=0".to_string(),
+                    "Comp.vue?vue&type=docs&index=1".to_string(),
+                ],
+                ..VueMainDecoration::default()
+            },
+            ProductKind::RuntimeClient,
+        );
+        assert!(
+            !decorated.contains("import block"),
+            "identifiers without descriptors must not emit custom imports:\n{decorated}"
+        );
+        assert!(
+            !decorated.contains("block0(_sfc_main)"),
+            "identifiers without descriptors must not emit custom invocations:\n{decorated}"
         );
     }
 
@@ -1835,8 +1871,12 @@ mod tests {
             false,
         )
         .expect("schema accepts the assembled main");
-        assert_eq!(artifacts.artifacts().len(), 1);
-        assert!(artifacts.artifacts().iter().any(|a| a.name() == "main"));
+        assert_eq!(artifacts.set().artifacts().len(), 1);
+        assert!(artifacts
+            .set()
+            .artifacts()
+            .iter()
+            .any(|a| a.name() == "main"));
     }
 
     #[test]
@@ -1894,21 +1934,25 @@ mod tests {
         )
         .expect("schema accepts");
         let first_main = first
+            .set()
             .artifacts()
             .iter()
             .find(|a| a.name() == "main")
             .expect("main");
         let option_main = option_changed
+            .set()
             .artifacts()
             .iter()
             .find(|a| a.name() == "main")
             .expect("main");
         let edited_main = after_edit
+            .set()
             .artifacts()
             .iter()
             .find(|a| a.name() == "main")
             .expect("main");
         let reverted_main = reverted
+            .set()
             .artifacts()
             .iter()
             .find(|a| a.name() == "main")
@@ -1918,6 +1962,7 @@ mod tests {
             "option change must change input basis"
         );
         let first_rev = first
+            .set()
             .source_units()
             .find(|u| u.unit.logical_role() == "main")
             .expect("main unit")
@@ -1925,6 +1970,7 @@ mod tests {
             .revision()
             .clone();
         let edited_rev = after_edit
+            .set()
             .source_units()
             .find(|u| u.unit.logical_role() == "main")
             .expect("main unit")
@@ -1932,6 +1978,7 @@ mod tests {
             .revision()
             .clone();
         let reverted_rev = reverted
+            .set()
             .source_units()
             .find(|u| u.unit.logical_role() == "main")
             .expect("main unit")
@@ -1939,6 +1986,7 @@ mod tests {
             .revision()
             .clone();
         let first_content = first
+            .set()
             .source_units()
             .find(|u| u.unit.logical_role() == "main")
             .expect("main unit")
@@ -1989,12 +2037,13 @@ mod tests {
             ProductKind::RuntimeClient,
             FragmentDialect::JavaScript,
             generated,
-            Some(script_map),
+            Some(script_map.to_string()),
             &VueMainDecoration::default(),
             true,
         )
         .expect("schema accepts authored map geometry");
         let main = artifacts
+            .set()
             .artifacts()
             .iter()
             .find(|artifact| artifact.name() == "main")
@@ -2005,6 +2054,7 @@ mod tests {
             .find(|map| map.family == ArtifactMapFamily::RuntimeSourceMap)
             .expect("runtime map");
         let main_unit = artifacts
+            .set()
             .source_units()
             .find(|unit| unit.unit.logical_role() == "main")
             .expect("main unit")
@@ -2012,6 +2062,7 @@ mod tests {
             .id()
             .clone();
         let script_unit = artifacts
+            .set()
             .source_units()
             .find(|unit| unit.unit.logical_role() == "script")
             .expect("script unit");
@@ -2041,7 +2092,7 @@ mod tests {
         assert!(
             main.relations.iter().any(|relation| {
                 relation.kind == ArtifactRelationKind::DependsOn
-                    && artifacts.artifacts().iter().any(|artifact| {
+                    && artifacts.set().artifacts().iter().any(|artifact| {
                         artifact.id() == &relation.target && artifact.name() == "script"
                     })
             }),
@@ -2122,16 +2173,18 @@ mod tests {
             ProductKind::RuntimeClient,
             FragmentDialect::JavaScript,
             generated,
-            Some(&composed),
+            Some(composed.clone()),
             &VueMainDecoration::default(),
             true,
         )
         .expect("schema accepts overlapping local spans");
         let script_unit = artifacts
+            .set()
             .source_units()
             .find(|unit| unit.unit.logical_role() == "script")
             .expect("script unit");
         let template_unit = artifacts
+            .set()
             .source_units()
             .find(|unit| unit.unit.logical_role() == "template")
             .expect("template unit");
@@ -2140,6 +2193,7 @@ mod tests {
             template_unit.source_span.start
         );
         let map = artifacts
+            .set()
             .artifacts()
             .iter()
             .find(|artifact| artifact.name() == "main")
@@ -2192,6 +2246,7 @@ mod tests {
         )
         .expect("schema accepts");
         let revision = artifacts
+            .set()
             .source_units()
             .find(|unit| unit.unit.logical_role() == "main")
             .expect("main unit")
@@ -2199,6 +2254,7 @@ mod tests {
             .revision()
             .clone();
         let main = artifacts
+            .set()
             .artifacts()
             .iter()
             .find(|artifact| artifact.name() == "main")
@@ -2232,7 +2288,7 @@ mod tests {
         })
         .expect("template-less assembly still emits Main");
         let main = assembled
-            .artifacts
+            .set()
             .artifacts()
             .iter()
             .find(|artifact| artifact.name() == "main")
@@ -2244,12 +2300,12 @@ mod tests {
             );
         };
         assert!(
-            Arc::ptr_eq(&assembled.code, content),
+            Arc::ptr_eq(assembled.code(), content),
             "body payload and typed artifact must share one allocation"
         );
         assert!(
             assembled
-                .artifacts
+                .set()
                 .artifacts()
                 .iter()
                 .filter(|artifact| artifact.name() != "main")

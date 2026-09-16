@@ -453,7 +453,19 @@ pub struct VerterTemplateBlock {
 
 /// Generated output for a single `<style>` block (CSS with scoping/modules applied).
 pub struct VerterStyleBlock {
-    pub code: String,
+    /// The published stylesheet, carrying the stage, dialect, producer and
+    /// diagnostics of the bytes the Vue style cascade actually minted. The
+    /// cascade is the sole producer of this value ([`crate::style_planner::
+    /// VueStyleCascadeOutcome::result`]); nothing downstream re-derives the
+    /// stage from the bytes, which is why the bare `code` string this field
+    /// replaced could not be carried across the compiler bridge.
+    ///
+    /// `None` when the block's `lang` names no dialect this compiler admits
+    /// (`postcss`, an unknown spelling), whether or not it authored bytes:
+    /// every qualified value names a dialect, and none would be true. The slot
+    /// stays empty until a route that applies host-selected block content
+    /// fills it or decides what its emptiness means.
+    pub result: Option<verter_css_syntax::QualifiedStyleResult>,
     pub scoped: bool,
     pub lang: Option<String>,
     pub duration_ms: f64,
@@ -465,11 +477,46 @@ pub struct VerterStyleBlock {
     pub module_classes: Vec<(String, String)>,
 }
 
+impl VerterStyleBlock {
+    /// The published bytes. A reader that only wants the text takes them
+    /// from the qualified result rather than from a second copy kept beside
+    /// it, so the bytes and the stage that produced them cannot disagree.
+    /// Empty when there is no qualified result, as for any refusal.
+    #[must_use]
+    pub fn code(&self) -> &str {
+        self.result
+            .as_ref()
+            .map_or("", verter_css_syntax::QualifiedStyleResult::code)
+    }
+}
+
 /// A custom block extracted from the SFC (e.g., `<i18n>`, `<docs>`).
+///
+/// Carries every fact [`crate::assembly::CustomBlockDescriptor`] construction
+/// needs: `region`/`source_order` are retained from the parser's own node
+/// spans (never rescanned), `lang`/`src` are the same-named entries
+/// already present in `attrs`, looked up once here rather than re-derived by
+/// every consumer, and `source_content` binds all of them to the parsed bytes.
+#[derive(Debug)]
 pub struct VerterCustomBlock {
     pub block_type: String,
     pub content: String,
     pub attrs: Vec<(String, String)>,
+    /// SFC-absolute region in UTF-8 bytes: the exact content span for a
+    /// block with content, or a zero-length anchor at the tag's
+    /// content-start position for a self-closing/`src`-backed block.
+    pub region: crate::common::Span,
+    /// This block's position among all custom blocks in the SFC, in
+    /// document order.
+    pub source_order: u32,
+    /// The block's own `lang` attribute value, when present.
+    pub lang: Option<String>,
+    /// The block's own `src` attribute value, when present.
+    pub src: Option<String>,
+    /// Digest of the exact SFC bytes these facts were read from, one value
+    /// shared by every block of a compile. Descriptor minting refuses facts
+    /// whose digest differs from the bytes it stages the SFC unit over.
+    pub source_content: verter_identity::identity::ContentId,
 }
 
 /// A single destructured binding's source mapping.

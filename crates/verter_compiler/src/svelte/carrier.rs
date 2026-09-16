@@ -451,7 +451,8 @@ pub(crate) fn svelte_carrier_bundle(
     // `svelte/internal/client`), attempted ONLY when the request asked for
     // a runtime product, and reached ONLY through the typed Svelte runtime
     // backend's bundle entry. A SUPPORTED component populates
-    // `main.body_code` (the host emits the `Main` virtual node from it,
+    // `main` with the staged compile-artifact handoff (the host emits the
+    // `Main` virtual node from its root artifact,
     // `has_runtime_surface()` becoming true through registry routing); an
     // UNSUPPORTED runtime surface FAILS CLOSED, returning a product-free
     // refusal carrying the precise surface + owning vertical. The refusal
@@ -1159,7 +1160,7 @@ mod tests {
 
     #[test]
     fn compile_bundle_emits_a_runtime_main_body_for_a_runes_component() {
-        // A SUPPORTED runes component populates `main.body_code` (Svelte client JS)
+        // A SUPPORTED runes component stages `main` (Svelte client JS)
         // so `has_runtime_surface()` becomes true. DISCRIMINATING: the body is the
         // client module, not empty.
         let source = "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count}</button>\n";
@@ -1176,27 +1177,24 @@ mod tests {
             bundle.has_runtime_surface(),
             "a runes component must carry a runtime surface"
         );
-        let body = bundle
+        let staged = bundle
             .main
-            .body_code
-            .expect("a runes component emits a Main body");
+            .as_ref()
+            .expect("a runes component stages a Main handoff");
+        let body = staged.code();
         assert!(
             body.contains("import * as $ from 'svelte/internal/client';"),
             "body:\n{body}"
         );
         assert!(body.contains("$.state(0)"), "body:\n{body}");
-        assert_eq!(bundle.main.lang.as_deref(), Some("js"));
+        assert_eq!(staged.lang(), "js");
         // No fail-closed diagnostic for a supported component.
         assert!(
             bundle.diagnostics.is_empty(),
             "a supported component emits no diagnostics, got: {:?}",
             bundle.diagnostics
         );
-        let set = bundle
-            .main
-            .artifacts
-            .as_ref()
-            .expect("compiler-owned artifact set");
+        let set = staged.set();
         let main = set
             .artifacts()
             .iter()
@@ -1206,7 +1204,7 @@ mod tests {
             panic!("produced Main must keep available content");
         };
         assert!(
-            std::sync::Arc::ptr_eq(&body, content),
+            std::sync::Arc::ptr_eq(body, content),
             "body payload and typed artifact must share one allocation"
         );
         assert!(
@@ -1233,7 +1231,7 @@ mod tests {
         )
         .expect("svelte runtime bundle");
         assert_eq!(crate::assembly::svelte_main_assembly_count(), 1);
-        let set = bundle.main.artifacts.as_ref().expect("artifact set");
+        let set = bundle.main.as_ref().expect("staged main handoff").set();
         let main = set
             .artifacts()
             .iter()
@@ -1308,9 +1306,9 @@ mod tests {
         );
         let body = bundle
             .main
-            .body_code
-            .as_deref()
-            .expect("a Main body for a legacy export-let prop component");
+            .as_ref()
+            .expect("a staged Main handoff for a legacy export-let prop component")
+            .code();
         assert!(
             body.contains("let label = $.prop($$props, 'label', 8);"),
             "the prop lowers through the shared $.prop substrate:\n{body}"
@@ -1351,7 +1349,7 @@ mod tests {
         )
         .expect("mapped Svelte runtime bundle");
         assert!(
-            mapped.main.body_code.is_some(),
+            mapped.main.is_some(),
             "source-map demand must preserve the successful Main body; diagnostics: {:?}",
             mapped.diagnostics
         );
@@ -1360,12 +1358,12 @@ mod tests {
             "a supported mapped compile must not acquire diagnostics: {:?}",
             mapped.diagnostics
         );
-        assert!(
-            !mapped.main.source_map.is_empty(),
-            "a successful mapped Main must carry its demanded source map"
-        );
-        let map = oxc_sourcemap::OwnedSourceMap::from_json_string(&mapped.main.source_map)
-            .expect("RuntimeMainModule.source_map is valid JSON");
+        let mapped_main = mapped.main.as_ref().expect("staged main handoff");
+        let mapped_map = mapped_main
+            .source_map()
+            .expect("a successful mapped Main must carry its demanded source map");
+        let map = oxc_sourcemap::OwnedSourceMap::from_json_string(mapped_map)
+            .expect("the staged Main source map is valid JSON");
         assert_eq!(map.get_file(), Some("Counter.svelte"));
         assert_eq!(map.get_sources().collect::<Vec<_>>(), ["Counter.svelte"]);
         assert_eq!(map.get_source_content(0), Some(source));
@@ -1381,9 +1379,11 @@ mod tests {
             &alloc,
         )
         .expect("plain Svelte runtime bundle");
-        assert!(plain.main.source_map.is_empty(), "no demand, no main map");
+        let plain_main = plain.main.as_ref().expect("staged main handoff");
+        assert!(plain_main.source_map().is_none(), "no demand, no main map");
         assert_eq!(
-            mapped.main.body_code, plain.main.body_code,
+            mapped_main.code(),
+            plain_main.code(),
             "source-map demand must not change Main JavaScript bytes"
         );
     }
@@ -1405,10 +1405,6 @@ mod tests {
         };
         let bundle = compile_bundle_expect_produced(source, &artifact, &opts, &alloc)
             .expect("svelte runtime bundle");
-        assert!(
-            bundle.styles.is_empty(),
-            "Svelte css publishes only as a stage-qualified style"
-        );
         let style = bundle
             .qualified_styles
             .first()
@@ -1517,7 +1513,7 @@ mod tests {
             compile_bundle_expect_produced(source_none, &artifact_none, &opts, &alloc)
                 .expect("svelte runtime bundle");
         assert!(
-            bundle_none.qualified_styles.is_empty() && bundle_none.styles.is_empty(),
+            bundle_none.qualified_styles.is_empty(),
             "no style block, no artifact"
         );
     }
@@ -1563,7 +1559,7 @@ mod tests {
                 "a REQUESTED-but-unsupported runtime surface must refuse, carrying no product. \
                  Got a bundle with tsx={} main={}",
                 bundle.tsx.is_some(),
-                bundle.main.body_code.is_some()
+                bundle.main.is_some()
             ),
         }
     }

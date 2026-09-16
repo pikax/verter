@@ -184,6 +184,35 @@ segments. JSON/V3/LSP adapters own UTF-16 conversion using source documents.
 The schema does not replace the live `ArtifactSet` publication boundary or
 `VerterCompileResult` routes.
 
+Vue custom-block parsing (`compile/mod.rs`, `extract_block_ranges` /
+the `unknown_nodes()` walk) retains one `VerterCustomBlock` per source
+block: `block_type`, `content`, `attrs` (exact authored order — attrs
+are never sorted or deduped, since `CustomBlockDescriptorId::mint`
+hashes them in order), `region` (SFC-absolute; a self-closing tag with
+no content span anchors at `tag_open.end`, a zero-length region),
+`source_order`, `lang`, `src` (matched by exact attribute name, as Vue's
+`createBlock` does), and `source_content` — the `ContentId` of the bytes
+the facts were read from, hashed once per compile and only when a custom
+block exists. The facts travel opaquely on
+`RuntimeCompileOutput.custom_block_facts` to the Vue bridge, which mints
+`CustomBlockDescriptor`s from them directly — no re-parse, no re-scan of
+source text — and refuses facts whose `source_content` differs from the
+registered carrier bytes.
+
+`assembly::StagedCompileArtifacts` is the request's ONE handoff from a
+framework host-integration backend into session lifecycle/publication code:
+a validated `CompileArtifactSet`, the `ArtifactId` of the runtime-module
+artifact inside it, the `FragmentDialect` those bytes are written in, and
+the runtime source map produced with them. `stage` is the only mint site
+and refuses a root the set does not contain (`UnknownRootArtifact`) or one
+that produced no content (`UnavailableRootArtifact`); an empty map payload
+stages as absent. `vue_main_compile_artifacts` and
+`svelte_main_compile_artifacts` return it, and it is what
+`RuntimeCompileOutput.main` carries — the module bytes live ON the staged
+root artifact, so a published body without its typed set is not
+representable and no consumer re-derives the module's language or locates
+its artifact by name.
+
 ## Multi-unit carrier lowering
 
 Runtime and IDE output blocks carry a `RuntimeOutputDescriptor` naming the generated destination space, emitted content artifact, declared input spaces, raw map, and honest `Exact`/`Approximate` fidelity. A separately lowered template receives `TemplateBindingMetadata` from its script pass (bindings, `has_script`, const props, and ref-bindable imports), matching Vue's official `bindingMetadata` mechanism.
@@ -454,7 +483,7 @@ Framework style rewrites use `verter_css_syntax::StyleSyntaxIr` and are delibera
 1. `transform_vue_v_bind(AuthoredStyleInput)` is the production v-bind-only entry: it runs on authored CSS, SCSS, indented Sass, Less, or Stylus and returns the same dialect. It never preprocesses or evaluates.
 2. CSS Modules hashing and the original-to-hashed mapping from typed selector spans are a cascade stage over the shared IR, not a public parse/materialize entry.
 3. Scoped-selector rewriting runs only on plain CSS after preprocessing. `PlainCssInput::try_new` typed-refuses every non-CSS dialect before that cascade stage is admitted. There is no shipped isolated parse/materialize entry for this stage.
-4. Svelte owns a separate plain-CSS consumer for `:global`, selector matching/pruning, scope insertion, and keyframe rewriting. Authored preprocessor dialects are typed-refused unless the host supplied a completed external preprocessing result for the block: the host hands it over once as a `SvelteSuppliedStyle` (produced bytes, producer, the host-minted source-space/artifact identity of those bytes, the host's parse of them, and the content identity of the authored bytes it validated — all read off the projection the block-content capture fence stamped, never re-derived from the live carrier), `bind_svelte_style_continuations` (`svelte/carrier.rs`) binds it to its block through `ExternalStyleContinuation::admit`, and the admitted continuation's produced bytes are then the block's only body for every stage (official-reject css probe, analysis, matcher, render) via `AdmittedStyleIrs`. A result that cannot be bound (stale basis, missing basis, unknown authored dialect, no block at its slot, boundary refusal) refuses the compile with `svelte-runtime-style-continuation-refused`; it never falls back to the authored block. Svelte's external css artifact publishes as a stage-qualified `QualifiedRuntimeStyle` (`RuntimeCompileOutput.qualified_styles` / `DirectCompileOutput.qualified_styles`), never as `RuntimeStyleBlock`, declared over the byte space the render consumed: the carrier source for an authored block, and for a continued block the HOST-minted space/artifact pair carried on `BoundStyleContinuation` — never a carrier space minted over the produced bytes, which would name an identity the host's own produced-to-authored map cannot be joined to. That host map (`SvelteSuppliedStyle.source_map` → `BoundStyleContinuation.source_map`) is transported with the continuation, and a continued block's css map is published chained through it (`chain_generated_map_json`, as for a supplied Vue block) — or absent when the host holds no map or the chain cannot be built — never the bare render map, whose produced-space positions would be labelled with the carrier file. The diagnostics the producing tool reported (`SvelteSuppliedStyle.diagnostics`, projected from the admitted override at the severity the tool stated, addressing the authored stage with no fabricated position) ride the continuation's result and then the published style's result in production order; they are never replaced by an empty list at the boundary.
+4. Svelte owns a separate plain-CSS consumer for `:global`, selector matching/pruning, scope insertion, and keyframe rewriting. Authored preprocessor dialects are typed-refused unless the host supplied a completed external preprocessing result for the block: the host hands it over once as a `SvelteSuppliedStyle` (produced bytes, producer, the host-minted source-space/artifact identity of those bytes, the host's parse of them, and the content identity of the authored bytes it validated — all read off the projection the block-content capture fence stamped, never re-derived from the live carrier), `bind_svelte_style_continuations` (`svelte/carrier.rs`) binds it to its block through `ExternalStyleContinuation::admit`, and the admitted continuation's produced bytes are then the block's only body for every stage (official-reject css probe, analysis, matcher, render) via `AdmittedStyleIrs`. A result that cannot be bound (stale basis, missing basis, unknown authored dialect, no block at its slot, boundary refusal) refuses the compile with `svelte-runtime-style-continuation-refused`; it never falls back to the authored block. Svelte's external css artifact publishes as a stage-qualified `QualifiedRuntimeStyle` (`RuntimeCompileOutput.qualified_styles` / `DirectCompileOutput.qualified_styles`), declared over the byte space the render consumed: the carrier source for an authored block, and for a continued block the HOST-minted space/artifact pair carried on `BoundStyleContinuation` — never a carrier space minted over the produced bytes, which would name an identity the host's own produced-to-authored map cannot be joined to. That host map (`SvelteSuppliedStyle.source_map` → `BoundStyleContinuation.source_map`) is transported with the continuation, and a continued block's css map is published chained through it (`chain_generated_map_json`, as for a supplied Vue block) — or absent when the host holds no map or the chain cannot be built — never the bare render map, whose produced-space positions would be labelled with the carrier file. The diagnostics the producing tool reported (`SvelteSuppliedStyle.diagnostics`, projected from the admitted override at the severity the tool stated, addressing the authored stage with no fabricated position) ride the continuation's result and then the published style's result in production order; they are never replaced by an empty list at the boundary.
 
 Only complete trusted nodes publish edits. Rewrite uncertainty fails closed; style-liveness uncertainty fails open. Every emitted edit and its source map comes from the same `CodeTransform`. Supplied or external inputs retain their host-minted source-space/artifact identity in `RuntimeOutputDescriptor`; carrier-absolute positions are never fabricated.
 
