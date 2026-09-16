@@ -429,3 +429,68 @@ fn schema_construction_preserves_unavailable_and_opaque_content_without_compile_
     transform.overwrite(0, 1, "y");
     assert!(observer.0.load(Ordering::SeqCst) > 0);
 }
+
+/// Staging binds a root the set actually contains. A handoff whose root is
+/// absent, or whose root produced no content, refuses — so every later read
+/// of the staged module's bytes, language and map is answering about an
+/// artifact the compiler really published.
+#[test]
+fn staging_refuses_an_absent_or_unproduced_root() {
+    use crate::compile_request::ProductKind;
+    let unit = source("main", "one");
+    let main = artifact(&unit.unit, ProductKind::RuntimeClient);
+    let root = main.id().clone();
+
+    let set = CompileArtifactSet::new(vec![unit.clone()], vec![main.clone()]).unwrap();
+    let staged = StagedCompileArtifacts::stage(
+        set,
+        root.clone(),
+        FragmentDialect::TypeScript,
+        Some("{\"version\":3}".to_string()),
+    )
+    .expect("a produced root stages");
+    assert_eq!(staged.root().id(), &root);
+    assert_eq!(&**staged.code(), "hello");
+    assert_eq!(staged.lang(), "ts");
+    assert_eq!(staged.product(), ProductKind::RuntimeClient);
+    assert_eq!(staged.source_map(), Some("{\"version\":3}"));
+    assert_eq!(staged.set().artifacts().len(), 1);
+
+    let foreign = artifact(&source("other", "two").unit, ProductKind::Declarations);
+    let set = CompileArtifactSet::new(vec![unit.clone()], vec![main.clone()]).unwrap();
+    assert_eq!(
+        StagedCompileArtifacts::stage(
+            set,
+            foreign.id().clone(),
+            FragmentDialect::TypeScript,
+            None,
+        )
+        .unwrap_err(),
+        ArtifactSchemaError::UnknownRootArtifact
+    );
+
+    let mut unproduced = main;
+    unproduced.content = ArtifactContent::Unavailable(ArtifactUnavailableReason::NotProduced);
+    let set = CompileArtifactSet::new(vec![unit], vec![unproduced]).unwrap();
+    assert_eq!(
+        StagedCompileArtifacts::stage(set, root, FragmentDialect::TypeScript, None).unwrap_err(),
+        ArtifactSchemaError::UnavailableRootArtifact
+    );
+}
+
+/// An empty map payload stages as "no map", not as a produced-but-empty
+/// one: downstream carries the map demand by presence alone, so an empty
+/// string would publish a map node for a map-disabled compile.
+#[test]
+fn staging_normalizes_an_empty_source_map_to_absent() {
+    use crate::compile_request::ProductKind;
+    let unit = source("main", "one");
+    let main = artifact(&unit.unit, ProductKind::RuntimeClient);
+    let root = main.id().clone();
+    let set = CompileArtifactSet::new(vec![unit], vec![main]).unwrap();
+    let staged =
+        StagedCompileArtifacts::stage(set, root, FragmentDialect::JavaScript, Some(String::new()))
+            .expect("a produced root stages");
+    assert_eq!(staged.source_map(), None);
+    assert_eq!(staged.lang(), "js");
+}

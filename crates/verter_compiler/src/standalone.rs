@@ -2136,11 +2136,10 @@ impl SvelteRuntimeBackend {
             Ok(module) => {
                 let css_code = module.css.as_ref().map(|css| css.code.as_str());
                 let source_map = module.source_map;
-                let code: std::sync::Arc<str> = std::sync::Arc::from(module.code);
-                let artifacts = svelte_main_compile_artifacts(SvelteMainCompileRequest {
+                let staged = svelte_main_compile_artifacts(SvelteMainCompileRequest {
                     canonical_id: runtime_opts.filename.as_deref().unwrap_or(""),
                     source,
-                    code: std::sync::Arc::clone(&code),
+                    code: std::sync::Arc::from(module.code),
                     source_map: source_map.as_deref(),
                     kind: if opts.ssr {
                         ProductKind::RuntimeServer
@@ -2161,10 +2160,7 @@ impl SvelteRuntimeBackend {
                     span: verter_span::Span::new(0, source.len() as u32),
                     diagnostics: std::mem::take(&mut bundle.diagnostics),
                 })?;
-                bundle.main.body_code = Some(code);
-                bundle.main.source_map = source_map.unwrap_or_default();
-                bundle.main.lang = Some("js".to_string());
-                bundle.main.artifacts = Some(artifacts);
+                bundle.main = Some(staged);
                 // The EXTERNAL scoped-css artifact (the official
                 // `compiled.css` — `{ code, map, hasGlobal }` + the scope
                 // hash) publishes as the bundle's stage-qualified style.
