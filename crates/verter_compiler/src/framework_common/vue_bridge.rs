@@ -1470,9 +1470,9 @@ mod tests {
 
         let main_unit = output
             .main
-            .artifacts
             .as_ref()
             .expect("main assembles")
+            .set()
             .source_units()
             .find(|unit| unit.unit.logical_role() == "sfc")
             .expect("sfc unit shares Main's real artifact set");
@@ -1485,7 +1485,7 @@ mod tests {
         // AC2 provenance: a descriptor's lineage must name the real
         // producer/attachment, never Main's own artifact/contract, so a
         // producer bug that misattaches descriptors to Main fails a test.
-        let main_artifacts = output.main.artifacts.as_ref().expect("main assembles");
+        let main_artifacts = output.main.as_ref().expect("main assembles").set();
         let sfc_artifact = main_artifacts
             .artifacts()
             .iter()
