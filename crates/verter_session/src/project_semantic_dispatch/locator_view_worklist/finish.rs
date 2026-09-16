@@ -118,10 +118,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .iter()
                     .map(|argument| projected(memo, *argument, context))
                     .collect();
-                graph.intern_node(SemanticNodeData::IntrinsicApplication {
-                    op: *op,
-                    args: Arc::from(projected_args.into_boxed_slice()),
-                })
+                graph.intern_node(
+                    SemanticNodeData::intrinsic_application(
+                        *op,
+                        Arc::from(projected_args.into_boxed_slice()),
+                    )
+                    .expect("rebuilt one-for-one from a well-formed application"),
+                )
             }
             SemanticNodeData::Alias(target) => projected(memo, *target, context),
             SemanticNodeData::TypeParam {

@@ -9225,6 +9225,18 @@ pub enum SemanticNodeData {
 }
 
 impl SemanticNodeData {
+    /// The ONE constructor for [`Self::IntrinsicApplication`]: `None` unless
+    /// `args` has exactly [`CompilerIntrinsicTypeOp::arity`] operands, so a
+    /// malformed compiler-native node never exists — not even transiently for
+    /// a reducer to refuse later.
+    #[must_use]
+    pub fn intrinsic_application(
+        op: CompilerIntrinsicTypeOp,
+        args: Arc<[SemanticNodeId]>,
+    ) -> Option<Self> {
+        (args.len() == op.arity()).then_some(Self::IntrinsicApplication { op, args })
+    }
+
     /// The kind-erased composite payload of a [`Self::Union`] /
     /// [`Self::Intersection`] arm — the uniform binding for readers that
     /// handle both composite kinds in one arm (the kind-bound payload

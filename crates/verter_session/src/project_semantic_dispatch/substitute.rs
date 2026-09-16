@@ -844,10 +844,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (
                     self.graph().intern_preserving_scope(
                         node,
-                        SemanticNodeData::IntrinsicApplication {
-                            op: *op,
-                            args: Arc::from(new_args.into_boxed_slice()),
-                        },
+                        SemanticNodeData::intrinsic_application(
+                            *op,
+                            Arc::from(new_args.into_boxed_slice()),
+                        )
+                        .expect("substituted one-for-one from a well-formed application"),
                     ),
                     true,
                 )

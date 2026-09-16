@@ -10379,11 +10379,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// application (the shape this replaced) would let a userland `Awaited`
     /// declaration capture a compiler-native operation by spelling.
     fn deferred_awaited(&self, operand: SemanticNodeId) -> SemanticNodeId {
-        self.graph()
-            .intern_node(SemanticNodeData::IntrinsicApplication {
-                op: crate::semantic_query::CompilerIntrinsicTypeOp::Awaited,
-                args: Arc::from(vec![operand].into_boxed_slice()),
-            })
+        self.graph().intern_node(
+            SemanticNodeData::intrinsic_application(
+                crate::semantic_query::CompilerIntrinsicTypeOp::Awaited,
+                Arc::from(vec![operand].into_boxed_slice()),
+            )
+            .expect("Awaited takes exactly the one operand supplied here"),
+        )
     }
 
     /// Re-enter [`SemanticQueryKey::AwaitedNormalize`] on a composite arm.
@@ -10590,17 +10592,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // strips it. Only this top-level carrier is resolved: an
             // `Awaited<T>` under a constructor (`Awaited<T>[]`) settles in the
             // prelude and keeps its authored representation.
+            //
+            // A carrier with the wrong operand count (`Awaited<A, B>`) mints
+            // nothing: the checked constructor refuses it and the payload
+            // refuses with it.
             SemanticNodeData::InstantiationRef { base, args }
-                if !args.is_empty() && self.builtin_sentinel_intrinsic_op(base).is_some() =>
+                if self.builtin_sentinel_intrinsic_op(base).is_some() =>
             {
                 let op = self
                     .builtin_sentinel_intrinsic_op(base)
                     .expect("guarded by the arm");
-                let args = Arc::clone(args);
+                let application = SemanticNodeData::intrinsic_application(op, Arc::clone(args))?;
                 drop(data);
-                let canonical = self
-                    .graph()
-                    .intern_node(SemanticNodeData::IntrinsicApplication { op, args });
+                let canonical = self.graph().intern_node(application);
                 self.async_return_payload_read(canonical, context)
             }
             SemanticNodeData::InstantiationRef { base, args }

@@ -70,6 +70,15 @@ impl CompilerIntrinsicTypeOp {
     /// the vocabulary without a wildcard.
     pub const ALL: &'static [CompilerIntrinsicTypeOp] = &[CompilerIntrinsicTypeOp::Awaited];
 
+    /// The exact number of operands the operation takes. An application with
+    /// any other count is malformed and is never minted as this operation.
+    #[must_use]
+    pub const fn arity(self) -> usize {
+        match self {
+            Self::Awaited => 1,
+        }
+    }
+
     /// The operation's rendered name — the spelling a reader expects
     /// (`Awaited<T>`). Display only: identity is the variant, never this string,
     /// and no lookup ever goes the other way from rendered text.
@@ -142,6 +151,16 @@ mod tests {
     fn an_unknown_wire_token_fails_rather_than_guessing() {
         assert_eq!(CompilerIntrinsicTypeOp::from_wire_str("uppercase"), None);
         assert_eq!(CompilerIntrinsicTypeOp::from_wire_str(""), None);
+    }
+
+    #[test]
+    fn arity_is_pinned_per_operation() {
+        for op in CompilerIntrinsicTypeOp::ALL {
+            let expected = match op {
+                CompilerIntrinsicTypeOp::Awaited => 1,
+            };
+            assert_eq!(op.arity(), expected, "{op:?}");
+        }
     }
 
     #[test]

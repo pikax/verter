@@ -823,19 +823,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // Interned DIRECTLY: an intrinsic names no declaration, so it
             // must never go through `resolve_locator_ref_head` (name
             // resolution). Operands lower as ordinary children; no
-            // reduction happens here.
+            // reduction happens here. A wrong operand count is a malformed
+            // input, never a compiler-native node.
             TypeExpr::IntrinsicApplication { op, arguments } => {
                 let args: Vec<SemanticNodeId> = arguments
                     .iter()
                     .map(|argument| self.lower_locator_shape_node(argument, ctx))
                     .collect();
-                graph.intern_node_with_scope(
-                    SemanticNodeData::IntrinsicApplication {
-                        op: *op,
-                        args: args.into(),
-                    },
-                    scope.clone(),
-                )
+                match SemanticNodeData::intrinsic_application(*op, args.into()) {
+                    Some(application) => graph.intern_node_with_scope(application, scope.clone()),
+                    None => self.opaque(QueryError::Miss),
+                }
             }
 
             TypeExpr::Infer { name } => match ctx.lookup_infer_declaration(name) {

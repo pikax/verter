@@ -329,6 +329,27 @@ mod tests {
 
     /// The values are folded into persisted footprint fingerprints: pin them
     /// so a renumbering is a visible test change, not a silent golden drift.
+    /// A compiler-native node exists only at the operation's exact arity.
+    #[test]
+    fn intrinsic_application_is_minted_only_at_the_operations_arity() {
+        use crate::semantic_query::CompilerIntrinsicTypeOp;
+        use std::sync::Arc;
+
+        let op = CompilerIntrinsicTypeOp::Awaited;
+        let operands = |count: u64| -> Arc<[SemanticNodeId]> {
+            (0..count).map(SemanticNodeId).collect::<Vec<_>>().into()
+        };
+        assert!(SemanticNodeData::intrinsic_application(op, operands(0)).is_none());
+        assert!(matches!(
+            SemanticNodeData::intrinsic_application(op, operands(1)),
+            Some(SemanticNodeData::IntrinsicApplication { args, .. }) if args.len() == 1
+        ));
+        assert!(
+            SemanticNodeData::intrinsic_application(op, operands(2)).is_none(),
+            "Awaited<A, B> must never become a compiler-native node"
+        );
+    }
+
     #[test]
     fn stable_ids_are_pinned() {
         use SemanticNodeTag as T;
