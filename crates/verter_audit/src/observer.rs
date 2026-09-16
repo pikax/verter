@@ -263,7 +263,7 @@ pub enum AuditEvent {
     /// `SessionDispatchHost::scope_payload_for_base`
     /// (`mod.rs:1661`) — the four `DispatchHost` trait callbacks
     /// (`resolve_prepared_type_decl`, `root_identity`,
-    /// `utility_source`, `bare_ref_origin`) all route through this
+    /// `resolve_builtin_utility`, `bare_ref_origin`) all route through this
     /// helper. Dominant warm-read attribution for the K-loop hot path.
     PreparedDeclBundleCallsiteScopePayload,
     /// One call to `prepared_decl_bundle` from `build_instantiate`

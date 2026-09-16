@@ -1583,7 +1583,7 @@ fn non_builtin_instantiation_roots_on_type_argument_file() {
     let gen = "/sg_self_root/non_builtin_inst_gen.ts";
     let arg = "/sg_self_root/non_builtin_inst_arg.ts";
     // Declaring file: a userland generic `Box<T>` (NOT a built-in
-    // utility — `utility_source` classifies `Box` as userland, so
+    // utility — `resolve_builtin_utility` classifies `Box` as userland, so
     // `build_instantiate` takes the `resolve_prepared_type_decl` path).
     upsert(&host, gen, "export type Box<T> = { value: T };\n");
     // Argument file: a separate canonical whose `Foo` is lowered into a

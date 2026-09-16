@@ -55,9 +55,8 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_solver::host::{
-    BareRefOrigin, ResolvedRootIdentity, UtilitySource,
-};
+use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+use verter_semantic::analysis::type_solver::host::{BareRefOrigin, ResolvedRootIdentity};
 
 use crate::resolver_core::prepared_decl::PreparedTypeDeclResolution;
 use crate::resolver_core::{BudgetDomain, BudgetExceededFailure, ResolverContext};
@@ -4109,35 +4108,39 @@ pub trait DispatchHost {
         symbol_name: &str,
     ) -> Option<ResolvedRootIdentity>;
 
-    /// Classify whether `name` is a built-in TS utility, user-shadowed, or
-    /// unknown in `base`'s scope. Scope matters because a local binding in
-    /// scope A can shadow a built-in that is not shadowed in scope B.
-    fn utility_source(&self, base: SemanticNodeId, name: &str) -> UtilitySource;
-
-    /// The PROVEN builtin-utility identity for `name` in `base`'s scope —
-    /// `None` when the name is shadowed by a userland declaration or is not
-    /// a builtin utility at all.
+    /// Decide, in ONE scope read, whether `name` in `base`'s scope is a
+    /// user-shadowed name, an unknown name, or the compiler-provided utility —
+    /// and for the last, carry its PROVEN identity. Scope matters because a
+    /// binding in scope A can shadow a built-in that is not shadowed in
+    /// scope B.
     ///
-    /// The TYPED peer of [`Self::utility_source`]. The adapter already
-    /// resolves name -> identity behind the shadowing gate to answer that
-    /// method, so this hands dispatch builders a DECIDED identity and they
-    /// never re-decide on a spelling. Builders are forbidden from calling
-    /// `BuiltinUtility::from_name` themselves — the
-    /// `ax_hybrid_carrier_stop_uses_demand_context_not_name_predicate`
-    /// guard fails `build.rs` for using a nominal carrier predicate — and
-    /// this is the seam that makes that unnecessary rather than merely
-    /// inconvenient.
-    fn resolved_builtin_utility(
-        &self,
-        base: SemanticNodeId,
-        name: &str,
-    ) -> Option<verter_semantic::analysis::type_solver::builtin::BuiltinUtility>;
+    /// Builders route on the returned identity and never re-decide on a
+    /// spelling. They are forbidden from calling `BuiltinUtility::from_name`
+    /// themselves — the
+    /// `ax_hybrid_carrier_stop_uses_demand_context_not_name_predicate` guard
+    /// fails `build.rs` for using a nominal carrier predicate — and this is
+    /// the seam that makes that unnecessary rather than merely inconvenient.
+    fn resolve_builtin_utility(&self, base: SemanticNodeId, name: &str)
+        -> BuiltinUtilityResolution;
 
     /// Classify whether `name` resolves locally or through an import in
     /// `base`'s scope. Used by lazy field expansion to keep imported
     /// object-like refs symbolic until a deeper route is requested.
     #[allow(dead_code)]
     fn bare_ref_origin(&self, base: SemanticNodeId, name: &str) -> BareRefOrigin;
+}
+
+/// The dispatch gate's decision for one utility-shaped name in one scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinUtilityResolution {
+    /// A userland declaration or import binds the name in scope.
+    Shadowed,
+    /// Not a compiler-provided utility.
+    Unknown,
+    /// The compiler-provided utility. `None` for an SDK-declared
+    /// `= intrinsic` that has no [`BuiltinUtility`] variant; the caller falls
+    /// through to its ordinary utility handling for those.
+    Builtin(Option<BuiltinUtility>),
 }
 
 /// Session-owned [`DispatchHost`] implementation.
@@ -4208,7 +4211,7 @@ impl<'a> SessionDispatchHost<'a> {
                 // `prepared_decl_bundle_warm` reads. The four
                 // `DispatchHost` trait callbacks
                 // (`resolve_prepared_type_decl`, `root_identity`,
-                // `utility_source`, `bare_ref_origin`) all route
+                // `resolve_builtin_utility`, `bare_ref_origin`) all route
                 // through this helper — dominant expected source of
                 // the K-loop warm-read pressure.
                 if let Some(obs) = verter_audit::current_observer() {
@@ -4272,54 +4275,37 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
         )
     }
 
-    fn utility_source(&self, base: SemanticNodeId, name: &str) -> UtilitySource {
-        use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
-        let (_scope, payload) = self.scope_payload_for_base(base);
-        // Scope shadowing takes priority: a userland `type Partial` in scope,
-        // or an import bound to that name, wins over the built-in utility.
-        // The canonical shadow set decides it, so this gate and the lowering
-        // paths agree on which names are shadowed.
-        if crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
-            payload.as_ref(),
-        )
-        .is_shadowing_lib(name)
-        {
-            return UtilitySource::Shadowed;
-        }
-        // SDK-declared intrinsics always classify as `Builtin` regardless
-        // of shadowing.
-        if let crate::intrinsic_registry::IntrinsicLookup::Found(_) = self
-            .ctx
-            .project_type_store()
-            .intrinsic_registry()
-            .lookup(name)
-        {
-            return UtilitySource::Builtin;
-        }
-        if BuiltinUtility::from_name(name).is_some() {
-            UtilitySource::Builtin
-        } else {
-            UtilitySource::Unknown
-        }
-    }
-
-    fn resolved_builtin_utility(
+    fn resolve_builtin_utility(
         &self,
         base: SemanticNodeId,
         name: &str,
-    ) -> Option<verter_semantic::analysis::type_solver::builtin::BuiltinUtility> {
-        use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
-        // Gated on the SAME classification, so a shadowed name can never
-        // yield an identity: a userland `type Awaited<T>` classifies
-        // `Shadowed` and resolves to `None` here, which is what stops a
-        // declaration acquiring compiler-native semantics by spelling.
-        //
-        // An SDK-declared `= intrinsic` classifies `Builtin` without having a
-        // `BuiltinUtility` variant; `from_name` answers `None` for those and
-        // the caller falls through to its ordinary utility handling.
-        match self.utility_source(base, name) {
-            UtilitySource::Builtin => BuiltinUtility::from_name(name),
-            UtilitySource::Shadowed | UtilitySource::Unknown => None,
+    ) -> BuiltinUtilityResolution {
+        let (_scope, payload) = self.scope_payload_for_base(base);
+        // Shadowing wins over every builtin source: a userland `type Partial`
+        // in scope, or an import bound to that name, is the declaration the
+        // name means. The canonical shadow authority decides it, so this gate
+        // and the lowering paths agree on which names are shadowed.
+        if crate::resolver_core::scope_shadowing::ScopeShadowing::scope_payload_shadows_lib(
+            payload.as_ref(),
+            name,
+        ) {
+            return BuiltinUtilityResolution::Shadowed;
+        }
+        // Unshadowed, an SDK-declared intrinsic is the compiler-provided
+        // declaration even without a `BuiltinUtility` variant.
+        let identity = BuiltinUtility::from_name(name);
+        if identity.is_some()
+            || matches!(
+                self.ctx
+                    .project_type_store()
+                    .intrinsic_registry()
+                    .lookup(name),
+                crate::intrinsic_registry::IntrinsicLookup::Found(_)
+            )
+        {
+            BuiltinUtilityResolution::Builtin(identity)
+        } else {
+            BuiltinUtilityResolution::Unknown
         }
     }
 

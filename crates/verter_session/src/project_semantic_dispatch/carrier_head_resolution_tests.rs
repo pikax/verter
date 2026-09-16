@@ -1932,28 +1932,34 @@ defineProps<{ setupOnly: string }>()
 // not spelling, so the rows cover the direct import, a renamed import of the
 // userland `Awaited`, and an unrelated export imported UNDER the builtin name.
 //
-// Discrimination: the dispatch builtin gate (`DispatchHost::utility_source`)
-// consulted only scope-local type names and type bindings, so an import
-// binding named `Awaited` classified `Builtin` and `resolved_builtin_utility`
-// handed builders the compiler-native identity — the gate rows below FAIL on
-// that shape. The canonical `ScopeShadowing` authority includes imports.
+// Discrimination: the dispatch builtin gate consulted only scope-local type
+// names and type bindings, so an import binding named `Awaited` classified as
+// the builtin and handed builders the compiler-native identity — the gate rows
+// below FAIL on that shape. The canonical `ScopeShadowing` authority includes
+// imports. The unshadowed control below proves the same gate still yields the
+// identity when nothing binds the name.
 #[test]
 fn imported_builtin_named_awaited_resolves_userland_and_never_the_awaited_relation() {
-    let rows: [(&str, &str); 3] = [
+    use super::BuiltinUtilityResolution as Gate;
+
+    let rows: [(&str, &str, Gate); 3] = [
         (
             "import type { Awaited } from \"./user\";\nexport type X = Awaited<string>;\n",
             "Awaited",
+            Gate::Shadowed,
         ),
         (
             "import type { Awaited as UserAwaited } from \"./user\";\nexport type X = UserAwaited<string>;\n",
             "UserAwaited",
+            Gate::Shadowed,
         ),
         (
             "import type { Box as Awaited } from \"./user\";\nexport type X = Awaited<string>;\n",
             "Awaited",
+            Gate::Shadowed,
         ),
     ];
-    for (consumer, local) in rows {
+    for (consumer, local, gate) in rows {
         let host = host();
         upsert_ts(
             &host,
@@ -1966,16 +1972,10 @@ fn imported_builtin_named_awaited_resolves_userland_and_never_the_awaited_relati
         let carrier = bare_ref_carrier(&dispatch, local, scope, &[PrimitiveKind::String]);
 
         let adapter = super::SessionDispatchHost::new(&host);
-        assert!(
-            !matches!(
-                super::DispatchHost::utility_source(&adapter, carrier, local),
-                super::UtilitySource::Builtin
-            ),
+        assert_eq!(
+            super::DispatchHost::resolve_builtin_utility(&adapter, carrier, local),
+            gate,
             "{local:?} imported in {consumer:?} must not classify as the builtin utility"
-        );
-        assert!(
-            super::DispatchHost::resolved_builtin_utility(&adapter, carrier, local).is_none(),
-            "{local:?} imported in {consumer:?} must not yield a builtin identity"
         );
 
         let before = dispatch.graph().stats_snapshot().awaited_normalize_count;
@@ -1992,4 +1992,26 @@ fn imported_builtin_named_awaited_resolves_userland_and_never_the_awaited_relati
             "{consumer:?}: an imported userland `Awaited` never enters the awaited relation"
         );
     }
+}
+
+/// Control for the imported-`Awaited` rows: with nothing binding the name,
+/// the one gate decision is the builtin AND carries its proven identity.
+#[test]
+fn unshadowed_awaited_resolves_to_the_builtin_identity_in_one_gate_decision() {
+    use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/plain.ts",
+        "export type X = Awaited<Promise<string>>;\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let scope = file_scope(&dispatch, "/plain.ts");
+    let carrier = bare_ref_carrier(&dispatch, "Awaited", scope, &[PrimitiveKind::String]);
+    let adapter = super::SessionDispatchHost::new(&host);
+    assert_eq!(
+        super::DispatchHost::resolve_builtin_utility(&adapter, carrier, "Awaited"),
+        super::BuiltinUtilityResolution::Builtin(Some(BuiltinUtility::Awaited)),
+    );
 }

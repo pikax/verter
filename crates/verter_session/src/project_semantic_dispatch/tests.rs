@@ -5298,9 +5298,9 @@ fn dispatch_host_adapter_routes_per_base_scope() {
         .resolve_prepared_type_decl(global_anchor, &ri)
         .is_missing());
 
-    // `utility_source` and `bare_ref_origin` behave per-scope; without
+    // `resolve_builtin_utility` and `bare_ref_origin` behave per-scope; without
     // user shadowings these return `Builtin` / `Unknown` respectively.
-    let _ = adapter.utility_source(anchor_a, "Partial");
+    let _ = adapter.resolve_builtin_utility(anchor_a, "Partial");
     let _ = adapter.bare_ref_origin(anchor_a, "Foo");
 }
 
@@ -8765,7 +8765,7 @@ fn mapped_type_uses_source_member_names_when_object_source() {
 
 /// Helper: build a content-free `ResolvedDeclSlotIdentity` slot carrying a
 /// utility name so `build_instantiate` sees it as a "utility" through
-/// `utility_source`. Returns the slot for use as
+/// `resolve_builtin_utility`. Returns the slot for use as
 /// `SemanticQueryKey::Instantiate.base`.
 fn utility_identity(
     _graph: &Arc<SemanticGraphStore>,
@@ -22169,8 +22169,8 @@ fn intern_string_literal_union_multi_preserves_members() {
 /// `pick_builtin_decl_identity()` returns the `__builtin__` sentinel
 /// matching the convention at `meta_resolve.rs:9959/9977/9998`. Any
 /// drift from this sentinel breaks the
-/// `adapter.utility_source(base, "Pick")` route through
-/// `UtilitySource::Builtin`.
+/// `adapter.resolve_builtin_utility(base, "Pick")` route through
+/// `BuiltinUtilityResolution::Builtin`.
 #[test]
 fn pick_builtin_decl_identity_uses_canonical_sentinel() {
     let id = pick_builtin_decl_identity();
@@ -22178,7 +22178,7 @@ fn pick_builtin_decl_identity_uses_canonical_sentinel() {
         id.defining_canonical.as_ref(),
         "__builtin__",
         "Pick defining_canonical must be the `__builtin__` sentinel; \
-         drift breaks utility_source routing"
+         drift breaks resolve_builtin_utility routing"
     );
     assert_eq!(id.merged_symbol_name.as_ref(), "Pick");
     // R6: the slot is content-free — no `whole_hash` field exists.

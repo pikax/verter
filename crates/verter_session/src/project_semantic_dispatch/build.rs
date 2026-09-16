@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
-use verter_semantic::analysis::type_solver::host::{ResolvedRootIdentity, UtilitySource};
+use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 use verter_semantic::analysis::type_solver::PreparedTypeDecl;
 use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
@@ -3050,7 +3050,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
 
         // Intern a scope-carrying placeholder so DispatchHost methods
-        // (utility_source, resolve_prepared_type_decl, etc.) can look
+        // (resolve_builtin_utility, resolve_prepared_type_decl, etc.) can look
         // up the declaration scope via node_scope(base).
         let scope = NodeScopeId::File {
             canonical_id: Arc::clone(decl_canonical),
@@ -3123,10 +3123,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // userland-equivalent alias would produce (userland-equivalence
         // rule). Shadowed names fall through to the ordinary
         // `resolve_prepared_type_decl` path.
-        if matches!(
-            adapter.utility_source(base, decl_name.as_ref()),
-            UtilitySource::Builtin
-        ) {
+        // One gate decision: the shadowing check and the proven identity come
+        // from the same scope read.
+        if let super::BuiltinUtilityResolution::Builtin(builtin_utility) =
+            adapter.resolve_builtin_utility(base, decl_name.as_ref())
+        {
             // Route/mode-INDEPENDENT L1 carrier-stop (Instantiate-EXECUTION
             // entrance). An object-filter builtin (`Pick`/`Omit`) whose
             // enumeration domain (argument 0) is OPEN must NOT route into
@@ -3203,11 +3204,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // direct-decl case: CarrierProps's own body is stamped below
             // and only its `extends`-reached members go through this
             // utility path as structural.)
-            // The typed builtin identity, decided by the ADAPTER behind the
-            // same shadowing/resolution gate that just proved this name is the
-            // compiler-provided utility. Builders never resolve a spelling
-            // themselves; carrying the proof is the whole point.
-            let builtin_utility = adapter.resolved_builtin_utility(base, decl_name.as_ref());
+            // `builtin_utility` is the identity the gate above proved; builders
+            // never resolve a spelling themselves.
             let (utility_result, utility_fence, utility_is_partial) = self.build_builtin_utility(
                 base,
                 decl_name.as_ref(),
@@ -5239,7 +5237,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Decided by the typed `BuiltinUtility` the caller proved after the
         // shadowing/resolution gate — never by spelling. A userland
         // `type Awaited<T>` never reaches here at all (the gate classifies it
-        // `UtilitySource::Shadowed`), and the literal-string arm that used to
+        // `BuiltinUtilityResolution::Shadowed`), and the literal-string arm that used to
         // own this reduction is gone, so a declaration cannot acquire
         // compiler-native semantics by being named `Awaited`.
         //
