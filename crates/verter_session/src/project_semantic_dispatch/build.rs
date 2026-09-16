@@ -10582,6 +10582,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 drop(data);
                 self.async_return_payload_read(inner, context)
             }
+            // An authored `Awaited<T>` at the TOP of the payload arrives as the
+            // syntax-preserving `__builtin__` carrier. The payload position
+            // demands its meaning, so resolve the carrier's declaration
+            // identity to the compiler-native operation and re-enter the
+            // family on the canonical intrinsic node — the arm above then
+            // strips it. Only this top-level carrier is resolved: an
+            // `Awaited<T>` under a constructor (`Awaited<T>[]`) settles in the
+            // prelude and keeps its authored representation.
+            SemanticNodeData::InstantiationRef { base, args }
+                if !args.is_empty() && self.builtin_sentinel_intrinsic_op(base).is_some() =>
+            {
+                let op = self
+                    .builtin_sentinel_intrinsic_op(base)
+                    .expect("guarded by the arm");
+                let args = Arc::clone(args);
+                drop(data);
+                let canonical = self
+                    .graph()
+                    .intern_node(SemanticNodeData::IntrinsicApplication { op, args });
+                self.async_return_payload_read(canonical, context)
+            }
             SemanticNodeData::InstantiationRef { base, args }
                 if args.len() == 1 && self.is_promise_global_identity(base) =>
             {

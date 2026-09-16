@@ -124,6 +124,39 @@ impl BuiltinUtility {
         }
     }
 
+    /// The compiler-native type operation this lib declaration denotes once
+    /// its identity is resolved, or `None` for an ordinary utility alias.
+    ///
+    /// Identity to identity: the caller must already hold the RESOLVED
+    /// utility (an unshadowed lib declaration). Unrelated to
+    /// [`Self::is_compiler_intrinsic`], which marks the unshadowable string
+    /// intrinsics.
+    pub fn compiler_intrinsic_type_op(self) -> Option<verter_type_expr::CompilerIntrinsicTypeOp> {
+        match self {
+            Self::Awaited => Some(verter_type_expr::CompilerIntrinsicTypeOp::Awaited),
+            Self::Partial
+            | Self::Required
+            | Self::Readonly
+            | Self::Pick
+            | Self::Omit
+            | Self::Record
+            | Self::Extract
+            | Self::Exclude
+            | Self::NonNullable
+            | Self::ReturnType
+            | Self::Parameters
+            | Self::ConstructorParameters
+            | Self::InstanceType
+            | Self::ThisParameterType
+            | Self::OmitThisParameter
+            | Self::Uppercase
+            | Self::Lowercase
+            | Self::Capitalize
+            | Self::Uncapitalize
+            | Self::NoInfer => None,
+        }
+    }
+
     /// Whether this is a compiler intrinsic that cannot be shadowed by user code.
     pub fn is_compiler_intrinsic(self) -> bool {
         matches!(
@@ -229,6 +262,40 @@ mod tests {
         assert!(BuiltinUtility::from_name("partial").is_none()); // case sensitive
         assert!(BuiltinUtility::from_name("").is_none());
     }
+
+    #[test]
+    fn only_awaited_denotes_a_compiler_intrinsic_type_op() {
+        for (name, _) in ALL_UTILITY_NAMES_FOR_TYPE_OP_TEST {
+            let utility = BuiltinUtility::from_name(name).expect("recognized utility");
+            let expected = (utility == BuiltinUtility::Awaited)
+                .then_some(verter_type_expr::CompilerIntrinsicTypeOp::Awaited);
+            assert_eq!(utility.compiler_intrinsic_type_op(), expected, "{name}");
+        }
+    }
+
+    const ALL_UTILITY_NAMES_FOR_TYPE_OP_TEST: &[(&str, ())] = &[
+        ("Partial", ()),
+        ("Required", ()),
+        ("Readonly", ()),
+        ("Pick", ()),
+        ("Omit", ()),
+        ("Record", ()),
+        ("Extract", ()),
+        ("Exclude", ()),
+        ("NonNullable", ()),
+        ("ReturnType", ()),
+        ("Parameters", ()),
+        ("ConstructorParameters", ()),
+        ("InstanceType", ()),
+        ("ThisParameterType", ()),
+        ("OmitThisParameter", ()),
+        ("Awaited", ()),
+        ("Uppercase", ()),
+        ("Lowercase", ()),
+        ("Capitalize", ()),
+        ("Uncapitalize", ()),
+        ("NoInfer", ()),
+    ];
 
     #[test]
     fn compiler_intrinsics_are_not_shadowable() {

@@ -4305,8 +4305,14 @@ enum Shape {
     Primitive(PrimitiveName),
     /// A `Ref` with this name and argument shapes.
     Ref(&'static str, &'static [Shape]),
-    /// The compiler-native `Awaited` operation over one argument.
+    /// The compiler-native `Awaited` operation over one argument — what a
+    /// position that DEMANDS the awaited meaning mints.
     Awaited(&'static Shape),
+    /// An authored `Awaited<…>` kept in its syntax-preserving spelling. Where
+    /// nothing demands its meaning, the checker-visible type is already right
+    /// and resolving it only to change the representation would be eager
+    /// normalization, so the row pins that it is NOT resolved.
+    AuthoredAwaited(&'static Shape),
     /// A mutable array of this element.
     Array(&'static Shape),
     /// An object with exactly this one member.
@@ -4332,6 +4338,17 @@ fn shape_matches(shape: &Shape, ty: &TypeExpr) -> bool {
                     .all(|(arg, got)| shape_matches(arg, got))
         }
         (
+            Shape::AuthoredAwaited(arg),
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            },
+        ) => {
+            name.as_ref() == "Awaited"
+                && type_arguments.len() == 1
+                && shape_matches(arg, &type_arguments[0])
+        }
+        (
             Shape::Awaited(arg),
             TypeExpr::IntrinsicApplication {
                 op: CompilerIntrinsicTypeOp::Awaited,
@@ -4352,36 +4369,19 @@ fn shape_matches(shape: &Shape, ty: &TypeExpr) -> bool {
     }
 }
 
-/// What the flow rail publishes for one matrix row.
-#[derive(Debug)]
-enum MatrixExpect {
-    /// Clean and warm, with the checker's shape.
-    Clean(Shape),
-    /// Not the checker's answer yet. Pinned to what the rail publishes today,
-    /// so a change is a visible test edit rather than silent drift.
-    Owed {
-        measured: MatrixMeasured,
-        note: &'static str,
-    },
-}
-
-#[derive(Debug)]
-enum MatrixMeasured {
-    /// Clean and warm, with this shape.
-    Clean(Shape),
-    /// A degraded success with this reason.
-    Degraded(FlowReturnDegradation),
-}
-
-/// The awaited-relation ORACLE MATRIX, pinned as rows.
+/// The awaited-relation ORACLE MATRIX, pinned as rows. Every row publishes
+/// the checker's type clean and warm.
 ///
 /// Two relations meet here and must never merge: the async RETURN payload
 /// (`return v` in an async function) and the AWAIT expression (`await v`).
 /// The checker keeps a bare parameter under the first and defers
 /// `Awaited<T>` under the second unless the constraint already settles it,
-/// so x1 != r1 and x4 != r4 are the discriminating pairs. g1 against g6 / g7
-/// pins that the return payload strips only a TOP-LEVEL `Awaited`, never one
-/// under a constructor; g8 is the synchronous control.
+/// so x1 != r1 and x4 != r4 are the discriminating pairs.
+///
+/// g1 against g6 / g7 pins that the return payload resolves and strips only
+/// a TOP-LEVEL authored `Awaited`: the payload position demands its meaning.
+/// Under an array nothing demands it, so g6 / g7 keep the authored spelling,
+/// and so does the synchronous control g8.
 ///
 /// Each `tsc` column is the declaration emit of the fixture in `CALLS_SRC`,
 /// measured on the repository's TypeScript 7.0.2 with
@@ -4395,160 +4395,122 @@ enum MatrixMeasured {
 fn awaited_relation_oracle_matrix() {
     const PROMISE_T: Shape = Shape::Ref("Promise", &[Shape::T]);
     const AWAITED_T: Shape = Shape::Awaited(&Shape::T);
+    const AUTHORED_AWAITED_T: Shape = Shape::AuthoredAwaited(&Shape::T);
     const PROMISE_A_AWAITED_T: Shape = Shape::Ref("Promise", &[Shape::Member("a", &AWAITED_T)]);
-    const AWAITED_REF_T: Shape = Shape::Ref("Awaited", &[Shape::T]);
-    const REPRESENTATION_SPLIT: &str = "the printed text agrees, but an authored \
-        `Awaited<T>` reaches the rail as a `Ref` spelled `Awaited` rather than the \
-        intrinsic application the await and yield positions mint";
-    let rows: &[(&str, &str, &str, MatrixExpect)] = &[
-        (
-            "r1",
-            "asyncGenericIdentity",
-            "Promise<T>",
-            MatrixExpect::Clean(PROMISE_T),
-        ),
-        (
-            "r2",
-            "matrixR2",
-            "Promise<T>",
-            MatrixExpect::Clean(PROMISE_T),
-        ),
-        (
-            "r3",
-            "matrixR3",
-            "Promise<T>",
-            MatrixExpect::Clean(PROMISE_T),
-        ),
-        (
-            "r4",
-            "matrixR4",
-            "Promise<T>",
-            MatrixExpect::Clean(PROMISE_T),
-        ),
+    const PROMISE_AUTHORED_ARRAY: Shape =
+        Shape::Ref("Promise", &[Shape::Array(&AUTHORED_AWAITED_T)]);
+    let rows: &[(&str, &str, &str, Shape)] = &[
+        ("r1", "asyncGenericIdentity", "Promise<T>", PROMISE_T),
+        ("r2", "matrixR2", "Promise<T>", PROMISE_T),
+        ("r3", "matrixR3", "Promise<T>", PROMISE_T),
+        ("r4", "matrixR4", "Promise<T>", PROMISE_T),
         (
             "x1",
             "matrixX1",
             "Promise<{ a: Awaited<T>; }>",
-            MatrixExpect::Clean(PROMISE_A_AWAITED_T),
+            PROMISE_A_AWAITED_T,
         ),
         (
             "x2",
             "matrixX2",
             "Promise<{ a: T; }>",
-            MatrixExpect::Clean(Shape::Ref("Promise", &[Shape::Member("a", &Shape::T)])),
+            Shape::Ref("Promise", &[Shape::Member("a", &Shape::T)]),
         ),
         (
             "x3",
             "matrixX3",
             "Promise<{ a: Awaited<T>; }>",
-            MatrixExpect::Clean(PROMISE_A_AWAITED_T),
+            PROMISE_A_AWAITED_T,
         ),
         (
             "x4",
             "matrixX4",
             "Promise<{ a: Awaited<T>; }>",
-            MatrixExpect::Clean(PROMISE_A_AWAITED_T),
+            PROMISE_A_AWAITED_T,
         ),
         (
             "y1",
             "asyncGenYieldParam",
             "AsyncGenerator<Awaited<T>, void, unknown>",
-            MatrixExpect::Clean(Shape::Ref(
+            Shape::Ref(
                 "AsyncGenerator",
                 &[
                     AWAITED_T,
                     Shape::Primitive(PrimitiveName::Void),
                     Shape::Primitive(PrimitiveName::Unknown),
                 ],
-            )),
+            ),
         ),
         (
             "y2",
             "matrixY2",
             "AsyncGenerator<T, void, unknown>",
-            MatrixExpect::Clean(Shape::Ref(
+            Shape::Ref(
                 "AsyncGenerator",
                 &[
                     Shape::T,
                     Shape::Primitive(PrimitiveName::Void),
                     Shape::Primitive(PrimitiveName::Unknown),
                 ],
-            )),
+            ),
         ),
-        (
-            "g1",
-            "matrixG1",
-            "Promise<T>",
-            MatrixExpect::Owed {
-                measured: MatrixMeasured::Degraded(FlowReturnDegradation::UnresolvedValue),
-                note: "the checker strips the top-level `Awaited` of the returned \
-                       parameter to `Promise<T>`; the rail degrades instead",
-            },
-        ),
+        ("g1", "matrixG1", "Promise<T>", PROMISE_T),
         (
             "g6",
             "matrixG6",
             "Promise<Awaited<T>[]>",
-            MatrixExpect::Owed {
-                measured: MatrixMeasured::Clean(Shape::Ref(
-                    "Promise",
-                    &[Shape::Array(&AWAITED_REF_T)],
-                )),
-                note: REPRESENTATION_SPLIT,
-            },
+            PROMISE_AUTHORED_ARRAY,
         ),
         (
             "g7",
             "matrixG7",
             "Promise<Awaited<T>[]>",
-            MatrixExpect::Owed {
-                measured: MatrixMeasured::Clean(Shape::Ref(
-                    "Promise",
-                    &[Shape::Array(&AWAITED_REF_T)],
-                )),
-                note: REPRESENTATION_SPLIT,
-            },
+            PROMISE_AUTHORED_ARRAY,
         ),
-        (
-            "g8",
-            "matrixG8",
-            "Awaited<T>",
-            MatrixExpect::Owed {
-                measured: MatrixMeasured::Clean(AWAITED_REF_T),
-                note: REPRESENTATION_SPLIT,
-            },
-        ),
+        ("g8", "matrixG8", "Awaited<T>", AUTHORED_AWAITED_T),
     ];
     let host = ts_host();
     let mut failures = Vec::new();
-    for (id, function, tsc, expect) in rows {
+    for (id, function, tsc, shape) in rows {
         let outcome = eval(&host, CALLS, function);
-        let pinned = match expect {
-            MatrixExpect::Clean(shape)
-            | MatrixExpect::Owed {
-                measured: MatrixMeasured::Clean(shape),
-                ..
-            } => matches!(
-                &outcome,
-                Outcome::Value { ty, degradation: None, candidates: 1 } if shape_matches(shape, ty)
-            ),
-            MatrixExpect::Owed {
-                measured: MatrixMeasured::Degraded(reason),
-                ..
-            } => matches!(
-                &outcome,
-                Outcome::Value { degradation: Some(got), candidates: 0, .. } if got == reason
-            ),
-        };
+        let pinned = matches!(
+            &outcome,
+            Outcome::Value { ty, degradation: None, candidates: 1 } if shape_matches(shape, ty)
+        );
         if !pinned {
-            let owed = match expect {
-                MatrixExpect::Clean(_) => "",
-                MatrixExpect::Owed { note, .. } => note,
-            };
             failures.push(format!(
-                "{id} ({function}): tsc `{tsc}`, pinned {expect:?}, measured {outcome:?} {owed}"
+                "{id} ({function}): tsc `{tsc}`, pinned {shape:?}, measured {outcome:?}"
             ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The negative twin of matrix row g1: a module-local `type Awaited<X>`
+/// shadows the lib declaration, so the top-level carrier is a USERLAND
+/// declaration and the async return payload must never strip it to `T` nor
+/// turn it into the compiler intrinsic.
+///
+/// Oracle (tsc 7.0.2 declaration emit): `Promise<Awaited<T>>`, where
+/// `Awaited` is the local `{ w: X }` alias. The payload relation does not
+/// yet resolve a userland alias carrier, so the rail publishes the typed gap
+/// — pinned exactly, so a future answer is a visible edit and a strip can
+/// never pass.
+#[test]
+fn a_shadowed_awaited_at_the_top_of_an_async_return_is_not_stripped() {
+    const SHADOW: &str = "/ws/cov/shadowed_awaited.ts";
+    let host = host_with(&[(
+        SHADOW,
+        "type Awaited<X> = { w: X };
+         export async function shadowG1<T>(v: Awaited<T>) {
+  return v;
+}
+",
+    )]);
+    assert_degraded(
+        &host,
+        SHADOW,
+        "shadowG1",
+        FlowReturnDegradation::UnresolvedValue,
+    );
 }
