@@ -4754,7 +4754,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     union_buffers,
                     None,
                 );
-                return;
             }
             SemanticNodeData::MergedDecl { contributors } => {
                 // Peer-merge the same-name interface contributors, then RE-VISIT

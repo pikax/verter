@@ -4931,6 +4931,16 @@ fn type_def_source_files() -> Vec<(String, String)> {
             "../verter_type_expr/src/property_key.rs",
             "verter_type_expr::property_key",
         ),
+        // `CompilerIntrinsicTypeOp` is the closed compiler-intrinsic operation
+        // vocabulary threaded through the shape-engine algebra sink
+        // (`intrinsic`). It lives in its own module, so reading `lib.rs` alone
+        // leaves it unresolved and the fail-closed INPUT-completeness check
+        // rejects it; reading its home lets the closure classify it as the
+        // non-bearing scalar identity it is (a `NoTypeExpr` C-like enum).
+        (
+            "../verter_type_expr/src/compiler_intrinsics.rs",
+            "verter_type_expr::compiler_intrinsics",
+        ),
         (
             "../verter_semantic/src/analysis/type_solver/query_engine.rs",
             "verter_semantic::analysis::type_solver::query_engine",

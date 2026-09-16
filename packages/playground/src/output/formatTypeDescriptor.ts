@@ -1,5 +1,16 @@
 import type { TypeDescriptor } from "@verter/component-meta/browser";
-import { intrinsicDisplayName } from "@verter/component-meta/browser";
+
+/**
+ * Display spelling for a compiler-intrinsic wire token.
+ *
+ * Rendered LOCALLY on purpose: the type-only import above is erased at
+ * runtime, so importing a value from `@verter/component-meta/browser` would
+ * turn this module into a real runtime dependency on that package's build
+ * output. An unknown op renders as its raw token rather than guessing.
+ */
+function intrinsicOpName(op: string): string {
+  return op === "awaited" ? "Awaited" : op;
+}
 
 export function formatTypeDescriptor(td: TypeDescriptor): string {
   switch (td.kind) {
@@ -40,9 +51,9 @@ export function formatTypeDescriptor(td: TypeDescriptor): string {
     }
     case "intrinsicApplication": {
       if (td.arguments.length) {
-        return `${intrinsicDisplayName(td.op)}<${td.arguments.map(formatTypeDescriptor).join(", ")}>`;
+        return `${intrinsicOpName(td.op)}<${td.arguments.map(formatTypeDescriptor).join(", ")}>`;
       }
-      return intrinsicDisplayName(td.op);
+      return intrinsicOpName(td.op);
     }
     case "unknown":
       return td.rawType;
