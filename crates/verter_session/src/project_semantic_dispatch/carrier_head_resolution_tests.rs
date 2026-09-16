@@ -2015,3 +2015,50 @@ fn unshadowed_awaited_resolves_to_the_builtin_identity_in_one_gate_decision() {
         super::BuiltinUtilityResolution::Builtin(Some(BuiltinUtility::Awaited)),
     );
 }
+
+/// Counts the dispatch adapter's scope-payload reads.
+#[derive(Default)]
+struct ScopePayloadReadCounter(std::sync::atomic::AtomicUsize);
+
+impl verter_audit::AuditObserver for ScopePayloadReadCounter {
+    fn record_event(&self, event: verter_audit::AuditEvent) {
+        if matches!(
+            event,
+            verter_audit::AuditEvent::PreparedDeclBundleCallsiteScopePayload
+        ) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// The builtin utility gate costs ONE scope-payload read per builtin build.
+///
+/// Discrimination: the gate used to be two callbacks — one to enter the
+/// builtin branch, one for the proven identity — so a builtin build read the
+/// scope payload twice. Re-adding a second gate call in that branch measures
+/// 2 here.
+#[test]
+fn a_builtin_utility_build_reads_the_scope_payload_once() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/p.ts",
+        "export type Foo = { a: string };\nexport type X = Partial<Foo>;\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let scope = file_scope(&dispatch, "/p.ts");
+    let carrier = bare_ref_carrier(&dispatch, "Partial", scope, &[PrimitiveKind::String]);
+    let counter = Arc::new(ScopePayloadReadCounter::default());
+    let guard = verter_audit::observer::install_observer(counter.clone());
+    let resolved = resolve_subject(&dispatch, carrier, ProjectionMode::Expanded);
+    drop(guard);
+    assert!(
+        !is_bare_ref(&dispatch, resolved) && !is_opaque(&dispatch, resolved),
+        "the builtin `Partial<string>` must build"
+    );
+    assert_eq!(
+        counter.0.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "one gate decision, one scope-payload read"
+    );
+}
