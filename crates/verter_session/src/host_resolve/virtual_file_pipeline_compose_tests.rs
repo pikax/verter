@@ -81,7 +81,6 @@ fn vue_compile_input(canonical_id: &str, source: &str, has_template: bool) -> Co
             template_lang: None,
             style_langs: Vec::new(),
             custom_types: Vec::new(),
-            custom_langs: Vec::new(),
         },
         parse_diagnostics: crate::types::DiagnosticsSnapshot::default(),
         src_blocks: Vec::new(),
@@ -373,5 +372,209 @@ fn staged_svelte_main_carries_bytes_language_and_artifact_relations() {
     assert!(
         !taken.root().maps.is_empty(),
         "qualified maps must survive the host handoff"
+    );
+}
+
+// ── Custom virtual nodes: descriptor-driven publication ──────────────────
+//
+// The publish path's custom-block authority is the bundle's source-backed
+// descriptors: identity/order/role/lang/content state come from them, bytes
+// come from them OR from the host's sealed block-content selection, and the
+// retired legacy adapter list is never consulted.
+
+/// A Vue bundle with a staged Main plus a custom-block descriptor set, the
+/// shape every custom-node publication consumes.
+fn custom_block_bundle(
+    fixtures: Vec<verter_compiler::assembly::CustomBlockFixture>,
+) -> verter_compiler::framework_common::RuntimeCompileOutput {
+    use verter_compiler::framework_common::{
+        RuntimeCompileOutput, RuntimeOutputDescriptor, RuntimeScriptBlock, SourceMapFidelity,
+    };
+    let source = "<script setup>const n = 1</script>";
+    let mut bundle = RuntimeCompileOutput {
+        script: Some(RuntimeScriptBlock {
+            code: "const n = 1\n".to_string(),
+            source_map: String::new(),
+            setup: true,
+            output_descriptor: RuntimeOutputDescriptor::generated(
+                "const n = 1\n",
+                None,
+                &[("test:space", "test:artifact")],
+                SourceMapFidelity::Approximate,
+            ),
+            generated_template_hole: None,
+            runtime_imports: Vec::new(),
+            sfc_export_placement: None,
+        }),
+        custom_block_artifacts: Some(
+            verter_compiler::assembly::custom_block_fixture_set(source, fixtures)
+                .expect("fixture descriptors mint"),
+        ),
+        ..RuntimeCompileOutput::default()
+    };
+    let staged = verter_compiler::assembly::vue_main_compile_artifacts(
+        "Comp.vue",
+        &bundle,
+        verter_compiler::compile_request::ProductKind::RuntimeClient,
+        verter_compiler::assembly::FragmentDialect::TypeScript,
+        "const _sfc_main = {}\n",
+        None,
+        &verter_compiler::assembly::VueMainDecoration::default(),
+        false,
+    )
+    .expect("schema accepts");
+    bundle.main = Some(staged);
+    bundle
+}
+
+fn published_custom_nodes(
+    input: &CompileInput,
+    bundle: verter_compiler::framework_common::RuntimeCompileOutput,
+) -> FxHashMap<crate::types::VirtualNodeKind, CachedVirtualFile> {
+    use crate::host_resolve::compile_request_build::BoundCompiledProducts;
+    let products = BoundCompiledProducts::Vue(
+        verter_compiler::framework_common::VueHostCompiledProducts::from_admitted_runtime_bundle(
+            bundle,
+            verter_compiler::compile_request::ProductKind::RuntimeClient,
+        ),
+    );
+    let mut outputs = FxHashMap::default();
+    publish_runtime_nodes(input, &products, &runtime_publication(), &mut outputs)
+        .expect("a staged bundle publishes");
+    outputs
+}
+
+/// AC1/AC2: role/tag, language and typed content state publish straight off
+/// the descriptors. A `src`-backed descriptor with no admitted selection
+/// publishes NO node — unavailable content is not replaced with empty text.
+#[test]
+fn custom_nodes_publish_from_descriptor_content_state() {
+    use verter_compiler::assembly::CustomBlockFixture;
+    let mut input = vue_compile_input(
+        "Comp.vue",
+        "<script setup>const n = 1</script><i18n lang=\"json\">{\"a\":1}</i18n><docs src=\"./d.md\"></docs><note></note>",
+        false,
+    );
+    // Planted session-metadata reconstruction: stale lang/type facts that
+    // disagree with the descriptors must never reach the published nodes.
+    input.meta.custom_types = vec!["wrong".to_string(); 3];
+
+    let bundle = custom_block_bundle(vec![
+        CustomBlockFixture {
+            role: "i18n".to_string(),
+            lang: Some("json".to_string()),
+            src: None,
+            text: Some("{\"a\":1}".to_string()),
+        },
+        CustomBlockFixture::src_backed("docs", "./d.md"),
+        CustomBlockFixture::empty("note"),
+    ]);
+    let outputs = published_custom_nodes(&input, bundle);
+
+    let i18n = outputs
+        .get(&crate::types::VirtualNodeKind::Custom { index: 0 })
+        .expect("a local descriptor publishes its node");
+    assert_eq!(&*i18n.code, "{\"a\":1}");
+    assert_eq!(i18n.lang.as_deref(), Some("json"));
+    assert_eq!(i18n.meta.block_type.as_deref(), Some("i18n"));
+    assert_eq!(i18n.meta.custom_index, Some(0));
+
+    assert!(
+        !outputs.contains_key(&crate::types::VirtualNodeKind::Custom { index: 1 }),
+        "a src-backed descriptor with no admitted selection must not publish an empty-content node"
+    );
+
+    let note = outputs
+        .get(&crate::types::VirtualNodeKind::Custom { index: 2 })
+        .expect("an empty descriptor publishes its node with empty typed content");
+    assert_eq!(&*note.code, "");
+    assert_eq!(note.lang, None);
+    assert_eq!(note.meta.block_type.as_deref(), Some("note"));
+}
+
+/// AC1/AC2: the host's sealed block-content selection is the byte authority
+/// for its slot — external `src` bytes and preprocessed `lang` output
+/// publish the admitted bytes, not the authored region.
+#[test]
+fn custom_node_bytes_come_from_the_admitted_selection() {
+    use verter_compiler::assembly::CustomBlockFixture;
+    use verter_compiler::framework_common::RuntimeBlockContentInput;
+    let mut input = vue_compile_input(
+        "Comp.vue",
+        "<script setup>const n = 1</script><i18n lang=\"yaml\">hello: world</i18n><docs src=\"./d.md\"></docs>",
+        false,
+    );
+    let selected = RuntimeBlockContentInput {
+        code: Arc::from("{\"processed\":true}"),
+        source_map: None,
+        lang: "json".to_string(),
+        content_artifact_token: "test:content".to_string(),
+        source_space_token: "test:space".to_string(),
+        parsed: None,
+        producer: None,
+        authored_basis: None,
+        diagnostics: Vec::new(),
+    };
+    input.block_content_inputs.custom_blocks = vec![Some(selected.clone()), Some(selected)];
+
+    let bundle = custom_block_bundle(vec![
+        CustomBlockFixture {
+            role: "i18n".to_string(),
+            lang: Some("yaml".to_string()),
+            src: None,
+            text: Some("hello: world".to_string()),
+        },
+        CustomBlockFixture::src_backed("docs", "./d.md"),
+    ]);
+    let outputs = published_custom_nodes(&input, bundle);
+
+    for index in 0..2 {
+        let node = outputs
+            .get(&crate::types::VirtualNodeKind::Custom { index })
+            .expect("a selected slot publishes its node");
+        assert_eq!(
+            &*node.code, "{\"processed\":true}",
+            "the admitted selection is the byte authority for slot {index}"
+        );
+    }
+}
+
+/// AC1: a bundle whose only custom-block surface is the retired legacy
+/// adapter list publishes no custom nodes and claims no runtime surface —
+/// planted reconstruction through that list fails closed.
+#[test]
+fn legacy_adapter_carrying_bundles_publish_no_custom_nodes() {
+    use crate::host_resolve::compile_request_build::BoundCompiledProducts;
+    use verter_compiler::framework_common::RuntimeCustomBlock;
+    let input = vue_compile_input(
+        "Comp.vue",
+        "<script setup>const n = 1</script><i18n>{}</i18n>",
+        false,
+    );
+    let bundle = verter_compiler::framework_common::RuntimeCompileOutput {
+        custom_blocks: vec![RuntimeCustomBlock {
+            block_type: "i18n".to_string(),
+            content: "{}".to_string(),
+        }],
+        ..Default::default()
+    };
+    assert!(
+        !bundle.has_runtime_surface(),
+        "the legacy list alone is not a runtime surface"
+    );
+    let products = BoundCompiledProducts::Vue(
+        verter_compiler::framework_common::VueHostCompiledProducts::from_admitted_runtime_bundle(
+            bundle,
+            verter_compiler::compile_request::ProductKind::RuntimeClient,
+        ),
+    );
+    let mut outputs = FxHashMap::default();
+    publish_runtime_nodes(&input, &products, &runtime_publication(), &mut outputs)
+        .expect("no runtime surface means nothing to refuse");
+    assert!(
+        outputs
+            .keys()
+            .all(|kind| !matches!(kind, crate::types::VirtualNodeKind::Custom { .. })),
+        "the retired adapter must not publish custom nodes"
     );
 }

@@ -287,12 +287,13 @@ routes carry no host-issued admission, so they mint their leg grants
 crate-privately at the route boundary (`ProductExecutionGrant`'s
 crate-private mint) and drive the SAME catalog backends. The neutral
 bundle is an `Option<StagedCompileArtifacts>` main handoff + neutral
-script/template/style/custom blocks + scope id + optional IDE `tsx`
+script/template/style blocks + custom-block descriptors + scope id +
+optional IDE `tsx`
 (when `want_ide`) + optional template facts + neutral `diagnostics`, or
 a `CarrierCompileOutcome::RuntimeSurfaceRefused` / `CompileUnsupported`
 refusal — never a silent empty. For Vue, `RuntimeCompileOutput` also
-carries `custom_block_artifacts: Option<CompileArtifactSet>` beside the
-legacy `custom_blocks` adapter: source-backed descriptors (role, `lang`,
+carries `custom_block_artifacts: Option<CompileArtifactSet>`: source-backed
+descriptors (role, `lang`,
 `src`, ordered attrs, source order, SFC-absolute region, content state,
 provenance) minted once per runtime compile by the Vue bridge
 (`stage_custom_block_artifacts` in `framework_common/vue_bridge.rs`),
@@ -302,8 +303,15 @@ registered canonical file and incarnation (never a host filename or the
 session-scoped authority), revision `carrier_revision_of` those bytes
 (never Main's generated-output basis) — one `"sfc"` analysis artifact,
 and the descriptors attached to it. Main's own staged set carries no
-custom-block material; moving descriptors into Main assembly and session
-consumers is CCA2EH. A malformed block (e.g. an empty `lang`), facts read
+custom-block material. Consumers take the descriptors directly through
+`RuntimeCompileOutput::custom_block_descriptors()`: Vue main assembly
+bounds its custom import/invocation count by them, and session
+publication populates `Custom` virtual nodes from their role/lang/
+content state (bytes from the host's sealed block-content selection
+when one was admitted; a content-less state publishes no node, never an
+empty-text fallback). The legacy `RuntimeCustomBlock` list is an
+unfilled declaration retained only for terminal deletion. A malformed
+block (e.g. an empty `lang`), facts read
 from bytes other than the registered carrier, or an attachment refusal
 publishes no descriptor and adds an error diagnostic
 (`vue-runtime-custom-block-refused`, located on the block when it names

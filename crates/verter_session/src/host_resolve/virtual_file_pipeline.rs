@@ -32,6 +32,7 @@ use crate::types::*;
 use crate::CompileTarget;
 use crate::VerterHost;
 use oxc_allocator::Allocator;
+use verter_compiler::assembly::CustomBlockContent;
 use verter_compiler::compile::format_import_specifier;
 use verter_compiler::framework_common::{RuntimeDiagnosticSeverity, RuntimeTemplateBlock};
 
@@ -3897,24 +3898,46 @@ pub(super) fn publish_runtime_nodes(
             );
         }
 
-        // Custom blocks have no target bit of their own. They ride with the
+        // Custom nodes have no target bit of their own. They ride with the
         // runtime module: compiler-owned Vue main assembly emits their virtual
         // imports, so a `Custom` node with no `Main` would have no importer.
-        for (i, block) in compiled
-            .custom_blocks
+        // Identity, order, role/tag, language and typed content state come
+        // from the bundle's source-backed descriptors — never reconstructed
+        // from session parse metadata. Bytes come from the host's sealed
+        // block-content selection when one was admitted (external `src` or
+        // preprocessed `lang` output); a `Local`/`Empty` descriptor without a
+        // selection publishes its own typed content. A descriptor whose
+        // content state carries no bytes (`src`-backed, unavailable) and no
+        // admitted selection publishes NO node — unavailable content is not
+        // replaced with empty text.
+        for (i, descriptor) in compiled
+            .custom_block_descriptors()
             .iter()
             .enumerate()
             .filter(|_| publish_runtime_module)
         {
+            let selected = snapshot
+                .block_content_inputs
+                .custom_blocks
+                .get(i)
+                .and_then(Option::as_ref);
+            let code = match selected {
+                Some(input) => Arc::clone(&input.code),
+                None => match descriptor.content() {
+                    CustomBlockContent::Local { text, .. } => Arc::from(text.as_str()),
+                    CustomBlockContent::Empty => Arc::from(""),
+                    CustomBlockContent::SrcBacked | CustomBlockContent::Unavailable(_) => continue,
+                },
+            };
             outputs.insert(
                 VirtualNodeKind::Custom { index: i },
                 CachedVirtualFile {
-                    code: Arc::from(block.content.as_str()),
+                    code,
                     source_map: None,
-                    lang: snapshot.meta.custom_langs.get(i).cloned().flatten(),
+                    lang: descriptor.lang().map(str::to_string),
                     meta: VirtualMeta {
                         custom_index: Some(i),
-                        block_type: Some(block.block_type.clone()),
+                        block_type: Some(descriptor.role().to_string()),
                         ..VirtualMeta::default()
                     },
                 },

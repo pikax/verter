@@ -10,8 +10,8 @@ use super::*;
 // assemble_main_module tests
 
 use verter_compiler::framework_common::{
-    QualifiedRuntimeStyle, RuntimeCompileOutput, RuntimeCustomBlock, RuntimeOutputDescriptor,
-    RuntimeScriptBlock, RuntimeTemplateBlock, SourceMapFidelity, TemplateRenderExport,
+    QualifiedRuntimeStyle, RuntimeCompileOutput, RuntimeOutputDescriptor, RuntimeScriptBlock,
+    RuntimeTemplateBlock, SourceMapFidelity, TemplateRenderExport,
 };
 use verter_css_syntax::{CssDialect, QualifiedStyleResult, StyleStage};
 
@@ -293,20 +293,26 @@ fn assemble_main_module_no_script_no_template() {
     assert!(result.contains("const _sfc_main = {}"));
 }
 
-/// @ai-generated - Custom blocks produce import + invocation lines
+/// @ai-generated - Custom blocks produce import + invocation lines, bounded
+/// by the bundle's source-backed descriptors
 #[test]
 fn assemble_main_module_custom_blocks() {
     let compiled = RuntimeCompileOutput {
-        custom_blocks: vec![RuntimeCustomBlock {
-            block_type: "i18n".to_string(),
-            content: "{\"en\":{}}".to_string(),
-        }],
+        custom_block_artifacts: Some(
+            verter_compiler::assembly::custom_block_fixture_set(
+                "<i18n>{\"en\":{}}</i18n>",
+                vec![verter_compiler::assembly::CustomBlockFixture::local(
+                    "i18n",
+                    "{\"en\":{}}",
+                )],
+            )
+            .expect("fixture descriptors mint"),
+        ),
         ..RuntimeCompileOutput::default()
     };
     let profile = CompileProfile::default();
     let meta = FileMeta {
         custom_types: vec!["i18n".to_string()],
-        custom_langs: vec![None],
         ..FileMeta::default()
     };
     let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile)
@@ -314,6 +320,24 @@ fn assemble_main_module_custom_blocks() {
         .code;
     assert!(result.contains("import block0 from"));
     assert!(result.contains("if (typeof block0 === 'function') block0(_sfc_main)"));
+}
+
+/// A bundle with host identifiers but NO descriptor authority emits no
+/// custom import/invocation — the identifier list alone must not
+/// reconstruct custom-block topology.
+#[test]
+fn assemble_main_module_custom_imports_require_descriptors() {
+    let compiled = RuntimeCompileOutput::default();
+    let profile = CompileProfile::default();
+    let meta = FileMeta {
+        custom_types: vec!["i18n".to_string()],
+        ..FileMeta::default()
+    };
+    let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile)
+        .expect("assembly with maps disabled cannot fail")
+        .code;
+    assert!(!result.contains("import block"));
+    assert!(!result.contains("block0(_sfc_main)"));
 }
 
 /// @ai-generated - Production mode skips __file
