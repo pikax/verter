@@ -52,9 +52,9 @@ pub use capability::{
 pub use carrier_compiler::{
     CarrierCompileOutcome, CompileUnsupported, IdeCompileOptions, IdeOutput, QualifiedRuntimeStyle,
     RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
-    RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
-    RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeSurfaceRefusal, RuntimeTemplateBlock,
-    SourceMapFidelity, TemplateRenderExport,
+    RuntimeCompileOutput, RuntimeDiagnostic, RuntimeDiagnosticSeverity, RuntimeOutputDescriptor,
+    RuntimeScriptBlock, RuntimeSurfaceRefusal, RuntimeTemplateBlock, SourceMapFidelity,
+    TemplateRenderExport,
 };
 pub use catalog::{
     CatalogCapability, CatalogIdentity, CatalogRow, DuplicateCatalogIdentity, FrontendCap, HostCap,
