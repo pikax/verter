@@ -840,9 +840,9 @@ pub struct RuntimeCompileOutput {
     /// bytes, so there is no shape in which an unqualified stylesheet
     /// travels beside a qualified one.
     pub qualified_styles: Vec<QualifiedRuntimeStyle>,
-    /// Source-backed custom-block descriptors beside the retired legacy
-    /// adapter, admitted to their own compile-artifact set: one `"sfc"`
-    /// source unit bound to the registered carrier (registered file
+    /// Source-backed custom-block descriptors admitted to their own
+    /// compile-artifact set: one `"sfc"` source unit bound to the registered
+    /// carrier (registered file
     /// lineage, carrier-bytes revision), one `"sfc"` analysis artifact, and
     /// one attached descriptor per block in source order. Minted once by the
     /// Vue bridge from the admitted artifact, whether or not Main is
