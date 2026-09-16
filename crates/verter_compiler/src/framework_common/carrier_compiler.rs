@@ -804,6 +804,12 @@ impl QualifiedRuntimeStyle {
 }
 
 /// A framework-neutral custom block (`<i18n>`, `<docs>`, …).
+///
+/// Legacy declaration, retained unreferenced for terminal deletion: the
+/// legacy adapter's conversion helpers were removed when consumers moved
+/// to [`RuntimeCompileOutput::custom_block_descriptors`], and no
+/// production route fills this shape anymore. Nothing may read it —
+/// custom-block facts travel on the source-backed descriptors only.
 #[derive(Debug, Clone)]
 pub struct RuntimeCustomBlock {
     /// The block tag (e.g. `"i18n"`).
@@ -849,8 +855,25 @@ pub struct RuntimeCompileOutput {
     /// bytes, so there is no shape in which an unqualified stylesheet
     /// travels beside a qualified one.
     pub qualified_styles: Vec<QualifiedRuntimeStyle>,
-    /// Custom blocks in source order.
+    /// Custom blocks, legacy adapter shape. Retained as an unreferenced
+    /// declaration for terminal deletion; no production route fills it.
+    /// Consumers take [`Self::custom_block_descriptors`] instead.
     pub custom_blocks: Vec<RuntimeCustomBlock>,
+    /// Source-backed custom-block descriptors beside the retired legacy
+    /// adapter, admitted to their own compile-artifact set: one `"sfc"`
+    /// source unit bound to the registered carrier (registered file
+    /// lineage, carrier-bytes revision), one `"sfc"` analysis artifact, and
+    /// one attached descriptor per block in source order. Minted once by the
+    /// Vue bridge from the admitted artifact, whether or not Main is
+    /// demanded. `None` for a carrier without custom blocks, for Svelte (no
+    /// custom-block producer cell), and on routes that never hold the
+    /// registered artifact.
+    pub custom_block_artifacts: Option<crate::assembly::CompileArtifactSet>,
+    /// Retained parse facts in transit from the runtime leg to the Vue
+    /// bridge, which takes them to mint [`Self::custom_block_artifacts`].
+    /// Opaque outside the bridge; `pub` only so cross-crate struct-update
+    /// construction (`..Default::default()`) still compiles.
+    pub custom_block_facts: super::vue_bridge::StagedCustomBlockFacts,
     /// The scope id (`data-v-xxxxxxxx`), empty when none.
     pub scope_id: String,
     /// The IDE (TSX/JSX) artifact, present when `want_ide` was requested AND
@@ -880,6 +903,25 @@ pub struct RuntimeCompileOutput {
 }
 
 impl RuntimeCompileOutput {
+    /// The source-backed custom-block descriptors this bundle carries, in
+    /// source order — the single consumer authority for custom-block
+    /// identity, order, role/tag, language, source identity and typed
+    /// content state. The descriptors travel unreduced inside their
+    /// staged compile-artifact set ([`Self::custom_block_artifacts`]), so
+    /// their relations and provenance stay reachable beside them. Empty
+    /// when the producing route minted none (no custom blocks, Svelte's
+    /// bounded-inapplicable cell, or a descriptor-less direct conversion);
+    /// a consumer that finds none publishes none and never falls back to
+    /// reconstructing facts from carrier metadata.
+    #[must_use]
+    pub fn custom_block_descriptors(
+        &self,
+    ) -> &[crate::assembly::custom_block::CustomBlockDescriptor] {
+        self.custom_block_artifacts
+            .as_ref()
+            .map_or(&[], |set| set.custom_blocks())
+    }
+
     /// Whether this bundle carries a RUNTIME surface (a directly-emitted
     /// body OR host-assemblable block side-files). A carrier that produced
     /// only an IDE artifact (Svelte) returns `false` — the host populates
@@ -890,7 +932,7 @@ impl RuntimeCompileOutput {
             || self.script.is_some()
             || self.template.is_some()
             || !self.qualified_styles.is_empty()
-            || !self.custom_blocks.is_empty()
+            || !self.custom_block_descriptors().is_empty()
     }
 
     /// Whether any diagnostic in the bundle is an error.

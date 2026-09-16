@@ -2847,7 +2847,6 @@ pub struct FileMeta {
     pub template_lang: Option<String>,
     pub style_langs: Vec<Option<String>>,
     pub custom_types: Vec<String>,
-    pub custom_langs: Vec<Option<String>>,
 }
 
 impl FileMeta {

@@ -1700,7 +1700,6 @@ fn virtual_nodes_full_sfc() {
         script_lang: Some("ts".to_string()),
         style_langs: vec![None, Some("scss".to_string())],
         custom_types: vec!["i18n".to_string()],
-        custom_langs: vec![None],
         ..FileMeta::default()
     };
     let nodes = meta.virtual_nodes();

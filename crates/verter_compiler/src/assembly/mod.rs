@@ -43,6 +43,8 @@ pub use compose::{
     assemble_sequence, prepend_preamble, splice_into_hole, ComposeRefusal, ComposedOutput,
     SequencedOutput,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use custom_block::{custom_block_fixture_set, CustomBlockFixture};
 pub use custom_block::{
     CustomBlockContent, CustomBlockDescriptor, CustomBlockDescriptorError, CustomBlockDescriptorId,
     CustomBlockDescriptorRequest, CustomBlockLifecycle,
