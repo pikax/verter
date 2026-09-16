@@ -184,6 +184,20 @@ segments. JSON/V3/LSP adapters own UTF-16 conversion using source documents.
 The schema does not replace the live `ArtifactSet` publication boundary or
 `VerterCompileResult` routes.
 
+`assembly::StagedCompileArtifacts` is the request's ONE handoff from a
+framework host-integration backend into session lifecycle/publication code:
+a validated `CompileArtifactSet`, the `ArtifactId` of the runtime-module
+artifact inside it, the `FragmentDialect` those bytes are written in, and
+the runtime source map produced with them. `stage` is the only mint site
+and refuses a root the set does not contain (`UnknownRootArtifact`) or one
+that produced no content (`UnavailableRootArtifact`); an empty map payload
+stages as absent. `vue_main_compile_artifacts` and
+`svelte_main_compile_artifacts` return it, and it is what
+`RuntimeCompileOutput.main` carries — the module bytes live ON the staged
+root artifact, so a published body without its typed set is not
+representable and no consumer re-derives the module's language or locates
+its artifact by name.
+
 ## Multi-unit carrier lowering
 
 Runtime and IDE output blocks carry a `RuntimeOutputDescriptor` naming the generated destination space, emitted content artifact, declared input spaces, raw map, and honest `Exact`/`Approximate` fidelity. A separately lowered template receives `TemplateBindingMetadata` from its script pass (bindings, `has_script`, const props, and ref-bindable imports), matching Vue's official `bindingMetadata` mechanism.

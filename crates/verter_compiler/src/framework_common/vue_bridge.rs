@@ -28,9 +28,8 @@ use crate::compile_request::{
 };
 use crate::framework_common::carrier_compiler::{
     CarrierCompileOutcome, CompileUnsupported, IdeCompileOptions, IdeOutput, RuntimeCompileOptions,
-    RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic, RuntimeMainModule,
-    RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock, RuntimeTemplateBlock,
-    SourceMapFidelity,
+    RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic, RuntimeOutputDescriptor,
+    RuntimeScriptBlock, RuntimeStyleBlock, RuntimeTemplateBlock, SourceMapFidelity,
 };
 use crate::framework_common::FrameworkParseArtifact;
 use crate::parser::types::{sfc_script_dialect, SfcScriptDialect};
@@ -730,7 +729,8 @@ fn with_catalog_template_facts(
 
 /// Assemble the Vue `_sfc_main` runtime module behind the Vue runtime
 /// compiler: host identifiers ride in on `opts.vue_main`, topology is
-/// compiler-owned, and the compile artifact set is attached to `bundle.main`.
+/// compiler-owned, and the staged compile-artifact handoff becomes
+/// `bundle.main`.
 pub(crate) fn emit_assembled_vue_main(
     bundle: &mut RuntimeCompileOutput,
     parsed: &ParsedSfc,
@@ -763,11 +763,8 @@ pub(crate) fn emit_assembled_vue_main(
         source,
         custom_blocks: &custom_blocks,
     })?;
-    bundle.main.body_code = Some(assembled.code);
-    bundle.main.source_map = assembled.source_map.unwrap_or_default();
-    bundle.main.lang = Some(assembled.lang);
-    bundle.custom_block_descriptors = assembled.artifacts.custom_blocks().to_vec();
-    bundle.main.artifacts = Some(assembled.artifacts);
+    bundle.custom_block_descriptors = assembled.set().custom_blocks().to_vec();
+    bundle.main = Some(assembled);
     Ok(())
 }
 
@@ -787,7 +784,7 @@ fn vue_script_lang_from_parsed(parsed: &ParsedSfc) -> Option<String> {
 /// [`RuntimeCompileOutput`]. Block fields are filled here; the assembled
 /// `_sfc_main` body is emitted by [`emit_assembled_vue_main`] on the
 /// runtime-bundle path. Direct conversion (conformance/tests) leaves
-/// `main.body_code` unset so the compiler-owned assemble adapter can run
+/// `main` unstaged so the compiler-owned assemble adapter can run
 /// once with host identifiers.
 ///
 /// Public so conformance/test harnesses can drive the genuine
@@ -946,8 +943,8 @@ pub fn vue_result_to_runtime_bundle(
 
     RuntimeCompileOutput {
         // Vue: compiler-owned main module is assembled on the runtime-bundle
-        // path. Direct conversion leaves `main.body_code` unset.
-        main: RuntimeMainModule::default(),
+        // path. Direct conversion stages no main handoff.
+        main: None,
         script,
         template,
         styles,
@@ -3657,8 +3654,7 @@ mod tests {
             0,
             "unrequested Main must be zero-work"
         );
-        assert!(bundle.main.body_code.is_none());
-        assert!(bundle.main.artifacts.is_none());
+        assert!(bundle.main.is_none());
         crate::assembly::reset_vue_main_assembly_count();
         let assembled = VueCarrierCompiler
             .compile_bundle_expect_produced(
@@ -3674,8 +3670,7 @@ mod tests {
             )
             .expect("Main demand assembles");
         assert_eq!(crate::assembly::vue_main_assembly_count(), 1);
-        assert!(assembled.main.body_code.is_some());
-        assert!(assembled.main.artifacts.is_some());
+        assert!(assembled.main.is_some());
     }
 
     #[test]
@@ -3704,8 +3699,7 @@ mod tests {
         refuse_opts.want_main = true;
         let failure = emit_assembled_vue_main(&mut bundle, parsed, &refuse_opts, source)
             .expect_err("empty script map must refuse compiler Main assembly");
-        assert!(bundle.main.body_code.is_none());
-        assert!(bundle.main.artifacts.is_none());
+        assert!(bundle.main.is_none());
         assert!(matches!(
             CompileUnsupported::VueMainAssemblyFailed(failure.to_string()),
             CompileUnsupported::VueMainAssemblyFailed(_)
@@ -3732,7 +3726,7 @@ mod tests {
                 &alloc,
             )
             .expect("template-only compiles");
-        assert_eq!(bundle.main.lang.as_deref(), Some("js"));
+        assert_eq!(bundle.main.as_ref().map(|staged| staged.lang()), Some("js"));
     }
 
     #[test]
@@ -3760,12 +3754,13 @@ mod tests {
                 &alloc,
             )
             .expect("Main demand with maps produces a bundle");
-        let body = bundle.main.body_code.as_deref().expect("assembled body");
+        let staged = bundle.main.as_ref().expect("staged main handoff");
+        let body = staged.code();
         assert!(
             body.contains("_sfc_main.__file = \"/src/Canonical.vue\""),
             "host canonical id must drive __file, got:\n{body}"
         );
-        let set = bundle.main.artifacts.as_ref().expect("artifact set");
+        let set = staged.set();
         let main = set
             .artifacts()
             .iter()

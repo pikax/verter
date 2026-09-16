@@ -65,29 +65,16 @@ fn custom_runtime_module_name_reaches_the_import_specifier() {
     assert!(code.starts_with("import { openBlock as _openBlock } from \"@vue/runtime-dom\"\n"));
 }
 
-/// Planted host-side Vue topology reconstruction is refused.
-#[test]
-fn planted_host_vue_topology_reconstruction_is_refused() {
-    use crate::host_resolve::compile_request_build::BoundCompiledProducts;
+fn vue_compile_input(canonical_id: &str, source: &str, has_template: bool) -> CompileInput {
     use crate::types::{CompileInput, FileMeta};
-    use rustc_hash::FxHashMap;
     use std::sync::Arc;
-    use verter_compiler::compile_request::ProductKind;
-    use verter_compiler::framework_common::{
-        RuntimeCompileOutput, RuntimeOutputDescriptor, RuntimeScriptBlock, SourceMapFidelity,
-        VueHostCompiledProducts,
-    };
-
-    let snapshot = vue_main_reconstruction_diagnostics(4);
-    assert_eq!(snapshot.diagnostics[0].code, "HOST_VUE_MAIN_NOT_ASSEMBLED");
-
-    let input = CompileInput {
-        canonical_id: "Comp.vue".to_string(),
-        source: Arc::<str>::from("<script></script><template><div/></template>"),
+    CompileInput {
+        canonical_id: canonical_id.to_string(),
+        source: Arc::<str>::from(source),
         whole_hash: [0; 16],
         meta: FileMeta {
             has_script: true,
-            has_template: true,
+            has_template,
             main_depends_on_styles: false,
             has_scoped_style: false,
             script_lang: None,
@@ -111,7 +98,52 @@ fn planted_host_vue_topology_reconstruction_is_refused() {
         style_v_bind_vars: Vec::new(),
         style_v_bind_usage_complete: true,
         prepared_styles: Vec::new(),
+    }
+}
+
+fn svelte_compile_input(canonical_id: &str, source: &str) -> CompileInput {
+    vue_compile_input(canonical_id, source, true)
+}
+
+fn runtime_publication() -> RuntimeNodePublication {
+    RuntimeNodePublication {
+        publish_runtime_module: true,
+        publish_script: true,
+        publish_template: true,
+        publish_style: false,
+        runtime_module_name: None,
+    }
+}
+
+/// Planted host-side Vue topology reconstruction is refused.
+///
+/// `Main` publishes only from the compiler's staged handoff: a bundle
+/// carrying compiled blocks but no staged main refuses on BOTH the
+/// publication and the render lane, and publishes no `Main` node.
+///
+/// "Compiled body present, typed artifact set absent" is deliberately not
+/// constructible here. The module's bytes live ON the staged root
+/// artifact, so the bundle has no separate body field a planted
+/// reconstruction could occupy — the state the old second leg exercised is
+/// now closed by the handoff's shape rather than by a runtime check.
+#[test]
+fn planted_host_vue_topology_reconstruction_is_refused() {
+    use crate::host_resolve::compile_request_build::BoundCompiledProducts;
+    use rustc_hash::FxHashMap;
+    use verter_compiler::compile_request::ProductKind;
+    use verter_compiler::framework_common::{
+        RuntimeCompileOutput, RuntimeOutputDescriptor, RuntimeScriptBlock, SourceMapFidelity,
+        VueHostCompiledProducts,
     };
+
+    let snapshot = vue_main_reconstruction_diagnostics(4);
+    assert_eq!(snapshot.diagnostics[0].code, "HOST_VUE_MAIN_NOT_ASSEMBLED");
+
+    let input = vue_compile_input(
+        "Comp.vue",
+        "<script></script><template><div/></template>",
+        true,
+    );
     let bundle = RuntimeCompileOutput {
         script: Some(RuntimeScriptBlock {
             code: "const n = 1".to_string(),
@@ -128,93 +160,37 @@ fn planted_host_vue_topology_reconstruction_is_refused() {
             sfc_export_placement: None,
         }),
         template: Some(template("const render = () => {}", "", vec![])),
-        main: Default::default(),
+        main: None,
         ..Default::default()
     };
-    assert!(bundle.main.body_code.is_none());
+    assert!(bundle.main.is_none());
     let products = BoundCompiledProducts::Vue(
         VueHostCompiledProducts::from_admitted_runtime_bundle(bundle, ProductKind::RuntimeClient),
     );
     let mut outputs = FxHashMap::default();
-    let err = publish_runtime_nodes(
-        &input,
-        &products,
-        &RuntimeNodePublication {
-            publish_runtime_module: true,
-            publish_script: true,
-            publish_template: true,
-            publish_style: false,
-            runtime_module_name: None,
-            assembly: crate::compile::VueMainAssemblyAxes::from(
-                &crate::types::CompileProfile::default(),
-            ),
-        },
-        &mut outputs,
-    )
-    .expect_err("blocks without a compiler-owned body must refuse");
+    let err = publish_runtime_nodes(&input, &products, &runtime_publication(), &mut outputs)
+        .expect_err("blocks without a staged main must refuse");
     assert_eq!(err.diagnostics[0].code, "HOST_VUE_MAIN_NOT_ASSEMBLED");
     assert!(!outputs.contains_key(&crate::types::VirtualNodeKind::Main));
 
-    let render = take_compiler_vue_main(products.runtime_bundle().expect("bundle"), &input, false);
+    let render = take_staged_main(
+        products.runtime_bundle().expect("bundle"),
+        &input,
+        StagedMainCarrier::Vue,
+    );
     let render_err = render.expect_err("render lane must refuse the same planted reconstruction");
     assert_eq!(
         render_err.diagnostics[0].code,
         "HOST_VUE_MAIN_NOT_ASSEMBLED"
     );
-
-    let mut planted_body = RuntimeCompileOutput {
-        script: Some(RuntimeScriptBlock {
-            code: "const n = 1".to_string(),
-            source_map: String::new(),
-            setup: true,
-            output_descriptor: RuntimeOutputDescriptor::generated(
-                "const n = 1",
-                None,
-                &[("test:space", "test:artifact")],
-                SourceMapFidelity::Approximate,
-            ),
-            generated_template_hole: None,
-            runtime_imports: Vec::new(),
-            sfc_export_placement: None,
-        }),
-        template: Some(template("const render = () => {}", "", vec![])),
-        main: Default::default(),
-        ..Default::default()
-    };
-    planted_body.main.body_code = Some(Arc::from("export default {}"));
-    let planted_products =
-        BoundCompiledProducts::Vue(VueHostCompiledProducts::from_admitted_runtime_bundle(
-            planted_body,
-            ProductKind::RuntimeClient,
-        ));
-    let mut planted_outputs = FxHashMap::default();
-    let planted_err = publish_runtime_nodes(
-        &input,
-        &planted_products,
-        &RuntimeNodePublication {
-            publish_runtime_module: true,
-            publish_script: true,
-            publish_template: true,
-            publish_style: false,
-            runtime_module_name: None,
-            assembly: crate::compile::VueMainAssemblyAxes::from(
-                &crate::types::CompileProfile::default(),
-            ),
-        },
-        &mut planted_outputs,
-    )
-    .expect_err("a planted body without a typed main artifact must refuse");
-    assert_eq!(
-        planted_err.diagnostics[0].code,
-        "HOST_VUE_MAIN_NOT_ASSEMBLED"
-    );
-    assert!(!planted_outputs.contains_key(&crate::types::VirtualNodeKind::Main));
 }
 
+/// The staged handoff is the ONLY Vue `Main` transport: its root artifact
+/// supplies the published bytes and language, and the complete set — typed
+/// contributor relations and qualified maps included — survives the
+/// handoff untouched.
 #[test]
-fn take_compiler_vue_main_preserves_artifact_relations() {
-    use crate::types::{CompileInput, FileMeta};
-    use std::sync::Arc;
+fn staged_vue_main_carries_bytes_language_and_artifact_relations() {
     use verter_compiler::assembly::{
         vue_main_compile_artifacts, FragmentDialect, VueMainDecoration,
     };
@@ -242,115 +218,53 @@ fn take_compiler_vue_main_preserves_artifact_relations() {
         ..Default::default()
     };
     let generated = "const n = 1\nexport default n;\n";
-    bundle.main.body_code = Some(Arc::from(generated));
-    bundle.main.artifacts = Some(
-        vue_main_compile_artifacts(
-            "Comp.vue",
-            &bundle,
-            ProductKind::RuntimeClient,
-            FragmentDialect::JavaScript,
-            generated,
-            Some(script_map),
-            &VueMainDecoration::default(),
-            true,
-            "",
-            &[],
-        )
-        .expect("schema accepts"),
+    let staged = vue_main_compile_artifacts(
+        "Comp.vue",
+        &bundle,
+        ProductKind::RuntimeClient,
+        FragmentDialect::TypeScript,
+        generated,
+        Some(script_map.to_string()),
+        &VueMainDecoration::default(),
+        true,
+        "",
+        &[],
+    )
+    .expect("schema accepts");
+    bundle.main = Some(staged);
+
+    let input = vue_compile_input("Comp.vue", "<script>const n = 1</script>", false);
+    let taken = take_staged_main(&bundle, &input, StagedMainCarrier::Vue).expect("staged handoff");
+    assert_eq!(&**taken.code(), generated);
+    assert_eq!(
+        taken.lang(),
+        "ts",
+        "the published language is the dialect the assembly declared, not a \
+         carrier-metadata fallback"
     );
-    let input = CompileInput {
-        canonical_id: "Comp.vue".to_string(),
-        source: Arc::<str>::from("<script>const n = 1</script>"),
-        whole_hash: [0; 16],
-        meta: FileMeta {
-            has_script: true,
-            has_template: false,
-            main_depends_on_styles: false,
-            has_scoped_style: false,
-            script_lang: None,
-            template_lang: None,
-            style_langs: Vec::new(),
-            custom_types: Vec::new(),
-            custom_langs: Vec::new(),
-        },
-        parse_diagnostics: crate::types::DiagnosticsSnapshot::default(),
-        src_blocks: Vec::new(),
-        external_requests: Vec::new(),
-        has_supplied_block_content: false,
-        block_content_inputs: Default::default(),
-        macro_type_deps: Vec::new(),
-        script_imports: Vec::new(),
-        script_macros: Vec::new(),
-        script_bindings: Vec::new(),
-        script_macro_usage: None,
-        script_vue_api_calls: Vec::new(),
-        framework_parse: None,
-        style_v_bind_vars: Vec::new(),
-        style_v_bind_usage_complete: true,
-        prepared_styles: Vec::new(),
-    };
-    let taken = take_compiler_vue_main(&bundle, &input, false).expect("body is present");
-    assert_eq!(&*taken.code, generated);
-    let set = taken
-        .artifacts
-        .expect("typed artifact set survives handoff");
+    assert_eq!(
+        taken.source_map(),
+        Some(script_map),
+        "the staged runtime map crosses the handoff with the set"
+    );
+    assert_eq!(taken.root().name(), "main");
+    let set = taken.set();
     assert!(set
         .artifacts()
         .iter()
         .any(|artifact| artifact.name() == "script"));
-    let main = set
-        .artifacts()
-        .iter()
-        .find(|artifact| artifact.name() == "main")
-        .expect("main");
     assert!(
-        !main.maps.is_empty(),
+        !taken.root().maps.is_empty(),
         "qualified maps must survive the host handoff"
     );
 }
 
-fn svelte_compile_input(canonical_id: &str, source: &str) -> CompileInput {
-    use crate::types::{CompileInput, FileMeta};
-    use std::sync::Arc;
-    CompileInput {
-        canonical_id: canonical_id.to_string(),
-        source: Arc::<str>::from(source),
-        whole_hash: [0; 16],
-        meta: FileMeta {
-            has_script: true,
-            has_template: true,
-            main_depends_on_styles: false,
-            has_scoped_style: false,
-            script_lang: None,
-            template_lang: None,
-            style_langs: Vec::new(),
-            custom_types: Vec::new(),
-            custom_langs: Vec::new(),
-        },
-        parse_diagnostics: crate::types::DiagnosticsSnapshot::default(),
-        src_blocks: Vec::new(),
-        external_requests: Vec::new(),
-        has_supplied_block_content: false,
-        block_content_inputs: Default::default(),
-        macro_type_deps: Vec::new(),
-        script_imports: Vec::new(),
-        script_macros: Vec::new(),
-        script_bindings: Vec::new(),
-        script_macro_usage: None,
-        script_vue_api_calls: Vec::new(),
-        framework_parse: None,
-        style_v_bind_vars: Vec::new(),
-        style_v_bind_usage_complete: true,
-        prepared_styles: Vec::new(),
-    }
-}
-
-/// Planted host-side Svelte topology reconstruction is refused.
+/// Planted host-side Svelte topology reconstruction is refused — the same
+/// staged-handoff rule as Vue, reporting the Svelte code.
 #[test]
 fn planted_host_svelte_topology_reconstruction_is_refused() {
     use crate::host_resolve::compile_request_build::BoundCompiledProducts;
     use rustc_hash::FxHashMap;
-    use std::sync::Arc;
     use verter_compiler::compile_request::ProductKind;
     use verter_compiler::framework_common::{
         RuntimeCompileOutput, RuntimeOutputDescriptor, RuntimeScriptBlock, SourceMapFidelity,
@@ -382,10 +296,10 @@ fn planted_host_svelte_topology_reconstruction_is_refused() {
             runtime_imports: Vec::new(),
             sfc_export_placement: None,
         }),
-        main: Default::default(),
+        main: None,
         ..Default::default()
     };
-    assert!(bundle.main.body_code.is_none());
+    assert!(bundle.main.is_none());
     let products =
         BoundCompiledProducts::Svelte(SvelteHostCompiledProducts::from_admitted_runtime_bundle(
             bundle,
@@ -396,63 +310,32 @@ fn planted_host_svelte_topology_reconstruction_is_refused() {
         &input,
         &products,
         &RuntimeNodePublication {
-            publish_runtime_module: true,
             publish_script: false,
             publish_template: false,
-            publish_style: false,
-            runtime_module_name: None,
-            assembly: crate::compile::VueMainAssemblyAxes::from(
-                &crate::types::CompileProfile::default(),
-            ),
+            ..runtime_publication()
         },
         &mut outputs,
     )
-    .expect_err("blocks without a compiler-owned body must refuse");
+    .expect_err("blocks without a staged main must refuse");
     assert_eq!(err.diagnostics[0].code, "HOST_SVELTE_MAIN_NOT_ASSEMBLED");
     assert!(!outputs.contains_key(&crate::types::VirtualNodeKind::Main));
 
-    let render = take_compiler_svelte_main(products.runtime_bundle().expect("bundle"), &input);
+    let render = take_staged_main(
+        products.runtime_bundle().expect("bundle"),
+        &input,
+        StagedMainCarrier::Svelte,
+    );
     let render_err = render.expect_err("render lane must refuse the same planted reconstruction");
     assert_eq!(
         render_err.diagnostics[0].code,
         "HOST_SVELTE_MAIN_NOT_ASSEMBLED"
     );
-
-    let mut planted_body = RuntimeCompileOutput::default();
-    planted_body.main.body_code = Some(Arc::from(
-        "import * as $ from 'svelte/internal/client';\nexport default function Comp($$anchor) {}\n",
-    ));
-    let planted_products =
-        BoundCompiledProducts::Svelte(SvelteHostCompiledProducts::from_admitted_runtime_bundle(
-            planted_body,
-            ProductKind::RuntimeClient,
-        ));
-    let mut planted_outputs = FxHashMap::default();
-    let planted_err = publish_runtime_nodes(
-        &input,
-        &planted_products,
-        &RuntimeNodePublication {
-            publish_runtime_module: true,
-            publish_script: false,
-            publish_template: false,
-            publish_style: false,
-            runtime_module_name: None,
-            assembly: crate::compile::VueMainAssemblyAxes::from(
-                &crate::types::CompileProfile::default(),
-            ),
-        },
-        &mut planted_outputs,
-    )
-    .expect_err("a planted body without a typed main artifact must refuse");
-    assert_eq!(
-        planted_err.diagnostics[0].code,
-        "HOST_SVELTE_MAIN_NOT_ASSEMBLED"
-    );
-    assert!(!planted_outputs.contains_key(&crate::types::VirtualNodeKind::Main));
 }
 
+/// The Svelte staged handoff transports the self-contained module the same
+/// way: bytes, language, map and the complete typed set.
 #[test]
-fn take_compiler_svelte_main_preserves_artifact_relations() {
+fn staged_svelte_main_carries_bytes_language_and_artifact_relations() {
     use std::sync::Arc;
     use verter_compiler::assembly::{svelte_main_compile_artifacts, SvelteMainCompileRequest};
     use verter_compiler::compile_request::ProductKind;
@@ -462,43 +345,35 @@ fn take_compiler_svelte_main_preserves_artifact_relations() {
     let generated =
         "import * as $ from 'svelte/internal/client';\nexport default function Comp($$anchor) {}\n";
     let map_json = r#"{"version":3,"file":"Comp.svelte","sources":["Comp.svelte"],"sourcesContent":["<script>let n = $state(1);</script>\n<p>{n}</p>\n"],"names":[],"mappings":"AAAA"}"#;
-    let mut bundle = RuntimeCompileOutput::default();
-    bundle.main.body_code = Some(Arc::from(generated));
-    bundle.main.source_map = map_json.to_string();
-    bundle.main.lang = Some("js".to_string());
-    bundle.main.artifacts = Some(
-        svelte_main_compile_artifacts(SvelteMainCompileRequest {
-            canonical_id: "Comp.svelte",
-            source,
-            code: Arc::from(generated),
-            source_map: Some(map_json),
-            kind: ProductKind::RuntimeClient,
-            want_maps: true,
-            is_production: false,
-            ssr: false,
-            runes: None,
-            css_hash_override: None,
-            custom_element: false,
-            css_code: None,
-        })
-        .expect("schema accepts"),
-    );
+    let bundle = RuntimeCompileOutput {
+        main: Some(
+            svelte_main_compile_artifacts(SvelteMainCompileRequest {
+                canonical_id: "Comp.svelte",
+                source,
+                code: Arc::from(generated),
+                source_map: Some(map_json),
+                kind: ProductKind::RuntimeClient,
+                want_maps: true,
+                is_production: false,
+                ssr: false,
+                runes: None,
+                css_hash_override: None,
+                custom_element: false,
+                css_code: None,
+            })
+            .expect("schema accepts"),
+        ),
+        ..Default::default()
+    };
     let input = svelte_compile_input("Comp.svelte", source);
-    let taken = take_compiler_svelte_main(&bundle, &input).expect("assembled body");
-    assert_eq!(&*taken.code, generated);
-    assert!(taken
-        .artifacts
-        .artifacts()
-        .iter()
-        .any(|artifact| artifact.name() == "main"));
-    let main = taken
-        .artifacts
-        .artifacts()
-        .iter()
-        .find(|artifact| artifact.name() == "main")
-        .expect("main");
+    let taken =
+        take_staged_main(&bundle, &input, StagedMainCarrier::Svelte).expect("staged handoff");
+    assert_eq!(&**taken.code(), generated);
+    assert_eq!(taken.lang(), "js");
+    assert_eq!(taken.source_map(), Some(map_json));
+    assert_eq!(taken.root().name(), "main");
     assert!(
-        !main.maps.is_empty(),
+        !taken.root().maps.is_empty(),
         "qualified maps must survive the host handoff"
     );
 }

@@ -31,6 +31,7 @@ use super::map_input::{
 use super::plan::{PlannedArtifact, ProductPlan};
 use super::publish::{
     publish, ArtifactContribution, ArtifactSet, AssemblyRefusal, CompileArtifactSet,
+    StagedCompileArtifacts,
 };
 use super::source_space::{
     ArtifactMapFamily, ArtifactMapSegment, QualifiedArtifactMap, SourceSpaceKind,
@@ -400,18 +401,6 @@ pub struct VueRuntimeMainRequest<'a> {
     /// This compile's own retained custom-block facts (region/source_order/
     /// lang/src/attrs), in document order. Empty ⇒ zero custom-block work.
     pub custom_blocks: &'a [crate::compile::VerterCustomBlock],
-}
-
-/// Assembled Vue `_sfc_main` plus its compile-artifact-set relations.
-///
-/// `code` is the same allocation stored on the main artifact's
-/// [`ArtifactContent::Available`] payload.
-#[derive(Debug)]
-pub struct VueRuntimeMainAssembled {
-    pub code: Arc<str>,
-    pub source_map: Option<String>,
-    pub lang: String,
-    pub artifacts: CompileArtifactSet,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -894,11 +883,15 @@ pub fn compose_main_module(
 }
 
 /// Sole semantic Vue main-module assembler: map validation, dialect,
-/// composition, and compile-artifact-set emission. Session adapters transport
-/// identifiers only.
+/// composition, and staged compile-artifact emission. Session adapters
+/// transport identifiers only.
+///
+/// The result is the request's ONE staged handoff: the module's bytes, its
+/// dialect and its map are read off the staged root artifact, never carried
+/// beside it.
 pub fn assemble_vue_runtime_main(
     request: VueRuntimeMainRequest<'_>,
-) -> Result<VueRuntimeMainAssembled, VueMainAssemblyFailure> {
+) -> Result<StagedCompileArtifacts, VueMainAssemblyFailure> {
     let planned_kind = if request.ssr {
         ProductKind::RuntimeServer
     } else {
@@ -959,13 +952,13 @@ pub fn assemble_vue_runtime_main(
     };
     publish(&plan, vec![contribution]).map_err(VueMainAssemblyFailure::from)?;
     let code: Arc<str> = Arc::from(composed.code);
-    let artifacts = vue_main_compile_artifacts(
+    vue_main_compile_artifacts(
         request.canonical_id,
         request.compiled,
         planned_kind,
         dialect,
-        Arc::clone(&code),
-        source_map.as_deref(),
+        code,
+        source_map,
         &request.decoration,
         want_maps,
         request.source,
@@ -976,12 +969,6 @@ pub fn assemble_vue_runtime_main(
             kind: planned_kind,
             reason: err.to_string(),
         })
-    })?;
-    Ok(VueRuntimeMainAssembled {
-        code,
-        source_map,
-        lang: dialect.lang_id().to_string(),
-        artifacts,
     })
 }
 
@@ -1123,8 +1110,8 @@ impl CanonicalEncode for VueMainInputBasis<'_> {
     }
 }
 
-/// Compile-artifact schema for one assembled Vue main artifact and its
-/// contributing script/template units. Relations are typed; maps are
+/// Staged compile-artifact handoff for one assembled Vue main artifact and
+/// its contributing script/template units. Relations are typed; maps are
 /// qualified by family. Construction performs no compile work.
 ///
 /// `custom_blocks` (this compile's own retained parse facts) mint one
@@ -1139,12 +1126,12 @@ pub fn vue_main_compile_artifacts(
     kind: ProductKind,
     dialect: FragmentDialect,
     code: impl Into<Arc<str>>,
-    runtime_source_map: Option<&str>,
+    runtime_source_map: Option<String>,
     decoration: &VueMainDecoration,
     want_maps: bool,
     source: &str,
     custom_blocks: &[crate::compile::VerterCustomBlock],
-) -> Result<CompileArtifactSet, super::publish::ArtifactSchemaError> {
+) -> Result<StagedCompileArtifacts, super::publish::ArtifactSchemaError> {
     let code = code.into();
     use std::collections::BTreeSet;
 
@@ -1168,7 +1155,7 @@ pub fn vue_main_compile_artifacts(
         }
         order.push_str("template");
     }
-    let map_json = runtime_source_map.unwrap_or("");
+    let map_json = runtime_source_map.as_deref().unwrap_or("");
     let ssr_module_id = decoration.ssr_module_id.as_deref().unwrap_or(canonical_id);
     let basis = VueMainInputBasis {
         canonical_id,
@@ -1208,7 +1195,7 @@ pub fn vue_main_compile_artifacts(
         verter_span::Span::new(0, code.len() as u32),
     );
 
-    let authored = authored_contribution_units(compiled, runtime_source_map);
+    let authored = authored_contribution_units(compiled, runtime_source_map.as_deref());
     for unit in &authored {
         push_unit(&unit.role, unit.content.as_bytes(), unit.span);
     }
@@ -1254,7 +1241,7 @@ pub fn vue_main_compile_artifacts(
         });
         artifacts.push(fragment);
     }
-    if let Some(map_json) = runtime_source_map {
+    if let Some(map_json) = runtime_source_map.as_deref() {
         let authored_ids: BTreeSet<_> = source_units
             .iter()
             .filter(|unit| unit.unit.logical_role() != "main")
@@ -1271,6 +1258,7 @@ pub fn vue_main_compile_artifacts(
             });
         }
     }
+    let root = main.id().clone();
     artifacts.insert(0, main);
 
     // The custom-block producer cell: an `"sfc"` unit spanning the full
@@ -1309,54 +1297,57 @@ pub fn vue_main_compile_artifacts(
     }
 
     let set = CompileArtifactSet::new(source_units, artifacts)?;
-    let Some((sfc_unit, sfc_artifact)) = sfc else {
-        return Ok(set);
+    let set = match sfc {
+        None => set,
+        Some((sfc_unit, sfc_artifact)) => {
+            let source_content = ContentId::from_content_bytes(source.as_bytes());
+            let block_producer =
+                ResultContractId::from_canonical(&VueAssemblyTag("vue-runtime-custom-blocks"));
+            let requests: Vec<CustomBlockDescriptorRequest> = custom_blocks
+                .iter()
+                .map(|block| {
+                    let content = if block.src.is_some() {
+                        CustomBlockContent::SrcBacked
+                    } else if block.content.is_empty() {
+                        CustomBlockContent::Empty
+                    } else {
+                        CustomBlockContent::Local {
+                            content: ContentId::from_content_bytes(block.content.as_bytes()),
+                            text: block.content.clone(),
+                        }
+                    };
+                    CustomBlockDescriptorRequest {
+                        source_unit: sfc_unit.id().clone(),
+                        source_id: source_id.clone(),
+                        revision: revision.clone(),
+                        source_content: source_content.clone(),
+                        role: block.block_type.clone(),
+                        lang: block.lang.clone(),
+                        src: block.src.clone(),
+                        attributes: block.attrs.clone(),
+                        source_order: block.source_order,
+                        region: block.region,
+                        content,
+                        provenance: ArtifactProvenance {
+                            input_basis: input_basis.clone(),
+                            producer: block_producer.clone(),
+                            inputs: BTreeSet::from([sfc_unit.id().clone()]),
+                        },
+                        attached_to: sfc_artifact.id().clone(),
+                        lifecycle: CustomBlockLifecycle::Complete,
+                    }
+                })
+                .collect();
+            let descriptors = requests
+                .into_iter()
+                .map(CustomBlockDescriptor::try_new)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(super::publish::ArtifactSchemaError::CustomBlockInvalid)?;
+            set.attach_custom_blocks(descriptors)
+                .map_err(super::publish::ArtifactSchemaError::CustomBlockInvalid)?
+        }
     };
-    let source_content = ContentId::from_content_bytes(source.as_bytes());
-    let block_producer =
-        ResultContractId::from_canonical(&VueAssemblyTag("vue-runtime-custom-blocks"));
-    let requests: Vec<CustomBlockDescriptorRequest> = custom_blocks
-        .iter()
-        .map(|block| {
-            let content = if block.src.is_some() {
-                CustomBlockContent::SrcBacked
-            } else if block.content.is_empty() {
-                CustomBlockContent::Empty
-            } else {
-                CustomBlockContent::Local {
-                    content: ContentId::from_content_bytes(block.content.as_bytes()),
-                    text: block.content.clone(),
-                }
-            };
-            CustomBlockDescriptorRequest {
-                source_unit: sfc_unit.id().clone(),
-                source_id: source_id.clone(),
-                revision: revision.clone(),
-                source_content: source_content.clone(),
-                role: block.block_type.clone(),
-                lang: block.lang.clone(),
-                src: block.src.clone(),
-                attributes: block.attrs.clone(),
-                source_order: block.source_order,
-                region: block.region,
-                content,
-                provenance: ArtifactProvenance {
-                    input_basis: input_basis.clone(),
-                    producer: block_producer.clone(),
-                    inputs: BTreeSet::from([sfc_unit.id().clone()]),
-                },
-                attached_to: sfc_artifact.id().clone(),
-                lifecycle: CustomBlockLifecycle::Complete,
-            }
-        })
-        .collect();
-    let descriptors = requests
-        .into_iter()
-        .map(CustomBlockDescriptor::try_new)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(super::publish::ArtifactSchemaError::CustomBlockInvalid)?;
-    set.attach_custom_blocks(descriptors)
-        .map_err(super::publish::ArtifactSchemaError::CustomBlockInvalid)
+    StagedCompileArtifacts::stage(set, root, dialect, runtime_source_map)
 }
 
 struct AuthoredContribution {
@@ -1940,8 +1931,12 @@ mod tests {
             &[],
         )
         .expect("schema accepts the assembled main");
-        assert_eq!(artifacts.artifacts().len(), 1);
-        assert!(artifacts.artifacts().iter().any(|a| a.name() == "main"));
+        assert_eq!(artifacts.set().artifacts().len(), 1);
+        assert!(artifacts
+            .set()
+            .artifacts()
+            .iter()
+            .any(|a| a.name() == "main"));
     }
 
     #[test]
@@ -2007,21 +2002,25 @@ mod tests {
         )
         .expect("schema accepts");
         let first_main = first
+            .set()
             .artifacts()
             .iter()
             .find(|a| a.name() == "main")
             .expect("main");
         let option_main = option_changed
+            .set()
             .artifacts()
             .iter()
             .find(|a| a.name() == "main")
             .expect("main");
         let edited_main = after_edit
+            .set()
             .artifacts()
             .iter()
             .find(|a| a.name() == "main")
             .expect("main");
         let reverted_main = reverted
+            .set()
             .artifacts()
             .iter()
             .find(|a| a.name() == "main")
@@ -2031,6 +2030,7 @@ mod tests {
             "option change must change input basis"
         );
         let first_rev = first
+            .set()
             .source_units()
             .find(|u| u.unit.logical_role() == "main")
             .expect("main unit")
@@ -2038,6 +2038,7 @@ mod tests {
             .revision()
             .clone();
         let edited_rev = after_edit
+            .set()
             .source_units()
             .find(|u| u.unit.logical_role() == "main")
             .expect("main unit")
@@ -2045,6 +2046,7 @@ mod tests {
             .revision()
             .clone();
         let reverted_rev = reverted
+            .set()
             .source_units()
             .find(|u| u.unit.logical_role() == "main")
             .expect("main unit")
@@ -2052,6 +2054,7 @@ mod tests {
             .revision()
             .clone();
         let first_content = first
+            .set()
             .source_units()
             .find(|u| u.unit.logical_role() == "main")
             .expect("main unit")
@@ -2102,7 +2105,7 @@ mod tests {
             ProductKind::RuntimeClient,
             FragmentDialect::JavaScript,
             generated,
-            Some(script_map),
+            Some(script_map.to_string()),
             &VueMainDecoration::default(),
             true,
             "",
@@ -2110,6 +2113,7 @@ mod tests {
         )
         .expect("schema accepts authored map geometry");
         let main = artifacts
+            .set()
             .artifacts()
             .iter()
             .find(|artifact| artifact.name() == "main")
@@ -2120,6 +2124,7 @@ mod tests {
             .find(|map| map.family == ArtifactMapFamily::RuntimeSourceMap)
             .expect("runtime map");
         let main_unit = artifacts
+            .set()
             .source_units()
             .find(|unit| unit.unit.logical_role() == "main")
             .expect("main unit")
@@ -2127,6 +2132,7 @@ mod tests {
             .id()
             .clone();
         let script_unit = artifacts
+            .set()
             .source_units()
             .find(|unit| unit.unit.logical_role() == "script")
             .expect("script unit");
@@ -2156,7 +2162,7 @@ mod tests {
         assert!(
             main.relations.iter().any(|relation| {
                 relation.kind == ArtifactRelationKind::DependsOn
-                    && artifacts.artifacts().iter().any(|artifact| {
+                    && artifacts.set().artifacts().iter().any(|artifact| {
                         artifact.id() == &relation.target && artifact.name() == "script"
                     })
             }),
@@ -2237,7 +2243,7 @@ mod tests {
             ProductKind::RuntimeClient,
             FragmentDialect::JavaScript,
             generated,
-            Some(&composed),
+            Some(composed.clone()),
             &VueMainDecoration::default(),
             true,
             "",
@@ -2245,10 +2251,12 @@ mod tests {
         )
         .expect("schema accepts overlapping local spans");
         let script_unit = artifacts
+            .set()
             .source_units()
             .find(|unit| unit.unit.logical_role() == "script")
             .expect("script unit");
         let template_unit = artifacts
+            .set()
             .source_units()
             .find(|unit| unit.unit.logical_role() == "template")
             .expect("template unit");
@@ -2257,6 +2265,7 @@ mod tests {
             template_unit.source_span.start
         );
         let map = artifacts
+            .set()
             .artifacts()
             .iter()
             .find(|artifact| artifact.name() == "main")
@@ -2311,6 +2320,7 @@ mod tests {
         )
         .expect("schema accepts");
         let revision = artifacts
+            .set()
             .source_units()
             .find(|unit| unit.unit.logical_role() == "main")
             .expect("main unit")
@@ -2318,6 +2328,7 @@ mod tests {
             .revision()
             .clone();
         let main = artifacts
+            .set()
             .artifacts()
             .iter()
             .find(|artifact| artifact.name() == "main")
@@ -2353,7 +2364,7 @@ mod tests {
         })
         .expect("template-less assembly still emits Main");
         let main = assembled
-            .artifacts
+            .set()
             .artifacts()
             .iter()
             .find(|artifact| artifact.name() == "main")
@@ -2365,12 +2376,12 @@ mod tests {
             );
         };
         assert!(
-            Arc::ptr_eq(&assembled.code, content),
+            Arc::ptr_eq(assembled.code(), content),
             "body payload and typed artifact must share one allocation"
         );
         assert!(
             assembled
-                .artifacts
+                .set()
                 .artifacts()
                 .iter()
                 .filter(|artifact| artifact.name() != "main")

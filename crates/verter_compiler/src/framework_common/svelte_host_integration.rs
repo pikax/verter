@@ -1480,16 +1480,14 @@ mod tests {
         let bundle = products
             .runtime_client_bundle()
             .expect("the client runtime bundle publishes");
-        assert!(
-            bundle.main.body_code.is_some(),
-            "the self-contained Main module comes from the one population"
-        );
-        assert!(
-            bundle.main.artifacts.as_ref().is_some_and(|set| set
-                .artifacts()
-                .iter()
-                .any(|artifact| artifact.name() == "main")),
-            "the one population admits the self-contained module as a staged artifact"
+        let staged = bundle
+            .main
+            .as_ref()
+            .expect("the self-contained Main module comes from the one population");
+        assert_eq!(
+            staged.root().name(),
+            "main",
+            "the one population stages the self-contained module as the root artifact"
         );
         assert!(
             !bundle.qualified_styles.is_empty(),
@@ -1535,9 +1533,8 @@ mod tests {
             rendered
                 .runtime_bundle()
                 .main
-                .body_code
-                .as_deref()
-                .is_some_and(|body| body.contains("svelte/internal/client")),
+                .as_ref()
+                .is_some_and(|staged| staged.code().contains("svelte/internal/client")),
             "the rendered Main is the self-contained client module"
         );
         assert!(rendered.runtime_bundle().tsx.is_none());
@@ -1776,7 +1773,8 @@ mod tests {
             .expect("client bundle")
             .main;
         assert!(
-            !main.source_map.is_empty(),
+            main.as_ref()
+                .is_some_and(|staged| staged.source_map().is_some()),
             "runtime_source_map=true must populate the runtime leg's own map"
         );
         assert!(
@@ -1791,7 +1789,8 @@ mod tests {
             .expect("client bundle")
             .main;
         assert!(
-            main.source_map.is_empty(),
+            main.as_ref()
+                .is_some_and(|staged| staged.source_map().is_none()),
             "an IDE-only map demand must not switch the runtime map on"
         );
         assert!(
@@ -1986,7 +1985,7 @@ mod tests {
         assert_eq!(style.consumed_stage, StyleStage::Preprocessed);
         assert_eq!(style.result.stage(), StyleStage::FrameworkRewritten);
         let hash = style.scope_hash.as_deref().expect("scoped by class");
-        let main = bundle.main.body_code.as_deref().expect("the main module");
+        let main = bundle.main.as_ref().expect("the main module").code();
         assert!(
             main.contains(&format!("card {hash}")),
             "the markup carries the continued stylesheet's scope class: {main}"
