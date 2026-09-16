@@ -851,22 +851,21 @@ pub struct RuntimeCompileOutput {
     pub qualified_styles: Vec<QualifiedRuntimeStyle>,
     /// Custom blocks in source order.
     pub custom_blocks: Vec<RuntimeCustomBlock>,
-    /// Source-backed custom-block descriptors, in source order — additive
-    /// alongside [`Self::custom_blocks`] (the legacy adapter), constructed
-    /// from the exact registered source/parse identity. Empty for Svelte
-    /// (no custom-block producer cell) and for a Vue compile with no custom
-    /// blocks; not yet consumed downstream. A shared allocation with the
-    /// validated copy attached inside [`Self::main`]'s artifact set — never
-    /// a re-cloned second copy of block content.
-    pub custom_block_descriptors: std::sync::Arc<[crate::assembly::CustomBlockDescriptor]>,
-    /// This compile's own retained custom-block facts, staged for
-    /// [`crate::framework_common::vue_bridge::emit_assembled_vue_main`] to
-    /// mint [`Self::custom_block_descriptors`] against Main's own real
-    /// artifact set once assembled. Never populated for Svelte. Consumed
-    /// (taken) by Main assembly; empty once assembly has run. `pub` only
-    /// for cross-crate struct-update construction (`..Default::default()`);
-    /// not a stable field for external callers to populate.
-    pub custom_block_facts: Vec<crate::compile::VerterCustomBlock>,
+    /// Source-backed custom-block descriptors beside [`Self::custom_blocks`]
+    /// (the legacy adapter), admitted to their own compile-artifact set: one
+    /// `"sfc"` source unit bound to the registered carrier (registered file
+    /// lineage, carrier-bytes revision), one `"sfc"` analysis artifact, and
+    /// one attached descriptor per block in source order. Minted once by the
+    /// Vue bridge from the admitted artifact, whether or not Main is
+    /// demanded. `None` for a carrier without custom blocks, for Svelte (no
+    /// custom-block producer cell), and on routes that never hold the
+    /// registered artifact. Not yet consumed downstream.
+    pub custom_block_artifacts: Option<crate::assembly::CompileArtifactSet>,
+    /// Retained parse facts in transit from the runtime leg to the Vue
+    /// bridge, which takes them to mint [`Self::custom_block_artifacts`].
+    /// Opaque outside the bridge; `pub` only so cross-crate struct-update
+    /// construction (`..Default::default()`) still compiles.
+    pub custom_block_facts: super::vue_bridge::StagedCustomBlockFacts,
     /// The scope id (`data-v-xxxxxxxx`), empty when none.
     pub scope_id: String,
     /// The IDE (TSX/JSX) artifact, present when `want_ide` was requested AND

@@ -903,7 +903,10 @@ fn compile_inner(
     // Collect block ranges for inter-block gap removal
     let block_ranges = extract_block_ranges(parsed, input);
 
-    // Collect custom blocks before taking template ast
+    // Collect custom blocks before taking template ast. The bytes' digest is
+    // taken once, on the first block, so a carrier without custom blocks
+    // hashes nothing.
+    let source_content = std::cell::OnceCell::new();
     let custom_blocks: Vec<VerterCustomBlock> = parsed
         .unknown_nodes()
         .iter()
@@ -917,6 +920,9 @@ fn compile_inner(
                 .map(|span| input[span.start as usize..span.end as usize].to_string())
                 .unwrap_or_default();
             let attrs = extract_attrs(&node.attributes, input);
+            // Exact-case names, as Vue's own `createBlock` reads them and as
+            // the descriptor contract binds `lang`/`src` to their attribute:
+            // `LANG="json"` stays an ordinary attribute.
             let lang = attrs
                 .iter()
                 .find(|(key, _)| key.as_str() == "lang")
@@ -938,6 +944,11 @@ fn compile_inner(
                 source_order: source_order as u32,
                 lang,
                 src,
+                source_content: source_content
+                    .get_or_init(|| {
+                        verter_identity::identity::ContentId::from_content_bytes(input.as_bytes())
+                    })
+                    .clone(),
             }
         })
         .collect();

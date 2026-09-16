@@ -190,10 +190,14 @@ block: `block_type`, `content`, `attrs` (exact authored order — attrs
 are never sorted or deduped, since `CustomBlockDescriptorId::mint`
 hashes them in order), `region` (SFC-absolute; a self-closing tag with
 no content span anchors at `tag_open.end`, a zero-length region),
-`source_order`, `lang`, `src`. These facts stage on
-`RuntimeCompileOutput.custom_block_facts` for
-`vue_main_compile_artifacts` to mint `CustomBlockDescriptor`s from
-directly — no re-parse, no re-scan of source text.
+`source_order`, `lang`, `src` (matched by exact attribute name, as Vue's
+`createBlock` does), and `source_content` — the `ContentId` of the bytes
+the facts were read from, hashed once per compile and only when a custom
+block exists. The facts travel opaquely on
+`RuntimeCompileOutput.custom_block_facts` to the Vue bridge, which mints
+`CustomBlockDescriptor`s from them directly — no re-parse, no re-scan of
+source text — and refuses facts whose `source_content` differs from the
+registered carrier bytes.
 
 `assembly::StagedCompileArtifacts` is the request's ONE handoff from a
 framework host-integration backend into session lifecycle/publication code:

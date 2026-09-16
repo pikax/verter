@@ -259,12 +259,6 @@ pub(crate) fn assemble_vue_main_module_with_axes(
     profile: &VueMainAssemblyAxes,
 ) -> Result<AssembledVueModule, VueMainAssemblyFailure> {
     let runtime = profile.runtime_module_name.as_deref().unwrap_or("vue");
-    // This transport carries only an already-assembled `RuntimeCompileOutput`
-    // (host identifiers/axes over a prior compile), never the original SFC
-    // bytes — so it cannot mint source-backed custom-block descriptors here
-    // and does not: `source`/`custom_blocks` stay at their zero-work values.
-    // The live host/LSP route (`VueCarrierCompiler::compile_bundle` ->
-    // `emit_assembled_vue_main`) carries the real bytes and produces them.
     let assembled = assemble_vue_runtime_main(VueRuntimeMainRequest {
         canonical_id,
         compiled,
@@ -282,8 +276,6 @@ pub(crate) fn assemble_vue_main_module_with_axes(
             meta,
             profile,
         ),
-        source: "",
-        custom_blocks: &[],
     })?;
     Ok(AssembledVueModule {
         code: assembled.code().to_string(),

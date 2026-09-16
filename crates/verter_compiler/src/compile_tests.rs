@@ -1605,8 +1605,7 @@ const msg = 'hello'
 
 #[test]
 fn custom_blocks_extracted() {
-    let result = compile_sfc(
-        r#"<script setup>
+    let source = r#"<script setup>
 const msg = 'hello'
 </script>
 
@@ -1617,8 +1616,8 @@ const msg = 'hello'
 <i18n lang="json">
 { "en": { "hello": "Hello" } }
 </i18n>
-"#,
-    );
+"#;
+    let result = compile_sfc(source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     assert_eq!(result.custom_blocks.len(), 1);
     let block = &result.custom_blocks[0];
@@ -1632,9 +1631,14 @@ const msg = 'hello'
         "\n{ \"en\": { \"hello\": \"Hello\" } }\n"
     );
     assert_eq!(
-        (region.end - region.start) as usize,
-        block.content.len(),
+        &source[region.start as usize..region.end as usize],
+        block.content,
         "a locally-authored block's region must span exactly its content bytes"
+    );
+    assert_eq!(
+        block.source_content,
+        verter_identity::identity::ContentId::from_content_bytes(source.as_bytes()),
+        "the facts carry the digest of the bytes they were parsed from"
     );
 }
 

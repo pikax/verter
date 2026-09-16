@@ -16,9 +16,6 @@ use std::sync::Arc;
 use oxc_sourcemap::SourceMap;
 
 use super::compose::{assemble_sequence, ComposeRefusal};
-use super::custom_block::{
-    CustomBlockContent, CustomBlockDescriptor, CustomBlockDescriptorRequest, CustomBlockLifecycle,
-};
 use super::fragment::{
     ArtifactContent, ArtifactProvenance, ArtifactRelation, ArtifactRelationKind, CompileArtifact,
     DeclaredImport, DeclaredImportKind, Fragment, FragmentDialect, FragmentRefusal,
@@ -399,12 +396,6 @@ pub struct VueRuntimeMainRequest<'a> {
     pub runtime: &'a str,
     pub ssr: bool,
     pub decoration: VueMainDecoration,
-    /// Authored SFC bytes. Identity for the custom-block source unit uses
-    /// this space directly; the assembler does not re-parse or re-emit it.
-    pub source: &'a str,
-    /// This compile's own retained custom-block facts (region/source_order/
-    /// lang/src/attrs), in document order. Empty ⇒ zero custom-block work.
-    pub custom_blocks: &'a [crate::compile::VerterCustomBlock],
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -965,8 +956,6 @@ pub fn assemble_vue_runtime_main(
         source_map,
         &request.decoration,
         want_maps,
-        request.source,
-        request.custom_blocks,
     )
     .map_err(|err| {
         VueMainAssemblyFailure::Publication(AssemblyRefusal::FinalParseFailed {
@@ -1070,7 +1059,7 @@ fn validate_vue_main_maps(
     })
 }
 
-pub(crate) struct VueAssemblyTag<'a>(pub(crate) &'a str);
+struct VueAssemblyTag<'a>(&'a str);
 impl CanonicalEncode for VueAssemblyTag<'_> {
     const DOMAIN_TAG: &'static str = "verter.compiler.vue.main.assembly.v1";
     fn encode_fields(&self, e: &mut CanonicalEncoder) {
@@ -1117,12 +1106,6 @@ impl CanonicalEncode for VueMainInputBasis<'_> {
 /// Staged compile-artifact handoff for one assembled Vue main artifact and
 /// its contributing script/template units. Relations are typed; maps are
 /// qualified by family. Construction performs no compile work.
-///
-/// `custom_blocks` (this compile's own retained parse facts) mint one
-/// source-backed [`CustomBlockDescriptor`] per block, sharing this call's
-/// own `source_id`/revision and attached to an `"sfc"` unit/artifact added
-/// to the SAME set Main publishes — never a second, unrelated lineage.
-/// Empty `custom_blocks` is zero extra work.
 #[allow(clippy::too_many_arguments)]
 pub fn vue_main_compile_artifacts(
     canonical_id: &str,
@@ -1133,8 +1116,6 @@ pub fn vue_main_compile_artifacts(
     runtime_source_map: Option<String>,
     decoration: &VueMainDecoration,
     want_maps: bool,
-    source: &str,
-    custom_blocks: &[crate::compile::VerterCustomBlock],
 ) -> Result<StagedCompileArtifacts, super::publish::ArtifactSchemaError> {
     let code = code.into();
     use std::collections::BTreeSet;
@@ -1256,7 +1237,7 @@ pub fn vue_main_compile_artifacts(
                 family: ArtifactMapFamily::RuntimeSourceMap,
                 generated: main.id().clone(),
                 generated_content: ContentId::from_content_bytes(code.as_bytes()),
-                input_basis: input_basis.clone(),
+                input_basis,
                 sources: authored_ids,
                 segments: runtime_map_segments(map_json, code.as_ref(), &source_units, &authored),
             });
@@ -1264,93 +1245,7 @@ pub fn vue_main_compile_artifacts(
     }
     let root = main.id().clone();
     artifacts.insert(0, main);
-
-    // The custom-block producer cell: an `"sfc"` unit spanning the full
-    // authored SFC bytes, sharing this call's own `source_id`/`revision` —
-    // the same lineage Main publishes under, never a second private set.
-    // Absent blocks are zero-work (no unit, no artifact, no descriptor).
-    let sfc = (!custom_blocks.is_empty()).then(|| {
-        let sfc_unit = SourceUnit::mint(
-            source_id.clone(),
-            revision.clone(),
-            "sfc",
-            ContentId::from_content_bytes(source.as_bytes()),
-        );
-        let sfc_artifact = CompileArtifact::new(
-            sfc_unit.id().clone(),
-            ProductKind::Analysis,
-            verter_language::LanguageId::new("vue"),
-            "sfc",
-            ArtifactProvenance {
-                input_basis: input_basis.clone(),
-                producer: ResultContractId::from_canonical(&VueAssemblyTag(
-                    "vue-runtime-custom-blocks",
-                )),
-                inputs: BTreeSet::from([sfc_unit.id().clone()]),
-            },
-            ArtifactContent::Unavailable(super::fragment::ArtifactUnavailableReason::NotProduced),
-        );
-        (sfc_unit, sfc_artifact)
-    });
-    if let Some((sfc_unit, sfc_artifact)) = &sfc {
-        source_units.push(ArtifactSourceUnit {
-            unit: sfc_unit.clone(),
-            source_span: verter_span::Span::new(0, source.len() as u32),
-        });
-        artifacts.push(sfc_artifact.clone());
-    }
-
     let set = CompileArtifactSet::new(source_units, artifacts)?;
-    let set = match sfc {
-        None => set,
-        Some((sfc_unit, sfc_artifact)) => {
-            let source_content = ContentId::from_content_bytes(source.as_bytes());
-            let block_producer =
-                ResultContractId::from_canonical(&VueAssemblyTag("vue-runtime-custom-blocks"));
-            let requests: Vec<CustomBlockDescriptorRequest> = custom_blocks
-                .iter()
-                .map(|block| {
-                    let content = if block.src.is_some() {
-                        CustomBlockContent::SrcBacked
-                    } else if block.content.is_empty() {
-                        CustomBlockContent::Empty
-                    } else {
-                        CustomBlockContent::Local {
-                            content: ContentId::from_content_bytes(block.content.as_bytes()),
-                            text: block.content.clone(),
-                        }
-                    };
-                    CustomBlockDescriptorRequest {
-                        source_unit: sfc_unit.id().clone(),
-                        source_id: source_id.clone(),
-                        revision: revision.clone(),
-                        source_content: source_content.clone(),
-                        role: block.block_type.clone(),
-                        lang: block.lang.clone(),
-                        src: block.src.clone(),
-                        attributes: block.attrs.clone(),
-                        source_order: block.source_order,
-                        region: block.region,
-                        content,
-                        provenance: ArtifactProvenance {
-                            input_basis: input_basis.clone(),
-                            producer: block_producer.clone(),
-                            inputs: BTreeSet::from([sfc_unit.id().clone()]),
-                        },
-                        attached_to: sfc_artifact.id().clone(),
-                        lifecycle: CustomBlockLifecycle::Complete,
-                    }
-                })
-                .collect();
-            let descriptors = requests
-                .into_iter()
-                .map(CustomBlockDescriptor::try_new)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(super::publish::ArtifactSchemaError::CustomBlockInvalid)?;
-            set.attach_custom_blocks(descriptors)
-                .map_err(super::publish::ArtifactSchemaError::CustomBlockInvalid)?
-        }
-    };
     StagedCompileArtifacts::stage(set, root, dialect, runtime_source_map)
 }
 
@@ -1935,8 +1830,6 @@ mod tests {
                 ..VueMainDecoration::default()
             },
             false,
-            "",
-            &[],
         )
         .expect("schema accepts the assembled main");
         assert_eq!(artifacts.set().artifacts().len(), 1);
@@ -1965,8 +1858,6 @@ mod tests {
             None,
             &vite,
             false,
-            "",
-            &[],
         )
         .expect("schema accepts");
         let option_changed = vue_main_compile_artifacts(
@@ -1978,8 +1869,6 @@ mod tests {
             None,
             &none,
             false,
-            "",
-            &[],
         )
         .expect("schema accepts");
         let edited = format!("{code}\n");
@@ -1992,8 +1881,6 @@ mod tests {
             None,
             &vite,
             false,
-            "",
-            &[],
         )
         .expect("schema accepts");
         let reverted = vue_main_compile_artifacts(
@@ -2005,8 +1892,6 @@ mod tests {
             None,
             &vite,
             false,
-            "",
-            &[],
         )
         .expect("schema accepts");
         let first_main = first
@@ -2116,8 +2001,6 @@ mod tests {
             Some(script_map.to_string()),
             &VueMainDecoration::default(),
             true,
-            "",
-            &[],
         )
         .expect("schema accepts authored map geometry");
         let main = artifacts
@@ -2254,8 +2137,6 @@ mod tests {
             Some(composed.clone()),
             &VueMainDecoration::default(),
             true,
-            "",
-            &[],
         )
         .expect("schema accepts overlapping local spans");
         let script_unit = artifacts
@@ -2323,8 +2204,6 @@ mod tests {
             None,
             &VueMainDecoration::default(),
             false,
-            "",
-            &[],
         )
         .expect("schema accepts");
         let revision = artifacts
@@ -2367,8 +2246,6 @@ mod tests {
             runtime: "vue",
             ssr: false,
             decoration: VueMainDecoration::default(),
-            source: "",
-            custom_blocks: &[],
         })
         .expect("template-less assembly still emits Main");
         let main = assembled
@@ -2443,8 +2320,6 @@ mod tests {
             runtime: "vue",
             ssr: false,
             decoration: VueMainDecoration::default(),
-            source: "",
-            custom_blocks: &[],
         })
         .expect_err("empty authored script map must refuse");
         assert!(matches!(

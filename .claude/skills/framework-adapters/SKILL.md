@@ -291,23 +291,26 @@ script/template/style/custom blocks + scope id + optional IDE `tsx`
 (when `want_ide`) + optional template facts + neutral `diagnostics`, or
 a `CarrierCompileOutcome::RuntimeSurfaceRefused` / `CompileUnsupported`
 refusal — never a silent empty. For Vue, `RuntimeCompileOutput` also
-carries `custom_block_descriptors: Arc<[CustomBlockDescriptor]>` —
-source-backed descriptors (role, `lang`, `src`, ordered attrs, source
-order, SFC-absolute region, content state, provenance) minted once,
-additively alongside the legacy `custom_blocks` adapter, by
-`vue_main_compile_artifacts` (`assembly/vue_module.rs`) from Main's own
-registered `source_id`/revision and attached to the SAME
-`CompileArtifactSet` Main publishes — never a second private lineage.
-`emit_assembled_vue_main` (`framework_common/vue_bridge.rs`) reads the
-finished set's descriptors back onto the bundle as a shared `Arc`
-handle (`CompileArtifactSet::custom_blocks_shared`), not a re-cloned
-copy. A single malformed block (e.g. an empty `lang` attribute) or a
-set-level attachment refusal fails the WHOLE compile closed
-(`ArtifactSchemaError::CustomBlockInvalid` →
-`VueMainAssemblyFailure` → `CompileUnsupported::VueMainAssemblyFailed`)
-rather than silently dropping the descriptor set. Empty for Svelte (no
-custom-block producer cell) and for a Vue compile with no custom
-blocks. `RuntimeCompileOutput.main` is the
+carries `custom_block_artifacts: Option<CompileArtifactSet>` beside the
+legacy `custom_blocks` adapter: source-backed descriptors (role, `lang`,
+`src`, ordered attrs, source order, SFC-absolute region, content state,
+provenance) minted once per runtime compile by the Vue bridge
+(`stage_custom_block_artifacts` in `framework_common/vue_bridge.rs`),
+whether or not Main is demanded. The set holds one `"sfc"` source unit
+over the admitted artifact's registered carrier bytes — lineage from the
+registered canonical file and incarnation (never a host filename or the
+session-scoped authority), revision `carrier_revision_of` those bytes
+(never Main's generated-output basis) — one `"sfc"` analysis artifact,
+and the descriptors attached to it. Main's own staged set carries no
+custom-block material; moving descriptors into Main assembly and session
+consumers is CCA2EH. A malformed block (e.g. an empty `lang`), facts read
+from bytes other than the registered carrier, or an attachment refusal
+publishes no descriptor and adds an error diagnostic
+(`vue-runtime-custom-block-refused`, located on the block when it names
+one), which fails the compile rather than silently dropping the set.
+`None` for Svelte (no custom-block producer cell), for a Vue compile with
+no custom blocks, and on direct conversions that never hold the
+registered artifact. `RuntimeCompileOutput.main` is the
 request's ONE staged compile-artifact handoff: the complete
 `CompileArtifactSet` plus the typed identity, dialect and runtime map of
 the module artifact inside it. The module's bytes live ON the staged

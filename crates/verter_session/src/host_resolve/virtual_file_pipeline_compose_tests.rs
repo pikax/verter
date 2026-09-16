@@ -227,8 +227,6 @@ fn staged_vue_main_carries_bytes_language_and_artifact_relations() {
         Some(script_map.to_string()),
         &VueMainDecoration::default(),
         true,
-        "",
-        &[],
     )
     .expect("schema accepts");
     bundle.main = Some(staged);
