@@ -147,7 +147,7 @@ fn run_pass() -> PassResult {
     for item in CORPUS {
         let output = compile_item(item);
         compile_calls += 1;
-        let artifacts = output.artifacts.artifacts();
+        let artifacts = output.artifacts();
         assert_eq!(
             artifacts.len(),
             1,

@@ -536,7 +536,6 @@ mod compiler_behaviour {
             output.diagnostics
         );
         let code = output
-            .artifacts
             .artifact(ProductKind::RuntimeClient)
             .expect("RuntimeClient must produce an artifact")
             .code();

@@ -3,7 +3,8 @@
 //! style/TSX blocks, before any [`crate::assembly`] composition) — a shape
 //! with no equivalent on the public one-shot
 //! [`crate::standalone::StandaloneCompiler::compile`] atomic contract, which
-//! publishes only the fully composed [`crate::assembly::ArtifactSet`]. These
+//! publishes only fully composed products inside its
+//! [`crate::assembly::CompileArtifactSet`]. These
 //! tests drive [`super::compile::compile`] directly and so must live inside
 //! the crate (that entry is `pub(crate)`) rather than as `tests/cases/`
 //! integration tests.

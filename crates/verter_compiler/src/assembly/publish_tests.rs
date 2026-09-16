@@ -43,7 +43,11 @@ fn fragment_with_helper(helper: &str) -> ValidatedFragment {
 }
 
 fn plan_with(products: Vec<CompileProduct>) -> ProductPlan {
-    let request = CompileRequest::new(
+    ProductPlan::from_request(&request_with(products))
+}
+
+fn request_with(products: Vec<CompileProduct>) -> CompileRequest {
+    CompileRequest::new(
         products,
         FrameworkCompileRequest::Vue(VueCompileRequest::default()),
         None,
@@ -52,8 +56,32 @@ fn plan_with(products: Vec<CompileProduct>) -> ProductPlan {
         false,
         false,
     )
-    .expect("test request constructs");
-    ProductPlan::from_request(&request)
+    .expect("test request constructs")
+}
+
+/// Fixed authored bytes for digest fixtures — the identity basis absorbs
+/// them as a digest, so any stable non-empty source serves.
+const DIGEST_SOURCE: &str = "export default {}";
+
+fn digest_output(
+    products: Vec<CompileProduct>,
+    contribution: ArtifactContribution<'_>,
+    qualified_styles: Vec<crate::framework_common::QualifiedRuntimeStyle>,
+    diagnostics: Vec<crate::compile::types::CompileDiagnostic>,
+) -> crate::standalone::DirectCompileOutput {
+    let request = request_with(products);
+    let plan = ProductPlan::from_request(&request);
+    let published = publish(&plan, vec![contribution]).expect("publish");
+    crate::standalone::stage_published_products(
+        DIGEST_SOURCE,
+        &request,
+        "vue",
+        &published,
+        qualified_styles,
+        None,
+        diagnostics,
+    )
+    .expect("set admission")
 }
 
 #[test]
@@ -213,10 +241,6 @@ fn digest_of(
 ) -> [u8; 32] {
     // `publish` fail-closes on a map the plan did not request, so the plan
     // has to ask for one whenever this helper supplies one.
-    let plan = plan_with(vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
-        runtime_source_map: runtime_source_map.is_some(),
-        ..RuntimeProductRequest::default()
-    })]);
     let contribution = ArtifactContribution {
         kind: ProductKind::RuntimeClient,
         fragments: vec![],
@@ -226,11 +250,15 @@ fn digest_of(
         source_projection_map: None,
         runtime_source_map: runtime_source_map.map(str::to_string),
     };
-    crate::standalone::direct_compile_output_digest(&crate::standalone::DirectCompileOutput {
-        artifacts: publish(&plan, vec![contribution]).expect("publish"),
-        qualified_styles: Vec::new(),
+    crate::standalone::direct_compile_output_digest(&digest_output(
+        vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
+            runtime_source_map: runtime_source_map.is_some(),
+            ..RuntimeProductRequest::default()
+        })],
+        contribution,
+        Vec::new(),
         diagnostics,
-    })
+    ))
 }
 
 fn one_diagnostic(message: &str) -> Vec<crate::compile::types::CompileDiagnostic> {
@@ -361,7 +389,6 @@ impl DigestFixture {
     }
 
     fn digest(&self) -> [u8; 32] {
-        let plan = plan_with(vec![self.product.clone()]);
         let contribution = ArtifactContribution {
             kind: self.product.kind(),
             fragments: vec![],
@@ -371,11 +398,12 @@ impl DigestFixture {
             source_projection_map: self.source_projection_map.clone(),
             runtime_source_map: self.runtime_source_map.clone(),
         };
-        crate::standalone::direct_compile_output_digest(&crate::standalone::DirectCompileOutput {
-            artifacts: publish(&plan, vec![contribution]).expect("publish"),
-            qualified_styles: self.qualified_styles.clone(),
-            diagnostics: self.diagnostics.clone(),
-        })
+        crate::standalone::direct_compile_output_digest(&digest_output(
+            vec![self.product.clone()],
+            contribution,
+            self.qualified_styles.clone(),
+            self.diagnostics.clone(),
+        ))
     }
 }
 

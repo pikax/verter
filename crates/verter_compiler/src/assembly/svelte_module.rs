@@ -261,7 +261,11 @@ pub fn svelte_main_compile_artifacts(
     StagedCompileArtifacts::stage(set, root, dialect, request.source_map.map(str::to_string))
 }
 
-fn runtime_map_segments(
+/// Mint byte-qualified segments for one JSON map over a single authored
+/// source unit, dropping tokens that fall outside the unit's span. Shared
+/// by every set conversion that binds a produced map to the authored
+/// carrier bytes it was compiled from.
+pub(crate) fn runtime_map_segments(
     map_json: &str,
     generated: &str,
     source: &str,
