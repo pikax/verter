@@ -3552,7 +3552,6 @@ impl VerterHost {
                     crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Runtime,
                 );
                 let vue_facts = verter_compiler::compile::types::VueExecutionInputs {
-                    macro_runtime: macro_output.runtime,
                     prop_constness_overrides: None,
                     style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
                     style_v_bind_usage_complete: Some(snapshot.style_v_bind_usage_complete),
@@ -3602,6 +3601,7 @@ impl VerterHost {
                 let inputs = VueHostExecutionInputs {
                     block_content: snapshot.block_content_inputs.clone(),
                     vue_facts: Some(vue_facts),
+                    vue_macros: macro_output.compiler_input(),
                     prepared_styles: snapshot.prepared_styles.clone(),
                     canonical_id: snapshot.canonical_id.clone(),
                     style_specifiers,

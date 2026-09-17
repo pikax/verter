@@ -1,0 +1,7 @@
+error[E0560]: struct `VueExecutionInputs` has no field named `macro_runtime`
+  --> tests/cases/compile-fail/vue_execution_inputs_no_macro_runtime.rs:14:9
+   |
+14 |         macro_runtime: Some(Arc::new(MacroRuntimeBundle { entries: Vec::new() })),
+   |         ^^^^^^^^^^^^^ `VueExecutionInputs` does not have this field
+   |
+   = note: available fields are: `prop_constness_overrides`, `style_v_bind_vars`, `style_v_bind_usage_complete`, `template_binding_metadata`, `template_used_vars` ... and 3 others

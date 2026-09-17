@@ -316,8 +316,14 @@ fn execution_grants_for_request(request: &CompileRequest) -> ProductExecutionGra
 pub struct VueHostExecutionInputs {
     /// Host-selected block bytes for supplied templates, scripts, styles.
     pub block_content: super::carrier_compiler::RuntimeBlockContentInputs,
-    /// Host-resolved Vue cross-file inputs (macro DTO, style v-bind facts).
+    /// Host-resolved Vue cross-file inputs (style v-bind facts).
     pub vue_facts: Option<crate::compile::types::VueExecutionInputs>,
+    /// The staged Vue runtime macro projection: exactly what the host's
+    /// TypeInfo producer built for this compile's target demand. This is
+    /// the ONLY macro-semantic channel across the host seam — the
+    /// transaction stages it once at entry and every leg reads the
+    /// staged handoff.
+    pub vue_macros: crate::compile::types::VueMacroSemanticInput,
     /// Host-retained parsed style IRs in inventory order.
     pub prepared_styles: Vec<Option<crate::style_planner::PreparedStyleIr>>,
     /// Host canonical identity for `__file` and SSR registration fallback.
@@ -345,6 +351,7 @@ impl Default for VueHostExecutionInputs {
         Self {
             block_content: Default::default(),
             vue_facts: None,
+            vue_macros: Default::default(),
             prepared_styles: Vec::new(),
             canonical_id: String::new(),
             style_specifiers: Vec::new(),
@@ -681,10 +688,19 @@ impl VueHostIntegrationBackend {
             return Err(VueHostCompileRefusal::AdmissionParseMismatch);
         }
         let source = artifact.carrier_source();
-        let opts = derive_admitted_runtime_options(&admission.request, inputs);
-        let grants = execution_grants_for_request(&admission.request);
-        drop(admission);
-        match vue_carrier_bundle(source, artifact, &opts, alloc, grants) {
+        // Take the request out of the consume-once admission FIRST, then
+        // enter ONE compile transaction over it and stage the host's
+        // macro-semantic handoff: the staged carrier is what every leg of
+        // this execution reads, and no bundle field rides the execution
+        // facts. The admission's remainder is consumed for good when it
+        // falls out of this scope — there is no re-execution channel.
+        let request = admission.request;
+        let mut attempt =
+            crate::compile_transaction::CompileAttempt::enter_direct(source, &request, "vue");
+        attempt.stage_vue_macro_semantics(inputs.vue_macros.clone());
+        let opts = derive_admitted_runtime_options(&request, inputs);
+        let grants = execution_grants_for_request(&request);
+        match vue_carrier_bundle(source, artifact, &opts, &attempt, alloc, grants) {
             Ok(CarrierCompileOutcome::Produced(bundle)) => Ok(bundle),
             // All-or-none: a refused runtime surface publishes nothing;
             // sibling projection/analysis products never warm or publish

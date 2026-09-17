@@ -226,7 +226,6 @@ fn host_backed_multi_product_executes_exactly_the_admitted_population() {
         .unwrap_or(crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::RuntimeBindingNames),
     );
     let vue_facts = verter_compiler::compile::types::VueExecutionInputs {
-        macro_runtime: macro_output.runtime,
         style_v_bind_usage_complete: Some(true),
         ..Default::default()
     };
@@ -256,6 +255,7 @@ fn host_backed_multi_product_executes_exactly_the_admitted_population() {
             artifact,
             &VueHostExecutionInputs {
                 vue_facts: Some(vue_facts),
+                vue_macros: macro_output.compiler_input(),
                 ..Default::default()
             },
             &alloc,

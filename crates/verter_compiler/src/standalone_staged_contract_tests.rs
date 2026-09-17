@@ -43,7 +43,6 @@ fn svelte_request(products: Vec<CompileProduct>) -> CompileRequest {
 }
 
 static LEAKED_VUE_EXECUTION_INPUTS: &VueExecutionInputs = &VueExecutionInputs {
-    macro_runtime: None,
     prop_constness_overrides: None,
     style_v_bind_vars: Vec::new(),
     style_v_bind_usage_complete: None,
@@ -627,12 +626,15 @@ fn a_contentless_host_supplied_selected_template_map_is_omitted_not_chained() {
         }),
         ..Default::default()
     };
+    let mut attempt =
+        crate::compile_transaction::CompileAttempt::enter_direct(source, &request, "vue");
+    attempt.stage_vue_macro_semantics(LEAKED_VUE_MACROS.clone());
     let output = compile_vue_parsed_runtime(
         source,
         &parsed,
         &request,
         LEAKED_VUE_EXECUTION_INPUTS,
-        LEAKED_VUE_MACROS,
+        &attempt,
         &block_content,
         &[],
     )

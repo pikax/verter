@@ -74,7 +74,6 @@ fn svelte_request(products: Vec<CompileProduct>) -> CompileRequest {
 }
 
 static LEAKED_VUE_EXECUTION_INPUTS: &VueExecutionInputs = &VueExecutionInputs {
-    macro_runtime: None,
     prop_constness_overrides: None,
     style_v_bind_vars: Vec::new(),
     style_v_bind_usage_complete: None,
@@ -2129,12 +2128,15 @@ fn direct_runtime_output_is_the_backend_parsed_core_output() {
         .compile(VUE_LARGE, &request, vue_inputs())
         .expect("direct dual-runtime compile succeeds");
     let parsed = crate::compile::parse_sfc(VUE_LARGE, None, None);
+    let mut attempt =
+        crate::compile_transaction::CompileAttempt::enter_direct(VUE_LARGE, &request, "vue");
+    attempt.stage_vue_macro_semantics(LEAKED_VUE_MACROS.clone());
     let via_core = compile_vue_parsed_runtime(
         VUE_LARGE,
         &parsed,
         &request,
         LEAKED_VUE_EXECUTION_INPUTS,
-        LEAKED_VUE_MACROS,
+        &attempt,
         &RuntimeBlockContentInputs::default(),
         &[],
     )

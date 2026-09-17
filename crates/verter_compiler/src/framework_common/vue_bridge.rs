@@ -256,14 +256,16 @@ impl VueCarrierCompiler {
 }
 
 /// Compile a Vue artifact already elected by a registered publication store.
-/// No raw-source parsing is reachable through this boundary.
+/// No raw-source parsing is reachable through this boundary. The caller's
+/// [`crate::compile_transaction::CompileAttempt`] carries the staged Vue
+/// runtime macro projection — the sole semantic handoff this route reads.
 #[doc(hidden)]
 pub fn compile_registered_vue_artifact(
     source: &str,
     artifact: &FrameworkParseArtifact,
     request: &crate::compile_request::CompileRequest,
     execution_inputs: &VueExecutionInputs,
-    macro_semantics: &VueMacroSemanticInput,
+    attempt: &crate::compile_transaction::CompileAttempt<'_>,
     allocator: &oxc_allocator::Allocator,
 ) -> Result<crate::compile::VerterCompileResult, CompileUnsupported> {
     let compiler = VueCarrierCompiler;
@@ -287,7 +289,7 @@ pub fn compile_registered_vue_artifact(
         parsed,
         request,
         execution_inputs,
-        macro_semantics,
+        attempt.vue_macro_semantics(),
         allocator,
     )
     .map_err(CompileUnsupported::RequestExecutionRefused)?;
@@ -429,10 +431,16 @@ impl VueCarrierCompiler {
         opts: &RuntimeCompileOptions,
         alloc: &oxc_allocator::Allocator,
     ) -> Result<CarrierCompileOutcome, CompileUnsupported> {
+        // This retained registry route has no canonical request, so it
+        // enters a semantic-only transaction: same sealed carrier, no
+        // admission facts. It carries no macro semantics of its own — a
+        // typed macro fails closed exactly as `Unavailable` demands.
+        let attempt = crate::compile_transaction::CompileAttempt::enter_semantic("");
         vue_carrier_bundle(
             source,
             artifact,
             opts,
+            &attempt,
             alloc,
             super::carrier_compiler::registry_route_execution_grants(opts),
         )
@@ -454,6 +462,7 @@ pub(crate) fn vue_carrier_bundle(
     source: &str,
     artifact: &FrameworkParseArtifact,
     opts: &RuntimeCompileOptions,
+    attempt: &crate::compile_transaction::CompileAttempt<'_>,
     alloc: &oxc_allocator::Allocator,
     mut grants: super::capability::ProductExecutionGrants,
 ) -> Result<CarrierCompileOutcome, CompileUnsupported> {
@@ -558,7 +567,7 @@ pub(crate) fn vue_carrier_bundle(
                 product: expected_runtime,
             });
         };
-        bundle = backend.compile_bundle_runtime(grant, source, parsed, opts, alloc)?;
+        bundle = backend.compile_bundle_runtime(grant, source, parsed, opts, attempt, alloc)?;
         // Descriptors are minted whether or not Main is demanded.
         stage_custom_block_artifacts(&mut bundle, artifact);
     }
@@ -591,11 +600,9 @@ pub(crate) fn vue_carrier_bundle(
             vue,
         )?;
         let execution = opts.vue_facts.clone().unwrap_or_default();
-        let macros = execution
-            .macro_runtime
-            .clone()
-            .map(VueMacroSemanticInput::Runtime)
-            .unwrap_or_default();
+        // The projection leg reads the SAME staged handoff the runtime leg
+        // reads — the transaction's carrier, never a second bundle field.
+        let macros = attempt.vue_macro_semantics().clone();
         // The projection leg executes only under its consume-once grant.
         let Some(grant) = grants
             .projection

@@ -343,14 +343,12 @@ pub(crate) struct ResolvedVueCompileOptions {
 /// `style_v_bind_usage_complete`/`template_binding_metadata`/
 /// `template_used_vars`) or internal Verter assembly-composition flags used
 /// only by the IDE-reentry / block-content composition path
-/// (`runtime_template_hole`/`runtime_inline_template_chunk`).
+/// (`runtime_template_hole`/`runtime_inline_template_chunk`). The Vue
+/// runtime macro projection is NOT representable here: it crosses the
+/// compile boundary only as the staged handoff on the sealed
+/// [`crate::compile_transaction::CompileAttempt`].
 #[derive(Debug, Clone, Default)]
 pub struct VueExecutionInputs {
-    /// Authoritative runtime macro projection, produced once by the
-    /// session. Replaces the former opaque `framework_extras` downcast
-    /// (`VueRuntimeCompileExtras.macro_runtime`) — the SAME fact, now a
-    /// typed field on a typed carrier instead of an `Arc<dyn Any>` payload.
-    pub macro_runtime: Option<std::sync::Arc<verter_macro_dto::MacroRuntimeBundle>>,
     pub prop_constness_overrides: Option<rustc_hash::FxHashSet<String>>,
     pub style_v_bind_vars: Vec<String>,
     pub style_v_bind_usage_complete: Option<bool>,

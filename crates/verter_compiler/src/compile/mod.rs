@@ -2604,7 +2604,6 @@ pub(crate) mod legacy_test_support {
             // The legacy shape threads macro semantics through the separate
             // `macro_semantics: &VueMacroSemanticInput` parameter, unchanged
             // from before this carrier existed — not through this field.
-            macro_runtime: None,
             prop_constness_overrides: verter_options.prop_constness_overrides.clone(),
             style_v_bind_vars: verter_options.style_v_bind_vars.clone(),
             style_v_bind_usage_complete: verter_options.style_v_bind_usage_complete,

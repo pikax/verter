@@ -515,13 +515,16 @@ impl VerterHost {
         //    The carrier still carries a cheap default-filled record
         //    marked `AuditDisabled`.
         if !self.config.audit_enabled {
-            let macro_semantics = self.vue_macro_compile_input(canonical_id, target);
+            let mut attempt = verter_compiler::compile_transaction::CompileAttempt::enter_direct(
+                source, &request, "vue",
+            );
+            attempt.stage_vue_macro_semantics(self.vue_macro_compile_input(canonical_id, target));
             let result = compile_registered_vue_artifact(
                 source,
                 &framework_parse,
                 &request,
                 &execution_inputs,
-                &macro_semantics,
+                &attempt,
                 &allocator,
             )
             .unwrap_or_else(|_| {
@@ -594,13 +597,16 @@ impl VerterHost {
             crate::host_audit_runtime::AuditRequestRegistration::Noop
         ) {
             let _noop_guard = verter_audit::install_noop_observer();
-            let macro_semantics = self.vue_macro_compile_input(canonical_id, target);
+            let mut attempt = verter_compiler::compile_transaction::CompileAttempt::enter_direct(
+                source, &request, "vue",
+            );
+            attempt.stage_vue_macro_semantics(self.vue_macro_compile_input(canonical_id, target));
             let result = compile_registered_vue_artifact(
                 source,
                 &framework_parse,
                 &request,
                 &execution_inputs,
-                &macro_semantics,
+                &attempt,
                 &allocator,
             )
             .unwrap_or_else(|_| {
@@ -628,13 +634,16 @@ impl VerterHost {
         //    + `record_event(CompileCodeTransformOp)` while this
         //    block runs.
         let total_start = Instant::now();
-        let macro_semantics = self.vue_macro_compile_input(canonical_id, target);
+        let mut attempt = verter_compiler::compile_transaction::CompileAttempt::enter_direct(
+            source, &request, "vue",
+        );
+        attempt.stage_vue_macro_semantics(self.vue_macro_compile_input(canonical_id, target));
         let result = compile_registered_vue_artifact(
             source,
             &framework_parse,
             &request,
             &execution_inputs,
-            &macro_semantics,
+            &attempt,
             &allocator,
         )
         .unwrap_or_else(|_| {

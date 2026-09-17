@@ -2229,15 +2229,19 @@ fn compose_vue_runtime_legs(
 
 /// Compile requested Vue runtime products over an already-parsed SFC through
 /// the canonical parsed-runtime core, then publish an atomic artifact set.
+/// The caller-entered [`crate::compile_transaction::CompileAttempt`] carries
+/// the staged macro-semantic handoff and admits the publication — one
+/// transaction spans entry, codegen, and admission.
 pub(crate) fn compile_vue_parsed_runtime(
     source: &str,
     parsed: &ParsedSfc,
     request: &CompileRequest,
     execution_inputs: &VueExecutionInputs,
-    macros: &VueMacroSemanticInput,
+    attempt: &crate::compile_transaction::CompileAttempt<'_>,
     block_content: &RuntimeBlockContentInputs,
     style_prepared: &[Option<PreparedStyleIr>],
 ) -> Result<DirectCompileOutput, VueParsedRuntimeError> {
+    let macros = attempt.vue_macro_semantics();
     refuse_unproducible_plan(request).map_err(map_direct_runtime_err)?;
     let resolved_backend = request
         .resolve_vue_backend(parsed.is_vapor())
@@ -2293,7 +2297,6 @@ pub(crate) fn compile_vue_parsed_runtime(
     }
     let artifacts = publish(&plan, contributions)
         .map_err(|err| VueParsedRuntimeError::Direct(DirectCompileError::Publish(err)))?;
-    let attempt = crate::compile_transaction::CompileAttempt::enter_direct(source, request, "vue");
     attempt
         .admit_published_products(
             source,
@@ -2437,14 +2440,14 @@ impl VueRuntimeBackend {
         parsed: &ParsedSfc,
         request: &CompileRequest,
         execution_inputs: &VueExecutionInputs,
-        macros: &VueMacroSemanticInput,
+        attempt: &crate::compile_transaction::CompileAttempt<'_>,
     ) -> Result<DirectCompileOutput, DirectCompileError> {
         compile_vue_parsed_runtime(
             source,
             parsed,
             request,
             execution_inputs,
-            macros,
+            attempt,
             &RuntimeBlockContentInputs::default(),
             &[],
         )
@@ -2464,7 +2467,7 @@ impl VueRuntimeBackend {
         parsed: &ParsedSfc,
         request: &CompileRequest,
         execution_inputs: &VueExecutionInputs,
-        macros: &VueMacroSemanticInput,
+        attempt: &crate::compile_transaction::CompileAttempt<'_>,
         block_content: &RuntimeBlockContentInputs,
         style_prepared: &[Option<PreparedStyleIr>],
         primary_bundle: &RuntimeCompileOutput,
@@ -2475,7 +2478,7 @@ impl VueRuntimeBackend {
             parsed,
             request,
             execution_inputs,
-            macros,
+            attempt.vue_macro_semantics(),
             block_content,
             style_prepared,
             primary_bundle,
@@ -2514,6 +2517,7 @@ impl VueRuntimeBackend {
         source: &str,
         parsed: &ParsedSfc,
         opts: &RuntimeCompileOptions,
+        attempt: &crate::compile_transaction::CompileAttempt<'_>,
         alloc: &Allocator,
     ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
         let expected_runtime = if opts.ssr {
@@ -2528,10 +2532,7 @@ impl VueRuntimeBackend {
         })?;
         record_runtime_backend_delegation();
         let extras = opts.vue_facts.as_ref();
-        let macros = extras
-            .and_then(|extras| extras.macro_runtime.clone())
-            .map(VueMacroSemanticInput::Runtime)
-            .unwrap_or_default();
+        let macros = attempt.vue_macro_semantics();
         let core_opts = CodegenOptions {
             filename: opts.filename.clone(),
             is_production: opts.is_production,
@@ -2587,7 +2588,7 @@ impl VueRuntimeBackend {
             parsed,
             &core_opts,
             &verter_opts,
-            &macros,
+            macros,
             &opts.block_content,
             &opts.prepared_styles,
             alloc,
@@ -2883,7 +2884,15 @@ impl StandaloneCompiler {
     ) -> Result<DirectCompileOutput, DirectCompileError> {
         match (request.framework(), inputs) {
             (FrameworkCompileRequest::Vue(_), DirectExecutionInputs::Vue { execution, macros }) => {
-                self.compile_vue(source, request, execution, macros)
+                // The facade enters ONE transaction per compile and stages
+                // the caller's macro semantics into it at entry: the
+                // staged handoff is the projection's sole carrier from
+                // here to admission.
+                let mut attempt = crate::compile_transaction::CompileAttempt::enter_direct(
+                    source, request, "vue",
+                );
+                attempt.stage_vue_macro_semantics(macros.clone());
+                self.compile_vue(source, request, execution, &attempt)
             }
             (FrameworkCompileRequest::Svelte(_), DirectExecutionInputs::Svelte { execution }) => {
                 self.compile_svelte(source, request, execution)
@@ -2908,7 +2917,7 @@ impl StandaloneCompiler {
         source: &str,
         request: &CompileRequest,
         execution_inputs: &VueExecutionInputs,
-        macro_semantics: &VueMacroSemanticInput,
+        attempt: &crate::compile_transaction::CompileAttempt<'_>,
     ) -> Result<DirectCompileOutput, DirectCompileError> {
         refuse_unproducible_plan(request)?;
         let vue = request.vue().expect("dispatch already matched Vue");
@@ -2919,7 +2928,7 @@ impl StandaloneCompiler {
                 .map(|(o, c)| (o.as_str(), c.as_str())),
             Some(vue.is_custom_element.as_slice()),
         );
-        self.compile_vue_from_parsed(source, &parsed, request, execution_inputs, macro_semantics)
+        self.compile_vue_from_parsed(source, &parsed, request, execution_inputs, attempt)
     }
 
     /// Lower an already-parsed Vue SFC through the same codegen
@@ -2998,15 +3007,18 @@ impl StandaloneCompiler {
     /// batch compile of the same `(source, request, execution_inputs,
     /// macro_semantics)` runs the IDENTICAL codegen from this point on;
     /// only where/how often the parse itself happened differs between
-    /// routes.
+    /// routes. The caller's [`crate::compile_transaction::CompileAttempt`]
+    /// carries the staged macro-semantic handoff AND the admission: one
+    /// transaction spans this whole compile.
     fn compile_vue_from_parsed(
         &self,
         source: &str,
         parsed: &ParsedSfc,
         request: &CompileRequest,
         execution_inputs: &VueExecutionInputs,
-        macro_semantics: &VueMacroSemanticInput,
+        attempt: &crate::compile_transaction::CompileAttempt<'_>,
     ) -> Result<DirectCompileOutput, DirectCompileError> {
+        let macro_semantics = attempt.vue_macro_semantics();
         let plan = ProductPlan::from_request(request);
 
         // A runtime-only request IS the typed runtime request: it delegates
@@ -3028,7 +3040,7 @@ impl StandaloneCompiler {
                 parsed,
                 request,
                 execution_inputs,
-                macro_semantics,
+                attempt,
             );
         }
 
@@ -3141,7 +3153,7 @@ impl StandaloneCompiler {
                     parsed,
                     request,
                     execution_inputs,
-                    macro_semantics,
+                    attempt,
                     &RuntimeBlockContentInputs::default(),
                     &[],
                     &bundle,
@@ -3173,8 +3185,9 @@ impl StandaloneCompiler {
         }
 
         let artifacts = publish(&plan, contributions)?;
-        let attempt =
-            crate::compile_transaction::CompileAttempt::enter_direct(source, request, "vue");
+        // The caller-entered transaction admits: entry and admission share
+        // one transaction, so the entry-bound source digest and input basis
+        // govern the whole compile — never a publication-time re-entry.
         attempt
             .admit_published_products(
                 source,
@@ -3446,7 +3459,14 @@ impl StandaloneCompiler {
                         reason: StalePreparedReason::ParseOptionsChanged,
                     });
                 }
-                self.compile_vue_from_parsed(source, &carrier.parsed, request, execution, macros)
+                // Same one-transaction-per-compile entry as the direct
+                // facade: stage the caller's macro semantics, then drive
+                // the parsed core through the SAME attempt.
+                let mut attempt = crate::compile_transaction::CompileAttempt::enter_direct(
+                    source, request, "vue",
+                );
+                attempt.stage_vue_macro_semantics(macros.clone());
+                self.compile_vue_from_parsed(source, &carrier.parsed, request, execution, &attempt)
             }
             (FrameworkCompileRequest::Svelte(_), DirectExecutionInputs::Svelte { execution }) => {
                 let PreparedCarrier::Svelte(carrier) = prepared else {
@@ -4231,7 +4251,6 @@ mod tests {
     // once keeps every test's call site a plain expression instead of
     // threading a local through each one.
     static LEAKED_VUE_EXECUTION_INPUTS: &VueExecutionInputs = &VueExecutionInputs {
-        macro_runtime: None,
         prop_constness_overrides: None,
         style_v_bind_vars: Vec::new(),
         style_v_bind_usage_complete: None,
