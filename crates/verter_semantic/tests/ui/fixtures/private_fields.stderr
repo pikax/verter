@@ -1,0 +1,9 @@
+error[E0451]: fields `owner_canonical` and `demands` of struct `verter_semantic::type_info::VueMacroSemanticInput` are private
+  --> tests/ui/fixtures/private_fields.rs:12:9
+   |
+11 |     let _plan = VueMacroSemanticInput {
+   |                 --------------------- in this type
+12 |         owner_canonical: Arc::from("/App.vue"),
+   |         ^^^^^^^^^^^^^^^ private field
+13 |         demands: Vec::new(),
+   |         ^^^^^^^ private field

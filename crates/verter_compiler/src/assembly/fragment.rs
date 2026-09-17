@@ -116,6 +116,12 @@ pub struct CompileArtifact {
     pub relations: std::collections::BTreeSet<ArtifactRelation>,
     /// Absent families were not supplied. There is no implicit identity map.
     pub maps: Vec<super::source_space::QualifiedArtifactMap>,
+    /// The exact dialect this artifact's bytes are written in, declared
+    /// once by the staging facade that admitted the publication
+    /// ([`Self::with_dialect`]). `None` for artifacts minted before the
+    /// C2 cutover paths that never stage one — per-product dialect reads
+    /// then report absence instead of inferring a dialect.
+    dialect: Option<FragmentDialect>,
 }
 
 impl CompileArtifact {
@@ -138,7 +144,22 @@ impl CompileArtifact {
             content,
             relations: Default::default(),
             maps: Vec::new(),
+            dialect: None,
         }
+    }
+
+    /// Declare the exact dialect this artifact's bytes are written in —
+    /// derived ONCE by the producer, never assumed downstream.
+    #[must_use]
+    pub fn with_dialect(mut self, dialect: FragmentDialect) -> Self {
+        self.dialect = Some(dialect);
+        self
+    }
+
+    /// The exact dialect this artifact's bytes are written in, when the
+    /// staging facade declared one.
+    pub const fn dialect(&self) -> Option<FragmentDialect> {
+        self.dialect
     }
 
     pub fn id(&self) -> &ArtifactId {

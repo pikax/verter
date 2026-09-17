@@ -244,6 +244,7 @@ pub fn svelte_main_compile_artifacts(
                 generated_content: ContentId::from_content_bytes(request.code.as_bytes()),
                 input_basis,
                 sources: BTreeSet::from([source_id.clone()]),
+                authored_json: Some(std::sync::Arc::from(map_json)),
                 segments: runtime_map_segments(
                     map_json,
                     request.code.as_ref(),

@@ -54,6 +54,12 @@ pub struct QualifiedArtifactMap {
     pub input_basis: verter_identity::identity::InputBasisId,
     pub sources: std::collections::BTreeSet<super::source_unit::SourceUnitId>,
     pub segments: Vec<ArtifactMapSegment>,
+    /// The authored map JSON exactly as produced (`None` for staged maps
+    /// minted before the C2 cutover, or where the producing route keeps
+    /// its own map authority). The staged `segments` remain the
+    /// structural projection; this is the produced fact a published
+    /// product view re-addresses — never a second derivation.
+    pub authored_json: Option<std::sync::Arc<str>>,
 }
 
 impl QualifiedArtifactMap {

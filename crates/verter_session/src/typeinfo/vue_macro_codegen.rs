@@ -14,19 +14,18 @@ use verter_macro_dto::{
     AuthoredMemberOrdinal, MacroAnchor, MacroFailure, MacroInvalidReason, MacroMemberReason,
     MacroPartialReason, MacroRuntimeBundle, MacroRuntimeEntry, MacroRuntimeOutcome,
     MacroRuntimeShape, MacroTscBundle, MacroTscEntry, MacroTscOutcome, MacroTscProjection,
-    ModelRuntimeShape, OrderedRuntimeConstructors, PropsDefaultsAssociation, PropsRuntimeShape,
-    RuntimeConstructor, RuntimeEmit, RuntimeProp, RuntimePropType, SynthesizedRowKind,
-    TscBindingUsage, TscDeclarationFailureReason, TscDependencyDeclaration, TscEmitRow,
-    TscEmitsProjection, TscExposeMemberRow, TscExposeMemberType, TscExposeProjection,
-    TscInferredClassMember, TscInferredClassTypePosition, TscModelProjection,
-    TscOwnerValueDependency, TscPropRow, TscPropsProjection, TscPublicPropsProjection,
-    TscRetainedBinding, TscRetainedValueCarrier, TscScopeRequirements, TscScriptOwner,
-    TscSemanticInferenceUnavailableReason, TscSpliceText, UnresolvedReason, UnsupportedReason,
+    OrderedRuntimeConstructors, PropsRuntimeShape, RuntimeConstructor, RuntimeProp,
+    RuntimePropType, SynthesizedRowKind, TscBindingUsage, TscDeclarationFailureReason,
+    TscDependencyDeclaration, TscEmitRow, TscEmitsProjection, TscExposeMemberRow,
+    TscExposeMemberType, TscExposeProjection, TscInferredClassMember, TscInferredClassTypePosition,
+    TscModelProjection, TscOwnerValueDependency, TscPropRow, TscPropsProjection,
+    TscPublicPropsProjection, TscRetainedBinding, TscRetainedValueCarrier, TscScopeRequirements,
+    TscScriptOwner, TscSemanticInferenceUnavailableReason, TscSpliceText, UnresolvedReason,
+    UnsupportedReason,
 };
 use verter_semantic::analysis::component_meta::MacroExpansionKind;
 use verter_semantic::analysis::{
-    AnalyzedMacro, AnalyzedMacroKind, LocalDeclarationKind, MacroTypeDepUsage,
-    ScriptAnalysisSnapshot,
+    AnalyzedMacro, AnalyzedMacroKind, LocalDeclarationKind, ScriptAnalysisSnapshot,
 };
 
 use crate::locator_identity::BroadRuntimeSubjectLocator;
@@ -43,10 +42,12 @@ use crate::semantic_query::{
 };
 use crate::typeinfo::surface::TypeInfoSurface;
 use crate::VerterHost;
+use verter_compiler::compile_transaction::CompileAttempt;
 use verter_scheduler::cache_id::SchedulerCacheId;
 use verter_scheduler::dag::PinId;
 use verter_scheduler::scheduler::{ScopedCacheNodeError, ScopedCacheNodeRequest};
 use verter_scheduler::stage::Priority;
+use verter_semantic::type_info::{MacroSemanticLane, ObservedMacroSurface, ObservedSurfaceMember};
 
 mod runtime;
 mod tsc_projection;
@@ -597,52 +598,66 @@ fn terminal_partial_vue_macro_codegen_output(
         });
     let mut runtime_entries = Vec::new();
     let mut tsc_entries = Vec::new();
-    if let Some(macros) = script_analysis
-        .as_ref()
-        .map(|analysis| analysis.macros.as_slice())
-    {
-        for (payload_index, mac) in macros.iter().enumerate() {
-            // Runtime-object `defineExpose` never has a runtime shape (see
-            // `is_codegen_macro`), so it advertises a TSC-only Partial row
-            // here, matching the compute path's own syntax_index so
-            // `apply_tsc_bundle`'s bundle-vs-advertised-entries accounting
-            // stays consistent across the cancelled/terminal-partial lane.
-            if mac.kind == AnalyzedMacroKind::DefineExpose
-                && !mac.is_type_based
-                && !mac.expose_fields.is_empty()
-            {
-                if demand.wants_tsc() {
-                    tsc_entries.push(MacroTscEntry {
-                        syntax_index: top_level_syntax_index(macros, payload_index),
-                        macro_index: macro_index(payload_index),
-                        outcome: MacroTscOutcome::Partial(MacroFailure::new(macro_reason, None)),
-                    });
+    // The terminal rows derive from the SAME sealed semantic plan the
+    // compute path drives (`CompileAttempt::project_vue_macro_semantics`
+    // over the staged analysis): lane policy, effective/syntax/macro
+    // indices, and row order are the kernel's decision, so this
+    // cancellation/shutdown lane never becomes a second owner of bundle
+    // row identity. Only each projected outcome is replaced with the
+    // terminal failure.
+    if let Some(script_analysis) = script_analysis.as_ref() {
+        let mut attempt = CompileAttempt::enter_semantic(owner_canonical);
+        attempt.stage_script_analysis(Arc::from(owner_canonical), Arc::clone(script_analysis));
+        if let Ok(plan) = attempt
+            .type_info()
+            .project_vue_macro_semantics(Arc::from(owner_canonical))
+        {
+            for row in plan.demands() {
+                let syntax_index = row.syntax_index();
+                let macro_index = macro_index(row.effective_index());
+                match row.lane() {
+                    // Runtime-object `defineExpose` never has a runtime
+                    // shape (the kernel's codegen-macro set excludes it),
+                    // so it advertises a TSC-only Partial row — matching
+                    // the compute path's own indices so
+                    // `apply_tsc_bundle`'s bundle-vs-advertised-entries
+                    // accounting stays consistent across the
+                    // cancelled/terminal-partial lane.
+                    MacroSemanticLane::ExposeRuntimeObject => {
+                        if demand.wants_tsc() {
+                            tsc_entries.push(MacroTscEntry {
+                                syntax_index,
+                                macro_index,
+                                outcome: MacroTscOutcome::Partial(MacroFailure::new(
+                                    macro_reason,
+                                    None,
+                                )),
+                            });
+                        }
+                    }
+                    MacroSemanticLane::CodegenPayload => {
+                        if demand.wants_runtime() {
+                            runtime_entries.push(MacroRuntimeEntry {
+                                syntax_index,
+                                macro_index,
+                                outcome: MacroRuntimeOutcome::Partial(MacroFailure::new(
+                                    macro_reason,
+                                    None,
+                                )),
+                            });
+                        }
+                        if demand.wants_tsc() {
+                            tsc_entries.push(MacroTscEntry {
+                                syntax_index,
+                                macro_index,
+                                outcome: MacroTscOutcome::Partial(MacroFailure::new(
+                                    macro_reason,
+                                    None,
+                                )),
+                            });
+                        }
+                    }
                 }
-                continue;
-            }
-            if mac.kind == AnalyzedMacroKind::WithDefaults || !mac.is_type_based {
-                continue;
-            }
-            let defaults_index = (mac.kind == AnalyzedMacroKind::DefineProps)
-                .then(|| containing_with_defaults_index(macros, payload_index))
-                .flatten();
-            let effective_index = defaults_index.unwrap_or(payload_index);
-            let syntax_index = top_level_syntax_index(macros, effective_index);
-            let macro_index = macro_index(effective_index);
-
-            if demand.wants_runtime() && is_codegen_macro(mac.kind) {
-                runtime_entries.push(MacroRuntimeEntry {
-                    syntax_index,
-                    macro_index,
-                    outcome: MacroRuntimeOutcome::Partial(MacroFailure::new(macro_reason, None)),
-                });
-            }
-            if demand.wants_tsc() && is_codegen_macro(mac.kind) {
-                tsc_entries.push(MacroTscEntry {
-                    syntax_index,
-                    macro_index,
-                    outcome: MacroTscOutcome::Partial(MacroFailure::new(macro_reason, None)),
-                });
             }
         }
     }
@@ -881,25 +896,44 @@ impl VerterHost {
         };
         let dispatch = ProjectSemanticDispatch::new(ctx);
 
-        for (payload_index, mac) in macros.iter().enumerate() {
+        // The semantic input plan is the kernel's decision (C2): which
+        // authored macros carry demands, their lane, index derivations,
+        // and surface dependency failures all come from
+        // `TypeInfoCore::attempt` through the compile transaction — this
+        // driver only executes the live I/O each plan row demands.
+        let mut attempt = CompileAttempt::enter_semantic(owner_canonical);
+        attempt.stage_script_analysis(Arc::from(owner_canonical), Arc::clone(script_analysis));
+        let semantic_input = match attempt
+            .type_info()
+            .project_vue_macro_semantics(Arc::from(owner_canonical))
+        {
+            Ok(plan) => plan,
+            // The analysis is staged above, so a refusal here is a
+            // producer bug; fail closed to the empty (refusal-carrying)
+            // state rather than guessing an inventory of our own.
+            Err(_) => return state,
+        };
+        for demand_row in semantic_input.demands() {
+            let payload_index = demand_row.macro_index();
+            let Some(mac) = macros.get(payload_index) else {
+                continue;
+            };
             // Runtime-object `defineExpose({ ... })`: never a runtime shape
-            // (see `is_codegen_macro`'s doc comment), no macro type argument
+            // (the kernel's codegen-macro set excludes it), no macro type argument
             // to resolve a payload from, so this is a dedicated TSC-only lane
             // rather than a fourth arm bolted onto the payload/runtime flow
             // Props/Emits/Model share. The type-argument form
             // (`defineExpose<T>()`, `mac.is_type_based`) is unchanged: the
             // compiler still splices it verbatim from authored syntax.
-            if mac.kind == AnalyzedMacroKind::DefineExpose
-                && !mac.is_type_based
-                && !mac.expose_fields.is_empty()
-            {
+            if demand_row.lane() == MacroSemanticLane::ExposeRuntimeObject {
                 if demand.wants_tsc() {
-                    let syntax_index = top_level_syntax_index(macros, payload_index);
-                    let macro_index = macro_index(payload_index);
+                    let syntax_index = demand_row.syntax_index();
+                    let macro_index_value = macro_index(payload_index);
                     let macro_scope = crate::request_context::ColdComputeCompletenessScope::enter();
                     let outcome = self.project_expose_runtime_object(
                         ctx,
                         &dispatch,
+                        &mut attempt,
                         mac,
                         payload_index,
                         owner_canonical,
@@ -912,41 +946,31 @@ impl VerterHost {
                     crate::request_context::fold_result_completeness(macro_completeness);
                     state.tsc_entries.push(MacroTscEntry {
                         syntax_index,
-                        macro_index,
+                        macro_index: macro_index_value,
                         outcome,
                     });
                 }
                 continue;
             }
-            if mac.kind == AnalyzedMacroKind::WithDefaults || !mac.is_type_based {
-                continue;
-            }
             let owner = build_owner_decl_identity(ctx, owner_canonical, mac.owner);
 
-            let defaults_index = (mac.kind == AnalyzedMacroKind::DefineProps)
-                .then(|| containing_with_defaults_index(macros, payload_index))
-                .flatten();
-            let effective_index = defaults_index.unwrap_or(payload_index);
-            let syntax_index = top_level_syntax_index(macros, effective_index);
-            let macro_index = macro_index(effective_index);
+            let effective_index = demand_row.effective_index();
+            let syntax_index = demand_row.syntax_index();
+            let macro_index_value = macro_index(effective_index);
 
-            if !is_codegen_macro(mac.kind) {
-                continue;
-            }
-
-            if mac.parsed_type_argument.is_none() {
+            if !demand_row.has_type_argument() {
                 let failure = ProjectionFailure::Unresolved(UnresolvedReason::MissingTypeArgument);
                 if demand.wants_runtime() {
                     state.runtime_entries.push(MacroRuntimeEntry {
                         syntax_index,
-                        macro_index,
+                        macro_index: macro_index_value,
                         outcome: failure.runtime(),
                     });
                 }
                 if demand.wants_tsc() {
                     state.tsc_entries.push(MacroTscEntry {
                         syntax_index,
-                        macro_index,
+                        macro_index: macro_index_value,
                         outcome: failure.tsc(),
                     });
                 }
@@ -971,20 +995,15 @@ impl VerterHost {
             );
             if payload.is_none() {
                 state.dependency_failures.extend(
-                    script_analysis
-                        .macro_type_deps
+                    demand_row
+                        .surface_dependency_failures()
                         .iter()
-                        .filter(|dependency| {
-                            dependency.macro_index == payload_index
-                                && dependency.macro_span == mac.span
-                                && dependency.usage.is_surface()
-                        })
-                        .map(|dependency| VueMacroDependencyFailure::MissingRoot {
-                            macro_index: payload_index,
+                        .map(|failure| VueMacroDependencyFailure::MissingRoot {
+                            macro_index: failure.macro_index(),
                             owner: mac.owner,
-                            import_source: dependency.import_source.clone(),
-                            type_name: dependency.type_name.clone(),
-                            macro_span: (dependency.macro_span.start, dependency.macro_span.end),
+                            import_source: failure.import_source().to_owned(),
+                            type_name: failure.type_name().to_owned(),
+                            macro_span: failure.macro_span(),
                         }),
                 );
             }
@@ -1027,12 +1046,12 @@ impl VerterHost {
                                     Some(subject) => self.project_runtime_props(
                                         ctx,
                                         &dispatch,
+                                        &mut attempt,
                                         payload,
                                         &subject,
                                         script_analysis,
-                                        mac,
+                                        owner_canonical,
                                         payload_index,
-                                        defaults_index,
                                         demand.wants_runtime_constructors(),
                                         &mut state.counters,
                                         &mut walker_diagnostics,
@@ -1046,10 +1065,10 @@ impl VerterHost {
                             AnalyzedMacroKind::DefineEmits => self.project_runtime_emits(
                                 ctx,
                                 &dispatch,
+                                &mut attempt,
                                 payload,
-                                mac,
+                                owner_canonical,
                                 payload_index,
-                                effective_index,
                                 demand.wants_runtime_constructors(),
                                 &mut state.counters,
                                 &mut walker_diagnostics,
@@ -1059,10 +1078,11 @@ impl VerterHost {
                                     .broad_runtime_subject_for_macro(&owner, payload_index)
                                 {
                                     Some(subject) => self.project_runtime_model(
+                                        &mut attempt,
                                         &dispatch,
                                         subject,
-                                        mac,
-                                        effective_index,
+                                        owner_canonical,
+                                        payload_index,
                                         demand.wants_runtime_constructors(),
                                         &mut state.counters,
                                     ),
@@ -1085,7 +1105,7 @@ impl VerterHost {
                 );
                 state.runtime_entries.push(MacroRuntimeEntry {
                     syntax_index,
-                    macro_index,
+                    macro_index: macro_index_value,
                     outcome,
                 });
             }
@@ -1099,6 +1119,7 @@ impl VerterHost {
                         (None, Some(payload)) => self.project_tsc_macro(
                             ctx,
                             &dispatch,
+                            &mut attempt,
                             payload,
                             mac,
                             payload_index,
@@ -1119,7 +1140,7 @@ impl VerterHost {
                 );
                 state.tsc_entries.push(MacroTscEntry {
                     syntax_index,
-                    macro_index,
+                    macro_index: macro_index_value,
                     outcome,
                 });
             }
@@ -1135,11 +1156,11 @@ impl VerterHost {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn project_tsc_macro(
         &self,
         ctx: &dyn ResolverContext,
         dispatch: &ProjectSemanticDispatch<'_>,
+        attempt: &mut CompileAttempt<'_>,
         payload: crate::semantic_query::SemanticNodeId,
         mac: &AnalyzedMacro,
         payload_index: usize,
@@ -1186,6 +1207,7 @@ impl VerterHost {
                         cross_file_namespace_import_type(
                             ctx,
                             dispatch,
+                            attempt,
                             member.value,
                             owner_canonical,
                             scope_inventory,
@@ -1345,7 +1367,7 @@ impl VerterHost {
     /// the ONLY expose form this producer projects. The type-argument form
     /// (`defineExpose<T>()`) is spliced verbatim by the compiler from
     /// authored syntax and never reaches this producer (`DefineExpose` is
-    /// deliberately absent from [`is_codegen_macro`]: it has no runtime
+    /// deliberately absent from the kernel's codegen-macro set: it has no runtime
     /// `props`/`emits` shape, so it never enters the shared
     /// payload/runtime-projection flow those roles share).
     ///
@@ -1362,17 +1384,44 @@ impl VerterHost {
         &self,
         ctx: &dyn ResolverContext,
         dispatch: &ProjectSemanticDispatch<'_>,
+        attempt: &mut CompileAttempt<'_>,
         mac: &AnalyzedMacro,
         payload_index: usize,
         owner_canonical: &str,
         scope_inventory: &TscScopeInventory<'_>,
         counters: &mut VueMacroCodegenCounters,
     ) -> MacroTscOutcome {
-        let mut members = Vec::with_capacity(mac.expose_fields.len());
+        // Row identity, ordering and anchors are the kernel's decision
+        // (`ProjectExposeSurface`); the live work below only resolves and
+        // renders each row's member type.
+        let expose_rows = match attempt
+            .type_info()
+            .project_expose_surface(Arc::from(owner_canonical), payload_index)
+        {
+            Ok(projection) => projection,
+            Err(_) => return partial_failure().tsc(),
+        };
+        let mut members = Vec::with_capacity(expose_rows.rows().len());
         let mut ref_names: FxHashSet<String> = FxHashSet::default();
-        for (field_index, field) in mac.expose_fields.iter().enumerate() {
-            let member_type = match &field.referenced_binding {
-                Some(binding_key) => {
+        for row in expose_rows.rows() {
+            let binding_key = match row.referenced_binding() {
+                Some(binding_key) => binding_key.clone(),
+                None => {
+                    members.push(TscExposeMemberRow {
+                        name: row.name().to_owned(),
+                        member_type: TscExposeMemberType::Unavailable(
+                            TscDeclarationFailureReason::Unsupported(
+                                UnsupportedReason::SemanticConstruct,
+                            ),
+                        ),
+                        anchor: row.anchor(),
+                    });
+                    continue;
+                }
+            };
+            let member_type = {
+                let binding_key = &binding_key;
+                {
                     let key = dispatch.typeof_key_for(
                         ValueRootKey {
                             scope: ScopeId::file(Arc::from(owner_canonical), binding_key.owner),
@@ -1438,14 +1487,11 @@ impl VerterHost {
                         ),
                     }
                 }
-                None => TscExposeMemberType::Unavailable(TscDeclarationFailureReason::Unsupported(
-                    UnsupportedReason::SemanticConstruct,
-                )),
             };
             members.push(TscExposeMemberRow {
-                name: field.name.clone(),
+                name: row.name().to_owned(),
                 member_type,
-                anchor: expose_member_anchor(mac, payload_index, field_index),
+                anchor: row.anchor(),
             });
         }
         let type_references: Vec<String> = ref_names.into_iter().collect();
@@ -1468,20 +1514,22 @@ impl VerterHost {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn project_runtime_props(
         &self,
         ctx: &dyn ResolverContext,
         dispatch: &ProjectSemanticDispatch<'_>,
+        attempt: &mut CompileAttempt<'_>,
         payload: crate::semantic_query::SemanticNodeId,
         runtime_subject: &BroadRuntimeSubjectLocator,
         analysis: &ScriptAnalysisSnapshot,
-        mac: &AnalyzedMacro,
+        owner_canonical: &str,
         payload_index: usize,
-        defaults_index: Option<usize>,
         classify_constructors: bool,
         counters: &mut VueMacroCodegenCounters,
         walker_diagnostics: &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
     ) -> MacroRuntimeOutcome {
+        let _ = analysis;
         let lane = MacroProjectionLane::runtime(classify_constructors);
         if probe_definitely_non_object_root(dispatch, payload) {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
@@ -1505,30 +1553,46 @@ impl VerterHost {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         };
 
-        let member_dependency_names = analysis
-            .macro_type_deps
+        // Row identity, ordering, optionality, anchors, the member-tier
+        // dependency names and the `withDefaults` association are the
+        // kernel's decision (`ProjectRuntimeProps` over the observed
+        // surface); the live work below only classifies each row's type.
+        let observed = ObservedMacroSurface {
+            members: surface
+                .members
+                .iter()
+                .map(|member| ObservedSurfaceMember {
+                    published_name: member.published_name().map(|name| name.to_string()),
+                    optional: member.optional,
+                    is_public: member.visibility.is_public(),
+                    referenced_type_name: None,
+                })
+                .collect(),
+            call_signature_event_names: Vec::new(),
+        };
+        attempt.stage_macro_surface(Arc::from(owner_canonical), payload_index, observed);
+        let projection = match attempt
+            .type_info()
+            .project_runtime_props(Arc::from(owner_canonical), payload_index)
+        {
+            Ok(projection) => projection,
+            Err(_) => return partial_failure().runtime(),
+        };
+        let member_dependency_names = projection
+            .member_dependency_names()
             .iter()
-            .filter(|dependency| {
-                dependency.macro_index == payload_index && dependency.macro_span == mac.span
-            })
-            .filter(|dependency| {
-                matches!(
-                    dependency.usage,
-                    MacroTypeDepUsage::Member | MacroTypeDepUsage::ValueQueryMember
-                )
-            })
-            .map(|dependency| dependency.type_name.as_str())
+            .map(String::as_str)
             .collect::<FxHashSet<_>>();
-
-        let mut props = Vec::new();
-        for member in surface
+        let projecting_members: Vec<_> = surface
             .members
             .iter()
             .filter(|member| member.visibility.is_public())
-        {
-            let Some(member_name) = member.published_name() else {
-                continue;
-            };
+            .filter(|member| member.published_name().is_some())
+            .collect();
+
+        let mut props = Vec::new();
+        for (row, member) in projection.rows().iter().zip(projecting_members) {
+            let member_name: Arc<str> = Arc::from(row.name());
             // A demand that never renders the runtime `props` option object
             // asks nothing about the member's type: the whole per-member
             // classification chain — and the cross-file type resolution it
@@ -1545,11 +1609,7 @@ impl VerterHost {
                     None,
                 ))
             } else {
-                match classify_runtime(
-                    dispatch,
-                    runtime_subject.member(Arc::clone(&member_name)),
-                    counters,
-                ) {
+                match classify_runtime(dispatch, runtime_subject.member(member_name), counters) {
                     Ok(classification) => RuntimePropType::Resolved {
                         constructors: classification.constructors,
                         skip_check: classification.skip_check,
@@ -1560,10 +1620,10 @@ impl VerterHost {
                 }
             };
             props.push(RuntimeProp {
-                name: member_name.to_string(),
-                optional: member.optional,
+                name: row.name().to_owned(),
+                optional: row.optional(),
                 type_shape,
-                anchor: member_anchor(mac, payload_index, member_name.as_ref()),
+                anchor: row.anchor(),
             });
         }
 
@@ -1591,7 +1651,7 @@ impl VerterHost {
         }
 
         MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
-            defaults: defaults_association(payload_index, defaults_index),
+            defaults: projection.defaults_association(),
             props,
         }))
     }
@@ -1601,10 +1661,10 @@ impl VerterHost {
         &self,
         ctx: &dyn ResolverContext,
         dispatch: &ProjectSemanticDispatch<'_>,
+        attempt: &mut CompileAttempt<'_>,
         payload: crate::semantic_query::SemanticNodeId,
-        mac: &AnalyzedMacro,
+        owner_canonical: &str,
         payload_index: usize,
-        effective_index: usize,
         renders_runtime_options: bool,
         counters: &mut VueMacroCodegenCounters,
         walker_diagnostics: &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
@@ -1636,14 +1696,58 @@ impl VerterHost {
             return ProjectionFailure::Invalid(MacroInvalidReason::InvalidEmitsShape).runtime();
         }
 
-        let emits = emit_rows(
-            dispatch,
-            &surface,
-            mac,
+        // The filtered semantic surface is the sole event-membership
+        // authority; the kernel owns admission order, name deduplication
+        // and anchoring over the observed event names (`ProjectRuntimeEmits`).
+        let context = ProjectionReductionContext::published(ProjectionMode::Navigate)
+            .with_orthogonal_axes_from(runtime_context);
+        let mut observed_event_names = Vec::new();
+        for signature in surface.call_signatures.iter() {
+            // The runtime `emits: [...]` array is DERIVED from the resolved
+            // value, so an INCOMPLETE name enumeration records its typed
+            // reason before the skip — the projection is then partial,
+            // never an option array that silently dropped authored events.
+            // A complete no-name signature (`NoSurface`) genuinely
+            // contributes no event.
+            let names = match CallableNodeView::new(dispatch, signature.node).event_names(context) {
+                crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(names)
+                | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(names) => {
+                    names.into_inner()
+                }
+                crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => continue,
+                crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+                    let _ = incomplete.into_recorded_partial();
+                    continue;
+                }
+            };
+            observed_event_names.extend(names.iter().map(|name| name.to_string()));
+        }
+        let observed_members = surface
+            .members
+            .iter()
+            .filter(|member| member.visibility.is_public())
+            .map(|member| ObservedSurfaceMember {
+                published_name: member.published_name().map(|name| name.to_string()),
+                optional: member.optional,
+                is_public: true,
+                referenced_type_name: None,
+            })
+            .collect();
+        attempt.stage_macro_surface(
+            Arc::from(owner_canonical),
             payload_index,
-            effective_index,
-            runtime_context,
+            ObservedMacroSurface {
+                members: observed_members,
+                call_signature_event_names: observed_event_names,
+            },
         );
+        let emits = match attempt
+            .type_info()
+            .project_runtime_emits(Arc::from(owner_canonical), payload_index)
+        {
+            Ok(projection) => projection.emits().to_vec(),
+            Err(_) => return partial_failure().runtime(),
+        };
         if macro_projection_faulted(lane) {
             return partial_failure().runtime();
         }
@@ -1660,12 +1764,14 @@ impl VerterHost {
         MacroRuntimeOutcome::Complete(MacroRuntimeShape::Emits(emits))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn project_runtime_model(
         &self,
+        attempt: &mut CompileAttempt<'_>,
         dispatch: &ProjectSemanticDispatch<'_>,
         runtime_subject: BroadRuntimeSubjectLocator,
-        mac: &AnalyzedMacro,
-        effective_index: usize,
+        owner_canonical: &str,
+        payload_index: usize,
         classify_constructors: bool,
         counters: &mut VueMacroCodegenCounters,
     ) -> MacroRuntimeOutcome {
@@ -1680,48 +1786,27 @@ impl VerterHost {
         } else {
             RuntimePropType::Unclassified
         };
-        let macro_index = macro_index(effective_index);
-        let name = mac.model_name.as_deref().unwrap_or("modelValue");
-        let modifiers_name = if name == "modelValue" {
-            "modelModifiers".to_owned()
-        } else {
-            format!("{name}Modifiers")
-        };
-        let optional = mac
-            .prop_fields
-            .first()
-            .is_none_or(|field| field.is_optional);
-
-        MacroRuntimeOutcome::Complete(MacroRuntimeShape::Model(ModelRuntimeShape {
-            prop: RuntimeProp {
-                name: name.to_owned(),
-                optional,
-                type_shape: value_type_shape,
-                anchor: MacroAnchor::Synthesized {
-                    macro_index,
-                    row: SynthesizedRowKind::ModelProp,
-                },
-            },
-            update_event: RuntimeEmit {
-                name: format!("update:{name}"),
-                anchor: MacroAnchor::Synthesized {
-                    macro_index,
-                    row: SynthesizedRowKind::ModelUpdateEvent,
-                },
-            },
-            modifiers_prop: RuntimeProp {
-                name: modifiers_name,
-                optional: true,
-                type_shape: RuntimePropType::Resolved {
-                    constructors: OrderedRuntimeConstructors::default(),
-                    skip_check: false,
-                },
-                anchor: MacroAnchor::Synthesized {
-                    macro_index,
-                    row: SynthesizedRowKind::ModelModifiersProp,
-                },
-            },
-        }))
+        // The model shape — names, synthesized anchors, optionality and
+        // the modifiers row — is the kernel's decision
+        // (`ProjectRuntimeModel`); only the value classification is a
+        // live observation staged into the transaction.
+        attempt.stage_model_value_type_shape(
+            Arc::from(owner_canonical),
+            payload_index,
+            value_type_shape,
+        );
+        match attempt
+            .type_info()
+            .project_runtime_model(Arc::from(owner_canonical), payload_index)
+        {
+            Ok(projection) => {
+                MacroRuntimeOutcome::Complete(MacroRuntimeShape::Model(projection.shape().clone()))
+            }
+            // `mac` is a `defineModel` row of the staged analysis, so a
+            // refusal here is a producer bug; fail closed on the partial
+            // rail rather than synthesizing a shape of our own.
+            Err(_) => partial_failure().runtime(),
+        }
     }
 }
 

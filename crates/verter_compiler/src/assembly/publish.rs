@@ -12,6 +12,10 @@ use crate::compile_request::ProductKind;
 /// A schema invariant failed; no partial `CompileArtifactSet` is returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactSchemaError {
+    /// A staged runtime root carries no declared fragment dialect, so a
+    /// staged handoff cannot state the one fact it exists to carry. Added
+    /// by the C2 sealed-facade cutover; fail-closed, never inferred.
+    RootDialectUnavailable,
     DuplicateArtifact,
     DuplicateSourceUnit,
     ConflictingSourceRevision,
