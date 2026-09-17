@@ -4862,3 +4862,199 @@ fn lib_awaited_conditional_oracle_matrix() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// `any` / `never` / `unknown` operands and non-signature callback
+/// representations for [`awaited_callback_edge_oracle_matrix`].
+const AWAITED_EDGES: &str = "/ws/cov/awaited_edges.ts";
+const AWAITED_EDGES_SRC: &str = r#"
+declare const l1: Awaited<{ then(onfulfilled: any): void }>; export function f1() { return l1; }
+declare const l2: Awaited<{ then(onfulfilled: ((v: number) => void) & ((v: string) => void)): void }>; export function f2() { return l2; }
+declare const l3: Awaited<{ then(onfulfilled: unknown): void }>; export function f3() { return l3; }
+declare const l4: Awaited<{ then(onfulfilled: never): void }>; export function f4() { return l4; }
+declare const l5: Awaited<{ then: any }>; export function f5() { return l5; }
+declare const l6: Awaited<{ then(onfulfilled: (v: any) => void): void }>; export function f6() { return l6; }
+declare const l7: Awaited<{ then(onfulfilled: Function): void }>; export function f7() { return l7; }
+declare const l8: Awaited<{ then(onfulfilled: ((v: number) => void) | ((v: string) => void)): void }>; export function f8() { return l8; }
+declare const l9: Awaited<{ then(onfulfilled: object): void }>; export function f9() { return l9; }
+declare const la: Awaited<{ then: unknown }>; export function fa() { return la; }
+declare const lb: Awaited<{ then: never }>; export function fb() { return lb; }
+declare const lc: Awaited<{ then(cb: ((v: number) => void) & { x: 1 }): void }>; export function fc() { return lc; }
+declare const ld: Awaited<{ then(cb: { x: 1 } & ((v: number) => void)): void }>; export function fd() { return ld; }
+declare const le: Awaited<{ then(cb: Date): void }>; export function fe() { return le; }
+declare const lf: Awaited<{ then(onfulfilled: any, x: number): void }>; export function ff() { return lf; }
+export async function r1(v: { then(onfulfilled: any): void }) { return v; }
+export async function r2(v: { then(onfulfilled: ((v: number) => void) & ((v: string) => void)): void }) { return v; }
+export async function r3(v: { then(onfulfilled: unknown): void }) { return v; }
+export async function r5(v: { then: any }) { return v; }
+export async function r7(v: { then(onfulfilled: Function): void }) { return v; }
+export async function r8(v: { then(onfulfilled: ((v: number) => void) | ((v: string) => void)): void }) { return v; }
+export async function s1(v: { then: unknown }) { return v; }
+export async function s2(v: { then: never }) { return v; }
+export async function s3(v: { then(cb: ((v: number) => void) & { x: 1 }): void }) { return v; }
+export async function s4(v: { then(cb: Date): void }) { return v; }
+"#;
+
+/// The awaited relations over `any` / `never` / `unknown` and over callbacks
+/// that are not a single signature, pinned against TypeScript 7.0.2.
+///
+/// The lib conditional (`f` rows, read through `Instantiate`):
+///
+/// - `onfulfilled: any` takes BOTH branches of
+///   `F extends (value: infer V, ...) => any` with `V` inferred as `unknown`,
+///   so the result is `Awaited<unknown>` = `unknown` (`f1`, `ff`) — never the
+///   `never` a "non-callable" reading of `any` would give;
+/// - a `then` typed `any` or `never` infers no `onfulfilled` and is `never`
+///   (`f5`, `fb`), while `then: unknown` does not match and leaves the operand
+///   (`fa`);
+/// - an intersection callback reads its LAST call signature, whatever arm
+///   order or non-callable arms it has (`f2`, `fc`, `fd`); a union callback
+///   distributes (`f8`);
+/// - an `unknown` / `never` / `object` / `Function` / `Date` callback has no
+///   call signature and is `never` (`f3`, `f4`, `f9`, `f7`, `fe`); the lib
+///   nominals are decided by declaration identity.
+///
+/// The runtime relation (`r` / `s` rows, the async return payload):
+/// `onfulfilled` of `any` / `unknown` / `Function` / `Date` is the checker's
+/// malformed-thenable `any` (`r1`, `r3`, `r7`, `s4`); an intersection callback
+/// unions EVERY signature (`r2` is `string | number`); a `then` of `any` /
+/// `unknown` / `never` is not a thenable (`r5`, `s1`, `s2`).
+///
+/// `r8` is the honest-refusal leg: the checker merges a union of callbacks
+/// into one signature with intersected parameters (`number & string`, so
+/// `Promise<never>`); this reader does not model union-signature merging and
+/// publishes the typed gap.
+///
+/// `f` columns come from assignability diagnostics with an `any`/`never`
+/// discriminating probe (`tsc --noEmit --strict`), the rest from declaration
+/// emit (`--declaration --emitDeclarationOnly --target es2022 --strict`).
+#[test]
+fn awaited_callback_edge_oracle_matrix() {
+    let host = host_with(&[(AWAITED_EDGES, AWAITED_EDGES_SRC)]);
+    let never = TypeExpr::Primitive(PrimitiveName::Never);
+    let unknown = TypeExpr::Primitive(PrimitiveName::Unknown);
+    let any = TypeExpr::Primitive(PrimitiveName::Any);
+    let is = |expected: TypeExpr| move |ty: &TypeExpr| *ty == expected;
+    let string_or_number = |ty: &TypeExpr| match ty {
+        TypeExpr::Union(members) => {
+            members.len() == 2 && members.contains(&string()) && members.contains(&number())
+        }
+        _ => false,
+    };
+    let mut failures = Vec::new();
+
+    let f1 = is(unknown.clone());
+    let f2 = is(string());
+    let f3 = is(never.clone());
+    let f4 = is(never.clone());
+    let f5 = is(never.clone());
+    let f6 = is(any.clone());
+    let f7 = is(never.clone());
+    let f9 = is(never.clone());
+    let fb = is(never.clone());
+    let fc = is(number());
+    let fd = is(number());
+    let fe = is(never.clone());
+    let ff = is(unknown.clone());
+    let lib_rows: &[OracleRow<'_>] = &[
+        ("f1", "unknown", &f1),
+        ("f2", "string", &f2),
+        ("f3", "never", &f3),
+        ("f4", "never", &f4),
+        ("f5", "never", &f5),
+        ("f6", "any", &f6),
+        ("f7", "never", &f7),
+        ("f8", "string | number", &string_or_number),
+        ("f9", "never", &f9),
+        ("fa", "{ then: unknown; }", &has_then_member),
+        ("fb", "never", &fb),
+        ("fc", "number", &fc),
+        ("fd", "number", &fd),
+        ("fe", "never", &fe),
+        ("ff", "unknown", &ff),
+    ];
+    with_dispatch(&host, |dispatch| {
+        for (function, tsc, pinned) in lib_rows {
+            let key = key_of(dispatch, AWAITED_EDGES, function);
+            let measured = match dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key))) {
+                QueryResult::Value(SemanticQueryOutput {
+                    value: SemanticQueryValue::FlowReturn(result),
+                    ..
+                }) => dispatch
+                    .declaration_carrier_body(result.return_type())
+                    .and_then(|body| host.project_node_to_type_expr_for_test(body)),
+                _ => None,
+            };
+            if !measured.as_ref().is_some_and(pinned) {
+                failures.push(format!("{function}: tsc `{tsc}`, measured {measured:?}"));
+            }
+        }
+    });
+
+    let promise_of = |inner: TypeExpr| {
+        move |ty: &TypeExpr| {
+            *ty == TypeExpr::Ref {
+                name: Arc::from("Promise"),
+                type_arguments: Arc::from(vec![inner.clone()].into_boxed_slice()),
+            }
+        }
+    };
+    let promise_of_then_surface = |ty: &TypeExpr| match ty {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            name.as_ref() == "Promise"
+                && type_arguments.len() == 1
+                && has_then_member(&type_arguments[0])
+        }
+        _ => false,
+    };
+    let promise_string_or_number = |ty: &TypeExpr| match ty {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            name.as_ref() == "Promise"
+                && type_arguments.len() == 1
+                && string_or_number(&type_arguments[0])
+        }
+        _ => false,
+    };
+    let r1 = promise_of(any.clone());
+    let r3 = promise_of(any.clone());
+    let r7 = promise_of(any.clone());
+    let s3 = promise_of(number());
+    let s4 = promise_of(any.clone());
+    let runtime_rows: &[OracleRow<'_>] = &[
+        ("r1", "Promise<any>", &r1),
+        ("r2", "Promise<string | number>", &promise_string_or_number),
+        ("r3", "Promise<any>", &r3),
+        ("r5", "Promise<{ then: any; }>", &promise_of_then_surface),
+        ("r7", "Promise<any>", &r7),
+        (
+            "s1",
+            "Promise<{ then: unknown; }>",
+            &promise_of_then_surface,
+        ),
+        ("s2", "Promise<{ then: never; }>", &promise_of_then_surface),
+        ("s3", "Promise<number>", &s3),
+        ("s4", "Promise<any>", &s4),
+    ];
+    for (function, tsc, pinned) in runtime_rows {
+        let outcome = eval(&host, AWAITED_EDGES, function);
+        let ok = matches!(
+            &outcome,
+            Outcome::Value { ty, degradation: None, candidates: 1 } if pinned(ty)
+        );
+        if !ok {
+            failures.push(format!("{function}: tsc `{tsc}`, measured {outcome:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert_degraded(
+        &host,
+        AWAITED_EDGES,
+        "r8",
+        FlowReturnDegradation::UnresolvedValue,
+    );
+}

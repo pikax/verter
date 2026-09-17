@@ -10659,7 +10659,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// signature-source rail ([`Self::resolve_signature_source_carrier`]),
     /// whose cycle detection and connected work envelope bound the chain — no
     /// private depth cap.
+    ///
+    /// An intersection carries every arm's call signatures in arm order (the
+    /// checker's `getSignaturesOfType` over an intersection). A lib runtime
+    /// nominal (`Function`, `Date`, `Promise`, …) that did not expand is
+    /// decided by its declaration identity: none of those interfaces declares
+    /// a call signature.
     fn awaited_call_signatures(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
+        // Identity first: the rail would try to expand the lib nominal, and
+        // its answer (no call signature) never depends on the expansion.
+        let settled = self
+            .evaluate_deferred_semantic_node_with_context(
+                node,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+            .into_active_query_build_node(self);
+        let nominal = match self.graph().node_data(settled).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => {
+                self.runtime_nominal_identity(identity).is_some()
+            }
+            Some(SemanticNodeData::InstantiationRef { base, .. }) => {
+                self.runtime_nominal_identity(base).is_some()
+            }
+            _ => false,
+        };
+        if nominal {
+            return Some(Vec::new());
+        }
         let resolved = self.resolve_signature_source_carrier(
             node,
             crate::semantic_query::ProjectionReductionContext::published(
@@ -10678,6 +10704,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::TemplateLiteral { .. }
             | SemanticNodeData::Array { .. }
             | SemanticNodeData::Tuple { .. } => Some(Vec::new()),
+            SemanticNodeData::Intersection(arms) => {
+                let arms = arms.clone();
+                drop(data);
+                let mut signatures = Vec::new();
+                for arm in arms.iter() {
+                    signatures.extend(self.awaited_call_signatures(*arm)?);
+                }
+                Some(signatures)
+            }
             _ => None,
         }
     }
@@ -10923,6 +10958,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if thens.is_empty() || thens.iter().any(|member| member.optional) {
             return LibThen::NotMatched;
         }
+        let never = self
+            .graph()
+            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+        // A `then` typed `any` or `never` is assignable to the required
+        // method but infers no `onfulfilled`: `F` is `unknown`, so `never`
+        // (tsc 7.0.2: `Awaited<{ then: any }>` is `never`; `then: unknown`
+        // is not assignable and leaves the operand).
+        if thens.iter().any(|member| {
+            let value = self
+                .evaluate_deferred_semantic_node_with_context(
+                    member.value,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                )
+                .into_active_query_build_node(self);
+            matches!(
+                self.graph().node_data(value).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Any | PrimitiveKind::Never
+                ))
+            )
+        }) {
+            return LibThen::Result(never);
+        }
         let mut signatures = Vec::new();
         for member in thens {
             match self.awaited_call_signatures(member.value) {
@@ -10934,9 +10992,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(&then_signature) = signatures.last() else {
             return LibThen::NotMatched;
         };
-        let never = self
-            .graph()
-            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
         let onfulfilled = match self.first_parameter(then_signature) {
             Some(FirstParameter::Type(onfulfilled)) => onfulfilled,
             // `infer F` over a missing parameter is `unknown`, which is not a
@@ -10945,9 +11000,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
             None => return LibThen::Refused,
         };
         // `F extends (value: infer V, ...) => any` distributes over `F`: a
-        // nullish or non-callable arm contributes `never`.
+        // nullish or non-callable arm contributes `never`. An `any` arm takes
+        // BOTH branches with `V` inferred as `unknown`, so it contributes
+        // `Awaited<unknown>` (tsc 7.0.2: `then(onfulfilled: any)` is `unknown`).
         let mut results = Vec::new();
         for arm in self.non_nullish_arms(onfulfilled) {
+            if matches!(
+                self.graph().node_data(arm).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+            ) {
+                let unknown = self
+                    .graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
+                match self.lib_awaited_read(unknown) {
+                    Some(Some(node)) => results.push(node),
+                    Some(None) => return LibThen::Deferred,
+                    None => return LibThen::Refused,
+                }
+                continue;
+            }
             let Some(callbacks) = self.awaited_call_signatures(arm) else {
                 return LibThen::Refused;
             };
