@@ -73,9 +73,10 @@ use crate::flow_completion_inventory::{
 };
 use verter_semantic::analysis::flow::flow_ir::{FlowExprRole, FlowSliceIR};
 use verter_semantic::analysis::flow::{
-    object_entry_descent, sequence_value_takes_call_rail, value_descent, FlowBindingRef, FrameSpan,
-    FunctionBodySkeleton, NameMeaning, ObjectEntryDescent, ObjectEntryKey, ObjectEntryKind,
-    SkeletonBindingId, SkeletonBindingKind, SkeletonPathSegment, ValueDescent,
+    object_entry_descent, sequence_value_takes_await_arm, sequence_value_takes_call_rail,
+    value_descent, FlowBindingRef, FrameSpan, FunctionBodySkeleton, NameMeaning,
+    ObjectEntryDescent, ObjectEntryKey, ObjectEntryKind, SkeletonBindingId, SkeletonBindingKind,
+    SkeletonPathSegment, ValueDescent,
 };
 use verter_semantic::analysis::function_program::{
     for_each_call_expression, inventory_statement_list, FunctionControlRegion, FunctionDescentStep,
@@ -315,6 +316,21 @@ pub enum SliceStatement {
         /// decision belongs to the join, not to this position; the
         /// per-arm tree additionally tells the evaluator WHICH kept
         /// constituents stay fresh on the sealed return.
+        freshness: SliceFreshness,
+    },
+    /// A statement-position `yield x` in a generator body. The yielded
+    /// expression lowers like a return argument (a call rides the call
+    /// carrier, a literal the leaf lowering); the evaluator collects the
+    /// contributions and the generator's return wrap joins them into the
+    /// `Generator<Y, R, N>` yield parameter. `yield*` delegation and a
+    /// yield nested inside another expression keep their existing
+    /// fail-closed classification — only the statement spelling is
+    /// modelled.
+    Yield {
+        /// The lowered yielded expression (`None` for a bare `yield;`).
+        argument: Option<SliceExpr>,
+        /// The argument's freshness mirror, same rule as
+        /// [`SliceStatement::Return::freshness`].
         freshness: SliceFreshness,
     },
     /// An `if` statement. Each arm is its own region; the test lowers to
@@ -975,6 +991,14 @@ pub enum SliceExpr {
     /// An expression the leaf lowering cannot represent (its `any`
     /// fallback), including a call with an unrepresentable callee.
     SemanticAny,
+    /// An `await x` — the operand lowered through its own arm (a call
+    /// operand rides the one call carrier, a binding read the binding
+    /// carriers, a leaf the shared leaf lowering). The evaluator unwraps
+    /// the resolved operand through the lib `Awaited` surface; an operand
+    /// the substrate cannot type keeps its typed gap and degrades.
+    Awaited {
+        operand: Box<SliceExpr>,
+    },
     Gap(crate::semantic_query::FlowGap),
     /// A read (or call) of a name the frame's lexical authority resolves
     /// to a FUNCTION-LOCAL binding this content half does not model: a
@@ -2648,6 +2672,14 @@ impl SliceFreshness {
 fn expression_freshness(expression: &Expression<'_>) -> SliceFreshness {
     match expression {
         Expression::ParenthesizedExpression(paren) => expression_freshness(&paren.expression),
+        // An `await x` publishes its OPERAND's value through the lib
+        // `Awaited` surface, which passes a settled literal through
+        // verbatim — so the operand's freshness is the await's own. tsgo
+        // types `async function f() { return await 1 }` as
+        // `Promise<number>`, exactly as `return 1` is; the pinned-wins
+        // fold and the per-arm rule below still apply unchanged, so two
+        // awaited fresh arms keep `1 | 2`.
+        Expression::AwaitExpression(awaited) => expression_freshness(&awaited.argument),
         Expression::ConditionalExpression(conditional) => SliceFreshness::PerArm(Arc::from([
             expression_freshness(&conditional.consequent),
             expression_freshness(&conditional.alternate),
@@ -5126,7 +5158,35 @@ impl Lowerer<'_> {
                 // source order, and a same-file assertion call whose
                 // narrowing persists.
                 Statement::ExpressionStatement(expression) => {
-                    if let Some(statement) = self.lower_effect_statement(&expression.expression) {
+                    // A statement-position `yield x` is the generator's
+                    // yield-parameter contributor: the argument lowers like
+                    // a return argument (unconditionally — the yield
+                    // parameter is demanded by the generator's own return
+                    // wrap, so over-selecting here is the safe asymmetry the
+                    // shared classifier documents). `yield*` delegation
+                    // keeps the fail-closed marker: the delegated
+                    // sequence's yield surface is not modelled.
+                    if let Expression::YieldExpression(yield_expr) =
+                        unwrap_parenthesized(&expression.expression)
+                    {
+                        let argument = yield_expr.argument.as_ref().map(|arg| {
+                            if yield_expr.delegate {
+                                SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression)
+                            } else {
+                                self.lower_expr(arg, ExprMode::Return)
+                            }
+                        });
+                        let freshness = yield_expr
+                            .argument
+                            .as_ref()
+                            .map_or(SliceFreshness::Pinned, expression_freshness);
+                        out.push(SliceStatement::Yield {
+                            argument,
+                            freshness,
+                        });
+                    } else if let Some(statement) =
+                        self.lower_effect_statement(&expression.expression)
+                    {
                         // A statement-position call to a callee proven
                         // never to return ends the path exactly as an
                         // authored `throw` does: the statements after it
@@ -6787,13 +6847,15 @@ impl Lowerer<'_> {
     /// Whether a sequence's LAST operand — its value provider — lowers
     /// through a structural arm this half owns: a NARROWABLE REFERENCE
     /// (lowered as the read, so the frame's substitutions stay visible),
-    /// or a call routed to the structural call rails by the ONE shared
+    /// a call routed to the structural call rails by the ONE shared
     /// predicate (`sequence_value_takes_call_rail`) the classifier's own
-    /// sequence verdict is decided through — so this half can never
-    /// delegate a form the classifier still calls an unmodeled-call
-    /// position.
+    /// sequence verdict is decided through, or an `await` (the
+    /// `Awaited` arm owns it) — so this half can never delegate a form
+    /// the classifier still calls an unmodeled-call position.
     fn sequence_value_lowers_structurally(&self, last: &Expression<'_>) -> bool {
-        self.narrow_subject_of(last).is_some() || sequence_value_takes_call_rail(last)
+        self.narrow_subject_of(last).is_some()
+            || sequence_value_takes_call_rail(last)
+            || sequence_value_takes_await_arm(last)
     }
 
     /// The narrowable reference an expression NAMES: a static member
@@ -7158,6 +7220,17 @@ impl Lowerer<'_> {
             Expression::ArrowFunctionExpression(arrow) => {
                 self.lower_nested_function(&FunctionNode::Arrow(arrow))
             }
+            // An `await x`: the operand lowers through its own arm (a
+            // call operand rides the one call carrier, a binding read the
+            // binding carriers) and the evaluator unwraps the resolved
+            // value through the lib `Awaited` surface. Taken BEFORE the
+            // classifier dispatch, exactly like the call arms — the
+            // classifier's [`ValueDescent::Awaited`] verdict descends both
+            // halves onto the operand, so neither half can fail the await
+            // closed as an unmodeled-call position.
+            Expression::AwaitExpression(awaited) => SliceExpr::Awaited {
+                operand: Box::new(self.lower_expr(&awaited.argument, mode)),
+            },
             Expression::CallExpression(call)
                 if matches!(
                     unwrap_parenthesized(&call.callee),
@@ -7378,6 +7451,14 @@ impl Lowerer<'_> {
                 }
                 match value_descent(other) {
                     ValueDescent::Transparent(inner) => self.lower_expr(inner, mode),
+                    // Unreachable in practice — the await arm above takes
+                    // `Expression::AwaitExpression` before the classifier
+                    // dispatch — but the classifier's verdict is the
+                    // authority: an await lowers its OPERAND through its
+                    // own arm and the evaluator unwraps through `Awaited`.
+                    ValueDescent::Awaited(awaited) => SliceExpr::Awaited {
+                        operand: Box::new(self.lower_expr(&awaited.argument, mode)),
+                    },
                     // A TYPE carrier decides the published type (`x as
                     // const` pins what a bare literal would widen). That is
                     // a statement about the MEMBER POLICY, not a reason to
@@ -7473,8 +7554,11 @@ impl Lowerer<'_> {
                     // call in value position, or fails closed. It does NOT
                     // follow that every leaf form is modeled: several answer
                     // the shallow pass's fallback `any` for reasons that have
-                    // nothing to do with calls (`JSXElement`, `Super`,
-                    // `await x` over a non-call) — see `lower_leaf`.
+                    // nothing to do with calls (`JSXElement`, `Super`) — see
+                    // `lower_leaf`. A VALUE-position `await x` never reaches
+                    // here (the `Awaited` arm takes it first); one FOLDED
+                    // into a leaf-composed answer composes an untyped
+                    // position and the leaf gate refuses it.
                     ValueDescent::Reference
                     | ValueDescent::Logical
                     | ValueDescent::Sequence

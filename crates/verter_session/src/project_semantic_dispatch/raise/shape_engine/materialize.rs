@@ -20,7 +20,8 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
 use verter_type_expr::{
-    LiteralValue, MappedModifier, MemberVisibility, PrimitiveName, TypeExpr, UnknownValue,
+    CompilerIntrinsicTypeOp, LiteralValue, MappedModifier, MemberVisibility, PrimitiveName,
+    TypeExpr, UnknownValue,
 };
 
 use super::super::ProjectSemanticDispatch;
@@ -58,6 +59,7 @@ pub(crate) enum MaterializePathSegment {
         slot: TypeParameterSlot,
     },
     ReferenceArgument(u32),
+    IntrinsicOperand(u32),
     ImportArgument(u32),
     TypeOfArgument(u32),
     KeyOfOperand,
@@ -344,6 +346,23 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
                 } else {
                     verter_type_expr::empty_type_args()
                 },
+            },
+        )
+    }
+    fn intrinsic(
+        &mut self,
+        op: CompilerIntrinsicTypeOp,
+        arguments: Vec<MaterializedTypeExpr>,
+    ) -> MaterializedTypeExpr {
+        fold_compound(
+            arguments
+                .into_iter()
+                .enumerate()
+                .map(|(i, arg)| (MaterializePathSegment::IntrinsicOperand(i as u32), arg))
+                .collect(),
+            |exprs| TypeExpr::IntrinsicApplication {
+                op,
+                arguments: Arc::from(exprs.into_boxed_slice()),
             },
         )
     }

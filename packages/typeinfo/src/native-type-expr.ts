@@ -41,6 +41,10 @@ export type NativeTypeExpr =
       typeParameters?: NativeTypeParameter[];
     }
   | { kind: "ref"; name: string; typeArguments: NativeTypeExpr[] }
+  // A compiler-native type OPERATION whose identity the checker has already
+  // resolved (`Awaited<T>`). Never a `ref`: it names no declaration, so it
+  // must not be resolved through any registry.
+  | { kind: "intrinsicApplication"; op: string; arguments: NativeTypeExpr[] }
   | {
       kind: "recursiveRef";
       name: string;

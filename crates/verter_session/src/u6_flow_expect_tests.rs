@@ -127,6 +127,15 @@ pub(crate) enum ExpectedNode {
     TypeParam { name: &'static str },
     /// `SemanticNodeData::DeclRef` naming this declaration.
     DeclRef { name: &'static str },
+    /// `SemanticNodeData::InstantiationRef` whose base names this
+    /// declaration (the builtin-sentinel `__builtin__` carrier included —
+    /// the async return wrap's `Promise<…>` and the generator wrap's
+    /// resolved lib head both mint this shape), with exactly these type
+    /// arguments, in order.
+    Instantiation {
+        name: &'static str,
+        args: &'static [ExpectedNode],
+    },
     /// `SemanticNodeData::InstantiationRef` whose BASE declaration is
     /// named here (the generic-application carrier — `Record<"c",
     /// unknown>`'s arm of the `in`-guard intersection mint). Distinct
@@ -318,6 +327,20 @@ pub(crate) fn node_matches(
         }
         (ExpectedNode::DeclRef { name }, SemanticNodeData::DeclRef { identity }) => {
             &*identity.decl_name == *name
+        }
+        (
+            ExpectedNode::Instantiation { name, args },
+            SemanticNodeData::InstantiationRef {
+                base,
+                args: got_args,
+            },
+        ) => {
+            &*base.decl_name == *name
+                && got_args.len() == args.len()
+                && got_args
+                    .iter()
+                    .zip(args.iter())
+                    .all(|(got, exp)| node_matches(dispatch, *got, exp, depth + 1))
         }
         (
             ExpectedNode::InstantiationRef { name },
@@ -554,6 +577,13 @@ pub(crate) fn render_node(
         }
         SemanticNodeData::DeferredCallable(_) => "DeferredCallable(…)".to_owned(),
         SemanticNodeData::DeclRef { identity } => format!("DeclRef({})", identity.decl_name),
+        SemanticNodeData::IntrinsicApplication { op, args } => {
+            let rendered: Vec<String> = args
+                .iter()
+                .map(|arg| render_node(dispatch, *arg, depth + 1))
+                .collect();
+            format!("{}<{}>", op.display_name(), rendered.join(", "))
+        }
         SemanticNodeData::InstantiationRef { base, .. } => {
             format!("InstantiationRef({})", base.decl_name)
         }
@@ -1043,7 +1073,8 @@ pub(crate) fn check_boundary_refusal(
 /// (`new (…) => T` never satisfies it). Parameter names are ignored;
 /// types and arity are exact. A reference name matches a resolved
 /// `DeclRef` only — `BareRef` / `TypeParam` reach `_ => false`
-/// (fail-closed). Generic-argument references, accessor prints, and
+/// (fail-closed). A generic-argument reference matches an
+/// `InstantiationRef` (name + exact argument list). Accessor prints and
 /// elided-member markers PARSE but match NOTHING (fail-closed; see the
 /// variant docs) — re-add those arms only with a control. A live
 /// object-spread program is compared through the SAME public
@@ -1062,6 +1093,11 @@ pub(crate) mod checker_syntax {
         BoolLit(bool),
         Primitive(PrimitiveKind),
         Ref(String),
+        /// `Name<T, …>`. Matches a live `InstantiationRef` naming the
+        /// same declaration with the exact argument list — reintroduced
+        /// with X18's deep pin (the async return wrap's `Promise<…>`
+        /// builtin carrier), discriminated by the mutation control over
+        /// X18's checker column.
         /// `Name<T, …>`. Matches a live `InstantiationRef` carrier by
         /// base name with ordered-exact, recursively equal arguments.
         /// Reintroduced with its row + control:
@@ -3886,6 +3922,12 @@ mod expectation_controls {
                 );
             },
         );
+        // Generic-argument references: the acceptance arm introduced with
+        // X18's async-wrap deep pin — an `InstantiationRef` with the exact
+        // head name and argument list, with the wrong-head and wrong-arity
+        // negative legs. The earlier fail-closed control was retired with
+        // the arm; the corpus mutation control discriminates the argument
+        // clauses.
         // Generic-argument references: the `in`-guard's Record mint
         // (N88's program) carries a live `InstantiationRef` carrier, so
         // the generic print accepts it — and every wrong name or wrong
@@ -3938,17 +3980,35 @@ mod expectation_controls {
                 );
             },
         );
-        // A generic print against a NON-carrier node still fails closed
-        // (X18's program publishes the unwrapped inner object).
+        // A generic print against the ASYNC WRAP's carrier: on this tree the
+        // async return wrap publishes `Promise<…>`, so the carrier accepts
+        // its own generic print (X18's deep pin) while every wrong head,
+        // kind, and argument count is still rejected.
         with_flow_node(
             "async function makeProps() { return { label: \"x\" } }",
             "makeProps",
             |dispatch, node| {
                 assert!(
-                    !accepts(dispatch, node, "Promise<{ label: string; }>"),
-                    "a GENERIC-ARGUMENT reference print against a non-carrier node must \
-                     match NOTHING (measured {})",
+                    accepts(dispatch, node, "Promise<{ label: string; }>"),
+                    "the async wrap's `Promise<…>` carrier must accept its own generic \
+                     print (measured {})",
                     render_node(dispatch, node, 0)
+                );
+                assert!(
+                    !accepts(dispatch, node, "Map<{ label: string; }>"),
+                    "a wrong generic HEAD name must be rejected"
+                );
+                assert!(
+                    !accepts(dispatch, node, "Promise<{ label: string; }>[]"),
+                    "a wrong node KIND (Array-wrapped) must be rejected"
+                );
+                assert!(
+                    !accepts(
+                        dispatch,
+                        node,
+                        "Promise<{ label: string; }, { label: string; }>"
+                    ),
+                    "a wrong generic ARGUMENT COUNT must be rejected"
                 );
             },
         );

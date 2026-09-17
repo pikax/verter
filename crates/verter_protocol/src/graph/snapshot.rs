@@ -107,6 +107,10 @@ pub(crate) enum PersistedGraphNode {
         name: u32,
         type_arguments: Vec<u32>,
     },
+    IntrinsicApplication {
+        op: u32,
+        arguments: Vec<u32>,
+    },
     TypeParameter {
         name: u32,
         constraint: u32,
@@ -220,6 +224,9 @@ fn try_persist(node: GraphNode) -> Result<PersistedGraphNode, SnapshotCaptureErr
             name,
             type_arguments,
         },
+        GraphNode::IntrinsicApplication { op, arguments } => {
+            PersistedGraphNode::IntrinsicApplication { op, arguments }
+        }
         GraphNode::TypeParameter {
             name,
             constraint,
@@ -480,6 +487,12 @@ fn validate_node_refs(
             types.iter().try_for_each(|ty| nid(*ty))
         }
         PersistedGraphNode::Array { element, .. } => nid(*element),
+        // `op` is a CLOSED TAG, never a string id, so there is deliberately
+        // no `sid` here — an intrinsic contributes nothing to the string
+        // table. Only its operands reference the node table.
+        PersistedGraphNode::IntrinsicApplication { arguments, .. } => {
+            arguments.iter().try_for_each(|argument| nid(*argument))
+        }
         PersistedGraphNode::Tuple { elements, .. } => elements.iter().try_for_each(|element| {
             sid(element.label)?;
             nid(element.ty)
@@ -906,6 +919,16 @@ mod tests {
                     conditional_context: vec![conditional_frame],
                 },
             ),
+            (
+                GraphNode::IntrinsicApplication {
+                    op: 1,
+                    arguments: vec![2],
+                },
+                PersistedGraphNode::IntrinsicApplication {
+                    op: 1,
+                    arguments: vec![2],
+                },
+            ),
         ]
     }
 
@@ -920,8 +943,8 @@ mod tests {
         let pairs = persistable_pairs();
         assert_eq!(
             pairs.len(),
-            24,
-            "the persisted vocabulary mirrors 24 of the 25 wire variants"
+            25,
+            "the persisted vocabulary mirrors 25 of the 26 wire variants"
         );
         for (live, expected) in pairs {
             // Clone at the call site only: `try_persist` consumes its node,

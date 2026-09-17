@@ -237,9 +237,9 @@ impl NodeArena {
         scope: NodeScopeId,
         fingerprint: u64,
     ) -> SemanticNodeId {
-        // Capture the discriminant before moving `data` so the
+        // Capture the variant bucket before moving `data` so the
         // contention instrumentation can bucket per-variant pushes.
-        let discriminant = data.discriminant_index();
+        let discriminant = data.node_tag().bucket_index();
         let shard_idx = (fingerprint & SHARD_MASK) as usize;
 
         // Sharded dedup hot path. The fingerprint routes to its shard and
@@ -309,15 +309,8 @@ impl NodeArena {
             }
             prov.node_arena_inner_write_wait_ns
                 .fetch_add(write_wait_ns, Relaxed);
-            if discriminant < prov.node_arena_pushes_per_discriminant.len() {
-                prov.node_arena_pushes_per_discriminant[discriminant].fetch_add(1, Relaxed);
-            } else {
-                verter_debug_assert!(
-                    false,
-                    "SemanticNodeData::discriminant_index() returned {} >= SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT",
-                    discriminant
-                );
-            }
+            // In range by construction: the array is sized to the tag bound.
+            prov.node_arena_pushes_per_discriminant[discriminant].fetch_add(1, Relaxed);
         }
 
         id

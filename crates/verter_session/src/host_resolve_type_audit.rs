@@ -529,6 +529,10 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
         // ClassifyTruthinessDomain is the modeless truthiness-domain
         // classification — no projection demand.
         | SemanticQueryKey::ClassifyTruthinessDomain { .. }
+        // The two awaited relations are fixed structural reductions —
+        // mode-free by design (no projection demand to consume a budget).
+        | SemanticQueryKey::AwaitedNormalize { .. }
+        | SemanticQueryKey::AsyncReturnPayload { .. }
         | SemanticQueryKey::ClassifyBroadRuntime { .. } => ProjectionMode::Identity,
     }
 }

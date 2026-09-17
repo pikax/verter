@@ -83,6 +83,10 @@ pub use wire::GraphAmbientNamespace as AmbientNamespaceNode;
 pub use wire::GraphArray as ArrayNode;
 pub use wire::GraphBudgetExceededKind as BudgetExceededKindWire;
 pub use wire::GraphClass as ClassNode;
+// The SHARED compiler-intrinsic op vocabulary (compiler_intrinsics.proto),
+// referenced by both this graph and component-meta. Re-exported under its own
+// name — there is no `Graph*` prefix to strip.
+pub use wire::CompilerIntrinsicTypeOp;
 pub use wire::GraphConditional as ConditionalNode;
 pub use wire::GraphConditionalResolution as ConditionalResolution;
 pub use wire::GraphContextualType as ContextualTypeNode;
@@ -99,6 +103,7 @@ pub use wire::GraphIndexSignature as IndexSignature;
 pub use wire::GraphIndexedAccess as IndexedAccessNode;
 pub use wire::GraphInfer as InferNode;
 pub use wire::GraphIntersection as IntersectionNode;
+pub use wire::GraphIntrinsicApplication as IntrinsicApplicationNode;
 pub use wire::GraphKeyOf as KeyOfNode;
 pub use wire::GraphLiteral as LiteralNode;
 pub use wire::GraphLiteralValue as LiteralValue;
@@ -314,7 +319,15 @@ pub use wire::UniqueSymbolKeyExpr;
 /// ordered effect oneof preserves typed keys, property/method/accessor kind,
 /// direct indices/signatures, raw spread operands, source spans, provenance,
 /// and freshness without fabricating a derived closed object.
-pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 7;
+/// v8 adds the `GraphIntrinsicApplication` node at tag 34: an applied
+/// compiler-native type operation (`Awaited<T>`) carrying a closed op enum
+/// and operand node ids. It exists so a resolved compiler intrinsic is never
+/// encoded as `GraphReference` / `GraphAliasInstantiation` (which would
+/// assert a declaration symbol it does not have) and never degraded to
+/// `GraphOpaque` (which is reserved for genuinely unrepresentable
+/// constructs). A v7 payload carries no intrinsic node, so v7 stays
+/// accepted for requests that do not need the v8 vocabulary.
+pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 8;
 
 // -------------------------------------------------------------------------
 // Typed constructor helpers for the request-error variants. The

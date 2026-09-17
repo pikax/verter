@@ -289,10 +289,14 @@ fn hash_node_rec<H: std::hash::Hasher>(
         return;
     };
 
+    // The variant byte comes from the shared vocabulary, so this hash cannot
+    // drift from the other per-variant tables. Its ids stay below
+    // `SEMANTIC_NODE_TAG_BOUND`, clear of the 0xFD..=0xFF sentinels.
+    hasher.write_u8(data.node_tag().stable_id());
+
     // Reference carriers: head name (+ scope-free declaration identity when
     // carried) + arity + arg descent.
     if let Some((name, _scope)) = data.bare_ref_head() {
-        hasher.write_u8(1);
         hasher.write(name.as_bytes());
         let args = data.carrier_type_args();
         hasher.write_u64(args.len() as u64);
@@ -303,11 +307,18 @@ fn hash_node_rec<H: std::hash::Hasher>(
     }
     match data.as_ref() {
         SemanticNodeData::DeclRef { identity } => {
-            hasher.write_u8(2);
             identity.hash(hasher);
         }
+        // The op's stable tag, never the derived enum `Hash`: the derive
+        // follows declaration order, the tag is the op's pinned identity.
+        SemanticNodeData::IntrinsicApplication { op, args } => {
+            hasher.write_u8(op.stable_hash_tag());
+            hasher.write_u64(args.len() as u64);
+            for arg in args.iter() {
+                hash_node_rec(ctx, *arg, hasher, seen, depth + 1);
+            }
+        }
         SemanticNodeData::InstantiationRef { base, args } => {
-            hasher.write_u8(3);
             base.hash(hasher);
             hasher.write_u64(args.len() as u64);
             for arg in args.iter() {
@@ -315,19 +326,15 @@ fn hash_node_rec<H: std::hash::Hasher>(
             }
         }
         SemanticNodeData::Literal(value) => {
-            hasher.write_u8(4);
             value.hash(hasher);
         }
         SemanticNodeData::Primitive(kind) => {
-            hasher.write_u8(5);
             kind.hash(hasher);
         }
         SemanticNodeData::Alias(target) => {
-            hasher.write_u8(6);
             hash_node_rec(ctx, *target, hasher, seen, depth + 1);
         }
         SemanticNodeData::Object(surface) => {
-            hasher.write_u8(7);
             hasher.write_u64(surface.positive_members().len() as u64);
             for member in surface.positive_members().iter() {
                 match &member.key {
@@ -368,33 +375,28 @@ fn hash_node_rec<H: std::hash::Hasher>(
             }
         }
         SemanticNodeData::ObjectSpreadProgram(program) => {
-            hasher.write_u8(30);
             program.hash(hasher);
             for child in program.child_nodes() {
                 hash_node_rec(ctx, child, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::Union(arms) => {
-            hasher.write_u8(8);
             hasher.write_u64(arms.len() as u64);
             for arm in arms.iter() {
                 hash_node_rec(ctx, *arm, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::Intersection(arms) => {
-            hasher.write_u8(9);
             hasher.write_u64(arms.len() as u64);
             for arm in arms.iter() {
                 hash_node_rec(ctx, *arm, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::Array { element, readonly } => {
-            hasher.write_u8(10);
             hasher.write_u8(u8::from(*readonly));
             hash_node_rec(ctx, *element, hasher, seen, depth + 1);
         }
         SemanticNodeData::Tuple { elements, readonly } => {
-            hasher.write_u8(11);
             hasher.write_u8(u8::from(*readonly));
             hasher.write_u64(elements.len() as u64);
             for element in elements.iter() {
@@ -413,7 +415,6 @@ fn hash_node_rec<H: std::hash::Hasher>(
             quasis,
             expressions,
         } => {
-            hasher.write_u8(12);
             hasher.write_u64(quasis.len() as u64);
             for quasi in quasis.iter() {
                 hasher.write(quasi.as_bytes());
@@ -424,11 +425,9 @@ fn hash_node_rec<H: std::hash::Hasher>(
             }
         }
         SemanticNodeData::KeyOf { base } => {
-            hasher.write_u8(13);
             hash_node_rec(ctx, *base, hasher, seen, depth + 1);
         }
         SemanticNodeData::IndexedAccess { object, index } => {
-            hasher.write_u8(14);
             hash_node_rec(ctx, *object, hasher, seen, depth + 1);
             match index {
                 IndexKey::String(key) => {
@@ -450,12 +449,10 @@ fn hash_node_rec<H: std::hash::Hasher>(
             }
         }
         SemanticNodeData::Mapped { source, mapper } => {
-            hasher.write_u8(15);
             hash_node_rec(ctx, *source, hasher, seen, depth + 1);
             mapper.hash(hasher);
         }
         SemanticNodeData::TypeOf(_) => {
-            hasher.write_u8(16);
             if let Some((value_root, path)) = data.typeof_head() {
                 value_root.hash(hasher);
                 hasher.write_u64(path.len() as u64);
@@ -469,12 +466,8 @@ fn hash_node_rec<H: std::hash::Hasher>(
         }
         // The nominal terminal hashes its DECLARING IDENTITY: the identity
         // is the node's whole semantic content, so two same-headed carriers
-        // denoting different declarations must hash apart. Tag 29 — a FRESH
-        // tag, because 26 is SyntheticBinding's and the variant tag is this
-        // hasher's domain separation: two unrelated kinds must never share
-        // one.
+        // denoting different declarations must hash apart.
         SemanticNodeData::TypeOfNominal(_) => {
-            hasher.write_u8(29);
             if let Some((value_root, path)) = data.typeof_head() {
                 value_root.hash(hasher);
                 hasher.write_u64(path.len() as u64);
@@ -495,17 +488,14 @@ fn hash_node_rec<H: std::hash::Hasher>(
         SemanticNodeData::TypeParam {
             decl, param_index, ..
         } => {
-            hasher.write_u8(17);
             decl.hash(hasher);
             hasher.write_u16(*param_index);
         }
         SemanticNodeData::Infer { name, binder } => {
-            hasher.write_u8(18);
             hasher.write(name.as_bytes());
             binder.write_stable_fingerprint(hasher);
         }
         SemanticNodeData::InferRef { name, binder } => {
-            hasher.write_u8(27);
             hasher.write(name.as_bytes());
             binder.write_stable_fingerprint(hasher);
         }
@@ -517,7 +507,6 @@ fn hash_node_rec<H: std::hash::Hasher>(
             distributive,
             pending,
         } => {
-            hasher.write_u8(19);
             hasher.write_u8(u8::from(*distributive));
             hash_node_rec(ctx, *check, hasher, seen, depth + 1);
             hash_node_rec(ctx, *extends, hasher, seen, depth + 1);
@@ -548,7 +537,6 @@ fn hash_node_rec<H: std::hash::Hasher>(
             type_parameters,
             ..
         } => {
-            hasher.write_u8(20);
             // The kind is semantic identity: `() => R` and `new () => R`
             // must never fingerprint-collide.
             hasher.write_u8(match kind {
@@ -574,22 +562,18 @@ fn hash_node_rec<H: std::hash::Hasher>(
             }
         }
         SemanticNodeData::MergedDecl { contributors } => {
-            hasher.write_u8(22);
             hasher.write_u64(contributors.len() as u64);
             for contributor in contributors.iter() {
                 hash_node_rec(ctx, *contributor, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::Opaque(error) => {
-            hasher.write_u8(23);
             error.hash(hasher);
         }
         SemanticNodeData::RawFallback { value } => {
-            hasher.write_u8(24);
             hasher.write(value.raw().as_bytes());
         }
         SemanticNodeData::ImportType(_) => {
-            hasher.write_u8(25);
             if let Some((specifier, qualifier, typeof_query)) = data.import_type_head() {
                 hasher.write(specifier.as_bytes());
                 hasher.write_u64(qualifier.len() as u64);
@@ -603,14 +587,11 @@ fn hash_node_rec<H: std::hash::Hasher>(
             }
         }
         SemanticNodeData::SyntheticBinding { id, .. } => {
-            hasher.write_u8(26);
             id.hash(hasher);
         }
         // The sealed callable carrier's parts are readable only by its two
         // consumers, so the cycle hash mixes the kind alone.
-        SemanticNodeData::DeferredCallable(_) => {
-            hasher.write_u8(31);
-        }
+        SemanticNodeData::DeferredCallable(_) => {}
         // `BareRef` is consumed by the `bare_ref_head` arm above the match;
         // every other reference / literal / primitive / alias variant has an
         // explicit arm.

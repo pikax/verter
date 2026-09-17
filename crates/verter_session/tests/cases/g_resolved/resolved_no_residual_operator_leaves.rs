@@ -102,6 +102,11 @@ fn contains_free_type_parameter(expr: &TypeExpr) -> bool {
             types.iter().any(contains_free_type_parameter)
         }
         TypeExpr::Array { element, .. } => contains_free_type_parameter(element),
+        // Operands MUST be walked: exception class (c) can only fire for an
+        // intrinsic that is open-deferred over a free type parameter.
+        TypeExpr::IntrinsicApplication { arguments, .. } => {
+            arguments.iter().any(contains_free_type_parameter)
+        }
         TypeExpr::Tuple { elements, .. } => {
             elements.iter().any(|e| contains_free_type_parameter(&e.ty))
         }
@@ -254,6 +259,9 @@ fn walk(expr: &TypeExpr, path: &str, out: &mut Vec<String>) {
         TypeExpr::TemplateLiteral { .. } => Some("TemplateLiteral"),
         TypeExpr::Infer { .. } => Some("Infer"),
         TypeExpr::Rest(_) => Some("Rest"),
+        // A deferred compiler operation IS a residual operator leaf, so it
+        // is counted like the rest and inherits exception class (c).
+        TypeExpr::IntrinsicApplication { .. } => Some("IntrinsicApplication"),
         _ => None,
     };
     if let Some(kind) = bad_kind {
@@ -274,6 +282,10 @@ fn walk(expr: &TypeExpr, path: &str, out: &mut Vec<String>) {
         // Synthetic carriers are closed terminal leaves with no
         // operator descendants.
         | TypeExpr::SyntheticSlotBinding(_)
+        // Unreachable in practice: `bad_kind` above returns `Some` for an
+        // intrinsic and the walk returns early. Present because this match
+        // is deliberately exhaustive.
+        | TypeExpr::IntrinsicApplication { .. }
         | TypeExpr::Unknown { .. } => {}
         // Exception class (b): RecursiveRef's payload is allowed to
         // retain operator forms (they encode the cycle).

@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package verter.v1;
+
+// ---------------------------------------------------------------------------
+// The shared compiler-intrinsic operation vocabulary.
+//
+// ONE identity for every wire surface that carries an applied compiler
+// intrinsic: component-meta's `IntrinsicApplicationNode` and the typeinfo
+// graph's `GraphIntrinsicApplication` both reference the enum below.
+//
+// The Rust side already owns a single `verter_type_expr::CompilerIntrinsicTypeOp`.
+// Duplicating that identity per envelope would let the two wire surfaces drift
+// from each other and from Rust, so the operation vocabulary is shared here
+// instead.
+//
+// What is NOT shared: the envelope SCHEMA VERSIONS. `SemanticTypeGraph.
+// schema_version` and `ComponentMetaPayload.schema_version` remain independent
+// and advance on their own contracts; only the operation vocabulary is common.
+// ---------------------------------------------------------------------------
+
+// Mirrors the Rust `verter_type_expr::CompilerIntrinsicTypeOp` vocabulary.
+//
+// UNSPECIFIED owns zero deliberately: a missing or unknown operation identity
+// must never decode as a real operation. Producers never emit UNSPECIFIED;
+// decoders treat it as malformed rather than guessing.
+enum CompilerIntrinsicTypeOp {
+  COMPILER_INTRINSIC_TYPE_OP_UNSPECIFIED = 0;
+  COMPILER_INTRINSIC_TYPE_OP_AWAITED = 1;
+}

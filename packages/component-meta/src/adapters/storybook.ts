@@ -4,6 +4,7 @@
 
 import type { ComponentMeta, PropMeta, EventMeta } from "../types.js";
 import type { TypeDescriptor } from "@verter/type-ir";
+import { intrinsicDisplayName } from "@verter/type-ir";
 
 export interface StorybookArgType {
   name?: string;
@@ -111,6 +112,10 @@ function typeToControl(type: TypeDescriptor): StorybookArgType["control"] {
     case "typeParameter":
       return false;
 
+    // A deferred compiler operation has no meaningful runtime control.
+    case "intrinsicApplication":
+      return false;
+
     default:
       return { type: "text" };
   }
@@ -138,6 +143,8 @@ function typeToStorybookName(type: TypeDescriptor): string {
       return type.name;
     case "ref":
       return type.name;
+    case "intrinsicApplication":
+      return intrinsicDisplayName(type.op);
     case "syntheticSlotBinding":
       // Synthetic slot-binding carriers render as their `bindingName` —
       // no runtime resolution.
@@ -177,6 +184,10 @@ function typeToSummary(type: TypeDescriptor): string {
       return type.typeArguments
         ? `${type.name}<${type.typeArguments.map(typeToSummary).join(", ")}>`
         : type.name;
+    case "intrinsicApplication":
+      return type.arguments.length > 0
+        ? `${intrinsicDisplayName(type.op)}<${type.arguments.map(typeToSummary).join(", ")}>`
+        : intrinsicDisplayName(type.op);
     case "recursiveRef":
       return type.typeArguments.length > 0
         ? `${type.name}<${type.typeArguments.map(typeToSummary).join(", ")}>`

@@ -21,6 +21,7 @@ pub(crate) enum InferSyntaxPathStep {
     IntersectionArm(u32),
     TupleElement(u32),
     RefTypeArgument(u32),
+    IntrinsicOperand(u32),
     ImportTypeArgument(u32),
     TypeOfTypeArgument(u32),
     IndexedAccessObject,
@@ -104,6 +105,16 @@ pub(crate) fn for_each_type_expr_child<'a>(
         TypeExpr::Parenthesized(inner) => visit(InferSyntaxPathStep::ParenthesizedInner, inner),
         TypeExpr::Rest(inner) => visit(InferSyntaxPathStep::RestInner, inner),
         TypeExpr::KeyOf(inner) => visit(InferSyntaxPathStep::KeyOfOperand, inner),
+        // An intrinsic CAN contain an `infer` (`Awaited<infer U>`), so its
+        // operands are real binder locations, not terminals.
+        TypeExpr::IntrinsicApplication { arguments, .. } => {
+            for (index, argument) in arguments.iter().enumerate() {
+                visit(
+                    InferSyntaxPathStep::IntrinsicOperand(index as u32),
+                    argument,
+                );
+            }
+        }
         TypeExpr::Array { element, .. } => visit(InferSyntaxPathStep::ArrayElement, element),
         TypeExpr::Union(arms) => {
             for (ordinal, arm) in arms.iter().enumerate() {
@@ -346,6 +357,7 @@ pub(crate) fn collect_extends_infer_declarations(
             | TypeExpr::RecursiveRef { .. }
             | TypeExpr::SyntheticSlotBinding(_)
             | TypeExpr::ImportType { .. }
+            | TypeExpr::IntrinsicApplication { .. }
             | TypeExpr::Unknown(_) => for_each_type_expr_child(expr, |step, child| {
                 pending.push((child, path.child(step)));
             }),

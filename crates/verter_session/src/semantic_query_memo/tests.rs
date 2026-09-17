@@ -10808,6 +10808,39 @@ mod prepared_identity_bijection {
                     subject: SemanticNodeId(2),
                 },
             ),
+            // The pair differs in the OPERAND, not the relation: this probe
+            // asks whether ONE family's identity is injective. The
+            // cross-FAMILY separation (same operand, different relation) is
+            // asserted by the dedicated do-not-warm-hit guards.
+            SemanticQueryKeyTag::AwaitedNormalize => (
+                SemanticQueryKey::AwaitedNormalize {
+                    operand: SemanticNodeId(1),
+                    context: structural_reduce_context(0),
+                },
+                SemanticQueryKey::AwaitedNormalize {
+                    operand: SemanticNodeId(2),
+                    context: structural_reduce_context(0),
+                },
+            ),
+            SemanticQueryKeyTag::AsyncReturnPayload => (
+                SemanticQueryKey::AsyncReturnPayload {
+                    operand: SemanticNodeId(1),
+                    context: structural_reduce_context(0),
+                },
+                SemanticQueryKey::AsyncReturnPayload {
+                    operand: SemanticNodeId(2),
+                    context: structural_reduce_context(0),
+                },
+            ),
+        }
+    }
+
+    fn structural_reduce_context(resolve: u8) -> crate::semantic_query::StructuralReduceContext {
+        crate::semantic_query::StructuralReduceContext {
+            resolve_env_hash: h16(resolve),
+            type_env_hash: h16(0),
+            lib_env_hash: h16(0),
+            project_identity: 0,
         }
     }
 

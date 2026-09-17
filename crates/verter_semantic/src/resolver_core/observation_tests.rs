@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use super::sealed::Sealed;
 use super::ResolverObservation;
-use crate::analysis::flow::FunctionBodySkeleton;
+use crate::analysis::flow::{FunctionBodyKind, FunctionBodySkeleton};
 use crate::analysis::types::Hash16;
 use crate::resolver_core::{
     AttemptOutcome, AugmentationTargetKey, CanonicalId, EnvHashes, FlowFunctionObservationKey,
@@ -578,6 +578,7 @@ fn flow_function_key(byte: u8) -> FlowFunctionObservationKey {
 
 fn empty_skeleton() -> FunctionBodySkeleton {
     FunctionBodySkeleton {
+        kind: FunctionBodyKind::Plain,
         names: Arc::from([]),
         regions: Arc::from([]),
         bindings: Arc::from([]),

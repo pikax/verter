@@ -46,9 +46,9 @@ use std::sync::Arc;
 
 use verter_span::Span;
 use verter_type_expr::{
-    ExcessPropertyOrigin, FunctionExpr, FunctionParam, FunctionSpans, IndexSignature,
-    IndexSignatureSpans, LiteralValue, MappedModifier, MemberSpans, MemberVisibility,
-    MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
+    CompilerIntrinsicTypeOp, ExcessPropertyOrigin, FunctionExpr, FunctionParam, FunctionSpans,
+    IndexSignature, IndexSignatureSpans, LiteralValue, MappedModifier, MemberSpans,
+    MemberVisibility, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
     RecursiveConditionalBranch, RecursiveConditionalFrame, SyntheticCarrierKey,
     SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeParam, UnknownValue, ValueRef,
 };
@@ -177,6 +177,7 @@ fn variant_index(expr: &TypeExpr) -> isize {
         // discriminant (NOT its declaration-order index) so 0..=21 stay frozen.
         TypeExpr::ConstructorType(_) => 22,
         TypeExpr::ImportType { .. } => 23,
+        TypeExpr::IntrinsicApplication { .. } => 24,
     }
 }
 
@@ -211,6 +212,13 @@ fn ref_hash<H: Hasher>(expr: &TypeExpr, h: &mut H) {
         } => {
             name.hash(h);
             ref_hash_slice(type_arguments, h);
+        }
+        // The op contributes its FROZEN tag — never the derived enum
+        // discriminant, which encodes declaration order and would move every
+        // content-addressed key if a future op were inserted before it.
+        TypeExpr::IntrinsicApplication { op, arguments } => {
+            op.stable_hash_tag().hash(h);
+            ref_hash_slice(arguments, h);
         }
         TypeExpr::TypeParameter(tp) => ref_hash_type_param(tp, h),
         TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) | TypeExpr::Parenthesized(inner) => {
@@ -651,6 +659,25 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
     // the two streams are equal to each other.
 
     // Ref — empty and non-empty type arguments.
+    // Compiler intrinsic application — the resolved counterpart of the
+    // identically-rendered `Ref("Awaited", …)` rows below it.
+    v.push((
+        "intrinsic-empty",
+        TypeExpr::IntrinsicApplication {
+            op: CompilerIntrinsicTypeOp::Awaited,
+            arguments: Arc::from([] as [TypeExpr; 0]),
+        },
+    ));
+    v.push((
+        "intrinsic-args",
+        TypeExpr::IntrinsicApplication {
+            op: CompilerIntrinsicTypeOp::Awaited,
+            arguments: Arc::from(vec![
+                TypeExpr::Primitive(PrimitiveName::String),
+                TypeExpr::named("V"),
+            ]),
+        },
+    ));
     v.push((
         "ref-empty",
         TypeExpr::Ref {
@@ -1211,5 +1238,66 @@ fn non_public_member_changes_hash_stream_from_pre_visibility() {
     assert_ne!(
         protected_stream, private_stream,
         "protected and private must produce distinct streams",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The intrinsic application's byte stream is FROZEN, element for element.
+// ---------------------------------------------------------------------------
+
+/// The stream is exactly: discriminant 24, the op's stable hash tag, the
+/// argument count, then each argument in order.
+///
+/// Pinned explicitly (not just via the `ref_hash` equivalence sweep) because
+/// three independent identities feed it — the TypeExpr discriminant, the op's
+/// stable tag, and the argument encoding — and each could drift separately.
+#[test]
+fn intrinsic_application_stream_is_frozen() {
+    let expr = TypeExpr::IntrinsicApplication {
+        op: CompilerIntrinsicTypeOp::Awaited,
+        arguments: Arc::from(vec![TypeExpr::Primitive(PrimitiveName::String)]),
+    };
+    let live = RecordingHasher::record(|h| expr.hash(h));
+    let reference = RecordingHasher::record(|h| ref_hash(&expr, h));
+    assert_eq!(
+        live, reference,
+        "the live iterative stream must equal the frozen reference mirror"
+    );
+
+    // The leading events, spelled out: discriminant, then the op tag.
+    let discriminant = RecordingHasher::record(|h| 24isize.hash(h));
+    assert_eq!(
+        live.first(),
+        discriminant.first(),
+        "an intrinsic application must lead with TypeExpr discriminant 24"
+    );
+    let tag =
+        RecordingHasher::record(|h| CompilerIntrinsicTypeOp::Awaited.stable_hash_tag().hash(h));
+    assert_eq!(
+        live.get(1),
+        tag.first(),
+        "the second event must be the op's STABLE tag, not its derived discriminant"
+    );
+}
+
+/// The resolved intrinsic and the authored reference that renders identically
+/// must NOT share a byte stream — otherwise one content-addressed key would
+/// serve both, which is the conflation this representation exists to prevent.
+#[test]
+fn intrinsic_and_authored_reference_do_not_share_a_stream() {
+    let operand = || TypeExpr::named("T");
+    let authored = TypeExpr::Ref {
+        name: Arc::from("Awaited"),
+        type_arguments: Arc::from(vec![operand()]),
+    };
+    let resolved = TypeExpr::IntrinsicApplication {
+        op: CompilerIntrinsicTypeOp::Awaited,
+        arguments: Arc::from(vec![operand()]),
+    };
+    assert_ne!(
+        RecordingHasher::record(|h| authored.hash(h)),
+        RecordingHasher::record(|h| resolved.hash(h)),
+        "a resolved compiler intrinsic must not hash like the authored reference \
+         spelled the same way"
     );
 }

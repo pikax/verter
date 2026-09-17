@@ -2140,9 +2140,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // Per-key substitution, then the final idempotent
                     // pre-seal closure — the member's proof, the value
                     // channel and the batch publish all see the closed
-                    // value.
-                    FlowReturnPendingOutcome::EvaluatedValue(self.close_flow_result_pre_seal(
-                        self.apply_frame_key_substitution(&member.key, result),
+                    // value — and the function-kind wrap materializes
+                    // last, exactly as the root's own close orders it.
+                    FlowReturnPendingOutcome::EvaluatedValue(self.materialize_flow_return_wrap(
+                        self.close_flow_result_pre_seal(
+                            self.apply_frame_key_substitution(&member.key, result),
+                        ),
                     ))
                 }
                 no_value => no_value,
@@ -3314,6 +3317,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return true;
             }
             match data.as_ref() {
+                SemanticNodeData::IntrinsicApplication { args, .. } => {
+                    stack.extend(args.iter().copied());
+                }
                 SemanticNodeData::Alias(inner) => stack.push(*inner),
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     let members = composite.composite_members().expect("composite arm");
@@ -7866,6 +7872,9 @@ fn comparable_root_kind(data: &SemanticNodeData) -> Option<ComparableRootKind> {
             _ => Some(ComparableRootKind::Primitive(*kind)),
         },
         SemanticNodeData::Literal(_) => Some(ComparableRootKind::Literal),
+        // An UNREDUCED operation has no comparable root shape yet — comparing
+        // it structurally would compare the operation, not its value.
+        SemanticNodeData::IntrinsicApplication { .. } => None,
         SemanticNodeData::TypeOfNominal(_) => Some(ComparableRootKind::Nominal),
         SemanticNodeData::Object(_)
         | SemanticNodeData::ObjectSpreadProgram(_)

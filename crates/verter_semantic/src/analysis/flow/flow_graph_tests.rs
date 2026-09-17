@@ -6,8 +6,8 @@
 use super::build_function_flow_graph_for_test as build_function_flow_graph;
 use super::*;
 use crate::analysis::flow::{
-    FunctionBodySkeleton, FunctionBodySource, SkeletonBindingId, SkeletonPathSegment,
-    SkeletonRegionKind, SkeletonReturnSiteId, SkeletonWriteCertainty,
+    FunctionBodyKind, FunctionBodySkeleton, FunctionBodySource, SkeletonBindingId,
+    SkeletonPathSegment, SkeletonRegionKind, SkeletonReturnSiteId, SkeletonWriteCertainty,
 };
 
 fn return_site_id(skeleton: &FunctionBodySkeleton, ordinal: usize) -> SkeletonReturnSiteId {
@@ -862,6 +862,7 @@ fn flow_graph_enumerates_every_node_family_and_empty_graphs() {
         "function enumerate(x: number) { const y = x + 1; if (x) { return y; } return x; }",
     );
     let empty = FunctionBodySkeleton {
+        kind: FunctionBodyKind::Plain,
         names: Arc::from([]),
         regions: Arc::from([]),
         bindings: Arc::from([]),

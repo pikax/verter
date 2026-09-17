@@ -1233,6 +1233,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         index: usize,
     ) -> Option<(SemanticNodeId, ProjectionReductionContext)> {
         match data {
+            SemanticNodeData::IntrinsicApplication { args, .. } => args
+                .get(index)
+                .map(|argument| (*argument, context.into_structural_provenance())),
             SemanticNodeData::Alias(target) => (index == 0).then_some((*target, context)),
             SemanticNodeData::TypeParam {
                 constraint,

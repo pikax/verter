@@ -1071,6 +1071,43 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "",
             admission: AdmissionSpec::Singleflight,
         },
+        // AwaitedNormalize { operand, context } — the checker's awaited-type
+        // relation as a first-class family. `R T L J` (no `P`): the reduction
+        // walks an already-lowered interned operand, but it recognises a
+        // `Promise` carrier by RESOLVED declaration identity through the
+        // intrinsic registry, which is a name-resolution question — so the
+        // resolve env is a real identity dimension, exactly as for
+        // TemplateLiteralReduce. The key has NO slot, so these env dims ride
+        // IN the context. LIVE producer. Carries no `mode` and no DemandAxis:
+        // the relation is fixed, not a projection rung, so `allowed_demand`
+        // is empty.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::AwaitedNormalize,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "StructuralReduceContext",
+            value_domain: SemanticQueryValueTag::TypeNode,
+            env_dims: EnvDimSpec::Static(env_resolve()),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard: "awaited_normalize_do_not_warm_hit",
+            admission: AdmissionSpec::Singleflight,
+        },
+        // AsyncReturnPayload { operand, context } — the payload relation an
+        // async function's joined return takes before the `Promise<…>` wrap.
+        // Same shape and same env set as AwaitedNormalize, and a DISTINCT
+        // family: the two relations disagree on a naked type parameter
+        // (`<T>` ⇒ `Awaited<T>` vs `T`), so sharing a family identity would
+        // let one answer warm-hit the other. The guard name is per-family for
+        // the same reason.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::AsyncReturnPayload,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "StructuralReduceContext",
+            value_domain: SemanticQueryValueTag::TypeNode,
+            env_dims: EnvDimSpec::Static(env_resolve()),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard: "async_return_payload_do_not_warm_hit",
+            admission: AdmissionSpec::Singleflight,
+        },
     ]
 }
 

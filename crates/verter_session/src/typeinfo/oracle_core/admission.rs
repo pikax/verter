@@ -764,6 +764,12 @@ pub(crate) fn admit_type_expr(expr: &TypeExpr) -> AdmissionVerdict {
         // Non-erased rejectable variants — deferred result constructs, rejected
         // in every currently-admissible mode.
         TypeExpr::KeyOf(_) => AdmissionVerdict::Reject(RejectReason::DeferredConstruct("keyof")),
+        // An applied compiler-native operation. Same class as its deferred
+        // siblings: the oracle is default-REJECT and an unreduced intrinsic
+        // has no TS-comparable admitted form.
+        TypeExpr::IntrinsicApplication { .. } => {
+            AdmissionVerdict::Reject(RejectReason::DeferredConstruct("intrinsic-application"))
+        }
         TypeExpr::TypeOf(_) => AdmissionVerdict::Reject(RejectReason::DeferredConstruct("typeof")),
         TypeExpr::IndexedAccess { .. } => {
             AdmissionVerdict::Reject(RejectReason::DeferredConstruct("indexed-access"))

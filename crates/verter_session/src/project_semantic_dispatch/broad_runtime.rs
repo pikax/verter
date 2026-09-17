@@ -202,6 +202,16 @@ impl ProjectSemanticDispatch<'_> {
             };
 
             match data.as_ref() {
+                // The operation is not itself a runtime shape; its operands
+                // are, so they are the work — never a blanket Unknown.
+                SemanticNodeData::IntrinsicApplication { args, .. } => {
+                    for arg in args.iter().rev() {
+                        work.push(RuntimeWork {
+                            node: *arg,
+                            filter_unknown: item.filter_unknown,
+                        });
+                    }
+                }
                 SemanticNodeData::Alias(inner) => work.push(RuntimeWork {
                     node: *inner,
                     filter_unknown: item.filter_unknown,

@@ -54,6 +54,10 @@ enum ProofPathStep {
     FunctionTypeParamConstraint(u32),
     FunctionTypeParamDefault(u32),
     ReferenceArgument(u32),
+    /// An operand of a compiler-native intrinsic operation. Distinct from
+    /// [`Self::ReferenceArgument`]: no declaration is referenced here, so the
+    /// proof record must not claim one.
+    IntrinsicOperand(u32),
     MergedContributor(u32),
     ObjectSpreadEffect(u32),
 }
@@ -117,6 +121,18 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
         match data.as_ref() {
             SemanticNodeData::DeclRef { identity } => {
                 references.insert(path, ProofReferenceIdentity::Decl(identity.clone()));
+            }
+            // No declaration is referenced by a compiler-native operation —
+            // only its operands carry proof-relevant references.
+            SemanticNodeData::IntrinsicApplication { args, .. } => {
+                for (index, arg) in args.iter().enumerate() {
+                    push_proof_child(
+                        &mut stack,
+                        &path,
+                        ProofPathStep::IntrinsicOperand(index as u32),
+                        *arg,
+                    );
+                }
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 references.insert(path.clone(), ProofReferenceIdentity::Decl(base.clone()));
@@ -556,7 +572,7 @@ fn normalized_projection_shape_equivalent(
             (
                 left @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
                 right @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
-            ) if left.discriminant_index() == right.discriminant_index() => {
+            ) if left.node_tag() == right.node_tag() => {
                 let left = left.composite_members().expect("composite arm");
                 let right = right.composite_members().expect("composite arm");
                 if left.len() != right.len() {

@@ -136,7 +136,9 @@ pub static SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS: AtomicU64 = AtomicU64::new(0
 ///  25 = FlowReturn
 ///  26 = ResolveCall
 ///  27 = ClassifyTruthinessDomain
-pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 28;
+///  28 = AwaitedNormalize
+///  29 = AsyncReturnPayload
+pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 30;
 
 /// Human-readable labels for each operator-kind index. Kept in sync
 /// with the comment on `DISPATCH_OPERATOR_KIND_COUNT` and with the
@@ -170,6 +172,8 @@ pub const DISPATCH_OPERATOR_KIND_LABELS: [&str; DISPATCH_OPERATOR_KIND_COUNT] = 
     "FlowReturn",
     "ResolveCall",
     "ClassifyTruthinessDomain",
+    "AwaitedNormalize",
+    "AsyncReturnPayload",
 ];
 
 /// Per-kind call counts. `dispatch_operator_with_recurse` increments
@@ -178,6 +182,8 @@ pub const DISPATCH_OPERATOR_KIND_LABELS: [&str; DISPATCH_OPERATOR_KIND_COUNT] = 
 pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
     // All zero-initialised; order within the array is immaterial —
     // `kind_index_for_key` keys it.
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -216,6 +222,8 @@ pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUN
 pub static DISPATCH_OPERATOR_KIND_NS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
     // All zero-initialised; order within the array is immaterial —
     // `kind_index_for_key` keys it.
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -389,6 +397,8 @@ pub fn kind_index_for_key(key: &crate::semantic_query::SemanticQueryKey) -> usiz
         SemanticQueryKey::FlowReturn(_) => 25,
         SemanticQueryKey::ResolveCall(_) => 26,
         SemanticQueryKey::ClassifyTruthinessDomain { .. } => 27,
+        SemanticQueryKey::AwaitedNormalize { .. } => 28,
+        SemanticQueryKey::AsyncReturnPayload { .. } => 29,
     }
 }
 

@@ -5298,9 +5298,9 @@ fn dispatch_host_adapter_routes_per_base_scope() {
         .resolve_prepared_type_decl(global_anchor, &ri)
         .is_missing());
 
-    // `utility_source` and `bare_ref_origin` behave per-scope; without
+    // `resolve_builtin_utility` and `bare_ref_origin` behave per-scope; without
     // user shadowings these return `Builtin` / `Unknown` respectively.
-    let _ = adapter.utility_source(anchor_a, "Partial");
+    let _ = adapter.resolve_builtin_utility(anchor_a, "Partial");
     let _ = adapter.bare_ref_origin(anchor_a, "Foo");
 }
 
@@ -8765,7 +8765,7 @@ fn mapped_type_uses_source_member_names_when_object_source() {
 
 /// Helper: build a content-free `ResolvedDeclSlotIdentity` slot carrying a
 /// utility name so `build_instantiate` sees it as a "utility" through
-/// `utility_source`. Returns the slot for use as
+/// `resolve_builtin_utility`. Returns the slot for use as
 /// `SemanticQueryKey::Instantiate.base`.
 fn utility_identity(
     _graph: &Arc<SemanticGraphStore>,
@@ -12013,23 +12013,35 @@ fn awaited_absorbs_lattice_extremes() {
     }
 }
 
-/// An object surface that CARRIES a `then` member may be a structural
-/// thenable — out of scope for the carrier-identity unwrap — so the
-/// reduction defers to the `Opaque(Miss)` shell instead of passing a
-/// potentially-wrong surface through.
+/// A `then` member decides the awaited type only when it is CALLABLE.
+///
+/// `{ then: number }` has no call signature on `then`, so the checker's
+/// thenable protocol calls it not a thenable and `Awaited<{ then: number }>`
+/// is the surface itself (tsc 7.0.2: `BadThen<T>` rows of
+/// `awaited_thenable_protocol_oracle_matrix`). A `then` typed by an open
+/// type parameter cannot be enumerated, so that surface still defers to the
+/// `Opaque(Miss)` shell rather than guessing either way.
 #[test]
-fn awaited_defers_then_bearing_object_surfaces() {
+fn awaited_decides_then_bearing_surfaces_by_callability() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let num = primitive(&graph, PrimitiveKind::Number);
-    let thenable = simple_object(&graph, &[("then", num)]);
+    let not_thenable = simple_object(&graph, &[("then", num)]);
 
-    let result = instantiate_utility(&dispatch, &graph, "Awaited", &[thenable]);
+    let result = instantiate_utility(&dispatch, &graph, "Awaited", &[not_thenable]);
+    assert_eq!(
+        result, not_thenable,
+        "a non-callable `then` is not a thenable: the surface is its own awaited type"
+    );
+
+    let open = outer_type_param(&graph, "T");
+    let undecidable = simple_object(&graph, &[("then", open)]);
+    let result = instantiate_utility(&dispatch, &graph, "Awaited", &[undecidable]);
     let data = graph.node_data(result).expect("node data");
     assert!(
         matches!(&*data, SemanticNodeData::Opaque(QueryError::Miss)),
-        "then-bearing surface must defer, got {data:?}"
+        "an undecidable `then` must defer, got {data:?}"
     );
 }
 
@@ -17205,6 +17217,83 @@ fn mapped_key_domain_judges_instantiations_per_argument_not_by_arg_openness() {
     }
 }
 
+/// A deferred intrinsic application is KNOWN-SYMBOLIC, never TERMINAL.
+///
+/// `means_type_is_not_yet_known()` answers `false` for
+/// `IntrinsicApplication(Awaited, [T])`: the operation is decided, so the
+/// node is not an unknown. That `false` must never be read as "fully
+/// materialized". The same node still carries its unreduced operand, is not
+/// a settled value the awaited relation may pass through, and is not a
+/// provably closed domain. Each of those three readers is pinned here beside
+/// the known-ness, with a settled primitive as the control that flips the
+/// terminal half.
+#[test]
+fn intrinsic_application_is_known_symbolic_and_not_terminal() {
+    use crate::semantic_query::{
+        ChildWalk, CompilerIntrinsicTypeOp, DeclIdentity, HashValue, LiteralValue, PrimitiveKind,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let awaited_t = graph.intern_node(SemanticNodeData::IntrinsicApplication {
+        op: CompilerIntrinsicTypeOp::Awaited,
+        args: Arc::from(vec![t_param].into_boxed_slice()),
+    });
+    let settled = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let key_lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "x".to_string(),
+    )));
+    let builtin_pick = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Pick"),
+    };
+
+    let data = graph.node_data(awaited_t).expect("interned");
+    assert!(
+        !data.means_type_is_not_yet_known(),
+        "a decided operation over an open binder is KNOWN, not an unknown"
+    );
+
+    let mut children = Vec::new();
+    assert_eq!(
+        data.for_each_child(|child| children.push(child)),
+        ChildWalk::Enumerated
+    );
+    assert_eq!(
+        children,
+        vec![t_param],
+        "known-symbolic, not terminal: the unreduced operand is still a child"
+    );
+    assert!(
+        !dispatch.settled_non_thenable(awaited_t),
+        "not terminal: the awaited relation must not pass the application through as settled"
+    );
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &dispatch,
+            &builtin_pick,
+            &[awaited_t, key_lit],
+        ),
+        "not terminal: an unreduced application is not a provably closed domain"
+    );
+
+    // Control: a settled primitive is terminal on every reader above.
+    let settled_data = graph.node_data(settled).expect("interned");
+    assert!(!settled_data.means_type_is_not_yet_known());
+    let mut settled_children = Vec::new();
+    assert_eq!(
+        settled_data.for_each_child(|child| settled_children.push(child)),
+        ChildWalk::Enumerated
+    );
+    assert!(settled_children.is_empty());
+    assert!(dispatch.settled_non_thenable(settled));
+}
+
 /// Hash-consed repeated open node: `Pick<Foo<T, T>, …>` interns BOTH type
 /// arguments as the SAME `TypeParam` node id. The per-argument openness
 /// collect must see `open_args = [true, true]` — a visited-set walk that
@@ -22092,8 +22181,8 @@ fn intern_string_literal_union_multi_preserves_members() {
 /// `pick_builtin_decl_identity()` returns the `__builtin__` sentinel
 /// matching the convention at `meta_resolve.rs:9959/9977/9998`. Any
 /// drift from this sentinel breaks the
-/// `adapter.utility_source(base, "Pick")` route through
-/// `UtilitySource::Builtin`.
+/// `adapter.resolve_builtin_utility(base, "Pick")` route through
+/// `BuiltinUtilityResolution::Builtin`.
 #[test]
 fn pick_builtin_decl_identity_uses_canonical_sentinel() {
     let id = pick_builtin_decl_identity();
@@ -22101,7 +22190,7 @@ fn pick_builtin_decl_identity_uses_canonical_sentinel() {
         id.defining_canonical.as_ref(),
         "__builtin__",
         "Pick defining_canonical must be the `__builtin__` sentinel; \
-         drift breaks utility_source routing"
+         drift breaks resolve_builtin_utility routing"
     );
     assert_eq!(id.merged_symbol_name.as_ref(), "Pick");
     // R6: the slot is content-free — no `whole_hash` field exists.
@@ -22197,6 +22286,8 @@ fn semantic_query_key_variant_set_is_structurally_pinned() {
             FlowReturn(_) => "FlowReturn",
             ResolveCall(_) => "ResolveCall",
             ClassifyTruthinessDomain { .. } => "ClassifyTruthinessDomain",
+            AwaitedNormalize { .. } => "AwaitedNormalize",
+            AsyncReturnPayload { .. } => "AsyncReturnPayload",
         }
     }
     // Sanity probe: each variant carries a distinct label and the

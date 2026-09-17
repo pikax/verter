@@ -278,7 +278,7 @@ fn type_node_taxonomy_proto_ts_parity() {
     // proof witness rides the payload-side `relation_proofs` table), and the
     // tag-33 `object_spread_program` arm carries the canonical ordered
     // spread-program node (34-100 stays reserved).
-    assert_proto_ts_parity("GraphTypeNode", "GraphTypeNode", "kind", 32);
+    assert_proto_ts_parity("GraphTypeNode", "GraphTypeNode", "kind", 33);
 }
 
 #[test]

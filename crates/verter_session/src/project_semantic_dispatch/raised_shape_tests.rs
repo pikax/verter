@@ -2797,6 +2797,7 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
             SemanticNodeData::DeclRef { .. } => "decl_ref",
             SemanticNodeData::InstantiationRef { .. } => "instantiation_ref",
             SemanticNodeData::BareRef(_) => "bare_ref",
+            SemanticNodeData::IntrinsicApplication { .. } => "intrinsic_application",
             SemanticNodeData::ImportType(_) => "import_type",
             SemanticNodeData::RawFallback { .. } => "raw_fallback",
             SemanticNodeData::SyntheticBinding { .. } => "synthetic_binding",

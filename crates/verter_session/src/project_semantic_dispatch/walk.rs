@@ -1600,6 +1600,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
             };
             match &*data {
+                // An UNREDUCED operation is not a member-projection base: its
+                // value is unknown until the owning family reduces it, so the
+                // path walk fails closed rather than inventing a surface.
+                SemanticNodeData::IntrinsicApplication { .. } => {
+                    results.push(self.opaque_miss());
+                    return;
+                }
                 SemanticNodeData::MergedDecl { contributors } => {
                     // Reduce the peer-merged surface and re-process the current
                     // segment against the merged object.
@@ -4737,6 +4744,17 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             }
         };
         match &*data {
+            // An unreduced operation contributes NO surface of its own.
+            SemanticNodeData::IntrinsicApplication { .. } => {
+                drop(data);
+                self.contribute_surface(
+                    target,
+                    root_contribution,
+                    intersection_buffers,
+                    union_buffers,
+                    None,
+                );
+            }
             SemanticNodeData::MergedDecl { contributors } => {
                 // Peer-merge the same-name interface contributors, then RE-VISIT
                 // the reduced node. The reducer applies declaration-merge member
@@ -7168,7 +7186,10 @@ pub(super) fn value_may_contribute_call_signatures(
             // could contribute a DIFFERENT signature set is independently
             // classified possibly-callable and already fails the whole
             // intersection closed.
-            SemanticNodeData::Primitive(_)
+            // Not callable: the operation carries no signature until the
+            // owning family reduces it.
+            SemanticNodeData::IntrinsicApplication { .. }
+            | SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
             // The nominal terminal widens to the `symbol` scalar — same
             // one-backing-interface order-safety as the primitive itself.

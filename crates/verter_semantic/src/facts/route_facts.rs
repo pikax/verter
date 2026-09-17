@@ -436,6 +436,13 @@ impl RouteFactProducer<'_> {
             TypeExpr::Array { element, .. } => {
                 self.walk_whole_route(element, context, guard, out);
             }
+            // The operands are genuinely part of the route and may carry refs;
+            // the op itself names no declaration and contributes no edge.
+            TypeExpr::IntrinsicApplication { arguments, .. } => {
+                for argument in arguments.iter() {
+                    self.walk_whole_route(argument, context, guard, out);
+                }
+            }
             TypeExpr::Tuple { elements, .. } => {
                 for element in elements.iter() {
                     self.walk_whole_route(&element.ty, context, guard, out);
@@ -1042,6 +1049,14 @@ pub(crate) fn collect_type_refs(expr: &TypeExpr, out: &mut Vec<String>) {
             }
         }
         TypeExpr::Array { element, .. } => collect_type_refs(element, out),
+        // A compiler intrinsic names NO declaration, so it contributes no
+        // type ref of its own — matching `referenced_names` in
+        // `verter_type_expr`. Its operands still enumerate.
+        TypeExpr::IntrinsicApplication { arguments, .. } => {
+            for argument in arguments.iter() {
+                collect_type_refs(argument, out);
+            }
+        }
         TypeExpr::Object(obj) => {
             for member in &obj.properties {
                 if let ObjectMember::Property(prop) = member {

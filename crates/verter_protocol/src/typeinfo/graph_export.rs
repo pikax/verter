@@ -67,8 +67,9 @@ use std::hash::{Hash, Hasher};
 use prost::Message;
 use rustc_hash::{FxHashMap, FxHasher};
 use verter_type_expr::{
-    AuthoredPropertyKey, FunctionExpr, LiteralValue, MappedModifier, MethodSignature, ObjectMember,
-    ObjectMethodKind, PrimitiveName, TypeExpr, TypeParam, ValueDeclIdentityPart,
+    AuthoredPropertyKey, CompilerIntrinsicTypeOp, FunctionExpr, LiteralValue, MappedModifier,
+    MethodSignature, ObjectMember, ObjectMethodKind, PrimitiveName, TypeExpr, TypeParam,
+    ValueDeclIdentityPart,
 };
 
 use crate::typeinfo::graph::{
@@ -77,10 +78,11 @@ use crate::typeinfo::graph::{
 };
 use crate::verter::v1::{
     graph_literal_value, graph_object_construction_effect, graph_property_key, graph_query_error,
-    graph_type_node, GraphAliasInstantiation, GraphArray, GraphConditional, GraphCycle,
-    GraphDiagnostic, GraphIndexSignature, GraphIndexedAccess, GraphInfer, GraphIntersection,
-    GraphKeyOf, GraphLiteral, GraphLiteralValue, GraphMapped, GraphObject,
-    GraphObjectConstructionEffect, GraphObjectIndexEffect, GraphObjectMember,
+    graph_type_node, CompilerIntrinsicTypeOp as CompilerIntrinsicTypeOpWire,
+    GraphAliasInstantiation, GraphArray, GraphConditional, GraphCycle, GraphDiagnostic,
+    GraphIndexSignature, GraphIndexedAccess, GraphInfer, GraphIntersection,
+    GraphIntrinsicApplication, GraphKeyOf, GraphLiteral, GraphLiteralValue, GraphMapped,
+    GraphObject, GraphObjectConstructionEffect, GraphObjectIndexEffect, GraphObjectMember,
     GraphObjectNamedEffect, GraphObjectSignatureEffect, GraphObjectSpreadEffect,
     GraphObjectSpreadProgram, GraphOpaque, GraphPrimitive, GraphPropertyKey, GraphQueryError,
     GraphQueryErrorBudgetExceeded, GraphQueryErrorOther, GraphReference, GraphSignature,
@@ -487,6 +489,20 @@ impl<'a> GraphExporter<'a> {
                 name,
                 type_arguments,
             } => self.reference_node(name, type_arguments, depth),
+            // NOT `reference_node`: that mints a symbol id and encodes
+            // `GraphReference` / `GraphAliasInstantiation`, asserting a
+            // declaration this operation does not have. NOT `opaque_other`
+            // either — since schema 8 an intrinsic HAS a faithful wire
+            // representation, so degrading would now be a lie.
+            TypeExpr::IntrinsicApplication { op, arguments } => {
+                let argument_ids = self.expr_ids(arguments, depth);
+                self.push_node(graph_type_node::Kind::IntrinsicApplication(
+                    GraphIntrinsicApplication {
+                        op: intrinsic_op_kind(*op) as i32,
+                        argument_node_ids: argument_ids,
+                    },
+                ))
+            }
             TypeExpr::TypeParameter(param) => self.type_parameter_node(param, depth),
             TypeExpr::KeyOf(operand) => {
                 let base = self.expr_node(operand, depth + 1);
@@ -1054,6 +1070,15 @@ impl<'a> GraphExporter<'a> {
         });
         self.symbol_ids.insert(cache_key, id);
         id
+    }
+}
+
+/// Exhaustive on purpose: a new compiler intrinsic must fail to compile here
+/// until its wire identity is stated. UNSPECIFIED is never produced — it
+/// exists so a missing op cannot decode as a real one.
+fn intrinsic_op_kind(op: CompilerIntrinsicTypeOp) -> CompilerIntrinsicTypeOpWire {
+    match op {
+        CompilerIntrinsicTypeOp::Awaited => CompilerIntrinsicTypeOpWire::Awaited,
     }
 }
 

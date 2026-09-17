@@ -330,6 +330,10 @@ pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
         | TypeExpr::KeyOf(element)
         | TypeExpr::Rest(element)
         | TypeExpr::Parenthesized(element) => dispatch_route_expr_is_materialized(element),
+        // A DEFERRED compiler operation: the application itself has not
+        // reduced, so the route is not materialized regardless of how
+        // materialized its operands are.
+        TypeExpr::IntrinsicApplication { .. } => false,
         TypeExpr::Tuple { elements, .. } => elements
             .iter()
             .all(|element| dispatch_route_expr_is_materialized(&element.ty)),

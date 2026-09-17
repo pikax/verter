@@ -44,6 +44,7 @@ pub use verter_semantic::analysis::type_solver::arena::PrimitiveKind;
 // so callers working with the semantic graph can match on exact literal
 // shapes (`"idle"` vs `"busy"`) without collapsing them to the broader
 // `Primitive(String)`.
+pub use verter_type_expr::CompilerIntrinsicTypeOp;
 pub use verter_type_expr::LiteralValue;
 
 // Reuse the existing structured failure shape from the resolver — there is no
@@ -119,7 +120,7 @@ pub mod admit;
 pub mod carrier;
 pub mod composite;
 mod flow_return_result;
-pub use flow_return_result::FlowReturnResult;
+pub use flow_return_result::{FlowReturnResult, FlowReturnWrap};
 
 /// The ONE owner of the legacy compatibility-spelling family (exact
 /// spellings + parameterised prefixes) and the shared display-family
@@ -132,7 +133,12 @@ pub(crate) mod compat_spelling;
 /// readable only by the `ResolveOverloadSet` / `ResolveCall` consumers.
 pub mod deferred_callable;
 pub use deferred_callable::{DeferredCallable, ResolveCallConsumer, ResolveOverloadSetConsumer};
+
+/// The one per-variant vocabulary of [`SemanticNodeData`] and its central
+/// topology-only child walk.
+pub mod node_tag;
 pub use index_key::CanonicalIndexInt;
+pub use node_tag::{ChildWalk, SemanticNodeTag, SEMANTIC_NODE_TAG_BOUND};
 
 pub use demand::{
     apply_mask, backfill_points, cached_satisfies, demand_at_hop, relevant_demand_axes,
@@ -4971,6 +4977,18 @@ pub struct SemanticGraphStats {
     pub branch_selections_true: u64,
     pub branch_selections_false: u64,
     pub budget_fallback_count: u64,
+    /// Cold `AwaitedNormalize` builds — one per family MISS that actually
+    /// ran the reducer. A warm family hit never enters the builder, so a
+    /// warm replay of an already-reduced operand leaves this UNCHANGED:
+    /// that is the discriminating signal for awaited-relation memoization
+    /// (a count that climbs on replay means the family is not being hit).
+    pub awaited_normalize_count: u64,
+    /// Cold `AsyncReturnPayload` builds. Counted SEPARATELY from
+    /// `awaited_normalize_count` because the two relations are distinct
+    /// families: one operand reduced under both relations is two cold
+    /// builds, and collapsing the counters would hide exactly the
+    /// cross-family aliasing the separation exists to prevent.
+    pub async_return_payload_count: u64,
     // ── Path / projection histogram percentiles (B2 baseline:
     // reservoir-sampled by C-phase builders; F3 corpus consumes p50/p95).
     pub path_length_p50: u32,
@@ -6585,6 +6603,44 @@ pub struct TemplateLiteralReduceContext {
     pub project_identity: u32,
 }
 
+/// Env a structural REDUCTION over already-lowered nodes depends on (env
+/// dims `R T L J`) — shared by
+/// [`SemanticQueryKey::AwaitedNormalize`] and
+/// [`SemanticQueryKey::AsyncReturnPayload`].
+///
+/// Neither key has a slot (the identity core is the interned `operand`
+/// node), so the R21 env dimensions ride here IN the context. Per R21 this
+/// carries `R T L J`:
+///
+/// - `resolve_env_hash` (`R`) — the operand's `Promise` carrier is
+///   recognised by RESOLVED declaration identity through the intrinsic
+///   registry, which is a name-resolution question: the same authored
+///   operand resolves to a different carrier under a different resolve env.
+/// - `type_env_hash` (`T`), `lib_env_hash` (`L`) — the standard structural
+///   reduction env (both relations read the lib's `Promise` declaration).
+/// - `project_identity` (`J`) — project isolation.
+///
+/// There is deliberately NO `parse_env_hash` (`P`): both relations operate
+/// over an already-lowered interned operand (content-version rooted via
+/// `ReadSetSignature`), never a fresh parsed body skeleton.
+///
+/// The context SHAPE is shared but the two families are NOT: they are
+/// distinct `SemanticQueryKey` variants with distinct `FamilyKey` variants,
+/// so one operand under one env is two different query identities with two
+/// different answers. That separation is the point — see
+/// [`SemanticQueryKey::AsyncReturnPayload`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StructuralReduceContext {
+    /// Import / name-resolution dimension (`R`).
+    pub resolve_env_hash: HashValue,
+    /// Type-env dimension (`T`).
+    pub type_env_hash: HashValue,
+    /// Lib-env dimension (`L`).
+    pub lib_env_hash: HashValue,
+    /// Project-isolation dimension (`J`).
+    pub project_identity: u32,
+}
+
 /// A point in a program — the identity core of
 /// [`SemanticQueryKey::FlowNarrowingAt`] and
 /// [`SemanticQueryKey::ContextualTypeAt`].
@@ -8053,6 +8109,110 @@ pub enum SemanticQueryKey {
     ClassifyTruthinessDomain {
         subject: SemanticNodeId,
     },
+    /// Normalize `operand` through the checker's RUNTIME AWAITED-TYPE
+    /// relation — the relation `await x` applies to its operand and an async
+    /// generator applies to its iteration parameters. An authored lib
+    /// `Awaited<T>` is NOT read through this family: it is the lib
+    /// conditional, evaluated under `Instantiate`, and differs on malformed
+    /// thenables (`never` there, `any` here).
+    ///
+    /// **LIVE producer** ([`AdmissionSpec::Singleflight`]). Per-shape
+    /// contract, measured against tsc 7.0.2:
+    ///
+    /// - a settled NON-THENABLE operand (primitive, literal, template
+    ///   literal, signature, tuple, array, an object surface that provably
+    ///   carries no `then` member) reduces to the operand itself;
+    /// - `null` / `undefined` pass through (the lib conditional's first
+    ///   clause);
+    /// - a `Promise<V>` carrier — recognised by RESOLVED declaration
+    ///   identity through the intrinsic registry, never by spelling —
+    ///   RE-ENTERS this family on `V`, so nesting unwraps through the
+    ///   memo / singleflight / cycle machinery rather than a private
+    ///   recursion;
+    /// - a union DISTRIBUTES by re-entering this family per arm and
+    ///   renormalising through the canonical union; any undecidable arm
+    ///   defers the whole reduction (partial distribution would silently
+    ///   drop information);
+    /// - a type parameter reduces to ITSELF when awaiting its constraint
+    ///   gives each constraint arm back (`<T extends string>`,
+    ///   `<T extends Plain>`, `<T extends number | Plain>` ⇒ `T`);
+    /// - every other type parameter — unconstrained, or constrained by
+    ///   `{}` / `object` / `unknown` / a thenable — reduces to the
+    ///   canonical [`SemanticNodeData::IntrinsicApplication`] over the
+    ///   `Awaited` compiler intrinsic, a settled, memoizable SYMBOLIC value
+    ///   (`<T>` ⇒ `Awaited<T>`, `<T extends Promise<string>>` ⇒
+    ///   `Awaited<T>`);
+    /// - that intrinsic application is its own awaited type (idempotence),
+    ///   and so is a DEFERRED authored lib `Awaited<X>`; a reduced authored
+    ///   application is awaited again;
+    /// - an object surface follows the checker's thenable protocol: no
+    ///   callable `then` ⇒ itself; a callable `then` whose `onfulfilled`
+    ///   is callable RE-ENTERS this family on the promised value; a callable
+    ///   `then` that promises nothing, or an optional callable `then` ⇒
+    ///   `any` (the checker reports the operand);
+    /// - a declaration carrier (`DeclRef` / `InstantiationRef`) expands
+    ///   one level through `Instantiate` and re-enters this family on the
+    ///   body; an unchanged body answers with the CARRIER, so a
+    ///   non-thenable alias keeps its identity;
+    /// - a `then` shape the reader cannot enumerate, a carrier that does
+    ///   not expand, a cyclic carrier, an exhausted budget, or any other
+    ///   unsettled shape is an HONEST REFUSAL (the deferred `Opaque(Miss)`
+    ///   shell), never a fabricated passthrough.
+    ///
+    /// Value domain: [`SemanticQueryValueTag::TypeNode`].
+    ///
+    /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
+    AwaitedNormalize {
+        operand: SemanticNodeId,
+        context: StructuralReduceContext,
+    },
+    /// Reduce `operand` to the PAYLOAD an async function publishes — the
+    /// `X` in the `Promise<X>` an async function's joined return is
+    /// wrapped in.
+    ///
+    /// **LIVE producer** ([`AdmissionSpec::Singleflight`]). This is a
+    /// GENUINELY DIFFERENT RELATION from [`Self::AwaitedNormalize`], not
+    /// the same reducer under a disposition flag, and the difference is
+    /// observable:
+    ///
+    /// | operand | `AwaitedNormalize` | `AsyncReturnPayload` |
+    /// |---|---|---|
+    /// | `<T>` | `Awaited<T>` | `T` |
+    /// | `<T extends string>` | `T` | `T` |
+    /// | `<T extends Promise<string>>` | `Awaited<T>` | `T` |
+    /// | `<T extends { then(…): … }>` | `Awaited<T>` | `T` |
+    ///
+    /// The first and last rows are the ARCHITECTURAL DISCRIMINATORS: any
+    /// implementation that collapses these two relations into one gets at
+    /// least one of them wrong. Measured on tsc 7.0.2: `async f<T>(v: T)`
+    /// publishes `Promise<T>` for every constraint — instantiating `T`
+    /// with `Promise<string>` genuinely nests to `Promise<Promise<string>>`
+    /// — while `async* g<T>(v: T)` publishes `AsyncGenerator<Awaited<T>, …>`.
+    ///
+    /// Per-shape contract:
+    ///
+    /// - a NAKED type parameter reduces to ITSELF, regardless of its
+    ///   constraint (the whole discriminator above);
+    /// - a settled operand reduces to itself;
+    /// - a concrete `Promise` carrier and a union reduce through THIS
+    ///   family's own recursive relation (re-entering `AsyncReturnPayload`,
+    ///   never `AwaitedNormalize`);
+    /// - a top-level authored `Awaited<X>` whose declaration identity is
+    ///   the unshadowed lib `Awaited` is decided by the lib conditional
+    ///   first: a reduced application is this family's operand, a deferred
+    ///   one strips to this family over `X`;
+    /// - object surfaces and declaration carriers follow the same thenable
+    ///   protocol and carrier expansion as [`Self::AwaitedNormalize`], each
+    ///   re-entering THIS family;
+    /// - anything else is an honest refusal.
+    ///
+    /// Value domain: [`SemanticQueryValueTag::TypeNode`].
+    ///
+    /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
+    AsyncReturnPayload {
+        operand: SemanticNodeId,
+        context: StructuralReduceContext,
+    },
 }
 
 /// Content-free discriminant for [`SemanticQueryKey`] — the variant identity
@@ -8098,6 +8258,8 @@ pub enum SemanticQueryKeyTag {
     FlowReturn,
     ResolveCall,
     ClassifyTruthinessDomain,
+    AwaitedNormalize,
+    AsyncReturnPayload,
 }
 
 impl SemanticQueryKeyTag {
@@ -8133,6 +8295,8 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::FlowReturn,
         SemanticQueryKeyTag::ResolveCall,
         SemanticQueryKeyTag::ClassifyTruthinessDomain,
+        SemanticQueryKeyTag::AwaitedNormalize,
+        SemanticQueryKeyTag::AsyncReturnPayload,
     ];
 
     /// The EXACT `SemanticQueryKey` variant identifier this tag names. The
@@ -8172,6 +8336,8 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::FlowReturn => "FlowReturn",
             SemanticQueryKeyTag::ResolveCall => "ResolveCall",
             SemanticQueryKeyTag::ClassifyTruthinessDomain => "ClassifyTruthinessDomain",
+            SemanticQueryKeyTag::AwaitedNormalize => "AwaitedNormalize",
+            SemanticQueryKeyTag::AsyncReturnPayload => "AsyncReturnPayload",
         }
     }
 
@@ -8266,6 +8432,8 @@ impl SemanticQueryKey {
             SemanticQueryKey::ClassifyTruthinessDomain { .. } => {
                 SemanticQueryKeyTag::ClassifyTruthinessDomain
             }
+            SemanticQueryKey::AwaitedNormalize { .. } => SemanticQueryKeyTag::AwaitedNormalize,
+            SemanticQueryKey::AsyncReturnPayload { .. } => SemanticQueryKeyTag::AsyncReturnPayload,
         }
     }
 }
@@ -8567,26 +8735,32 @@ pub enum ObjectConstructionEffect {
 }
 
 impl ObjectConstructionEffect {
-    fn push_child_nodes(&self, children: &mut Vec<SemanticNodeId>) {
+    fn for_each_child_node(&self, visit: &mut impl FnMut(SemanticNodeId)) {
         match self {
             Self::DirectProperty(effect) => {
-                children.extend(authored_property_key_child(&effect.key));
-                children.push(effect.value);
+                if let Some(key) = authored_property_key_child(&effect.key) {
+                    visit(key);
+                }
+                visit(effect.value);
             }
             Self::DirectMethod(effect) => {
-                children.extend(authored_property_key_child(&effect.key));
-                children.push(effect.signature);
+                if let Some(key) = authored_property_key_child(&effect.key) {
+                    visit(key);
+                }
+                visit(effect.signature);
             }
             Self::DirectGet(effect) | Self::DirectSet(effect) => {
-                children.extend(authored_property_key_child(&effect.key));
-                children.push(effect.signature);
+                if let Some(key) = authored_property_key_child(&effect.key) {
+                    visit(key);
+                }
+                visit(effect.signature);
             }
             Self::DirectIndex(effect) => {
-                children.push(effect.key_type);
-                children.push(effect.value_type);
+                visit(effect.key_type);
+                visit(effect.value_type);
             }
             Self::DirectCall(node) | Self::DirectConstruct(node) | Self::Spread(node) => {
-                children.push(*node);
+                visit(*node);
             }
         }
     }
@@ -8602,10 +8776,15 @@ impl ObjectSpreadProgram {
     /// Iterate every semantic child in effect order.
     pub fn child_nodes(&self) -> impl Iterator<Item = SemanticNodeId> + '_ {
         let mut children = Vec::new();
-        for effect in self.effects.iter() {
-            effect.push_child_nodes(&mut children);
-        }
+        self.for_each_child_node(|child| children.push(child));
         children.into_iter()
+    }
+
+    /// Visit every semantic child in effect order, without allocating.
+    pub fn for_each_child_node(&self, mut visit: impl FnMut(SemanticNodeId)) {
+        for effect in self.effects.iter() {
+            effect.for_each_child_node(&mut visit);
+        }
     }
 
     /// Rebuild the program after applying `map` to every semantic child.
@@ -8671,6 +8850,19 @@ impl ObjectSpreadProgram {
 
 #[derive(Debug, Clone)]
 pub enum SemanticNodeData {
+    /// A compiler-native intrinsic operation applied to its operands, kept
+    /// DEFERRED because the answer depends on a binder the substitution has
+    /// not supplied yet (`Awaited<T>` for an unconstrained `T`).
+    ///
+    /// This is a settled semantic VALUE: the checker prints exactly this for
+    /// a generic async generator's iteration parameters, and substituting the
+    /// binder later reduces it through the owning query family. It must never
+    /// be confused with [`Self::Opaque`] (a refusal) or with an
+    /// [`Self::InstantiationRef`] of a lib alias (a declaration application).
+    IntrinsicApplication {
+        op: CompilerIntrinsicTypeOp,
+        args: Arc<[SemanticNodeId]>,
+    },
     Alias(SemanticNodeId),
     Object(SurfaceView),
     ObjectSpreadProgram(ObjectSpreadProgram),
@@ -9056,6 +9248,18 @@ pub enum SemanticNodeData {
 }
 
 impl SemanticNodeData {
+    /// The ONE constructor for [`Self::IntrinsicApplication`]: `None` unless
+    /// `args` has exactly [`CompilerIntrinsicTypeOp::arity`] operands, so a
+    /// malformed compiler-native node never exists — not even transiently for
+    /// a reducer to refuse later.
+    #[must_use]
+    pub fn intrinsic_application(
+        op: CompilerIntrinsicTypeOp,
+        args: Arc<[SemanticNodeId]>,
+    ) -> Option<Self> {
+        (args.len() == op.arity()).then_some(Self::IntrinsicApplication { op, args })
+    }
+
     /// The kind-erased composite payload of a [`Self::Union`] /
     /// [`Self::Intersection`] arm — the uniform binding for readers that
     /// handle both composite kinds in one arm (the kind-bound payload
@@ -9067,54 +9271,6 @@ impl SemanticNodeData {
             Self::Union(list) => Some(list),
             Self::Intersection(list) => Some(list),
             _ => None,
-        }
-    }
-
-    /// Stable discriminant index used by arena instrumentation
-    /// to bucket per-variant push counts on
-    /// [`crate::types::MetaProvenance::node_arena_pushes_per_discriminant`].
-    ///
-    /// Values are independent of the variant declaration order so that
-    /// variant additions / removals do not
-    /// renumber unrelated buckets. The returned index must stay below
-    /// [`crate::types::SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT`].
-    #[must_use]
-    pub fn discriminant_index(&self) -> usize {
-        match self {
-            Self::Alias(_) => 0,
-            Self::Object(_) => 1,
-            Self::ObjectSpreadProgram(_) => 30,
-            Self::Union(_) => 2,
-            Self::Intersection(_) => 3,
-            Self::Primitive(_) => 4,
-            Self::Literal(_) => 5,
-            Self::Opaque(_) => 6,
-            Self::Array { .. } => 7,
-            Self::Tuple { .. } => 8,
-            Self::TemplateLiteral { .. } => 9,
-            Self::KeyOf { .. } => 10,
-            Self::IndexedAccess { .. } => 11,
-            Self::Mapped { .. } => 12,
-            Self::TypeOf(_) => 13,
-            Self::TypeOfNominal(_) => 18,
-            Self::TypeParam { .. } => 14,
-            Self::Infer { .. } => 15,
-            Self::InferRef { .. } => 28,
-            Self::MergedDecl { .. } => 16,
-            Self::Conditional { .. } => 17,
-            // Indices 19 and 26 are intentionally unused so the
-            // surviving variants keep stable bucket indices independent of
-            // declaration order.
-            Self::Signature { .. } => 29,
-            Self::DeferredCallable(_) => 31,
-            Self::DeclRef { .. } => 20,
-            Self::InstantiationRef { .. } => 21,
-            Self::BareRef(_) => 22,
-            Self::ImportType(_) => 23,
-            Self::RawFallback { .. } => 24,
-            // Index 25 is intentionally unused so the surviving variants
-            // keep stable bucket indices independent of declaration order.
-            Self::SyntheticBinding { .. } => 27,
         }
     }
 
@@ -9159,6 +9315,9 @@ impl SemanticNodeData {
             | Self::DeferredCallable(_)
             | Self::DeclRef { .. }
             | Self::InstantiationRef { .. }
+            // A deferred intrinsic application is a KNOWN value — the operation
+            // is decided, only the operand's binder is still open.
+            | Self::IntrinsicApplication { .. }
             | Self::SyntheticBinding { .. } => false,
         }
     }
@@ -9181,7 +9340,7 @@ impl SemanticNodeData {
 // do not collide.
 impl PartialEq for SemanticNodeData {
     fn eq(&self, other: &Self) -> bool {
-        if self.discriminant_index() != other.discriminant_index() {
+        if self.node_tag() != other.node_tag() {
             return false;
         }
         match (self, other) {
@@ -9350,6 +9509,10 @@ impl PartialEq for SemanticNodeData {
                 Self::InstantiationRef { base: ab, args: aa },
                 Self::InstantiationRef { base: bb, args: ba },
             ) => ab == bb && aa == ba,
+            (
+                Self::IntrinsicApplication { op: ao, args: aa },
+                Self::IntrinsicApplication { op: bo, args: ba },
+            ) => ao == bo && aa == ba,
             (Self::MergedDecl { contributors: a }, Self::MergedDecl { contributors: b }) => a == b,
             (Self::BareRef(a), Self::BareRef(b)) => a == b,
             (Self::ImportType(a), Self::ImportType(b)) => a == b,
@@ -9375,7 +9538,7 @@ impl std::hash::Hash for SemanticNodeData {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         // Discriminant tag first so two variants with structurally-similar
         // payloads (e.g. `Alias(id)` vs `KeyOf { base: id }`) cannot collide.
-        (self.discriminant_index() as u8).hash(state);
+        self.node_tag().stable_id().hash(state);
         match self {
             Self::Alias(inner) => {
                 inner.hash(state);
@@ -9502,6 +9665,12 @@ impl std::hash::Hash for SemanticNodeData {
             }
             Self::InstantiationRef { base, args } => {
                 base.hash(state);
+                args.hash(state);
+            }
+            Self::IntrinsicApplication { op, args } => {
+                // The FROZEN tag, for the same reason the TypeExpr stream uses
+                // it: structural hashing must not depend on enum derive order.
+                op.stable_hash_tag().hash(state);
                 args.hash(state);
             }
             Self::MergedDecl { contributors } => {
@@ -10146,6 +10315,8 @@ mod tests {
             "substitute_memo_misses",
             "evaluate_deferred_memo_hits",
             "evaluate_deferred_memo_misses",
+            "awaited_normalize_count",
+            "async_return_payload_count",
         ];
         for field in expected_to_fire {
             assert!(

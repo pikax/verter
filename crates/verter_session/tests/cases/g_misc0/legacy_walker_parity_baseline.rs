@@ -236,6 +236,7 @@ fn typeexpr_kind(ty: &TypeExpr) -> &'static str {
         TypeExpr::SyntheticSlotBinding(_) => "SyntheticSlotBinding",
         TypeExpr::ImportType { .. } => "ImportType",
         TypeExpr::Unknown { .. } => "Unknown",
+        TypeExpr::IntrinsicApplication { .. } => "IntrinsicApplication",
     }
 }
 

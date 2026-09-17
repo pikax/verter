@@ -106,6 +106,11 @@ pub use publication::{
 
 pub mod intrinsics;
 
+/// Compiler-native type OPERATIONS (distinct from the generated HTML/static
+/// intrinsic member catalog in [`intrinsics`]).
+pub mod compiler_intrinsics;
+pub use compiler_intrinsics::CompilerIntrinsicTypeOp;
+
 /// Compile-time marker witnesses + [P2] discrimination fixtures for the closed
 /// fact / locator / span-origin families.
 #[cfg(test)]
@@ -283,9 +288,27 @@ pub enum TypeExpr {
     // -- References --
     /// A named type reference, optionally with type arguments.
     /// `MyType`, `Partial<T>`, `Record<K, V>`.
+    ///
+    /// ALWAYS an authored / still-resolvable NAME. A compiler operation whose
+    /// identity has already been resolved is
+    /// [`Self::IntrinsicApplication`] — never a `Ref` spelled like one.
     Ref {
         name: Arc<str>,
         type_arguments: Arc<[TypeExpr]>,
+    },
+
+    // -- Compiler-native operations --
+    /// An applied compiler intrinsic — `Awaited<T>` once its identity is
+    /// resolved as compiler-native rather than as a declaration reference.
+    ///
+    /// Distinct from [`Self::Ref`] by identity even when both render as
+    /// `Awaited<T>`: a `Ref` contributes its name to referenced-name
+    /// traversal (it names something resolvable), an intrinsic application
+    /// does NOT (it names no declaration) — while its operands participate in
+    /// traversal either way.
+    IntrinsicApplication {
+        op: CompilerIntrinsicTypeOp,
+        arguments: Arc<[TypeExpr]>,
     },
 
     /// A first-class generic type parameter reference carrying declaration metadata.

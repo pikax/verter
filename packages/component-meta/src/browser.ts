@@ -45,6 +45,7 @@ export type {
   EnumType,
   EnumMember,
   RefType,
+  IntrinsicApplicationType,
   RecursiveRefType,
   RecursiveRefConditionalFrame,
   UnknownType,
@@ -61,6 +62,8 @@ export {
   func,
   typeParameter,
   ref,
+  intrinsicApplication,
+  intrinsicDisplayName,
   recursiveRef,
   unknown,
 } from "@verter/type-ir";

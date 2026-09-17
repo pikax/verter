@@ -143,6 +143,10 @@ pub(crate) enum NodeShape {
     Tuple,
     IndexedAccess,
     Reference,
+    /// `SemanticNodeData::InstantiationRef` — a generic instantiation
+    /// carrier (the async return wrap's `Promise<…>` and the generator
+    /// wrap's resolved lib head mint this shape).
+    Instantiation,
     /// `SemanticNodeData::Opaque(QueryError::UnmodeledPosition)` — the typed
     /// unmodelled-position MARKER, distinct from a cache miss.
     OpaqueUnmodeledPosition,
@@ -737,6 +741,7 @@ fn node_shape(data: Option<&SemanticNodeData>) -> NodeShape {
         Some(SemanticNodeData::Array { .. }) => NodeShape::Array,
         Some(SemanticNodeData::Tuple { .. }) => NodeShape::Tuple,
         Some(SemanticNodeData::IndexedAccess { .. }) => NodeShape::IndexedAccess,
+        Some(SemanticNodeData::InstantiationRef { .. }) => NodeShape::Instantiation,
         Some(SemanticNodeData::Opaque(QueryError::UnmodeledPosition)) => {
             NodeShape::OpaqueUnmodeledPosition
         }
@@ -1159,6 +1164,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "5a47b2cfe65c26e6a913289e4805974dfc8ed125dfcc6bd2f1f134a23f3cf249",
     ),
     (
+        "C15_heritage_nested_builtin_open",
+        "51d48630b7089a4ba157e2bb43aecc11a61c6fedf826c52011275b4fada125dd",
+    ),
+    (
         "CC03_as_const_plain_return",
         "7e730b8d0bcbb37eaf8a7f46630d08e828afdf5a14fc9da5574f39821b02820e",
     ),
@@ -1421,6 +1430,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "X16_switch_fallthrough",
         "da6e096ca75e743743cf48d63f121f803c598115fec9705b8472acde93f03aab",
+    ),
+    (
+        "X18_async_return",
+        "bd3cc2b546461b8c5810e25edbcb0f5cfde123c05adfee7ea220d9c40b761a86",
     ),
     (
         "X20_as_const_spread_source",
@@ -3504,7 +3517,7 @@ mod corpus_suite {
             ),
             (
                 "X18_async_return",
-                "checker prints `Promise<{ label: string; }>`; the renderer spells the unwrapped inner object `{ label: string }` — the async-wrapper divergence the KnownOwed arm pins",
+                "checker prints `Promise<{ label: string; }>`; the renderer prints the raw construction-plan discriminant `InstantiationRef(Promise)` — the semantic comparison composes the wrap through the InstantiationRef matching arm",
             ),
             (
                 "X19_generator_yield",
@@ -3767,6 +3780,48 @@ mod corpus_suite {
                 assert!(
                     !accepts("{ v: string; }"),
                     "a dropped constituent must be rejected"
+                );
+            },
+        );
+        // The generic-argument acceptance arm, discriminated on X18's
+        // async wrap (its live node IS the `Promise<…>` builtin carrier).
+        let x18 = row("X18_async_return");
+        with_live_flow_node(
+            x18.aux,
+            "ctl_x18_checker",
+            x18.script,
+            "makeProps",
+            |dispatch, node| {
+                let node = node.expect("X18 produces a value");
+                let accepts = |text: &str| {
+                    let parsed = checker_syntax::parse(text)
+                        .unwrap_or_else(|err| panic!("`{text}` must parse: {err}"));
+                    checker_syntax::matches_node(dispatch, node, &parsed, 0)
+                };
+                assert!(
+                    accepts(x18.checker),
+                    "the recorded checker `{}` must match X18's live wrapped surface",
+                    x18.checker
+                );
+                assert!(
+                    !accepts("Promise<{ label: number; }>"),
+                    "a wrong generic ARGUMENT member type must be rejected"
+                );
+                assert!(
+                    !accepts("Promise<{ n: string; }>"),
+                    "a wrong generic ARGUMENT member name must be rejected"
+                );
+                assert!(
+                    !accepts("Promise<{ label: string; n: number; }>"),
+                    "an extra generic ARGUMENT member (superset) must be rejected"
+                );
+                assert!(
+                    !accepts("{ label: string; }"),
+                    "the UNWRAPPED inner object must be rejected — the wrap is the answer"
+                );
+                assert!(
+                    !accepts("Map<{ label: string; }>"),
+                    "a wrong generic HEAD name must be rejected"
                 );
             },
         );
@@ -4839,9 +4894,6 @@ const OPEN_DEBTS: &[&str] = &[
     // ── TypeScript semantics: adversarial axes (X family) ──────────────
     // A get/set pair surfaces as a duplicate member key: refused, TSX faults.
     "X14_accessor_pair",
-    // Async return wrapping is unmodelled: the Promise is silently unwrapped
-    // and the inner object is published as a props surface.
-    "X18_async_return",
     // The macro lane correctly rejects a generator return, but the TSX lane
     // faults with the same code — the consumer-reach debt class.
     "X19_generator_yield",
@@ -4851,16 +4903,12 @@ const OPEN_DEBTS: &[&str] = &[
     // A scalar literal is correctly rejected as a props macro type, but that
     // runtime diagnostic must not delete the file's IDE TSX surface.
     "E05_scalar_flow_answer_keeps_tsx_surface",
-    // ── TypeScript semantics: mapped heritage (index signature, nested builtin) ──
+    // ── TypeScript semantics: mapped heritage (index signature) ──
     // The mapped route over an index-signature heritage interface drops the
     // index signature and publishes complete; the direct-alias route drops it
     // byte-identically — a pre-existing mapped source-member enumeration
     // defect whose reach the heritage work extended.
     "C14_mapped_heritage_drops_index_signature",
-    // A nested builtin in the heritage clause's key domain is not reduced by
-    // the one-hop fallback — a conservative zero-member publication where the
-    // checker computes the closed surface.
-    "C15_heritage_nested_builtin_open",
     // ── satisfies-contextual widening (value inference) ────────────────
     // The satisfies TARGET never contextually types the operand's members:
     // a fresh member literal keeps its `Literal` node where the checker's
@@ -4949,7 +4997,7 @@ const OPEN_DEBTS: &[&str] = &[
 #[cfg(test)]
 const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 3, 1, 2),
-    (Owner::U2MappedTemplate, 4, 1, 2),
+    (Owner::U2MappedTemplate, 4, 2, 1),
     (Owner::U6CallResolve, 33, 32, 1),
     // Nine switch-, try/catch- and reunion-family rows are parked as the
     // SUBTYPE-REUNION class: TypeScript's return-position reunion applies
@@ -4969,8 +5017,9 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U6ContextualCore, 8, 7, 1),
     // B10's `as const` spread-modifier debt moved to the value-inference
     // owner with its B03/B04 class, so the substrate total drops by one
-    // from D13's 64 to 63.
-    (Owner::U6FlowReturnSubstrate, 63, 47, 3),
+    // from D13's 64 to 63. The async return wrap greens X18 (the
+    // `Promise<…>` carrier matches the checker).
+    (Owner::U6FlowReturnSubstrate, 63, 48, 2),
     (Owner::U6NarrowTypeof, 48, 29, 19),
     // The `instanceof` arm rule: derivation decided by class heritage on
     // both edges (the subclass arm survives, the base arm downcasts, the

@@ -57,6 +57,14 @@ pub enum GraphNode {
         name: u32,
         type_arguments: Vec<u32>,
     },
+    /// An applied compiler intrinsic. `op` is the shared op code (0 =
+    /// unspecified, never emitted; 1 = Awaited), NOT a string id — an
+    /// intrinsic names no declaration and must never reach the string
+    /// table or be resolvable as a name.
+    IntrinsicApplication {
+        op: u32,
+        arguments: Vec<u32>,
+    },
     TypeParameter {
         name: u32,
         constraint: u32,
@@ -312,6 +320,11 @@ enum ExprMemoKey {
         type_arguments_ptr: usize,
         type_arguments_len: usize,
     },
+    IntrinsicApplication {
+        op: u8,
+        ptr: usize,
+        len: usize,
+    },
     Unknown {
         raw: String,
     },
@@ -322,6 +335,11 @@ impl ExprMemoKey {
         match expr {
             TypeExpr::Primitive(name) => Self::Primitive(*name),
             TypeExpr::Literal(value) => Self::Literal(value.clone()),
+            TypeExpr::IntrinsicApplication { op, arguments } => Self::IntrinsicApplication {
+                op: op.stable_hash_tag(),
+                ptr: slice_ptr_id(arguments),
+                len: arguments.len(),
+            },
             TypeExpr::Union(types) => Self::Union {
                 ptr: slice_ptr_id(types),
                 len: types.len(),
@@ -497,6 +515,16 @@ impl ExprPtrKey {
                 p2: 0,
                 p3: 0,
                 extra: 0,
+            },
+            // Pointer-derivable: the op is a closed scalar and the operands
+            // are an owned slice, so identity needs no cloned data.
+            TypeExpr::IntrinsicApplication { op, arguments } => Self {
+                tag: 16,
+                p0: arguments.as_ptr() as usize,
+                p1: arguments.len(),
+                p2: 0,
+                p3: 0,
+                extra: op.stable_hash_tag() as usize,
             },
             TypeExpr::Union(types) => Self {
                 tag: 1,
@@ -929,6 +957,16 @@ impl GraphBuilder {
                 name: self.string_id(name),
                 type_arguments: type_arguments.iter().map(|ty| self.node_id(ty)).collect(),
             },
+            TypeExpr::IntrinsicApplication { op, arguments } => {
+                GraphNode::IntrinsicApplication {
+                    // Exhaustive on purpose: a new op must fail here until
+                    // its wire code is stated.
+                    op: match op {
+                        verter_type_expr::CompilerIntrinsicTypeOp::Awaited => 1,
+                    },
+                    arguments: arguments.iter().map(|ty| self.node_id(ty)).collect(),
+                }
+            }
             TypeExpr::TypeParameter(param) => self.type_parameter_node(param),
             TypeExpr::KeyOf(operand) => GraphNode::KeyOf {
                 operand: self.node_id(operand),
@@ -1393,6 +1431,14 @@ fn remap_snapshot_node(
             name: sid(*name),
             type_arguments: type_arguments.iter().map(|arg| nid(*arg)).collect(),
         },
+        // `op` is a COPIED TAG, not a string id — no `sid` widening. The
+        // operands are node ids and widen through `nid` like any child.
+        PersistedGraphNode::IntrinsicApplication { op, arguments } => {
+            GraphNode::IntrinsicApplication {
+                op: *op,
+                arguments: arguments.iter().map(|arg| nid(*arg)).collect(),
+            }
+        }
         PersistedGraphNode::TypeParameter {
             name,
             constraint,

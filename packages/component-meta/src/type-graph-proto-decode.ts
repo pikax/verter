@@ -62,6 +62,7 @@ import {
   NODE_PARENTHESIZED,
   NODE_PRIMITIVE,
   NODE_RECURSIVE_REF,
+  NODE_INTRINSIC_APPLICATION,
   NODE_REF,
   NODE_REST,
   NODE_SYNTHETIC_SLOT_BINDING,
@@ -408,6 +409,12 @@ function decodeTypeNode(node: ProtoTypeNode): GraphNodeRecord {
         nameId: Number(value?.nameId ?? 0),
         typeArgumentNodeIds: numberList(value?.typeArgumentNodeIds),
       };
+    case "intrinsicApplication":
+      return {
+        kind: NODE_INTRINSIC_APPLICATION,
+        op: Number(value?.op ?? 0),
+        argumentNodeIds: numberList(value?.argumentNodeIds),
+      };
     case "typeParameter":
       return {
         kind: NODE_TYPE_PARAMETER,
@@ -554,6 +561,10 @@ function validateNodeTable(graph: DecodedTypeGraph): void {
       case NODE_REF:
         graph.getString(node.nameId);
         node.typeArgumentNodeIds.forEach((id) => graph.getNode(id));
+        break;
+      // No `getString`: the op is a closed enum, not a string-table entry.
+      case NODE_INTRINSIC_APPLICATION:
+        node.argumentNodeIds.forEach((id) => graph.getNode(id));
         break;
       case NODE_TYPE_PARAMETER:
         graph.getString(node.nameId);

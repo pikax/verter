@@ -18,9 +18,9 @@ use crate::verter::v1::{
     ConditionalNode, ConsumedRootBindings, EventMeta, ExpansionDiagnostic, ExpansionMetadata,
     ExposedMeta, FallthroughBranch, FallthroughEventEntry, FallthroughPropEntry,
     FallthroughSurface, FunctionNode, FunctionParameter, ImportBindingMeta, ImportMeta,
-    IndexedAccessNode, InferNode, InheritedSource, JsdocTag, KeyOfNode, LiteralNode,
-    MacroExpansionDiagnosticEntry, MappedNode, MemberAvailability, MemberProvenance, ModelMeta,
-    ObjectMember as ProtoObjectMember, ObjectNode, OriginEdge as ProtoOriginEdge,
+    IndexedAccessNode, InferNode, InheritedSource, IntrinsicApplicationNode, JsdocTag, KeyOfNode,
+    LiteralNode, MacroExpansionDiagnosticEntry, MappedNode, MemberAvailability, MemberProvenance,
+    ModelMeta, ObjectMember as ProtoObjectMember, ObjectNode, OriginEdge as ProtoOriginEdge,
     OriginGraph as ProtoOriginGraph, OriginNode as ProtoOriginNode, ParenthesizedNode,
     PartialBranchReason, PropMeta, PublicInstanceMemberMeta, PublicInstanceMeta, RefNode,
     ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp, ResolvedRootStep,
@@ -31,7 +31,7 @@ use crate::verter::v1::{
     UnionNode, UnknownNode, UnresolvedBranchReason, UnresolvedRootTargetReason, VueApiCallMeta,
 };
 
-pub const COMPONENT_META_SCHEMA_VERSION: u32 = 11;
+pub const COMPONENT_META_SCHEMA_VERSION: u32 = 12;
 
 pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
     let mut builder = GraphBuilder::new();
@@ -2255,6 +2255,17 @@ fn graph_node_to_proto(node: GraphNode) -> TypeNode {
             name_id: name,
             type_argument_node_ids: type_arguments,
         }),
+        // The op rides as a closed enum, never a `name_id` — an intrinsic
+        // must not reach the string table or be resolvable as a name.
+        // `GraphNode` already carries the shared op code, and both wire
+        // surfaces reference the SAME `CompilerIntrinsicTypeOp`, so the code
+        // flows through unchanged.
+        GraphNode::IntrinsicApplication { op, arguments } => {
+            type_node::Kind::IntrinsicApplication(IntrinsicApplicationNode {
+                op: op as i32,
+                argument_node_ids: arguments,
+            })
+        }
         GraphNode::TypeParameter {
             name,
             constraint,
@@ -3223,17 +3234,17 @@ mod tests {
         // equality) demand in lockstep: a decoder that trusts the
         // completeness position must never accept a payload old enough to
         // omit it.
-        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 11);
+        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 12);
     }
 
     #[test]
     fn full_body_roundtrips_supported_contract_and_completeness_tags() {
         let payload = build_test_payload();
-        assert_eq!(payload.schema_version, 11);
+        assert_eq!(payload.schema_version, 12);
         let encoded = payload.encode_to_vec();
         let decoded =
             ComponentMetaPayload::decode(encoded.as_slice()).expect("full payload decodes");
-        assert_eq!(decoded.schema_version, 11);
+        assert_eq!(decoded.schema_version, 12);
         let body = decoded.body.expect("component-meta body");
         let bytes = body.encode_to_vec();
         assert!(

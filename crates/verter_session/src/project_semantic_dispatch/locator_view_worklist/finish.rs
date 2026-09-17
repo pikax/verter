@@ -111,6 +111,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> SemanticNodeId {
         let graph = self.graph();
         match data {
+            // Rebuilt over the PROJECTED operands so a later substitution can
+            // still reduce the operation through its owning family.
+            SemanticNodeData::IntrinsicApplication { op, args } => {
+                let projected_args: Vec<SemanticNodeId> = args
+                    .iter()
+                    .map(|argument| projected(memo, *argument, context))
+                    .collect();
+                graph.intern_node(
+                    SemanticNodeData::intrinsic_application(
+                        *op,
+                        Arc::from(projected_args.into_boxed_slice()),
+                    )
+                    .expect("rebuilt one-for-one from a well-formed application"),
+                )
+            }
             SemanticNodeData::Alias(target) => projected(memo, *target, context),
             SemanticNodeData::TypeParam {
                 decl,

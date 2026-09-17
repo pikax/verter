@@ -3594,6 +3594,14 @@ const KEY_OWNING_BLOCK = new Map([
   // The demand-scoped truthiness-domain classifier is the canonical
   // type algebra's own key (flow narrowing frames consume the fact).
   ["ClassifyTruthinessDomain", "U2CanonicalTypeAlgebra"],
+  // The compiler's runtime awaited relation (`await x`, async-generator
+  // iteration parameters) is produced beside the flow return wrap. An authored
+  // `Awaited<T>` is the lib conditional under `Instantiate` and never reads
+  // this key. Matches the live `key_owning_block` arm.
+  ["AwaitedNormalize", "U6FlowReturnSubstrate"],
+  // The async-function publication rule has no utility spelling — it is
+  // produced by the flow return wrap alongside `FlowReturn` itself.
+  ["AsyncReturnPayload", "U6FlowReturnSubstrate"],
 ]);
 
 function reaches(fromBlock, target) {

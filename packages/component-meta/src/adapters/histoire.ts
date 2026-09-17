@@ -92,6 +92,10 @@ function typeToDefaultValue(type: TypeDescriptor): unknown {
     case "ref":
       return undefined;
 
+    // No default value is derivable from a deferred compiler operation.
+    case "intrinsicApplication":
+      return undefined;
+
     case "syntheticSlotBinding":
       // Synthetic slot-binding carriers are opaque terminals — surface
       // the user-visible `bindingName` as the default placeholder.

@@ -421,6 +421,9 @@ impl ProjectSemanticDispatch<'_> {
                 }
 
                 // ── Composite carriers: recurse into EVERY child node id. ──
+                SemanticNodeData::IntrinsicApplication { args, .. } => {
+                    stack.extend(args.iter().copied());
+                }
                 SemanticNodeData::Alias(inner) => stack.push(*inner),
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     let members = composite.composite_members().expect("composite arm");

@@ -34,7 +34,8 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_span::Span;
 use verter_type_expr::{
-    LiteralValue, MappedModifier, MemberVisibility, PrimitiveName, TypeExpr, UnknownValue,
+    CompilerIntrinsicTypeOp, LiteralValue, MappedModifier, MemberVisibility, PrimitiveName,
+    TypeExpr, UnknownValue,
 };
 
 use super::super::ProjectSemanticDispatch;
@@ -111,6 +112,12 @@ enum RaisedTerm {
     Ref {
         name: Arc<str>,
         type_arguments: Vec<RaisedShapeKey>,
+    },
+    /// An applied compiler intrinsic. Keyed by the OP, never by a name —
+    /// so it can never intern equal to a `Ref` spelled the same way.
+    IntrinsicApplication {
+        op: CompilerIntrinsicTypeOp,
+        arguments: Vec<RaisedShapeKey>,
     },
     TypeParameter {
         name: Arc<str>,
@@ -491,6 +498,10 @@ pub(in crate::project_semantic_dispatch) enum RaisedRootKind {
     /// Raises to `TypeExpr::Ref` — a `DeclRef` / `InstantiationRef` / `BareRef` /
     /// `DeclPlaceholder` carrier.
     Reference,
+    /// Raises to `TypeExpr::IntrinsicApplication` — a compiler-native
+    /// operation. Deliberately NOT `Reference`: it raises to no
+    /// declaration and must not share the reference root mirror.
+    IntrinsicApplication,
     /// Raises to `TypeExpr::KeyOf`.
     KeyOf,
     /// Raises to `TypeExpr::IndexedAccess`.
@@ -697,6 +708,13 @@ trait RaisedShapeAlgebra {
     /// / `DeclRef` shell with empty args, and the `BareRef`/`InstantiationRef`
     /// carriers with raised-or-surface-member-fallback args).
     fn reference(&mut self, name: Arc<str>, type_arguments: Vec<Self::Out>) -> Self::Out;
+    /// An applied compiler intrinsic over its raised operands.
+    ///
+    /// Deliberately SEPARATE from [`Self::reference`]: an intrinsic names no
+    /// declaration, so raising it as a named reference would conflate a
+    /// compiler operation with a userland type spelled the same way. No
+    /// implementor may delegate this to `reference`.
+    fn intrinsic(&mut self, op: CompilerIntrinsicTypeOp, arguments: Vec<Self::Out>) -> Self::Out;
     fn synthetic_slot_binding(
         &mut self,
         carrier: Arc<verter_type_expr::SyntheticCarrierKey>,
@@ -932,7 +950,8 @@ fn project_node_root_kind(
 
 /// Node-domain equivalent of `type_expr_root_is_published_operator(raise(node))`:
 /// whether `node`'s NORMALIZED raised root is a published surface operator — a
-/// `Ref` / `KeyOf` / `IndexedAccess` / `Conditional` / `TypeOf`, OR a `Mapped`
+/// `Ref` / `IntrinsicApplication` / `KeyOf` / `IndexedAccess` / `Conditional` /
+/// `TypeOf`, OR a `Mapped`
 /// whose value root is NOT the `semanticMiss` sentinel. Reads the post-normalized
 /// [`RaisedRootKind`] off the ROOT-ONLY projection (no `TypeExpr` materialised),
 /// so it answers IDENTICALLY to the `TypeExpr` predicate on
@@ -946,6 +965,7 @@ pub(in crate::project_semantic_dispatch) fn project_node_root_is_published_opera
     Some(matches!(
         project_node_root_kind(dispatch, node)?,
         RaisedRootKind::Reference
+            | RaisedRootKind::IntrinsicApplication
             | RaisedRootKind::KeyOf
             | RaisedRootKind::IndexedAccess
             | RaisedRootKind::Conditional

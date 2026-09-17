@@ -823,6 +823,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // would re-bind its inner `TKey ← K-typeparam` instead of
             // `TKey ← "badge"-literal`, and its Conditional payload
             // would never close.
+            // An intrinsic application defers only because its operand is
+            // binder-dependent. Substitution MUST descend and rebuild it, so
+            // supplying the binder re-enters the owning query family and the
+            // operation reduces (`Awaited<T>` with `T := Promise<string>`
+            // becomes `string`). Without this the deferred carrier would be a
+            // dead end rather than a resumable semantic value.
+            SemanticNodeData::IntrinsicApplication { op, args } => {
+                let mut new_args = Vec::with_capacity(args.len());
+                let mut any_changed = false;
+                for arg_node in args.iter() {
+                    let (sub, c) =
+                        self.substitute_with_change_tracking(*arg_node, parameter_node, arg);
+                    any_changed |= c;
+                    new_args.push(sub);
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::intrinsic_application(
+                            *op,
+                            Arc::from(new_args.into_boxed_slice()),
+                        )
+                        .expect("substituted one-for-one from a well-formed application"),
+                    ),
+                    true,
+                )
+            }
             SemanticNodeData::InstantiationRef { base, args } => {
                 let mut new_args = Vec::with_capacity(args.len());
                 let mut any_changed = false;

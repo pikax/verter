@@ -32,6 +32,7 @@ export {
   StructuredTypeExpressionSchema,
   GraphTypeNodeSchema,
   GraphObjectSpreadProgramSchema,
+  GraphIntrinsicApplicationSchema,
   GraphObjectConstructionEffectSchema,
   GraphObjectNamedEffectSchema,
   GraphObjectIndexEffectSchema,
@@ -95,6 +96,11 @@ export {
   GraphUnsupportedConstruct,
   GraphVariance,
 } from "./gen/verter/v1/typeinfo_pb.js";
+
+// The SHARED compiler-intrinsic op vocabulary lives in its own generated
+// module (compiler_intrinsics.proto) and is referenced by BOTH envelopes, so
+// it is re-exported from there rather than through either envelope.
+export { CompilerIntrinsicTypeOp } from "./gen/verter/v1/compiler_intrinsics_pb.js";
 
 export type {
   SemanticTypeGraph,
@@ -169,4 +175,4 @@ export type {
  * Schema 2 stays accepted for the legacy
  * operations; the framework-surface operation requires 3.
  */
-export const TYPEINFO_GRAPH_SCHEMA_VERSION = 7;
+export const TYPEINFO_GRAPH_SCHEMA_VERSION = 8;

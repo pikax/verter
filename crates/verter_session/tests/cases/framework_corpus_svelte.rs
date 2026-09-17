@@ -537,13 +537,13 @@ fn svelte_prop_default_and_origin_are_on_the_public_framework_surface_wire() {
     let strings = string_table(payload);
     let resolve = |id: u32| strings.get(id as usize).cloned().unwrap_or_default();
 
-    // The response graph carries schema 7 (the current wire schema: typed
-    // property keys landed at schema 6 and the canonical object-spread
-    // program node at schema 7).
+    // The response graph carries schema 8 (the current wire schema: typed
+    // property keys landed at schema 6, the canonical object-spread program
+    // node at schema 7, and the applied compiler intrinsic at schema 8).
     assert_eq!(
         payload.graph.as_ref().unwrap().schema_version,
-        7,
-        "the framework-surface graph is schema 7"
+        8,
+        "the framework-surface graph is schema 8"
     );
 
     // `size = 'md'` — the runtime DEFAULT VALUE source text rides the wire

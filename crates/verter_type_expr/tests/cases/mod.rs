@@ -3,6 +3,7 @@
 //! entry is its own module so per-entry helpers stay in disjoint scopes —
 //! do NOT centralise shared helpers here, and keep this list sorted.
 
+mod compiler_intrinsic_identity;
 mod deep_drop_is_iterative;
 mod exact_size_factories;
 mod excess_origin_discrimination;

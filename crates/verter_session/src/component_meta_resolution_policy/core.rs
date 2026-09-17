@@ -538,6 +538,9 @@ pub(super) fn body_root_is_resolvable(body: SemanticNodeId, ctx: &PolicyCtx<'_, 
         Some(SemanticNodeData::IndexedAccess { object, .. }) => {
             !indexed_access_targets_macro_participating(*object, ctx)
         }
+        // An unreduced operation is the authoritative symbolic form, exactly
+        // like the indexed-access case above: it is not a body to chase.
+        Some(SemanticNodeData::IntrinsicApplication { .. }) => false,
         // A cross-file import carrier is a symbolic reference (like a bare
         // reference head), an opaque / raw-fallback node carries no
         // publishable shape, and open type structure (type parameters /

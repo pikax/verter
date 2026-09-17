@@ -287,6 +287,17 @@ pub(crate) fn hash_type_expr_structurally<H: Hasher>(root: &TypeExpr, hasher: &m
                     worklist.push(arg);
                 }
             }
+            // Tag 24: appended, so every existing stream is unchanged. The
+            // op contributes its FROZEN tag, never a name — this hash must
+            // not depend on display text or on enum declaration order.
+            TypeExpr::IntrinsicApplication { op, arguments } => {
+                24u8.hash(hasher);
+                op.stable_hash_tag().hash(hasher);
+                (arguments.len() as u64).hash(hasher);
+                for arg in arguments.iter() {
+                    worklist.push(arg);
+                }
+            }
             TypeExpr::TypeParameter(tp) => {
                 9u8.hash(hasher);
                 tp.name.hash(hasher);

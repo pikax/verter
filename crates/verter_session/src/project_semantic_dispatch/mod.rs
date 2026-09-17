@@ -55,9 +55,8 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_solver::host::{
-    BareRefOrigin, ResolvedRootIdentity, UtilitySource,
-};
+use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+use verter_semantic::analysis::type_solver::host::{BareRefOrigin, ResolvedRootIdentity};
 
 use crate::resolver_core::prepared_decl::PreparedTypeDeclResolution;
 use crate::resolver_core::{BudgetDomain, BudgetExceededFailure, ResolverContext};
@@ -2753,7 +2752,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return self.build_project_object_spread(*program, selector, *context);
             }
             let build_node = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-            if matches!(&key_for_build, SemanticQueryKey::Instantiate(_)) {
+            if semantic_query_consumes_connected_work(&key_for_build) {
                 if let Err(reasons) = self.charge_connected_work() {
                     let carrier = self.connected_limit_carrier(&key_for_build, reasons);
                     self.fold_local_partial_completeness(reasons);
@@ -2890,6 +2889,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     args,
                     context,
                 } => self.build_template_literal_reduce(pattern, args, *context),
+                // AwaitedNormalize / AsyncReturnPayload — LIVE producers,
+                // the two awaited relations the checker actually has. They
+                // are node-domain builds like TemplateLiteralReduce, NOT
+                // typed-value classifiers, so they route here and their
+                // composite arms re-enter their own family through
+                // `execute_read`.
+                SemanticQueryKey::AwaitedNormalize { operand, context } => {
+                    self.build_awaited_normalize(*operand, *context)
+                }
+                SemanticQueryKey::AsyncReturnPayload { operand, context } => {
+                    self.build_async_return_payload(*operand, *context)
+                }
                 // ResolveOverloadSet — LIVE producer. Projects the callee's
                 // ordered VISIBLE signature group (build_typeof's visibility
                 // rule already hid trailing implementations where the callee
@@ -3559,6 +3570,28 @@ fn finalise_traced_build_output<T>(
     output
 }
 
+/// Which query kinds consume a unit of the CONNECTED-WORK envelope on
+/// every cold build.
+///
+/// `Instantiate` has always charged here: a generic expansion storm is
+/// bounded by the connected envelope, not by any per-kind fuse. The two
+/// awaited relations join it because their composite arms RE-ENTER their
+/// own family — a union of N arms over a carrier that nests M deep is
+/// N x M dispatches, exactly the shape the envelope exists to bound.
+///
+/// Charging at the QUERY level is deliberate, and is why the recursive
+/// arms carry no local [`ConnectedWorkCredit`]: that type is for a local
+/// explicit structural worklist, and pairing it with a per-arm family
+/// re-entry would charge the same work twice.
+fn semantic_query_consumes_connected_work(key: &SemanticQueryKey) -> bool {
+    matches!(
+        key,
+        SemanticQueryKey::Instantiate(_)
+            | SemanticQueryKey::AwaitedNormalize { .. }
+            | SemanticQueryKey::AsyncReturnPayload { .. }
+    )
+}
+
 /// Aggregate request work budget gate.
 ///
 /// Returns `true` for every `SemanticQueryKey` kind that counts toward
@@ -3601,6 +3634,11 @@ fn semantic_query_counts_toward_projection_budget(key: &SemanticQueryKey) -> boo
             | SemanticQueryKey::TemplateLiteralReduce { .. }
             | SemanticQueryKey::TypeOf { .. }
             | SemanticQueryKey::ProjectObjectSpread { .. }
+            // Both awaited relations distribute over unions and unwrap
+            // nested carriers by re-entering their own family, so an
+            // awaited-dominated storm is the same expansion shape.
+            | SemanticQueryKey::AwaitedNormalize { .. }
+            | SemanticQueryKey::AsyncReturnPayload { .. }
     )
 }
 
@@ -4070,16 +4108,39 @@ pub trait DispatchHost {
         symbol_name: &str,
     ) -> Option<ResolvedRootIdentity>;
 
-    /// Classify whether `name` is a built-in TS utility, user-shadowed, or
-    /// unknown in `base`'s scope. Scope matters because a local binding in
-    /// scope A can shadow a built-in that is not shadowed in scope B.
-    fn utility_source(&self, base: SemanticNodeId, name: &str) -> UtilitySource;
+    /// Decide, in ONE scope read, whether `name` in `base`'s scope is a
+    /// user-shadowed name, an unknown name, or the compiler-provided utility —
+    /// and for the last, carry its PROVEN identity. Scope matters because a
+    /// binding in scope A can shadow a built-in that is not shadowed in
+    /// scope B.
+    ///
+    /// Builders route on the returned identity and never re-decide on a
+    /// spelling. They are forbidden from calling `BuiltinUtility::from_name`
+    /// themselves — the
+    /// `ax_hybrid_carrier_stop_uses_demand_context_not_name_predicate` guard
+    /// fails `build.rs` for using a nominal carrier predicate — and this is
+    /// the seam that makes that unnecessary rather than merely inconvenient.
+    fn resolve_builtin_utility(&self, base: SemanticNodeId, name: &str)
+        -> BuiltinUtilityResolution;
 
     /// Classify whether `name` resolves locally or through an import in
     /// `base`'s scope. Used by lazy field expansion to keep imported
     /// object-like refs symbolic until a deeper route is requested.
     #[allow(dead_code)]
     fn bare_ref_origin(&self, base: SemanticNodeId, name: &str) -> BareRefOrigin;
+}
+
+/// The dispatch gate's decision for one utility-shaped name in one scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinUtilityResolution {
+    /// A userland declaration or import binds the name in scope.
+    Shadowed,
+    /// Not a compiler-provided utility.
+    Unknown,
+    /// The compiler-provided utility. `None` for an SDK-declared
+    /// `= intrinsic` that has no [`BuiltinUtility`] variant; the caller falls
+    /// through to its ordinary utility handling for those.
+    Builtin(Option<BuiltinUtility>),
 }
 
 /// Session-owned [`DispatchHost`] implementation.
@@ -4150,7 +4211,7 @@ impl<'a> SessionDispatchHost<'a> {
                 // `prepared_decl_bundle_warm` reads. The four
                 // `DispatchHost` trait callbacks
                 // (`resolve_prepared_type_decl`, `root_identity`,
-                // `utility_source`, `bare_ref_origin`) all route
+                // `resolve_builtin_utility`, `bare_ref_origin`) all route
                 // through this helper — dominant expected source of
                 // the K-loop warm-read pressure.
                 if let Some(obs) = verter_audit::current_observer() {
@@ -4214,32 +4275,37 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
         )
     }
 
-    fn utility_source(&self, base: SemanticNodeId, name: &str) -> UtilitySource {
-        use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+    fn resolve_builtin_utility(
+        &self,
+        base: SemanticNodeId,
+        name: &str,
+    ) -> BuiltinUtilityResolution {
         let (_scope, payload) = self.scope_payload_for_base(base);
-        // Scope-local shadowing takes priority: a userland `type Partial`
-        // in scope wins over the built-in utility.
-        if let Some(payload) = payload.as_ref() {
-            if payload.scope_type_names().contains(name)
-                || payload.scope_type_bindings().contains_key(name)
-            {
-                return UtilitySource::Shadowed;
-            }
+        // Shadowing wins over every builtin source: a userland `type Partial`
+        // in scope, or an import bound to that name, is the declaration the
+        // name means. The canonical shadow authority decides it, so this gate
+        // and the lowering paths agree on which names are shadowed.
+        if crate::resolver_core::scope_shadowing::ScopeShadowing::scope_payload_shadows_lib(
+            payload.as_ref(),
+            name,
+        ) {
+            return BuiltinUtilityResolution::Shadowed;
         }
-        // SDK-declared intrinsics always classify as `Builtin` regardless
-        // of shadowing.
-        if let crate::intrinsic_registry::IntrinsicLookup::Found(_) = self
-            .ctx
-            .project_type_store()
-            .intrinsic_registry()
-            .lookup(name)
+        // Unshadowed, an SDK-declared intrinsic is the compiler-provided
+        // declaration even without a `BuiltinUtility` variant.
+        let identity = BuiltinUtility::from_name(name);
+        if identity.is_some()
+            || matches!(
+                self.ctx
+                    .project_type_store()
+                    .intrinsic_registry()
+                    .lookup(name),
+                crate::intrinsic_registry::IntrinsicLookup::Found(_)
+            )
         {
-            return UtilitySource::Builtin;
-        }
-        if BuiltinUtility::from_name(name).is_some() {
-            UtilitySource::Builtin
+            BuiltinUtilityResolution::Builtin(identity)
         } else {
-            UtilitySource::Unknown
+            BuiltinUtilityResolution::Unknown
         }
     }
 

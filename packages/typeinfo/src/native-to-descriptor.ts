@@ -22,6 +22,8 @@ import {
   tuple,
   object,
   func,
+  intrinsicApplication,
+  intrinsicDisplayName,
   ref,
   recursiveRef,
   typeParameter,
@@ -123,6 +125,9 @@ export function nativeToDescriptor(expr: NativeTypeExpr): TypeDescriptor {
       });
     case "ref":
       return ref(expr.name, expr.typeArguments.map(nativeToDescriptor));
+    // Preserves the compiler-native identity; never lowered to a `ref`.
+    case "intrinsicApplication":
+      return intrinsicApplication(expr.op, expr.arguments.map(nativeToDescriptor));
     case "recursiveRef":
       return recursiveRef(
         expr.name,
@@ -270,6 +275,10 @@ function describeBrief(expr: NativeTypeExpr): string {
       return JSON.stringify(expr.value);
     case "ref":
       return expr.name;
+    case "intrinsicApplication":
+      return expr.arguments.length > 0
+        ? `${intrinsicDisplayName(expr.op)}<${expr.arguments.map(describeBrief).join(", ")}>`
+        : intrinsicDisplayName(expr.op);
     case "constructorType":
       // Function-like; brief it distinctly from a plain function so an operator
       // shell that embeds a constructor type (e.g. inside a conditional) reads

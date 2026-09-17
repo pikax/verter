@@ -3945,14 +3945,10 @@ pub(crate) struct CachedMetaPayload {
 
 // MetaProvenance — per-host counters for component-meta observability
 
-/// Number of [`crate::semantic_query::SemanticNodeData`] discriminants used
-/// to size the per-discriminant push-count array in [`MetaProvenance`].
-///
-/// Sized with headroom over the current variants so adding a
-/// variant doesn't require widening the array. If
-/// `SemanticNodeData::discriminant_index` ever returns `>= 32`, that's
-/// a debug-assert hit at the push site rather than a silent overflow.
-pub const SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT: usize = 32;
+/// Width of the per-variant push-count array in [`MetaProvenance`]: the
+/// exclusive bound of [`crate::semantic_query::SemanticNodeTag::bucket_index`].
+pub const SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT: usize =
+    crate::semantic_query::SEMANTIC_NODE_TAG_BOUND;
 
 /// Per-host provenance counters for component-meta observability.
 ///
@@ -4223,8 +4219,8 @@ pub struct MetaProvenance {
     pub scheduler_submit_count: std::sync::atomic::AtomicU64,
     /// Scheduler peak inbox depth (mirrored from `SchedulerCounters`).
     pub scheduler_inbox_depth_max: std::sync::atomic::AtomicU64,
-    /// Per-`SemanticNodeData` discriminant push count, indexed by
-    /// `SemanticNodeData::discriminant_index()`. Sized to
+    /// Per-`SemanticNodeData` variant push count, indexed by
+    /// `SemanticNodeTag::bucket_index()`. Sized to
     /// [`SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT`] for variant headroom.
     pub node_arena_pushes_per_discriminant:
         [std::sync::atomic::AtomicU64; SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT],

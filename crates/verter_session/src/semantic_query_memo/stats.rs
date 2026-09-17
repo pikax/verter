@@ -108,6 +108,14 @@ pub(crate) struct AtomicSemanticGraphStats {
     pub(super) branch_selections_true: AtomicU64,
     pub(super) branch_selections_false: AtomicU64,
     pub(super) budget_fallback_count: AtomicU64,
+    /// Cold `AwaitedNormalize` builds observed by the store. Bumped by
+    /// the builder itself, so a warm family hit does NOT increment it —
+    /// the discriminating signal for awaited-relation memoization.
+    pub(super) awaited_normalize_count: AtomicU64,
+    /// Cold `AsyncReturnPayload` builds observed by the store. Separate
+    /// from `awaited_normalize_count`: the two relations are distinct
+    /// families and must be countable apart.
+    pub(super) async_return_payload_count: AtomicU64,
     pub(super) path_length_samples: Mutex<SampleCollector>,
     pub(super) projection_depth_samples: Mutex<SampleCollector>,
     pub(super) decl_subexpression_lowering_count: AtomicU64,
@@ -178,6 +186,8 @@ impl Default for AtomicSemanticGraphStats {
             branch_selections_true: AtomicU64::new(0),
             branch_selections_false: AtomicU64::new(0),
             budget_fallback_count: AtomicU64::new(0),
+            awaited_normalize_count: AtomicU64::new(0),
+            async_return_payload_count: AtomicU64::new(0),
             path_length_samples: Mutex::new(SampleCollector::with_cap(SAMPLE_RESERVOIR_CAP)),
             projection_depth_samples: Mutex::new(SampleCollector::with_cap(SAMPLE_RESERVOIR_CAP)),
             decl_subexpression_lowering_count: AtomicU64::new(0),
@@ -344,6 +354,8 @@ impl SemanticGraphStore {
             branch_selections_true: stats.branch_selections_true.load(Ordering::Relaxed),
             branch_selections_false: stats.branch_selections_false.load(Ordering::Relaxed),
             budget_fallback_count: stats.budget_fallback_count.load(Ordering::Relaxed),
+            awaited_normalize_count: stats.awaited_normalize_count.load(Ordering::Relaxed),
+            async_return_payload_count: stats.async_return_payload_count.load(Ordering::Relaxed),
             path_length_p50,
             path_length_p95,
             projection_depth_p50,

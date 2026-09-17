@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package verter.v1;
 
+import "verter/v1/compiler_intrinsics.proto";
+
 message ComponentMetaPayload {
   uint32 schema_version = 1;
   TypeGraph type_graph = 2;
@@ -62,6 +64,7 @@ message TypeNode {
     RestNode rest = 20;
     RecursiveRefNode recursive_ref = 21;
     SyntheticSlotBindingNode synthetic_slot_binding = 22;
+    IntrinsicApplicationNode intrinsic_application = 23;
   }
 }
 
@@ -173,6 +176,18 @@ message FunctionParameter {
 message RefNode {
   uint32 name_id = 1;
   repeated uint32 type_argument_node_ids = 2;
+}
+
+// An applied compiler-native type operation. NOT a `RefNode`: the op is a
+// closed enum rather than a `name_id`, so it never enters the string table
+// and can never be resolved as a declaration name.
+//
+// `op` is the SHARED `CompilerIntrinsicTypeOp` (compiler_intrinsics.proto) —
+// the same vocabulary the typeinfo graph uses, so one op code flows through
+// both wire surfaces and the snapshot unchanged.
+message IntrinsicApplicationNode {
+  CompilerIntrinsicTypeOp op = 1;
+  repeated uint32 argument_node_ids = 2;
 }
 
 message TypeParameterNode {

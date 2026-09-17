@@ -102,6 +102,46 @@ pub struct FlowReturnResult {
     /// a widened or substituted rebuild can never list a value the
     /// return no longer carries.
     fresh_literal_arms: std::sync::Arc<[SemanticNodeId]>,
+    /// The PENDING function-kind return wrap (async / generator /
+    /// async-generator), carried as a deferred fact until the value
+    /// leaves the frame for publication. While set, `return_type` is the
+    /// BODY join — the equation fixed point, the post-convergence
+    /// literal widening, the per-key substitution, and the pre-seal
+    /// union re-close all operate on it unwrapped — and the publication
+    /// closure materializes the wrapper through the shared lib
+    /// instantiation surfaces exactly once: `Promise<join>` over a join
+    /// the shared `Awaited` surface already collapsed, the verbatim
+    /// `Generator<Y, join, N>`, and `AsyncGenerator<Y, join, N>` whose
+    /// two iteration parameters take the async iteration rule. See
+    /// [`FlowReturnWrap`].
+    wrap: Option<FlowReturnWrap>,
+}
+
+/// The deferred function-kind wrap of one flow-return value — the
+/// language's return-type rule for `async` and generator functions,
+/// recorded by the evaluation and materialized at the publication
+/// closure (never inside the equation fixed point, whose lattice is the
+/// BODY join: a recursive async component converges on the body values
+/// and wraps once, exactly as the checker collapses the self-reference
+/// through its own awaited rule).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlowReturnWrap {
+    /// The function's authored kind.
+    pub kind: verter_semantic::analysis::flow::FunctionBodyKind,
+    /// The joined YIELD parameter of a generator / async-generator body
+    /// (`None` for plain async). The evaluator joins the yielded
+    /// expressions' types with the return join's own arm rules (dedupe,
+    /// lone-fresh-literal widening); a body with no yields carries no
+    /// node and the wrap publishes the empty union (`never`).
+    pub yield_join: Option<SemanticNodeId>,
+    /// The RESOLVED lib head node for a generator wrap (`Generator` /
+    /// `AsyncGenerator`), captured at the evaluation's binder
+    /// environment: the wrap instantiates THIS identity, so an authored
+    /// annotation and the wrap mint one node identity. `None` when the
+    /// environment could not resolve the head — the wrap then publishes
+    /// the typed gap. Unused for the async kinds (`Promise` identity is
+    /// registry-decided, no environment needed).
+    pub generator_head: Option<SemanticNodeId>,
 }
 
 transports_completion!(FlowReturnResult => FlowReturnResult);
@@ -156,6 +196,7 @@ impl FlowReturnResult {
             can_fall_through,
             degradation,
             fresh_literal_arms: retained_fresh_literal_arms(graph, return_type, fresh_literal_arms),
+            wrap: None,
         }
     }
 
@@ -178,26 +219,49 @@ impl FlowReturnResult {
         &self.fresh_literal_arms
     }
 
+    /// The pending function-kind wrap, when the body's kind requires one
+    /// and publication has not materialized it yet.
+    #[must_use]
+    pub fn function_wrap(&self) -> Option<&FlowReturnWrap> {
+        self.wrap.as_ref()
+    }
+
+    /// Attach the deferred function-kind wrap. Idempotent by construction
+    /// at the one evaluation join per result; the wrap rides every
+    /// rebuild untouched until the publication closure consumes it.
+    #[must_use]
+    pub(crate) fn with_function_wrap(mut self, wrap: FlowReturnWrap) -> Self {
+        self.wrap = Some(wrap);
+        self
+    }
+
     /// The same value with its RETURN TYPE replaced — the only
     /// field-level rebuild (the post-convergence literal widening in the
     /// SCC discharge), and it re-derives the verdict through
     /// [`Self::new_with_fresh_literal_arms`] rather than carrying the
     /// old one over. The fresh arms carry forward and re-filter against
     /// the NEW return: a widened literal or an absorbed constituent
-    /// drops out of the list with the value it named.
+    /// drops out of the list with the value it named. A pending
+    /// function-kind wrap carries forward untouched — the rebuild is a
+    /// BODY-join transformation (widening, substitution), and the wrap
+    /// materializes over the rebuilt body at publication.
     #[must_use]
     pub(crate) fn with_return_type(
         &self,
         graph: &crate::semantic_query_memo::SemanticGraphStore,
         return_type: SemanticNodeId,
     ) -> Self {
-        Self::new_with_fresh_literal_arms(
+        let rebuilt = Self::new_with_fresh_literal_arms(
             graph,
             return_type,
             self.can_fall_through,
             self.degradation,
             &self.fresh_literal_arms,
-        )
+        );
+        match self.wrap {
+            Some(wrap) => rebuilt.with_function_wrap(wrap),
+            None => rebuilt,
+        }
     }
 }
 

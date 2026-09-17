@@ -112,6 +112,9 @@ fn classify_snippet_params_arg(data: Option<&SemanticNodeData>) -> SnippetParams
     match data {
         // A tuple `Params` — one positional binding per element.
         SemanticNodeData::Tuple { .. } => SnippetParamsArg::Tuple,
+        // A reached-but-unreduced operation: PRESENT and binding-less, the
+        // same bucket the open deferred shells take. Never a dropped slot.
+        SemanticNodeData::IntrinsicApplication { .. } => SnippetParamsArg::ResolvedNonTuple,
         // RESOLVED NON-TUPLE — a reached type shape that is not a tuple
         // (including reached-but-OPEN deferred shells: `KeyOf` /
         // `IndexedAccess` / `Mapped` / `Infer` are reached and bucketed

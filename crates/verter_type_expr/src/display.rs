@@ -298,6 +298,12 @@ pub fn render_type_expr_display(
                     record_reference(name, &mut seen_references, &mut referenced_type_names);
                     push_named_type(&mut work, name, type_arguments);
                 }
+                // Renders like a named application (`Awaited<T>`) but is NOT a
+                // reference: no `record_reference`, so it never appears in the
+                // rendered referenced-name set.
+                TypeExpr::IntrinsicApplication { op, arguments } => {
+                    push_named_type(&mut work, op.display_name(), arguments);
+                }
                 TypeExpr::TypeParameter(parameter) => {
                     ensure_type_name(&parameter.name, "type parameter")?;
                     text.push_str(&parameter.name);

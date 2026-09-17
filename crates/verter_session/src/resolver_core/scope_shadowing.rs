@@ -162,6 +162,25 @@ impl ScopeShadowing {
         self.shadowed_type_names.contains(name)
     }
 
+    /// Whether `name` is shadowed in `payload`'s scope, answered without
+    /// building a shadow set.
+    ///
+    /// For gates with no per-scope memo to consult (the stateless dispatch
+    /// adapter): it probes the SAME three sources [`Self::from_scope_payload`]
+    /// folds, so `scope_payload_shadows_lib(p, n)` equals
+    /// `from_scope_payload(p).is_shadowing_lib(n)` — pinned by
+    /// `payload_probe_agrees_with_the_folded_shadow_set`.
+    pub(crate) fn scope_payload_shadows_lib(
+        payload: Option<&DeclarationScopePayload>,
+        name: &str,
+    ) -> bool {
+        payload.is_some_and(|payload| {
+            payload.scope_type_names().contains(name)
+                || payload.scope_type_bindings().contains_key(name)
+                || payload.import_bindings().contains_key(name)
+        })
+    }
+
     /// Internal — merge a `scope_type_names` set with the keys of
     /// `scope_type_bindings` and `import_bindings` into a deduplicated
     /// shadow set. Each source independently shadows ambient-lib builtins
@@ -264,6 +283,26 @@ mod tests {
         owner_scope.import_bindings = import_bindings;
         owner_scope.script_setup_type_bindings = bindings;
         DeclarationScopePayload::from_bundle(&Arc::new(bundle), owner)
+    }
+
+    #[test]
+    fn payload_probe_agrees_with_the_folded_shadow_set() {
+        let payload = payload_with_imports(&["Local"], &["Binding"], &["Awaited"]);
+        let folded = ScopeShadowing::from_scope_payload(Some(&payload));
+        for name in ["Local", "Binding", "Awaited", "Partial", ""] {
+            assert_eq!(
+                ScopeShadowing::scope_payload_shadows_lib(Some(&payload), name),
+                folded.is_shadowing_lib(name),
+                "{name:?}"
+            );
+        }
+        for source in ["Local", "Binding", "Awaited"] {
+            assert!(
+                ScopeShadowing::scope_payload_shadows_lib(Some(&payload), source),
+                "each of the three sources shadows on its own: {source:?}"
+            );
+        }
+        assert!(!ScopeShadowing::scope_payload_shadows_lib(None, "Awaited"));
     }
 
     #[test]

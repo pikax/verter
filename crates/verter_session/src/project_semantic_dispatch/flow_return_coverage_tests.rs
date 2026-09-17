@@ -48,7 +48,9 @@ use crate::semantic_query::{
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 use verter_type_expr::facts::FunctionPartIdentity;
-use verter_type_expr::{LiteralValue, PrimitiveName, TopLevelOwnerId, TypeExpr, UnknownValue};
+use verter_type_expr::{
+    CompilerIntrinsicTypeOp, LiteralValue, PrimitiveName, TopLevelOwnerId, TypeExpr, UnknownValue,
+};
 
 // ──────────────────────────────────────────────────────────────────────
 // Fixtures
@@ -56,6 +58,10 @@ use verter_type_expr::{LiteralValue, PrimitiveName, TopLevelOwnerId, TypeExpr, U
 
 const LEAF: &str = "/ws/cov/leaf.ts";
 const LEAF_SRC: &str = r#"
+// The lib generator surface this standalone host has no `lib*.d.ts` for:
+// the wrap resolves `Generator` through the ONE shared bare-ref resolver,
+// so a file-scope declaration is the environment's stand-in.
+interface Generator<T, TReturn, TNext> {}
 export declare function idf<T>(x: T): T;
 
 export function leafInstExpr() {
@@ -126,6 +132,45 @@ export function* leafGenerator() {
   return "done";
 }
 
+// The SYNC negative control for the async-generator await: a plain
+// generator does NOT await what it yields — tsgo:
+// `Generator<Promise<number>, string, unknown>`.
+export declare function leafAsyncSrc(): Promise<number>;
+export function* leafGeneratorYieldPromise() {
+  yield leafAsyncSrc();
+  return "done";
+}
+
+// A SYNC generator publishes its generic yield verbatim — no awaiting, and
+// no deferred `Awaited` spelling either (tsgo: `Generator<T, string, unknown>`).
+export function* leafGeneratorYieldParam<T>(v: T) {
+  yield v;
+  return "done";
+}
+
+// A YIELDED settled call deposits its fresh literal return exactly as a
+// RETURNED one does, so the lone-fresh-arm widening reads it the same way
+// (tsgo: `Generator<number, string, unknown>`); two such yields are two
+// distinct constituents and keep `1 | 2`.
+export function* leafGeneratorYieldCall() {
+  yield idf(1);
+  return "done";
+}
+export function* leafGeneratorYieldTwoCalls() {
+  yield idf(1);
+  yield idf(2);
+  return "done";
+}
+
+// A PARENTHESIZED statement-position yield: the outer node is a
+// `ParenthesizedExpression`, not a bare `YieldExpression` — the yield
+// classifier must unwrap it, or this contributor is silently dropped and
+// the generator's yield parameter collapses to `never`.
+export function* leafGeneratorParenthesizedYield() {
+  (yield 1);
+  return "done";
+}
+
 export function leafAssign() {
   let a = 1;
   return (a = 2);
@@ -146,6 +191,21 @@ export function leafRegExp() {
 
 export function leafTemplate() {
   return `x${1}`;
+}
+
+// A generator whose YIELD (not its return) calls a mutually recursive
+// sibling: `sccGenYield`/`sccGenPartner` form one SCC component through
+// the yield-position call, not through a return-position one.
+export function* sccGenYield(c: boolean) {
+  if (c) {
+    yield sccGenPartner(c);
+  }
+  return 1;
+}
+
+export function sccGenPartner(c: boolean) {
+  if (c) return "s";
+  return sccGenYield(false);
 }
 "#;
 
@@ -170,6 +230,46 @@ export function jsxFrag() {
 export declare function jsxHelper(n: number): "H";
 export function jsxAttrCall() {
   return <div data-x={jsxHelper(1)} />;
+}
+"#;
+
+const NEG: &str = "/ws/cov/nolib.ts";
+const NEG_SRC: &str = r#"
+// NO lib generator surface: this file deliberately declares neither
+// `Generator` nor `AsyncGenerator`, so the GENERATOR paths' wrap
+// lib-head resolution fails and the wrap must keep the typed gap.
+// `negAsync` below is unaffected — the async wrap's `Promise` carrier is
+// a registry-decided interning with no lib-head lookup of its own.
+export function* negGen() {
+  return 1;
+}
+export async function negAsync() {
+  return 1;
+}
+
+// A SELF-REFERENTIAL (directly-circular, not valid authored TS) alias:
+// `negAsyncSelfRef`'s operand recurses back through the SAME alias every
+// `Awaited` unwrap step, so the dispatch exhausts its unwrap budget and
+// must publish the TYPED GAP rather than loop forever or fabricate a
+// resolved-looking answer.
+type NegSelfProm = Promise<NegSelfProm>;
+export declare function negAsyncSrc(): NegSelfProm;
+export async function negAsyncSelfRef() {
+  return negAsyncSrc();
+}
+
+// A THENABLE Promise payload: the awaited relations defer a
+// `then`-bearing object surface (structural thenables are out of scope —
+// see the object arm of `settled_non_thenable`), so the async wrap's
+// Promise-embedding branch must reach the family's honest refusal, and
+// the wrap must publish the TYPED GAP rather than a fabricated
+// `Promise<Thenable>` or a bare unwrapped `Thenable`.
+interface NegThenable {
+  then(cb: (v: number) => void): void;
+}
+export declare function negThenableSrc(): Promise<NegThenable>;
+export async function negAsyncThenable() {
+  return negThenableSrc();
 }
 "#;
 
@@ -241,6 +341,8 @@ export function callThisParam() {
 }
 
 export declare function asyncSrc(): Promise<number>;
+// The lib async-generator surface (see LEAF_SRC's `Generator` note).
+interface AsyncGenerator<T, TReturn, TNext> {}
 export async function callAwait() {
   return await asyncSrc();
 }
@@ -249,6 +351,120 @@ export async function callAsyncPlain() {
 }
 export async function* callAsyncGen() {
   yield 1;
+}
+// A bare PASSTHROUGH of an already-`Promise`-typed value: the async wrap
+// must Awaited-collapse the embedded carrier before re-wrapping, so the
+// published type is `Promise<number>` — never `Promise<Promise<number>>`.
+export async function callAsyncPassthrough() {
+  return asyncSrc();
+}
+
+// `return await 1`: the lib `Awaited` surface passes a SETTLED literal
+// through verbatim, so the operand's FRESHNESS is the await's own and the
+// lone fresh arm widens exactly as a bare `return 1` does — tsgo:
+// `Promise<number>`, never `Promise<1>`.
+export async function callAwaitFreshLiteral() {
+  return await 1;
+}
+
+// The FALSIFICATION twin: TWO awaited fresh arms are two DISTINCT literal
+// constituents, so the lone-fresh-arm widening must NOT fire — tsgo:
+// `Promise<1 | 2>`.
+export async function callAwaitFreshTernary(c: boolean) {
+  return c ? await 1 : await 2;
+}
+
+// An async generator AWAITS what it yields: the yield parameter rides the
+// same lib `Awaited` surface the async wrap's body join does — tsgo:
+// `AsyncGenerator<number, void, unknown>`, never
+// `AsyncGenerator<Promise<number>, …>`.
+export async function* callAsyncGenYieldPromise() {
+  yield asyncSrc();
+}
+
+// …and what it RETURNS: the same collapse applies to the body join —
+// tsgo: `AsyncGenerator<number, number, unknown>`.
+export async function* callAsyncGenReturnPromise() {
+  yield 1;
+  return asyncSrc();
+}
+
+
+// A GENERIC body join: the bare type parameter `T` itself. tsgo publishes
+// `Promise<T>` for this shape — it does NOT spell `Awaited<T>`, and
+// instantiating `T` with `Promise<string>` genuinely nests to
+// `Promise<Promise<string>>` — so the wrap must neither collapse the
+// parameter nor wrap it in a deferred `Awaited`.
+export async function asyncGenericIdentity<T>(value: T) {
+  return value;
+}
+
+// The same generic body reached through a `Promise` parameter, a union of
+// the parameter and its promise, and an `await` — tsgo publishes
+// `Promise<T>` for all three, collapsing exactly one promise level.
+export async function asyncPromiseParam<T>(v: Promise<T>) {
+  return v;
+}
+export async function asyncUnionParam<T>(v: T | Promise<T>) {
+  return v;
+}
+export async function asyncAwaitParam<T>(v: T) {
+  return await v;
+}
+
+// An async GENERATOR does not share the async function's generic rule:
+// tsgo spells the DEFERRED `Awaited<T>` in both iteration parameters.
+export async function* asyncGenYieldParam<T>(v: T) {
+  yield v;
+}
+export async function* asyncGenReturnParam<T>(v: T) {
+  return v;
+}
+
+// The awaited-relation ORACLE MATRIX (see `awaited_relation_oracle_matrix`).
+// `asyncGenericIdentity` and `asyncGenYieldParam` above are its r1 / y1 rows.
+interface MatrixThenable<V> {
+  then(onfulfilled: (value: V) => void): void;
+}
+export async function matrixR2<T extends string>(v: T) {
+  return v;
+}
+export async function matrixR3<T extends Promise<string>>(v: T) {
+  return v;
+}
+export async function matrixR4<T extends MatrixThenable<number>>(v: T) {
+  return v;
+}
+export async function matrixX1<T>(v: T) {
+  const a = await v;
+  return { a };
+}
+export async function matrixX2<T extends string>(v: T) {
+  const a = await v;
+  return { a };
+}
+export async function matrixX3<T extends Promise<string>>(v: T) {
+  const a = await v;
+  return { a };
+}
+export async function matrixX4<T extends MatrixThenable<number>>(v: T) {
+  const a = await v;
+  return { a };
+}
+export async function* matrixY2<T extends string>(v: T) {
+  yield v;
+}
+export async function matrixG1<T>(v: Awaited<T>) {
+  return v;
+}
+export async function matrixG6<T>(v: Array<Awaited<T>>) {
+  return v;
+}
+export async function matrixG7<T>(v: Awaited<T>[]) {
+  return v;
+}
+export function matrixG8<T>(v: Awaited<T>) {
+  return v;
 }
 
 export declare function ovlAmbient(a: string): "S";
@@ -589,6 +805,7 @@ fn ts_host() -> Arc<VerterHost> {
     host_with(&[
         (LEAF, LEAF_SRC),
         (JSX, JSX_SRC),
+        (NEG, NEG_SRC),
         (JSX_UNCONFIGURED, JSX_UNCONFIGURED_SRC),
         (CALLS, CALLS_SRC),
         (TL, TL_SRC),
@@ -816,6 +1033,16 @@ fn boolean() -> TypeExpr {
 
 fn string_lit(value: &str) -> TypeExpr {
     TypeExpr::Literal(LiteralValue::String(value.to_string()))
+}
+
+/// The published spelling of a naked type parameter.
+fn type_param(name: &str) -> TypeExpr {
+    TypeExpr::TypeParameter(verter_type_expr::TypeParam {
+        name: name.to_string(),
+        constraint: None,
+        default: None,
+        is_const: false,
+    })
 }
 
 /// A bare named type reference with no type arguments.
@@ -1887,7 +2114,7 @@ fn private_field_expression_return_is_the_field_type() {
 /// Oracle: `ReturnType<typeof leafGenerator>` is
 /// `Generator<number, string, unknown>`.
 ///
-/// Verbatim failure (un-ignored):
+/// Verbatim failure (before the wrap landed):
 ///
 /// ```text
 /// assertion `left != right` failed: a generator's return must not be the bare `return` type
@@ -1895,20 +2122,54 @@ fn private_field_expression_return_is_the_field_type() {
 ///  right: Primitive(String)
 /// ```
 ///
-/// Owning layer: the flow evaluator publishes the raw `return`
-/// contributor join with NO generator wrapping — no `is_generator`
-/// consultation exists anywhere on the flow path. This is a WARM WRONG
-/// answer, not merely an imprecise one: a consumer reading
-/// `ReturnType<typeof leafGenerator>` gets `string` where the language
-/// says `Generator<number, string, unknown>`.
+/// Owning layer (landed): the function-kind wrap — the skeleton carries
+/// the authored `generator` flag, the join defers the wrap past the
+/// equation fixed point, and the publication closure instantiates the
+/// resolved lib `Generator` head over `(yield join, return join,
+/// unknown)`. The fixture declares the `Generator` surface this
+/// standalone host has no `lib*.d.ts` for; an environment that cannot
+/// resolve the head keeps the typed gap (never warm) instead.
 #[test]
-#[ignore = "generator functions are not wrapped: the flow rail publishes the bare `return` join as the function's return type, warm"]
 fn generator_return_is_wrapped_in_generator() {
     let host = ts_host();
-    assert_ne!(
+    assert_eq!(
         value_of(&host, LEAF, "leafGenerator"),
-        string(),
-        "a generator's return must not be the bare `return` type"
+        TypeExpr::Ref {
+            name: Arc::from("Generator"),
+            type_arguments: Arc::from(
+                vec![
+                    number(),
+                    string(),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice()
+            ),
+        },
+        "a generator's return is Generator<yield, return, next>"
+    );
+}
+
+/// A PARENTHESIZED statement-position `(yield 1);` must classify exactly
+/// like the bare `yield 1;` form — the outer `ParenthesizedExpression`
+/// node must not hide the yield contributor from the generator's yield
+/// join, or the parameter silently collapses to `never`.
+#[test]
+fn parenthesized_statement_position_yield_still_contributes_to_the_yield_join() {
+    let host = ts_host();
+    assert_eq!(
+        value_of(&host, LEAF, "leafGeneratorParenthesizedYield"),
+        TypeExpr::Ref {
+            name: Arc::from("Generator"),
+            type_arguments: Arc::from(
+                vec![
+                    number(),
+                    string(),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice()
+            ),
+        },
+        "a parenthesized yield must contribute number to the yield join, not collapse it to never"
     );
 }
 
@@ -2184,7 +2445,7 @@ fn tagged_template_call_return_is_the_tag_return() {
 /// Oracle: `ReturnType<typeof callAsyncPlain>` is `Promise<number>` for
 /// `async function callAsyncPlain() { return 1; }`.
 ///
-/// Verbatim failure (un-ignored):
+/// Verbatim failure (before the wrap landed):
 ///
 /// ```text
 /// assertion `left != right` failed: an async function's return must not be the bare body type
@@ -2192,24 +2453,22 @@ fn tagged_template_call_return_is_the_tag_return() {
 ///  right: Primitive(Number)
 /// ```
 ///
-/// Owning layer: the flow evaluator publishes the raw `return`
-/// contributor join with NO `Promise` wrapping — `is_async` is not
-/// consulted anywhere on the flow path (neither
-/// `verter_session/src/flow_slice_content.rs`,
-/// `verter_session/src/project_semantic_dispatch/flow_return*.rs`, nor
-/// `verter_semantic/src/analysis/flow/**` reference it). This is a WARM
-/// WRONG answer at a public consumer boundary: a downstream
-/// `ReturnType<typeof asyncFn>` reads `number` where the language says
-/// `Promise<number>`, and the enclosing composition is never marked
-/// partial because `degradation` is `None`.
+/// Owning layer (landed): the function-kind wrap — the skeleton carries
+/// the authored `async` flag, the join defers the wrap past the equation
+/// fixed point (so the fresh literal `1` widens to `number` first), and
+/// the publication closure interns the registry-decided `Promise` builtin
+/// carrier over the body join — the same identity an authored unshadowed
+/// `Promise<…>` reference takes.
 #[test]
-#[ignore = "async functions are not wrapped: the flow rail publishes the bare body join as the function's return type, warm"]
 fn async_function_return_is_wrapped_in_promise() {
     let host = ts_host();
-    assert_ne!(
+    assert_eq!(
         value_of(&host, CALLS, "callAsyncPlain"),
-        number(),
-        "an async function's return must not be the bare body type"
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+        },
+        "an async function's return is Promise<body join>, warm"
     );
 }
 
@@ -2218,7 +2477,7 @@ fn async_function_return_is_wrapped_in_promise() {
 /// Oracle: `ReturnType<typeof callAsyncGen>` is
 /// `AsyncGenerator<number, void, unknown>`.
 ///
-/// Verbatim failure (un-ignored):
+/// Verbatim failure (before the wrap landed):
 ///
 /// ```text
 /// assertion `left != right` failed: an async generator's return must not be `void`
@@ -2226,16 +2485,26 @@ fn async_function_return_is_wrapped_in_promise() {
 ///  right: Primitive(Void)
 /// ```
 ///
-/// Owning layer: the same missing wrapping as the async and generator
-/// rows — the body's fall-through `void` is published warm.
+/// Owning layer (landed): the generator wrap over the async-generator
+/// kind — the yield join (`number`), the body's fall-through `void`, and
+/// `unknown` next, over the resolved lib `AsyncGenerator` head.
 #[test]
-#[ignore = "async generators are not wrapped: the flow rail publishes the body's fall-through `void`, warm"]
 fn async_generator_return_is_wrapped_in_async_generator() {
     let host = ts_host();
-    assert_ne!(
+    assert_eq!(
         value_of(&host, CALLS, "callAsyncGen"),
-        TypeExpr::Primitive(PrimitiveName::Void),
-        "an async generator's return must not be `void`"
+        TypeExpr::Ref {
+            name: Arc::from("AsyncGenerator"),
+            type_arguments: Arc::from(
+                vec![
+                    number(),
+                    TypeExpr::Primitive(PrimitiveName::Void),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice()
+            ),
+        },
+        "an async generator's return is AsyncGenerator<yield, return, next>"
     );
 }
 
@@ -2251,19 +2520,19 @@ fn async_generator_return_is_wrapped_in_async_generator() {
 ///   left: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection })
 ///  right: Ref { name: "Promise", type_arguments: [Primitive(Number)] }
 /// ```///
-/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
-/// result is a degraded success and nothing warms — so the row observes a
-/// VALUE rather than `Miss`. The capability gap named below is unchanged.
+/// The fail-closed DISPOSITION was POSITIONAL before the await arm
+/// landed: the value was the typed unresolved marker (projected
+/// `Unknown { raw: "unmodeledPosition" }`), a degraded success that
+/// never warmed.
 ///
-/// Owning layer: TWO independent capability gaps compose here — the
-/// awaited call is never resolved and never `Promise`-unwrapped, and the
-/// enclosing `async` is never re-wrapped. Fixing only the async wrapping
-/// would turn this into `Promise<any>`, still wrong. The admission half
-/// is settled: `await f()` is a `ValueDescent::UnmodeledCall`, so it
-/// fails closed rather than publishing `any` warm.
+/// Owning layer (landed): TWO arms compose — the awaited call resolves
+/// through the ONE call carrier (`ValueDescent::Awaited` descends both
+/// halves onto the operand) and unwraps through the lib `Awaited`
+/// instantiation, and the enclosing `async` re-wraps through the
+/// function-kind wrap. Fixing only one arm would have published
+/// `Promise<any>` (wrap without unwrap) or `number` (unwrap without
+/// wrap) — both wrong.
 #[test]
-#[ignore = "an awaited call is not resolved and the enclosing async is not wrapped: it fails closed as an unmodeled call position"]
 fn awaited_call_return_is_the_awaited_value_wrapped_again() {
     let host = ts_host();
     assert_eq!(
@@ -2272,6 +2541,512 @@ fn awaited_call_return_is_the_awaited_value_wrapped_again() {
             name: Arc::from("Promise"),
             type_arguments: Arc::from(vec![number()].into_boxed_slice()),
         },
+    );
+}
+
+/// The Promise-EMBEDDING half of the async wrap's `Awaited`-collapse
+/// arm: `callAwait` covers an `await` operand (the value is unwrapped
+/// BEFORE the re-wrap), but a body that returns an already-`Promise`-typed
+/// value directly (no `await`) exercises `materialize_flow_return_wrap`'s
+/// unconditional `Awaited` dispatch over the body ITSELF — the join
+/// carries `Promise<…>` at its top level, so the dispatch collapses it
+/// before re-wrapping.
+///
+/// Oracle: `ReturnType<typeof callAsyncPassthrough>` is `Promise<number>`
+/// for `async function callAsyncPassthrough() { return asyncSrc(); }` —
+/// never `Promise<Promise<number>>`.
+#[test]
+fn async_return_of_an_already_promise_typed_value_collapses_the_embedded_carrier() {
+    let host = ts_host();
+    assert_eq!(
+        value_of(&host, CALLS, "callAsyncPassthrough"),
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+        },
+        "a bare Promise-typed passthrough must collapse to Promise<number>, not Promise<Promise<number>>",
+    );
+}
+
+/// A GENERIC async body publishes `Promise<T>` — the parameter itself,
+/// never a spelled `Awaited<T>` and never a typed gap.
+///
+/// Oracle (tsc 7.0.2): `asyncGenericIdentity` declares `Promise<T>`, and
+/// instantiating `T` with `Promise<string>` genuinely nests to
+/// `Promise<Promise<string>>` — the checker does NOT collapse an
+/// unresolved parameter, so publishing the collapse would be wrong and
+/// gapping it would lose an answer the checker has.
+#[test]
+fn an_async_wrap_over_a_bare_generic_body_publishes_the_parameter() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "asyncGenericIdentity",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![type_param("T")].into_boxed_slice()),
+        },
+    );
+}
+
+/// A `Promise`-typed generic body collapses exactly ONE promise level, to
+/// the same `Promise<T>` — tsgo: `asyncPromiseParam` is `Promise<T>`,
+/// never `Promise<Promise<T>>`.
+#[test]
+fn an_async_wrap_over_a_promise_typed_generic_body_collapses_one_level() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "asyncPromiseParam",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![type_param("T")].into_boxed_slice()),
+        },
+    );
+}
+
+/// A union of a parameter and its own promise collapses to the single
+/// parameter — tsgo: `asyncUnionParam` is `Promise<T>`.
+#[test]
+fn an_async_wrap_over_a_parameter_union_collapses_to_the_parameter() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "asyncUnionParam",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![type_param("T")].into_boxed_slice()),
+        },
+    );
+}
+
+/// `return await v` over a generic operand publishes the parameter
+/// unchanged — tsgo: `asyncAwaitParam` is `Promise<T>`.
+#[test]
+fn an_awaited_generic_operand_publishes_the_parameter_unchanged() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "asyncAwaitParam",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![type_param("T")].into_boxed_slice()),
+        },
+    );
+}
+
+/// An async GENERATOR spells the DEFERRED `Awaited<T>` for a generic yield
+/// — NOT the bare parameter the async function publishes. The two surfaces
+/// have different generic rules, and tsc 7.0.2 prints them differently:
+/// `AsyncGenerator<Awaited<T>, void, unknown>` here versus `Promise<T>` for
+/// the async function (measured by declaration emit).
+///
+/// The deferred `Awaited<T>` is a `TypeExpr::IntrinsicApplication` — a
+/// compiler-native operation — NOT a `Ref` spelled `Awaited`. The generator
+/// used to fabricate an `InstantiationRef` carrier over a `__builtin__`
+/// canonical for this; a `Ref` contributes its name to referenced-name
+/// traversal, so that shape let a userland `Awaited` declaration collide
+/// with the intrinsic.
+#[test]
+fn an_async_generator_over_a_generic_yield_spells_the_deferred_awaited() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "asyncGenYieldParam",
+        TypeExpr::Ref {
+            name: Arc::from("AsyncGenerator"),
+            type_arguments: Arc::from(
+                vec![
+                    TypeExpr::IntrinsicApplication {
+                        op: CompilerIntrinsicTypeOp::Awaited,
+                        arguments: Arc::from(vec![type_param("T")].into_boxed_slice()),
+                    },
+                    TypeExpr::Primitive(PrimitiveName::Void),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
+    );
+}
+
+/// …and for a generic RETURN — tsgo:
+/// `AsyncGenerator<never, Awaited<T>, unknown>`.
+#[test]
+fn an_async_generator_over_a_generic_return_spells_the_deferred_awaited() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "asyncGenReturnParam",
+        TypeExpr::Ref {
+            name: Arc::from("AsyncGenerator"),
+            type_arguments: Arc::from(
+                vec![
+                    TypeExpr::Primitive(PrimitiveName::Never),
+                    TypeExpr::IntrinsicApplication {
+                        op: CompilerIntrinsicTypeOp::Awaited,
+                        arguments: Arc::from(vec![type_param("T")].into_boxed_slice()),
+                    },
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
+    );
+}
+
+/// The SYNC control for both generic rules: a plain generator publishes the
+/// parameter verbatim, with no collapse and no deferred spelling — tsgo:
+/// `Generator<T, string, unknown>`.
+#[test]
+fn a_sync_generator_over_a_generic_yield_publishes_the_parameter_verbatim() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        LEAF,
+        "leafGeneratorYieldParam",
+        TypeExpr::Ref {
+            name: Arc::from("Generator"),
+            type_arguments: Arc::from(
+                vec![
+                    type_param("T"),
+                    string(),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
+    );
+}
+
+/// A YIELDED settled call widens its fresh literal return exactly as a
+/// RETURNED one does — tsgo: `Generator<number, string, unknown>`.
+/// Reading the freshness before evaluation, and never consulting the call's
+/// own fresh-literal deposit, published `1`.
+#[test]
+fn a_yielded_settled_call_widens_its_fresh_literal_as_a_returned_one_does() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        LEAF,
+        "leafGeneratorYieldCall",
+        TypeExpr::Ref {
+            name: Arc::from("Generator"),
+            type_arguments: Arc::from(
+                vec![
+                    number(),
+                    string(),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
+    );
+}
+
+/// The FALSIFICATION twin: two yielded settled calls are two distinct
+/// literal constituents, so the lone-fresh-arm widening must not fire —
+/// tsgo: `Generator<1 | 2, string, unknown>`.
+#[test]
+fn two_yielded_settled_calls_keep_both_literal_constituents() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        LEAF,
+        "leafGeneratorYieldTwoCalls",
+        TypeExpr::Ref {
+            name: Arc::from("Generator"),
+            type_arguments: Arc::from(
+                vec![
+                    TypeExpr::union(vec![
+                        TypeExpr::number_literal(1.0),
+                        TypeExpr::number_literal(2.0),
+                    ]),
+                    string(),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
+    );
+}
+
+/// `return await 1` — the AWAITED operand carries its own FRESHNESS.
+///
+/// The lib `Awaited` surface passes a SETTLED literal through verbatim,
+/// so `return await 1` contributes exactly the fresh literal arm
+/// `return 1` does and the lone-fresh-arm widening fires. Oracle:
+/// `ReturnType<typeof callAwaitFreshLiteral>` is `Promise<number>`.
+///
+/// Classifying the whole `AwaitExpression` as PINNED (the freshness
+/// mirror had no await arm) published `Promise<1>` — wrong-complete,
+/// and warm.
+#[test]
+fn an_awaited_fresh_literal_return_widens_exactly_as_the_bare_literal_does() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "callAwaitFreshLiteral",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+        },
+    );
+}
+
+/// The FALSIFICATION twin of the widening above: TWO awaited fresh arms
+/// are two DISTINCT literal constituents, so the lone-fresh-arm rule must
+/// NOT fire. Oracle: `ReturnType<typeof callAwaitFreshTernary>` is
+/// `Promise<1 | 2>` — recursing freshness through `await` must not become
+/// blanket widening.
+#[test]
+fn two_awaited_fresh_literal_arms_keep_both_literal_constituents() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "callAwaitFreshTernary",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(
+                vec![TypeExpr::union(vec![
+                    TypeExpr::number_literal(1.0),
+                    TypeExpr::number_literal(2.0),
+                ])]
+                .into_boxed_slice(),
+            ),
+        },
+    );
+}
+
+/// An async generator AWAITS what it YIELDS: the yield parameter rides the
+/// same shared lib `Awaited` surface the async wrap applies to its body
+/// join. Oracle: `ReturnType<typeof callAsyncGenYieldPromise>` is
+/// `AsyncGenerator<number, void, unknown>` — never
+/// `AsyncGenerator<Promise<number>, void, unknown>`.
+#[test]
+fn an_async_generator_yield_join_is_awaited_through_the_shared_lib_surface() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "callAsyncGenYieldPromise",
+        TypeExpr::Ref {
+            name: Arc::from("AsyncGenerator"),
+            type_arguments: Arc::from(
+                vec![
+                    number(),
+                    TypeExpr::Primitive(PrimitiveName::Void),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
+    );
+}
+
+/// …and what it RETURNS: the same collapse applies to the body join, so
+/// the wrap never publishes a `Promise`-shaped TReturn. Oracle:
+/// `ReturnType<typeof callAsyncGenReturnPromise>` is
+/// `AsyncGenerator<number, number, unknown>`.
+#[test]
+fn an_async_generator_return_join_is_awaited_through_the_same_surface() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "callAsyncGenReturnPromise",
+        TypeExpr::Ref {
+            name: Arc::from("AsyncGenerator"),
+            type_arguments: Arc::from(
+                vec![
+                    number(),
+                    number(),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
+    );
+}
+
+/// The SYNC negative control: a plain generator does NOT await what it
+/// yields — the collapse belongs to the ASYNC kinds alone. Oracle:
+/// `ReturnType<typeof leafGeneratorYieldPromise>` is
+/// `Generator<Promise<number>, string, unknown>`.
+#[test]
+fn a_sync_generator_yield_join_is_never_awaited() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        LEAF,
+        "leafGeneratorYieldPromise",
+        TypeExpr::Ref {
+            name: Arc::from("Generator"),
+            type_arguments: Arc::from(
+                vec![
+                    TypeExpr::Ref {
+                        name: Arc::from("Promise"),
+                        type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+                    },
+                    string(),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
+    );
+}
+
+/// NEGATIVE LEG — a wrap whose lib head the environment cannot
+/// resolve keeps the TYPED GAP and never warms.
+///
+/// `negGen`'s file declares no `Generator` surface, so the wrap's shared
+/// bare-ref head resolution misses and the materialization publishes the
+/// typed marker: a degraded success with zero warm candidates. Contrast
+/// `leafGenerator` (same shape, with the surface declared), which
+/// publishes `Generator<number, string, unknown>` clean and warm.
+#[test]
+fn generator_wrap_without_lib_surface_keeps_typed_gap_and_never_warms() {
+    let host = ts_host();
+    match eval(&host, NEG, "negGen") {
+        Outcome::Value {
+            degradation,
+            candidates,
+            ..
+        } => {
+            assert!(degradation.is_some(), "the unresolved wrap must degrade");
+            assert_eq!(
+                candidates, 0,
+                "a gapped wrap is ReturnOnly — it must never warm"
+            );
+        }
+        other => panic!("negGen must produce a degraded value, got {other:?}"),
+    }
+}
+
+/// The Promise-EMBEDDING collapse over a STRUCTURAL thenable payload follows
+/// the checker's thenable protocol, clean and warm.
+///
+/// `negAsyncThenable` returns `Promise<NegThenable>` where `NegThenable` is
+/// `{ then(cb: (v: number) => void): void }`: the payload relation unwraps
+/// the `Promise`, reaches the interface carrier, expands it, and reads the
+/// promised value off the callback's first parameter. Oracle (tsc 7.0.2
+/// declaration emit): `Promise<number>` — never `Promise<NegThenable>` and
+/// never the typed gap this row pinned while structural thenables were
+/// unmodelled. The honest-refusal leg for a `then` this reader cannot
+/// enumerate is `awaited_decides_then_bearing_surfaces_by_callability`.
+#[test]
+fn async_wrap_awaited_collapse_over_a_thenable_payload_publishes_the_promised_value() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        NEG,
+        "negAsyncThenable",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+        },
+    );
+}
+
+/// Wrapped results admit WARM and REPLAY equal to FRESH.
+///
+/// The wrap is materialized inside the sealed value (the proof covers the
+/// wrapped node), so the memo stores it and every later demand — the same
+/// dispatch's warm read, and a FRESH dispatch over the same store —
+/// publishes the identical wrapped answer.
+#[test]
+fn wrapped_async_return_admits_warm_and_replay_equal_to_fresh() {
+    let host = ts_host();
+    let expected = TypeExpr::Ref {
+        name: Arc::from("Promise"),
+        type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+    };
+    // Fresh, then warm on the same dispatch.
+    assert_clean_warm(&host, CALLS, "callAsyncPlain", expected.clone());
+    assert_clean_warm(&host, CALLS, "callAsyncPlain", expected.clone());
+    // Replay: a fresh dispatch over the same store answers warm-equal.
+    assert_clean_warm(&host, CALLS, "callAsyncPlain", expected);
+}
+
+/// BOUNDED WORK: one awaited-relation build PER UNWRAP LEVEL, and
+/// identical warm demand adds ZERO builds.
+///
+/// `callAwait` is `return await asyncSrc()` where `asyncSrc(): Promise<number>`,
+/// so the cold demand measures 2: `AwaitedNormalize(Promise<number>)` and, via
+/// that arm's re-entry on the payload, `AwaitedNormalize(number)`. Two is the
+/// CORRECT bound, not an accounting slip — the composite arms re-enter the
+/// family rather than recursing privately, which is what puts every unwrap
+/// level under its own memo entry. The predecessor did the whole chain inside
+/// one `Instantiate` and cost 1; the second entry here is independently
+/// reusable by any other await of `number`, which the private recursion could
+/// never offer.
+///
+/// The load-bearing half is the SECOND assertion: warm repeats add ZERO. A
+/// warm family hit returns before the builder runs, so the per-family counter
+/// is what makes that observable at all.
+///
+/// This counts `awaited_normalize_count`, NOT `instantiate_count`: the
+/// unwrap used to be a lib `Instantiate` of `Awaited<T>` and is now its own
+/// family, so the instantiate counter no longer moves for it. The claim
+/// under test is unchanged — bounded cold work, zero warm work — and the
+/// per-family counter is what makes "zero warm work" observable at all,
+/// since a warm family hit returns before the builder runs.
+#[test]
+fn wrapped_await_demand_adds_one_cold_instantiation_and_zero_warm() {
+    let host = ts_host();
+    let before = host
+        .project_type_store()
+        .semantic_graph()
+        .stats_snapshot()
+        .awaited_normalize_count;
+    assert_clean_warm(
+        &host,
+        CALLS,
+        "callAwait",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+        },
+    );
+    let cold = host
+        .project_type_store()
+        .semantic_graph()
+        .stats_snapshot()
+        .awaited_normalize_count;
+    assert_eq!(
+        cold - before,
+        2,
+        "the cold awaited-unwrap demand pays exactly one build per unwrap level"
+    );
+    // bounded-loop: three warm repeats, a fixed demand count
+    for _ in 0..3 {
+        assert_clean_warm(
+            &host,
+            CALLS,
+            "callAwait",
+            TypeExpr::Ref {
+                name: Arc::from("Promise"),
+                type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+            },
+        );
+    }
+    let warm = host
+        .project_type_store()
+        .semantic_graph()
+        .stats_snapshot()
+        .awaited_normalize_count;
+    assert_eq!(
+        warm, cold,
+        "identical warm demand must add ZERO awaited-relation builds"
     );
 }
 
@@ -3289,27 +4064,24 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// callCtorSigNew  new ctorSig(1)                  { q: string; }
 /// callOptional    maybeFn?.()                     number | undefined
 /// callTagged      tag`a${1}b`                     boolean
-/// callAwait       await asyncSrc()                Promise<number>
 /// ```
+///
+/// `await asyncSrc()` is NOT in this set: an awaited
+/// call is a modelled form (`ValueDescent::Awaited`) whose operand rides
+/// the call carrier, so `callAwait` publishes `Promise<number>` (see
+/// `awaited_call_return_is_the_awaited_value_wrapped_again`).
 ///
 /// Mutation recipe: `value_is_unmodeled_call` is the single authority
 /// (both `value_descent`'s guarded arm and the content half's residual
 /// type-carrier check delegate to it), so flipping one of its arms flips
 /// exactly the matching rows — `NewExpression` /
 /// `TaggedTemplateExpression` to `false` flips `callNew` /
-/// `callCtorSigNew` / `callTagged` back to a warm `any`,
-/// `ChainElement::CallExpression` to `false` flips `callOptional`, and
-/// the `AwaitExpression` arm flips `callAwait`.
+/// `callCtorSigNew` / `callTagged` back to a warm `any`, and
+/// `ChainElement::CallExpression` to `false` flips `callOptional`.
 #[test]
 fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() {
     let host = ts_host();
-    for name in [
-        "callNew",
-        "callCtorSigNew",
-        "callOptional",
-        "callTagged",
-        "callAwait",
-    ] {
+    for name in ["callNew", "callCtorSigNew", "callOptional", "callTagged"] {
         assert_fails_closed(&host, CALLS, name);
     }
 }
@@ -3325,10 +4097,13 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 ///
 /// The discriminator runs the other way with the same fixture: every
 /// call form with NO structural arm (`new`, an optional call, a tagged
-/// template, `await`) keeps the fail-closed verdict when a sequence
-/// wraps it — the sequence context never converts an unmodeled call
-/// into a published value either. The delegation answers the CALL's own
-/// question; it invents no arm.
+/// template) keeps the fail-closed verdict when a sequence wraps it —
+/// the sequence context never converts an unmodeled call into a
+/// published value either. The delegation answers the CALL's own
+/// question; it invents no arm. An `await` last operand is a MODELLED
+/// form, so `(0, await asyncSrc())` surfaces
+/// `Promise<number>` clean and warm — the await's own verdict, kept by
+/// the sequence exactly as the resolved bare call's is.
 ///
 /// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
 /// --ignoreConfig`) — the answers the fail-closed rows decline to
@@ -3338,26 +4113,31 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 /// callSeqNew       CtorC
 /// callSeqOptional  number | undefined
 /// callSeqTagged    boolean
-/// callSeqAwait     Promise<number>
 /// ```
 ///
 /// Mutation recipe: dropping the sequence delegation from the content
-/// half's sequence arm flips `callSeqRest` to the fail-closed marker;
-/// widening the delegation past the paren-transparent `CallExpression`
-/// form (a `New` / chain / tagged / `await` last operand) flips the four
-/// negative rows to a published value.
+/// half's sequence arm flips `callSeqRest` and `callSeqAwait` to the
+/// fail-closed marker; widening the delegation past the
+/// paren-transparent `CallExpression` form (a `New` / chain / tagged
+/// last operand) flips the three negative rows to a published value.
 #[test]
 fn a_sequence_wrapped_call_keeps_the_calls_own_verdict() {
     let host = ts_host();
     // A resolved call surfaces through the sequence, clean and warm.
     assert_clean_warm(&host, CALLS, "callSeqRest", string_lit("rest"));
-    // Every form with no structural arm keeps failing closed.
-    for name in [
-        "callSeqNew",
-        "callSeqOptional",
-        "callSeqTagged",
+    // An awaited call keeps its own modelled verdict through the
+    // sequence: resolved operand, `Awaited` unwrap, async re-wrap.
+    assert_clean_warm(
+        &host,
+        CALLS,
         "callSeqAwait",
-    ] {
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+        },
+    );
+    // Every form with no structural arm keeps failing closed.
+    for name in ["callSeqNew", "callSeqOptional", "callSeqTagged"] {
         assert_fails_closed(&host, CALLS, name);
     }
 }
@@ -3395,4 +4175,1079 @@ fn non_call_forms_and_modeled_call_arms_are_untouched_by_the_call_position_gate(
             TypeExpr::Primitive(PrimitiveName::Undefined),
         ]),
     );
+}
+
+/// A yield-position hold must never leak into the RETURN equation's own
+/// join. `sccGenYield` and `sccGenPartner` form one SCC component through
+/// the YIELD-position call (`yield sccGenPartner(c)`), not through a
+/// return-position one: `sccGenYield`'s own `return` is the unconditional
+/// literal `1`, and `sccGenPartner`'s hold-back to `sccGenYield` is a
+/// RETURN-position edge on `sccGenPartner`, not on `sccGenYield`.
+///
+/// Before the fix, the hold `sccGenPartner`'s call registered while
+/// evaluating the yield argument was never dropped from the frame's hold
+/// list, so the SCC fixed point folded `sccGenPartner`'s resolved return
+/// into `sccGenYield`'s own return-type join — publishing a return
+/// parameter of `"s" | 1` instead of the correct `number`. The yield
+/// parameter alone carries `sccGenPartner`'s contribution; the RETURN
+/// parameter — this row's subject — must stay exactly `sccGenYield`'s own
+/// widened return-position value.
+///
+/// No checker answer pins the YIELD parameter for this shape: tsgo declines
+/// the whole mutually-recursive pair with TS7023 (`implicitly has return
+/// type 'any' ... referenced directly or indirectly in one of its return
+/// expressions`), so this row is an internal contract about hold
+/// contamination rather than a checker comparison. The yield parameter
+/// follows the same rule a return position does — a yielded call's
+/// fresh-literal deposit widens as a lone arm — which the two shapes the
+/// checker CAN type do pin: an unrecursive twin publishes its callee's
+/// return verbatim (`ctlPartner(c): "s" | "t"`), and a single-literal
+/// callee widens inside its own return inference.
+#[test]
+fn yield_position_hold_does_not_contaminate_the_return_position_join() {
+    let host = ts_host();
+    assert_eq!(
+        value_of(&host, LEAF, "sccGenYield"),
+        TypeExpr::Ref {
+            name: Arc::from("Generator"),
+            type_arguments: Arc::from(
+                vec![string(), number(), TypeExpr::Primitive(PrimitiveName::Unknown)]
+                    .into_boxed_slice()
+            ),
+        },
+        "the return parameter must be sccGenYield's own return join, never sccGenPartner's yielded value",
+    );
+}
+
+/// `negAsync`'s wrap has no generator lib-head dependency at all (plain
+/// `async`, no `Generator`/`AsyncGenerator` lookup), so — unlike `negGen`
+/// — the missing lib surface in this file never touches it: it must
+/// resolve exactly like `callAsyncPlain` does.
+#[test]
+fn plain_async_wrap_is_unaffected_by_a_missing_generator_lib_surface() {
+    let host = ts_host();
+    assert_clean_warm(
+        &host,
+        NEG,
+        "negAsync",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+        },
+    );
+}
+
+/// The `Awaited` dispatch over a SELF-REFERENTIAL operand:
+/// `negAsyncSrc`'s declared return is the directly-circular alias
+/// `NegSelfProm = Promise<NegSelfProm>` (not valid authored TS — real
+/// `tsc` rejects this alias with TS2456 — but a fixture-only shape this
+/// substrate must still fail closed over rather than hang or fabricate
+/// an answer). The async wrap's unconditional `Awaited` dispatch resolves
+/// the alias to `Promise<NegSelfProm>` and RE-ENTERS the family over the
+/// SAME identical alias every step (the `Promise<V>` payload arm of
+/// `AwaitedNormalize`), so it never settles. The refusal is now the
+/// FAMILY's own cycle handling, not a private unwrap counter: re-entry
+/// produces the identical query key, which the same-path guard stops —
+/// the retired `AWAITED_UNWRAP_BUDGET` constant is gone with the private
+/// recursion it bounded. The dispatch refuses rather than looping
+/// forever or answering a resolved-looking but meaningless carrier, and
+/// the wrap publishes the TYPED GAP, never warming.
+#[test]
+fn async_wrap_awaited_dispatch_over_a_self_referential_operand_keeps_typed_gap_never_warms() {
+    let host = ts_host();
+    match eval(&host, NEG, "negAsyncSelfRef") {
+        Outcome::Value {
+            degradation,
+            candidates,
+            ..
+        } => {
+            assert!(
+                degradation.is_some(),
+                "a directly-circular Awaited operand must degrade, never resolve to a fabricated answer"
+            );
+            assert_eq!(
+                candidates, 0,
+                "a gapped async wrap is ReturnOnly — it must never warm"
+            );
+        }
+        other => panic!("negAsyncSelfRef must produce a degraded value, got {other:?}"),
+    }
+}
+
+/// Structural matcher for [`awaited_relation_oracle_matrix`]. Spans are part
+/// of `TypeExpr` equality, so object rows cannot be spelled as one expected
+/// value.
+#[derive(Debug)]
+enum Shape {
+    /// A `TypeParameter` named `T`.
+    T,
+    /// A primitive with this name.
+    Primitive(PrimitiveName),
+    /// A `Ref` with this name and argument shapes.
+    Ref(&'static str, &'static [Shape]),
+    /// The compiler-native `Awaited` operation over one argument — what a
+    /// position that DEMANDS the awaited meaning mints.
+    Awaited(&'static Shape),
+    /// An authored `Awaited<…>` kept in its syntax-preserving spelling. Where
+    /// nothing demands its meaning, the checker-visible type is already right
+    /// and resolving it only to change the representation would be eager
+    /// normalization, so the row pins that it is NOT resolved.
+    AuthoredAwaited(&'static Shape),
+    /// A mutable array of this element.
+    Array(&'static Shape),
+    /// An object with exactly this one member.
+    Member(&'static str, &'static Shape),
+}
+
+fn shape_matches(shape: &Shape, ty: &TypeExpr) -> bool {
+    match (shape, ty) {
+        (Shape::T, TypeExpr::TypeParameter(param)) => &*param.name == "T",
+        (Shape::Primitive(name), TypeExpr::Primitive(got)) => name == got,
+        (
+            Shape::Ref(name, args),
+            TypeExpr::Ref {
+                name: got,
+                type_arguments,
+            },
+        ) => {
+            got.as_ref() == *name
+                && args.len() == type_arguments.len()
+                && args
+                    .iter()
+                    .zip(type_arguments.iter())
+                    .all(|(arg, got)| shape_matches(arg, got))
+        }
+        (
+            Shape::AuthoredAwaited(arg),
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            },
+        ) => {
+            name.as_ref() == "Awaited"
+                && type_arguments.len() == 1
+                && shape_matches(arg, &type_arguments[0])
+        }
+        (
+            Shape::Awaited(arg),
+            TypeExpr::IntrinsicApplication {
+                op: CompilerIntrinsicTypeOp::Awaited,
+                arguments,
+            },
+        ) => arguments.len() == 1 && shape_matches(arg, &arguments[0]),
+        (
+            Shape::Array(element),
+            TypeExpr::Array {
+                element: got,
+                readonly: false,
+            },
+        ) => shape_matches(element, got),
+        (Shape::Member(key, value), TypeExpr::Object(object)) => {
+            object.properties.len() == 1 && shape_matches(value, projected_member(ty, key))
+        }
+        _ => false,
+    }
+}
+
+/// The awaited-relation ORACLE MATRIX, pinned as rows. Every row publishes
+/// the checker's type clean and warm.
+///
+/// Two relations meet here and must never merge: the async RETURN payload
+/// (`return v` in an async function) and the AWAIT expression (`await v`).
+/// The checker keeps a bare parameter under the first and defers
+/// `Awaited<T>` under the second unless the constraint already settles it,
+/// so x1 != r1 and x4 != r4 are the discriminating pairs.
+///
+/// g1 against g6 / g7 pins that the return payload resolves and strips only
+/// a TOP-LEVEL authored `Awaited`: the payload position demands its meaning.
+/// Under an array nothing demands it, so g6 / g7 keep the authored spelling,
+/// and so does the synchronous control g8.
+///
+/// Each `tsc` column is the declaration emit of the fixture in `CALLS_SRC`,
+/// measured on the repository's TypeScript 7.0.2 with
+///
+/// ```text
+/// tsc --ignoreConfig --declaration --emitDeclarationOnly --target es2022 --strict
+/// ```
+///
+/// (the x rows read the local's type off the returned `{ a }`).
+#[test]
+fn awaited_relation_oracle_matrix() {
+    const PROMISE_T: Shape = Shape::Ref("Promise", &[Shape::T]);
+    const AWAITED_T: Shape = Shape::Awaited(&Shape::T);
+    const AUTHORED_AWAITED_T: Shape = Shape::AuthoredAwaited(&Shape::T);
+    const PROMISE_A_AWAITED_T: Shape = Shape::Ref("Promise", &[Shape::Member("a", &AWAITED_T)]);
+    const PROMISE_AUTHORED_ARRAY: Shape =
+        Shape::Ref("Promise", &[Shape::Array(&AUTHORED_AWAITED_T)]);
+    let rows: &[(&str, &str, &str, Shape)] = &[
+        ("r1", "asyncGenericIdentity", "Promise<T>", PROMISE_T),
+        ("r2", "matrixR2", "Promise<T>", PROMISE_T),
+        ("r3", "matrixR3", "Promise<T>", PROMISE_T),
+        ("r4", "matrixR4", "Promise<T>", PROMISE_T),
+        (
+            "x1",
+            "matrixX1",
+            "Promise<{ a: Awaited<T>; }>",
+            PROMISE_A_AWAITED_T,
+        ),
+        (
+            "x2",
+            "matrixX2",
+            "Promise<{ a: T; }>",
+            Shape::Ref("Promise", &[Shape::Member("a", &Shape::T)]),
+        ),
+        (
+            "x3",
+            "matrixX3",
+            "Promise<{ a: Awaited<T>; }>",
+            PROMISE_A_AWAITED_T,
+        ),
+        (
+            "x4",
+            "matrixX4",
+            "Promise<{ a: Awaited<T>; }>",
+            PROMISE_A_AWAITED_T,
+        ),
+        (
+            "y1",
+            "asyncGenYieldParam",
+            "AsyncGenerator<Awaited<T>, void, unknown>",
+            Shape::Ref(
+                "AsyncGenerator",
+                &[
+                    AWAITED_T,
+                    Shape::Primitive(PrimitiveName::Void),
+                    Shape::Primitive(PrimitiveName::Unknown),
+                ],
+            ),
+        ),
+        (
+            "y2",
+            "matrixY2",
+            "AsyncGenerator<T, void, unknown>",
+            Shape::Ref(
+                "AsyncGenerator",
+                &[
+                    Shape::T,
+                    Shape::Primitive(PrimitiveName::Void),
+                    Shape::Primitive(PrimitiveName::Unknown),
+                ],
+            ),
+        ),
+        ("g1", "matrixG1", "Promise<T>", PROMISE_T),
+        (
+            "g6",
+            "matrixG6",
+            "Promise<Awaited<T>[]>",
+            PROMISE_AUTHORED_ARRAY,
+        ),
+        (
+            "g7",
+            "matrixG7",
+            "Promise<Awaited<T>[]>",
+            PROMISE_AUTHORED_ARRAY,
+        ),
+        ("g8", "matrixG8", "Awaited<T>", AUTHORED_AWAITED_T),
+    ];
+    let host = ts_host();
+    let mut failures = Vec::new();
+    for (id, function, tsc, shape) in rows {
+        let outcome = eval(&host, CALLS, function);
+        let pinned = matches!(
+            &outcome,
+            Outcome::Value { ty, degradation: None, candidates: 1 } if shape_matches(shape, ty)
+        );
+        if !pinned {
+            failures.push(format!(
+                "{id} ({function}): tsc `{tsc}`, pinned {shape:?}, measured {outcome:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The negative twin of matrix row g1: a module-local `type Awaited<X>`
+/// shadows the lib declaration, so the top-level carrier is a USERLAND
+/// declaration. The async return payload must never strip it to `T` nor turn
+/// it into the compiler intrinsic; as an ordinary non-thenable alias it is
+/// its own payload and keeps its identity.
+///
+/// Oracle (tsc 7.0.2 declaration emit): `Promise<Awaited<T>>`, where
+/// `Awaited` is the local `{ w: X }` alias.
+#[test]
+fn a_shadowed_awaited_at_the_top_of_an_async_return_is_not_stripped() {
+    const SHADOW: &str = "/ws/cov/shadowed_awaited.ts";
+    let host = host_with(&[(
+        SHADOW,
+        "type Awaited<X> = { w: X };\nexport async function shadowG1<T>(v: Awaited<T>) {\n  return v;\n}\n",
+    )]);
+    match eval(&host, SHADOW, "shadowG1") {
+        Outcome::Value {
+            ty,
+            degradation: None,
+            candidates: 1,
+        } => assert!(
+            shape_matches(
+                &Shape::Ref("Promise", &[Shape::AuthoredAwaited(&Shape::T)]),
+                &ty
+            ),
+            "the local alias keeps its identity: {ty:?}"
+        ),
+        other => panic!("shadowG1 must publish Promise<Awaited<T>> clean, got {other:?}"),
+    }
+}
+
+/// Declaration carriers, constrained parameters and structural thenables for
+/// [`awaited_thenable_protocol_oracle_matrix`].
+const THENABLES: &str = "/ws/cov/thenables.ts";
+const THENABLES_SRC: &str = r#"
+interface AsyncGenerator<T, TReturn, TNext> {}
+type Box<X> = { w: X };
+interface IBox<X> { w: X }
+type Plain = { p: string };
+type P<X> = Promise<X>;
+type ThenBox<X> = { then(onfulfilled: (value: X) => void): void };
+type BadThen<X> = { then: number; w: X };
+type BadThen2<X> = { then(): void; w: X };
+type OptThen = { then?(onfulfilled: (value: number) => void): void };
+export async function a1<T>(v: Box<T>) { return v; }
+export async function a2<T>(v: IBox<T>) { return v; }
+export async function a3(v: Plain) { return v; }
+export async function a4<T>(v: P<T>) { return v; }
+export async function a5<T>(v: ThenBox<T>) { return v; }
+export async function a6(v: ThenBox<string>) { return v; }
+export async function a7<T>(v: BadThen<T>) { return v; }
+export async function a8<T>(v: BadThen2<T>) { return v; }
+export async function w1<T>(v: Box<T>) { const a = await v; return { a }; }
+export async function w5<T>(v: ThenBox<T>) { const a = await v; return { a }; }
+export async function w6(v: ThenBox<string>) { const a = await v; return { a }; }
+export async function w7<T>(v: BadThen<T>) { const a = await v; return { a }; }
+export async function w8<T>(v: BadThen2<T>) { const a = await v; return { a }; }
+export async function* y5(v: ThenBox<string>) { yield v; }
+export async function c1<T extends {}>(v: T) { const a = await v; return { a }; }
+export async function c2<T extends object>(v: T) { const a = await v; return { a }; }
+export async function c3<T extends Plain>(v: T) { const a = await v; return { a }; }
+export async function c4<T extends ThenBox<number>>(v: T) { const a = await v; return { a }; }
+export async function c5<T extends unknown>(v: T) { const a = await v; return { a }; }
+export async function c6<T extends { p: string }>(v: T) { const a = await v; return { a }; }
+export async function c7<T extends number | Plain>(v: T) { const a = await v; return { a }; }
+export async function o1(v: OptThen) { return v; }
+export async function o2(v: OptThen) { const a = await v; return { a }; }
+"#;
+
+/// The checker's awaited-type protocol beyond the lib `Promise`, pinned as
+/// rows: declaration carriers, constrained type parameters and structural
+/// thenables, through both awaited relations (`a` / `o1` rows are the
+/// async return payload, `w` / `c` / `o2` rows the await expression, `y5` the
+/// async generator yield).
+///
+/// - A non-thenable declaration carrier is its own awaited type and KEEPS its
+///   identity (`Promise<Box<T>>`, `Promise<Plain>`; a `then` that is not
+///   callable is not a thenable, `a7` / `w7`).
+/// - An alias to `Promise` unwraps (`a4`).
+/// - A callable `then` whose `onfulfilled` is callable promises that
+///   callback's first parameter, reduced by the SAME relation (`a5` is `T`,
+///   `w5` is `Awaited<T>`).
+/// - A callable `then` that promises nothing, and an optional callable `then`,
+///   are errors the checker types `any` (`a8`, `w8`, `o1`, `o2`).
+/// - An awaited type parameter stays `Awaited<T>` unless its constraint is
+///   provably its own awaited type; `{}`, `object`, `unknown` and a thenable
+///   constraint all defer (`c1`..`c7`).
+///
+/// Each `tsc` column is the declaration emit of the matching declaration,
+/// measured on the repository's TypeScript 7.0.2 with
+/// `tsc --ignoreConfig --declaration --emitDeclarationOnly --target es2022 --strict`.
+#[test]
+fn awaited_thenable_protocol_oracle_matrix() {
+    const T: Shape = Shape::T;
+    const PROMISE_T: Shape = Shape::Ref("Promise", &[Shape::T]);
+    const PROMISE_A_T: Shape = Shape::Ref("Promise", &[Shape::Member("a", &Shape::T)]);
+    const AWAITED_T: Shape = Shape::Awaited(&Shape::T);
+    const PROMISE_A_AWAITED_T: Shape = Shape::Ref("Promise", &[Shape::Member("a", &AWAITED_T)]);
+    const ANY: Shape = Shape::Primitive(PrimitiveName::Any);
+    const STRING: Shape = Shape::Primitive(PrimitiveName::String);
+    let clean: &[(&str, &str, Shape)] = &[
+        (
+            "a1",
+            "Promise<Box<T>>",
+            Shape::Ref("Promise", &[Shape::Ref("Box", &[T])]),
+        ),
+        (
+            "a2",
+            "Promise<IBox<T>>",
+            Shape::Ref("Promise", &[Shape::Ref("IBox", &[T])]),
+        ),
+        (
+            "a3",
+            "Promise<Plain>",
+            Shape::Ref("Promise", &[Shape::Ref("Plain", &[])]),
+        ),
+        ("a4", "Promise<T>", PROMISE_T),
+        ("a5", "Promise<T>", PROMISE_T),
+        ("a6", "Promise<string>", Shape::Ref("Promise", &[STRING])),
+        (
+            "a7",
+            "Promise<BadThen<T>>",
+            Shape::Ref("Promise", &[Shape::Ref("BadThen", &[T])]),
+        ),
+        ("a8", "Promise<any>", Shape::Ref("Promise", &[ANY])),
+        (
+            "w1",
+            "Promise<{ a: Box<T>; }>",
+            Shape::Ref("Promise", &[Shape::Member("a", &Shape::Ref("Box", &[T]))]),
+        ),
+        ("w5", "Promise<{ a: Awaited<T>; }>", PROMISE_A_AWAITED_T),
+        (
+            "w6",
+            "Promise<{ a: string; }>",
+            Shape::Ref("Promise", &[Shape::Member("a", &STRING)]),
+        ),
+        (
+            "w7",
+            "Promise<{ a: BadThen<T>; }>",
+            Shape::Ref(
+                "Promise",
+                &[Shape::Member("a", &Shape::Ref("BadThen", &[T]))],
+            ),
+        ),
+        (
+            "w8",
+            "Promise<{ a: any; }>",
+            Shape::Ref("Promise", &[Shape::Member("a", &ANY)]),
+        ),
+        (
+            "y5",
+            "AsyncGenerator<string, void, unknown>",
+            Shape::Ref(
+                "AsyncGenerator",
+                &[
+                    STRING,
+                    Shape::Primitive(PrimitiveName::Void),
+                    Shape::Primitive(PrimitiveName::Unknown),
+                ],
+            ),
+        ),
+        ("c1", "Promise<{ a: Awaited<T>; }>", PROMISE_A_AWAITED_T),
+        ("c2", "Promise<{ a: Awaited<T>; }>", PROMISE_A_AWAITED_T),
+        ("c3", "Promise<{ a: T; }>", PROMISE_A_T),
+        ("c4", "Promise<{ a: Awaited<T>; }>", PROMISE_A_AWAITED_T),
+        ("c5", "Promise<{ a: Awaited<T>; }>", PROMISE_A_AWAITED_T),
+        ("c6", "Promise<{ a: T; }>", PROMISE_A_T),
+        ("c7", "Promise<{ a: T; }>", PROMISE_A_T),
+        ("o1", "Promise<any>", Shape::Ref("Promise", &[ANY])),
+        (
+            "o2",
+            "Promise<{ a: any; }>",
+            Shape::Ref("Promise", &[Shape::Member("a", &ANY)]),
+        ),
+    ];
+    let host = host_with(&[(THENABLES, THENABLES_SRC)]);
+    let mut failures = Vec::new();
+    for (function, tsc, shape) in clean {
+        let outcome = eval(&host, THENABLES, function);
+        let pinned = matches!(
+            &outcome,
+            Outcome::Value { ty, degradation: None, candidates: 1 } if shape_matches(shape, ty)
+        );
+        if !pinned {
+            failures.push(format!(
+                "{function}: tsc `{tsc}`, pinned {shape:?}, measured {outcome:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Authored lib `Awaited<X>` applications for
+/// [`lib_awaited_conditional_oracle_matrix`].
+const LIB_AWAITED: &str = "/ws/cov/lib_awaited.ts";
+const LIB_AWAITED_SRC: &str = r#"
+type ThenBox<X> = { then(onfulfilled: (value: X) => void): void };
+type Plain = { p: string };
+type C1<X> = (value: X) => void;
+type C2<X> = C1<X>;
+type C3<X> = C2<X>;
+type C4<X> = C3<X>;
+type DeepThen = { then(cb: C4<string>): void };
+type RestThen = { then(...onfulfilled: ((value: number) => void)[]): void };
+declare const l1: Awaited<{ then(): void }>; export function f1() { return l1; }
+declare const l2: Awaited<{ then?(cb: (v: number) => void): void }>; export function f2() { return l2; }
+declare const l3: Awaited<{ then: number }>; export function f3() { return l3; }
+declare const l4: Awaited<ThenBox<string>>; export function f4() { return l4; }
+declare const l5: Awaited<{ then(...cbs: ((v: number) => void)[]): void }>; export function f5() { return l5; }
+declare const l6: Awaited<{ then(cb: number): void }>; export function f6() { return l6; }
+declare const l7: Awaited<{ then(cb: ((v: number) => void) | undefined): void }>; export function f7() { return l7; }
+declare const l8: Awaited<Plain>; export function f8() { return l8; }
+declare const l9: Awaited<Promise<ThenBox<boolean>>>; export function f9() { return l9; }
+declare const l10: Awaited<{ then(cb: () => void): void }>; export function f10() { return l10; }
+declare const l11: Awaited<string | Promise<number>>; export function f11() { return l11; }
+declare const l12: Awaited<{ then(cb: (...v: number[]) => void): void }>; export function f12() { return l12; }
+declare const l13: Awaited<{ then(cb: (v: number) => void): void; then(cb: (v: string) => void, x: 1): void }>; export function f13() { return l13; }
+declare const l14: Awaited<() => void>; export function f14() { return l14; }
+declare const l15: Awaited<DeepThen>; export function f15() { return l15; }
+export async function m1<T extends string>(v: Awaited<T>) { return v; }
+export async function m2<T extends Promise<string>>(v: Awaited<T>) { return v; }
+export async function m3(v: Awaited<{ then(): void }>) { return v; }
+export async function m4<T>(v: Awaited<T>) { const a = await v; return { a }; }
+export async function m5<T>(v: Awaited<Awaited<T>>) { return v; }
+export async function m6(v: Awaited<{ then?(cb: (v: number) => void): void }>) { return v; }
+export async function m7(v: Awaited<{ then(): void }>) { const a = await v; return { a }; }
+export async function n1(v: RestThen) { return v; }
+export async function d1(v: DeepThen) { return v; }
+"#;
+
+/// One oracle row: the fixture function, the tsc answer, and its pin.
+type OracleRow<'a> = (&'a str, &'a str, &'a dyn Fn(&TypeExpr) -> bool);
+
+/// Whether `ty` is an object carrying a `then` member (property or method).
+fn has_then_member(ty: &TypeExpr) -> bool {
+    let TypeExpr::Object(object) = ty else {
+        return false;
+    };
+    object.properties.iter().any(|member| match member {
+        verter_type_expr::ObjectMember::Property(p) => p.key.as_string() == Some("then"),
+        verter_type_expr::ObjectMember::Method(m) => m.key.as_string() == Some("then"),
+        _ => false,
+    })
+}
+
+/// An authored `Awaited<X>` is the LIB conditional, not the compiler's
+/// runtime awaited relation, and the two differ on malformed thenables.
+///
+/// The `f` rows read each authored application through the `Instantiate`
+/// family (the declared const's flow return is the syntax-preserving carrier,
+/// so the rows expand it explicitly):
+///
+/// - a callable `then` with no callable `onfulfilled` is `never` (`f1`, `f6`)
+///   — where `await` of the same value is `any` (`w8` of
+///   `awaited_thenable_protocol_oracle_matrix`);
+/// - an OPTIONAL callable `then` does not satisfy the required member, so the
+///   operand is its own result (`f2`), as is a non-callable `then` (`f3`);
+/// - a leading rest `then` parameter and a rest callback parameter read their
+///   element (`f5`, `f12`); a parameterless callback infers `unknown` (`f10`);
+/// - an overloaded `then` infers from its LAST signature (`f13`, `string`),
+///   where the runtime relation unions every signature;
+/// - unions distribute (`f11`), promises and thenables nest (`f9`), a
+///   non-thenable alias keeps its identity (`f8`), and a callback reached
+///   through a four-level alias chain settles through the shared signature
+///   rail (`f15`).
+///
+/// The `m` rows are the async positions over authored applications: a
+/// deferred `Awaited<T>` strips at the return payload whatever the
+/// constraint (`m1`, `m2`, twice for `m5`); a reduced one is the payload's
+/// operand (`m3` `never`, `m6` the optional-`then` surface the runtime
+/// relation calls `any`); an await keeps a deferred application (`m4`) and
+/// awaits a reduced one (`m7`). `n1` / `d1` are the runtime relation over a
+/// rest `then` and a deep callback alias chain.
+///
+/// Every `tsc` column is TypeScript 7.0.2: the `f` rows from assignability
+/// diagnostics (`tsc --noEmit --strict`), the rest from declaration emit
+/// (`--declaration --emitDeclarationOnly --target es2022 --strict`).
+#[test]
+fn lib_awaited_conditional_oracle_matrix() {
+    let host = host_with(&[(LIB_AWAITED, LIB_AWAITED_SRC)]);
+    let mut failures = Vec::new();
+
+    let lib_rows: &[OracleRow<'_>] = &[
+        ("f1", "never", &|ty| {
+            *ty == TypeExpr::Primitive(PrimitiveName::Never)
+        }),
+        (
+            "f2",
+            "{ then?(cb: (v: number) => void): void; }",
+            &has_then_member,
+        ),
+        ("f3", "{ then: number; }", &has_then_member),
+        ("f4", "string", &|ty| *ty == string()),
+        ("f5", "number", &|ty| *ty == number()),
+        ("f6", "never", &|ty| {
+            *ty == TypeExpr::Primitive(PrimitiveName::Never)
+        }),
+        ("f7", "number", &|ty| *ty == number()),
+        ("f8", "Plain", &|ty| {
+            shape_matches(&Shape::Ref("Plain", &[]), ty)
+        }),
+        ("f9", "boolean", &|ty| *ty == boolean()),
+        ("f10", "unknown", &|ty| {
+            *ty == TypeExpr::Primitive(PrimitiveName::Unknown)
+        }),
+        ("f11", "string | number", &|ty| match ty {
+            TypeExpr::Union(members) => {
+                members.len() == 2 && members.contains(&string()) && members.contains(&number())
+            }
+            _ => false,
+        }),
+        ("f12", "number", &|ty| *ty == number()),
+        ("f13", "string", &|ty| *ty == string()),
+        ("f14", "() => void", &|ty| {
+            matches!(ty, TypeExpr::Function(_))
+        }),
+        ("f15", "string", &|ty| *ty == string()),
+    ];
+    with_dispatch(&host, |dispatch| {
+        for (function, tsc, pinned) in lib_rows {
+            let key = key_of(dispatch, LIB_AWAITED, function);
+            let measured = match dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key))) {
+                QueryResult::Value(SemanticQueryOutput {
+                    value: SemanticQueryValue::FlowReturn(result),
+                    ..
+                }) => dispatch
+                    .declaration_carrier_body(result.return_type())
+                    .and_then(|body| host.project_node_to_type_expr_for_test(body)),
+                _ => None,
+            };
+            if !measured.as_ref().is_some_and(pinned) {
+                failures.push(format!("{function}: tsc `{tsc}`, measured {measured:?}"));
+            }
+        }
+    });
+
+    const PROMISE_T: Shape = Shape::Ref("Promise", &[Shape::T]);
+    let async_rows: &[OracleRow<'_>] = &[
+        ("m1", "Promise<T>", &|ty| shape_matches(&PROMISE_T, ty)),
+        ("m2", "Promise<T>", &|ty| shape_matches(&PROMISE_T, ty)),
+        ("m3", "Promise<never>", &|ty| {
+            shape_matches(
+                &Shape::Ref("Promise", &[Shape::Primitive(PrimitiveName::Never)]),
+                ty,
+            )
+        }),
+        ("m4", "Promise<{ a: Awaited<T>; }>", &|ty| {
+            shape_matches(
+                &Shape::Ref(
+                    "Promise",
+                    &[Shape::Member("a", &Shape::AuthoredAwaited(&Shape::T))],
+                ),
+                ty,
+            )
+        }),
+        ("m5", "Promise<T>", &|ty| shape_matches(&PROMISE_T, ty)),
+        ("m6", "Promise<any>", &|ty| {
+            shape_matches(
+                &Shape::Ref("Promise", &[Shape::Primitive(PrimitiveName::Any)]),
+                ty,
+            )
+        }),
+        ("m7", "Promise<{ a: never; }>", &|ty| {
+            shape_matches(
+                &Shape::Ref(
+                    "Promise",
+                    &[Shape::Member("a", &Shape::Primitive(PrimitiveName::Never))],
+                ),
+                ty,
+            )
+        }),
+        ("n1", "Promise<number>", &|ty| {
+            shape_matches(
+                &Shape::Ref("Promise", &[Shape::Primitive(PrimitiveName::Number)]),
+                ty,
+            )
+        }),
+        ("d1", "Promise<string>", &|ty| {
+            shape_matches(
+                &Shape::Ref("Promise", &[Shape::Primitive(PrimitiveName::String)]),
+                ty,
+            )
+        }),
+    ];
+    for (function, tsc, pinned) in async_rows {
+        let outcome = eval(&host, LIB_AWAITED, function);
+        let ok = matches!(
+            &outcome,
+            Outcome::Value { ty, degradation: None, candidates: 1 } if pinned(ty)
+        );
+        if !ok {
+            failures.push(format!("{function}: tsc `{tsc}`, measured {outcome:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `any` / `never` / `unknown` operands and non-signature callback
+/// representations for [`awaited_callback_edge_oracle_matrix`].
+const AWAITED_EDGES: &str = "/ws/cov/awaited_edges.ts";
+const AWAITED_EDGES_SRC: &str = r#"
+declare const l1: Awaited<{ then(onfulfilled: any): void }>; export function f1() { return l1; }
+declare const l2: Awaited<{ then(onfulfilled: ((v: number) => void) & ((v: string) => void)): void }>; export function f2() { return l2; }
+declare const l3: Awaited<{ then(onfulfilled: unknown): void }>; export function f3() { return l3; }
+declare const l4: Awaited<{ then(onfulfilled: never): void }>; export function f4() { return l4; }
+declare const l5: Awaited<{ then: any }>; export function f5() { return l5; }
+declare const l6: Awaited<{ then(onfulfilled: (v: any) => void): void }>; export function f6() { return l6; }
+declare const l7: Awaited<{ then(onfulfilled: Function): void }>; export function f7() { return l7; }
+declare const l8: Awaited<{ then(onfulfilled: ((v: number) => void) | ((v: string) => void)): void }>; export function f8() { return l8; }
+declare const l9: Awaited<{ then(onfulfilled: object): void }>; export function f9() { return l9; }
+declare const la: Awaited<{ then: unknown }>; export function fa() { return la; }
+declare const lb: Awaited<{ then: never }>; export function fb() { return lb; }
+declare const lc: Awaited<{ then(cb: ((v: number) => void) & { x: 1 }): void }>; export function fc() { return lc; }
+declare const ld: Awaited<{ then(cb: { x: 1 } & ((v: number) => void)): void }>; export function fd() { return ld; }
+declare const le: Awaited<{ then(cb: Date): void }>; export function fe() { return le; }
+declare const lf: Awaited<{ then(onfulfilled: any, x: number): void }>; export function ff() { return lf; }
+export async function r1(v: { then(onfulfilled: any): void }) { return v; }
+export async function r2(v: { then(onfulfilled: ((v: number) => void) & ((v: string) => void)): void }) { return v; }
+export async function r3(v: { then(onfulfilled: unknown): void }) { return v; }
+export async function r5(v: { then: any }) { return v; }
+export async function r7(v: { then(onfulfilled: Function): void }) { return v; }
+export async function r8(v: { then(onfulfilled: ((v: number) => void) | ((v: string) => void)): void }) { return v; }
+export async function s1(v: { then: unknown }) { return v; }
+export async function s2(v: { then: never }) { return v; }
+export async function s3(v: { then(cb: ((v: number) => void) & { x: 1 }): void }) { return v; }
+export async function s4(v: { then(cb: Date): void }) { return v; }
+"#;
+
+/// The awaited relations over `any` / `never` / `unknown` and over callbacks
+/// that are not a single signature, pinned against TypeScript 7.0.2.
+///
+/// The lib conditional (`f` rows, read through `Instantiate`):
+///
+/// - `onfulfilled: any` takes BOTH branches of
+///   `F extends (value: infer V, ...) => any` with `V` inferred as `unknown`,
+///   so the result is `Awaited<unknown>` = `unknown` (`f1`, `ff`) — never the
+///   `never` a "non-callable" reading of `any` would give;
+/// - a `then` typed `any` or `never` infers no `onfulfilled` and is `never`
+///   (`f5`, `fb`), while `then: unknown` does not match and leaves the operand
+///   (`fa`);
+/// - an intersection callback reads its LAST call signature, whatever arm
+///   order or non-callable arms it has (`f2`, `fc`, `fd`); a union callback
+///   distributes (`f8`);
+/// - an `unknown` / `never` / `object` / `Function` / `Date` callback has no
+///   call signature and is `never` (`f3`, `f4`, `f9`, `f7`, `fe`); the lib
+///   nominals are decided by declaration identity.
+///
+/// The runtime relation (`r` / `s` rows, the async return payload):
+/// `onfulfilled` of `any` / `unknown` / `Function` / `Date` is the checker's
+/// malformed-thenable `any` (`r1`, `r3`, `r7`, `s4`); an intersection callback
+/// unions EVERY signature (`r2` is `string | number`); a `then` of `any` /
+/// `unknown` / `never` is not a thenable (`r5`, `s1`, `s2`).
+///
+/// `r8` is the honest-refusal leg: the checker merges a union of callbacks
+/// into one signature with intersected parameters (`number & string`, so
+/// `Promise<never>`); this reader does not model union-signature merging and
+/// publishes the typed gap.
+///
+/// `f` columns come from assignability diagnostics with an `any`/`never`
+/// discriminating probe (`tsc --noEmit --strict`), the rest from declaration
+/// emit (`--declaration --emitDeclarationOnly --target es2022 --strict`).
+#[test]
+fn awaited_callback_edge_oracle_matrix() {
+    let host = host_with(&[(AWAITED_EDGES, AWAITED_EDGES_SRC)]);
+    let never = TypeExpr::Primitive(PrimitiveName::Never);
+    let unknown = TypeExpr::Primitive(PrimitiveName::Unknown);
+    let any = TypeExpr::Primitive(PrimitiveName::Any);
+    let is = |expected: TypeExpr| move |ty: &TypeExpr| *ty == expected;
+    let string_or_number = |ty: &TypeExpr| match ty {
+        TypeExpr::Union(members) => {
+            members.len() == 2 && members.contains(&string()) && members.contains(&number())
+        }
+        _ => false,
+    };
+    let mut failures = Vec::new();
+
+    let f1 = is(unknown.clone());
+    let f2 = is(string());
+    let f3 = is(never.clone());
+    let f4 = is(never.clone());
+    let f5 = is(never.clone());
+    let f6 = is(any.clone());
+    let f7 = is(never.clone());
+    let f9 = is(never.clone());
+    let fb = is(never.clone());
+    let fc = is(number());
+    let fd = is(number());
+    let fe = is(never.clone());
+    let ff = is(unknown.clone());
+    let lib_rows: &[OracleRow<'_>] = &[
+        ("f1", "unknown", &f1),
+        ("f2", "string", &f2),
+        ("f3", "never", &f3),
+        ("f4", "never", &f4),
+        ("f5", "never", &f5),
+        ("f6", "any", &f6),
+        ("f7", "never", &f7),
+        ("f8", "string | number", &string_or_number),
+        ("f9", "never", &f9),
+        ("fa", "{ then: unknown; }", &has_then_member),
+        ("fb", "never", &fb),
+        ("fc", "number", &fc),
+        ("fd", "number", &fd),
+        ("fe", "never", &fe),
+        ("ff", "unknown", &ff),
+    ];
+    with_dispatch(&host, |dispatch| {
+        for (function, tsc, pinned) in lib_rows {
+            let key = key_of(dispatch, AWAITED_EDGES, function);
+            let measured = match dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key))) {
+                QueryResult::Value(SemanticQueryOutput {
+                    value: SemanticQueryValue::FlowReturn(result),
+                    ..
+                }) => dispatch
+                    .declaration_carrier_body(result.return_type())
+                    .and_then(|body| host.project_node_to_type_expr_for_test(body)),
+                _ => None,
+            };
+            if !measured.as_ref().is_some_and(pinned) {
+                failures.push(format!("{function}: tsc `{tsc}`, measured {measured:?}"));
+            }
+        }
+    });
+
+    let promise_of = |inner: TypeExpr| {
+        move |ty: &TypeExpr| {
+            *ty == TypeExpr::Ref {
+                name: Arc::from("Promise"),
+                type_arguments: Arc::from(vec![inner.clone()].into_boxed_slice()),
+            }
+        }
+    };
+    let promise_of_then_surface = |ty: &TypeExpr| match ty {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            name.as_ref() == "Promise"
+                && type_arguments.len() == 1
+                && has_then_member(&type_arguments[0])
+        }
+        _ => false,
+    };
+    let promise_string_or_number = |ty: &TypeExpr| match ty {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            name.as_ref() == "Promise"
+                && type_arguments.len() == 1
+                && string_or_number(&type_arguments[0])
+        }
+        _ => false,
+    };
+    let r1 = promise_of(any.clone());
+    let r3 = promise_of(any.clone());
+    let r7 = promise_of(any.clone());
+    let s3 = promise_of(number());
+    let s4 = promise_of(any.clone());
+    let runtime_rows: &[OracleRow<'_>] = &[
+        ("r1", "Promise<any>", &r1),
+        ("r2", "Promise<string | number>", &promise_string_or_number),
+        ("r3", "Promise<any>", &r3),
+        ("r5", "Promise<{ then: any; }>", &promise_of_then_surface),
+        ("r7", "Promise<any>", &r7),
+        (
+            "s1",
+            "Promise<{ then: unknown; }>",
+            &promise_of_then_surface,
+        ),
+        ("s2", "Promise<{ then: never; }>", &promise_of_then_surface),
+        ("s3", "Promise<number>", &s3),
+        ("s4", "Promise<any>", &s4),
+    ];
+    for (function, tsc, pinned) in runtime_rows {
+        let outcome = eval(&host, AWAITED_EDGES, function);
+        let ok = matches!(
+            &outcome,
+            Outcome::Value { ty, degradation: None, candidates: 1 } if pinned(ty)
+        );
+        if !ok {
+            failures.push(format!("{function}: tsc `{tsc}`, measured {outcome:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert_degraded(
+        &host,
+        AWAITED_EDGES,
+        "r8",
+        FlowReturnDegradation::UnresolvedValue,
+    );
+}
+
+/// A consumer whose callbacks name the lib runtime nominals `Function` and
+/// `Date`, for [`augmented_global_nominal_callbacks_follow_the_merged_interface`].
+const AUGMENT_CONSUMER: &str = "/ws/cov/augment_consumer.ts";
+const AUGMENT_CONSUMER_SRC: &str = r#"
+declare const la: Awaited<{ then(onfulfilled: Function): void }>; export function fa() { return la; }
+declare const lb: Awaited<{ then(onfulfilled: Date): void }>; export function fb() { return lb; }
+declare const lc: Awaited<{ then(onfulfilled: ((v: string) => void) & ((v: number) => void)): void }>; export function fc() { return lc; }
+export async function r1(v: { then(onfulfilled: Function): void }) { return v; }
+export async function r2(v: { then(onfulfilled: Date): void }) { return v; }
+export async function r3(v: { then(onfulfilled: ((v: string) => void) & ((v: number) => void)): void }) { return v; }
+"#;
+/// A separate `declare global` augmenter merging call signatures into both.
+const AUGMENT_GLOBAL: &str = "/ws/cov/augment_global.d.ts";
+const AUGMENT_GLOBAL_SRC: &str = r#"
+export {};
+declare global {
+  interface Function { (value: number): void; }
+  interface Date { (value: string): void; }
+}
+"#;
+
+/// The lib runtime nominals are OPEN interfaces: a pristine `Function` or
+/// `Date` declares no call signature, but a project's `declare global` block
+/// merges them in, and both awaited relations must see the merged interface.
+///
+/// Oracle (tsc 7.0.2, the augmentation in scope): `Awaited<{ then(onfulfilled:
+/// Function): void }>` is `number` and `Date` gives `string` (assignability
+/// diagnostics); the async return over the same `then` publishes
+/// `Promise<number>` / `Promise<string>` (declaration emit). Without the
+/// augmentation the lib results are `never` and the async returns `Promise<any>`
+/// (`awaited_callback_edge_oracle_matrix` rows `f7`, `fe`, `r7`, `s4`).
+///
+/// The rows are measured twice on ONE host: pristine first, then after the
+/// augmenter enters the program — the second read must not serve the pristine
+/// answer, which is what the augmenter-set fact the shared augmentation folder
+/// observes guarantees. A fresh cold read discovers an augmenter nothing
+/// imports through program-completeness indexing.
+///
+/// `fc` / `r3` pin intersection ORDER: `((v: string) => void) & ((v: number)
+/// => void)` is `number` for the lib conditional (last signature) and
+/// `string | number` for the await relation — the reverse of `f2` / `r2`.
+#[test]
+fn augmented_global_nominal_callbacks_follow_the_merged_interface() {
+    let host = host_with(&[(AUGMENT_CONSUMER, AUGMENT_CONSUMER_SRC)]);
+    let lib = |function: &str| {
+        with_dispatch(&host, |dispatch| {
+            let key = key_of(dispatch, AUGMENT_CONSUMER, function);
+            match dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key))) {
+                QueryResult::Value(SemanticQueryOutput {
+                    value: SemanticQueryValue::FlowReturn(result),
+                    ..
+                }) => dispatch
+                    .declaration_carrier_body(result.return_type())
+                    .and_then(|body| host.project_node_to_type_expr_for_test(body)),
+                _ => None,
+            }
+        })
+    };
+    let promise_of = |inner: TypeExpr| TypeExpr::Ref {
+        name: Arc::from("Promise"),
+        type_arguments: Arc::from(vec![inner].into_boxed_slice()),
+    };
+    let never = TypeExpr::Primitive(PrimitiveName::Never);
+    let any = TypeExpr::Primitive(PrimitiveName::Any);
+    // Clean (no degradation) and admitted. After the augmenter enters, the
+    // slot legitimately holds the pristine candidate beside the merged one.
+    let clean = |function: &str| match eval(&host, AUGMENT_CONSUMER, function) {
+        Outcome::Value {
+            ty,
+            degradation: None,
+            candidates,
+        } if candidates >= 1 => Some(ty),
+        _ => None,
+    };
+
+    // Pristine lib interfaces: no call signature.
+    assert_eq!(lib("fa"), Some(never.clone()), "pristine Function");
+    assert_eq!(lib("fb"), Some(never), "pristine Date");
+    assert_eq!(
+        clean("r1"),
+        Some(promise_of(any.clone())),
+        "pristine Function"
+    );
+    assert_eq!(clean("r2"), Some(promise_of(any)), "pristine Date");
+
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(AUGMENT_GLOBAL.to_string()),
+        input_id: AUGMENT_GLOBAL.to_string(),
+        source: Arc::from(AUGMENT_GLOBAL_SRC),
+        file_language: lang(AUGMENT_GLOBAL),
+        aliases: Vec::new(),
+    });
+    // Augmentation discovery is demand-driven: the augmenter enters the program
+    // when its artifact publishes, which is what retires the index rows the
+    // pristine read recorded.
+    host.ensure_indexed_ready(AUGMENT_GLOBAL)
+        .expect("the augmenter must index");
+
+    // Augmented: the merged call signatures decide.
+    assert_eq!(lib("fa"), Some(number()), "augmented Function");
+    assert_eq!(lib("fb"), Some(string()), "augmented Date");
+    assert_eq!(
+        clean("r1"),
+        Some(promise_of(number())),
+        "augmented Function"
+    );
+    assert_eq!(clean("r2"), Some(promise_of(string())), "augmented Date");
+
+    // Intersection order, reversed from `f2` / `r2`.
+    assert_eq!(lib("fc"), Some(number()), "last intersection signature");
+    let r3 = clean("r3").expect("r3 publishes clean");
+    let TypeExpr::Ref { type_arguments, .. } = &r3 else {
+        panic!("r3 must be Promise<…>, got {r3:?}");
+    };
+    assert!(
+        matches!(
+            &type_arguments[0],
+            TypeExpr::Union(members)
+                if members.len() == 2 && members.contains(&string()) && members.contains(&number())
+        ),
+        "the await relation unions every intersection signature: {r3:?}"
+    );
+}
+
+/// A `declare global` augmenter that nothing imports, adding GENERIC call
+/// signatures to `Promise<T>` and `Map<K, V>` and a plain one to `Function`,
+/// for [`augmented_generic_nominal_callbacks_bind_their_type_arguments`].
+const GENERIC_GLOBAL: &str = "/ws/cov/generic_global.d.ts";
+const GENERIC_GLOBAL_SRC: &str = r#"export {};
+declare global {
+  interface Promise<T> { (value: T): void; }
+  interface Map<K, V> { (value: V): void; }
+  interface Function { (value: boolean): void; }
+}
+"#;
+const GENERIC_CONSUMER: &str = "/ws/cov/generic_consumer.ts";
+const GENERIC_CONSUMER_SRC: &str = r#"
+declare const la: Awaited<{ then(onfulfilled: Promise<number>): void }>; export function fa() { return la; }
+declare const lb: Awaited<{ then(onfulfilled: Map<string, number>): void }>; export function fb() { return lb; }
+declare const lc: Awaited<{ then(onfulfilled: Promise<string>): void }>; export function fc() { return lc; }
+declare const ld: Awaited<{ then(onfulfilled: Function): void }>; export function fd() { return ld; }
+export async function r1(v: { then(onfulfilled: Promise<number>): void }) { return v; }
+export async function r2(v: { then(onfulfilled: Map<string, number>): void }) { return v; }
+"#;
+
+/// A GENERIC lib nominal's augmentation is instantiated with the nominal's
+/// own type arguments, and an augmenter nothing imports is discovered cold.
+///
+/// Oracle (tsc 7.0.2, the augmentation in scope): `Awaited<{ then(onfulfilled:
+/// Promise<number>): void }>` is `number`, `Map<string, number>` gives
+/// `number` (the SECOND parameter, so the binding is positional, not
+/// first-argument), and `Promise<string>` gives `string` (the argument, not a
+/// fixed answer); the async returns over the first two are `Promise<number>`.
+///
+/// The host only UPSERTS both files — the augmenter is never explicitly
+/// indexed, so every row goes through the production program-completeness
+/// scan that indexes known members before the augmentation lookup. `fd` pins
+/// the non-generic cold path.
+///
+/// Discriminating: collecting the augmentation without its type arguments
+/// lowers `T` / `V` unbound and every row degrades to a typed gap.
+#[test]
+fn augmented_generic_nominal_callbacks_bind_their_type_arguments() {
+    let host = host_with(&[
+        (GENERIC_GLOBAL, GENERIC_GLOBAL_SRC),
+        (GENERIC_CONSUMER, GENERIC_CONSUMER_SRC),
+    ]);
+    let lib = |function: &str| {
+        with_dispatch(&host, |dispatch| {
+            let key = key_of(dispatch, GENERIC_CONSUMER, function);
+            match dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key))) {
+                QueryResult::Value(SemanticQueryOutput {
+                    value: SemanticQueryValue::FlowReturn(result),
+                    ..
+                }) => dispatch
+                    .declaration_carrier_body(result.return_type())
+                    .and_then(|body| host.project_node_to_type_expr_for_test(body)),
+                _ => None,
+            }
+        })
+    };
+    assert_eq!(lib("fa"), Some(number()), "Promise<number>");
+    assert_eq!(lib("fb"), Some(number()), "Map<string, number>");
+    assert_eq!(lib("fc"), Some(string()), "Promise<string>");
+    assert_eq!(lib("fd"), Some(boolean()), "Function");
+    let promise_number = TypeExpr::Ref {
+        name: Arc::from("Promise"),
+        type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+    };
+    assert_clean_warm(&host, GENERIC_CONSUMER, "r1", promise_number.clone());
+    assert_clean_warm(&host, GENERIC_CONSUMER, "r2", promise_number);
 }

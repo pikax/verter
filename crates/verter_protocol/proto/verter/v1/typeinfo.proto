@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package verter.v1;
 
+import "verter/v1/compiler_intrinsics.proto";
+
 // ---------------------------------------------------------------------------
 // FFI request/response DTOs for typeinfo session entry points.
 //
@@ -193,7 +195,7 @@ message GraphTypeNode {
   // bumping `SemanticTypeGraph.schema_version`. The directive lives
   // at the enclosing message level because proto3 forbids
   // `reserved` inside an `oneof` block.
-  reserved 34 to 100;
+  reserved 35 to 100;
   // Tag 28 / name `relation_proof` held the retired relation-proof
   // oneof arm. The proof witness moved OFF the type-values surface to
   // the payload-side `SemanticTypeGraph.relation_proofs` table (field
@@ -242,6 +244,7 @@ message GraphTypeNode {
     GraphOpaque opaque = 31;
     GraphCycle cycle = 32;
     GraphObjectSpreadProgram object_spread_program = 33;
+    GraphIntrinsicApplication intrinsic_application = 34;
   }
 }
 
@@ -269,6 +272,22 @@ message GraphObject {
 // effect list is never replaced by a derived member surface.
 message GraphObjectSpreadProgram {
   repeated GraphObjectConstructionEffect effects = 1;
+}
+
+// An applied compiler-native type operation (`Awaited<T>` once the checker
+// has resolved its identity as compiler-native rather than as a declaration
+// reference).
+//
+// Deliberately NOT `GraphReference` / `GraphAliasInstantiation`: those name a
+// declaration symbol, and an intrinsic names none. Encoding one through them
+// would let a userland type spelled `Awaited` capture a compiler operation.
+// The op rides as a closed enum, never a string id, so it can never reach the
+// symbol table or be resolved as a name.
+//
+// Operands are graph node ids, preserving DAG identity and sharing.
+message GraphIntrinsicApplication {
+  CompilerIntrinsicTypeOp op = 1;
+  repeated uint32 argument_node_ids = 2;
 }
 
 // One lossless source-ordered object-construction effect.

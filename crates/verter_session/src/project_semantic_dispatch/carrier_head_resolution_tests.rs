@@ -1923,3 +1923,142 @@ defineProps<{ setupOnly: string }>()
         "the unresolved exact-head reason must remain typed"
     );
 }
+
+// ── B22. IMPORTED `Awaited` — the import is the declaration, not the relation ─
+//
+// A userland type NAMED `Awaited`, brought in by an import, is an ordinary
+// declaration: `X = Awaited<string>` is `{ user: string }` and never dispatches
+// the compiler-native awaited relation. The invariant is declaration identity,
+// not spelling, so the rows cover the direct import, a renamed import of the
+// userland `Awaited`, and an unrelated export imported UNDER the builtin name.
+//
+// Discrimination: the dispatch builtin gate consulted only scope-local type
+// names and type bindings, so an import binding named `Awaited` classified as
+// the builtin and handed builders the compiler-native identity — the gate rows
+// below FAIL on that shape. The canonical `ScopeShadowing` authority includes
+// imports. The unshadowed control below proves the same gate still yields the
+// identity when nothing binds the name.
+#[test]
+fn imported_builtin_named_awaited_resolves_userland_and_never_the_awaited_relation() {
+    use super::BuiltinUtilityResolution as Gate;
+
+    let rows: [(&str, &str, Gate); 3] = [
+        (
+            "import type { Awaited } from \"./user\";\nexport type X = Awaited<string>;\n",
+            "Awaited",
+            Gate::Shadowed,
+        ),
+        (
+            "import type { Awaited as UserAwaited } from \"./user\";\nexport type X = UserAwaited<string>;\n",
+            "UserAwaited",
+            Gate::Shadowed,
+        ),
+        (
+            "import type { Box as Awaited } from \"./user\";\nexport type X = Awaited<string>;\n",
+            "Awaited",
+            Gate::Shadowed,
+        ),
+    ];
+    for (consumer, local, gate) in rows {
+        let host = host();
+        upsert_ts(
+            &host,
+            "/user.ts",
+            "export type Awaited<T> = { user: T };\nexport type Box<T> = { user: T };\n",
+        );
+        upsert_ts(&host, "/consumer.ts", consumer);
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let scope = file_scope(&dispatch, "/consumer.ts");
+        let carrier = bare_ref_carrier(&dispatch, local, scope, &[PrimitiveKind::String]);
+
+        let adapter = super::SessionDispatchHost::new(&host);
+        assert_eq!(
+            super::DispatchHost::resolve_builtin_utility(&adapter, carrier, local),
+            gate,
+            "{local:?} imported in {consumer:?} must not classify as the builtin utility"
+        );
+
+        let before = dispatch.graph().stats_snapshot().awaited_normalize_count;
+        let (member, kind) = first_member_primitive(&dispatch, carrier)
+            .unwrap_or_else(|| panic!("{consumer:?}: X must expand to `{{ user: string }}`"));
+        assert_eq!(
+            member, "user",
+            "{consumer:?}: the imported declaration wins"
+        );
+        assert_eq!(kind, PrimitiveKind::String);
+        assert_eq!(
+            dispatch.graph().stats_snapshot().awaited_normalize_count,
+            before,
+            "{consumer:?}: an imported userland `Awaited` never enters the awaited relation"
+        );
+    }
+}
+
+/// Control for the imported-`Awaited` rows: with nothing binding the name,
+/// the one gate decision is the builtin AND carries its proven identity.
+#[test]
+fn unshadowed_awaited_resolves_to_the_builtin_identity_in_one_gate_decision() {
+    use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/plain.ts",
+        "export type X = Awaited<Promise<string>>;\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let scope = file_scope(&dispatch, "/plain.ts");
+    let carrier = bare_ref_carrier(&dispatch, "Awaited", scope, &[PrimitiveKind::String]);
+    let adapter = super::SessionDispatchHost::new(&host);
+    assert_eq!(
+        super::DispatchHost::resolve_builtin_utility(&adapter, carrier, "Awaited"),
+        super::BuiltinUtilityResolution::Builtin(Some(BuiltinUtility::Awaited)),
+    );
+}
+
+/// Counts the dispatch adapter's scope-payload reads.
+#[derive(Default)]
+struct ScopePayloadReadCounter(std::sync::atomic::AtomicUsize);
+
+impl verter_audit::AuditObserver for ScopePayloadReadCounter {
+    fn record_event(&self, event: verter_audit::AuditEvent) {
+        if matches!(
+            event,
+            verter_audit::AuditEvent::PreparedDeclBundleCallsiteScopePayload
+        ) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// The builtin utility gate costs ONE scope-payload read per builtin build.
+///
+/// Discrimination: the gate used to be two callbacks — one to enter the
+/// builtin branch, one for the proven identity — so a builtin build read the
+/// scope payload twice. Re-adding a second gate call in that branch measures
+/// 2 here.
+#[test]
+fn a_builtin_utility_build_reads_the_scope_payload_once() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/p.ts",
+        "export type Foo = { a: string };\nexport type X = Partial<Foo>;\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let scope = file_scope(&dispatch, "/p.ts");
+    let carrier = bare_ref_carrier(&dispatch, "Partial", scope, &[PrimitiveKind::String]);
+    let counter = Arc::new(ScopePayloadReadCounter::default());
+    let guard = verter_audit::observer::install_observer(counter.clone());
+    let resolved = resolve_subject(&dispatch, carrier, ProjectionMode::Expanded);
+    drop(guard);
+    assert!(
+        !is_bare_ref(&dispatch, resolved) && !is_opaque(&dispatch, resolved),
+        "the builtin `Partial<string>` must build"
+    );
+    assert_eq!(
+        counter.0.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "one gate decision, one scope-payload read"
+    );
+}

@@ -581,6 +581,19 @@ impl<'a> Walker<'a> {
                 type_arguments,
             } => self.walk_ref(name.as_ref(), type_arguments),
             TypeExpr::TypeParameter(param) => self.walk_type_param(param),
+            // A compiler intrinsic contributes its FROZEN op tag, never the
+            // derived enum discriminant: declaration order must not be able to
+            // move a content-addressed facts key.
+            TypeExpr::IntrinsicApplication { op, arguments } => {
+                self.buf.push(0x3B);
+                self.buf.push(op.stable_hash_tag());
+                self.buf
+                    .extend_from_slice(&(arguments.len() as u32).to_le_bytes());
+                for argument in arguments.iter() {
+                    self.walk_node(argument);
+                    self.buf.push(0xFE);
+                }
+            }
             TypeExpr::KeyOf(inner) => {
                 self.buf.push(0x30);
                 self.walk_node(inner);
@@ -1343,6 +1356,15 @@ impl<'a> Walker<'a> {
                 key.push(0xFF);
                 key.extend_from_slice(&(type_arguments.as_ptr() as usize).to_le_bytes());
                 key.extend_from_slice(&(type_arguments.len() as u32).to_le_bytes());
+            }
+            // Mirrors the `Ref` shape: tag, leaf identity, then the owned
+            // slice pointer + length. MUST NOT recurse (see the doc above).
+            TypeExpr::IntrinsicApplication { op, arguments } => {
+                key.push(0xB7);
+                key.push(op.stable_hash_tag());
+                key.push(0xFF);
+                key.extend_from_slice(&(arguments.as_ptr() as usize).to_le_bytes());
+                key.extend_from_slice(&(arguments.len() as u32).to_le_bytes());
             }
             TypeExpr::TypeParameter(p) => {
                 key.push(0xA9);

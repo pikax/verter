@@ -888,6 +888,19 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
                     .collect::<Vec<_>>(),
             ),
         },
+        // A compiler intrinsic BINDS and NAMES nothing: its identity is a closed
+        // op, never a spelling the enclosing generic scope could capture. Only
+        // its OPERANDS can reference that scope, so normalise them and rebuild
+        // — the application itself is never rewritten into a `TypeParameter`.
+        TypeExpr::IntrinsicApplication { op, arguments } => TypeExpr::IntrinsicApplication {
+            op: *op,
+            arguments: Arc::from(
+                arguments
+                    .iter()
+                    .map(|argument| normalize_type_parameter_refs(argument, scope))
+                    .collect::<Vec<_>>(),
+            ),
+        },
         // `import("m").Gen<T>` — only the instantiation type-arguments can
         // reference the enclosing generic scope; specifier / qualifier /
         // typeof_query are leaves. Normalise the arguments exactly as `Ref`.
