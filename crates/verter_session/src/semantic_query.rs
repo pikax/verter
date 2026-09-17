@@ -8131,17 +8131,29 @@ pub enum SemanticQueryKey {
     ///   renormalising through the canonical union; any undecidable arm
     ///   defers the whole reduction (partial distribution would silently
     ///   drop information);
-    /// - a type parameter whose constraint PROVES it non-thenable reduces
-    ///   to the parameter itself (`<T extends string>` ⇒ `T`);
-    /// - every other naked / open type parameter reduces to the canonical
-    ///   [`SemanticNodeData::IntrinsicApplication`] over the `Awaited`
-    ///   compiler intrinsic — a settled, memoizable SYMBOLIC value, not a
-    ///   refusal (`<T>` ⇒ `Awaited<T>`, and `<T extends Promise<string>>`
-    ///   ⇒ `Awaited<T>`, because that constraint does NOT prove
-    ///   non-thenable);
-    /// - a structural thenable, a cyclic carrier, an exhausted budget, or
-    ///   any other unsettled shape is an HONEST REFUSAL (the deferred
-    ///   `Opaque(Miss)` shell), never a fabricated passthrough.
+    /// - a type parameter reduces to ITSELF when awaiting its constraint
+    ///   gives each constraint arm back (`<T extends string>`,
+    ///   `<T extends Plain>`, `<T extends number | Plain>` ⇒ `T`);
+    /// - every other type parameter — unconstrained, or constrained by
+    ///   `{}` / `object` / `unknown` / a thenable — reduces to the
+    ///   canonical [`SemanticNodeData::IntrinsicApplication`] over the
+    ///   `Awaited` compiler intrinsic, a settled, memoizable SYMBOLIC value
+    ///   (`<T>` ⇒ `Awaited<T>`, `<T extends Promise<string>>` ⇒
+    ///   `Awaited<T>`);
+    /// - that intrinsic application is its own awaited type (idempotence);
+    /// - an object surface follows the checker's thenable protocol: no
+    ///   callable `then` ⇒ itself; a callable `then` whose `onfulfilled`
+    ///   is callable RE-ENTERS this family on the promised value; a callable
+    ///   `then` that promises nothing, or an optional callable `then` ⇒
+    ///   `any` (the checker reports the operand);
+    /// - a declaration carrier (`DeclRef` / `InstantiationRef`) expands
+    ///   one level through `Instantiate` and re-enters this family on the
+    ///   body; an unchanged body answers with the CARRIER, so a
+    ///   non-thenable alias keeps its identity;
+    /// - a `then` shape the reader cannot enumerate, a carrier that does
+    ///   not expand, a cyclic carrier, an exhausted budget, or any other
+    ///   unsettled shape is an HONEST REFUSAL (the deferred `Opaque(Miss)`
+    ///   shell), never a fabricated passthrough.
     ///
     /// Value domain: [`SemanticQueryValueTag::TypeNode`].
     ///
@@ -8181,6 +8193,12 @@ pub enum SemanticQueryKey {
     /// - a concrete `Promise` carrier and a union reduce through THIS
     ///   family's own recursive relation (re-entering `AsyncReturnPayload`,
     ///   never `AwaitedNormalize`);
+    /// - a top-level authored `Awaited<X>` whose declaration identity is
+    ///   the unshadowed lib `Awaited` resolves to the intrinsic application,
+    ///   which strips to this family over `X`;
+    /// - object surfaces and declaration carriers follow the same thenable
+    ///   protocol and carrier expansion as [`Self::AwaitedNormalize`], each
+    ///   re-entering THIS family;
     /// - anything else is an honest refusal.
     ///
     /// Value domain: [`SemanticQueryValueTag::TypeNode`].

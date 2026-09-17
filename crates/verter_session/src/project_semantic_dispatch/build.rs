@@ -10323,16 +10323,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Whether `node` is a SETTLED shape the awaited relations provably
-    /// reduce to ITSELF — it cannot be a thenable, so there is nothing to
-    /// unwrap.
+    /// reduce to ITSELF without reading its structure — it cannot be a
+    /// thenable, so there is nothing to unwrap.
     ///
-    /// This is the ONE authority for "provably non-thenable", and both
-    /// relations ask it: `AwaitedNormalize`'s settled-passthrough arm asks
-    /// it of the OPERAND, and its type-parameter arm asks the same question
-    /// of the parameter's CONSTRAINT — which is the whole `<T extends
-    /// string>` ⇒ `T` versus `<T extends Promise<string>>` ⇒ `Awaited<T>`
-    /// distinction, falling out of one predicate rather than four special
-    /// cases.
+    /// The shared prelude's fast path for both relations. A `then`-bearing
+    /// object surface is NOT settled here: the structural arms decide it by
+    /// the checker's thenable protocol (`surface_thenability`).
     ///
     /// NEGATIVE EVIDENCE ONLY. `false` means "not proven settled", never
     /// "is a thenable": the caller falls through to the real reduction or to
@@ -10356,9 +10352,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 | SemanticNodeData::Tuple { .. }
                 | SemanticNodeData::Array { .. },
             ) => true,
-            // An object surface settles only when it provably carries NO
-            // `then` member: a `then`-bearing surface may be a structural
-            // thenable, which is out of scope and must defer.
+            // An object surface settles here only when it carries NO `then`
+            // member; a `then`-bearing surface goes to the thenable protocol.
             Some(SemanticNodeData::Object(surface)) => !surface
                 .positive_members()
                 .iter()
@@ -10458,14 +10453,326 @@ impl<'a> ProjectSemanticDispatch<'a> {
         (resolved, None)
     }
 
+    /// Re-enter the family `relation` names — each relation's composite arms
+    /// go back through its OWN query so nested unwraps share its memo, cycle
+    /// guard and budget.
+    fn awaited_relation_read(
+        &self,
+        relation: AwaitedRelation,
+        operand: SemanticNodeId,
+        context: crate::semantic_query::StructuralReduceContext,
+    ) -> Option<SemanticNodeId> {
+        match relation {
+            AwaitedRelation::Normalize => self.awaited_normalize_read(operand, context),
+            AwaitedRelation::Payload => self.async_return_payload_read(operand, context),
+        }
+    }
+
+    /// The structural arms BOTH awaited relations share, reached after each
+    /// family's own arms declined. They follow the checker's awaited-type
+    /// protocol (`getAwaitedType` / `getPromisedTypeOfPromise`):
+    ///
+    /// - an object surface is decided by its `then` member
+    ///   ([`Self::surface_thenability`]): not thenable ⇒ itself; a valid
+    ///   thenable ⇒ the relation over the promised value; a callable `then`
+    ///   with no callable `onfulfilled` ⇒ `any` (the checker reports the
+    ///   operand and types it `any`);
+    /// - a declaration carrier (`DeclRef` / `InstantiationRef`) expands ONE
+    ///   level through the shared `Instantiate` family and re-enters the
+    ///   relation on its body. When the body comes back unchanged the
+    ///   CARRIER is the answer, so a non-thenable alias keeps its authored
+    ///   identity (`Promise<Box<T>>`, never the expanded `{ w: T }`).
+    ///
+    /// Anything the protocol cannot decide refuses honestly.
+    fn awaited_structural_node(
+        &self,
+        relation: AwaitedRelation,
+        resolved: SemanticNodeId,
+        context: crate::semantic_query::StructuralReduceContext,
+    ) -> Option<SemanticNodeId> {
+        let data = self.graph().node_data(resolved)?;
+        match data.as_ref() {
+            SemanticNodeData::Object(surface) => {
+                let thenability = self.surface_thenability(surface);
+                drop(data);
+                match thenability {
+                    Thenability::NotThenable => Some(resolved),
+                    Thenability::Promised(values) => {
+                        let mut reduced = Vec::with_capacity(values.len());
+                        for value in values {
+                            reduced.push(self.awaited_relation_read(relation, value, context)?);
+                        }
+                        Some(if reduced.len() == 1 {
+                            reduced[0]
+                        } else {
+                            self.intern_normalized_union_or_intersection(&reduced, true)
+                        })
+                    }
+                    Thenability::Malformed => Some(
+                        self.graph()
+                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
+                    ),
+                    Thenability::Undecided => None,
+                }
+            }
+            SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. } => {
+                drop(data);
+                let body = self.declaration_carrier_body(resolved)?;
+                if body == resolved {
+                    return None;
+                }
+                let reduced = self.awaited_relation_read(relation, body, context)?;
+                Some(if reduced == body { resolved } else { reduced })
+            }
+            _ => None,
+        }
+    }
+
+    /// Expand a declaration carrier ONE level through the shared
+    /// `Instantiate` family — `None` for any other node or when the family
+    /// produces no value. The carrier may come back unchanged (a carrier-stop);
+    /// callers compare against the input.
+    fn declaration_carrier_body(&self, carrier: SemanticNodeId) -> Option<SemanticNodeId> {
+        let (identity, args) = match self.graph().node_data(carrier).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => (
+                identity.clone(),
+                Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            ),
+            Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                (base.clone(), Arc::clone(args))
+            }
+            _ => return None,
+        };
+        let slot = self.type_slot_for(
+            Arc::clone(&identity.canonical_id),
+            identity.owner,
+            Arc::clone(&identity.decl_name),
+        );
+        let context = self.instantiate_context_for(
+            &identity.canonical_id,
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Expanded,
+            ),
+        );
+        match self
+            .execute_read(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(slot, args, context),
+            ))
+            .value
+        {
+            QueryResult::Value(body) => Some(body),
+            _ => None,
+        }
+    }
+
+    /// The checker's thenable protocol over one object surface.
+    ///
+    /// No `then` member, or a `then` with no call signature (`then: number`),
+    /// is not thenable. Otherwise each `then` call signature's first
+    /// parameter is the `onfulfilled` callback (nullish arms removed), and
+    /// each callback call signature's first parameter is a promised value (a
+    /// parameterless callback promises `never`). A callable `then` that yields
+    /// no promised value is malformed, and so is an OPTIONAL callable `then`:
+    /// the checker finds no call signature on `then | undefined` (no promise)
+    /// yet still calls the operand thenable. A rest parameter, a union
+    /// callback or a signature source this reader cannot enumerate is
+    /// undecided.
+    fn surface_thenability(&self, surface: &crate::semantic_query::SurfaceView) -> Thenability {
+        let thens: Vec<&crate::semantic_query::SurfaceMember> = surface
+            .positive_members()
+            .iter()
+            .filter(|member| member.string_name() == Some("then"))
+            .collect();
+        if thens.is_empty() {
+            return Thenability::NotThenable;
+        }
+        let optional = thens.iter().any(|member| member.optional);
+        let mut then_signatures = Vec::new();
+        for member in thens {
+            match self.awaited_call_signatures(member.value, 0) {
+                Some(signatures) => then_signatures.extend(signatures),
+                None => return Thenability::Undecided,
+            }
+        }
+        if then_signatures.is_empty() {
+            return Thenability::NotThenable;
+        }
+        if optional {
+            return Thenability::Malformed;
+        }
+        let mut promised = Vec::new();
+        for signature in then_signatures {
+            let Some(onfulfilled) = self.first_call_parameter(signature) else {
+                return Thenability::Undecided;
+            };
+            let Some((onfulfilled, rest)) = onfulfilled else {
+                // `then()` names no callback: it contributes no promised value.
+                continue;
+            };
+            if rest {
+                return Thenability::Undecided;
+            }
+            let arms = self.non_nullish_arms(onfulfilled);
+            let callback = match arms.as_slice() {
+                [] => continue,
+                [single] => *single,
+                _ => return Thenability::Undecided,
+            };
+            let Some(callbacks) = self.awaited_call_signatures(callback, 0) else {
+                return Thenability::Undecided;
+            };
+            for callback in callbacks {
+                match self.first_call_parameter(callback) {
+                    Some(Some((value, false))) => promised.push(value),
+                    Some(None) => promised.push(
+                        self.graph()
+                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
+                    ),
+                    Some(Some((_, true))) | None => return Thenability::Undecided,
+                }
+            }
+        }
+        if promised.is_empty() {
+            Thenability::Malformed
+        } else {
+            Thenability::Promised(promised)
+        }
+    }
+
+    /// The call signatures of `node` for the thenable protocol: `Some(empty)`
+    /// for a provably non-callable settled value, `None` when this reader
+    /// cannot enumerate them. A declaration carrier expands one level (twice
+    /// at most, bounding alias chains).
+    fn awaited_call_signatures(
+        &self,
+        node: SemanticNodeId,
+        depth: u8,
+    ) -> Option<Vec<SemanticNodeId>> {
+        let resolved = self
+            .evaluate_deferred_semantic_node_with_context(
+                node,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+            .into_active_query_build_node(self);
+        let data = self.graph().node_data(resolved)?;
+        match data.as_ref() {
+            SemanticNodeData::Signature { kind, .. } => Some(match kind {
+                crate::semantic_query::SignatureKind::Call => vec![resolved],
+                crate::semantic_query::SignatureKind::Construct => Vec::new(),
+            }),
+            SemanticNodeData::Object(surface) => Some(surface.call_signatures.to_vec()),
+            SemanticNodeData::Primitive(_)
+            | SemanticNodeData::Literal(_)
+            | SemanticNodeData::TemplateLiteral { .. }
+            | SemanticNodeData::Array { .. }
+            | SemanticNodeData::Tuple { .. } => Some(Vec::new()),
+            SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. }
+                if depth < 2 =>
+            {
+                drop(data);
+                let body = self.declaration_carrier_body(resolved)?;
+                if body == resolved {
+                    return None;
+                }
+                self.awaited_call_signatures(body, depth + 1)
+            }
+            _ => None,
+        }
+    }
+
+    /// The first parameter of a call signature as `(type, is_rest)`;
+    /// `Some(None)` when the signature takes no parameter, `None` when `node`
+    /// is not a signature.
+    fn first_call_parameter(&self, node: SemanticNodeId) -> Option<Option<(SemanticNodeId, bool)>> {
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Signature { params, .. }) => {
+                Some(params.first().map(|param| (param.ty, param.rest)))
+            }
+            _ => None,
+        }
+    }
+
+    /// `node`'s union arms without `null` / `undefined` (the checker's
+    /// `NEUndefinedOrNull` facts); a non-union is its own single arm.
+    fn non_nullish_arms(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        let resolved = self
+            .evaluate_deferred_semantic_node_with_context(
+                node,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+            .into_active_query_build_node(self);
+        let is_nullish = |arm: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(arm).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                ))
+            )
+        };
+        let members = match self.graph().node_data(resolved).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+            _ => vec![resolved],
+        };
+        members
+            .into_iter()
+            .filter(|arm| !is_nullish(*arm))
+            .collect()
+    }
+
+    /// Whether an awaited type parameter must stay the deferred `Awaited<T>`
+    /// — the checker's `isAwaitedTypeNeeded` over the parameter's constraint.
+    /// Needed for no constraint, an `any` / `unknown` / empty-object /
+    /// `object` constraint, or one that is not provably its own awaited type
+    /// (a thenable, or undecidable); not needed when awaiting the constraint
+    /// gives the constraint back (`string`, `{ p: string }`, `Plain`,
+    /// `number | Plain`).
+    fn awaited_type_parameter_needs_deferral(
+        &self,
+        constraint: Option<SemanticNodeId>,
+        context: crate::semantic_query::StructuralReduceContext,
+    ) -> bool {
+        let Some(bound) = constraint else {
+            return true;
+        };
+        let bound = self
+            .evaluate_deferred_semantic_node_with_context(
+                bound,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+            .into_active_query_build_node(self);
+        let empty_or_top = match self.graph().node_data(bound).as_deref() {
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::Any | PrimitiveKind::Unknown | PrimitiveKind::Object,
+            )) => true,
+            Some(SemanticNodeData::Object(surface)) => {
+                surface.positive_members().is_empty()
+                    && surface.call_signatures.is_empty()
+                    && surface.construct_signatures.is_empty()
+                    && surface.index_signatures.is_empty()
+            }
+            _ => false,
+        };
+        if empty_or_top {
+            return true;
+        }
+        // The checker asks whether SOME constituent is thenable, so a union
+        // is decided arm by arm rather than by re-normalizing the whole.
+        let arms: Vec<SemanticNodeId> = match self.graph().node_data(bound).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+            _ => vec![bound],
+        };
+        arms.into_iter()
+            .any(|arm| self.awaited_normalize_read(arm, context) != Some(arm))
+    }
+
     /// The awaited-type normalization — the LIVE producer for
     /// [`SemanticQueryKey::AwaitedNormalize`]. See that variant for the full
     /// per-shape contract and the tsc 7.0.2 rows it is measured against.
     ///
     /// An honest refusal is `QueryResult::Error(QueryError::Miss)`, which is
-    /// never warm-published — a structural thenable, a carrier the evaluator
-    /// could not settle, or an arm whose own family read refused, all land
-    /// there rather than fabricating a passthrough.
+    /// never warm-published — a `then` shape the protocol reader cannot
+    /// enumerate, a carrier that does not expand, or an arm whose own family
+    /// read refused, all land there rather than fabricating a passthrough.
     pub(super) fn build_awaited_normalize(
         &self,
         operand: SemanticNodeId,
@@ -10510,21 +10817,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 Some(self.intern_normalized_union_or_intersection(&reduced, true))
             }
-            // A type parameter whose constraint PROVES it non-thenable is its
-            // own awaited type; every other open parameter is the canonical
-            // deferred intrinsic — a settled symbolic value, not a refusal.
+            // A type parameter whose constraint is provably its own awaited
+            // type is its own awaited type; every other open parameter is the
+            // canonical deferred intrinsic — a settled symbolic value, not a
+            // refusal.
             SemanticNodeData::TypeParam { constraint, .. } => {
                 let constraint = *constraint;
                 drop(data);
-                if constraint.is_some_and(|bound| self.settled_non_thenable(bound)) {
-                    Some(resolved)
-                } else {
+                if self.awaited_type_parameter_needs_deferral(constraint, context) {
                     Some(self.deferred_awaited(resolved))
+                } else {
+                    Some(resolved)
                 }
             }
-            // Structural thenables, conditionals, intersections, mapped
-            // carriers, infer shells, unsettled decl refs: honest refusal.
-            _ => None,
+            // The awaited operation is idempotent: `Awaited<Awaited<T>>` is
+            // `Awaited<T>`.
+            SemanticNodeData::IntrinsicApplication {
+                op: crate::semantic_query::CompilerIntrinsicTypeOp::Awaited,
+                ..
+            } => Some(resolved),
+            // Object surfaces and declaration carriers follow the shared
+            // thenable protocol; conditionals, intersections, mapped
+            // carriers and infer shells refuse honestly.
+            _ => {
+                drop(data);
+                self.awaited_structural_node(AwaitedRelation::Normalize, resolved, context)
+            }
         }
     }
 
@@ -10623,7 +10941,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 Some(self.intern_normalized_union_or_intersection(&reduced, true))
             }
-            _ => None,
+            _ => {
+                drop(data);
+                self.awaited_structural_node(AwaitedRelation::Payload, resolved, context)
+            }
         }
     }
 
@@ -11585,4 +11906,26 @@ mod carrier_type_param_descent_tests {
             );
         }
     }
+}
+
+/// Which awaited relation a shared structural arm re-enters.
+#[derive(Debug, Clone, Copy)]
+enum AwaitedRelation {
+    /// [`SemanticQueryKey::AwaitedNormalize`].
+    Normalize,
+    /// [`SemanticQueryKey::AsyncReturnPayload`].
+    Payload,
+}
+
+/// An object surface's standing under the checker's thenable protocol.
+#[derive(Debug)]
+enum Thenability {
+    /// No callable `then`: the surface is its own awaited type.
+    NotThenable,
+    /// A valid thenable promising these values.
+    Promised(Vec<SemanticNodeId>),
+    /// A callable `then` that promises nothing: the checker types it `any`.
+    Malformed,
+    /// This reader cannot decide the protocol.
+    Undecided,
 }

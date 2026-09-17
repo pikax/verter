@@ -12013,23 +12013,35 @@ fn awaited_absorbs_lattice_extremes() {
     }
 }
 
-/// An object surface that CARRIES a `then` member may be a structural
-/// thenable — out of scope for the carrier-identity unwrap — so the
-/// reduction defers to the `Opaque(Miss)` shell instead of passing a
-/// potentially-wrong surface through.
+/// A `then` member decides the awaited type only when it is CALLABLE.
+///
+/// `{ then: number }` has no call signature on `then`, so the checker's
+/// thenable protocol calls it not a thenable and `Awaited<{ then: number }>`
+/// is the surface itself (tsc 7.0.2: `BadThen<T>` rows of
+/// `awaited_thenable_protocol_oracle_matrix`). A `then` typed by an open
+/// type parameter cannot be enumerated, so that surface still defers to the
+/// `Opaque(Miss)` shell rather than guessing either way.
 #[test]
-fn awaited_defers_then_bearing_object_surfaces() {
+fn awaited_decides_then_bearing_surfaces_by_callability() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let num = primitive(&graph, PrimitiveKind::Number);
-    let thenable = simple_object(&graph, &[("then", num)]);
+    let not_thenable = simple_object(&graph, &[("then", num)]);
 
-    let result = instantiate_utility(&dispatch, &graph, "Awaited", &[thenable]);
+    let result = instantiate_utility(&dispatch, &graph, "Awaited", &[not_thenable]);
+    assert_eq!(
+        result, not_thenable,
+        "a non-callable `then` is not a thenable: the surface is its own awaited type"
+    );
+
+    let open = outer_type_param(&graph, "T");
+    let undecidable = simple_object(&graph, &[("then", open)]);
+    let result = instantiate_utility(&dispatch, &graph, "Awaited", &[undecidable]);
     let data = graph.node_data(result).expect("node data");
     assert!(
         matches!(&*data, SemanticNodeData::Opaque(QueryError::Miss)),
-        "then-bearing surface must defer, got {data:?}"
+        "an undecidable `then` must defer, got {data:?}"
     );
 }
 

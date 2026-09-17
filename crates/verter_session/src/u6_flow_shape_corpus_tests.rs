@@ -1164,6 +1164,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "5a47b2cfe65c26e6a913289e4805974dfc8ed125dfcc6bd2f1f134a23f3cf249",
     ),
     (
+        "C15_heritage_nested_builtin_open",
+        "51d48630b7089a4ba157e2bb43aecc11a61c6fedf826c52011275b4fada125dd",
+    ),
+    (
         "CC03_as_const_plain_return",
         "7e730b8d0bcbb37eaf8a7f46630d08e828afdf5a14fc9da5574f39821b02820e",
     ),
@@ -4899,16 +4903,12 @@ const OPEN_DEBTS: &[&str] = &[
     // A scalar literal is correctly rejected as a props macro type, but that
     // runtime diagnostic must not delete the file's IDE TSX surface.
     "E05_scalar_flow_answer_keeps_tsx_surface",
-    // ── TypeScript semantics: mapped heritage (index signature, nested builtin) ──
+    // ── TypeScript semantics: mapped heritage (index signature) ──
     // The mapped route over an index-signature heritage interface drops the
     // index signature and publishes complete; the direct-alias route drops it
     // byte-identically — a pre-existing mapped source-member enumeration
     // defect whose reach the heritage work extended.
     "C14_mapped_heritage_drops_index_signature",
-    // A nested builtin in the heritage clause's key domain is not reduced by
-    // the one-hop fallback — a conservative zero-member publication where the
-    // checker computes the closed surface.
-    "C15_heritage_nested_builtin_open",
     // ── satisfies-contextual widening (value inference) ────────────────
     // The satisfies TARGET never contextually types the operand's members:
     // a fresh member literal keeps its `Literal` node where the checker's
@@ -4997,7 +4997,7 @@ const OPEN_DEBTS: &[&str] = &[
 #[cfg(test)]
 const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 3, 1, 2),
-    (Owner::U2MappedTemplate, 4, 1, 2),
+    (Owner::U2MappedTemplate, 4, 2, 1),
     (Owner::U6CallResolve, 33, 32, 1),
     // Nine switch-, try/catch- and reunion-family rows are parked as the
     // SUBTYPE-REUNION class: TypeScript's return-position reunion applies

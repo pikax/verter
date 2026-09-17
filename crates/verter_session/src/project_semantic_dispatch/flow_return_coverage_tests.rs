@@ -2932,49 +2932,29 @@ fn generator_wrap_without_lib_surface_keeps_typed_gap_and_never_warms() {
     }
 }
 
-/// NEGATIVE LEG (async) — the Promise-EMBEDDING collapse branch's
-/// OWN failure path: the awaited-relation read reaching a genuine honest
-/// refusal keeps the TYPED GAP, never a wrong warm value.
+/// The Promise-EMBEDDING collapse over a STRUCTURAL thenable payload follows
+/// the checker's thenable protocol, clean and warm.
 ///
-/// `negAsyncThenable`'s declared return is `Promise<NegThenable>` where
-/// `NegThenable` carries a `then` member — the payload relation
-/// (`build_async_return_payload` in `build.rs`) has no structural arm that
-/// settles a resolved-but-unrecognised carrier (measured: the un-expanded
-/// interface reference falls through its catch-all default, not the
-/// `then`-bearing-object arm of `settled_non_thenable` — both keep the
-/// same refusal), so the relation refuses and the read is the deferred
-/// shell. `FlowReturnResult::new_with_fresh_literal_arms`'s unresolved-reach
-/// backstop then folds `FlowReturnDegradation::UnresolvedValue` into the
-/// wrap's materialized result, so the whole `negAsyncThenable` return is a
-/// degraded success — unlike `negAsyncSelfRef`'s self-referential collapse
-/// (which resolves CLEAN), this row never warms. Verified by mutation: with
-/// the payload relation's catch-all arm forced to pass its operand through
-/// instead of refusing, this test fails on a clean `Promise<NegThenable>`
-/// with `degradation=None`. Contrast with
-/// `generator_wrap_without_lib_surface_keeps_typed_gap_and_never_warms`:
-/// that row's gap comes from an unresolvable lib HEAD; this row's comes
-/// from the `Awaited` reducer's own deferred answer over an unrecognised
-/// payload shape.
+/// `negAsyncThenable` returns `Promise<NegThenable>` where `NegThenable` is
+/// `{ then(cb: (v: number) => void): void }`: the payload relation unwraps
+/// the `Promise`, reaches the interface carrier, expands it, and reads the
+/// promised value off the callback's first parameter. Oracle (tsc 7.0.2
+/// declaration emit): `Promise<number>` — never `Promise<NegThenable>` and
+/// never the typed gap this row pinned while structural thenables were
+/// unmodelled. The honest-refusal leg for a `then` this reader cannot
+/// enumerate is row `n1` of `awaited_thenable_protocol_oracle_matrix`.
 #[test]
-fn async_wrap_awaited_collapse_over_a_thenable_payload_keeps_typed_gap_and_never_warms() {
+fn async_wrap_awaited_collapse_over_a_thenable_payload_publishes_the_promised_value() {
     let host = ts_host();
-    match eval(&host, NEG, "negAsyncThenable") {
-        Outcome::Value {
-            degradation,
-            candidates,
-            ..
-        } => {
-            assert!(
-                degradation.is_some(),
-                "an Awaited-collapse over an unresolvable thenable payload must degrade"
-            );
-            assert_eq!(
-                candidates, 0,
-                "a gapped async wrap is ReturnOnly — it must never warm"
-            );
-        }
-        other => panic!("negAsyncThenable must produce a degraded value, got {other:?}"),
-    }
+    assert_clean_warm(
+        &host,
+        NEG,
+        "negAsyncThenable",
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+        },
+    );
 }
 
 /// Wrapped results admit WARM and REPLAY equal to FRESH.
@@ -4488,29 +4468,203 @@ fn awaited_relation_oracle_matrix() {
 
 /// The negative twin of matrix row g1: a module-local `type Awaited<X>`
 /// shadows the lib declaration, so the top-level carrier is a USERLAND
-/// declaration and the async return payload must never strip it to `T` nor
-/// turn it into the compiler intrinsic.
+/// declaration. The async return payload must never strip it to `T` nor turn
+/// it into the compiler intrinsic; as an ordinary non-thenable alias it is
+/// its own payload and keeps its identity.
 ///
 /// Oracle (tsc 7.0.2 declaration emit): `Promise<Awaited<T>>`, where
-/// `Awaited` is the local `{ w: X }` alias. The payload relation does not
-/// yet resolve a userland alias carrier, so the rail publishes the typed gap
-/// — pinned exactly, so a future answer is a visible edit and a strip can
-/// never pass.
+/// `Awaited` is the local `{ w: X }` alias.
 #[test]
 fn a_shadowed_awaited_at_the_top_of_an_async_return_is_not_stripped() {
     const SHADOW: &str = "/ws/cov/shadowed_awaited.ts";
     let host = host_with(&[(
         SHADOW,
-        "type Awaited<X> = { w: X };
-         export async function shadowG1<T>(v: Awaited<T>) {
-  return v;
-}
-",
+        "type Awaited<X> = { w: X };\nexport async function shadowG1<T>(v: Awaited<T>) {\n  return v;\n}\n",
     )]);
+    match eval(&host, SHADOW, "shadowG1") {
+        Outcome::Value {
+            ty,
+            degradation: None,
+            candidates: 1,
+        } => assert!(
+            shape_matches(
+                &Shape::Ref("Promise", &[Shape::AuthoredAwaited(&Shape::T)]),
+                &ty
+            ),
+            "the local alias keeps its identity: {ty:?}"
+        ),
+        other => panic!("shadowG1 must publish Promise<Awaited<T>> clean, got {other:?}"),
+    }
+}
+
+/// Declaration carriers, constrained parameters and structural thenables for
+/// [`awaited_thenable_protocol_oracle_matrix`].
+const THENABLES: &str = "/ws/cov/thenables.ts";
+const THENABLES_SRC: &str = r#"
+interface AsyncGenerator<T, TReturn, TNext> {}
+type Box<X> = { w: X };
+interface IBox<X> { w: X }
+type Plain = { p: string };
+type P<X> = Promise<X>;
+type ThenBox<X> = { then(onfulfilled: (value: X) => void): void };
+type BadThen<X> = { then: number; w: X };
+type BadThen2<X> = { then(): void; w: X };
+type OptThen = { then?(onfulfilled: (value: number) => void): void };
+type RestThen = { then(...onfulfilled: ((value: number) => void)[]): void };
+export async function a1<T>(v: Box<T>) { return v; }
+export async function a2<T>(v: IBox<T>) { return v; }
+export async function a3(v: Plain) { return v; }
+export async function a4<T>(v: P<T>) { return v; }
+export async function a5<T>(v: ThenBox<T>) { return v; }
+export async function a6(v: ThenBox<string>) { return v; }
+export async function a7<T>(v: BadThen<T>) { return v; }
+export async function a8<T>(v: BadThen2<T>) { return v; }
+export async function w1<T>(v: Box<T>) { const a = await v; return { a }; }
+export async function w5<T>(v: ThenBox<T>) { const a = await v; return { a }; }
+export async function w6(v: ThenBox<string>) { const a = await v; return { a }; }
+export async function w7<T>(v: BadThen<T>) { const a = await v; return { a }; }
+export async function w8<T>(v: BadThen2<T>) { const a = await v; return { a }; }
+export async function* y5(v: ThenBox<string>) { yield v; }
+export async function c1<T extends {}>(v: T) { const a = await v; return { a }; }
+export async function c2<T extends object>(v: T) { const a = await v; return { a }; }
+export async function c3<T extends Plain>(v: T) { const a = await v; return { a }; }
+export async function c4<T extends ThenBox<number>>(v: T) { const a = await v; return { a }; }
+export async function c5<T extends unknown>(v: T) { const a = await v; return { a }; }
+export async function c6<T extends { p: string }>(v: T) { const a = await v; return { a }; }
+export async function c7<T extends number | Plain>(v: T) { const a = await v; return { a }; }
+export async function o1(v: OptThen) { return v; }
+export async function o2(v: OptThen) { const a = await v; return { a }; }
+export async function n1(v: RestThen) { return v; }
+"#;
+
+/// The checker's awaited-type protocol beyond the lib `Promise`, pinned as
+/// rows: declaration carriers, constrained type parameters and structural
+/// thenables, through both awaited relations (`a` / `o1` / `n1` rows are the
+/// async return payload, `w` / `c` / `o2` rows the await expression, `y5` the
+/// async generator yield).
+///
+/// - A non-thenable declaration carrier is its own awaited type and KEEPS its
+///   identity (`Promise<Box<T>>`, `Promise<Plain>`; a `then` that is not
+///   callable is not a thenable, `a7` / `w7`).
+/// - An alias to `Promise` unwraps (`a4`).
+/// - A callable `then` whose `onfulfilled` is callable promises that
+///   callback's first parameter, reduced by the SAME relation (`a5` is `T`,
+///   `w5` is `Awaited<T>`).
+/// - A callable `then` that promises nothing, and an optional callable `then`,
+///   are errors the checker types `any` (`a8`, `w8`, `o1`, `o2`).
+/// - An awaited type parameter stays `Awaited<T>` unless its constraint is
+///   provably its own awaited type; `{}`, `object`, `unknown` and a thenable
+///   constraint all defer (`c1`..`c7`).
+/// - `n1` is the honest-refusal leg: tsc reads the rest callback
+///   (`Promise<number>`), this reader does not enumerate rest parameters and
+///   publishes the typed gap rather than guessing.
+///
+/// Each `tsc` column is the declaration emit of the matching declaration,
+/// measured on the repository's TypeScript 7.0.2 with
+/// `tsc --ignoreConfig --declaration --emitDeclarationOnly --target es2022 --strict`.
+#[test]
+fn awaited_thenable_protocol_oracle_matrix() {
+    const T: Shape = Shape::T;
+    const PROMISE_T: Shape = Shape::Ref("Promise", &[Shape::T]);
+    const PROMISE_A_T: Shape = Shape::Ref("Promise", &[Shape::Member("a", &Shape::T)]);
+    const AWAITED_T: Shape = Shape::Awaited(&Shape::T);
+    const PROMISE_A_AWAITED_T: Shape = Shape::Ref("Promise", &[Shape::Member("a", &AWAITED_T)]);
+    const ANY: Shape = Shape::Primitive(PrimitiveName::Any);
+    const STRING: Shape = Shape::Primitive(PrimitiveName::String);
+    let clean: &[(&str, &str, Shape)] = &[
+        (
+            "a1",
+            "Promise<Box<T>>",
+            Shape::Ref("Promise", &[Shape::Ref("Box", &[T])]),
+        ),
+        (
+            "a2",
+            "Promise<IBox<T>>",
+            Shape::Ref("Promise", &[Shape::Ref("IBox", &[T])]),
+        ),
+        (
+            "a3",
+            "Promise<Plain>",
+            Shape::Ref("Promise", &[Shape::Ref("Plain", &[])]),
+        ),
+        ("a4", "Promise<T>", PROMISE_T),
+        ("a5", "Promise<T>", PROMISE_T),
+        ("a6", "Promise<string>", Shape::Ref("Promise", &[STRING])),
+        (
+            "a7",
+            "Promise<BadThen<T>>",
+            Shape::Ref("Promise", &[Shape::Ref("BadThen", &[T])]),
+        ),
+        ("a8", "Promise<any>", Shape::Ref("Promise", &[ANY])),
+        (
+            "w1",
+            "Promise<{ a: Box<T>; }>",
+            Shape::Ref("Promise", &[Shape::Member("a", &Shape::Ref("Box", &[T]))]),
+        ),
+        ("w5", "Promise<{ a: Awaited<T>; }>", PROMISE_A_AWAITED_T),
+        (
+            "w6",
+            "Promise<{ a: string; }>",
+            Shape::Ref("Promise", &[Shape::Member("a", &STRING)]),
+        ),
+        (
+            "w7",
+            "Promise<{ a: BadThen<T>; }>",
+            Shape::Ref(
+                "Promise",
+                &[Shape::Member("a", &Shape::Ref("BadThen", &[T]))],
+            ),
+        ),
+        (
+            "w8",
+            "Promise<{ a: any; }>",
+            Shape::Ref("Promise", &[Shape::Member("a", &ANY)]),
+        ),
+        (
+            "y5",
+            "AsyncGenerator<string, void, unknown>",
+            Shape::Ref(
+                "AsyncGenerator",
+                &[
+                    STRING,
+                    Shape::Primitive(PrimitiveName::Void),
+                    Shape::Primitive(PrimitiveName::Unknown),
+                ],
+            ),
+        ),
+        ("c1", "Promise<{ a: Awaited<T>; }>", PROMISE_A_AWAITED_T),
+        ("c2", "Promise<{ a: Awaited<T>; }>", PROMISE_A_AWAITED_T),
+        ("c3", "Promise<{ a: T; }>", PROMISE_A_T),
+        ("c4", "Promise<{ a: Awaited<T>; }>", PROMISE_A_AWAITED_T),
+        ("c5", "Promise<{ a: Awaited<T>; }>", PROMISE_A_AWAITED_T),
+        ("c6", "Promise<{ a: T; }>", PROMISE_A_T),
+        ("c7", "Promise<{ a: T; }>", PROMISE_A_T),
+        ("o1", "Promise<any>", Shape::Ref("Promise", &[ANY])),
+        (
+            "o2",
+            "Promise<{ a: any; }>",
+            Shape::Ref("Promise", &[Shape::Member("a", &ANY)]),
+        ),
+    ];
+    let host = host_with(&[(THENABLES, THENABLES_SRC)]);
+    let mut failures = Vec::new();
+    for (function, tsc, shape) in clean {
+        let outcome = eval(&host, THENABLES, function);
+        let pinned = matches!(
+            &outcome,
+            Outcome::Value { ty, degradation: None, candidates: 1 } if shape_matches(shape, ty)
+        );
+        if !pinned {
+            failures.push(format!(
+                "{function}: tsc `{tsc}`, pinned {shape:?}, measured {outcome:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
     assert_degraded(
         &host,
-        SHADOW,
-        "shadowG1",
+        THENABLES,
+        "n1",
         FlowReturnDegradation::UnresolvedValue,
     );
 }
