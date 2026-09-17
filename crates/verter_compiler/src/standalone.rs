@@ -313,7 +313,8 @@ impl DirectCompileOutput {
         )?))
     }
 
-    /// All published products' views, in publication order, derived from
+    /// All published products' views, in publication order (the
+    /// contribution/plan order the set was admitted with), derived from
     /// the canonical set at call time — no rows are retained beside it.
     pub fn artifacts(&self) -> Vec<PublishedProductView<'_>> {
         self.set

@@ -191,6 +191,19 @@ fn terminal_order_is_independent_of_artifact_source_map_and_relation_insertion()
     let actual =
         CompileArtifactSet::new(vec![template, script], vec![declarations, runtime, ide]).unwrap();
     assert_eq!(expected, actual.to_json().unwrap());
+    assert_eq!(
+        actual
+            .artifacts()
+            .iter()
+            .map(|artifact| artifact.product())
+            .collect::<Vec<_>>(),
+        vec![
+            ProductKind::Declarations,
+            ProductKind::RuntimeClient,
+            ProductKind::IdeCompanion,
+        ],
+        "stored artifact order is the caller-supplied contribution order"
+    );
     let wire: serde_json::Value = serde_json::from_str(&expected).unwrap();
     assert_eq!(wire["schemaVersion"], 1);
     assert_eq!(wire["coordinates"], "utf8-bytes");
