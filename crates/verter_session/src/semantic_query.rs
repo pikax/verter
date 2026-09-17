@@ -8109,10 +8109,12 @@ pub enum SemanticQueryKey {
     ClassifyTruthinessDomain {
         subject: SemanticNodeId,
     },
-    /// Normalize `operand` through the checker's AWAITED-TYPE relation —
-    /// the relation `await x` applies to its operand, an async generator
-    /// applies to its iteration parameters, and a resolved lib
-    /// `Awaited<T>` read applies to its argument.
+    /// Normalize `operand` through the checker's RUNTIME AWAITED-TYPE
+    /// relation — the relation `await x` applies to its operand and an async
+    /// generator applies to its iteration parameters. An authored lib
+    /// `Awaited<T>` is NOT read through this family: it is the lib
+    /// conditional, evaluated under `Instantiate`, and differs on malformed
+    /// thenables (`never` there, `any` here).
     ///
     /// **LIVE producer** ([`AdmissionSpec::Singleflight`]). Per-shape
     /// contract, measured against tsc 7.0.2:
@@ -8140,7 +8142,9 @@ pub enum SemanticQueryKey {
     ///   `Awaited` compiler intrinsic, a settled, memoizable SYMBOLIC value
     ///   (`<T>` ⇒ `Awaited<T>`, `<T extends Promise<string>>` ⇒
     ///   `Awaited<T>`);
-    /// - that intrinsic application is its own awaited type (idempotence);
+    /// - that intrinsic application is its own awaited type (idempotence),
+    ///   and so is a DEFERRED authored lib `Awaited<X>`; a reduced authored
+    ///   application is awaited again;
     /// - an object surface follows the checker's thenable protocol: no
     ///   callable `then` ⇒ itself; a callable `then` whose `onfulfilled`
     ///   is callable RE-ENTERS this family on the promised value; a callable
@@ -8194,8 +8198,9 @@ pub enum SemanticQueryKey {
     ///   family's own recursive relation (re-entering `AsyncReturnPayload`,
     ///   never `AwaitedNormalize`);
     /// - a top-level authored `Awaited<X>` whose declaration identity is
-    ///   the unshadowed lib `Awaited` resolves to the intrinsic application,
-    ///   which strips to this family over `X`;
+    ///   the unshadowed lib `Awaited` is decided by the lib conditional
+    ///   first: a reduced application is this family's operand, a deferred
+    ///   one strips to this family over `X`;
     /// - object surfaces and declaration carriers follow the same thenable
     ///   protocol and carrier expansion as [`Self::AwaitedNormalize`], each
     ///   re-entering THIS family;

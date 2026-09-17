@@ -489,25 +489,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// The compiler-native operation a `__builtin__`-sentinel declaration
-    /// identity denotes, or `None`.
+    /// The lib utility a `__builtin__`-sentinel declaration identity denotes,
+    /// or `None`.
     ///
     /// The sentinel is minted only after the shadowing gates in this module
     /// prove the head is the unshadowed lib global, so the sentinel IS that
-    /// lib declaration; this reads which operation the declaration is. Any
-    /// other identity — including a userland declaration spelled the same —
-    /// answers `None`.
-    pub(super) fn builtin_sentinel_intrinsic_op(
+    /// lib declaration and its name is the discriminator inside the sentinel
+    /// namespace. Any other identity — including a userland declaration
+    /// spelled the same — answers `None`.
+    pub(super) fn builtin_sentinel_utility(
         &self,
         identity: &DeclIdentity,
-    ) -> Option<crate::semantic_query::CompilerIntrinsicTypeOp> {
+    ) -> Option<verter_semantic::analysis::type_solver::builtin::BuiltinUtility> {
         if identity.canonical_id.as_ref() != "__builtin__" {
             return None;
         }
         verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
             identity.decl_name.as_ref(),
-        )?
-        .compiler_intrinsic_type_op()
+        )
     }
 
     /// Intern the LIB-ENVIRONMENT global `name` applied to `args`,

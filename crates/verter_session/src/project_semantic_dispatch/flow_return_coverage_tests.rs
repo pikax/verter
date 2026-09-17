@@ -2942,7 +2942,7 @@ fn generator_wrap_without_lib_surface_keeps_typed_gap_and_never_warms() {
 /// declaration emit): `Promise<number>` — never `Promise<NegThenable>` and
 /// never the typed gap this row pinned while structural thenables were
 /// unmodelled. The honest-refusal leg for a `then` this reader cannot
-/// enumerate is row `n1` of `awaited_thenable_protocol_oracle_matrix`.
+/// enumerate is `awaited_decides_then_bearing_surfaces_by_callability`.
 #[test]
 fn async_wrap_awaited_collapse_over_a_thenable_payload_publishes_the_promised_value() {
     let host = ts_host();
@@ -4510,7 +4510,6 @@ type ThenBox<X> = { then(onfulfilled: (value: X) => void): void };
 type BadThen<X> = { then: number; w: X };
 type BadThen2<X> = { then(): void; w: X };
 type OptThen = { then?(onfulfilled: (value: number) => void): void };
-type RestThen = { then(...onfulfilled: ((value: number) => void)[]): void };
 export async function a1<T>(v: Box<T>) { return v; }
 export async function a2<T>(v: IBox<T>) { return v; }
 export async function a3(v: Plain) { return v; }
@@ -4534,12 +4533,11 @@ export async function c6<T extends { p: string }>(v: T) { const a = await v; ret
 export async function c7<T extends number | Plain>(v: T) { const a = await v; return { a }; }
 export async function o1(v: OptThen) { return v; }
 export async function o2(v: OptThen) { const a = await v; return { a }; }
-export async function n1(v: RestThen) { return v; }
 "#;
 
 /// The checker's awaited-type protocol beyond the lib `Promise`, pinned as
 /// rows: declaration carriers, constrained type parameters and structural
-/// thenables, through both awaited relations (`a` / `o1` / `n1` rows are the
+/// thenables, through both awaited relations (`a` / `o1` rows are the
 /// async return payload, `w` / `c` / `o2` rows the await expression, `y5` the
 /// async generator yield).
 ///
@@ -4555,9 +4553,6 @@ export async function n1(v: RestThen) { return v; }
 /// - An awaited type parameter stays `Awaited<T>` unless its constraint is
 ///   provably its own awaited type; `{}`, `object`, `unknown` and a thenable
 ///   constraint all defer (`c1`..`c7`).
-/// - `n1` is the honest-refusal leg: tsc reads the rest callback
-///   (`Promise<number>`), this reader does not enumerate rest parameters and
-///   publishes the typed gap rather than guessing.
 ///
 /// Each `tsc` column is the declaration emit of the matching declaration,
 /// measured on the repository's TypeScript 7.0.2 with
@@ -4661,10 +4656,209 @@ fn awaited_thenable_protocol_oracle_matrix() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    assert_degraded(
-        &host,
-        THENABLES,
-        "n1",
-        FlowReturnDegradation::UnresolvedValue,
-    );
+}
+
+/// Authored lib `Awaited<X>` applications for
+/// [`lib_awaited_conditional_oracle_matrix`].
+const LIB_AWAITED: &str = "/ws/cov/lib_awaited.ts";
+const LIB_AWAITED_SRC: &str = r#"
+type ThenBox<X> = { then(onfulfilled: (value: X) => void): void };
+type Plain = { p: string };
+type C1<X> = (value: X) => void;
+type C2<X> = C1<X>;
+type C3<X> = C2<X>;
+type C4<X> = C3<X>;
+type DeepThen = { then(cb: C4<string>): void };
+type RestThen = { then(...onfulfilled: ((value: number) => void)[]): void };
+declare const l1: Awaited<{ then(): void }>; export function f1() { return l1; }
+declare const l2: Awaited<{ then?(cb: (v: number) => void): void }>; export function f2() { return l2; }
+declare const l3: Awaited<{ then: number }>; export function f3() { return l3; }
+declare const l4: Awaited<ThenBox<string>>; export function f4() { return l4; }
+declare const l5: Awaited<{ then(...cbs: ((v: number) => void)[]): void }>; export function f5() { return l5; }
+declare const l6: Awaited<{ then(cb: number): void }>; export function f6() { return l6; }
+declare const l7: Awaited<{ then(cb: ((v: number) => void) | undefined): void }>; export function f7() { return l7; }
+declare const l8: Awaited<Plain>; export function f8() { return l8; }
+declare const l9: Awaited<Promise<ThenBox<boolean>>>; export function f9() { return l9; }
+declare const l10: Awaited<{ then(cb: () => void): void }>; export function f10() { return l10; }
+declare const l11: Awaited<string | Promise<number>>; export function f11() { return l11; }
+declare const l12: Awaited<{ then(cb: (...v: number[]) => void): void }>; export function f12() { return l12; }
+declare const l13: Awaited<{ then(cb: (v: number) => void): void; then(cb: (v: string) => void, x: 1): void }>; export function f13() { return l13; }
+declare const l14: Awaited<() => void>; export function f14() { return l14; }
+declare const l15: Awaited<DeepThen>; export function f15() { return l15; }
+export async function m1<T extends string>(v: Awaited<T>) { return v; }
+export async function m2<T extends Promise<string>>(v: Awaited<T>) { return v; }
+export async function m3(v: Awaited<{ then(): void }>) { return v; }
+export async function m4<T>(v: Awaited<T>) { const a = await v; return { a }; }
+export async function m5<T>(v: Awaited<Awaited<T>>) { return v; }
+export async function m6(v: Awaited<{ then?(cb: (v: number) => void): void }>) { return v; }
+export async function m7(v: Awaited<{ then(): void }>) { const a = await v; return { a }; }
+export async function n1(v: RestThen) { return v; }
+export async function d1(v: DeepThen) { return v; }
+"#;
+
+/// One oracle row: the fixture function, the tsc answer, and its pin.
+type OracleRow<'a> = (&'a str, &'a str, &'a dyn Fn(&TypeExpr) -> bool);
+
+/// Whether `ty` is an object carrying a `then` member (property or method).
+fn has_then_member(ty: &TypeExpr) -> bool {
+    let TypeExpr::Object(object) = ty else {
+        return false;
+    };
+    object.properties.iter().any(|member| match member {
+        verter_type_expr::ObjectMember::Property(p) => p.key.as_string() == Some("then"),
+        verter_type_expr::ObjectMember::Method(m) => m.key.as_string() == Some("then"),
+        _ => false,
+    })
+}
+
+/// An authored `Awaited<X>` is the LIB conditional, not the compiler's
+/// runtime awaited relation, and the two differ on malformed thenables.
+///
+/// The `f` rows read each authored application through the `Instantiate`
+/// family (the declared const's flow return is the syntax-preserving carrier,
+/// so the rows expand it explicitly):
+///
+/// - a callable `then` with no callable `onfulfilled` is `never` (`f1`, `f6`)
+///   — where `await` of the same value is `any` (`w8` of
+///   `awaited_thenable_protocol_oracle_matrix`);
+/// - an OPTIONAL callable `then` does not satisfy the required member, so the
+///   operand is its own result (`f2`), as is a non-callable `then` (`f3`);
+/// - a leading rest `then` parameter and a rest callback parameter read their
+///   element (`f5`, `f12`); a parameterless callback infers `unknown` (`f10`);
+/// - an overloaded `then` infers from its LAST signature (`f13`, `string`),
+///   where the runtime relation unions every signature;
+/// - unions distribute (`f11`), promises and thenables nest (`f9`), a
+///   non-thenable alias keeps its identity (`f8`), and a callback reached
+///   through a four-level alias chain settles through the shared signature
+///   rail (`f15`).
+///
+/// The `m` rows are the async positions over authored applications: a
+/// deferred `Awaited<T>` strips at the return payload whatever the
+/// constraint (`m1`, `m2`, twice for `m5`); a reduced one is the payload's
+/// operand (`m3` `never`, `m6` the optional-`then` surface the runtime
+/// relation calls `any`); an await keeps a deferred application (`m4`) and
+/// awaits a reduced one (`m7`). `n1` / `d1` are the runtime relation over a
+/// rest `then` and a deep callback alias chain.
+///
+/// Every `tsc` column is TypeScript 7.0.2: the `f` rows from assignability
+/// diagnostics (`tsc --noEmit --strict`), the rest from declaration emit
+/// (`--declaration --emitDeclarationOnly --target es2022 --strict`).
+#[test]
+fn lib_awaited_conditional_oracle_matrix() {
+    let host = host_with(&[(LIB_AWAITED, LIB_AWAITED_SRC)]);
+    let mut failures = Vec::new();
+
+    let lib_rows: &[OracleRow<'_>] = &[
+        ("f1", "never", &|ty| {
+            *ty == TypeExpr::Primitive(PrimitiveName::Never)
+        }),
+        (
+            "f2",
+            "{ then?(cb: (v: number) => void): void; }",
+            &has_then_member,
+        ),
+        ("f3", "{ then: number; }", &has_then_member),
+        ("f4", "string", &|ty| *ty == string()),
+        ("f5", "number", &|ty| *ty == number()),
+        ("f6", "never", &|ty| {
+            *ty == TypeExpr::Primitive(PrimitiveName::Never)
+        }),
+        ("f7", "number", &|ty| *ty == number()),
+        ("f8", "Plain", &|ty| {
+            shape_matches(&Shape::Ref("Plain", &[]), ty)
+        }),
+        ("f9", "boolean", &|ty| *ty == boolean()),
+        ("f10", "unknown", &|ty| {
+            *ty == TypeExpr::Primitive(PrimitiveName::Unknown)
+        }),
+        ("f11", "string | number", &|ty| match ty {
+            TypeExpr::Union(members) => {
+                members.len() == 2 && members.contains(&string()) && members.contains(&number())
+            }
+            _ => false,
+        }),
+        ("f12", "number", &|ty| *ty == number()),
+        ("f13", "string", &|ty| *ty == string()),
+        ("f14", "() => void", &|ty| {
+            matches!(ty, TypeExpr::Function(_))
+        }),
+        ("f15", "string", &|ty| *ty == string()),
+    ];
+    with_dispatch(&host, |dispatch| {
+        for (function, tsc, pinned) in lib_rows {
+            let key = key_of(dispatch, LIB_AWAITED, function);
+            let measured = match dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key))) {
+                QueryResult::Value(SemanticQueryOutput {
+                    value: SemanticQueryValue::FlowReturn(result),
+                    ..
+                }) => dispatch
+                    .declaration_carrier_body(result.return_type())
+                    .and_then(|body| host.project_node_to_type_expr_for_test(body)),
+                _ => None,
+            };
+            if !measured.as_ref().is_some_and(pinned) {
+                failures.push(format!("{function}: tsc `{tsc}`, measured {measured:?}"));
+            }
+        }
+    });
+
+    const PROMISE_T: Shape = Shape::Ref("Promise", &[Shape::T]);
+    let async_rows: &[OracleRow<'_>] = &[
+        ("m1", "Promise<T>", &|ty| shape_matches(&PROMISE_T, ty)),
+        ("m2", "Promise<T>", &|ty| shape_matches(&PROMISE_T, ty)),
+        ("m3", "Promise<never>", &|ty| {
+            shape_matches(
+                &Shape::Ref("Promise", &[Shape::Primitive(PrimitiveName::Never)]),
+                ty,
+            )
+        }),
+        ("m4", "Promise<{ a: Awaited<T>; }>", &|ty| {
+            shape_matches(
+                &Shape::Ref(
+                    "Promise",
+                    &[Shape::Member("a", &Shape::AuthoredAwaited(&Shape::T))],
+                ),
+                ty,
+            )
+        }),
+        ("m5", "Promise<T>", &|ty| shape_matches(&PROMISE_T, ty)),
+        ("m6", "Promise<any>", &|ty| {
+            shape_matches(
+                &Shape::Ref("Promise", &[Shape::Primitive(PrimitiveName::Any)]),
+                ty,
+            )
+        }),
+        ("m7", "Promise<{ a: never; }>", &|ty| {
+            shape_matches(
+                &Shape::Ref(
+                    "Promise",
+                    &[Shape::Member("a", &Shape::Primitive(PrimitiveName::Never))],
+                ),
+                ty,
+            )
+        }),
+        ("n1", "Promise<number>", &|ty| {
+            shape_matches(
+                &Shape::Ref("Promise", &[Shape::Primitive(PrimitiveName::Number)]),
+                ty,
+            )
+        }),
+        ("d1", "Promise<string>", &|ty| {
+            shape_matches(
+                &Shape::Ref("Promise", &[Shape::Primitive(PrimitiveName::String)]),
+                ty,
+            )
+        }),
+    ];
+    for (function, tsc, pinned) in async_rows {
+        let outcome = eval(&host, LIB_AWAITED, function);
+        let ok = matches!(
+            &outcome,
+            Outcome::Value { ty, degradation: None, candidates: 1 } if pinned(ty)
+        );
+        if !ok {
+            failures.push(format!("{function}: tsc `{tsc}`, measured {outcome:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

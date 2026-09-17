@@ -2744,10 +2744,10 @@ const LIFTED_ROW_OVERRIDES = new Map([
   [
     tkey("utility_top_bottom.rs", "utility_top_bottom_utb15_awaited_unknown_is_unknown"),
     {
-      mech: "UtilityGraphReduction",
+      mech: "QueryValueDomainFoundation",
       proof: "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator", "AwaitedNormalize"],
-      consumed_mechanisms: ["QueryValueDomainFoundation"],
+      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator"],
+      consumed_mechanisms: [],
       unblocker:
         "lifted by U2.UTILITIES: `Awaited<unknown>` reduces to `unknown` (no " +
         "thenable branch matches; the final conditional fallthrough returns T) " +
@@ -2758,10 +2758,10 @@ const LIFTED_ROW_OVERRIDES = new Map([
   [
     tkey("utility_top_bottom.rs", "utility_top_bottom_utb17_awaited_null_is_null"),
     {
-      mech: "UtilityGraphReduction",
+      mech: "QueryValueDomainFoundation",
       proof: "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator", "AwaitedNormalize"],
-      consumed_mechanisms: ["QueryValueDomainFoundation"],
+      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator"],
+      consumed_mechanisms: [],
       unblocker:
         "lifted by U2.UTILITIES: `Awaited<null>` preserves `null` via the first " +
         "conditional clause (T extends null | undefined ? T : ...), proven " +
@@ -2771,10 +2771,10 @@ const LIFTED_ROW_OVERRIDES = new Map([
   [
     tkey("utility_top_bottom.rs", "utility_top_bottom_utb18_awaited_undefined_is_undefined"),
     {
-      mech: "UtilityGraphReduction",
+      mech: "QueryValueDomainFoundation",
       proof: "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator", "AwaitedNormalize"],
-      consumed_mechanisms: ["QueryValueDomainFoundation"],
+      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator"],
+      consumed_mechanisms: [],
       unblocker:
         "lifted by U2.UTILITIES: `Awaited<undefined>` preserves `undefined` via " +
         "the first conditional clause (the nullish short-circuit), proven " +
@@ -2787,10 +2787,10 @@ const LIFTED_ROW_OVERRIDES = new Map([
       "utility_top_bottom_utb19_awaited_nested_promise_is_inner_primitive",
     ),
     {
-      mech: "UtilityGraphReduction",
+      mech: "QueryValueDomainFoundation",
       proof: "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator", "AwaitedNormalize"],
-      consumed_mechanisms: ["QueryValueDomainFoundation"],
+      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator"],
+      consumed_mechanisms: [],
       unblocker:
         "lifted by U2.UTILITIES: `Awaited<Promise<Promise<string>>>` recursively " +
         "unwraps the registry-classified Promise carriers to `string`, proven " +
@@ -2813,10 +2813,10 @@ const LIFTED_ROW_OVERRIDES = new Map([
   [
     tkey("typescript_rules.rs", "typescript_rules_awaited_recursively_unwraps_promises"),
     {
-      mech: "UtilityGraphReduction",
+      mech: "QueryValueDomainFoundation",
       proof: "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator", "AwaitedNormalize"],
-      consumed_mechanisms: ["QueryValueDomainFoundation"],
+      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator"],
+      consumed_mechanisms: [],
       unblocker:
         "lifted by U2.UTILITIES: `Awaited<Promise<Promise<{ done: true }>>>` " +
         "recursively unwraps the registry-classified Promise carriers to the " +
@@ -3594,11 +3594,11 @@ const KEY_OWNING_BLOCK = new Map([
   // The demand-scoped truthiness-domain classifier is the canonical
   // type algebra's own key (flow narrowing frames consume the fact).
   ["ClassifyTruthinessDomain", "U2CanonicalTypeAlgebra"],
-  // `Awaited<T>` IS a builtin utility, so its reduction relation is produced
-  // by the utility-graph reduction mechanism. Matches the live
-  // `key_owning_block` arm; the `await` / async-generator flow positions
-  // CONSUME this key rather than owning it.
-  ["AwaitedNormalize", "U2Utilities"],
+  // The compiler's runtime awaited relation (`await x`, async-generator
+  // iteration parameters) is produced beside the flow return wrap. An authored
+  // `Awaited<T>` is the lib conditional under `Instantiate` and never reads
+  // this key. Matches the live `key_owning_block` arm.
+  ["AwaitedNormalize", "U6FlowReturnSubstrate"],
   // The async-function publication rule has no utility spelling — it is
   // produced by the flow return wrap alongside `FlowReturn` itself.
   ["AsyncReturnPayload", "U6FlowReturnSubstrate"],

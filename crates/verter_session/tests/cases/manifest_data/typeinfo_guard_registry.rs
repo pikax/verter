@@ -661,14 +661,14 @@ struct RowRegistryBlockCounts {
 #[rustfmt::skip]
 const ROW_REGISTRY_PER_BLOCK: &[RowRegistryBlockCounts] = &[
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U0ManifestSubstrate, total: 0, ignored: 0, running_unratified: 0, lifted: 0, superseded: 0 },
-    RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2QueryValueDomain, total: 17, ignored: 0, running_unratified: 0, lifted: 17, superseded: 0 },
+    RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2QueryValueDomain, total: 22, ignored: 0, running_unratified: 0, lifted: 22, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2CanonicalTypeAlgebra, total: 0, ignored: 0, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2BinderIdentityFacts, total: 0, ignored: 0, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U8WireSurfaceClosure, total: 0, ignored: 0, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U12Exporter, total: 0, ignored: 0, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U13Projection, total: 0, ignored: 0, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2RelationInfer, total: 20, ignored: 19, running_unratified: 1, lifted: 0, superseded: 0 },
-    RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2Utilities, total: 37, ignored: 32, running_unratified: 0, lifted: 5, superseded: 0 },
+    RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2Utilities, total: 32, ignored: 32, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2IndexedAccess, total: 24, ignored: 9, running_unratified: 0, lifted: 15, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2MappedTemplate, total: 18, ignored: 13, running_unratified: 0, lifted: 5, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2ClassSurfaces, total: 38, ignored: 29, running_unratified: 4, lifted: 5, superseded: 0 },

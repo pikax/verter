@@ -21,15 +21,19 @@
 //! ## Invariant
 //!
 //! ```text
-//! authored `Awaited<T>`                -> TypeExpr::Ref("Awaited", [T])
-//! resolved canonical lib Awaited       -> SemanticNodeData::IntrinsicApplication(Awaited, [T])
-//! semantic materialisation             -> TypeExpr::IntrinsicApplication(Awaited, [T])
+//! authored `Awaited<T>`              -> TypeExpr::Ref("Awaited", [T])  (the lib conditional)
+//! compiler await over an open binder -> SemanticNodeData::IntrinsicApplication(Awaited, [T])
+//! semantic materialisation           -> TypeExpr::IntrinsicApplication(Awaited, [T])
 //! ```
 //!
-//! A `Ref("Awaited")` therefore always means an authored / still-resolvable
-//! NAMED reference; an `IntrinsicApplication(Awaited)` means the identity has
-//! already been resolved as compiler-native. The second is never encoded as the
-//! first.
+//! A `Ref("Awaited")` always means the authored lib alias — a declaration the
+//! checker evaluates as its lib CONDITIONAL, even once its identity is proven.
+//! An `IntrinsicApplication(Awaited)` means the compiler's own deferred awaited
+//! operation (`await x`, an async generator's iteration parameters). The two
+//! agree on promises and valid thenables but NOT on malformed ones
+//! (`Awaited<{ then(): void }>` is `never`; awaiting that value is `any`),
+//! so a resolved lib alias is never re-encoded as the intrinsic, nor the
+//! intrinsic as the alias.
 
 use verter_no_storedspan::NoStoredSpan;
 use verter_no_typeexpr::NoTypeExpr;
@@ -58,10 +62,12 @@ use verter_no_typeexpr::NoTypeExpr;
 pub enum CompilerIntrinsicTypeOp {
     /// The awaited type of an operand.
     ///
-    /// The relation `await x` performs, and the one the canonical lib
-    /// `Awaited<T>` declaration denotes once its identity is resolved. Deferred
-    /// (rather than reduced) exactly when the operand's thenability is not yet
-    /// decidable — a binder-dependent operand such as an unconstrained `T`.
+    /// The compiler's own awaited operation — what `await x` and an async
+    /// generator's iteration parameters perform. NOT the lib `Awaited<T>`
+    /// alias, which is a conditional type with different results on
+    /// malformed thenables. Deferred (rather than reduced) exactly when the
+    /// operand's thenability is not yet decidable — a binder-dependent
+    /// operand such as an unconstrained `T`.
     Awaited,
 }
 

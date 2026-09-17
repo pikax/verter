@@ -718,12 +718,11 @@ struct BlockContractRow {
 ///   `U2.QUERY_VALUE_DOMAIN` — it extends the foundational decl/value key
 ///   surface that block owns (the strictly-unsubstituted authored-body
 ///   shape `Instantiate` composes; no manifest row consumes it);
-/// - the awaited-type normalization (`AwaitedNormalize`) at
-///   `U2.UTILITIES` — `Awaited<T>` is a builtin utility and this key IS
-///   its reduction relation, so the utility-graph reduction mechanism
-///   produces it (the block's prereqs — value domain, relation,
-///   indexed access, mapped/template — are exactly what the reducer
-///   consumes); no manifest row consumes it;
+/// - the compiler's runtime awaited relation (`AwaitedNormalize`) at
+///   `U6.FLOW_RETURN_SUBSTRATE` — `await x` and an async generator's
+///   iteration parameters take it beside the flow return wrap; an authored
+///   `Awaited<T>` is the lib conditional under `Instantiate` and never
+///   reads it; no manifest row consumes it;
 /// - the async-function return payload (`AsyncReturnPayload`) at
 ///   `U6.FLOW_RETURN_SUBSTRATE` — there is no TS `AsyncReturnPayload<T>`
 ///   utility: this is the checker's async publication rule, produced by
@@ -766,7 +765,7 @@ fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
         // classification, and the flow narrowing frames CONSUME the fact.
         ClassifyTruthinessDomain => U2CanonicalTypeAlgebra,
         // `Awaited<T>` is a builtin utility; this key is its reduction.
-        AwaitedNormalize => U2Utilities,
+        AwaitedNormalize => U6FlowReturnSubstrate,
         // The async publication rule, produced by the return wrap.
         AsyncReturnPayload => U6FlowReturnSubstrate,
     }
@@ -2095,13 +2094,12 @@ fn key_owning_block_owner_mapping_is_pinned_closed_set() {
         // truthiness-domain classification; the flow narrowing
         // truthiness frame consumes the fact and holds no private rule.
         (ClassifyTruthinessDomain, U2CanonicalTypeAlgebra),
-        // The awaited-type normalization at U2.UTILITIES — the utility-graph
-        // reduction mechanism produces it (`Awaited<T>` is a builtin utility
-        // and this key is its relation). NOT U2.QUERY_VALUE_DOMAIN: that is
-        // where the reduction USED to live, inside `Instantiate`'s builtin
-        // arm, and this table pins the PRODUCING mechanism, not the prior
-        // home.
-        (AwaitedNormalize, U2Utilities),
+        // The compiler's runtime awaited relation at U6.FLOW_RETURN_SUBSTRATE
+        // — produced beside the flow return wrap for `await x` and async
+        // generator iteration. NOT U2.UTILITIES: the authored `Awaited<T>`
+        // utility is the lib conditional, evaluated under `Instantiate`, and
+        // types malformed thenables differently, so it never reads this key.
+        (AwaitedNormalize, U6FlowReturnSubstrate),
         // The async-function return payload at U6.FLOW_RETURN_SUBSTRATE —
         // the flow return wrap produces it. NOT U2.UTILITIES: it has no
         // utility spelling, and NOT U6.ASYNC_GENERATOR: the async GENERATOR
