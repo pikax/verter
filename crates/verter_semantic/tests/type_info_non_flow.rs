@@ -448,6 +448,119 @@ fn preloaded_and_staged_snapshots_are_equivalent() {
     }
 }
 
+/// The route-removal mutation rail of the six-row table
+/// (`C2-GAP3-WILDCARD-DISPATCH`). Every row must dispatch to its OWN
+/// route: a `TypeInfoCore::attempt` arm swallowed to `need_inputs`, to a
+/// sibling payload, or under a `_` wildcard fails the complete-snapshot
+/// leg below (each row must complete with its own payload variant), and
+/// a `missing_input_proof_id` arm collapsed onto a sibling's id fails
+/// the pairwise-distinct rail. The variant match is exhaustive on
+/// purpose — a seventh payload cannot strand this rail either.
+#[test]
+fn route_removal_mutations_fail_on_every_row() {
+    fn payload_variant(payload: &NonFlowPayload) -> &'static str {
+        match payload {
+            NonFlowPayload::VueMacroSemanticInput(_) => "VueMacroSemanticInput",
+            NonFlowPayload::ImportedComponentSurface(_) => "ImportedComponentSurface",
+            NonFlowPayload::RuntimePropsProjection(_) => "RuntimePropsProjection",
+            NonFlowPayload::RuntimeEmitsProjection(_) => "RuntimeEmitsProjection",
+            NonFlowPayload::RuntimeModelProjection(_) => "RuntimeModelProjection",
+            NonFlowPayload::ExposeSurfaceProjection(_) => "ExposeSurfaceProjection",
+        }
+    }
+    let table = [
+        (
+            NonFlowOperation::ProjectVueMacroSemantics {
+                owner_canonical: Arc::from(OWNER),
+            },
+            MISSING_PROOF_VUE_MACRO,
+            "VueMacroSemanticInput",
+        ),
+        (
+            NonFlowOperation::ResolveImportedComponentSurface {
+                owner_canonical: Arc::from(OWNER),
+                type_reference: Arc::from("BadgeProps"),
+                referenced_canonical: Some(Arc::from("/src/Badge.vue")),
+            },
+            MISSING_PROOF_IMPORTED_COMPONENT,
+            "ImportedComponentSurface",
+        ),
+        (
+            NonFlowOperation::ProjectRuntimeProps {
+                owner_canonical: Arc::from(OWNER),
+                macro_index: 0,
+            },
+            MISSING_PROOF_PROPS,
+            "RuntimePropsProjection",
+        ),
+        (
+            NonFlowOperation::ProjectRuntimeEmits {
+                owner_canonical: Arc::from(OWNER),
+                macro_index: 1,
+            },
+            MISSING_PROOF_EMITS,
+            "RuntimeEmitsProjection",
+        ),
+        (
+            NonFlowOperation::ProjectRuntimeModel {
+                owner_canonical: Arc::from(OWNER),
+                macro_index: 2,
+            },
+            MISSING_PROOF_MODEL,
+            "RuntimeModelProjection",
+        ),
+        (
+            NonFlowOperation::ProjectExposeSurface {
+                owner_canonical: Arc::from(OWNER),
+                macro_index: 3,
+            },
+            MISSING_PROOF_EXPOSE,
+            "ExposeSurfaceProjection",
+        ),
+    ];
+    let complete = core_of(complete_snapshot());
+    let all_missing = core_of(Arc::new(NonFlowObservationSnapshot::new()));
+    let mut completed_variants = Vec::new();
+    let mut reported_proof_ids = Vec::new();
+    for (operation, proof_id, expected_variant) in &table {
+        let AttemptOutcome::Complete(payload) = complete.attempt(operation) else {
+            panic!(
+                "{proof_id}: route removal — a complete snapshot must complete, \
+                 not degrade through a swallowed arm"
+            );
+        };
+        assert_eq!(
+            payload_variant(&payload),
+            *expected_variant,
+            "{proof_id}: route removal — the arm must carry its own payload"
+        );
+        assert!(
+            matches!(
+                all_missing.attempt(operation),
+                AttemptOutcome::NeedInputs(_)
+            ),
+            "{proof_id}: the all-missing snapshot must stay NeedInputs"
+        );
+        assert_eq!(operation.missing_input_proof_id(), *proof_id);
+        completed_variants.push(payload_variant(&payload));
+        reported_proof_ids.push(operation.missing_input_proof_id());
+    }
+    completed_variants.sort_unstable();
+    completed_variants.dedup();
+    assert_eq!(
+        completed_variants.len(),
+        6,
+        "each row dispatches its own payload variant"
+    );
+    reported_proof_ids.sort_unstable();
+    reported_proof_ids.dedup();
+    assert_eq!(
+        reported_proof_ids.len(),
+        6,
+        "each row reports its own proof id"
+    );
+}
+
 /// The inventory plan: lane policy, index derivations, authored order,
 /// and surface dependency failures are the kernel's decisions.
 #[test]

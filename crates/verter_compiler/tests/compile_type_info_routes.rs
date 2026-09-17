@@ -341,6 +341,129 @@ fn preloaded_and_staged_route_results_are_equivalent() {
     );
 }
 
+/// The route-removal mutation rail of the six-route table through the
+/// sealed gateway (`C2-GAP3-WILDCARD-DISPATCH`). Every route must
+/// complete on the fully staged transaction with its own route content
+/// — a `CompileTypeInfo` method collapsed to an unconditional refusal
+/// fails its complete leg — and every all-missing refusal must carry
+/// its own, pairwise-distinct proof id, so a route collapsed onto a
+/// sibling's proof id cannot pass.
+#[test]
+fn route_removal_mutations_fail_on_every_route() {
+    let request = vue_request();
+
+    let mut staged = CompileAttempt::enter_direct("", &request, "vue");
+    stage_all(&mut staged);
+    let type_info = staged.type_info();
+    let plan = type_info
+        .project_vue_macro_semantics(Arc::from(OWNER))
+        .expect("vue-macro route removal: staged observations must complete");
+    assert_eq!(plan.owner_canonical(), OWNER);
+    let imported = type_info
+        .resolve_imported_component_surface(
+            Arc::from(OWNER),
+            Arc::from("BadgeProps"),
+            Some(Arc::from("/src/Badge.vue")),
+        )
+        .expect("imported-component route removal: must complete");
+    assert!(!imported.bare_name_is_imported());
+    let props = type_info
+        .project_runtime_props(Arc::from(OWNER), 0)
+        .expect("props route removal: must complete");
+    assert_eq!(
+        props
+            .rows()
+            .iter()
+            .map(|row| row.name())
+            .collect::<Vec<_>>(),
+        vec!["count"]
+    );
+    let emits = type_info
+        .project_runtime_emits(Arc::from(OWNER), 1)
+        .expect("emits route removal: must complete");
+    assert_eq!(
+        emits
+            .emits()
+            .iter()
+            .map(|row| row.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["saved"]
+    );
+    let model = type_info
+        .project_runtime_model(Arc::from(OWNER), 2)
+        .expect("model route removal: must complete");
+    assert_eq!(model.shape().prop.name, "title");
+    type_info
+        .project_expose_surface(Arc::from(OWNER), 3)
+        .expect("expose route removal: must complete");
+
+    // All-missing leg: each route refuses with its own, pairwise-distinct
+    // charter proof id.
+    let mut empty = CompileAttempt::enter_direct("", &request, "vue");
+    let type_info = empty.type_info();
+    let reported_proof_ids = [
+        need_inputs_proof(
+            &type_info
+                .project_vue_macro_semantics(Arc::from(OWNER))
+                .expect_err("all-missing vue-macro refuses"),
+        )
+        .unwrap(),
+        need_inputs_proof(
+            &type_info
+                .resolve_imported_component_surface(
+                    Arc::from(OWNER),
+                    Arc::from("BadgeProps"),
+                    Some(Arc::from("/src/Badge.vue")),
+                )
+                .expect_err("all-missing imported-component refuses"),
+        )
+        .unwrap(),
+        need_inputs_proof(
+            &type_info
+                .project_runtime_props(Arc::from(OWNER), 0)
+                .expect_err("all-missing props refuses"),
+        )
+        .unwrap(),
+        need_inputs_proof(
+            &type_info
+                .project_runtime_emits(Arc::from(OWNER), 1)
+                .expect_err("all-missing emits refuses"),
+        )
+        .unwrap(),
+        need_inputs_proof(
+            &type_info
+                .project_runtime_model(Arc::from(OWNER), 2)
+                .expect_err("all-missing model refuses"),
+        )
+        .unwrap(),
+        need_inputs_proof(
+            &type_info
+                .project_expose_surface(Arc::from(OWNER), 3)
+                .expect_err("all-missing expose refuses"),
+        )
+        .unwrap(),
+    ];
+    assert_eq!(
+        reported_proof_ids,
+        [
+            MISSING_PROOF_VUE_MACRO,
+            MISSING_PROOF_IMPORTED_COMPONENT,
+            MISSING_PROOF_PROPS,
+            MISSING_PROOF_EMITS,
+            MISSING_PROOF_MODEL,
+            MISSING_PROOF_EXPOSE,
+        ]
+    );
+    let mut distinct_proof_ids = reported_proof_ids.to_vec();
+    distinct_proof_ids.sort_unstable();
+    distinct_proof_ids.dedup();
+    assert_eq!(
+        distinct_proof_ids.len(),
+        6,
+        "no two routes share a missing-input proof id"
+    );
+}
+
 /// The request-local continuation: an identical re-request resumes and
 /// serves the sealed answer; a changed observation restarts the whole
 /// operation and reflects the NEW input — the sealed stale answer is
