@@ -36,6 +36,10 @@ use super::source_space::{
 use super::source_unit::{
     source_unit_id, ArtifactSourceUnit, ContentId, SourceId, SourceRevision, SourceUnit,
 };
+// The UTF-16/byte map-geometry helpers are owned by the sibling Svelte
+// assembly module and shared crate-wide: one spelling of generated-code
+// coordinate conversion, never a per-framework copy.
+use super::svelte_module::{generated_line_starts, next_char_end, utf16_offset_to_bytes};
 use crate::code_transform::CodeTransform;
 use crate::compile::format_import_specifier;
 use crate::compile_request::{ProductKind, RuntimeHmrStrategy};
@@ -1416,51 +1420,6 @@ fn runtime_map_segments(
         }
     }
     kept
-}
-
-fn generated_line_starts(code: &str) -> Vec<u32> {
-    let mut starts = vec![0u32];
-    for (index, byte) in code.bytes().enumerate() {
-        if byte == b'\n' {
-            starts.push((index + 1) as u32);
-        }
-    }
-    starts
-}
-
-fn utf16_offset_to_bytes(code: &str, line_starts: &[u32], line: u32, column: u32) -> Option<u32> {
-    let start = *line_starts.get(line as usize)? as usize;
-    let end = line_starts
-        .get(line as usize + 1)
-        .map(|next| *next as usize)
-        .unwrap_or(code.len());
-    let line_bytes = code.get(start..end)?;
-    let mut utf16 = 0u32;
-    for (byte_off, ch) in line_bytes.char_indices() {
-        if utf16 == column {
-            return Some((start + byte_off) as u32);
-        }
-        utf16 = utf16.saturating_add(ch.len_utf16() as u32);
-        if utf16 > column {
-            return None;
-        }
-    }
-    if utf16 == column {
-        Some((start + line_bytes.len()) as u32)
-    } else {
-        None
-    }
-}
-
-fn next_char_end(code: &str, start: u32) -> u32 {
-    let start = start as usize;
-    let Some(rest) = code.get(start..) else {
-        return start as u32;
-    };
-    match rest.chars().next() {
-        Some(ch) => (start + ch.len_utf8()) as u32,
-        None => start as u32,
-    }
 }
 
 #[cfg(test)]

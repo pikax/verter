@@ -299,27 +299,19 @@ fn assert_runtime_parity(
     via_standalone: &verter_compiler::standalone::DirectCompileOutput,
 ) {
     let backend_kinds: Vec<_> = via_backend
-        .artifacts
         .artifacts()
         .iter()
         .map(|artifact| artifact.kind())
         .collect();
     let standalone_kinds: Vec<_> = via_standalone
-        .artifacts
         .artifacts()
         .iter()
         .map(|artifact| artifact.kind())
         .collect();
     assert_eq!(backend_kinds, standalone_kinds);
     for kind in &backend_kinds {
-        let backend = via_backend
-            .artifacts
-            .artifact(*kind)
-            .expect("backend artifact");
-        let standalone = via_standalone
-            .artifacts
-            .artifact(*kind)
-            .expect("standalone artifact");
+        let backend = via_backend.artifact(*kind).expect("backend artifact");
+        let standalone = via_standalone.artifact(*kind).expect("standalone artifact");
         assert_eq!(backend.code(), standalone.code());
         assert_eq!(
             backend.runtime_source_map(),
@@ -439,19 +431,12 @@ fn vue_runtime_backend_matches_parsed_core_on_kitchen_sink() {
         .expect("runtime backend kitchen sink");
     assert_runtime_parity(&via_backend, &via_standalone);
     let client = via_backend
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client artifact");
     assert!(!client.code().is_empty());
     assert!(client.runtime_source_map().is_some());
-    assert!(via_backend
-        .artifacts
-        .artifact(ProductKind::RuntimeServer)
-        .is_none());
-    assert!(via_backend
-        .artifacts
-        .artifact(ProductKind::IdeCompanion)
-        .is_none());
+    assert!(via_backend.artifact(ProductKind::RuntimeServer).is_none());
+    assert!(via_backend.artifact(ProductKind::IdeCompanion).is_none());
 }
 
 #[test]
@@ -500,7 +485,6 @@ fn one_runtime_request_emits_client_and_server_from_one_admitted_parse() {
     let via_backend = compile_via_backend(SIMPLE, &artifact, &request).expect("dual runtime");
     assert_runtime_parity(&via_backend, &via_standalone);
     let kinds: Vec<_> = via_backend
-        .artifacts
         .artifacts()
         .iter()
         .map(|artifact| artifact.kind())
@@ -511,11 +495,9 @@ fn one_runtime_request_emits_client_and_server_from_one_admitted_parse() {
         "dual-target publication order is the parsed-core plan order"
     );
     let client = via_backend
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client");
     let server = via_backend
-        .artifacts
         .artifact(ProductKind::RuntimeServer)
         .expect("server");
     assert_ne!(
@@ -543,13 +525,11 @@ fn runtime_source_map_option_is_honored_per_target() {
     let with_map = compile_via_backend(SIMPLE, &artifact, &mapped).expect("mapped");
     let without_map = compile_via_backend(SIMPLE, &artifact, &unmapped).expect("unmapped");
     assert!(with_map
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .runtime_source_map()
         .is_some());
     assert!(without_map
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .runtime_source_map()
@@ -582,17 +562,14 @@ fn inline_none_follows_is_production_and_does_not_hide_an_explicit_false() {
         compile_via_backend(SIMPLE, &artifact, &production_explicit_false).expect("prod false");
     let dev_default = compile_via_backend(SIMPLE, &artifact, &development_default).expect("dev");
     let prod_default_code = prod_default
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .code();
     let prod_false_code = prod_false
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .code();
     let dev_default_code = dev_default
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .code();
@@ -1026,7 +1003,6 @@ fn vue_runtime_backend_preserves_supplied_template_bytes() {
     let via_empty =
         compile_via_backend(source, &artifact, &request).expect("carrier-only template");
     let empty_client = via_empty
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .code();
@@ -1049,7 +1025,6 @@ fn vue_runtime_backend_preserves_supplied_template_bytes() {
     )
     .expect("supplied template");
     let client = via_backend
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .code();
@@ -1076,11 +1051,9 @@ fn mixed_runtime_source_map_options_are_honored_per_target() {
     );
     let via_backend = compile_via_backend(SIMPLE, &artifact, &request).expect("mixed map request");
     let client = via_backend
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client");
     let server = via_backend
-        .artifacts
         .artifact(ProductKind::RuntimeServer)
         .expect("server");
     assert!(
@@ -1139,7 +1112,6 @@ fn runtime_macros_are_the_sole_macro_channel() {
     });
     let via_ignored = compile_via_backend(source, &artifact, &request).expect("default macros");
     let ignored_code = via_ignored
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .code();
@@ -1154,7 +1126,6 @@ fn runtime_macros_are_the_sole_macro_channel() {
     )
     .expect("runtime macros");
     let code = via_backend
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .code();
@@ -1239,7 +1210,6 @@ fn projected_setup_runtime_matches_compile_bundle_and_passes_node_check() {
     let via_backend = compile_via_backend_with_inputs(source, &artifact, &request, &inputs)
         .expect("projected setup runtime");
     let client = via_backend
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .code();
@@ -1348,7 +1318,6 @@ fn production_supplied_inline_template_composes_and_does_not_detach_render() {
     let via_backend = compile_via_backend_with_inputs(source, &artifact, &request, &inputs)
         .expect("production supplied-inline");
     let client = via_backend
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .code();
@@ -1361,7 +1330,6 @@ fn production_supplied_inline_template_composes_and_does_not_detach_render() {
         "backend must not fall back to a detached render:\n{client}"
     );
     let map = via_backend
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .runtime_source_map()
@@ -1396,7 +1364,6 @@ fn selected_template_preserves_source_space_and_detached_map() {
     let via_backend = compile_via_backend_with_inputs(source, &artifact, &request, &inputs)
         .expect("detached selected template");
     let client = via_backend
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client");
     let code = client.code();
@@ -1452,7 +1419,6 @@ fn detached_selected_template_map_preserves_supplied_source_map_provenance() {
     )
     .expect("detached selected template with supplied map");
     let map = via_backend
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .runtime_source_map()
@@ -1491,7 +1457,6 @@ fn production_external_selected_template_composes_inline_and_does_not_detach() {
     )
     .expect("production external selected template");
     let client = via_backend
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client");
     let code = client.code();
@@ -1597,7 +1562,6 @@ fn projected_setup_plus_selected_template_keeps_the_selected_template() {
     )
     .expect("projected setup plus selected template");
     let client = via_backend
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .code();
@@ -1666,7 +1630,6 @@ fn projected_setup_injects_use_css_vars_from_carrier_and_selected_styles() {
         )
         .unwrap_or_else(|error| panic!("{name}: projected setup with style v-bind: {error:?}"));
         let client = via_backend
-            .artifacts
             .artifact(ProductKind::RuntimeClient)
             .expect("client")
             .code();
@@ -1701,7 +1664,6 @@ fn inline_selected_template_helper_imports_are_declared_on_the_script() {
     let via_backend = compile_via_backend_with_inputs(source, &artifact, &request, &inputs)
         .expect("production supplied-inline helpers");
     let client = via_backend
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .code();
@@ -1917,7 +1879,6 @@ fn assembled_runtime_client_maps_authored_anchors_after_generated_preamble() {
     let via_backend = compile_via_backend(ASSEMBLY_MAP_SOURCE, &artifact, &request)
         .expect("assembled runtime client");
     let client = via_backend
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client artifact");
     let code = client.code();
@@ -2054,12 +2015,10 @@ fn assembled_runtime_client_without_map_keeps_equivalent_code_and_no_map() {
         .expect("unmapped compile");
     assert_eq!(
         mapped
-            .artifacts
             .artifact(ProductKind::RuntimeClient)
             .expect("client")
             .code(),
         unmapped
-            .artifacts
             .artifact(ProductKind::RuntimeClient)
             .expect("client")
             .code(),
@@ -2067,7 +2026,6 @@ fn assembled_runtime_client_without_map_keeps_equivalent_code_and_no_map() {
     );
     assert!(
         unmapped
-            .artifacts
             .artifact(ProductKind::RuntimeClient)
             .expect("client")
             .runtime_source_map()
@@ -2089,7 +2047,6 @@ fn direct_ssr_compile_does_not_emit_host_ssr_registration() {
     );
     let output = compile_via_standalone(SIMPLE, &request);
     let code = output
-        .artifacts
         .artifact(ProductKind::RuntimeServer)
         .expect("server")
         .code();
@@ -2116,7 +2073,6 @@ fn direct_ssr_compile_does_not_emit_host_ssr_registration() {
         )
         .expect("prepared SSR compile");
     let prepared_code = prepared_out
-        .artifacts
         .artifact(ProductKind::RuntimeServer)
         .expect("server")
         .code();
@@ -2136,7 +2092,6 @@ fn direct_ssr_compile_does_not_emit_host_ssr_registration() {
     let batch_code = batch.results[0]
         .as_ref()
         .expect("batch SSR")
-        .artifacts
         .artifact(ProductKind::RuntimeServer)
         .expect("server")
         .code();
@@ -2161,7 +2116,6 @@ fn direct_dev_compile_does_not_emit_host_hmr_trailer() {
     );
     let output = compile_via_standalone(SIMPLE, &request);
     let code = output
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .code();

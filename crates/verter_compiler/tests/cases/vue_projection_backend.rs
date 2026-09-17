@@ -796,16 +796,7 @@ fn parsed_core_ide_only_request_does_not_publish_a_runtime_artifact() {
             },
         )
         .expect("ide-only parsed core");
-    assert!(output
-        .artifacts
-        .artifact(ProductKind::RuntimeClient)
-        .is_none());
-    assert!(output
-        .artifacts
-        .artifact(ProductKind::RuntimeServer)
-        .is_none());
-    assert!(output
-        .artifacts
-        .artifact(ProductKind::IdeCompanion)
-        .is_some());
+    assert!(output.artifact(ProductKind::RuntimeClient).is_none());
+    assert!(output.artifact(ProductKind::RuntimeServer).is_none());
+    assert!(output.artifact(ProductKind::IdeCompanion).is_some());
 }

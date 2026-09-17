@@ -4,16 +4,20 @@
 //! [`CompileRequest::new`](CompileRequest::new), which enforces every
 //! construction-time fail-closed rule) plus the framework-tagged
 //! [`DirectExecutionInputs`] carrier for resolved facts excluded from
-//! request identity, and gets back exactly one atomic
-//! [`crate::assembly::ArtifactSet`] — the SAME publication boundary
-//! every host-backed route publishes through, never a second one — plus a
-//! [`DirectCompileOutput`] sibling for the two facts the sealed
-//! `ProductKind`/`ArtifactContribution`/`publish()` model has no carrier
-//! for at all (style/CSS content, and non-fatal compile diagnostics): both
-//! are HOST-side siblings in every registered route (a virtual style file,
-//! a diagnostics snapshot) for BOTH frameworks, so a one-shot compile with
-//! no host/virtual-file system needs its own explicit sibling to avoid
-//! silently discarding real computed output.
+//! request identity, and gets back one [`DirectCompileOutput`] holding the
+//! request's staged compile contracts: the atomic
+//! [`crate::assembly::publish`] boundary — the SAME publication boundary
+//! every host-backed route publishes through, never a second one — is
+//! converted into one canonical
+//! [`crate::assembly::CompileArtifactSet`] every published product is
+//! admitted to, the request's runtime module stages its
+//! [`crate::assembly::StagedCompileArtifacts`] handoff over that set, and
+//! the per-kind SFC-shaped view is a projection bound to the same set.
+//! Style/CSS content and non-fatal compile diagnostics ride as explicit
+//! siblings: both are HOST-side siblings in every registered route (a
+//! virtual style file, a diagnostics snapshot) for BOTH frameworks, so a
+//! one-shot compile with no host/virtual-file system needs its own
+//! explicit sibling to avoid silently discarding real computed output.
 //!
 //! [`StandaloneCompiler::compile`] dispatches solely on
 //! `request.framework()`, builds the [`crate::compile_request::CompileRequest`]'s
@@ -35,14 +39,22 @@
 use oxc_allocator::Allocator;
 
 use crate::assembly::fragment::{
-    DeclaredImport, Fragment, FragmentDialect, FragmentRefusal, FrameworkDomain, PlacementSlot,
-    SyntacticContract,
+    ArtifactContent, ArtifactProvenance, CompileArtifact, DeclaredImport, Fragment,
+    FragmentDialect, FragmentRefusal, FrameworkDomain, PlacementSlot, SyntacticContract,
 };
 use crate::assembly::plan::ProductPlan;
-use crate::assembly::publish::{publish, ArtifactContribution};
-use crate::assembly::source_space::SourceSpaceKind;
+use crate::assembly::publish::{
+    publish, ArtifactContribution, ArtifactSchemaError, AssembledArtifact, CompileArtifactSet,
+    StagedCompileArtifacts,
+};
+use crate::assembly::source_space::{
+    ArtifactMapFamily, ArtifactMapSegment, QualifiedArtifactMap, SourceSpaceKind,
+};
 use crate::assembly::source_unit::source_unit_id;
-use crate::assembly::svelte_module::{svelte_main_compile_artifacts, SvelteMainCompileRequest};
+use crate::assembly::svelte_module::{
+    generated_line_starts, next_char_end, svelte_main_compile_artifacts, utf16_offset_to_bytes,
+    SvelteMainCompileRequest,
+};
 use crate::assembly::vue_module::{
     compose_fragments, ComposedFragments, VueMainCompositionFailure, VueMainModuleRequest,
 };
@@ -98,7 +110,7 @@ use crate::svelte::{
 use oxc_sourcemap::{SourceMap, SourceMapBuilder};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::hash_map::Entry;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use verter_css_syntax::CssDialect;
 use verter_debug_assert::verter_debug_assert;
 use verter_language::FrameworkAdapterId;
@@ -143,9 +155,70 @@ pub enum DirectExecutionInputs<'a> {
     },
 }
 
-/// [`StandaloneCompiler::compile`]'s successful result: the atomic
-/// [`ArtifactSet`] every planned product publishes into, plus two siblings
-/// the sealed publication model carries no slot for.
+/// One published product's SFC-shaped projection row — the per-kind view
+/// compile consumers read off a [`DirectCompileOutput`]. Each row is bound
+/// to exactly one artifact of the output's [`CompileArtifactSet`] by typed
+/// identity ([`Self::artifact_id`]), and its bytes are the SAME allocation
+/// that artifact stores, so the row is a view over the set and never a
+/// second carrier of the same output.
+#[derive(Debug, Clone)]
+pub struct SfcArtifactProjection {
+    kind: ProductKind,
+    artifact: crate::assembly::fragment::ArtifactId,
+    dialect: FragmentDialect,
+    code: std::sync::Arc<str>,
+    source_projection_map: Option<String>,
+    runtime_source_map: Option<String>,
+}
+
+impl SfcArtifactProjection {
+    /// The product kind this row projects.
+    pub fn kind(&self) -> ProductKind {
+        self.kind
+    }
+
+    /// The published module/projection bytes — shared with the row's
+    /// artifact in the output's [`CompileArtifactSet`].
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    /// The row's byte allocation, identical to the one the bound artifact
+    /// stores ([`Self::code`] is a view over it).
+    pub fn code_allocation(&self) -> &std::sync::Arc<str> {
+        &self.code
+    }
+
+    /// The exact dialect [`Self::code`] is written in.
+    pub fn dialect(&self) -> FragmentDialect {
+        self.dialect
+    }
+
+    /// The IDE-companion source projection map, when this row's product
+    /// planned one.
+    pub fn source_projection_map(&self) -> Option<&str> {
+        self.source_projection_map.as_deref()
+    }
+
+    /// The runtime source map, when this row's product demanded and
+    /// produced one.
+    pub fn runtime_source_map(&self) -> Option<&str> {
+        self.runtime_source_map.as_deref()
+    }
+
+    /// The typed identity of the artifact this row projects inside the
+    /// output's [`CompileArtifactSet`].
+    pub fn artifact_id(&self) -> &crate::assembly::fragment::ArtifactId {
+        &self.artifact
+    }
+}
+
+/// [`StandaloneCompiler::compile`]'s successful result: the request's
+/// complete staged compile contracts. Every published product is admitted
+/// to one canonical [`CompileArtifactSet`] (the staged artifact), a runtime
+/// module's handoff stages over that set ([`Self::into_staged_main`]), and
+/// the per-kind SFC-shaped view is a projection bound to the same set
+/// ([`Self::artifact`]) — one artifact authority, never a second one.
 ///
 /// `qualified_styles` is the style/CSS content a compiled `RuntimeClient`/
 /// `RuntimeServer` product's own `<style>` block(s) produce — in every
@@ -156,6 +229,12 @@ pub enum DirectExecutionInputs<'a> {
 /// else to put it, so it rides here instead. Empty (never missing) when the
 /// component has no style output.
 ///
+/// `custom_block_artifacts` is the source-backed custom-block descriptor
+/// set of the producing route — present exactly when that route held the
+/// registered carrier lineage descriptors are minted against; a one-shot
+/// compile never holds one, so its set stays absent rather than being
+/// reconstructed from block metadata.
+///
 /// `diagnostics` is the compile's own non-fatal diagnostic channel — Vue's
 /// `VerterCompileResult::errors`; always empty for Svelte, whose
 /// `compile_client` is refuse-by-default (a diagnostic-worthy defect is
@@ -163,12 +242,486 @@ pub enum DirectExecutionInputs<'a> {
 /// soft, coexisting-with-success diagnostic).
 #[derive(Debug)]
 pub struct DirectCompileOutput {
-    pub artifacts: ArtifactSet,
+    set: CompileArtifactSet,
+    /// Typed identity of the request's primary runtime-module artifact
+    /// (`RuntimeServer` when both legs were planned, else `RuntimeClient`)
+    /// — the root [`Self::into_staged_main`] stages. `None` when the
+    /// request published no runtime product.
+    runtime_root: Option<crate::assembly::fragment::ArtifactId>,
+    sfc_artifacts: Vec<SfcArtifactProjection>,
     /// Stage-qualified style outputs — Vue's rewritten block stylesheets and
     /// Svelte's external scoped-css artifact. Every compile publishes every
     /// style here, carrying the stage, dialect and producer of its bytes.
     pub qualified_styles: Vec<QualifiedRuntimeStyle>,
+    /// Source-backed custom-block descriptors in their own artifact set;
+    /// `None` when the producing route holds no registered lineage.
+    pub custom_block_artifacts: Option<CompileArtifactSet>,
     pub diagnostics: Vec<CompileDiagnostic>,
+}
+
+impl DirectCompileOutput {
+    /// The request's complete staged artifact set: every published product
+    /// with canonical identity, provenance and qualified maps.
+    pub fn set(&self) -> &CompileArtifactSet {
+        &self.set
+    }
+
+    /// The staged compile handoff over the output's set: the complete
+    /// artifact set plus the typed identity, dialect and map of the
+    /// request's primary runtime module. Consumes the output — the set
+    /// moves into the handoff rather than being copied. `Ok(None)` when
+    /// the request published no runtime product.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactSchemaError`] when the staged root no longer names an
+    /// available artifact of the set — a structurally impossible state
+    /// held fail-closed rather than unwrapped.
+    pub fn into_staged_main(self) -> Result<Option<StagedCompileArtifacts>, ArtifactSchemaError> {
+        let Some(root) = self.runtime_root else {
+            return Ok(None);
+        };
+        let Some(root_row) = self.sfc_artifacts.iter().find(|row| row.artifact == root) else {
+            return Err(ArtifactSchemaError::UnknownRootArtifact);
+        };
+        let dialect = root_row.dialect;
+        let source_map = root_row.runtime_source_map.clone();
+        Ok(Some(StagedCompileArtifacts::stage(
+            self.set, root, dialect, source_map,
+        )?))
+    }
+
+    /// All published products' projection rows, in publication order.
+    pub fn artifacts(&self) -> &[SfcArtifactProjection] {
+        &self.sfc_artifacts
+    }
+
+    /// The projection row for one published product kind.
+    pub fn artifact(&self, kind: ProductKind) -> Option<&SfcArtifactProjection> {
+        self.sfc_artifacts.iter().find(|row| row.kind == kind)
+    }
+
+    /// The source-backed custom-block descriptors this output carries, in
+    /// source order — empty when the producing route minted none.
+    pub fn custom_block_descriptors(
+        &self,
+    ) -> &[crate::assembly::custom_block::CustomBlockDescriptor] {
+        self.custom_block_artifacts
+            .as_ref()
+            .map_or(&[], |set| set.custom_blocks())
+    }
+
+    /// Whether every projection row names an artifact of the set whose
+    /// available content is the row's own byte allocation — the structural
+    /// fact that the per-kind view projects over the canonical set instead
+    /// of carrying a second copy of the output.
+    #[must_use]
+    pub fn projection_over_set(&self) -> bool {
+        self.sfc_artifacts.iter().all(|row| {
+            self.set.artifact(&row.artifact).is_some_and(|artifact| {
+                artifact.product() == row.kind
+                    && matches!(
+                        &artifact.content,
+                        ArtifactContent::Available(content) if std::sync::Arc::ptr_eq(content, &row.code)
+                    )
+            })
+        })
+    }
+}
+
+// ── Facade conversion to the canonical artifact set ──────────────────
+
+/// Domain identity of the direct facade's artifact-set conversion: one
+/// stable logical source identity per `(carrier id, framework)` compile.
+struct DirectSetTag<'a> {
+    canonical_id: &'a str,
+    framework: &'static str,
+}
+
+impl verter_identity::encoding::CanonicalEncode for DirectSetTag<'_> {
+    const DOMAIN_TAG: &'static str = "verter.compiler.direct.compile.v1";
+    fn encode_fields(&self, e: &mut verter_identity::encoding::CanonicalEncoder) {
+        e.field_str(1, self.canonical_id);
+        e.field_str(2, self.framework);
+    }
+}
+
+/// The observed-input basis of one facade conversion: identity and request
+/// axes plus DIGESTS of the authored source and of every published
+/// product's bytes/maps — never the bytes themselves, so a set's identity
+/// stays bounded by the size of its compile axes, not its output.
+struct DirectSetInputBasis<'a> {
+    canonical_id: &'a str,
+    framework: &'static str,
+    is_production: bool,
+    force_js: bool,
+    source_digest: [u8; 32],
+    products_digest: [u8; 32],
+}
+
+impl verter_identity::encoding::CanonicalEncode for DirectSetInputBasis<'_> {
+    const DOMAIN_TAG: &'static str = "verter.compiler.direct.compile.input_basis.v1";
+    fn encode_fields(&self, e: &mut verter_identity::encoding::CanonicalEncoder) {
+        e.field_str(1, self.canonical_id);
+        e.field_str(2, self.framework);
+        e.field_bool(3, self.is_production);
+        e.field_bool(4, self.force_js);
+        e.field_bytes(5, &self.source_digest);
+        e.field_bytes(6, &self.products_digest);
+    }
+}
+
+fn set_content_digest(bytes: &[u8]) -> [u8; 32] {
+    *crate::assembly::source_unit::ContentId::from_content_bytes(bytes)
+        .digest()
+        .as_bytes()
+}
+
+/// Convert one atomic publication into the facade's staged contracts: the
+/// canonical [`CompileArtifactSet`] every published product of the request
+/// is admitted to, the per-kind [`SfcArtifactProjection`] rows bound to
+/// that set, and the typed root of the request's primary runtime module.
+/// The publication stays the atomicity authority — this conversion only
+/// admits its already-published facts to the schema, moving each artifact's
+/// bytes into the set exactly once (rows read the same allocation back).
+///
+/// Each artifact is minted against the authored carrier bytes, its own
+/// produced bytes, and one further unit per content-bearing source space
+/// its demanded map declares; map segments resolve against each token's
+/// own declared source content, so a selected-unit space keeps its own
+/// identity instead of being rebased onto the carrier.
+pub(crate) fn stage_published_products(
+    source: &str,
+    request: &CompileRequest,
+    framework: &'static str,
+    published: &ArtifactSet,
+    qualified_styles: Vec<QualifiedRuntimeStyle>,
+    custom_block_artifacts: Option<CompileArtifactSet>,
+    diagnostics: Vec<CompileDiagnostic>,
+) -> Result<DirectCompileOutput, ArtifactSchemaError> {
+    use crate::assembly::source_unit::{
+        ArtifactSourceUnit, ContentId, SourceId, SourceRevision, SourceUnit,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let canonical_id = request.filename().unwrap_or("");
+    let mut products_hasher = blake3::Hasher::new();
+    for artifact in published.artifacts() {
+        hash_len_prefixed_str(&mut products_hasher, artifact.kind().wire_tag());
+        hash_len_prefixed_str(&mut products_hasher, artifact.dialect().lang_id());
+        hash_len_prefixed_str(&mut products_hasher, artifact.code());
+        hash_len_prefixed_opt_str(&mut products_hasher, artifact.source_projection_map());
+        hash_len_prefixed_opt_str(&mut products_hasher, artifact.runtime_source_map());
+    }
+    let mut products_digest = [0u8; 32];
+    products_hasher.finalize_xof().fill(&mut products_digest);
+
+    let basis = DirectSetInputBasis {
+        canonical_id,
+        framework,
+        is_production: request.is_production(),
+        force_js: request.force_js(),
+        source_digest: set_content_digest(source.as_bytes()),
+        products_digest,
+    };
+    let source_id = SourceId::from_canonical(&DirectSetTag {
+        canonical_id,
+        framework,
+    });
+    let revision = SourceRevision::from_canonical(&basis);
+    let mut source_units = Vec::new();
+
+    let mut push_unit = |role: &str, bytes: &[u8], span: verter_span::Span| {
+        let unit = SourceUnit::mint(
+            source_id.clone(),
+            revision.clone(),
+            role,
+            ContentId::from_content_bytes(bytes),
+        );
+        source_units.push(ArtifactSourceUnit {
+            source_span: span,
+            unit,
+        });
+    };
+    push_unit(
+        "source",
+        source.as_bytes(),
+        verter_span::Span::new(0, source.len() as u32),
+    );
+    let mut row_codes = Vec::new();
+    for artifact in published.artifacts() {
+        let code: std::sync::Arc<str> = Arc::from(artifact.code());
+        push_unit(
+            artifact.kind().wire_tag(),
+            artifact.code().as_bytes(),
+            verter_span::Span::new(0, artifact.code().len() as u32),
+        );
+        row_codes.push(code);
+    }
+
+    let producer = verter_identity::identity::ResultContractId::from_canonical(&DirectSetTag {
+        canonical_id: "published-products",
+        framework,
+    });
+    let input_basis = verter_identity::identity::InputBasisId::from_canonical(&basis);
+    let authored_unit = &source_units[0];
+    let authored_unit_id = authored_unit.unit.id().clone();
+
+    // Map staging runs before artifact construction so every source unit a
+    // produced map declares exists when each artifact's provenance names
+    // the units its own map binds.
+    let mut mint = DeclaredSourceMint {
+        source_id: &source_id,
+        revision: &revision,
+        minted_by_digest: BTreeMap::new(),
+        source_units: &mut source_units,
+    };
+    let mut staged_maps = Vec::new();
+    for artifact in published.artifacts() {
+        let staged = artifact_map_json(artifact).map(|(family, map_json)| {
+            stage_map_over_declared_sources(
+                map_json,
+                artifact.code(),
+                source,
+                &authored_unit_id,
+                &mut mint,
+            )
+            .map(|(sources, segments)| (family, sources, segments))
+        });
+        staged_maps.push(staged.transpose()?);
+    }
+    drop(mint);
+
+    let mut artifacts = Vec::new();
+    let mut rows = Vec::new();
+    for ((artifact, code), staged) in published.artifacts().iter().zip(row_codes).zip(staged_maps) {
+        let kind = artifact.kind();
+        let unit_id = source_units
+            .iter()
+            .find(|unit| unit.unit.logical_role() == kind.wire_tag())
+            .expect("each published product minted its own unit")
+            .unit
+            .id()
+            .clone();
+        // An artifact's inputs are the authored carrier, its own product
+        // unit, and the declared source spaces its own map binds — never a
+        // sibling product's unit.
+        let mut inputs = BTreeSet::from([authored_unit_id.clone(), unit_id.clone()]);
+        if let Some((_, map_sources, _)) = staged.as_ref() {
+            inputs.extend(map_sources.iter().cloned());
+        }
+        let mut compiled = CompileArtifact::new(
+            unit_id,
+            kind,
+            artifact.dialect().schema_language(),
+            kind.wire_tag(),
+            ArtifactProvenance {
+                input_basis: input_basis.clone(),
+                producer: producer.clone(),
+                inputs,
+            },
+            ArtifactContent::Available(Arc::clone(&code)),
+        );
+        if let Some((family, map_sources, segments)) = staged {
+            compiled.maps.push(QualifiedArtifactMap {
+                family,
+                generated: compiled.id().clone(),
+                generated_content: ContentId::from_content_bytes(code.as_bytes()),
+                input_basis: input_basis.clone(),
+                sources: map_sources,
+                segments,
+            });
+        }
+        rows.push(SfcArtifactProjection {
+            kind,
+            artifact: compiled.id().clone(),
+            dialect: artifact.dialect(),
+            code,
+            source_projection_map: artifact.source_projection_map().map(str::to_string),
+            runtime_source_map: artifact.runtime_source_map().map(str::to_string),
+        });
+        artifacts.push(compiled);
+    }
+
+    let runtime_root = [ProductKind::RuntimeServer, ProductKind::RuntimeClient]
+        .into_iter()
+        .find_map(|kind| rows.iter().find(|row| row.kind == kind))
+        .map(|row| row.artifact.clone());
+
+    let output = DirectCompileOutput {
+        set: CompileArtifactSet::new(source_units, artifacts)?,
+        runtime_root,
+        sfc_artifacts: rows,
+        qualified_styles,
+        custom_block_artifacts,
+        diagnostics,
+    };
+    verter_debug_assert!(
+        output.projection_over_set(),
+        "every projection row must share the allocation of the artifact it names"
+    );
+    Ok(output)
+}
+
+/// The mapping product `artifact` demands, with its produced JSON — `None`
+/// when this product carries no map or its map string is empty.
+fn artifact_map_json(artifact: &AssembledArtifact) -> Option<(ArtifactMapFamily, &str)> {
+    match artifact.kind() {
+        ProductKind::RuntimeClient | ProductKind::RuntimeServer => artifact
+            .runtime_source_map()
+            .filter(|json| !json.is_empty())
+            .map(|json| (ArtifactMapFamily::RuntimeSourceMap, json)),
+        ProductKind::IdeCompanion => artifact
+            .source_projection_map()
+            .filter(|json| !json.is_empty())
+            .map(|json| (ArtifactMapFamily::SourceProjection, json)),
+        _ => None,
+    }
+}
+
+/// Shared minting state for one conversion's map-declared source units:
+/// the lineage every minted unit descends from, plus the
+/// content-keyed reuse table so two artifacts' maps over the same declared
+/// space share one unit and a conversion never mints duplicates.
+struct DeclaredSourceMint<'a> {
+    source_id: &'a crate::assembly::source_unit::SourceId,
+    revision: &'a crate::assembly::source_unit::SourceRevision,
+    minted_by_digest:
+        std::collections::BTreeMap<[u8; 32], crate::assembly::source_unit::SourceUnitId>,
+    source_units: &'a mut Vec<crate::assembly::source_unit::ArtifactSourceUnit>,
+}
+
+impl DeclaredSourceMint<'_> {
+    /// Mint (or reuse) the source unit for one map-declared source space.
+    fn unit_for(&mut self, content: &str) -> crate::assembly::source_unit::SourceUnitId {
+        use crate::assembly::source_unit::{ArtifactSourceUnit, ContentId, SourceUnit};
+
+        let digest = set_content_digest(content.as_bytes());
+        if let Some(id) = self.minted_by_digest.get(&digest) {
+            return id.clone();
+        }
+        let role = format!("map-source-{}", &hex::encode(digest)[..16]);
+        let unit = SourceUnit::mint(
+            self.source_id.clone(),
+            self.revision.clone(),
+            role,
+            ContentId::from_content_bytes(content.as_bytes()),
+        );
+        let id = unit.id().clone();
+        self.source_units.push(ArtifactSourceUnit {
+            source_span: verter_span::Span::new(0, content.len() as u32),
+            unit,
+        });
+        self.minted_by_digest.insert(digest, id.clone());
+        id
+    }
+}
+
+/// Resolve one produced map's segments against the source spaces its own
+/// JSON declares. A row whose content is the authored carrier bytes binds
+/// to the carrier's already-minted unit; every other content-bearing row
+/// gets one minted unit per conversion, shared across artifacts by content.
+/// A token addressing a row with no declared content has no representable
+/// source identity and refuses the whole conversion
+/// ([`ArtifactSchemaError::MapSourceWithoutContent`]) — it is never
+/// rebound to the carrier bytes nor silently dropped. Tokens whose
+/// coordinates do not resolve inside their own declared content, or whose
+/// generated position falls outside the produced code, stay omitted, as
+/// any out-of-range map token is.
+fn stage_map_over_declared_sources(
+    map_json: &str,
+    generated: &str,
+    carrier: &str,
+    authored_unit_id: &crate::assembly::source_unit::SourceUnitId,
+    mint: &mut DeclaredSourceMint<'_>,
+) -> Result<
+    (
+        std::collections::BTreeSet<crate::assembly::source_unit::SourceUnitId>,
+        Vec<ArtifactMapSegment>,
+    ),
+    ArtifactSchemaError,
+> {
+    use std::collections::BTreeSet;
+
+    let mut sources = BTreeSet::from([authored_unit_id.clone()]);
+    let Ok(map) = oxc_sourcemap::SourceMap::from_json_string(map_json) else {
+        return Ok((sources, Vec::new()));
+    };
+    let row_contents: Vec<&str> = (0..map.get_sources().count())
+        .map(|index| {
+            map.get_source_content(index as u32)
+                .map(str::as_ref)
+                .unwrap_or("")
+        })
+        .collect();
+    let row_starts: Vec<Vec<u32>> = row_contents
+        .iter()
+        .map(|content| generated_line_starts(content))
+        .collect();
+    let gen_starts = generated_line_starts(generated);
+    let gen_len = generated.len() as u32;
+    let mut segments = Vec::new();
+    for token in map.get_tokens() {
+        let Some(row) = token.get_source_id() else {
+            continue;
+        };
+        let Some(&content) = row_contents.get(row as usize) else {
+            return Err(ArtifactSchemaError::MapSourceWithoutContent);
+        };
+        if content.is_empty() {
+            return Err(ArtifactSchemaError::MapSourceWithoutContent);
+        }
+        let unit_id = if content == carrier {
+            authored_unit_id.clone()
+        } else {
+            mint.unit_for(content)
+        };
+        let Some(source_start) = utf16_offset_to_bytes(
+            content,
+            &row_starts[row as usize],
+            token.get_src_line(),
+            token.get_src_col(),
+        ) else {
+            continue;
+        };
+        let source_end = next_char_end(content, source_start);
+        if source_start > source_end {
+            continue;
+        }
+        let Some(start) = utf16_offset_to_bytes(
+            generated,
+            &gen_starts,
+            token.get_dst_line(),
+            token.get_dst_col(),
+        ) else {
+            continue;
+        };
+        if start >= gen_len {
+            continue;
+        }
+        let end = next_char_end(generated, start).min(gen_len);
+        if generated.get(start as usize..end as usize).is_none() {
+            continue;
+        }
+        segments.push(ArtifactMapSegment {
+            generated: start..end,
+            source_unit: unit_id.clone(),
+            source_span: verter_span::Span::new(source_start, source_end),
+        });
+        sources.insert(unit_id);
+    }
+    segments.sort_by_key(|segment| (segment.generated.start, segment.generated.end));
+    segments.dedup_by(|a, b| a.generated.start == b.generated.start);
+    let mut kept = Vec::with_capacity(segments.len());
+    for segment in segments {
+        if kept
+            .last()
+            .is_none_or(|prev: &ArtifactMapSegment| prev.generated.end <= segment.generated.start)
+        {
+            kept.push(segment);
+        }
+    }
+    Ok((sources, kept))
 }
 
 /// Every way [`StandaloneCompiler::compile`] can fail. No variant carries a
@@ -222,6 +775,12 @@ pub enum DirectCompileError {
     /// contribution set (exact-cardinality, required-map,
     /// undeclared-helper, or final-parse checks).
     Publish(AssemblyRefusal),
+    /// The facade's compile-artifact-set conversion refused: a published
+    /// product could not be admitted to the canonical artifact schema
+    /// (identity, provenance or qualified-map geometry). The publication
+    /// itself succeeded; the set admission failed, and the whole compile
+    /// reports the refusal rather than returning a partial view.
+    ArtifactSchema(ArtifactSchemaError),
     /// The request planned a product this direct route does not (yet)
     /// produce. Never a silent skip — every planned artifact this route
     /// cannot supply is a typed refusal, matching `publish`'s own
@@ -1087,10 +1646,33 @@ fn correct_selected_unit_map(
         return Ok(String::new());
     }
     match supplied.filter(|map| !map.is_empty()) {
-        Some(supplied) => chain_generated_map_json(generated, supplied)
-            .ok_or(VueParsedRuntimeError::BlockContentUnavailable),
+        Some(supplied) => match SourceMap::from_json_string(supplied) {
+            Ok(input_map) if map_tokens_address_content_backed(&input_map) => {
+                chain_generated_map_json(generated, supplied)
+                    .ok_or(VueParsedRuntimeError::BlockContentUnavailable)
+            }
+            // A host may hold a block's positions without the bytes they
+            // address. A map chained through such rows publishes tokens no
+            // staged artifact can resolve, so it is omitted rather than
+            // chained: the compiler's own map over the selected bytes stands.
+            Ok(_) => Ok(generated.to_string()),
+            Err(_) => Err(VueParsedRuntimeError::BlockContentUnavailable),
+        },
         None => Ok(generated.to_string()),
     }
+}
+
+/// Whether every token-addressed row of a host-supplied map declares the
+/// content of the source space it names. Rows no token addresses are
+/// irrelevant — only a mapped row without its bytes makes a chained map
+/// unstageable.
+fn map_tokens_address_content_backed(map: &SourceMap) -> bool {
+    map.get_tokens().all(|token| {
+        token.get_source_id().is_none_or(|row| {
+            map.get_source_content(row)
+                .is_some_and(|content| !content.is_empty())
+        })
+    })
 }
 
 fn chain_generated_map_json(generated: &str, input: &str) -> Option<String> {
@@ -1750,11 +2332,16 @@ pub(crate) fn compile_vue_parsed_runtime(
     }
     let artifacts = publish(&plan, contributions)
         .map_err(|err| VueParsedRuntimeError::Direct(DirectCompileError::Publish(err)))?;
-    Ok(DirectCompileOutput {
-        artifacts,
-        qualified_styles: primary.bundle.qualified_styles,
+    stage_published_products(
+        source,
+        request,
+        "vue",
+        &artifacts,
+        primary.bundle.qualified_styles,
+        primary.bundle.custom_block_artifacts,
         diagnostics,
-    })
+    )
+    .map_err(|err| VueParsedRuntimeError::Direct(DirectCompileError::ArtifactSchema(err)))
 }
 
 fn map_direct_runtime_err(err: DirectCompileError) -> VueParsedRuntimeError {
@@ -2530,6 +3117,10 @@ impl StandaloneCompiler {
         let wants_client = plan.wants(ProductKind::RuntimeClient);
         let wants_server = plan.wants(ProductKind::RuntimeServer);
         let mut runtime_legs = None;
+        // Source-backed custom-block descriptors ride off the primary
+        // bundle: present exactly when the producing route held the
+        // registered carrier lineage they are minted against.
+        let mut custom_block_artifacts = None;
 
         if wants_client || wants_server {
             // Runtime legs co-planned beside a non-runtime product: the
@@ -2561,6 +3152,7 @@ impl StandaloneCompiler {
             // (primary) bundle only, never duplicated from a secondary
             // compile.
             qualified_styles.extend(bundle.qualified_styles.iter().cloned());
+            custom_block_artifacts = bundle.custom_block_artifacts.take();
 
             let composed = backend
                 .compile_runtime_legs_from_parse(
@@ -2600,11 +3192,16 @@ impl StandaloneCompiler {
         }
 
         let artifacts = publish(&plan, contributions)?;
-        Ok(DirectCompileOutput {
-            artifacts,
+        stage_published_products(
+            source,
+            request,
+            "vue",
+            &artifacts,
             qualified_styles,
+            custom_block_artifacts,
             diagnostics,
-        })
+        )
+        .map_err(DirectCompileError::ArtifactSchema)
     }
 
     fn compile_svelte(
@@ -2750,11 +3347,16 @@ impl StandaloneCompiler {
             });
         }
         let artifacts = publish(&plan, contributions)?;
-        Ok(DirectCompileOutput {
-            artifacts,
-            qualified_styles: styles,
-            diagnostics: Vec::new(),
-        })
+        stage_published_products(
+            source,
+            request,
+            "svelte",
+            &artifacts,
+            styles,
+            None,
+            Vec::new(),
+        )
+        .map_err(DirectCompileError::ArtifactSchema)
     }
 
     /// Parse `source` once under `request`'s framework and (Vue-only)
@@ -3545,7 +4147,7 @@ fn hash_opt_span(hasher: &mut blake3::Hasher, span: Option<verter_span::Span>) {
 pub fn direct_compile_output_digest(output: &DirectCompileOutput) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
 
-    let artifacts = output.artifacts.artifacts();
+    let artifacts = output.artifacts();
     hash_usize(&mut hasher, artifacts.len());
     for artifact in artifacts {
         hash_usize(&mut hasher, product_kind_rank(artifact.kind()) as usize);
@@ -3675,7 +4277,7 @@ mod tests {
         let output = StandaloneCompiler
             .compile(VUE_SOURCE, &request, vue_inputs())
             .expect("a plain IdeCompanion compile must not be refused");
-        let set = output.artifacts;
+        let set = &output;
         assert_eq!(
             set.artifacts().len(),
             1,
@@ -3705,7 +4307,7 @@ mod tests {
         let output = StandaloneCompiler
             .compile(VUE_SOURCE, &request, vue_inputs())
             .expect("a plain RuntimeClient compile must not be refused");
-        let set = output.artifacts;
+        let set = &output;
         assert_eq!(set.artifacts().len(), 1);
         let artifact = set
             .artifact(ProductKind::RuntimeClient)
@@ -3738,10 +4340,7 @@ mod tests {
         let output = StandaloneCompiler
             .compile(VUE_SOURCE, &request, vue_inputs())
             .expect("compile must not be refused");
-        let artifact = output
-            .artifacts
-            .artifact(ProductKind::RuntimeClient)
-            .unwrap();
+        let artifact = output.artifact(ProductKind::RuntimeClient).unwrap();
         assert!(
             artifact.runtime_source_map().is_some(),
             "a requested runtime source map must be produced"
@@ -3756,10 +4355,7 @@ mod tests {
         let output = StandaloneCompiler
             .compile(VUE_SOURCE, &request, vue_inputs())
             .expect("compile must not be refused");
-        let artifact = output
-            .artifacts
-            .artifact(ProductKind::RuntimeClient)
-            .unwrap();
+        let artifact = output.artifact(ProductKind::RuntimeClient).unwrap();
         assert!(
             artifact.runtime_source_map().is_none(),
             "an unrequested runtime map must be a true None"
@@ -3775,7 +4371,7 @@ mod tests {
         let output = StandaloneCompiler
             .compile(VUE_SOURCE, &request, vue_inputs())
             .expect("a multi-product compile must not be refused");
-        let set = output.artifacts;
+        let set = &output;
         assert_eq!(set.artifacts().len(), 2);
         assert!(set.artifact(ProductKind::RuntimeClient).is_some());
         assert!(set.artifact(ProductKind::IdeCompanion).is_some());
@@ -3793,7 +4389,7 @@ mod tests {
         let output = StandaloneCompiler
             .compile(VUE_SOURCE, &request, vue_inputs())
             .expect("a dual-runtime compile must not be refused");
-        let set = output.artifacts;
+        let set = &output;
         assert_eq!(set.artifacts().len(), 2, "both runtime kinds must publish");
         let client = set
             .artifact(ProductKind::RuntimeClient)
@@ -3826,7 +4422,7 @@ mod tests {
         let output = StandaloneCompiler
             .compile(VUE_SOURCE, &request, vue_inputs())
             .expect("a plain Declarations compile must not be refused");
-        let set = output.artifacts;
+        let set = &output;
         assert_eq!(set.artifacts().len(), 1);
         assert!(set.artifact(ProductKind::Declarations).is_some());
     }
@@ -3965,7 +4561,7 @@ mod tests {
         let output = StandaloneCompiler
             .compile(SVELTE_SOURCE, &request, svelte_inputs())
             .expect("a plain Svelte RuntimeClient compile must not be refused");
-        let set = output.artifacts;
+        let set = &output;
         assert_eq!(set.artifacts().len(), 1);
         let artifact = set
             .artifact(ProductKind::RuntimeClient)
@@ -4141,3 +4737,7 @@ mod tests {
 #[cfg(test)]
 #[path = "standalone_prepared_tests.rs"]
 mod prepared_tests;
+
+#[cfg(test)]
+#[path = "standalone_staged_contract_tests.rs"]
+mod staged_contract_tests;
