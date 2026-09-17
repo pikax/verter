@@ -20,7 +20,7 @@ use verter_semantic::analysis::{
 use verter_semantic::resolver_core::ResolutionBasis;
 use verter_semantic::type_info::{
     ImportedComponentResolution, MacroSemanticLane, NonFlowObservationKey,
-    NonFlowObservationSnapshot, NonFlowOperation, NonFlowOutcome, NonFlowPayload,
+    NonFlowObservationSnapshot, NonFlowOperation, NonFlowOutcome, NonFlowPayload, NonFlowTerminal,
     ObservedMacroSurface, ObservedSurfaceMember, TypeInfoCore, MISSING_PROOF_EMITS,
     MISSING_PROOF_EXPOSE, MISSING_PROOF_IMPORTED_COMPONENT, MISSING_PROOF_MODEL,
     MISSING_PROOF_PROPS, MISSING_PROOF_VUE_MACRO,
@@ -253,7 +253,7 @@ fn complete_snapshot() -> Arc<NonFlowObservationSnapshot> {
         Arc::from(OWNER),
         ImportedComponentResolution {
             specifier: Arc::from("./Badge.vue"),
-            resolved_canonical: Arc::from("/src/Badge.vue"),
+            resolved_canonical: Some(Arc::from("/src/Badge.vue")),
         },
     );
     Arc::new(snapshot)
@@ -335,7 +335,9 @@ fn all_missing_rows_report_their_proof_ids() {
                 macro_index: 3,
             },
             MISSING_PROOF_EXPOSE,
-            vec![script_analysis(), macro_surface(3)],
+            // Expose reads only the script analysis — its rows live on
+            // the macro row itself, so no macro surface is demanded.
+            vec![script_analysis()],
         ),
     ];
     let core = core_of(Arc::new(NonFlowObservationSnapshot::new()));
@@ -356,7 +358,9 @@ fn all_missing_rows_report_their_proof_ids() {
         );
         assert_eq!(
             load_set.keys(),
-            operation.missing_input_load_set(basis()).keys(),
+            operation
+                .missing_input_load_set(core.snapshot(), basis())
+                .keys(),
             "{proof_id}: load set is the operation's single derivation"
         );
     }
@@ -467,7 +471,7 @@ fn preloaded_and_staged_snapshots_are_equivalent() {
         Arc::from(OWNER),
         ImportedComponentResolution {
             specifier: Arc::from("./Badge.vue"),
-            resolved_canonical: Arc::from("/src/Badge.vue"),
+            resolved_canonical: Some(Arc::from("/src/Badge.vue")),
         },
     );
     let staged_core = core_of(Arc::new(staged));
@@ -799,6 +803,203 @@ fn imported_component_surface_resolves_through_staged_observations() {
     assert!(!local.bare_name_is_imported());
     assert_eq!(local.import_specifier(), None);
     assert_eq!(local.qualified_testing_name(), None);
+}
+
+/// An unstaged import resolution is MISSING INPUT, never a completed
+/// non-match: after the analysis is staged, the route demands the exact
+/// `ImportResolution` slot before it may conclude no import reaches the
+/// referenced declaration. A staged negative (`resolved_canonical:
+/// None`) is the explicit observed no-match.
+#[test]
+fn unstaged_import_resolutions_demand_their_slots() {
+    let operation = || NonFlowOperation::ResolveImportedComponentSurface {
+        owner_canonical: Arc::from(OWNER),
+        type_reference: Arc::from("BadgeProps"),
+        referenced_canonical: Some(Arc::from("/src/Badge.vue")),
+    };
+    let mut snapshot = NonFlowObservationSnapshot::new();
+    snapshot.stage_script_analysis(Arc::from(OWNER), Arc::new(fixture_analysis()));
+    let core = core_of(Arc::new(snapshot.clone()));
+    let NonFlowOutcome::NeedInputs(load_set) = core.attempt(&operation()) else {
+        panic!("an unstaged resolution must be NeedInputs, not a completed non-match");
+    };
+    assert_eq!(
+        load_set.keys(),
+        [NonFlowObservationKey::ImportResolution {
+            owner_canonical: Arc::from(OWNER),
+            specifier: Arc::from("./Badge.vue"),
+        }],
+        "the demand names the exact unstaged import-resolution slot"
+    );
+    drop(core);
+
+    // A staged negative completes the route with no match: absence of a
+    // resolved canonical is an observation, not a pending input.
+    snapshot.stage_import_resolution(
+        Arc::from(OWNER),
+        ImportedComponentResolution {
+            specifier: Arc::from("./Badge.vue"),
+            resolved_canonical: None,
+        },
+    );
+    let core = core_of(Arc::new(snapshot.clone()));
+    let NonFlowOutcome::Complete(NonFlowPayload::ImportedComponentSurface(negative)) =
+        core.attempt(&operation())
+    else {
+        panic!("a staged negative resolution completes the route");
+    };
+    assert_eq!(negative.import_specifier(), None);
+    drop(core);
+
+    // The positive resolution reaches the specifier.
+    snapshot.stage_import_resolution(
+        Arc::from(OWNER),
+        ImportedComponentResolution {
+            specifier: Arc::from("./Badge.vue"),
+            resolved_canonical: Some(Arc::from("/src/Badge.vue")),
+        },
+    );
+    let core = core_of(Arc::new(snapshot));
+    let NonFlowOutcome::Complete(NonFlowPayload::ImportedComponentSurface(positive)) =
+        core.attempt(&operation())
+    else {
+        panic!("a staged positive resolution completes the route");
+    };
+    assert_eq!(positive.import_specifier(), Some("./Badge.vue"));
+}
+
+/// A directly-imported bare name is retained by the scope requirements,
+/// so the qualified testing form must suppress it even when the kernel
+/// can also see the specifier the binding's import resolves through.
+#[test]
+fn qualified_testing_name_suppresses_directly_imported_bare_names() {
+    let mut snapshot = NonFlowObservationSnapshot::new();
+    let mut analysis = fixture_analysis();
+    // `import { Badge } from "./Badge.vue"`: the bare name `Badge` is a
+    // directly-imported binding, and the specifier's staged resolution
+    // reaches the referenced canonical — both facts are visible at once.
+    analysis.imports[0].bindings.push(AnalyzedImportBinding {
+        name: "Badge".to_owned(),
+        kind: ImportBindingKind::Named,
+        imported_name: Some("Badge".to_owned()),
+        is_type_only: false,
+        vue_api: None,
+        span: span(0, 9),
+    });
+    snapshot.stage_script_analysis(Arc::from(OWNER), Arc::new(analysis));
+    snapshot.stage_import_resolution(
+        Arc::from(OWNER),
+        ImportedComponentResolution {
+            specifier: Arc::from("./Badge.vue"),
+            resolved_canonical: Some(Arc::from("/src/Badge.vue")),
+        },
+    );
+    let core = core_of(Arc::new(snapshot));
+    let NonFlowOutcome::Complete(NonFlowPayload::ImportedComponentSurface(surface)) =
+        core.attempt(&NonFlowOperation::ResolveImportedComponentSurface {
+            owner_canonical: Arc::from(OWNER),
+            type_reference: Arc::from("Badge"),
+            referenced_canonical: Some(Arc::from("/src/Badge.vue")),
+        })
+    else {
+        panic!("a fully staged surface must complete");
+    };
+    assert!(surface.bare_name_is_imported());
+    assert_eq!(surface.import_specifier(), Some("./Badge.vue"));
+    assert_eq!(
+        surface.qualified_testing_name(),
+        None,
+        "a directly-imported bare name never takes the qualified form"
+    );
+}
+
+/// Domain validation: once the analysis is staged, a slot with no macro
+/// row — or a row of another macro's kind, or a type-argument form
+/// addressed to the runtime-object expose operation — is `Terminal`.
+/// No staged observation can repair such a request, so the driver must
+/// never receive a repeatable `NeedInputs` demand for it; only a
+/// restarted attempt under a CHANGED analysis revalidates the guard.
+#[test]
+fn invalid_macro_requests_are_terminal_after_the_analysis_is_staged() {
+    let mut snapshot = NonFlowObservationSnapshot::new();
+    snapshot.stage_script_analysis(Arc::from(OWNER), Arc::new(fixture_analysis()));
+    let core = core_of(Arc::new(snapshot));
+    let wrong_kind = [
+        (
+            NonFlowOperation::ProjectRuntimeProps {
+                owner_canonical: Arc::from(OWNER),
+                macro_index: 1,
+            },
+            1,
+        ),
+        (
+            NonFlowOperation::ProjectRuntimeEmits {
+                owner_canonical: Arc::from(OWNER),
+                macro_index: 0,
+            },
+            0,
+        ),
+        (
+            NonFlowOperation::ProjectRuntimeModel {
+                owner_canonical: Arc::from(OWNER),
+                macro_index: 0,
+            },
+            0,
+        ),
+        (
+            NonFlowOperation::ProjectExposeSurface {
+                owner_canonical: Arc::from(OWNER),
+                macro_index: 2,
+            },
+            2,
+        ),
+    ];
+    for (operation, macro_index) in &wrong_kind {
+        assert!(
+            matches!(
+                core.attempt(operation),
+                NonFlowOutcome::Terminal(NonFlowTerminal::WrongMacroKind {
+                    macro_index: index,
+                    ..
+                }) if index == *macro_index
+            ),
+            "a wrong-kind request must be Terminal, not a repeatable demand: {operation:?}"
+        );
+    }
+    assert!(matches!(
+        core.attempt(&NonFlowOperation::ProjectRuntimeProps {
+            owner_canonical: Arc::from(OWNER),
+            macro_index: 99,
+        }),
+        NonFlowOutcome::Terminal(NonFlowTerminal::MacroRowMissing { macro_index: 99 })
+    ));
+
+    // The runtime-object expose operation rejects a type-argument form…
+    let mut type_based = fixture_analysis();
+    type_based.macros[3].is_type_based = true;
+    let mut snapshot = NonFlowObservationSnapshot::new();
+    snapshot.stage_script_analysis(Arc::from(OWNER), Arc::new(type_based));
+    let core = core_of(Arc::new(snapshot));
+    assert!(matches!(
+        core.attempt(&NonFlowOperation::ProjectExposeSurface {
+            owner_canonical: Arc::from(OWNER),
+            macro_index: 3,
+        }),
+        NonFlowOutcome::Terminal(NonFlowTerminal::TypeBasedForm { macro_index: 3 })
+    ));
+
+    // …and a restarted attempt under a changed analysis revalidates the
+    // guard: the same slot with the runtime-object form back completes.
+    let mut snapshot = NonFlowObservationSnapshot::new();
+    snapshot.stage_script_analysis(Arc::from(OWNER), Arc::new(fixture_analysis()));
+    let core = core_of(Arc::new(snapshot));
+    assert!(matches!(
+        core.attempt(&NonFlowOperation::ProjectExposeSurface {
+            owner_canonical: Arc::from(OWNER),
+            macro_index: 3,
+        }),
+        NonFlowOutcome::Complete(_)
+    ));
 }
 
 /// The observation frontier is canonically ordered — the identity a

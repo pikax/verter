@@ -122,17 +122,9 @@ fn incremental_revalidation_equals_fresh_recompute() {
                 "the fresh answer carries the post-edit member set"
             );
         }
-        (left, right) => assert_eq!(
-            matches!(
-                left,
-                verter_compiler::compile::VueMacroSemanticInput::Unavailable
-            ),
-            matches!(
-                right,
-                verter_compiler::compile::VueMacroSemanticInput::Unavailable
-            ),
-            "both lanes agree on the demand shape"
-        ),
+        (left, right) => {
+            panic!("expected RuntimeAndTsc for both derivations, got {left:?} and {right:?}")
+        }
     }
 }
 

@@ -10,13 +10,19 @@
 //!
 //! The kernel never names a host, scheduler, session type, or callback:
 //! every input arrives as staged immutable observation data
-//! ([`core::NonFlowObservationSnapshot`]), and every question it cannot
+//! ([`core::NonFlowObservationSnapshot`]), every question it cannot yet
 //! answer from that data returns
-//! [`AttemptOutcome::NeedInputs`](crate::resolver_core::AttemptOutcome)
-//! with the operation's missing-input proof id. Driving I/O (loading the
-//! demanded inputs, re-attempting, discarding on invalidation) belongs to
-//! the compile-transaction driver in `verter_compiler`, never to this
-//! crate.
+//! [`NonFlowOutcome::NeedInputs`](non_flow::NonFlowOutcome::NeedInputs)
+//! carrying a [`NonFlowLoadSet`](non_flow::NonFlowLoadSet) — the exact
+//! unstaged observation slots the route reads, bound to the resolution
+//! basis the retry runs under (the operation's stable `C2-GAP3-MISSING-*`
+//! proof id lives on
+//! [`NonFlowOperation::missing_input_proof_id`](non_flow::NonFlowOperation::missing_input_proof_id))
+//! — and a request outside the operation's domain returns
+//! [`NonFlowOutcome::Terminal`](non_flow::NonFlowOutcome::Terminal).
+//! Driving I/O (loading the demanded inputs, re-attempting, discarding
+//! on invalidation) belongs to the compile-transaction driver in
+//! `verter_compiler`, never to this crate.
 
 pub mod core;
 pub mod non_flow;
@@ -27,9 +33,9 @@ pub use core::{
 };
 pub use non_flow::{
     ExposeSurfaceProjection, ImportedComponentSurface, MacroSemanticLane, NonFlowLoadSet,
-    NonFlowOperation, NonFlowOutcome, NonFlowPayload, ProjectedExposeRow, ProjectedRuntimePropRow,
-    RuntimeEmitsProjection, RuntimeModelProjection, RuntimePropsProjection, VueMacroMissingRoot,
-    VueMacroSemanticDemand, VueMacroSemanticInput, MISSING_PROOF_EMITS, MISSING_PROOF_EXPOSE,
-    MISSING_PROOF_IMPORTED_COMPONENT, MISSING_PROOF_MODEL, MISSING_PROOF_PROPS,
-    MISSING_PROOF_VUE_MACRO,
+    NonFlowOperation, NonFlowOutcome, NonFlowPayload, NonFlowTerminal, ProjectedExposeRow,
+    ProjectedRuntimePropRow, RuntimeEmitsProjection, RuntimeModelProjection,
+    RuntimePropsProjection, VueMacroMissingRoot, VueMacroSemanticDemand, VueMacroSemanticInput,
+    MISSING_PROOF_EMITS, MISSING_PROOF_EXPOSE, MISSING_PROOF_IMPORTED_COMPONENT,
+    MISSING_PROOF_MODEL, MISSING_PROOF_PROPS, MISSING_PROOF_VUE_MACRO,
 };

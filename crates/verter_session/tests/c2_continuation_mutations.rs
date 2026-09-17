@@ -17,7 +17,7 @@ use verter_semantic::analysis::{
     TypeResolutionSource,
 };
 use verter_semantic::type_info::{
-    ObservedMacroSurface, ObservedSurfaceMember, MISSING_PROOF_PROPS, MISSING_PROOF_VUE_MACRO,
+    ObservedMacroSurface, ObservedSurfaceMember, MISSING_PROOF_VUE_MACRO,
 };
 use verter_span::Span;
 use verter_type_expr::TopLevelOwnerId;
@@ -203,8 +203,9 @@ fn reconfigured_observation_slot_restarts_the_model_operation() {
 }
 
 /// Mutation: DISAPPEARED observation — dropping the macro row from the
-/// restaged analysis refuses with the operation's proof id instead of
-/// resuming anything.
+/// restaged analysis terminally refuses the operation (a slot with no
+/// macro row is a domain failure no staged observation can repair)
+/// instead of resuming anything.
 #[test]
 fn disappeared_analysis_refuses_with_the_proof_id() {
     let mut attempt = CompileAttempt::enter_semantic(OWNER);
@@ -220,12 +221,10 @@ fn disappeared_analysis_refuses_with_the_proof_id() {
         .type_info()
         .project_runtime_props(Arc::from(OWNER), 0)
         .expect_err("the disappeared macro row must refuse");
-    match failure {
-        TypeInfoRouteFailure::NeedInputs { proof_id, .. } => {
-            assert_eq!(proof_id, MISSING_PROOF_PROPS)
-        }
-        other => panic!("expected a proof-carrying refusal, got {other:?}"),
-    }
+    assert!(
+        matches!(failure, TypeInfoRouteFailure::Terminal),
+        "a disappeared macro row is a terminal domain refusal, not a repeatable demand: {failure:?}"
+    );
 }
 
 /// The plan operation's own all-missing/complete rounds carry the same

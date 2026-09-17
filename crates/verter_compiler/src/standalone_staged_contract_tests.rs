@@ -189,6 +189,30 @@ fn ide_only_compile_carries_the_companion_without_a_runtime_handoff() {
     );
 }
 
+/// A present-but-EMPTY IDE projection map stays `Some("")` through the
+/// staged conversion: the companion's projection map is never optional,
+/// and "IDE maps disabled" (empty JSON) is a different published fact
+/// from "no map at all" (absent) — the view and the products digest
+/// both keep the distinction.
+#[test]
+fn ide_companion_projection_map_is_present_even_when_empty() {
+    let request = vue_request(vec![CompileProduct::IdeCompanion(IdeProductRequest {
+        want_source_map: false,
+        ..Default::default()
+    })]);
+    let output = StandaloneCompiler
+        .compile(VUE_SIMPLE, &request, vue_inputs())
+        .expect("an IDE-only request must compile");
+    let row = output
+        .artifact(ProductKind::IdeCompanion)
+        .expect("the companion must project");
+    assert_eq!(
+        row.source_projection_map(),
+        Some(""),
+        "a present-but-empty IDE projection map stays Some(\"\"), never None"
+    );
+}
+
 #[test]
 fn projection_rows_are_bound_to_the_artifact_set() {
     let request = vue_request(vec![
@@ -297,6 +321,87 @@ fn revision_and_basis_follow_the_published_bytes() {
         first_unit.unit.revision(),
         second_unit.unit.revision(),
         "an authored edit must change the source revision"
+    );
+}
+
+/// The transaction's [`InputBasisId`] is bound at ENTRY — from the
+/// request input axes and the authored source digest, before any
+/// product generation. Two admissions over IDENTICAL entry inputs but
+/// DIFFERENT published-product bytes therefore share one input basis,
+/// while their revisions — the products' content identity — differ:
+/// generated output affects the revision, never the input basis.
+#[test]
+fn input_basis_is_entry_bound_while_the_revision_tracks_the_products() {
+    let request = vue_request(vec![CompileProduct::RuntimeClient(
+        RuntimeProductRequest::default(),
+    )]);
+    let source = "export const leg = 1;\n";
+    let publish_with_code = |code: String| {
+        use crate::assembly::fragment::FragmentDialect;
+        use crate::assembly::publish::{publish, ArtifactContribution};
+        use crate::assembly::ProductPlan;
+        let plan = ProductPlan::from_request(&request);
+        publish(
+            &plan,
+            vec![ArtifactContribution {
+                kind: ProductKind::RuntimeClient,
+                fragments: Vec::new(),
+                code,
+                emitted_imports: Vec::new(),
+                dialect: FragmentDialect::Tsx,
+                source_projection_map: None,
+                runtime_source_map: None,
+            }],
+        )
+        .expect("synthetic publication")
+    };
+    let first_attempt =
+        crate::compile_transaction::CompileAttempt::enter_direct(source, &request, "vue");
+    let first = first_attempt
+        .admit_published_products(
+            source,
+            &publish_with_code("export const a = 1;\n".to_owned()),
+            Vec::new(),
+            None,
+            Vec::new(),
+        )
+        .expect("first admission");
+    let second_attempt =
+        crate::compile_transaction::CompileAttempt::enter_direct(source, &request, "vue");
+    let second = second_attempt
+        .admit_published_products(
+            source,
+            &publish_with_code("export const b = 2;\n".to_owned()),
+            Vec::new(),
+            None,
+            Vec::new(),
+        )
+        .expect("second admission");
+
+    assert_eq!(
+        first_attempt.input_basis(),
+        second_attempt.input_basis(),
+        "identical entry inputs share one input basis regardless of generated products"
+    );
+    assert_eq!(
+        first.set().artifacts()[0].provenance.input_basis,
+        second.set().artifacts()[0].provenance.input_basis,
+        "admitted artifacts carry the entry-bound basis, not a products-derived one"
+    );
+    let revision_of = |output: &crate::standalone::DirectCompileOutput| {
+        output
+            .set()
+            .source_units()
+            .find(|unit| unit.unit.logical_role() == "source")
+            .expect("authored source unit")
+            .unit
+            .revision()
+            .clone()
+    };
+    assert_ne!(
+        revision_of(&first),
+        revision_of(&second),
+        "different published-product bytes are different revisions of one input basis"
     );
 }
 

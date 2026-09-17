@@ -32,10 +32,10 @@ use crate::resolver_core::ResolutionBasis;
 use super::non_flow::{
     authored_emit_order, containing_with_defaults_index, emit_member_anchor, expose_member_anchor,
     is_codegen_macro, macro_index, prop_member_anchor, top_level_syntax_index,
-    ExposeSurfaceProjection, ImportedComponentSurface, MacroSemanticLane, NonFlowOperation,
-    NonFlowOutcome, NonFlowPayload, ProjectedExposeRow, ProjectedRuntimePropRow,
-    RuntimeEmitsProjection, RuntimeModelProjection, RuntimePropsProjection, VueMacroMissingRoot,
-    VueMacroSemanticDemand, VueMacroSemanticInput,
+    ExposeSurfaceProjection, ImportedComponentSurface, MacroSemanticLane, NonFlowLoadSet,
+    NonFlowOperation, NonFlowOutcome, NonFlowPayload, NonFlowTerminal, ProjectedExposeRow,
+    ProjectedRuntimePropRow, RuntimeEmitsProjection, RuntimeModelProjection,
+    RuntimePropsProjection, VueMacroMissingRoot, VueMacroSemanticDemand, VueMacroSemanticInput,
 };
 
 pub(crate) mod sealed {
@@ -50,9 +50,17 @@ pub trait NonFlowObservation: sealed::Sealed + Send + Sync {
     /// The immutable script analysis observation for one canonical owner.
     fn script_analysis(&self, owner_canonical: &str) -> Option<&Arc<ScriptAnalysisSnapshot>>;
 
-    /// The observed import resolution for one authored specifier: the
-    /// canonical id the host resolved it to, when it resolved.
-    fn import_resolution(&self, owner_canonical: &str, specifier: &str) -> Option<&Arc<str>>;
+    /// The observed import resolution for one authored specifier:
+    /// `Some(Some(canonical))` — the host observed the specifier resolve
+    /// to that canonical; `Some(None)` — the host observed the specifier
+    /// resolve to nothing (a staged negative); `None` — no observation
+    /// for this specifier is staged, so absence unambiguously means
+    /// input is missing, never "resolved to nothing".
+    fn import_resolution(
+        &self,
+        owner_canonical: &str,
+        specifier: &str,
+    ) -> Option<Option<&Arc<str>>>;
 
     /// The observed macro surface for one authored macro.
     fn macro_surface(
@@ -143,9 +151,15 @@ pub struct ObservedMacroSurface {
 pub struct ImportedComponentResolution {
     /// The authored import specifier.
     pub specifier: Arc<str>,
-    /// The canonical id the host resolved the specifier to.
-    pub resolved_canonical: Arc<str>,
+    /// The canonical id the host resolved the specifier to; `None` is a
+    /// STAGED NEGATIVE observation (the host resolved it to nothing),
+    /// distinct from the specifier never having been observed at all.
+    pub resolved_canonical: Option<Arc<str>>,
 }
+
+/// The staged outcome of one import-specifier resolution: the canonical
+/// it resolved to, or an observed negative (`None`).
+type StagedImportResolution = Option<Arc<str>>;
 
 /// The immutable observation store the kernel reads. Population happens
 /// through the staging methods before the snapshot is shared with a
@@ -153,7 +167,7 @@ pub struct ImportedComponentResolution {
 #[derive(Debug, Clone, Default)]
 pub struct NonFlowObservationSnapshot {
     script_analyses: BTreeMap<Arc<str>, Arc<ScriptAnalysisSnapshot>>,
-    import_resolutions: BTreeMap<(Arc<str>, Arc<str>), Arc<str>>,
+    import_resolutions: BTreeMap<(Arc<str>, Arc<str>), StagedImportResolution>,
     macro_surfaces: BTreeMap<(Arc<str>, usize), ObservedMacroSurface>,
     model_value_type_shapes: BTreeMap<(Arc<str>, usize), RuntimePropType>,
 }
@@ -256,9 +270,14 @@ impl NonFlowObservation for NonFlowObservationSnapshot {
         self.script_analyses.get(owner_canonical)
     }
 
-    fn import_resolution(&self, owner_canonical: &str, specifier: &str) -> Option<&Arc<str>> {
+    fn import_resolution(
+        &self,
+        owner_canonical: &str,
+        specifier: &str,
+    ) -> Option<Option<&Arc<str>>> {
         self.import_resolutions
             .get(&(Arc::from(owner_canonical), Arc::from(specifier)))
+            .map(|resolved| resolved.as_ref())
     }
 
     fn macro_surface(
@@ -347,7 +366,7 @@ impl TypeInfoCore {
     }
 
     fn need_inputs(&self, operation: &NonFlowOperation) -> NonFlowOutcome {
-        NonFlowOutcome::NeedInputs(operation.missing_input_load_set(self.basis))
+        NonFlowOutcome::NeedInputs(operation.missing_input_load_set(&self.snapshot, self.basis))
     }
 
     fn script_analysis(&self, owner_canonical: &Arc<str>) -> Option<&Arc<ScriptAnalysisSnapshot>> {
@@ -450,21 +469,45 @@ impl TypeInfoCore {
         // declaration — reused verbatim so the sibling testing surface
         // resolves the same target the component's own import does. A
         // reference that resolved to no canonical (or to the owner
-        // itself) is not a cross-file import.
-        let import_specifier = referenced_canonical.as_ref().and_then(|canonical| {
+        // itself) is not a cross-file import. Every import the owner
+        // declares must carry a staged resolution observation before the
+        // route can conclude "no import reaches the referenced
+        // declaration": an unstaged resolution is missing input
+        // (`NeedInputs` naming its exact `ImportResolution` slot), never
+        // a completed non-match — a staged negative (`Some(None)`) is
+        // the explicit form of "observed to resolve to nothing".
+        let import_specifier = 'specifier: {
+            let Some(canonical) = referenced_canonical.as_ref() else {
+                break 'specifier None;
+            };
             // A reference that resolved to the owner itself is local,
             // never a cross-file import.
             if canonical.as_ref() == owner_canonical.as_ref() {
-                return None;
+                break 'specifier None;
             }
-            analysis.imports.iter().find_map(|import| {
-                (self
+            let mut missing = Vec::new();
+            for import in &analysis.imports {
+                match self
                     .snapshot
                     .import_resolution(owner_canonical, &import.source)
-                    .is_some_and(|resolved| resolved.as_ref() == canonical.as_ref()))
-                .then(|| import.source.clone())
-            })
-        });
+                {
+                    Some(Some(resolved)) => {
+                        if resolved.as_ref() == canonical.as_ref() {
+                            break 'specifier Some(import.source.clone());
+                        }
+                    }
+                    Some(None) => {}
+                    None => missing.push(NonFlowObservationKey::ImportResolution {
+                        owner_canonical: Arc::clone(owner_canonical),
+                        specifier: Arc::from(import.source.as_str()),
+                    }),
+                }
+            }
+            if !missing.is_empty() {
+                return NonFlowOutcome::NeedInputs(NonFlowLoadSet::new(missing, self.basis));
+            }
+            None
+        };
         NonFlowOutcome::Complete(NonFlowPayload::ImportedComponentSurface(
             ImportedComponentSurface {
                 owner_canonical: Arc::clone(owner_canonical),
@@ -487,11 +530,21 @@ impl TypeInfoCore {
         let Some(analysis) = self.script_analysis(owner_canonical) else {
             return self.need_inputs(&operation);
         };
+        // Domain validation: once the analysis is staged, a slot with no
+        // macro row — or a row of another macro's kind — cannot be
+        // repaired by staging more observations. Terminal, never a
+        // NeedInputs the driver would repeat unsatisfiably; a restarted
+        // attempt under a changed analysis revalidates the guard.
         let Some(mac) = self.macro_row(analysis, macro_index_value) else {
-            return self.need_inputs(&operation);
+            return NonFlowOutcome::Terminal(NonFlowTerminal::MacroRowMissing {
+                macro_index: macro_index_value,
+            });
         };
         if mac.kind != AnalyzedMacroKind::DefineProps {
-            return self.need_inputs(&operation);
+            return NonFlowOutcome::Terminal(NonFlowTerminal::WrongMacroKind {
+                macro_index: macro_index_value,
+                kind: mac.kind,
+            });
         }
         let Some(surface) = self
             .snapshot
@@ -557,10 +610,15 @@ impl TypeInfoCore {
             return self.need_inputs(&operation);
         };
         let Some(mac) = self.macro_row(analysis, macro_index_value) else {
-            return self.need_inputs(&operation);
+            return NonFlowOutcome::Terminal(NonFlowTerminal::MacroRowMissing {
+                macro_index: macro_index_value,
+            });
         };
         if mac.kind != AnalyzedMacroKind::DefineEmits {
-            return self.need_inputs(&operation);
+            return NonFlowOutcome::Terminal(NonFlowTerminal::WrongMacroKind {
+                macro_index: macro_index_value,
+                kind: mac.kind,
+            });
         }
         let Some(surface) = self
             .snapshot
@@ -623,10 +681,15 @@ impl TypeInfoCore {
             return self.need_inputs(&operation);
         };
         let Some(mac) = self.macro_row(analysis, macro_index_value) else {
-            return self.need_inputs(&operation);
+            return NonFlowOutcome::Terminal(NonFlowTerminal::MacroRowMissing {
+                macro_index: macro_index_value,
+            });
         };
         if mac.kind != AnalyzedMacroKind::DefineModel {
-            return self.need_inputs(&operation);
+            return NonFlowOutcome::Terminal(NonFlowTerminal::WrongMacroKind {
+                macro_index: macro_index_value,
+                kind: mac.kind,
+            });
         }
         let Some(value_type_shape) = self
             .snapshot
@@ -698,10 +761,23 @@ impl TypeInfoCore {
             return self.need_inputs(&operation);
         };
         let Some(mac) = self.macro_row(analysis, macro_index_value) else {
-            return self.need_inputs(&operation);
+            return NonFlowOutcome::Terminal(NonFlowTerminal::MacroRowMissing {
+                macro_index: macro_index_value,
+            });
         };
         if mac.kind != AnalyzedMacroKind::DefineExpose {
-            return self.need_inputs(&operation);
+            return NonFlowOutcome::Terminal(NonFlowTerminal::WrongMacroKind {
+                macro_index: macro_index_value,
+                kind: mac.kind,
+            });
+        }
+        // This operation is defined for the runtime-object
+        // `defineExpose({ ... })` form; a type-argument form carries no
+        // authored expose fields and is not this operation's domain.
+        if mac.is_type_based {
+            return NonFlowOutcome::Terminal(NonFlowTerminal::TypeBasedForm {
+                macro_index: macro_index_value,
+            });
         }
         let rows = mac
             .expose_fields

@@ -1225,23 +1225,23 @@ pub(super) fn cross_file_namespace_import_type(
     };
     let canonical = identity.canonical_id.as_ref();
     let decl_name = identity.decl_name.as_ref();
-    // The authored specifiers that resolve through the shared host import
-    // resolver are staged as observations once (the analyzer snapshot's
-    // `resolved_canonical_id` is not populated on this path); the
-    // matching and the qualified-name policy are the kernel's decision
-    // (`ResolveImportedComponentSurface`), not this walk's.
+    // The authored specifiers of the owner's imports are staged as
+    // observations once — INCLUDING observed non-resolutions (`None`):
+    // the kernel treats an unstaged resolution as missing input and
+    // demands its exact slot, so a specifier the host resolved to
+    // nothing must be staged as the explicit negative, never left
+    // absent. The matching and the qualified-name policy remain the
+    // kernel's decision (`ResolveImportedComponentSurface`), not this
+    // walk's.
     for import in inventory.analysis.imports.iter() {
-        if let Some(resolved) =
-            ctx.resolve_type_dependency_canonical(owner_canonical, &import.source)
-        {
-            attempt.stage_import_resolution(
-                std::sync::Arc::from(owner_canonical),
-                verter_semantic::type_info::ImportedComponentResolution {
-                    specifier: std::sync::Arc::from(import.source.as_str()),
-                    resolved_canonical: std::sync::Arc::from(resolved.as_str()),
-                },
-            );
-        }
+        let resolved = ctx.resolve_type_dependency_canonical(owner_canonical, &import.source);
+        attempt.stage_import_resolution(
+            std::sync::Arc::from(owner_canonical),
+            verter_semantic::type_info::ImportedComponentResolution {
+                specifier: std::sync::Arc::from(import.source.as_str()),
+                resolved_canonical: resolved.map(std::sync::Arc::from),
+            },
+        );
     }
     let surface = attempt
         .type_info()

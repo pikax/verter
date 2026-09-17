@@ -18,14 +18,17 @@ use verter_compiler::compile_request::{
 };
 use verter_compiler::compile_transaction::{CompileAttempt, TypeInfoRouteFailure};
 use verter_macro_dto::RuntimePropType;
+use verter_semantic::analysis::types::ImportBindingKind;
 use verter_semantic::analysis::{
-    AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, MacroTypeDep,
-    MacroTypeDepUsage, ScriptAnalysisSnapshot, TypeResolutionSource,
+    AnalyzedEmitField, AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind,
+    AnalyzedPropField, MacroTypeDep, MacroTypeDepUsage, ScriptAnalysisSnapshot,
+    TypeResolutionSource,
 };
 use verter_semantic::type_info::{
-    ImportedComponentResolution, ObservedMacroSurface, ObservedSurfaceMember, MISSING_PROOF_EMITS,
-    MISSING_PROOF_EXPOSE, MISSING_PROOF_IMPORTED_COMPONENT, MISSING_PROOF_MODEL,
-    MISSING_PROOF_PROPS, MISSING_PROOF_VUE_MACRO,
+    ImportedComponentResolution, NonFlowObservationKey, ObservedMacroSurface,
+    ObservedSurfaceMember, MISSING_PROOF_EMITS, MISSING_PROOF_EXPOSE,
+    MISSING_PROOF_IMPORTED_COMPONENT, MISSING_PROOF_MODEL, MISSING_PROOF_PROPS,
+    MISSING_PROOF_VUE_MACRO,
 };
 use verter_span::Span;
 use verter_type_expr::TopLevelOwnerId;
@@ -118,6 +121,21 @@ fn fixture_analysis() -> ScriptAnalysisSnapshot {
             macro_span: Span::new(10, 80),
             usage: MacroTypeDepUsage::Surface,
         }],
+        imports: vec![AnalyzedImport {
+            source: "./Badge.vue".to_owned(),
+            owner: TopLevelOwnerId::default(),
+            is_type_only: true,
+            bindings: vec![AnalyzedImportBinding {
+                name: "Badge".to_owned(),
+                kind: ImportBindingKind::Named,
+                imported_name: Some("Badge".to_owned()),
+                is_type_only: true,
+                vue_api: None,
+                span: Span::new(0, 9),
+            }],
+            span: Span::new(0, 9),
+            resolved_canonical_id: None,
+        }],
         ..ScriptAnalysisSnapshot::default()
     }
 }
@@ -157,7 +175,7 @@ fn stage_all(attempt: &mut CompileAttempt<'_>) {
         Arc::from(OWNER),
         ImportedComponentResolution {
             specifier: Arc::from("./Badge.vue"),
-            resolved_canonical: Arc::from("/src/Badge.vue"),
+            resolved_canonical: Some(Arc::from("/src/Badge.vue")),
         },
     );
 }
@@ -228,6 +246,70 @@ fn all_missing_routes_refuse_with_their_proof_ids() {
         ),
         Some(MISSING_PROOF_EXPOSE)
     );
+}
+
+/// An unstaged import resolution is missing input at the route seam too:
+/// after the analysis is staged, resolving a cross-file reference whose
+/// import has no staged resolution refuses with the exact
+/// `ImportResolution` slot in the load set — never a completed
+/// non-match — and staging that one slot completes the route.
+#[test]
+fn unstaged_import_resolution_refuses_with_its_slot() {
+    let request = vue_request();
+    let mut attempt = CompileAttempt::enter_direct("", &request, "vue");
+    // First round demands the analysis.
+    let failure = attempt
+        .type_info()
+        .resolve_imported_component_surface(
+            Arc::from(OWNER),
+            Arc::from("BadgeProps"),
+            Some(Arc::from("/src/Badge.vue")),
+        )
+        .expect_err("nothing staged refuses");
+    assert_eq!(
+        need_inputs_proof(&failure),
+        Some(MISSING_PROOF_IMPORTED_COMPONENT)
+    );
+    // Analysis alone is not enough: the owner's import has no staged
+    // resolution, so the route demands that exact slot instead of
+    // concluding a non-match.
+    attempt.stage_script_analysis(Arc::from(OWNER), Arc::new(fixture_analysis()));
+    let TypeInfoRouteFailure::NeedInputs { keys, .. } = attempt
+        .type_info()
+        .resolve_imported_component_surface(
+            Arc::from(OWNER),
+            Arc::from("BadgeProps"),
+            Some(Arc::from("/src/Badge.vue")),
+        )
+        .expect_err("the unstaged import resolution must be demanded")
+    else {
+        panic!("expected a load-set refusal naming the import-resolution slot");
+    };
+    assert_eq!(
+        keys,
+        vec![NonFlowObservationKey::ImportResolution {
+            owner_canonical: Arc::from(OWNER),
+            specifier: Arc::from("./Badge.vue"),
+        }],
+        "the demand names the exact unstaged import-resolution slot"
+    );
+    // Staging exactly the demanded slot completes the route.
+    attempt.stage_import_resolution(
+        Arc::from(OWNER),
+        ImportedComponentResolution {
+            specifier: Arc::from("./Badge.vue"),
+            resolved_canonical: Some(Arc::from("/src/Badge.vue")),
+        },
+    );
+    let surface = attempt
+        .type_info()
+        .resolve_imported_component_surface(
+            Arc::from(OWNER),
+            Arc::from("BadgeProps"),
+            Some(Arc::from("/src/Badge.vue")),
+        )
+        .expect("staging exactly the demanded set satisfies the next round");
+    assert_eq!(surface.import_specifier(), Some("./Badge.vue"));
 }
 
 /// Complete/preloaded equivalence across the whole six-row table:
@@ -527,8 +609,9 @@ fn continuation_revalidates_and_restarts_on_input_change() {
 }
 
 /// A disappeared input also forces restart-and-refuse: staging the
-/// analysis away leaves the operation `NeedInputs` again — the sealed
-/// output is gone.
+/// analysis away leaves the operation terminally refused — the sealed
+/// output is gone, and a slot with no macro row is a domain failure no
+/// staged observation can repair (never a repeatable `NeedInputs`).
 #[test]
 fn disappeared_input_discards_the_sealed_output() {
     let request = vue_request();
@@ -540,7 +623,7 @@ fn disappeared_input_discards_the_sealed_output() {
         .is_ok());
 
     // Restage the analysis under a new version with the macro row GONE:
-    // the operation restarts into a missing-input refusal — the sealed
+    // the operation restarts into a terminal refusal — the sealed
     // answer from the earlier state is gone with it.
     let mut analysis = fixture_analysis();
     analysis.macros.clear();
@@ -549,9 +632,8 @@ fn disappeared_input_discards_the_sealed_output() {
         .type_info()
         .project_runtime_props(Arc::from(OWNER), 0)
         .expect_err("a disappeared macro row must refuse, not resume");
-    assert_eq!(
-        need_inputs_proof(&failure),
-        Some(MISSING_PROOF_PROPS),
+    assert!(
+        matches!(failure, TypeInfoRouteFailure::Terminal),
         "restart never serves stale sealed output: {failure:?}"
     );
 }

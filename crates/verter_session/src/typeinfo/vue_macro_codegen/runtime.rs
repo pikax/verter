@@ -526,45 +526,6 @@ fn span_is_owned_by_macro(member: verter_span::Span, mac: verter_span::Span) -> 
     member.start >= mac.start && member.end <= mac.end
 }
 
-pub(super) fn containing_with_defaults_index(
-    macros: &[AnalyzedMacro],
-    inner_index: usize,
-) -> Option<usize> {
-    let inner = &macros[inner_index];
-    macros
-        .iter()
-        .enumerate()
-        .filter(|(_, outer)| outer.kind == AnalyzedMacroKind::WithDefaults)
-        .filter(|(_, outer)| outer.span.start < inner.span.start && inner.span.end < outer.span.end)
-        .min_by_key(|(_, outer)| outer.span.end.saturating_sub(outer.span.start))
-        .map(|(index, _)| index)
-}
-
-pub(super) fn top_level_syntax_index(macros: &[AnalyzedMacro], effective_index: usize) -> u32 {
-    let effective = &macros[effective_index];
-    verter_debug_assert!(is_top_level_macro(macros, effective_index));
-
-    let preceding = macros
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| is_top_level_macro(macros, *index))
-        .filter(|(index, mac)| {
-            (mac.span.start, mac.span.end, *index)
-                < (effective.span.start, effective.span.end, effective_index)
-        })
-        .count();
-    u32::try_from(preceding).unwrap_or(u32::MAX)
-}
-
-fn is_top_level_macro(macros: &[AnalyzedMacro], candidate_index: usize) -> bool {
-    let candidate = &macros[candidate_index];
-    !macros.iter().enumerate().any(|(index, outer)| {
-        index != candidate_index
-            && outer.span.start < candidate.span.start
-            && candidate.span.end < outer.span.end
-    })
-}
-
 /// WHICH macro codegen consumer is asking whether an observed partial
 /// faults it.
 ///
@@ -723,15 +684,6 @@ pub(super) fn flow_return_degradation_observed() -> bool {
     let reasons = crate::request_context::current_cold_compute_completeness().reasons();
     reasons.contains(PartialReasonSet::FLOW_RETURN_UNINFERRED)
         || reasons.contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED)
-}
-
-pub(super) fn is_codegen_macro(kind: AnalyzedMacroKind) -> bool {
-    matches!(
-        kind,
-        AnalyzedMacroKind::DefineProps
-            | AnalyzedMacroKind::DefineEmits
-            | AnalyzedMacroKind::DefineModel
-    )
 }
 
 pub(super) fn expansion_kind(kind: AnalyzedMacroKind) -> MacroExpansionKind {

@@ -18,7 +18,7 @@ impl NonFlowObservation for ForeignSource {
         &self,
         _owner_canonical: &str,
         _specifier: &str,
-    ) -> Option<&Arc<str>> {
+    ) -> Option<Option<&Arc<str>>> {
         None
     }
     fn macro_surface(

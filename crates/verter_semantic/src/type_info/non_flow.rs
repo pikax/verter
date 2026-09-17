@@ -16,10 +16,10 @@ use verter_macro_dto::{
 use verter_span::Span;
 
 use crate::analysis::{AnalyzedMacro, AnalyzedMacroKind};
-use crate::resolver_core::{AttemptFailure, ResolutionBasis};
+use crate::resolver_core::ResolutionBasis;
 use verter_type_expr::DeclBindingKey;
 
-use super::core::NonFlowObservationKey;
+use super::core::{NonFlowObservation, NonFlowObservationKey, NonFlowObservationSnapshot};
 
 /// Missing-input proof id for [`NonFlowOperation::ProjectVueMacroSemantics`].
 pub const MISSING_PROOF_VUE_MACRO: &str = "C2-GAP3-MISSING-VUE-MACRO";
@@ -100,43 +100,59 @@ impl NonFlowOperation {
 
     /// The single derivation of the load set this operation reports when
     /// its inputs are missing: exactly the observation slots the
-    /// kernel's route for this operation reads — the owner's script
-    /// analysis, plus the macro's demanded surface or model value
-    /// classification for the per-macro rows. Every key names a slot the
+    /// kernel's route for this operation READS and the current snapshot
+    /// has not staged yet — the owner's script analysis, plus the
+    /// macro's demanded surface or model value classification for the
+    /// per-macro rows. Already-staged slots are never re-demanded: a
+    /// driver that stages exactly the returned set always satisfies the
+    /// next round, so a satisfied demand can never loop through
+    /// restaging and continuation resets. Every key names a slot the
     /// transaction driver stages
     /// ([`NonFlowObservationKey`](super::core::NonFlowObservationKey)
-    /// maps one-to-one onto the staging methods), so a driver that
-    /// loads exactly the demanded set always satisfies the next round.
-    pub fn missing_input_load_set(&self, basis: ResolutionBasis) -> NonFlowLoadSet {
+    /// maps one-to-one onto the staging methods).
+    ///
+    /// `ProjectExposeSurface` reads only the owner's script analysis
+    /// (the expose rows live on the macro row itself), so it demands no
+    /// macro surface.
+    pub fn missing_input_load_set(
+        &self,
+        snapshot: &NonFlowObservationSnapshot,
+        basis: ResolutionBasis,
+    ) -> NonFlowLoadSet {
         let owner = Arc::clone(self.owner_canonical());
-        let mut keys = vec![NonFlowObservationKey::ScriptAnalysis {
-            owner_canonical: owner,
-        }];
+        let mut keys = Vec::new();
+        if snapshot.script_analysis(owner.as_ref()).is_none() {
+            keys.push(NonFlowObservationKey::ScriptAnalysis {
+                owner_canonical: owner,
+            });
+        }
         match self {
             Self::ProjectVueMacroSemantics { .. }
-            | Self::ResolveImportedComponentSurface { .. } => {}
-            Self::ProjectRuntimeProps {
-                owner_canonical,
-                macro_index,
+            | Self::ResolveImportedComponentSurface { .. }
+            | Self::ProjectExposeSurface { .. } => {}
+            Self::ProjectRuntimeProps { macro_index, .. }
+            | Self::ProjectRuntimeEmits { macro_index, .. } => {
+                if snapshot
+                    .macro_surface(self.owner_canonical().as_ref(), *macro_index)
+                    .is_none()
+                {
+                    keys.push(NonFlowObservationKey::MacroSurface {
+                        owner_canonical: Arc::clone(self.owner_canonical()),
+                        macro_index: *macro_index,
+                    });
+                }
             }
-            | Self::ProjectRuntimeEmits {
-                owner_canonical,
-                macro_index,
+            Self::ProjectRuntimeModel { macro_index, .. } => {
+                if snapshot
+                    .model_value_type_shape(self.owner_canonical().as_ref(), *macro_index)
+                    .is_none()
+                {
+                    keys.push(NonFlowObservationKey::ModelValueTypeShape {
+                        owner_canonical: Arc::clone(self.owner_canonical()),
+                        macro_index: *macro_index,
+                    });
+                }
             }
-            | Self::ProjectExposeSurface {
-                owner_canonical,
-                macro_index,
-            } => keys.push(NonFlowObservationKey::MacroSurface {
-                owner_canonical: Arc::clone(owner_canonical),
-                macro_index: *macro_index,
-            }),
-            Self::ProjectRuntimeModel {
-                owner_canonical,
-                macro_index,
-            } => keys.push(NonFlowObservationKey::ModelValueTypeShape {
-                owner_canonical: Arc::clone(owner_canonical),
-                macro_index: *macro_index,
-            }),
         }
         NonFlowLoadSet::new(keys, basis)
     }
@@ -207,12 +223,36 @@ impl NonFlowLoadSet {
     }
 }
 
+/// Why one non-flow operation terminally refused a request whose inputs
+/// ARE staged: the request itself is outside the operation's domain, so
+/// no additional observation can ever satisfy it. Distinct from
+/// [`NonFlowOutcome::NeedInputs`]: a terminal outcome is never retried
+/// with more inputs — only a restarted attempt under a CHANGED script
+/// analysis (a different macro inventory) revalidates the domain check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NonFlowTerminal {
+    /// The requested macro slot names no authored macro row of the
+    /// staged analysis.
+    MacroRowMissing { macro_index: usize },
+    /// The addressed macro row exists but is not the
+    /// [`AnalyzedMacroKind`] this operation projects.
+    WrongMacroKind {
+        macro_index: usize,
+        kind: AnalyzedMacroKind,
+    },
+    /// The operation is defined for the runtime-object form, and the
+    /// addressed row carries a macro type argument instead.
+    TypeBasedForm { macro_index: usize },
+}
+
 /// The outcome of one non-flow gateway attempt: the C2-typed retry
 /// envelope. Same closed `Complete`/`NeedInputs`/`Terminal` vocabulary
 /// as [`AttemptOutcome`](crate::resolver_core::AttemptOutcome), but the
 /// `NeedInputs` payload is a [`NonFlowLoadSet`] so the demand names the
 /// observation slots the kernel actually misses — never a resolver I/O
-/// identity the gateway cannot consume.
+/// identity the gateway cannot consume — and the `Terminal` payload is
+/// the C2 domain-failure vocabulary above, not the resolver's I/O
+/// envelope failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NonFlowOutcome {
     /// The operation completed against the staged observations.
@@ -220,8 +260,9 @@ pub enum NonFlowOutcome {
     /// The operation's observation slots are missing; the driver stages
     /// exactly the demanded set and re-enters the same route.
     NeedInputs(NonFlowLoadSet),
-    /// The kernel reported a terminal failure.
-    Terminal(AttemptFailure),
+    /// The kernel terminally refused the request: its inputs are staged
+    /// but the request is outside the operation's domain.
+    Terminal(NonFlowTerminal),
 }
 
 /// Which lane one authored macro's semantic demand serves — derived once,
@@ -387,8 +428,13 @@ impl ImportedComponentSurface {
     }
     /// The sibling-testing surface's qualified name
     /// (`import("specifier").Name`) for a cross-file reference; `None`
-    /// for a local or directly-imported one.
+    /// for a local or directly-imported one — a directly-imported bare
+    /// name is retained by the scope requirements, so the qualified
+    /// form would shadow a name that already resolves.
     pub fn qualified_testing_name(&self) -> Option<String> {
+        if self.bare_name_is_imported {
+            return None;
+        }
         self.import_specifier
             .as_ref()
             .map(|specifier| format!("import(\"{specifier}\").{}", self.type_reference))

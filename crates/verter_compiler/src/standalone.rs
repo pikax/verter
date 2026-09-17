@@ -521,7 +521,12 @@ pub(crate) fn admit_published_products(
 }
 
 /// The mapping product `artifact` demands, with its produced JSON — `None`
-/// when this product carries no map or its map string is empty.
+/// when this product carries no map. An `IdeCompanion`'s projection map
+/// is never optional (`PlannedArtifact::requires_source_projection_map`
+/// is always `true` for it), so a PRESENT-BUT-EMPTY map string stages as
+/// `Some("")` — distinct from no map at all, in both the staged view and
+/// the products digest. A runtime map, by contrast, is staged only when
+/// it carries content.
 fn artifact_map_json(artifact: &AssembledArtifact) -> Option<(ArtifactMapFamily, &str)> {
     match artifact.kind() {
         ProductKind::RuntimeClient | ProductKind::RuntimeServer => artifact
@@ -530,7 +535,6 @@ fn artifact_map_json(artifact: &AssembledArtifact) -> Option<(ArtifactMapFamily,
             .map(|json| (ArtifactMapFamily::RuntimeSourceMap, json)),
         ProductKind::IdeCompanion => artifact
             .source_projection_map()
-            .filter(|json| !json.is_empty())
             .map(|json| (ArtifactMapFamily::SourceProjection, json)),
         _ => None,
     }

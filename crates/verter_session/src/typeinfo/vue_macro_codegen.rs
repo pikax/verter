@@ -598,52 +598,66 @@ fn terminal_partial_vue_macro_codegen_output(
         });
     let mut runtime_entries = Vec::new();
     let mut tsc_entries = Vec::new();
-    if let Some(macros) = script_analysis
-        .as_ref()
-        .map(|analysis| analysis.macros.as_slice())
-    {
-        for (payload_index, mac) in macros.iter().enumerate() {
-            // Runtime-object `defineExpose` never has a runtime shape (see
-            // `is_codegen_macro`), so it advertises a TSC-only Partial row
-            // here, matching the compute path's own syntax_index so
-            // `apply_tsc_bundle`'s bundle-vs-advertised-entries accounting
-            // stays consistent across the cancelled/terminal-partial lane.
-            if mac.kind == AnalyzedMacroKind::DefineExpose
-                && !mac.is_type_based
-                && !mac.expose_fields.is_empty()
-            {
-                if demand.wants_tsc() {
-                    tsc_entries.push(MacroTscEntry {
-                        syntax_index: top_level_syntax_index(macros, payload_index),
-                        macro_index: macro_index(payload_index),
-                        outcome: MacroTscOutcome::Partial(MacroFailure::new(macro_reason, None)),
-                    });
+    // The terminal rows derive from the SAME sealed semantic plan the
+    // compute path drives (`CompileAttempt::project_vue_macro_semantics`
+    // over the staged analysis): lane policy, effective/syntax/macro
+    // indices, and row order are the kernel's decision, so this
+    // cancellation/shutdown lane never becomes a second owner of bundle
+    // row identity. Only each projected outcome is replaced with the
+    // terminal failure.
+    if let Some(script_analysis) = script_analysis.as_ref() {
+        let mut attempt = CompileAttempt::enter_semantic(owner_canonical);
+        attempt.stage_script_analysis(Arc::from(owner_canonical), Arc::clone(script_analysis));
+        if let Ok(plan) = attempt
+            .type_info()
+            .project_vue_macro_semantics(Arc::from(owner_canonical))
+        {
+            for row in plan.demands() {
+                let syntax_index = row.syntax_index();
+                let macro_index = macro_index(row.effective_index());
+                match row.lane() {
+                    // Runtime-object `defineExpose` never has a runtime
+                    // shape (the kernel's codegen-macro set excludes it),
+                    // so it advertises a TSC-only Partial row — matching
+                    // the compute path's own indices so
+                    // `apply_tsc_bundle`'s bundle-vs-advertised-entries
+                    // accounting stays consistent across the
+                    // cancelled/terminal-partial lane.
+                    MacroSemanticLane::ExposeRuntimeObject => {
+                        if demand.wants_tsc() {
+                            tsc_entries.push(MacroTscEntry {
+                                syntax_index,
+                                macro_index,
+                                outcome: MacroTscOutcome::Partial(MacroFailure::new(
+                                    macro_reason,
+                                    None,
+                                )),
+                            });
+                        }
+                    }
+                    MacroSemanticLane::CodegenPayload => {
+                        if demand.wants_runtime() {
+                            runtime_entries.push(MacroRuntimeEntry {
+                                syntax_index,
+                                macro_index,
+                                outcome: MacroRuntimeOutcome::Partial(MacroFailure::new(
+                                    macro_reason,
+                                    None,
+                                )),
+                            });
+                        }
+                        if demand.wants_tsc() {
+                            tsc_entries.push(MacroTscEntry {
+                                syntax_index,
+                                macro_index,
+                                outcome: MacroTscOutcome::Partial(MacroFailure::new(
+                                    macro_reason,
+                                    None,
+                                )),
+                            });
+                        }
+                    }
                 }
-                continue;
-            }
-            if mac.kind == AnalyzedMacroKind::WithDefaults || !mac.is_type_based {
-                continue;
-            }
-            let defaults_index = (mac.kind == AnalyzedMacroKind::DefineProps)
-                .then(|| containing_with_defaults_index(macros, payload_index))
-                .flatten();
-            let effective_index = defaults_index.unwrap_or(payload_index);
-            let syntax_index = top_level_syntax_index(macros, effective_index);
-            let macro_index = macro_index(effective_index);
-
-            if demand.wants_runtime() && is_codegen_macro(mac.kind) {
-                runtime_entries.push(MacroRuntimeEntry {
-                    syntax_index,
-                    macro_index,
-                    outcome: MacroRuntimeOutcome::Partial(MacroFailure::new(macro_reason, None)),
-                });
-            }
-            if demand.wants_tsc() && is_codegen_macro(mac.kind) {
-                tsc_entries.push(MacroTscEntry {
-                    syntax_index,
-                    macro_index,
-                    outcome: MacroTscOutcome::Partial(MacroFailure::new(macro_reason, None)),
-                });
             }
         }
     }
@@ -905,7 +919,7 @@ impl VerterHost {
                 continue;
             };
             // Runtime-object `defineExpose({ ... })`: never a runtime shape
-            // (see `is_codegen_macro`'s doc comment), no macro type argument
+            // (the kernel's codegen-macro set excludes it), no macro type argument
             // to resolve a payload from, so this is a dedicated TSC-only lane
             // rather than a fourth arm bolted onto the payload/runtime flow
             // Props/Emits/Model share. The type-argument form
@@ -1353,7 +1367,7 @@ impl VerterHost {
     /// the ONLY expose form this producer projects. The type-argument form
     /// (`defineExpose<T>()`) is spliced verbatim by the compiler from
     /// authored syntax and never reaches this producer (`DefineExpose` is
-    /// deliberately absent from [`is_codegen_macro`]: it has no runtime
+    /// deliberately absent from the kernel's codegen-macro set: it has no runtime
     /// `props`/`emits` shape, so it never enters the shared
     /// payload/runtime-projection flow those roles share).
     ///

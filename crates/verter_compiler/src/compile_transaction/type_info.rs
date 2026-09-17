@@ -29,9 +29,10 @@ use verter_semantic::type_info::{
 /// How a type-info route can fail. The proof id is the operation's
 /// stable missing-input identifier (`C2-GAP3-MISSING-*`); the keys are
 /// the kernel's own single derivation of what to load next: the exact
-/// observation slots the route found missing, staged one-to-one by this
-/// transaction's staging methods (`stage_script_analysis`,
-/// `stage_macro_surface`, `stage_model_value_type_shape`).
+/// unstaged observation slots the route found missing, staged one-to-one
+/// by this transaction's staging methods (`stage_script_analysis`,
+/// `stage_import_resolution`, `stage_macro_surface`,
+/// `stage_model_value_type_shape`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeInfoRouteFailure {
     /// The operation's inputs are not staged; the driver stages them and
