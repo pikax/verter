@@ -563,6 +563,10 @@ fn a_contentless_host_supplied_selected_template_map_is_omitted_not_chained() {
     let published = oxc_sourcemap::SourceMap::from_json_string(map_json)
         .expect("the published map is valid JSON");
     assert!(
+        published.get_sources().count() > 0 && published.get_tokens().next().is_some(),
+        "the demanded runtime map must retain source rows and mappings"
+    );
+    assert!(
         (0..published.get_sources().count()).all(|index| published
             .get_source_content(index as u32)
             .is_some_and(|content| !content.is_empty())),
