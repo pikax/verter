@@ -19,8 +19,27 @@ use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 
 const CANONICAL: &str = "/ws/call-resolve.ts";
 
+/// A standalone host whose call-site canonical is SERVABLE: every call key
+/// these tests mint points into `CANONICAL`, and a call's dependency proof
+/// roots on the call-site file, so the file must exist for a result to be
+/// admissible at all. Tests that need real declarations at `CANONICAL`
+/// upsert their own source over this stub.
 fn host() -> Arc<VerterHost> {
-    Arc::new(VerterHost::new_standalone(HostConfig::default()))
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_source(&host, CANONICAL, "export {};\n");
+    host
+}
+
+fn upsert_source(host: &VerterHost, canonical: &str, source: &str) {
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(source),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
 }
 
 pub(super) fn occurrence(name: &str, ordinal: u32) -> SignatureNodeOccurrence {
@@ -1113,37 +1132,60 @@ fn anonymous_candidate_pairs_with_its_own_instantiation() {
     );
 }
 
-/// A winner with NO authored origin is genuinely rootless: its result stays
-/// transaction-local and is NEVER admitted to the shared `ResolveCall`
-/// family memo, while a winner with a content-free authored occurrence IS.
-/// Mutation recipe: admit rootless results; the first assertion fails.
-/// Mutation recipe: suppress every admission; the authored control fails.
+/// Admission follows the DEPENDENCY PROOF of a call's inputs, never the
+/// winner's origin. A winner with no authored occurrence and a winner with
+/// a content-free authored occurrence over the SAME structural inputs are
+/// both admitted: the proof is the call-site file plus every file-scoped
+/// leaf reachable from the inputs, and both calls carry exactly that. The
+/// origin stays observable as PROVENANCE on the result.
+///
+/// Mutation recipe: refuse a winner on its `Rootless` origin and the first
+/// count drops to zero while the authored control stays admitted; refuse
+/// every admission and the authored control fails too.
 #[test]
-fn rootless_winner_is_transaction_local_but_authored_winner_admits() {
+fn admission_follows_the_dependency_proof_not_the_winners_origin() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let rootless = anonymous_signature(
+    let anonymous = anonymous_signature(
         &dispatch,
         vec![FunctionParam::synthetic(None, string, false, false)],
         Vec::new(),
         string,
     );
-    let rootless_callee = callable(&dispatch, vec![rootless], Vec::new());
-    let rootless_key = call_key(
+    let anonymous_callee = callable(&dispatch, vec![anonymous], Vec::new());
+    let anonymous_key = call_key(
         &dispatch,
-        rootless_callee,
+        anonymous_callee,
         CallKind::Call,
         None,
         vec![eager(string)],
     );
-    let _ = selected_query(&dispatch, rootless_key.clone());
+    let result = selected_query(&dispatch, anonymous_key.clone());
+    assert!(
+        matches!(
+            &result,
+            ResolvedCallResult::Selected {
+                selected: crate::semantic_query::SignatureCandidateOrigin::Rootless,
+                ..
+            }
+        ),
+        "the anonymous winner keeps its rootless PROVENANCE, got {result:?}"
+    );
+    let anonymous_query = SemanticQueryKey::ResolveCall(Box::new(anonymous_key));
     assert_eq!(
-        graph
-            .slot_candidate_count_for_tests(&SemanticQueryKey::ResolveCall(Box::new(rootless_key))),
-        0,
-        "a rootless winner never enters the shared cache"
+        graph.slot_candidate_count_for_tests(&anonymous_query),
+        1,
+        "a rootless-origin winner whose inputs are fully rooted IS admitted"
+    );
+    let roots = graph
+        .entry_self_root_canonicals_for_tests(&anonymous_query)
+        .expect("the admitted call carries its self-roots");
+    assert_eq!(
+        roots.as_ref(),
+        &[Arc::<str>::from(CANONICAL)],
+        "structural inputs contribute no file root; the proof is the call-site file"
     );
 
     let authored = signature(
@@ -1164,11 +1206,77 @@ fn rootless_winner_is_transaction_local_but_authored_winner_admits() {
         vec![eager(string)],
     );
     let _ = selected_query(&dispatch, authored_key.clone());
-    assert!(
+    assert_eq!(
         graph
-            .slot_candidate_count_for_tests(&SemanticQueryKey::ResolveCall(Box::new(authored_key)))
-            > 0,
-        "an authored-occurrence winner IS admitted"
+            .slot_candidate_count_for_tests(&SemanticQueryKey::ResolveCall(Box::new(authored_key))),
+        1,
+        "an authored-occurrence winner is admitted under the same proof"
+    );
+}
+
+/// A call whose dependency proof CANNOT be established stays
+/// transaction-local through the real admission path: the value still
+/// serves, the family memo refuses it. Two independent ways to lose the
+/// proof — the call SITE is not a servable file (no root for the file the
+/// key's program point names), and an input whose file leaves lie beyond
+/// the bounded root walk (a structural chain the walk cannot finish).
+///
+/// Mutation recipe: admit a call with an unservable call site, or treat a
+/// truncated root walk as complete, and the matching zero count fails.
+#[test]
+fn unrootable_call_is_served_but_never_admitted() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let graph = dispatch.graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let anonymous = anonymous_signature(
+        &dispatch,
+        vec![FunctionParam::synthetic(None, string, false, false)],
+        Vec::new(),
+        string,
+    );
+    let callee = callable(&dispatch, vec![anonymous], Vec::new());
+
+    // (1) The call site is not a servable file.
+    let mut unservable = call_key(&dispatch, callee, CallKind::Call, None, vec![eager(string)]);
+    unservable.point = ProgramPointId {
+        canonical_id: Arc::from("/ws/never-upserted.ts"),
+        offset: 0,
+    };
+    let result = selected_query(&dispatch, unservable.clone());
+    assert!(
+        matches!(result, ResolvedCallResult::Selected { .. }),
+        "the value still serves, got {result:?}"
+    );
+    assert_eq!(
+        graph.slot_candidate_count_for_tests(&SemanticQueryKey::ResolveCall(Box::new(unservable))),
+        0,
+        "a call whose site file has no root is refused warm"
+    );
+
+    // (2) An input whose file leaves lie beyond the bounded root walk: a
+    // Global structural chain deeper than the walk's cap as the declared
+    // return. The call selects (no parameter to relate), but the proof is
+    // incomplete, so the result is refused warm.
+    let mut deep = string;
+    for _ in 0..(super::build::SELF_ROOT_WALK_CAP + 8) {
+        deep = graph.intern_node(SemanticNodeData::Array {
+            element: deep,
+            readonly: false,
+        });
+    }
+    let deep_return = anonymous_signature(&dispatch, Vec::new(), Vec::new(), deep);
+    let deep_callee = callable(&dispatch, vec![deep_return], Vec::new());
+    let deep_key = call_key(&dispatch, deep_callee, CallKind::Call, None, Vec::new());
+    let result = selected_query(&dispatch, deep_key.clone());
+    assert!(
+        matches!(result, ResolvedCallResult::Selected { return_type, .. } if return_type == deep),
+        "the value still serves, got {result:?}"
+    );
+    assert_eq!(
+        graph.slot_candidate_count_for_tests(&SemanticQueryKey::ResolveCall(Box::new(deep_key))),
+        0,
+        "a call whose input roots cannot be fully walked is refused warm"
     );
 }
 
@@ -3395,14 +3503,19 @@ fn union_undecidable_arm_degrades_the_whole_call() {
     );
 }
 
-/// A ROOTLESS callee's overload set — and a union containing a rootless
-/// arm — stays transaction-local: the query resolves, `cache_suppress`
-/// propagates, and no family candidate is admitted for the overload-set
-/// OR the call query. Mutation recipe: root the rootless set on the
-/// demanding file (or drop the suppression) and the two zero-admission
-/// assertions fail.
+/// An anonymous callee's overload set — and a union mixing an anonymous
+/// arm with an authored one — is admitted on the DEPENDENCY PROOF of its
+/// inputs, not on the candidates' origins. Purely structural inputs (every
+/// node here is interned scope-less over primitives and literals) have a
+/// COMPLETE, empty file-root set: the value is a function of immutable
+/// interned nodes alone, exactly like a normalised union of primitives.
+/// The call through the union admits under the same rule, rooted on the
+/// call-site file.
+///
+/// Mutation recipe: refuse the set (or the call) on an anonymous
+/// candidate's missing occurrence and the matching count drops to zero.
 #[test]
-fn rootless_overload_set_and_call_stay_transaction_local() {
+fn anonymous_overload_set_and_call_admit_on_their_dependency_proof() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let graph = dispatch.graph();
@@ -3423,20 +3536,31 @@ fn rootless_overload_set_and_call_stay_transaction_local() {
         QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::OverloadSet(refs),
             ..
-        }) => assert_eq!(
-            refs.len(),
-            1,
-            "the rootless set still resolves in-transaction"
-        ),
-        other => panic!("the rootless overload set must resolve, got {other:?}"),
+        }) => {
+            assert_eq!(refs.len(), 1, "the anonymous set resolves");
+            assert_eq!(
+                refs[0].occurrence,
+                crate::semantic_query::SignatureCandidateOrigin::Rootless,
+                "the candidate keeps its rootless provenance"
+            );
+        }
+        other => panic!("the anonymous overload set must resolve, got {other:?}"),
     }
     assert_eq!(
         graph.slot_candidate_count_for_tests(&set_key),
+        1,
+        "an anonymous callee's overload set is admitted on its (structural) proof"
+    );
+    assert_eq!(
+        graph
+            .entry_self_root_canonicals_for_tests(&set_key)
+            .expect("the admitted set carries its self-roots")
+            .len(),
         0,
-        "a rootless callee's overload set admits no family candidate"
+        "scope-less structural inputs contribute no file root"
     );
 
-    // A union CONTAINING a rootless arm propagates the same suppression.
+    // A union mixing an anonymous arm with an authored one admits too.
     let two = graph.intern_node(SemanticNodeData::Literal(
         crate::semantic_query::LiteralValue::Number(2.0),
     ));
@@ -3461,25 +3585,341 @@ fn rootless_overload_set_and_call_stay_transaction_local() {
         QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::OverloadSet(refs),
             ..
-        }) => assert_eq!(refs.len(), 2, "the union still resolves in-transaction"),
+        }) => assert_eq!(refs.len(), 2, "the union resolves"),
         other => panic!("the union overload set must resolve, got {other:?}"),
     }
     assert_eq!(
         graph.slot_candidate_count_for_tests(&union_key),
-        0,
-        "a union containing a rootless arm admits no family candidate"
+        1,
+        "a union with an anonymous arm is admitted on its proof"
     );
 
-    // The CALL through the rootless union resolves and admits nothing.
+    // The CALL through the union admits, rooted on the call-site file.
     let call = call_key(&dispatch, union, CallKind::Call, None, Vec::new());
-    let result = selected(dispatch.execute_resolve_call(call.clone()));
+    let result = selected_query(&dispatch, call.clone());
     assert!(
         matches!(result, ResolvedCallResult::UnionSelected { .. }),
-        "the union call still resolves in-transaction, got {result:?}"
+        "the union call resolves, got {result:?}"
+    );
+    let call_query = SemanticQueryKey::ResolveCall(Box::new(call));
+    assert_eq!(
+        graph.slot_candidate_count_for_tests(&call_query),
+        1,
+        "the call through the union is admitted"
     );
     assert_eq!(
-        graph.slot_candidate_count_for_tests(&SemanticQueryKey::ResolveCall(Box::new(call))),
-        0,
-        "the call through a rootless union admits no family candidate"
+        graph
+            .entry_self_root_canonicals_for_tests(&call_query)
+            .expect("the admitted call carries its self-roots")
+            .as_ref(),
+        &[Arc::<str>::from(CANONICAL)],
+        "the call's proof is the call-site file"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Dependency-rooted admission over REAL declaring files: a call's inputs
+// are rooted on every file whose content they were lowered from, reached
+// transitively through scope-less composites, and the admitted entry
+// misses exactly when one of those files changes.
+// ---------------------------------------------------------------------------
+
+const INLINE_DECL_A: &str = "/ws/inline-decl-a.ts";
+const INLINE_DECL_B: &str = "/ws/inline-decl-b.ts";
+const UNRELATED_DECL: &str = "/ws/inline-unrelated.ts";
+
+/// `typeof <name>` declared at file scope in `canonical`.
+fn typeof_value_node(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    canonical: &str,
+    name: &str,
+) -> SemanticNodeId {
+    let key = dispatch.typeof_key_for(
+        crate::semantic_query::ValueRootKey {
+            scope: crate::semantic_query::ScopeId::file(
+                Arc::from(canonical),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
+            name: Arc::from(name),
+        },
+        crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    );
+    match dispatch.execute_type_node(key) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("`typeof {name}` in {canonical} must resolve, got {other:?}"),
+    }
+}
+
+/// The declaring canonical of a `File`-scoped node, `None` for a
+/// scope-less one.
+fn declaring_file(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<Arc<str>> {
+    match dispatch.graph().node_scope(node) {
+        Some(crate::semantic_query::NodeScopeId::File { canonical_id, .. }) => Some(canonical_id),
+        _ => None,
+    }
+}
+
+fn rooted_host() -> Arc<VerterHost> {
+    let host = host();
+    upsert_source(
+        &host,
+        INLINE_DECL_A,
+        "export declare const inlineA: (x: string) => 1;\n",
+    );
+    upsert_source(
+        &host,
+        INLINE_DECL_B,
+        "export declare const inlineB: (x: string) => 2;\n",
+    );
+    upsert_source(&host, UNRELATED_DECL, "export const unrelated = 1;\n");
+    host
+}
+
+/// A call on an INLINE callable — a function-typed declaration with no
+/// authored function occurrence — is admitted, rooted on the file that
+/// declares the callable AND the call-site file: cold, warm and replay
+/// agree; the warm read is a counted memo hit; an unrelated edit keeps the
+/// entry; an edit to the declaring file misses it while the entry is still
+/// physically present.
+///
+/// Mutation recipe: refuse the winner on its rootless origin and the
+/// admission count is zero; root the call on the site alone and the
+/// declaring-file root (and the declaring-file miss) disappear.
+#[test]
+fn inline_callable_call_admits_rooted_on_its_declaring_file() {
+    let host = rooted_host();
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let graph = dispatch.graph();
+
+    let callee = typeof_value_node(&dispatch, INLINE_DECL_A, "inlineA");
+    // Evidence for the shape under test: the lowered inline function type
+    // is a FILE-scoped node of its declaring file.
+    assert_eq!(
+        declaring_file(&dispatch, callee).as_deref(),
+        Some(INLINE_DECL_A),
+        "the inline callable is lowered in its declaring file's scope"
+    );
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let key = call_key(&dispatch, callee, CallKind::Call, None, vec![eager(string)]);
+    let query = SemanticQueryKey::ResolveCall(Box::new(key.clone()));
+
+    let hits_before = graph.stats_snapshot().hits;
+    let fresh = selected_query(&dispatch, key.clone());
+    let ResolvedCallResult::Selected {
+        selected,
+        return_type,
+        ..
+    } = &fresh
+    else {
+        panic!("the inline call selects its one signature, got {fresh:?}");
+    };
+    assert_eq!(
+        *selected,
+        crate::semantic_query::SignatureCandidateOrigin::Rootless,
+        "an inline callable carries no authored occurrence — provenance only"
+    );
+    assert_eq!(
+        host.project_node_to_type_expr_for_test(*return_type),
+        Some(verter_type_expr::TypeExpr::number_literal(1.0)),
+    );
+    assert_eq!(
+        graph.slot_candidate_count_for_tests(&query),
+        1,
+        "the inline-callable call is admitted"
+    );
+    let roots = graph
+        .entry_self_root_canonicals_for_tests(&query)
+        .expect("the admitted call carries its self-roots");
+    assert!(
+        roots.iter().any(|root| root.as_ref() == INLINE_DECL_A),
+        "the proof names the declaring file, got {roots:?}"
+    );
+    assert!(
+        roots.iter().any(|root| root.as_ref() == CANONICAL),
+        "the proof names the call-site file, got {roots:?}"
+    );
+    assert!(
+        !roots.iter().any(|root| root.as_ref() == UNRELATED_DECL),
+        "an unrelated file never enters the proof, got {roots:?}"
+    );
+
+    // Warm: the same dispatch re-reads the admitted entry.
+    let warm = selected_query(&dispatch, key.clone());
+    assert_eq!(warm, fresh, "warm == fresh");
+    assert_eq!(
+        graph.stats_snapshot().hits,
+        hits_before + 1,
+        "exactly one counted warm hit"
+    );
+
+    // An unrelated edit keeps the entry valid; a replay on a fresh view
+    // serves it warm again.
+    upsert_source(&host, UNRELATED_DECL, "export const unrelated = 2;\n");
+    assert!(
+        graph.get_validated(&query, host.as_ref()).is_some(),
+        "an unrelated edit keeps the entry"
+    );
+    let replay = {
+        let store_view = host.resolver_store_view_read().into_owned_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        selected_query(&dispatch, key.clone())
+    };
+    assert_eq!(replay, fresh, "replay == fresh");
+    assert_eq!(
+        graph.stats_snapshot().hits,
+        hits_before + 2,
+        "the replay is the second counted warm hit"
+    );
+
+    // An edit to the DECLARING file misses the warm read while the entry
+    // is still physically present.
+    upsert_source(
+        &host,
+        INLINE_DECL_A,
+        "export declare const inlineA: (x: string) => 3;\n",
+    );
+    assert!(
+        graph.get_unvalidated(&query).is_some(),
+        "the entry survives physically"
+    );
+    assert!(
+        graph.get_validated(&query, host.as_ref()).is_none(),
+        "the declaring-file edit misses the warm read"
+    );
+}
+
+/// A UNION callee interned as a scope-less canonical composite over two
+/// inline callables from DIFFERENT files reaches its file leaves
+/// transitively: the `UnionSelected` result is admitted with both
+/// declaring files in its proof, and an edit to either arm's file misses
+/// it.
+///
+/// Mutation recipe: refuse the union on a rootless arm and the count is
+/// zero; read only the callee node's own scope and neither declaring file
+/// reaches the proof (the second arm's edit then keeps a stale entry warm).
+#[test]
+fn global_union_callee_call_admits_rooted_on_every_arm_file() {
+    let host = rooted_host();
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let graph = dispatch.graph();
+
+    let arm_a = typeof_value_node(&dispatch, INLINE_DECL_A, "inlineA");
+    let arm_b = typeof_value_node(&dispatch, INLINE_DECL_B, "inlineB");
+    let callee = dispatch.intern_normalized_union_or_intersection(&[arm_a, arm_b], true);
+    // Evidence for the shape under test: the canonical composite is
+    // scope-less; only its arms carry file scopes.
+    assert_eq!(
+        graph.node_scope(callee),
+        Some(crate::semantic_query::NodeScopeId::Global),
+        "a multi-arm canonical union interns scope-less"
+    );
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let key = call_key(&dispatch, callee, CallKind::Call, None, vec![eager(string)]);
+    let query = SemanticQueryKey::ResolveCall(Box::new(key.clone()));
+
+    let fresh = selected_query(&dispatch, key.clone());
+    assert!(
+        matches!(&fresh, ResolvedCallResult::UnionSelected { selections, .. } if selections.len() == 2),
+        "every arm selects, got {fresh:?}"
+    );
+    assert_eq!(
+        graph.slot_candidate_count_for_tests(&query),
+        1,
+        "the union call is admitted"
+    );
+    let roots = graph
+        .entry_self_root_canonicals_for_tests(&query)
+        .expect("the admitted call carries its self-roots");
+    for expected in [INLINE_DECL_A, INLINE_DECL_B, CANONICAL] {
+        assert!(
+            roots.iter().any(|root| root.as_ref() == expected),
+            "the proof names {expected}, got {roots:?}"
+        );
+    }
+    assert_eq!(
+        selected_query(&dispatch, key.clone()),
+        fresh,
+        "warm == fresh"
+    );
+
+    upsert_source(&host, UNRELATED_DECL, "export const unrelated = 2;\n");
+    assert!(
+        graph.get_validated(&query, host.as_ref()).is_some(),
+        "an unrelated edit keeps the entry"
+    );
+    upsert_source(
+        &host,
+        INLINE_DECL_B,
+        "export declare const inlineB: (x: string) => 3;\n",
+    );
+    assert!(graph.get_unvalidated(&query).is_some());
+    assert!(
+        graph.get_validated(&query, host.as_ref()).is_none(),
+        "an edit to the second arm's declaring file misses the warm read"
+    );
+}
+
+/// The overload set of a scope-less union over inline callables from two
+/// files is admitted with BOTH files in its proof — the producer roots on
+/// the transitive file leaves of its inputs, never on a candidate's
+/// occurrence.
+#[test]
+fn overload_set_of_global_union_admits_rooted_on_every_arm_file() {
+    let host = rooted_host();
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let graph = dispatch.graph();
+
+    let arm_a = typeof_value_node(&dispatch, INLINE_DECL_A, "inlineA");
+    let arm_b = typeof_value_node(&dispatch, INLINE_DECL_B, "inlineB");
+    let callee = dispatch.intern_normalized_union_or_intersection(&[arm_a, arm_b], true);
+    let env = host.host_view_env_hashes_for(CANONICAL);
+    let set_key = SemanticQueryKey::ResolveOverloadSet {
+        callee,
+        type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: crate::semantic_query::OverloadSetContext {
+            resolve_env_hash: env.resolve_env_hash,
+        },
+    };
+    match dispatch.execute(set_key.clone()) {
+        QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::OverloadSet(refs),
+            ..
+        }) => assert_eq!(refs.len(), 2, "both arms contribute a candidate"),
+        other => panic!("the union overload set must resolve, got {other:?}"),
+    }
+    assert_eq!(graph.slot_candidate_count_for_tests(&set_key), 1);
+    let roots = graph
+        .entry_self_root_canonicals_for_tests(&set_key)
+        .expect("the admitted set carries its self-roots");
+    for expected in [INLINE_DECL_A, INLINE_DECL_B] {
+        assert!(
+            roots.iter().any(|root| root.as_ref() == expected),
+            "the proof names {expected}, got {roots:?}"
+        );
+    }
+    upsert_source(
+        &host,
+        INLINE_DECL_A,
+        "export declare const inlineA: (x: string) => 3;\n",
+    );
+    assert!(
+        graph.get_validated(&set_key, host.as_ref()).is_none(),
+        "an edit to an arm's declaring file misses the warm read"
     );
 }

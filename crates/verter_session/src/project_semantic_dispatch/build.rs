@@ -27,6 +27,13 @@ use crate::semantic_query::{
     SemanticNodeId, SemanticQueryKey, SurfaceEntry, SurfaceMember, SurfaceView, ValueRootKey,
 };
 
+/// The node budget of one transitive self-root walk
+/// ([`ProjectSemanticDispatch::transitive_self_roots_from_nodes`]). A walk
+/// that exceeds it has NOT established its root set and the result it
+/// roots is refused warm — the cap bounds the work, it never truncates the
+/// proof silently.
+pub(super) const SELF_ROOT_WALK_CAP: usize = 4096;
+
 /// The effective prepared VALUE-decl identity resolved by
 /// [`ProjectSemanticDispatch::effective_prepared_value_decl`]: the declaring
 /// `(canonical, owner, symbol)` (post value-export-target fallback) plus the
@@ -374,6 +381,87 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         roots
+    }
+
+    /// Collect the observed self-roots of a set of input nodes
+    /// TRANSITIVELY: like [`Self::observed_self_roots_from_nodes`], but a
+    /// `Global`-scoped input is walked down to the `File`-scoped leaves it
+    /// is composed of, so a scope-less composite (a canonical union /
+    /// intersection over file-derived arms, a structural object shell, an
+    /// anonymous signature over file-derived parameter types) roots on
+    /// every file its identity actually depends on.
+    ///
+    /// The walk is bounded, deterministic and deduplicated: depth-first in
+    /// child order, each node visited once, at most
+    /// [`SELF_ROOT_WALK_CAP`] nodes. A `File`-scoped node contributes its
+    /// `(canonical, observed_whole_hash)` and is NOT descended — its scope
+    /// already pins the content version everything lowered under it was
+    /// observed at, and a child lowered from another file carries its own
+    /// scope in its own interned identity. Structural leaves (primitives,
+    /// literals, references) contribute nothing.
+    ///
+    /// Returns `Err` when the root set could NOT be established: the walk
+    /// exceeded its cap, reached a node with no payload, or reached a
+    /// scope-less payload whose children are sealed and unenumerable. An
+    /// incomplete root set is never a partial answer — the caller routes
+    /// the result `ReturnOnly` under the incomplete-self-rooting rule.
+    ///
+    /// Like its non-transitive sibling this never re-reads current
+    /// content; it only projects the identities the input nodes already
+    /// carry.
+    pub(super) fn transitive_self_roots_from_nodes(
+        &self,
+        nodes: impl IntoIterator<Item = SemanticNodeId>,
+    ) -> Result<
+        Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+        crate::cache_runtime::NonAdmissionReason,
+    > {
+        let graph = self.graph();
+        let mut roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> = Vec::new();
+        let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        // Depth-first from the LAST pushed node; inputs are pushed in
+        // reverse so the first input is walked first.
+        let mut stack: Vec<SemanticNodeId> = nodes.into_iter().collect();
+        stack.reverse();
+        let mut children: Vec<SemanticNodeId> = Vec::new();
+        while let Some(node) = stack.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            if visited.len() > SELF_ROOT_WALK_CAP {
+                return Err(crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance);
+            }
+            match graph.node_scope(node) {
+                Some(NodeScopeId::File {
+                    canonical_id,
+                    whole_hash,
+                    ..
+                }) => {
+                    if !roots
+                        .iter()
+                        .any(|(c, h)| *c == canonical_id && *h == whole_hash)
+                    {
+                        roots.push((canonical_id, whole_hash));
+                    }
+                }
+                Some(NodeScopeId::Global) => {
+                    let Some(data) = graph.node_data(node) else {
+                        return Err(crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance);
+                    };
+                    children.clear();
+                    if data.for_each_child(|child| children.push(child))
+                        != crate::semantic_query::ChildWalk::Enumerated
+                    {
+                        return Err(crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance);
+                    }
+                    stack.extend(children.iter().rev().copied());
+                }
+                None => {
+                    return Err(crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance);
+                }
+            }
+        }
+        Ok(roots)
     }
 
     /// Resolve a top-level declaration lookup via the host's shallow state.
