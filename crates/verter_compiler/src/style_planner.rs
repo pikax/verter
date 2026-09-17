@@ -3993,6 +3993,7 @@ impl ExternalStyleContinuation {
                 generated_content,
                 input_basis,
                 sources,
+                authored_json: None,
                 segments: anchors,
             });
         }

@@ -129,6 +129,7 @@ fn mapped_artifact(unit: &SourceUnit) -> CompileArtifact {
         generated_content: ContentId::from_content_bytes(b"hello"),
         input_basis: a.provenance.input_basis.clone(),
         sources: BTreeSet::from([unit.id().clone()]),
+        authored_json: None,
         segments: vec![ArtifactMapSegment {
             generated: 0..5,
             source_unit: unit.id().clone(),
@@ -172,6 +173,7 @@ fn terminal_order_is_independent_of_artifact_source_map_and_relation_insertion()
         generated_content: ContentId::from_content_bytes(b"hello"),
         input_basis: runtime.provenance.input_basis.clone(),
         sources: BTreeSet::from([script.unit.id().clone()]),
+        authored_json: None,
         segments: vec![],
     });
     let mut runtime_projection = runtime.maps[0].clone();

@@ -34,6 +34,11 @@ verter_parser = { path = "../verter_parser" }
 verter_language = { path = "../verter_language" }
 verter_css_syntax = { path = "../verter_css_syntax" }
 verter_no_typeexpr = { workspace = true }
+# Dependency-neutral macro-codegen DTO vocabulary. This crate is an explicit
+# two-sided firewall (see its Cargo.toml): the semantic kernel's C2 non-flow
+# payloads (anchors, runtime rows, model shapes) may use it without either
+# side pulling in the other.
+verter_macro_dto = { workspace = true }
 verter_type_expr = { workspace = true }
 verter_type_expr_oxc = { workspace = true }
 rustc-hash = { workspace = true }
@@ -59,6 +64,10 @@ web-time = "1.1"
 
 [dev-dependencies]
 static_assertions = "1.1.0"
+# The C2 privacy-rail UI harness (tests/ui/type_info_privacy.rs) compiles its
+# fixtures through trybuild, mirroring the workspace's compile-contract
+# runner; it is a dev-only edge and never enters the production closure.
+trybuild = "1.0"
 verter_test_support = { path = "../verter_test_support" }
 # Activates the `test-support` feature on `verter_css_syntax` for
 # `cargo test --package verter_semantic` (and example/bench) builds only —
@@ -69,3 +78,9 @@ verter_test_support = { path = "../verter_test_support" }
 # production builds compile `parse_inline_style_declarations` without the
 # counter TLS or its increment.
 verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
+
+# C2 privacy-rail UI harness: not auto-discovered (lives under tests/ui/),
+# declared explicitly so nextest runs it like any other integration test.
+[[test]]
+name = "type_info_privacy"
+path = "tests/ui/type_info_privacy.rs"

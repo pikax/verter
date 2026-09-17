@@ -1214,6 +1214,7 @@ pub(super) fn emit_type_is_cross_sfc_carrier(
 pub(super) fn cross_file_namespace_import_type(
     ctx: &dyn ResolverContext,
     dispatch: &ProjectSemanticDispatch<'_>,
+    attempt: &mut verter_compiler::compile_transaction::CompileAttempt<'_>,
     node: crate::semantic_query::SemanticNodeId,
     owner_canonical: &str,
     inventory: &TscScopeInventory<'_>,
@@ -1223,33 +1224,37 @@ pub(super) fn cross_file_namespace_import_type(
         return None;
     };
     let canonical = identity.canonical_id.as_ref();
-    if canonical == owner_canonical {
-        return None;
-    }
     let decl_name = identity.decl_name.as_ref();
-    // A directly-imported named binding is retained by the scope requirements,
-    // so its bare name already resolves — leave those to the display path.
-    let bare_name_is_imported = inventory
-        .analysis
-        .imports
-        .iter()
-        .flat_map(|import| import.bindings.iter())
-        .any(|binding| binding.name == decl_name);
-    if bare_name_is_imported {
+    // The authored specifiers that resolve through the shared host import
+    // resolver are staged as observations once (the analyzer snapshot's
+    // `resolved_canonical_id` is not populated on this path); the
+    // matching and the qualified-name policy are the kernel's decision
+    // (`ResolveImportedComponentSurface`), not this walk's.
+    for import in inventory.analysis.imports.iter() {
+        if let Some(resolved) =
+            ctx.resolve_type_dependency_canonical(owner_canonical, &import.source)
+        {
+            attempt.stage_import_resolution(
+                std::sync::Arc::from(owner_canonical),
+                verter_semantic::type_info::ImportedComponentResolution {
+                    specifier: std::sync::Arc::from(import.source.as_str()),
+                    resolved_canonical: std::sync::Arc::from(resolved.as_str()),
+                },
+            );
+        }
+    }
+    let surface = attempt
+        .type_info()
+        .resolve_imported_component_surface(
+            std::sync::Arc::from(owner_canonical),
+            std::sync::Arc::from(decl_name),
+            Some(std::sync::Arc::from(canonical)),
+        )
+        .ok()?;
+    if surface.bare_name_is_imported() {
         return None;
     }
-    // The authored specifier that resolves to the referenced file — reused
-    // verbatim so the `import(...)` in the sibling testing surface resolves the
-    // same target the component's own import does. Resolved through the shared
-    // host import resolver (the analyzer snapshot's `resolved_canonical_id` is
-    // not populated on this path).
-    let specifier = inventory.analysis.imports.iter().find_map(|import| {
-        (ctx.resolve_type_dependency_canonical(owner_canonical, &import.source)
-            .as_deref()
-            == Some(canonical))
-        .then_some(import.source.as_str())
-    })?;
-    Some(format!("import(\"{specifier}\").{decl_name}"))
+    surface.qualified_testing_name()
 }
 
 #[allow(clippy::too_many_arguments)]

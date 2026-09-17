@@ -48,6 +48,7 @@ pub mod assembly;
 pub mod compile;
 
 pub mod compile_request;
+pub mod compile_transaction;
 
 pub mod framework_common;
 

@@ -1243,6 +1243,7 @@ pub fn vue_main_compile_artifacts(
                 generated_content: ContentId::from_content_bytes(code.as_bytes()),
                 input_basis,
                 sources: authored_ids,
+                authored_json: Some(std::sync::Arc::from(map_json)),
                 segments: runtime_map_segments(map_json, code.as_ref(), &source_units, &authored),
             });
         }

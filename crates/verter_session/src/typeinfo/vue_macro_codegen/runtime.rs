@@ -433,67 +433,6 @@ fn runtime_constructor(kind: BroadRuntimeKind) -> RuntimeConstructor {
     }
 }
 
-pub(super) fn emit_rows(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    surface: &TypeInfoSurface,
-    mac: &AnalyzedMacro,
-    payload_index: usize,
-    effective_index: usize,
-    runtime_context: ProjectionReductionContext,
-) -> Vec<RuntimeEmit> {
-    let mut rows = Vec::new();
-
-    // The filtered semantic surface is the sole event-membership authority.
-    // `mac.emit_fields` is parser-owned anchor metadata and can include fields
-    // reached through producer-addressed `@vue-ignore` heritage; seeding rows
-    // from it would reintroduce an arm the runtime surface deliberately
-    // removed. Use it only through `authored_emit_anchor` after a semantic
-    // call-signature/member has admitted the event.
-    let context = ProjectionReductionContext::published(ProjectionMode::Navigate)
-        .with_orthogonal_axes_from(runtime_context);
-    for signature in surface.call_signatures.iter() {
-        // The runtime `emits: [...]` array is DERIVED from the resolved value,
-        // so an INCOMPLETE name enumeration records its typed reason before
-        // the skip — the projection is then partial, never an option array
-        // that silently dropped authored events. A complete no-name signature
-        // (`NoSurface`) genuinely contributes no event.
-        let names = match CallableNodeView::new(dispatch, signature.node).event_names(context) {
-            crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(names)
-            | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(names) => {
-                names.into_inner()
-            }
-            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => continue,
-            crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
-                let _ = incomplete.into_recorded_partial();
-                continue;
-            }
-        };
-        for name in names {
-            push_emit(
-                &mut rows,
-                name.as_ref(),
-                authored_emit_anchor(mac, payload_index, effective_index, name.as_ref()),
-            );
-        }
-    }
-    for member in surface
-        .members
-        .iter()
-        .filter(|member| member.visibility.is_public())
-    {
-        let Some(name) = member.published_name() else {
-            continue;
-        };
-        push_emit(
-            &mut rows,
-            name.as_ref(),
-            authored_emit_anchor(mac, payload_index, effective_index, name.as_ref()),
-        );
-    }
-    rows.sort_by_key(|row| authored_emit_order(row.anchor));
-    rows
-}
-
 /// Decide only resolved, concrete member shapes. Open/opaque member payloads
 /// retain the existing conservative emit-name projection, while concrete
 /// scalar/object/array payloads cannot satisfy Vue's tuple/function payload
@@ -540,16 +479,10 @@ pub(super) fn authored_emit_order(anchor: MacroAnchor) -> (u8, u32) {
     }
 }
 
-fn push_emit(rows: &mut Vec<RuntimeEmit>, name: &str, anchor: MacroAnchor) {
-    if rows.iter().any(|row| row.name == name) {
-        return;
-    }
-    rows.push(RuntimeEmit {
-        name: name.to_owned(),
-        anchor,
-    });
-}
-
+/// Anchor for one `defineProps` member of the TSC splice lane — the
+/// runtime lane's twin policy now lives in the semantic kernel
+/// (`type_info::non_flow::prop_member_anchor`); the TSC authored-splice
+/// lane keeps this copy until C3 closes it.
 pub(super) fn member_anchor(mac: &AnalyzedMacro, payload_index: usize, name: &str) -> MacroAnchor {
     let Some(ordinal) = mac
         .prop_fields
@@ -561,43 +494,6 @@ pub(super) fn member_anchor(mac: &AnalyzedMacro, payload_index: usize, name: &st
             macro_index: macro_index(payload_index),
         };
     };
-    MacroAnchor::Authored {
-        macro_index: macro_index(payload_index),
-        member_ordinal: AuthoredMemberOrdinal::new(member_ordinal(ordinal)),
-    }
-}
-
-/// Anchor for one runtime-object `defineExpose({ ... })` member, keyed by
-/// its authored source-order position among the macro's own `expose_fields`
-/// — the same authored-member-ordinal scheme [`member_anchor`] uses for
-/// `defineProps`.
-///
-/// Takes the field's own POSITION in `expose_fields`, not its name: two
-/// authored members may legally share a name (`defineExpose({ dup: a, dup: b
-/// })`), and a name-based re-scan would resolve both to the position of the
-/// FIRST match, collapsing distinct members onto one anchor.
-pub(super) fn expose_member_anchor(
-    mac: &AnalyzedMacro,
-    payload_index: usize,
-    field_index: usize,
-) -> MacroAnchor {
-    let is_owned = mac.expose_fields[field_index]
-        .span
-        .is_some_and(|span| span_is_owned_by_macro(span, mac.span));
-    if !is_owned {
-        return MacroAnchor::MacroArgument {
-            macro_index: macro_index(payload_index),
-        };
-    }
-    let ordinal = mac.expose_fields[..=field_index]
-        .iter()
-        .filter(|field| {
-            field
-                .span
-                .is_some_and(|span| span_is_owned_by_macro(span, mac.span))
-        })
-        .count()
-        - 1;
     MacroAnchor::Authored {
         macro_index: macro_index(payload_index),
         member_ordinal: AuthoredMemberOrdinal::new(member_ordinal(ordinal)),
@@ -628,18 +524,6 @@ pub(super) fn authored_emit_anchor(
 
 fn span_is_owned_by_macro(member: verter_span::Span, mac: verter_span::Span) -> bool {
     member.start >= mac.start && member.end <= mac.end
-}
-
-pub(super) fn defaults_association(
-    payload_index: usize,
-    defaults_index: Option<usize>,
-) -> PropsDefaultsAssociation {
-    defaults_index.map_or(PropsDefaultsAssociation::None, |index| {
-        PropsDefaultsAssociation::WithDefaults {
-            payload_macro_index: macro_index(payload_index),
-            defaults_macro_index: macro_index(index),
-        }
-    })
 }
 
 pub(super) fn containing_with_defaults_index(
