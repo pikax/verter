@@ -10670,6 +10670,7 @@ mod prepared_identity_bijection {
                     type_args: nodes(&[]),
                     context: OverloadSetContext {
                         resolve_env_hash: h16(0),
+                        ..Default::default()
                     },
                 },
                 SemanticQueryKey::ResolveOverloadSet {
@@ -10677,6 +10678,7 @@ mod prepared_identity_bijection {
                     type_args: nodes(&[]),
                     context: OverloadSetContext {
                         resolve_env_hash: h16(0),
+                        ..Default::default()
                     },
                 },
             ),

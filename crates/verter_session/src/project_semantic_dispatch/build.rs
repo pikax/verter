@@ -2005,10 +2005,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// node — the callee AND each explicit type argument (the node-keyed
     /// rooting rule `NormalizeUnion` uses; the produced value semantically
     /// depends on the arg nodes, so they root too) — plus, for a union,
-    /// each settled arm node's origin. A ROOTLESS group (any candidate
-    /// with no authored occurrence) is `cache_suppress`ed: it resolves
-    /// in-transaction but admits no family candidate and no reverse
-    /// metadata.
+    /// each settled arm node's origin, collected transitively so a
+    /// scope-less composite roots on every file leaf. An incomplete or
+    /// empty self-root proof is `cache_suppress`ed: origin is provenance,
+    /// never the admission oracle.
     pub(super) fn build_resolve_overload_set(
         &self,
         callee: SemanticNodeId,
@@ -2064,8 +2064,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         if arms.len() > 1 {
             let mut arm_group_nodes = Vec::with_capacity(arms.len());
-            let mut arm_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> = Vec::new();
-            let mut any_rootless_arm = false;
             for arm in arms {
                 let arm = self.resolve_signature_source_carrier(
                     arm,
@@ -2085,41 +2083,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         None => return miss(),
                     }
                 };
-                if self.signature_group_is_rootless(&call_sigs, &construct_sigs) {
-                    any_rootless_arm = true;
-                }
-                let roots = self.observed_self_roots_from_nodes(std::iter::once(arm_node));
-                for root in roots {
-                    if !arm_roots.iter().any(|(c, h)| *c == root.0 && *h == root.1) {
-                        arm_roots.push(root);
-                    }
-                }
                 arm_group_nodes.push(arm_node);
             }
             // Canonical construction: the per-arm overload-set union of a
             // union callee (arm order carries no overload precedence).
             let result_node = self.intern_normalized_union_or_intersection(&arm_group_nodes, true);
-            let mut observed_self_roots = self.observed_self_roots_from_nodes(
-                std::iter::once(callee).chain(type_args.iter().copied()),
-            );
-            for root in arm_roots {
-                if !observed_self_roots
-                    .iter()
-                    .any(|(c, h)| *c == root.0 && *h == root.1)
-                {
-                    observed_self_roots.push(root);
-                }
-            }
-            // A rootless arm supplies no durable reuse ownership: rooting
-            // the composite on the demanding file would be false
-            // provenance, so the result stays transaction-local.
+            let root_nodes = std::iter::once(callee)
+                .chain(type_args.iter().copied())
+                .chain(arm_group_nodes.iter().copied());
+            let (observed_self_roots, proof_complete) =
+                match self.transitive_self_roots_from_nodes(root_nodes) {
+                    Ok(roots) => (roots, true),
+                    Err(_) => (Vec::new(), false),
+                };
             let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
                 crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
                     QueryResult::Value(result_node),
                     self.project_generation_signature(),
                 ))
                 .with_observed_self_roots(observed_self_roots);
-            output.cache_suppress |= any_rootless_arm;
+            output.cache_suppress |= !proof_complete;
             return output;
         }
         let Some(single) = arms.first().copied() else {
@@ -2139,42 +2122,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         };
 
-        let observed_self_roots = self.observed_self_roots_from_nodes(
-            std::iter::once(callee).chain(type_args.iter().copied()),
-        );
-        // A ROOTLESS callee (a parameter / local / inline callable with no
-        // authored occurrence) supplies no durable reuse ownership: its
-        // set stays transaction-local (no family candidate, no reverse
-        // metadata) while the value still serves this transaction —
-        // rooting it on the demanding file would be false provenance.
-        // Authored callees stay warm-cacheable.
-        let rootless = self.signature_group_is_rootless(&call_sigs, &construct_sigs);
+        let (observed_self_roots, proof_complete) = match self.transitive_self_roots_from_nodes(
+            std::iter::once(callee)
+                .chain(type_args.iter().copied())
+                .chain(std::iter::once(result_node)),
+        ) {
+            Ok(roots) => (roots, true),
+            Err(_) => (Vec::new(), false),
+        };
         let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
             crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
                 QueryResult::Value(result_node),
                 self.project_generation_signature(),
             ))
             .with_observed_self_roots(observed_self_roots);
-        output.cache_suppress |= rootless;
+        output.cache_suppress |= !proof_complete;
         output
-    }
-
-    /// Whether any candidate of an ordered signature group has NO authored
-    /// occurrence — a parameter / local / inline callable position. Such a
-    /// group is genuinely rootless: no stable identity owns it.
-    fn signature_group_is_rootless(
-        &self,
-        call_sigs: &[SemanticNodeId],
-        construct_sigs: &[SemanticNodeId],
-    ) -> bool {
-        call_sigs.iter().chain(construct_sigs.iter()).any(|sig| {
-            match self.graph().node_data(*sig).as_deref() {
-                Some(SemanticNodeData::Signature { occurrence, .. }) => occurrence.is_none(),
-                // The sealed carrier's occurrence is always authored.
-                Some(SemanticNodeData::DeferredCallable(_)) => false,
-                _ => true,
-            }
-        })
     }
 
     /// Unwrap alias chains to the signature-group-bearing node and read its

@@ -408,16 +408,16 @@ pub(super) enum FamilyKey {
     /// differing in any relation-identity axis map to distinct family
     /// identities.
     ///
-    /// The `RelateMemoKey` payload is BOXED: a Rust
-    /// enum is sized to its largest variant, and `RelateMemoKey` is 144B, so
-    /// embedding it BY VALUE would inflate EVERY entry key of the hot
-    /// single-node `FamilyKey → FamilySlots` keyspace. `Box<RelateMemoKey>`
-    /// is 8 bytes and delegates `Hash`/`Eq`/`Clone` to the inner key, so the
-    /// family IDENTITY (and `variant_label`) is UNCHANGED — two `Relate`
-    /// keys differing in any relation-identity axis still map to distinct
+    /// The `RelateMemoKey` payload is INTERNED: a Rust enum is sized to
+    /// its largest variant, and `RelateMemoKey` is 144B, so embedding it
+    /// BY VALUE would inflate EVERY entry key of the hot single-node
+    /// `FamilyKey → FamilySlots` keyspace. The interned handle is 16
+    /// bytes (id + `Arc`) and `Hash`/`Eq` by intern id, so the family
+    /// IDENTITY (and `variant_label`) is UNCHANGED — two `Relate` keys
+    /// differing in any relation-identity axis still map to distinct
     /// family identities.
     Relate {
-        key: Box<crate::semantic_query::RelateMemoKey>,
+        key: super::family_intern::InternedRelateKey,
     },
     /// Mode-erased `ApparentType` identity. `ApparentType` has no slot, so
     /// its R21 env dims (`type_env_hash` = `T`, `lib_env_hash` = `L`,
@@ -604,7 +604,7 @@ pub(super) enum FamilyKey {
     /// BOXED (mirroring [`Self::Relate`]): the key composite would
     /// inflate EVERY entry of the hot keyspace.
     ResolveCall {
-        key: Box<crate::semantic_query::ResolveCallKey>,
+        key: super::family_intern::InternedResolveCallKey,
     },
 }
 
@@ -1801,15 +1801,17 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             context,
         } => (
             FamilyKey::Relate {
-                key: Box::new(crate::semantic_query::RelateMemoKey {
-                    source: *source,
-                    target: *target,
-                    relation: *relation,
-                    policy: *policy,
-                    source_freshness: *source_freshness,
-                    inference_context: inference_context.clone(),
-                    context: *context,
-                }),
+                key: super::family_intern::InternedRelateKey::intern(
+                    crate::semantic_query::RelateMemoKey {
+                        source: *source,
+                        target: *target,
+                        relation: *relation,
+                        policy: *policy,
+                        source_freshness: *source_freshness,
+                        inference_context: inference_context.clone(),
+                        context: *context,
+                    },
+                ),
             },
             ModeSlot::Single,
         ),
@@ -2021,7 +2023,9 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         // explicit type args + sealed-empty flow axis + env/substitution
         // context), so the family uses the `Single` slot.
         SemanticQueryKey::ResolveCall(key) => (
-            FamilyKey::ResolveCall { key: key.clone() },
+            FamilyKey::ResolveCall {
+                key: super::family_intern::InternedResolveCallKey::intern((**key).clone()),
+            },
             ModeSlot::Single,
         ),
         // ClassifyTruthinessDomain — LIVE producer with a mode-erased

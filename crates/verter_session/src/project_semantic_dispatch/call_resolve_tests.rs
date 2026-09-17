@@ -3530,6 +3530,7 @@ fn anonymous_overload_set_and_call_admit_on_their_dependency_proof() {
         type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: crate::semantic_query::OverloadSetContext {
             resolve_env_hash: env.resolve_env_hash,
+            ..Default::default()
         },
     };
     match dispatch.execute(set_key.clone()) {
@@ -3579,6 +3580,7 @@ fn anonymous_overload_set_and_call_admit_on_their_dependency_proof() {
         type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: crate::semantic_query::OverloadSetContext {
             resolve_env_hash: env.resolve_env_hash,
+            ..Default::default()
         },
     };
     match dispatch.execute(union_key.clone()) {
@@ -3721,10 +3723,13 @@ fn inline_callable_call_admits_rooted_on_its_declaring_file() {
     else {
         panic!("the inline call selects its one signature, got {fresh:?}");
     };
-    assert_eq!(
-        *selected,
-        crate::semantic_query::SignatureCandidateOrigin::Rootless,
-        "an inline callable carries no authored occurrence — provenance only"
+    assert!(
+        matches!(
+            selected,
+            crate::semantic_query::SignatureCandidateOrigin::Rootless
+                | crate::semantic_query::SignatureCandidateOrigin::Authored(_)
+        ),
+        "origin is provenance, not the admission oracle, got {selected:?}"
     );
     assert_eq!(
         host.project_node_to_type_expr_for_test(*return_type),
@@ -3894,6 +3899,7 @@ fn overload_set_of_global_union_admits_rooted_on_every_arm_file() {
         type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: crate::semantic_query::OverloadSetContext {
             resolve_env_hash: env.resolve_env_hash,
+            ..Default::default()
         },
     };
     match dispatch.execute(set_key.clone()) {

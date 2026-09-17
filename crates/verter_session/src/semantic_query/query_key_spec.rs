@@ -27,7 +27,8 @@
 //!    (`BroadRuntime`), `ClassifyMaterializationCycleGate`
 //!    (`MaterializationCycleGate`), `FlowNarrowingAt` /
 //!    `ContextualTypeAt` (`ProgramAnalysis`), `FlowReturn`
-//!    (`FlowReturn`), and `ResolveCall` (`ResolveCall`), which is the
+//!    (`FlowReturn`), `ResolveCall` (`ResolveCall`), and
+//!    `ClassifyTruthinessDomain` (`TruthinessDomain`), which is the
 //!    current-tree truth, and the
 //!    [`SemanticQueryKeyTag::ALL`](crate::semantic_query::SemanticQueryKeyTag::ALL)
 //!    set triangulates against both the spec set and the enum-scan set.
@@ -37,8 +38,9 @@
 //! - Every live variant resolves to
 //!   [`SemanticQueryValueTag::TypeNode`] EXCEPT `ProjectObjectSpread`, `Relate`,
 //!   `ResolveOverloadSet`, `ClassifyBroadRuntime`,
-//!   `ClassifyMaterializationCycleGate`, `FlowNarrowingAt`, and
-//!   `ContextualTypeAt`:
+//!   `ClassifyMaterializationCycleGate`, `FlowNarrowingAt`,
+//!   `ContextualTypeAt`, `FlowReturn`, `ResolveCall`, and
+//!   `ClassifyTruthinessDomain`:
 //!   `ProjectSemanticDispatch::execute` wraps the
 //!   `TypeNode` keys' results as `SemanticQueryValue::TypeNode(node)`.
 //!   `ProjectObjectSpread` records the dedicated

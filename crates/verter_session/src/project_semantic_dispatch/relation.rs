@@ -2289,9 +2289,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             txn.relation.completed_members.extend(completed);
             txn.flow.completed_members.extend(proven_flow_members);
             for (key, state, result) in call_members {
-                // A rootless winner has no stable occurrence to key a
-                // shared entry on: it stays transaction-local, so its
-                // inline flight is released instead of queued.
+                // Incomplete proof stays transaction-local. Origin is
+                // provenance and is not the admission oracle.
                 match crate::semantic_query::AdmissibleCallResult::new(result) {
                     Some(result) => txn.call.completed_members.push(CompletedResolveCallMember {
                         key,
@@ -2299,7 +2298,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         inline_flight: state.inline_flight,
                         self_roots: state.self_roots,
                     }),
-                    None => rootless_flights.push(state.inline_flight),
+                    _ => rootless_flights.push(state.inline_flight),
                 }
             }
         }

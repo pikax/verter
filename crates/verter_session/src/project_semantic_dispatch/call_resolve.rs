@@ -229,9 +229,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.inject_unproven_flow_member_for_tests(idx);
         match self.resolve_call_frame_pop(idx, outcome, true) {
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, self_roots)) => {
-                // A rootless winner has no stable occurrence to key a
-                // shared entry on: the caller still receives the result,
-                // but the family memo refuses it.
+                // Origin is provenance. An empty/incomplete self-root proof
+                // stays transaction-local; a complete proof admits.
                 let admits = crate::semantic_query::AdmissibleCallResult::admits(&result);
                 let mut output = QueryBuildOutput::from((
                     QueryResult::Value(SemanticQueryValue::ResolveCall(Arc::new(result))),
@@ -294,7 +293,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             CallArgKey::Eager { ty, .. } => Some(*ty),
             CallArgKey::ProgramExpression { .. } => None,
         }));
-        let mut self_roots = self.observed_self_roots_from_nodes(observed_nodes);
+        let mut self_roots = self.observed_self_roots_from_nodes(observed_nodes.iter().copied());
+        if let Ok(transitive) = self.transitive_self_roots_from_nodes(observed_nodes) {
+            for root in transitive {
+                if !self_roots.iter().any(|(c, h)| *c == root.0 && *h == root.1) {
+                    self_roots.push(root);
+                }
+            }
+        }
         if let Some(serve) = self
             .ctx
             .ensure_indexed_ready_serve(key.point.canonical_id.as_ref())
@@ -752,9 +758,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         if !machinery_root {
-            // A rootless winner has no stable occurrence to key a shared
-            // entry on: it stays transaction-local, so its inline flight
-            // is released instead of queued for publication.
+            // Incomplete proof stays transaction-local (no shared entry).
+            // Origin is provenance and is not consulted here.
             match crate::semantic_query::AdmissibleCallResult::new(root_result.clone()) {
                 Some(result) => self.dispatch_txn.borrow_mut().call.completed_members.push(
                     CompletedResolveCallMember {
@@ -764,7 +769,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self_roots: root.self_roots,
                     },
                 ),
-                None => self.resolve_call_abort_inline_flight(root.inline_flight.as_ref()),
+                _ => self.resolve_call_abort_inline_flight(root.inline_flight.as_ref()),
             }
         }
         if machinery_root {
@@ -1340,7 +1345,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .execute_via_cold_build_helper(SemanticQueryKey::ResolveOverloadSet {
                 callee,
                 type_args: Arc::clone(type_args),
-                context: crate::semantic_query::OverloadSetContext { resolve_env_hash },
+                context: crate::semantic_query::OverloadSetContext {
+                    resolve_env_hash,
+                    ..Default::default()
+                },
             })
             .value
         {

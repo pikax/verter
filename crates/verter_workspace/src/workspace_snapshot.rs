@@ -136,6 +136,7 @@ pub struct OwnershipProject {
 /// `Configured { .. }` — there is no way to accidentally read options from
 /// a fallback project.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum ProjectPayload {
     Configured {
         tsconfig_path: CanonicalPath,

@@ -330,7 +330,8 @@ fn all_dimensions(cfg: &IdeProjectConfig, inputs: &EnvHashInputs<'_>) -> [Hash16
 fn type_env_hash_changes_when_any_type_meaning_option_flips() {
     let (cfg, inputs) = baseline();
     let base = all_dimensions(&cfg, &inputs);
-    let flips: [(&str, fn(&mut SemanticCompilerOptions)); 10] = [
+    type OptionFlip = fn(&mut SemanticCompilerOptions);
+    let flips: [(&str, OptionFlip); 10] = [
         ("strictNullChecks", |o| o.strict_null_checks = false),
         ("strictFunctionTypes", |o| o.strict_function_types = false),
         ("strictBindCallApply", |o| o.strict_bind_call_apply = false),
