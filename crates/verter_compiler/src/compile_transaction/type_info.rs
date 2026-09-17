@@ -18,17 +18,20 @@ use std::sync::Arc;
 
 use verter_macro_dto::RuntimePropType;
 use verter_semantic::analysis::ScriptAnalysisSnapshot;
-use verter_semantic::resolver_core::{AttemptOutcome, InputKey, ResolutionBasis};
+use verter_semantic::resolver_core::ResolutionBasis;
 use verter_semantic::type_info::{
     ExposeSurfaceProjection, ImportedComponentResolution, ImportedComponentSurface,
-    NonFlowObservationKey, NonFlowObservationSnapshot, NonFlowOperation, NonFlowPayload,
-    ObservedMacroSurface, RuntimeEmitsProjection, RuntimeModelProjection, RuntimePropsProjection,
-    TypeInfoCore, VueMacroSemanticInput,
+    NonFlowObservationKey, NonFlowObservationSnapshot, NonFlowOperation, NonFlowOutcome,
+    NonFlowPayload, ObservedMacroSurface, RuntimeEmitsProjection, RuntimeModelProjection,
+    RuntimePropsProjection, TypeInfoCore, VueMacroSemanticInput,
 };
 
 /// How a type-info route can fail. The proof id is the operation's
 /// stable missing-input identifier (`C2-GAP3-MISSING-*`); the keys are
-/// the kernel's own single derivation of what to load next.
+/// the kernel's own single derivation of what to load next: the exact
+/// observation slots the route found missing, staged one-to-one by this
+/// transaction's staging methods (`stage_script_analysis`,
+/// `stage_macro_surface`, `stage_model_value_type_shape`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeInfoRouteFailure {
     /// The operation's inputs are not staged; the driver stages them and
@@ -36,8 +39,9 @@ pub enum TypeInfoRouteFailure {
     NeedInputs {
         /// The operation's stable missing-input proof id.
         proof_id: &'static str,
-        /// The load set the kernel derived for the missing inputs.
-        keys: Vec<InputKey>,
+        /// The observation slots the kernel found missing — the exact
+        /// identities the transaction's staging methods accept.
+        keys: Vec<NonFlowObservationKey>,
     },
     /// A re-entered operation demanded nothing new — the driver cannot
     /// make progress and the sealed output was discarded.
@@ -62,7 +66,7 @@ struct RequestContinuation {
     originating: Vec<(NonFlowObservationKey, u64)>,
     basis: ResolutionBasis,
     consumed: Vec<(NonFlowObservationKey, u64)>,
-    demanded: Vec<InputKey>,
+    demanded: Vec<NonFlowObservationKey>,
     sealed: Option<NonFlowPayload>,
 }
 
@@ -248,7 +252,7 @@ impl CompileTypeInfo {
             TypeInfoCore::from_observation_snapshot(Arc::new(self.snapshot.clone()), self.basis);
         let outcome = core.attempt(operation);
         match outcome {
-            AttemptOutcome::Complete(payload) => {
+            NonFlowOutcome::Complete(payload) => {
                 self.continuation = Some(RequestContinuation {
                     operation: operation.clone(),
                     request_nonce: self.request_nonce,
@@ -260,9 +264,9 @@ impl CompileTypeInfo {
                 });
                 Ok(payload)
             }
-            AttemptOutcome::NeedInputs(load_set) => {
+            NonFlowOutcome::NeedInputs(load_set) => {
                 let proof_id = operation.missing_input_proof_id();
-                let keys: Vec<InputKey> = load_set.keys().to_vec();
+                let keys: Vec<NonFlowObservationKey> = load_set.keys().to_vec();
                 let demanded = continuation
                     .as_ref()
                     .map_or_else(Vec::new, |continuation| continuation.demanded.clone());
@@ -286,7 +290,7 @@ impl CompileTypeInfo {
                 });
                 Err(TypeInfoRouteFailure::NeedInputs { proof_id, keys })
             }
-            AttemptOutcome::Terminal(_) => {
+            NonFlowOutcome::Terminal(_) => {
                 self.continuation = None;
                 Err(TypeInfoRouteFailure::Terminal)
             }

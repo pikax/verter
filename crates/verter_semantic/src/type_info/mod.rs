@@ -26,10 +26,10 @@ pub use core::{
     NonFlowObservationSnapshot, ObservedMacroSurface, ObservedSurfaceMember, TypeInfoCore,
 };
 pub use non_flow::{
-    ExposeSurfaceProjection, ImportedComponentSurface, MacroSemanticLane, NonFlowOperation,
-    NonFlowPayload, ProjectedExposeRow, ProjectedRuntimePropRow, RuntimeEmitsProjection,
-    RuntimeModelProjection, RuntimePropsProjection, VueMacroMissingRoot, VueMacroSemanticDemand,
-    VueMacroSemanticInput, MISSING_PROOF_EMITS, MISSING_PROOF_EXPOSE,
+    ExposeSurfaceProjection, ImportedComponentSurface, MacroSemanticLane, NonFlowLoadSet,
+    NonFlowOperation, NonFlowOutcome, NonFlowPayload, ProjectedExposeRow, ProjectedRuntimePropRow,
+    RuntimeEmitsProjection, RuntimeModelProjection, RuntimePropsProjection, VueMacroMissingRoot,
+    VueMacroSemanticDemand, VueMacroSemanticInput, MISSING_PROOF_EMITS, MISSING_PROOF_EXPOSE,
     MISSING_PROOF_IMPORTED_COMPONENT, MISSING_PROOF_MODEL, MISSING_PROOF_PROPS,
     MISSING_PROOF_VUE_MACRO,
 };

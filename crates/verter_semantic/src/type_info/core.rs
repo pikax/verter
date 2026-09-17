@@ -5,8 +5,9 @@
 //! ([`TypeInfoCore::attempt`]) dispatches a [`NonFlowOperation`]
 //! exhaustively — no wildcard arm — and answers from staged observations
 //! only. Anything the snapshot cannot answer is
-//! [`AttemptOutcome::NeedInputs`] carrying the operation's proof id; the
-//! kernel never guesses, never falls back, and never performs I/O.
+//! [`NonFlowOutcome::NeedInputs`] naming the exact observation slots the
+//! route found missing; the kernel never guesses, never falls back, and
+//! never performs I/O.
 //!
 //! Sealing: [`NonFlowObservation`] is a sealed trait with exactly one
 //! implementation in this crate. Foreign observation sources, injected
@@ -26,15 +27,15 @@ use verter_macro_dto::{
 use crate::analysis::{
     AnalyzedMacro, AnalyzedMacroKind, MacroTypeDepUsage, ScriptAnalysisSnapshot,
 };
-use crate::resolver_core::{AttemptOutcome, ResolutionBasis};
+use crate::resolver_core::ResolutionBasis;
 
 use super::non_flow::{
     authored_emit_order, containing_with_defaults_index, emit_member_anchor, expose_member_anchor,
     is_codegen_macro, macro_index, prop_member_anchor, top_level_syntax_index,
     ExposeSurfaceProjection, ImportedComponentSurface, MacroSemanticLane, NonFlowOperation,
-    NonFlowPayload, ProjectedExposeRow, ProjectedRuntimePropRow, RuntimeEmitsProjection,
-    RuntimeModelProjection, RuntimePropsProjection, VueMacroMissingRoot, VueMacroSemanticDemand,
-    VueMacroSemanticInput,
+    NonFlowOutcome, NonFlowPayload, ProjectedExposeRow, ProjectedRuntimePropRow,
+    RuntimeEmitsProjection, RuntimeModelProjection, RuntimePropsProjection, VueMacroMissingRoot,
+    VueMacroSemanticDemand, VueMacroSemanticInput,
 };
 
 pub(crate) mod sealed {
@@ -312,7 +313,7 @@ impl TypeInfoCore {
     /// `operation` exhaustively — there is no wildcard arm, so adding a
     /// [`NonFlowOperation`] variant without extending this match (and the
     /// proof table) is a compile error, not a silent route.
-    pub fn attempt(&self, operation: &NonFlowOperation) -> AttemptOutcome<NonFlowPayload> {
+    pub fn attempt(&self, operation: &NonFlowOperation) -> NonFlowOutcome {
         match operation {
             NonFlowOperation::ProjectVueMacroSemantics { owner_canonical } => {
                 self.project_vue_macro_semantics(owner_canonical)
@@ -345,8 +346,8 @@ impl TypeInfoCore {
         }
     }
 
-    fn need_inputs(&self, operation: &NonFlowOperation) -> AttemptOutcome<NonFlowPayload> {
-        AttemptOutcome::NeedInputs(operation.missing_input_load_set(self.basis))
+    fn need_inputs(&self, operation: &NonFlowOperation) -> NonFlowOutcome {
+        NonFlowOutcome::NeedInputs(operation.missing_input_load_set(self.basis))
     }
 
     fn script_analysis(&self, owner_canonical: &Arc<str>) -> Option<&Arc<ScriptAnalysisSnapshot>> {
@@ -361,10 +362,7 @@ impl TypeInfoCore {
         analysis.macros.get(macro_index)
     }
 
-    fn project_vue_macro_semantics(
-        &self,
-        owner_canonical: &Arc<str>,
-    ) -> AttemptOutcome<NonFlowPayload> {
+    fn project_vue_macro_semantics(&self, owner_canonical: &Arc<str>) -> NonFlowOutcome {
         let operation = NonFlowOperation::ProjectVueMacroSemantics {
             owner_canonical: Arc::clone(owner_canonical),
         };
@@ -419,7 +417,7 @@ impl TypeInfoCore {
                 ),
             });
         }
-        AttemptOutcome::Complete(NonFlowPayload::VueMacroSemanticInput(
+        NonFlowOutcome::Complete(NonFlowPayload::VueMacroSemanticInput(
             VueMacroSemanticInput {
                 owner_canonical: Arc::clone(owner_canonical),
                 demands,
@@ -432,7 +430,7 @@ impl TypeInfoCore {
         owner_canonical: &Arc<str>,
         type_reference: &Arc<str>,
         referenced_canonical: &Option<Arc<str>>,
-    ) -> AttemptOutcome<NonFlowPayload> {
+    ) -> NonFlowOutcome {
         let operation = NonFlowOperation::ResolveImportedComponentSurface {
             owner_canonical: Arc::clone(owner_canonical),
             type_reference: Arc::clone(type_reference),
@@ -467,7 +465,7 @@ impl TypeInfoCore {
                 .then(|| import.source.clone())
             })
         });
-        AttemptOutcome::Complete(NonFlowPayload::ImportedComponentSurface(
+        NonFlowOutcome::Complete(NonFlowPayload::ImportedComponentSurface(
             ImportedComponentSurface {
                 owner_canonical: Arc::clone(owner_canonical),
                 type_reference: Arc::clone(type_reference),
@@ -481,7 +479,7 @@ impl TypeInfoCore {
         &self,
         owner_canonical: &Arc<str>,
         macro_index_value: usize,
-    ) -> AttemptOutcome<NonFlowPayload> {
+    ) -> NonFlowOutcome {
         let operation = NonFlowOperation::ProjectRuntimeProps {
             owner_canonical: Arc::clone(owner_canonical),
             macro_index: macro_index_value,
@@ -527,7 +525,7 @@ impl TypeInfoCore {
                     defaults_macro_index: macro_index(index),
                 }
             });
-        AttemptOutcome::Complete(NonFlowPayload::RuntimePropsProjection(
+        NonFlowOutcome::Complete(NonFlowPayload::RuntimePropsProjection(
             RuntimePropsProjection {
                 owner_canonical: Arc::clone(owner_canonical),
                 macro_index: macro_index_value,
@@ -550,7 +548,7 @@ impl TypeInfoCore {
         &self,
         owner_canonical: &Arc<str>,
         macro_index_value: usize,
-    ) -> AttemptOutcome<NonFlowPayload> {
+    ) -> NonFlowOutcome {
         let operation = NonFlowOperation::ProjectRuntimeEmits {
             owner_canonical: Arc::clone(owner_canonical),
             macro_index: macro_index_value,
@@ -603,7 +601,7 @@ impl TypeInfoCore {
             );
         }
         emits.sort_by_key(|row| authored_emit_order(row.anchor));
-        AttemptOutcome::Complete(NonFlowPayload::RuntimeEmitsProjection(
+        NonFlowOutcome::Complete(NonFlowPayload::RuntimeEmitsProjection(
             RuntimeEmitsProjection {
                 owner_canonical: Arc::clone(owner_canonical),
                 macro_index: macro_index_value,
@@ -616,7 +614,7 @@ impl TypeInfoCore {
         &self,
         owner_canonical: &Arc<str>,
         macro_index_value: usize,
-    ) -> AttemptOutcome<NonFlowPayload> {
+    ) -> NonFlowOutcome {
         let operation = NonFlowOperation::ProjectRuntimeModel {
             owner_canonical: Arc::clone(owner_canonical),
             macro_index: macro_index_value,
@@ -649,7 +647,7 @@ impl TypeInfoCore {
             .prop_fields
             .first()
             .is_none_or(|field| field.is_optional);
-        AttemptOutcome::Complete(NonFlowPayload::RuntimeModelProjection(
+        NonFlowOutcome::Complete(NonFlowPayload::RuntimeModelProjection(
             RuntimeModelProjection {
                 owner_canonical: Arc::clone(owner_canonical),
                 macro_index: macro_index_value,
@@ -691,7 +689,7 @@ impl TypeInfoCore {
         &self,
         owner_canonical: &Arc<str>,
         macro_index_value: usize,
-    ) -> AttemptOutcome<NonFlowPayload> {
+    ) -> NonFlowOutcome {
         let operation = NonFlowOperation::ProjectExposeSurface {
             owner_canonical: Arc::clone(owner_canonical),
             macro_index: macro_index_value,
@@ -715,7 +713,7 @@ impl TypeInfoCore {
                 anchor: expose_member_anchor(mac, macro_index_value, field_index),
             })
             .collect();
-        AttemptOutcome::Complete(NonFlowPayload::ExposeSurfaceProjection(
+        NonFlowOutcome::Complete(NonFlowPayload::ExposeSurfaceProjection(
             ExposeSurfaceProjection {
                 owner_canonical: Arc::clone(owner_canonical),
                 macro_index: macro_index_value,

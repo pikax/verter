@@ -14,11 +14,12 @@ use verter_macro_dto::{
     AuthoredMemberOrdinal, MacroAnchor, ModelRuntimeShape, PropsDefaultsAssociation, RuntimeEmit,
 };
 use verter_span::Span;
-use verter_type_expr::TopLevelOwnerId;
 
 use crate::analysis::{AnalyzedMacro, AnalyzedMacroKind};
-use crate::resolver_core::{InputKey, LoadSet, ResolutionBasis};
+use crate::resolver_core::{AttemptFailure, ResolutionBasis};
 use verter_type_expr::DeclBindingKey;
+
+use super::core::NonFlowObservationKey;
 
 /// Missing-input proof id for [`NonFlowOperation::ProjectVueMacroSemantics`].
 pub const MISSING_PROOF_VUE_MACRO: &str = "C2-GAP3-MISSING-VUE-MACRO";
@@ -98,12 +99,22 @@ impl NonFlowOperation {
     }
 
     /// The single derivation of the load set this operation reports when
-    /// its inputs are missing: the authored owner's content plus, for
-    /// per-macro operations, the demanded macro row's declaration body.
-    pub fn missing_input_load_set(&self, basis: ResolutionBasis) -> LoadSet {
-        let macro_row = match self {
+    /// its inputs are missing: exactly the observation slots the
+    /// kernel's route for this operation reads — the owner's script
+    /// analysis, plus the macro's demanded surface or model value
+    /// classification for the per-macro rows. Every key names a slot the
+    /// transaction driver stages
+    /// ([`NonFlowObservationKey`](super::core::NonFlowObservationKey)
+    /// maps one-to-one onto the staging methods), so a driver that
+    /// loads exactly the demanded set always satisfies the next round.
+    pub fn missing_input_load_set(&self, basis: ResolutionBasis) -> NonFlowLoadSet {
+        let owner = Arc::clone(self.owner_canonical());
+        let mut keys = vec![NonFlowObservationKey::ScriptAnalysis {
+            owner_canonical: owner,
+        }];
+        match self {
             Self::ProjectVueMacroSemantics { .. }
-            | Self::ResolveImportedComponentSurface { .. } => None,
+            | Self::ResolveImportedComponentSurface { .. } => {}
             Self::ProjectRuntimeProps {
                 owner_canonical,
                 macro_index,
@@ -112,27 +123,22 @@ impl NonFlowOperation {
                 owner_canonical,
                 macro_index,
             }
-            | Self::ProjectRuntimeModel {
-                owner_canonical,
-                macro_index,
-            }
             | Self::ProjectExposeSurface {
                 owner_canonical,
                 macro_index,
-            } => Some((Arc::clone(owner_canonical), *macro_index)),
-        };
-        let mut keys = vec![InputKey::FileContent {
-            canonical: Arc::clone(self.owner_canonical()),
-        }];
-        if let Some((canonical, macro_index)) = macro_row {
-            keys.push(InputKey::DeclBody {
-                canonical,
-                owner: TopLevelOwnerId::default(),
-                name: Arc::from(format!("__vue_macro_{macro_index}")),
-                space: crate::resolver_core::DeclarationSpace::Type,
-            });
+            } => keys.push(NonFlowObservationKey::MacroSurface {
+                owner_canonical: Arc::clone(owner_canonical),
+                macro_index: *macro_index,
+            }),
+            Self::ProjectRuntimeModel {
+                owner_canonical,
+                macro_index,
+            } => keys.push(NonFlowObservationKey::ModelValueTypeShape {
+                owner_canonical: Arc::clone(owner_canonical),
+                macro_index: *macro_index,
+            }),
         }
-        LoadSet::new(keys, basis)
+        NonFlowLoadSet::new(keys, basis)
     }
 
     /// The canonical owner every observation this operation reads is
@@ -157,6 +163,65 @@ impl NonFlowOperation {
             } => owner_canonical,
         }
     }
+}
+
+/// The typed load set one gateway `NeedInputs` outcome carries: the
+/// observation slots the kernel's route found missing, in canonical
+/// order, bound to the resolution basis the retry runs under.
+///
+/// Deliberately NOT the resolver's
+/// [`LoadSet`](crate::resolver_core::LoadSet): that envelope's
+/// [`InputKey`](crate::resolver_core::InputKey) taxonomy names I/O
+/// shapes (file content, declaration bodies, path probes) — none of
+/// them can name a staged observation slot, so reusing it would force
+/// fabricated I/O identities the gateway never reads and the staging
+/// API cannot admit. Here every key is a
+/// [`NonFlowObservationKey`](super::core::NonFlowObservationKey), the
+/// exact identity the transaction driver stages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonFlowLoadSet {
+    keys: Vec<NonFlowObservationKey>,
+    basis: ResolutionBasis,
+}
+
+impl NonFlowLoadSet {
+    /// Builds a normalized load set: sorts and dedups `keys`, mirroring
+    /// the resolver `LoadSet` normalization contract.
+    #[must_use]
+    pub fn new(mut keys: Vec<NonFlowObservationKey>, basis: ResolutionBasis) -> Self {
+        keys.sort();
+        keys.dedup();
+        Self { keys, basis }
+    }
+
+    /// The missing observation slots, in canonical order.
+    #[must_use]
+    pub fn keys(&self) -> &[NonFlowObservationKey] {
+        &self.keys
+    }
+
+    /// The resolution basis the retry is bound to.
+    #[must_use]
+    pub const fn basis(&self) -> ResolutionBasis {
+        self.basis
+    }
+}
+
+/// The outcome of one non-flow gateway attempt: the C2-typed retry
+/// envelope. Same closed `Complete`/`NeedInputs`/`Terminal` vocabulary
+/// as [`AttemptOutcome`](crate::resolver_core::AttemptOutcome), but the
+/// `NeedInputs` payload is a [`NonFlowLoadSet`] so the demand names the
+/// observation slots the kernel actually misses — never a resolver I/O
+/// identity the gateway cannot consume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NonFlowOutcome {
+    /// The operation completed against the staged observations.
+    Complete(NonFlowPayload),
+    /// The operation's observation slots are missing; the driver stages
+    /// exactly the demanded set and re-enters the same route.
+    NeedInputs(NonFlowLoadSet),
+    /// The kernel reported a terminal failure.
+    Terminal(AttemptFailure),
 }
 
 /// Which lane one authored macro's semantic demand serves — derived once,

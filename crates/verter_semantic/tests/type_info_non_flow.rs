@@ -17,10 +17,11 @@ use verter_semantic::analysis::{
     AnalyzedPropField, MacroTypeDep, MacroTypeDepUsage, ScriptAnalysisSnapshot,
     TypeResolutionSource,
 };
-use verter_semantic::resolver_core::{AttemptOutcome, ResolutionBasis};
+use verter_semantic::resolver_core::ResolutionBasis;
 use verter_semantic::type_info::{
-    ImportedComponentResolution, MacroSemanticLane, NonFlowObservationSnapshot, NonFlowOperation,
-    NonFlowPayload, ObservedMacroSurface, ObservedSurfaceMember, TypeInfoCore, MISSING_PROOF_EMITS,
+    ImportedComponentResolution, MacroSemanticLane, NonFlowObservationKey,
+    NonFlowObservationSnapshot, NonFlowOperation, NonFlowOutcome, NonFlowPayload,
+    ObservedMacroSurface, ObservedSurfaceMember, TypeInfoCore, MISSING_PROOF_EMITS,
     MISSING_PROOF_EXPOSE, MISSING_PROOF_IMPORTED_COMPONENT, MISSING_PROOF_MODEL,
     MISSING_PROOF_PROPS, MISSING_PROOF_VUE_MACRO,
 };
@@ -264,15 +265,36 @@ fn core_of(snapshot: Arc<NonFlowObservationSnapshot>) -> TypeInfoCore {
 
 /// The six-row table: all-missing ⇒ `NeedInputs` whose load set is the
 /// operation's own single derivation and whose proof id is the charter
-/// row's stable id.
+/// row's stable id. The expected keys are pinned per row — they must
+/// name the observation slots the kernel's route reads (staging each
+/// of them satisfies the next round), never a fabricated resolver I/O
+/// identity such as a `DeclBody` the gateway cannot consume.
 #[test]
 fn all_missing_rows_report_their_proof_ids() {
+    fn script_analysis() -> NonFlowObservationKey {
+        NonFlowObservationKey::ScriptAnalysis {
+            owner_canonical: Arc::from(OWNER),
+        }
+    }
+    fn macro_surface(macro_index: usize) -> NonFlowObservationKey {
+        NonFlowObservationKey::MacroSurface {
+            owner_canonical: Arc::from(OWNER),
+            macro_index,
+        }
+    }
+    fn model_value_type_shape(macro_index: usize) -> NonFlowObservationKey {
+        NonFlowObservationKey::ModelValueTypeShape {
+            owner_canonical: Arc::from(OWNER),
+            macro_index,
+        }
+    }
     let table = [
         (
             NonFlowOperation::ProjectVueMacroSemantics {
                 owner_canonical: Arc::from(OWNER),
             },
             MISSING_PROOF_VUE_MACRO,
+            vec![script_analysis()],
         ),
         (
             NonFlowOperation::ResolveImportedComponentSurface {
@@ -281,6 +303,7 @@ fn all_missing_rows_report_their_proof_ids() {
                 referenced_canonical: Some(Arc::from("/src/Badge.vue")),
             },
             MISSING_PROOF_IMPORTED_COMPONENT,
+            vec![script_analysis()],
         ),
         (
             NonFlowOperation::ProjectRuntimeProps {
@@ -288,6 +311,7 @@ fn all_missing_rows_report_their_proof_ids() {
                 macro_index: 0,
             },
             MISSING_PROOF_PROPS,
+            vec![script_analysis(), macro_surface(0)],
         ),
         (
             NonFlowOperation::ProjectRuntimeEmits {
@@ -295,6 +319,7 @@ fn all_missing_rows_report_their_proof_ids() {
                 macro_index: 1,
             },
             MISSING_PROOF_EMITS,
+            vec![script_analysis(), macro_surface(1)],
         ),
         (
             NonFlowOperation::ProjectRuntimeModel {
@@ -302,6 +327,7 @@ fn all_missing_rows_report_their_proof_ids() {
                 macro_index: 2,
             },
             MISSING_PROOF_MODEL,
+            vec![script_analysis(), model_value_type_shape(2)],
         ),
         (
             NonFlowOperation::ProjectExposeSurface {
@@ -309,18 +335,24 @@ fn all_missing_rows_report_their_proof_ids() {
                 macro_index: 3,
             },
             MISSING_PROOF_EXPOSE,
+            vec![script_analysis(), macro_surface(3)],
         ),
     ];
     let core = core_of(Arc::new(NonFlowObservationSnapshot::new()));
-    for (operation, proof_id) in &table {
+    for (operation, proof_id, expected_keys) in &table {
         let outcome = core.attempt(operation);
-        let AttemptOutcome::NeedInputs(load_set) = outcome else {
+        let NonFlowOutcome::NeedInputs(load_set) = outcome else {
             panic!("{proof_id}: all-missing attempt must be NeedInputs, got {outcome:?}");
         };
         assert_eq!(
             operation.missing_input_proof_id(),
             *proof_id,
             "proof id is the charter row's stable id"
+        );
+        assert_eq!(
+            load_set.keys(),
+            expected_keys,
+            "{proof_id}: keys must name the missing observation slots staging satisfies"
         );
         assert_eq!(
             load_set.keys(),
@@ -363,7 +395,7 @@ fn per_macro_missing_observations_report_their_proof_ids() {
     ];
     for (operation, proof_id) in &table {
         assert!(
-            matches!(core.attempt(operation), AttemptOutcome::NeedInputs(_)),
+            matches!(core.attempt(operation), NonFlowOutcome::NeedInputs(_)),
             "{proof_id}: missing observation must stay NeedInputs"
         );
         assert_eq!(operation.missing_input_proof_id(), *proof_id);
@@ -373,7 +405,7 @@ fn per_macro_missing_observations_report_their_proof_ids() {
         owner_canonical: Arc::from(OWNER),
         macro_index: 3,
     };
-    assert!(matches!(core.attempt(&expose), AttemptOutcome::Complete(_)));
+    assert!(matches!(core.attempt(&expose), NonFlowOutcome::Complete(_)));
 }
 
 /// Preloaded-vs-staged equivalence: a snapshot that had everything before
@@ -414,7 +446,7 @@ fn preloaded_and_staged_snapshots_are_equivalent() {
         assert!(
             matches!(
                 staged_core.attempt(operation),
-                AttemptOutcome::NeedInputs(_)
+                NonFlowOutcome::NeedInputs(_)
             ),
             "empty snapshot must report NeedInputs first"
         );
@@ -523,7 +555,7 @@ fn route_removal_mutations_fail_on_every_row() {
     let mut completed_variants = Vec::new();
     let mut reported_proof_ids = Vec::new();
     for (operation, proof_id, expected_variant) in &table {
-        let AttemptOutcome::Complete(payload) = complete.attempt(operation) else {
+        let NonFlowOutcome::Complete(payload) = complete.attempt(operation) else {
             panic!(
                 "{proof_id}: route removal — a complete snapshot must complete, \
                  not degrade through a swallowed arm"
@@ -537,7 +569,7 @@ fn route_removal_mutations_fail_on_every_row() {
         assert!(
             matches!(
                 all_missing.attempt(operation),
-                AttemptOutcome::NeedInputs(_)
+                NonFlowOutcome::NeedInputs(_)
             ),
             "{proof_id}: the all-missing snapshot must stay NeedInputs"
         );
@@ -566,7 +598,7 @@ fn route_removal_mutations_fail_on_every_row() {
 #[test]
 fn vue_macro_semantic_input_plan_is_kernel_owned() {
     let core = core_of(complete_snapshot());
-    let AttemptOutcome::Complete(NonFlowPayload::VueMacroSemanticInput(plan)) =
+    let NonFlowOutcome::Complete(NonFlowPayload::VueMacroSemanticInput(plan)) =
         core.attempt(&NonFlowOperation::ProjectVueMacroSemantics {
             owner_canonical: Arc::from(OWNER),
         })
@@ -606,7 +638,7 @@ fn vue_macro_semantic_input_plan_is_kernel_owned() {
 #[test]
 fn props_projection_shapes_rows_over_the_observed_surface() {
     let core = core_of(complete_snapshot());
-    let AttemptOutcome::Complete(NonFlowPayload::RuntimePropsProjection(projection)) = core
+    let NonFlowOutcome::Complete(NonFlowPayload::RuntimePropsProjection(projection)) = core
         .attempt(&NonFlowOperation::ProjectRuntimeProps {
             owner_canonical: Arc::from(OWNER),
             macro_index: 0,
@@ -638,7 +670,7 @@ fn props_projection_shapes_rows_over_the_observed_surface() {
 #[test]
 fn emits_projection_dedupes_and_orders_by_authored_order() {
     let core = core_of(complete_snapshot());
-    let AttemptOutcome::Complete(NonFlowPayload::RuntimeEmitsProjection(projection)) = core
+    let NonFlowOutcome::Complete(NonFlowPayload::RuntimeEmitsProjection(projection)) = core
         .attempt(&NonFlowOperation::ProjectRuntimeEmits {
             owner_canonical: Arc::from(OWNER),
             macro_index: 1,
@@ -666,7 +698,7 @@ fn emits_projection_dedupes_and_orders_by_authored_order() {
 #[test]
 fn model_projection_synthesizes_the_shape_from_the_macro_row() {
     let core = core_of(complete_snapshot());
-    let AttemptOutcome::Complete(NonFlowPayload::RuntimeModelProjection(projection)) = core
+    let NonFlowOutcome::Complete(NonFlowPayload::RuntimeModelProjection(projection)) = core
         .attempt(&NonFlowOperation::ProjectRuntimeModel {
             owner_canonical: Arc::from(OWNER),
             macro_index: 2,
@@ -697,7 +729,7 @@ fn model_projection_synthesizes_the_shape_from_the_macro_row() {
     };
     assert!(matches!(
         partial_core.attempt(&operation),
-        AttemptOutcome::NeedInputs(_)
+        NonFlowOutcome::NeedInputs(_)
     ));
     assert_eq!(operation.missing_input_proof_id(), MISSING_PROOF_MODEL);
 }
@@ -706,7 +738,7 @@ fn model_projection_synthesizes_the_shape_from_the_macro_row() {
 #[test]
 fn expose_projection_orders_rows_by_authored_field_position() {
     let core = core_of(complete_snapshot());
-    let AttemptOutcome::Complete(NonFlowPayload::ExposeSurfaceProjection(projection)) = core
+    let NonFlowOutcome::Complete(NonFlowPayload::ExposeSurfaceProjection(projection)) = core
         .attempt(&NonFlowOperation::ProjectExposeSurface {
             owner_canonical: Arc::from(OWNER),
             macro_index: 3,
@@ -742,7 +774,7 @@ fn expose_projection_orders_rows_by_authored_field_position() {
 fn imported_component_surface_resolves_through_staged_observations() {
     let core = core_of(complete_snapshot());
     let resolve = |reference: &str, canonical: Option<&str>| {
-        let AttemptOutcome::Complete(NonFlowPayload::ImportedComponentSurface(surface)) = core
+        let NonFlowOutcome::Complete(NonFlowPayload::ImportedComponentSurface(surface)) = core
             .attempt(&NonFlowOperation::ResolveImportedComponentSurface {
                 owner_canonical: Arc::from(OWNER),
                 type_reference: Arc::from(reference),
