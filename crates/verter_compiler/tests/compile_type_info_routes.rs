@@ -728,3 +728,48 @@ fn admission_is_bound_to_the_entry_source_digest() {
         "the published product view derives from the canonical set"
     );
 }
+
+/// C3 — the closed Vue runtime macro projection: the staged handoff on the
+/// sealed transaction is the projection's SOLE carrier into compile. An
+/// unstaged transaction carries `Unavailable`, staging preserves the exact
+/// bundle identity (no copy, no re-derivation, no variant collapse), and the
+/// handoff is readable only through the transaction.
+#[test]
+fn staged_vue_macro_semantics_is_the_sole_carrier() {
+    use verter_compiler::compile::types::VueMacroSemanticInput;
+    use verter_macro_dto::{MacroRuntimeBundle, MacroTscBundle};
+
+    let request = vue_request();
+    let mut attempt =
+        CompileAttempt::enter_direct("<template><p>hi</p></template>", &request, "vue");
+    assert!(
+        matches!(
+            attempt.vue_macro_semantics(),
+            VueMacroSemanticInput::Unavailable
+        ),
+        "an unstaged transaction carries no macro projection"
+    );
+
+    let runtime = Arc::new(MacroRuntimeBundle {
+        entries: Vec::new(),
+    });
+    let tsc = Arc::new(MacroTscBundle {
+        entries: Vec::new(),
+    });
+    attempt.stage_vue_macro_semantics(VueMacroSemanticInput::RuntimeAndTsc {
+        runtime: Arc::clone(&runtime),
+        tsc: Arc::clone(&tsc),
+    });
+    let verter_compiler::compile::types::VueMacroSemanticInput::RuntimeAndTsc {
+        runtime: out_runtime,
+        tsc: out_tsc,
+    } = attempt.vue_macro_semantics()
+    else {
+        panic!("the staged variant is preserved exactly");
+    };
+    assert!(
+        Arc::ptr_eq(&runtime, out_runtime) && Arc::ptr_eq(&tsc, out_tsc),
+        "staging carries the produced bundles by identity — the transaction never re-derives or copies the projection"
+    );
+    let _ = (&out_runtime, &out_tsc);
+}

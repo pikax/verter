@@ -1120,7 +1120,7 @@ fn runtime_macros_are_the_sole_macro_channel() {
         &artifact,
         &request,
         &VueRuntimeInputs {
-            macros: Some(runtime),
+            vue_macros: VueMacroSemanticInput::Runtime(runtime),
             ..Default::default()
         },
     )
@@ -1708,9 +1708,14 @@ fn inline_selected_template_helper_imports_are_declared_on_the_script() {
 #[test]
 fn one_runtime_macro_channel_is_structural() {
     let inputs = VueRuntimeInputs::default();
-    let _: &Option<Arc<verter_macro_dto::MacroRuntimeBundle>> = &inputs.macros;
+    // The ONE macro channel is the sealed staged handoff type itself —
+    // no raw bundle field exists to construct beside it.
+    let _: &VueMacroSemanticInput = &inputs.vue_macros;
     let _: &VueRuntimeExecutionFacts = &inputs.execution;
-    assert!(inputs.macros.is_none());
+    assert!(matches!(
+        inputs.vue_macros,
+        VueMacroSemanticInput::Unavailable
+    ));
     assert!(inputs.execution.prop_constness_overrides.is_none());
 }
 

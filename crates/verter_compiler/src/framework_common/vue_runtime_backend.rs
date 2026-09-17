@@ -4,14 +4,11 @@
 //! parsed compiler core and a runtime-only [`CompileRequest`]. Catalog
 //! lookup keys adapter × epoch × Runtime.
 
-use std::sync::Arc;
-
 use rustc_hash::FxHashSet;
 use verter_language::{
     syntax_profile_id_for, FileLanguage, FrameworkAdapterId, LanguageId, ParseOptions,
     SyntaxProfileId,
 };
-use verter_macro_dto::MacroRuntimeBundle;
 
 use crate::assembly::AssembledArtifact;
 use crate::compile::types::{TemplateBindingMetadata, VueExecutionInputs, VueMacroSemanticInput};
@@ -56,8 +53,10 @@ pub struct VueRuntimeInputs {
     /// Resolved Vue facts threaded beside the request. Macro payloads are
     /// not representable here.
     pub execution: VueRuntimeExecutionFacts,
-    /// Authoritative runtime macro projection, when supplied.
-    pub macros: Option<Arc<MacroRuntimeBundle>>,
+    /// The staged Vue runtime macro projection, when this route supplies
+    /// one: the same sealed handoff the transaction carries, never a
+    /// second raw-bundle channel.
+    pub vue_macros: VueMacroSemanticInput,
 }
 
 /// Typed Vue runtime refusal.
@@ -145,11 +144,13 @@ impl RuntimeCompilerBackend<VueSfcV3> for VueRuntimeBackend {
             return Err(VueRuntimeError::ProfileMismatch);
         }
 
-        let macros = inputs
-            .macros
-            .clone()
-            .map(VueMacroSemanticInput::Runtime)
-            .unwrap_or_default();
+        // One transaction spans this compile: enter over the admitted
+        // request, stage the macro-semantic handoff, drive the parsed core
+        // through it. `Unavailable` (the default) still fails closed on
+        // typed macros exactly as before.
+        let mut attempt =
+            crate::compile_transaction::CompileAttempt::enter_direct(source, request, "vue");
+        attempt.stage_vue_macro_semantics(inputs.vue_macros.clone());
         let execution = vue_execution_from_facts(&inputs.execution);
 
         compile_vue_parsed_runtime(
@@ -157,7 +158,7 @@ impl RuntimeCompilerBackend<VueSfcV3> for VueRuntimeBackend {
             parsed,
             request,
             &execution,
-            &macros,
+            &attempt,
             &inputs.block_content,
             &inputs.execution.prepared_styles,
         )

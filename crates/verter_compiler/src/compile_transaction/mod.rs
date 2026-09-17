@@ -41,6 +41,7 @@ use verter_semantic::resolver_core::ResolutionBasis;
 use verter_semantic::type_info::{ImportedComponentResolution, ObservedMacroSurface};
 
 use crate::assembly::publish::ArtifactSchemaError;
+use crate::compile::types::VueMacroSemanticInput;
 use crate::compile_request::CompileRequest;
 
 /// Domain identity of the direct facade's artifact-set conversion: one
@@ -149,8 +150,8 @@ impl From<ArtifactSchemaError> for CompileTransactionRefusal {
 /// The staged compile transaction. Entered once per compile; owns the
 /// input-basis identity (minted at entry from the request input axes —
 /// generated products never affect it), the staged type-info
-/// observations, and the request-local continuation state of the last
-/// driven operation.
+/// observations, the closed Vue runtime macro projection handoff, and
+/// the request-local continuation state of the last driven operation.
 pub struct CompileAttempt<'a> {
     canonical_id: &'a str,
     framework: &'static str,
@@ -159,6 +160,7 @@ pub struct CompileAttempt<'a> {
     source_digest: [u8; 32],
     input_basis: InputBasisId,
     type_info: CompileTypeInfo,
+    vue_macro_semantics: VueMacroSemanticInput,
 }
 
 static REQUEST_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -198,6 +200,7 @@ impl<'a> CompileAttempt<'a> {
             source_digest,
             input_basis,
             type_info,
+            vue_macro_semantics: VueMacroSemanticInput::Unavailable,
         }
     }
 
@@ -226,7 +229,24 @@ impl<'a> CompileAttempt<'a> {
             source_digest,
             input_basis,
             type_info,
+            vue_macro_semantics: VueMacroSemanticInput::Unavailable,
         }
+    }
+
+    /// Stage the closed Vue runtime macro projection: the sole carrier of
+    /// the macro-semantic bundles into compile. Each route stages exactly
+    /// what its TypeInfo producer produced (or `Unavailable` when the
+    /// target demands no macro semantics) once, at transaction entry, and
+    /// every codegen consumer reads [`Self::vue_macro_semantics`] — there
+    /// is no second handoff channel beside the transaction.
+    pub fn stage_vue_macro_semantics(&mut self, input: VueMacroSemanticInput) {
+        self.vue_macro_semantics = input;
+    }
+
+    /// The staged Vue runtime macro projection — the one semantic handoff
+    /// every Vue codegen consumer reads. `Unavailable` until staged.
+    pub fn vue_macro_semantics(&self) -> &VueMacroSemanticInput {
+        &self.vue_macro_semantics
     }
 
     /// The sealed type-info gateway of this transaction: exactly the six

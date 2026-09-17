@@ -947,7 +947,9 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
             &artifact,
             &request,
             &VueExecutionInputs::default(),
-            &VueMacroSemanticInput::Unavailable,
+            &verter_compiler::compile_transaction::CompileAttempt::enter_direct(
+                source, &request, "vue",
+            ),
             &alloc_b,
         )
         .expect("registered Vue artifact compiles");

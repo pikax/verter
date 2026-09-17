@@ -252,7 +252,11 @@ resolution. Parser macro facts are limited to authored spans, runtime
 object/array constructors, defaults-object shape, model names/options, and
 other syntax needed to preserve the source. Typed `defineProps`,
 `defineEmits`, and `defineModel` surfaces arrive from TypeInfo through the
-explicit `VueMacroSemanticInput` compile argument:
+explicit `VueMacroSemanticInput` compile argument, staged once at entry on
+the sealed `CompileAttempt` (`stage_vue_macro_semantics` / read via
+`vue_macro_semantics()`) — the transaction's staged handoff is the
+projection's SOLE carrier; no route threads a bundle on
+`VueExecutionInputs`/`VueRuntimeInputs` beside it:
 
 - `Unavailable`
 - `Runtime(Arc<MacroRuntimeBundle>)`

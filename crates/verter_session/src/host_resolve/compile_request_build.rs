@@ -410,7 +410,6 @@ fn prepare_vue_execution_inputs(
     // ephemeral `VueExecutionInputs` carrier — excluded from
     // `CompileRequest` identity, and reachable only from here.
     let vue_facts = verter_compiler::compile::types::VueExecutionInputs {
-        macro_runtime: macro_output.runtime,
         prop_constness_overrides: None, // populated by the cross-file optimizer
         style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
         style_v_bind_usage_complete: Some(snapshot.style_v_bind_usage_complete),
@@ -429,6 +428,10 @@ fn prepare_vue_execution_inputs(
     Ok(VueHostExecutionInputs {
         block_content: snapshot.block_content_inputs.clone(),
         vue_facts: Some(vue_facts),
+        // The one macro-semantic channel: exactly what the TypeInfo
+        // producer built for this compile's target demand, staged into
+        // the compile transaction by the compiler-side entry.
+        vue_macros: macro_output.compiler_input(),
         prepared_styles: snapshot.prepared_styles.clone(),
         canonical_id: snapshot.canonical_id.clone(),
         style_specifiers,
