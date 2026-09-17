@@ -72,16 +72,15 @@ fn digest_output(
     let request = request_with(products);
     let plan = ProductPlan::from_request(&request);
     let published = publish(&plan, vec![contribution]).expect("publish");
-    crate::standalone::stage_published_products(
-        DIGEST_SOURCE,
-        &request,
-        "vue",
-        &published,
-        qualified_styles,
-        None,
-        diagnostics,
-    )
-    .expect("set admission")
+    crate::compile_transaction::CompileAttempt::enter_direct(DIGEST_SOURCE, &request, "vue")
+        .admit_published_products(
+            DIGEST_SOURCE,
+            &published,
+            qualified_styles,
+            None,
+            diagnostics,
+        )
+        .expect("set admission")
 }
 
 #[test]

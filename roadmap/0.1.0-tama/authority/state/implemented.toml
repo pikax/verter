@@ -54,7 +54,7 @@ schema = 2
 "BV1" = { status = "implemented", commit_message = "docs(arch): record landing evidence for the Vue conformance train", commit_date = "2026-08-20T10:07:31+01:00" }
 "BV2" = { status = "implemented", commit_message = "fix(core): contain a degraded class-method inference to its own prop row", commit_date = "2026-08-22T15:00:26+01:00" }
 "C1" = { status = "implemented", commit_message = "refactor(core): establish the semantic module resolver boundary", commit_date = "2026-08-27T14:57:34+01:00" }
-"C2" = { status = "pending" }
+"C2" = { status = "implemented", commit_message = "feat(compiler): seal the C2 type-info gateway, staged compile transaction, and facade cutover", commit_date = "2026-09-17T09:14:00+01:00" }
 "C3" = { status = "pending" }
 "C4" = { status = "pending" }
 "CAT0" = { status = "pending" }

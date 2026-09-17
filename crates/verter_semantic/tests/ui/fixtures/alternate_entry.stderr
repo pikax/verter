@@ -1,0 +1,17 @@
+error[E0599]: no method named `attempt_unchecked` found for struct `TypeInfoCore` in the current scope
+  --> tests/ui/fixtures/alternate_entry.rs:16:18
+   |
+16 |     let _ = core.attempt_unchecked(&NonFlowOperation::ProjectExposeSurface {
+   |             -----^^^^^^^^^^^^^^^^^ method not found in `TypeInfoCore`
+
+error[E0599]: no variant, associated function, or constant named `from_operation` found for enum `NonFlowPayload` in the current scope
+  --> tests/ui/fixtures/alternate_entry.rs:21:29
+   |
+21 |     let _ = NonFlowPayload::from_operation(&NonFlowOperation::ProjectExposeSurface {
+   |                             ^^^^^^^^^^^^^^ variant, associated function, or constant not found in `NonFlowPayload`
+   |
+help: there is an associated function `from_in` with a similar name
+  --> $CARGO/oxc_allocator-$VERSION/src/convert.rs
+   |
+   |     fn from_in(value: T, allocator: &'a Allocator) -> Self;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
