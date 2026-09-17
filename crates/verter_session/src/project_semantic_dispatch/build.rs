@@ -3684,7 +3684,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             contributor_nodes,
             contributor_roots,
             source_env_unobservable,
-        } = self.collect_augmentation_contributions(target, decl_name.as_ref(), context)?;
+        } = self.collect_augmentation_contributions(target, decl_name.as_ref(), &[], context)?;
 
         // Tainted-EMPTY collection: augmenters targeted this decl but every
         // contribution was unobservable. Keep the base body UNCHANGED (no false
@@ -3749,11 +3749,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// set fingerprint) intact still moves the augmenter's `FileWholeHash`, so
     /// the per-augmenter whole-hash fact is what catches it.
     ///
+    /// `type_arguments` are the applied arguments of the augmented
+    /// declaration: each contributor binds its OWN declared type parameters to
+    /// them positionally, the same name environment `Instantiate` builds for a
+    /// base body, so a merged `interface Promise<T>` contribution read for
+    /// `Promise<number>` lowers its `T` as `number`. An unbound parameter
+    /// stays unbound, as in `Instantiate`'s published modes.
+    ///
     /// Returns `None` when no augmenter contributes.
     fn collect_augmentation_contributions(
         &self,
         target: crate::file_artifact_store::AugmentationTargetKind,
         decl_name: &str,
+        type_arguments: &[SemanticNodeId],
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<AugmentationContributions> {
         use crate::file_artifact_store::{AugmentationTargetKey, AugmentationTargetKind};
@@ -3951,7 +3959,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
                         aug_scope_payload.as_ref(),
                     );
-                let aug_env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
                 // A `declare global` augmenter is indexed under the global tag;
                 // its retained body lives in the GLOBAL augmentation scope, not
                 // in a module scope named after the tag.
@@ -3991,6 +3998,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         continue;
                     }
                 };
+                let aug_env: FxHashMap<String, SemanticNodeId> = aug_prepared
+                    .type_parameters
+                    .iter()
+                    .zip(type_arguments.iter())
+                    .map(|(param, argument)| (param.name.clone(), *argument))
+                    .collect();
                 let mut aug_subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
                 // Demand the augmenter's RETAINED contribution body through
                 // the augmenter's OWN `LowerLocator` (the augmentation-scoped
@@ -4252,7 +4265,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `cross_file_augmentation_merge_equivalence_tests::external_module_augmentation_warm_parent_rejects_contributor_content_edit_end_to_end`.
             contributor_roots: _,
             source_env_unobservable,
-        } = self.collect_augmentation_contributions(target, name, context)?;
+        } = self.collect_augmentation_contributions(target, name, &[], context)?;
         // A torn contributor (unobservable source-env identity — a
         // torn/unhealable/unservable augmenter) is SERVED but must NEVER be
         // warm-admitted. This carrier is interned mid-reference-resolution and
@@ -10695,17 +10708,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(SemanticNodeData::DeclRef { identity })
                 if self.runtime_nominal_identity(identity).is_some() =>
             {
-                Some(Arc::clone(&identity.decl_name))
+                Some((
+                    Arc::clone(&identity.decl_name),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                ))
             }
-            Some(SemanticNodeData::InstantiationRef { base, .. })
+            // The nominal's type ARGUMENTS travel with it: a generic
+            // augmentation (`interface Promise<T> { (value: T): void }`) is
+            // instantiated with them.
+            Some(SemanticNodeData::InstantiationRef { base, args })
                 if self.runtime_nominal_identity(base).is_some() =>
             {
-                Some(Arc::clone(&base.decl_name))
+                Some((Arc::clone(&base.decl_name), Arc::clone(args)))
             }
             _ => None,
         };
-        if let Some(name) = nominal {
-            return self.runtime_nominal_call_signatures(&name);
+        if let Some((name, type_arguments)) = nominal {
+            return self.runtime_nominal_call_signatures(&name, &type_arguments);
         }
         let resolved = self.resolve_signature_source_carrier(
             node,
@@ -10738,12 +10757,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// The call signatures of the lib runtime nominal interface `name`: the
-    /// pristine lib declaration contributes none, and every `declare global`
-    /// augmentation of `name` contributes its own. A torn contributor is served
+    /// The call signatures of the lib runtime nominal interface `name` applied
+    /// to `type_arguments`: the pristine lib declaration contributes none, and
+    /// every `declare global` augmentation of `name` contributes its own,
+    /// instantiated with those arguments. A torn contributor is served
     /// but folds the no-warm rail, exactly as the external augmentation path
     /// does.
-    fn runtime_nominal_call_signatures(&self, name: &str) -> Option<Vec<SemanticNodeId>> {
+    fn runtime_nominal_call_signatures(
+        &self,
+        name: &str,
+        type_arguments: &[SemanticNodeId],
+    ) -> Option<Vec<SemanticNodeId>> {
         // Program-completeness discovery, as for an ambient external module: a
         // `declare global` augmenter is typically a program-root `.d.ts` that
         // nothing imports, and the augmentation index only sees loaded
@@ -10760,6 +10784,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }) = self.collect_augmentation_contributions(
             crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
             name,
+            type_arguments,
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),

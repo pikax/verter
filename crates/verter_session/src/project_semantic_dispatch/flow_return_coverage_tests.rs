@@ -5182,3 +5182,72 @@ fn augmented_global_nominal_callbacks_follow_the_merged_interface() {
         "the await relation unions every intersection signature: {r3:?}"
     );
 }
+
+/// A `declare global` augmenter that nothing imports, adding GENERIC call
+/// signatures to `Promise<T>` and `Map<K, V>` and a plain one to `Function`,
+/// for [`augmented_generic_nominal_callbacks_bind_their_type_arguments`].
+const GENERIC_GLOBAL: &str = "/ws/cov/generic_global.d.ts";
+const GENERIC_GLOBAL_SRC: &str = r#"export {};
+declare global {
+  interface Promise<T> { (value: T): void; }
+  interface Map<K, V> { (value: V): void; }
+  interface Function { (value: boolean): void; }
+}
+"#;
+const GENERIC_CONSUMER: &str = "/ws/cov/generic_consumer.ts";
+const GENERIC_CONSUMER_SRC: &str = r#"
+declare const la: Awaited<{ then(onfulfilled: Promise<number>): void }>; export function fa() { return la; }
+declare const lb: Awaited<{ then(onfulfilled: Map<string, number>): void }>; export function fb() { return lb; }
+declare const lc: Awaited<{ then(onfulfilled: Promise<string>): void }>; export function fc() { return lc; }
+declare const ld: Awaited<{ then(onfulfilled: Function): void }>; export function fd() { return ld; }
+export async function r1(v: { then(onfulfilled: Promise<number>): void }) { return v; }
+export async function r2(v: { then(onfulfilled: Map<string, number>): void }) { return v; }
+"#;
+
+/// A GENERIC lib nominal's augmentation is instantiated with the nominal's
+/// own type arguments, and an augmenter nothing imports is discovered cold.
+///
+/// Oracle (tsc 7.0.2, the augmentation in scope): `Awaited<{ then(onfulfilled:
+/// Promise<number>): void }>` is `number`, `Map<string, number>` gives
+/// `number` (the SECOND parameter, so the binding is positional, not
+/// first-argument), and `Promise<string>` gives `string` (the argument, not a
+/// fixed answer); the async returns over the first two are `Promise<number>`.
+///
+/// The host only UPSERTS both files — the augmenter is never explicitly
+/// indexed, so every row goes through the production program-completeness
+/// scan that indexes known members before the augmentation lookup. `fd` pins
+/// the non-generic cold path.
+///
+/// Discriminating: collecting the augmentation without its type arguments
+/// lowers `T` / `V` unbound and every row degrades to a typed gap.
+#[test]
+fn augmented_generic_nominal_callbacks_bind_their_type_arguments() {
+    let host = host_with(&[
+        (GENERIC_GLOBAL, GENERIC_GLOBAL_SRC),
+        (GENERIC_CONSUMER, GENERIC_CONSUMER_SRC),
+    ]);
+    let lib = |function: &str| {
+        with_dispatch(&host, |dispatch| {
+            let key = key_of(dispatch, GENERIC_CONSUMER, function);
+            match dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key))) {
+                QueryResult::Value(SemanticQueryOutput {
+                    value: SemanticQueryValue::FlowReturn(result),
+                    ..
+                }) => dispatch
+                    .declaration_carrier_body(result.return_type())
+                    .and_then(|body| host.project_node_to_type_expr_for_test(body)),
+                _ => None,
+            }
+        })
+    };
+    assert_eq!(lib("fa"), Some(number()), "Promise<number>");
+    assert_eq!(lib("fb"), Some(number()), "Map<string, number>");
+    assert_eq!(lib("fc"), Some(string()), "Promise<string>");
+    assert_eq!(lib("fd"), Some(boolean()), "Function");
+    let promise_number = TypeExpr::Ref {
+        name: Arc::from("Promise"),
+        type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+    };
+    assert_clean_warm(&host, GENERIC_CONSUMER, "r1", promise_number.clone());
+    assert_clean_warm(&host, GENERIC_CONSUMER, "r2", promise_number);
+}
