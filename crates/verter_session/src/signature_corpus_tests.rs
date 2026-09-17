@@ -19,7 +19,8 @@
 //!    The comparison bases are STRUCTURAL only — the typed
 //!    checker-syntax projection of the recorded `checker` text, the
 //!    recorded `decl_emit` signature return where the checker column is
-//!    a display-only binder instantiation or a recorded refusal
+//!    a display-only binder instantiation (checker print output — never
+//!    a live basis itself) or a recorded refusal
 //!    (compared ORDER-SENSITIVELY — the declaration bytes carry union
 //!    arm order as a structured field), and for diagnostic rows the
 //!    recorded refusal pinned by a deferred carrier. A
@@ -291,8 +292,10 @@ fn probe_lane_source(row: &Row) -> String {
 struct LiveProbeOutcome {
     /// The live answer structurally matches the row's recorded checker
     /// text through the checker-syntax projection (when the row records
-    /// one). Structured ONLY — a Verter display string is never
-    /// semantic identity.
+    /// one that is not a display-only column). Structured ONLY — a
+    /// Verter display string is never semantic identity, and neither is
+    /// a display-only checker print (those rows compare through their
+    /// declared return alone).
     matched_checker: bool,
     /// The live answer structurally matches the claim recorded in the
     /// row's `decl_emit` signature return — the rows whose checker
@@ -379,7 +382,14 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
             checker_syntax::matches_node(&dispatch, node, &parsed, 0)
         }
     };
-    let matched_checker = !row.checker.is_empty() && structural_match(row.checker, false);
+    // The checker text is a basis only where it carries a STRUCTURAL
+    // claim: a display-only column (a binder-at-constraint display,
+    // SV23/25/26) is checker PRINT OUTPUT, never semantic identity, so
+    // those rows compare through their declared return alone and a
+    // reduction to the display text must not satisfy or flip them.
+    let matched_checker = !row.checker.is_empty()
+        && !row.checker_display_only
+        && structural_match(row.checker, false);
     // The declared return is a LIVE basis when the checker column is a
     // display-only binder instantiation (the dedup/order claim lives in
     // the declaration bytes — SV23/25/26) or when the row records a
@@ -532,7 +542,9 @@ fn signature_corpus_live_answers_follow_their_verdicts() {
 /// `MatchesChecker` verdict and CONTRADICTS a `KnownOwed` one, a
 /// diagnostic row whose probe reduces loses its refusal pin, and a
 /// DISPLAY-ONLY row flips through its declared-return basis alone (the
-/// rail the V4 ordering rows ride). This is the control that keeps the
+/// rail the V4 ordering rows ride) while a live answer matching ONLY
+/// the display text never satisfies or flips one. This is the control
+/// that keeps the
 /// corpus driver's row-flip mechanism honest — a later block implementing
 /// a probe reduction flips its row through THIS rail, never a prose
 /// report.
@@ -610,6 +622,32 @@ fn signature_corpus_flip_law_fires_in_both_directions() {
         verdict_failure(&owed_display, &live)
             .is_some_and(|failure| failure.contains("STRUCTURALLY EQUALS")),
         "an implemented declared-return claim must flip a KnownOwed display-only row"
+    );
+    // ...but a live answer that matches ONLY the display text must NOT
+    // satisfy or flip a display-only row: the display instantiation is
+    // checker print output, never semantic identity, so the ORDERED
+    // declared return stays the row's only basis (without the
+    // exclusion, a later `ReturnType` reduction to the display text
+    // would flip SV25/SV26 without the order/dedup claim).
+    let mut display_text = reduced_row(
+        Verdict::KnownOwed {
+            note: "control: display text alone is not an answer",
+        },
+        None,
+    );
+    display_text.probe = "unknown";
+    display_text.checker = "unknown";
+    display_text.checker_display_only = true;
+    display_text.decl_emit = "export declare function witness(): string;\n";
+    let live = live_probe_outcome(&display_text);
+    assert!(
+        !live.matched_checker && !live.matched_declared_return,
+        "the display text must not be a live basis for a display-only row"
+    );
+    assert_eq!(
+        verdict_failure(&display_text, &live),
+        None,
+        "a KnownOwed display-only row must NOT flip when only the display text matches"
     );
 }
 
