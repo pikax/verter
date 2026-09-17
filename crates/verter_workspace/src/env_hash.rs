@@ -8,8 +8,8 @@
 //! |--------------------|---------------------------------------------------------------------------------------|
 //! | `parse_env_hash`   | The workspace parser-flag string (`EnvHashInputs.parser_flags`) — TODAY the sole consumed input; syntax mode / language target are NOT yet folded in (each new parse-relevant input must be added here AND to `parse_env_hash`). |
 //! | `resolve_env_hash` | `base_url`, `paths`, workspace aliases, project references, `moduleResolution` mode, `exports`/`imports` condition set, extension order. |
-//! | `type_env_hash`    | TS semantic options that change type meaning (`strict`, `noImplicitAny`, ...).        |
-//! | `lib_env_hash`     | TS built-in lib selection, `types`, `typeRoots`, ambient corpus identity.             |
+//! | `type_env_hash`    | The project's EFFECTIVE type-meaning options (`IdeProjectCompilerOptions::semantic`): every `strict`-family member (`strictNullChecks`, `strictFunctionTypes`, `strictBindCallApply`, `strictPropertyInitialization`, `noImplicitAny`, `noImplicitThis`, `useUnknownInCatchVariables`, `alwaysStrict`) plus `exactOptionalPropertyTypes` and `noUncheckedIndexedAccess`, in that fixed declaration order — canonical values, so spelling (`strict` umbrella vs. spelled-out members, `extends`-inherited vs. explicit) never enters. |
+//! | `lib_env_hash`     | The project's lib SELECTION (`noLib`, explicit `lib` as canonical file names, or the `target`-derived default lib file), `typeRoots`, ambient corpus identity. `target` reaches this dimension ONLY through the default lib file it selects. |
 //! | `project_identity` | Project root, tsconfig path, provider root, workspace root, membership.               |
 //!
 //! Every cache layer keys on **only** the dimensions it actually depends on
@@ -45,16 +45,24 @@ use xxhash_rust::xxh3::xxh3_128;
 
 use crate::module_resolution::{ConditionSet, ModuleResolutionMode};
 use verter_semantic::resolver_core::ConfiguredMembership;
-use verter_semantic::resolver_core::{IdeProjectCompilerOptions, IdeProjectConfig};
+use verter_semantic::resolver_core::{
+    IdeProjectCompilerOptions, IdeProjectConfig, SemanticCompilerOptions,
+};
 
 /// Per-call inputs to the env-hash functions that are NOT part of
 /// [`IdeProjectConfig`].
 ///
 /// `IdeProjectConfig` captures the project-shape data (root, tsconfig,
-/// references, paths, aliases, membership). The remaining inputs — parser
-/// flags, resolve extensions, TS semantic options, and TS lib data — are
-/// surfaced through this borrowed-view struct so callers can pass them by
-/// reference without cloning.
+/// references, paths, aliases, membership) AND the project's effective
+/// type-semantic options (`compiler_options.semantic` — the strictness
+/// family, exact optionality, lib selection, target), so the type and lib
+/// dimensions read those from the config itself: one source of truth per
+/// project, never a per-call copy that could disagree with the published
+/// project. The remaining workspace-level inputs — parser flags, resolve
+/// extensions, `typeRoots`, module-resolution mode, export conditions,
+/// the ambient corpus fingerprint — are surfaced through this
+/// borrowed-view struct so callers can pass them by reference without
+/// cloning.
 ///
 /// All fields are stable input projections, not raw deserialised structures.
 /// Callers that hold richer types should produce minimal stable forms before
@@ -71,16 +79,6 @@ pub struct EnvHashInputs<'a> {
     /// Order matters — `(.ts, .tsx)` and `(.tsx, .ts)` are different
     /// resolve behaviours.
     pub resolve_extensions: &'a [&'a str],
-
-    /// TS `strict` flag.
-    pub type_strict: bool,
-
-    /// TS `noImplicitAny` flag.
-    pub type_no_implicit_any: bool,
-
-    /// TS lib selection (e.g. `lib.dom.d.ts`, `lib.es2022.d.ts`).
-    /// Includes user-declared `lib` from tsconfig plus any default lib names.
-    pub lib_names: &'a [&'a str],
 
     /// TS `typeRoots` — directories scanned for ambient `@types` packages.
     pub type_roots: &'a [&'a str],
@@ -214,27 +212,39 @@ impl IdeProjectConfigEnvHash for IdeProjectConfig {
         compute_hash16(&buf)
     }
 
-    /// `type_env_hash` — captures TS semantic options that change type
-    /// meaning (`strict`, `noImplicitAny`, etc.).
+    /// `type_env_hash` — captures the project's EFFECTIVE type-meaning
+    /// options (`self.compiler_options.semantic`): every `strict`-family
+    /// member plus `exactOptionalPropertyTypes` and
+    /// `noUncheckedIndexedAccess`, folded in a fixed declaration order
+    /// ([`write_type_meaning_options`]). Values are the canonical effective
+    /// set, so two projects that spell the same configuration differently
+    /// (`strict: false` vs. every member spelled out; inherited through
+    /// `extends` vs. explicit) hash identically, and any single effective
+    /// flip hashes differently.
+    ///
+    /// Does NOT include the lib selection (`lib` / `noLib` / `target`) — that
+    /// is the `lib_env_hash` dimension (R21). Ignores `inputs`: the type
+    /// dimension has no workspace-level input today; a future one is added
+    /// to [`EnvHashInputs`] AND folded here, never bundled elsewhere.
     ///
     /// Bound by: typed-IR resolve,
-    /// `SemanticGraphStore`, `ComponentMetaResultDb`.
-    fn type_env_hash(&self, inputs: &EnvHashInputs<'_>) -> Hash16 {
+    /// `SemanticGraphStore`, `ComponentMetaResultDb`, the relation memo.
+    fn type_env_hash(&self, _inputs: &EnvHashInputs<'_>) -> Hash16 {
         let mut buf: Vec<u8> = Vec::with_capacity(32);
         buf.extend_from_slice(SALT_TYPE);
         buf.push(SEP);
-        buf.push(inputs.type_strict as u8);
-        buf.push(inputs.type_no_implicit_any as u8);
-        // Future TS-semantic flags (e.g. `strictNullChecks`,
-        // `useUnknownInCatchVariables`) extend this body in declaration
-        // order. Adding a flag is a producer-side change; existing keys
-        // re-hash automatically.
+        write_type_meaning_options(&mut buf, &self.compiler_options.semantic);
         compute_hash16(&buf)
     }
 
-    /// `lib_env_hash` — captures TS built-in lib selection
-    /// (`lib.dom.d.ts`, `lib.es*.d.ts`), `types`, `typeRoots`, registered
-    /// ambient libs, the global / module-augmentation corpus identity.
+    /// `lib_env_hash` — captures the project's lib SELECTION (`noLib`, the
+    /// explicit `lib` set as canonical file names, or the `target`-derived
+    /// default lib file — see
+    /// [`SemanticCompilerOptions::effective_lib_file_names`]), `typeRoots`,
+    /// registered ambient libs, the global / module-augmentation corpus
+    /// identity. `target` reaches this hash ONLY through the default lib
+    /// file it selects: once an explicit `lib` is declared, a target change
+    /// is invisible here, exactly as it is to the loaded lib set.
     ///
     /// R21 scoping rule: enters a cache key only when the cached value
     /// depends on lib data. `ResolvedImportFacts` MUST NOT key on this
@@ -245,7 +255,15 @@ impl IdeProjectConfigEnvHash for IdeProjectConfig {
         let mut buf: Vec<u8> = Vec::with_capacity(256);
         buf.extend_from_slice(SALT_LIB);
         buf.push(SEP);
-        write_str_slice(&mut buf, inputs.lib_names);
+        let semantic = &self.compiler_options.semantic;
+        buf.push(semantic.no_lib as u8);
+        // Explicit-empty `lib: []` (loads nothing) vs. unset (the target's
+        // default lib) already differ through the name list; the
+        // declared-ness byte keeps `noLib` + unset distinct from an explicit
+        // empty selection as well.
+        buf.push(semantic.lib.is_some() as u8);
+        buf.push(SEP);
+        write_str_slice(&mut buf, &semantic.effective_lib_file_names());
         write_str_slice(&mut buf, inputs.type_roots);
         buf.extend_from_slice(&inputs.ambient_corpus_fingerprint.to_le_bytes());
         compute_hash16(&buf)
@@ -289,6 +307,47 @@ fn write_str_slice(buf: &mut Vec<u8>, items: &[&str]) {
     for s in items {
         buf.extend_from_slice(s.as_bytes());
         buf.push(SEP);
+    }
+    buf.push(SEP);
+}
+
+/// Fold every effective option that changes TYPE MEANING, one byte each, in
+/// this fixed declaration order. Lib selection (`lib` / `noLib` / `target`)
+/// is deliberately absent — it is the lib dimension. Adding a type-meaning
+/// option to [`SemanticCompilerOptions`] means appending it HERE (and to the
+/// type-dimension discrimination table in the tests); existing keys re-hash
+/// automatically.
+fn write_type_meaning_options(buf: &mut Vec<u8>, semantic: &SemanticCompilerOptions) {
+    let SemanticCompilerOptions {
+        strict_null_checks,
+        strict_function_types,
+        strict_bind_call_apply,
+        strict_property_initialization,
+        no_implicit_any,
+        no_implicit_this,
+        use_unknown_in_catch_variables,
+        always_strict,
+        exact_optional_property_types,
+        no_unchecked_indexed_access,
+        // Lib-dimension fields, named so a new field cannot be added to the
+        // struct without deciding its dimension here.
+        no_lib: _,
+        lib: _,
+        target: _,
+    } = semantic;
+    for flag in [
+        strict_null_checks,
+        strict_function_types,
+        strict_bind_call_apply,
+        strict_property_initialization,
+        no_implicit_any,
+        no_implicit_this,
+        use_unknown_in_catch_variables,
+        always_strict,
+        exact_optional_property_types,
+        no_unchecked_indexed_access,
+    ] {
+        buf.push(*flag as u8);
     }
     buf.push(SEP);
 }

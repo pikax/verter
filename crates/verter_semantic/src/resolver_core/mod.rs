@@ -88,7 +88,10 @@ pub use path_utils::{
     resolve_known_dependency_base, resolve_known_dependency_id, strip_carrier_extension,
     CARRIER_API_MODULE_SPECIFIER_SUFFIX, CARRIER_API_VIRTUAL_SUFFIX,
 };
-pub use project_config::{IdeProjectCompilerOptions, IdeProjectConfig, WorkspaceAlias};
+pub use project_config::{
+    canonical_lib_file_name, IdeProjectCompilerOptions, IdeProjectConfig,
+    RawSemanticCompilerOptions, ScriptTarget, SemanticCompilerOptions, WorkspaceAlias,
+};
 pub use project_stable_key::ProjectStableKey;
 pub use resolution_snapshot::ResolutionObservationSnapshot;
 pub use resolution_world_identity::{

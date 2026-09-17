@@ -5169,9 +5169,6 @@ pub(crate) fn compose_env_hash_tables(
     let inputs = EnvHashInputs {
         parser_flags: WORKSPACE_PARSER_FLAGS,
         resolve_extensions: &extensions_refs,
-        type_strict: false,
-        type_no_implicit_any: false,
-        lib_names: &[],
         type_roots: &[],
         module_resolution_mode: ModuleResolutionMode::default(),
         export_conditions: &export_conditions,
@@ -5211,9 +5208,6 @@ fn compose_env_hash_tables_from_configs(
     let inputs = EnvHashInputs {
         parser_flags: WORKSPACE_PARSER_FLAGS,
         resolve_extensions: &extension_refs,
-        type_strict: false,
-        type_no_implicit_any: false,
-        lib_names: &[],
         type_roots: &[],
         module_resolution_mode: ModuleResolutionMode::default(),
         export_conditions: &export_conditions,
@@ -5344,9 +5338,6 @@ fn compute_workspace_default_env_hash_array(extensions: &[String]) -> ProjectEnv
     let inputs = EnvHashInputs {
         parser_flags: WORKSPACE_PARSER_FLAGS,
         resolve_extensions: &extensions_refs,
-        type_strict: false,
-        type_no_implicit_any: false,
-        lib_names: &[],
         type_roots: &[],
         module_resolution_mode: ModuleResolutionMode::default(),
         export_conditions: &export_conditions,

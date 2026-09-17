@@ -1397,3 +1397,166 @@ fn has_configured_ts_project_anywhere_still_accepts_root_tsconfig() {
         "a classic single-root workspace is still accepted (a superset of a root-only gate)"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// load_compiler_options — effective type-semantic options through `extends`
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Write `files` (name → JSON) into a temp dir and load the compiler options
+/// of `leaf` through the real filesystem workspace.
+fn semantic_options_from_files(
+    files: &[(&str, &str)],
+    leaf: &str,
+) -> verter_semantic::resolver_core::SemanticCompilerOptions {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    let tmp = tempfile::TempDir::new().unwrap();
+    for (name, json) in files {
+        std::fs::write(tmp.path().join(name), json).unwrap();
+    }
+    let leaf_path = tmp.path().join(leaf).to_string_lossy().replace('\\', "/");
+    load_compiler_options(&ws, &leaf_path).semantic
+}
+
+/// A config declaring no semantic option runs on TypeScript's defaults
+/// (the whole `strict` family ON) — including a missing file.
+#[test]
+fn semantic_options_default_to_typescript_defaults_when_undeclared() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    assert_eq!(
+        load_compiler_options(&ws, "/nonexistent/tsconfig.json").semantic,
+        verter_semantic::resolver_core::SemanticCompilerOptions::default()
+    );
+    assert_eq!(
+        semantic_options_from_files(
+            &[(
+                "tsconfig.json",
+                r#"{ "compilerOptions": { "baseUrl": "." } }"#
+            )],
+            "tsconfig.json",
+        ),
+        verter_semantic::resolver_core::SemanticCompilerOptions::default()
+    );
+}
+
+/// The umbrella inherited through `extends` and a member declared on the
+/// leaf resolve through ONE rule set: the leaf member overrides the
+/// inherited umbrella for itself only, and an inherited umbrella vs. the
+/// same values spelled out on a leaf are the SAME effective set.
+#[test]
+fn semantic_options_inherit_through_extends_with_leaf_members_winning() {
+    let base = r#"{ "compilerOptions": { "strict": false, "target": "ES2020" } }"#;
+
+    let inherited = semantic_options_from_files(
+        &[
+            ("tsconfig.base.json", base),
+            ("tsconfig.json", r#"{ "extends": "./tsconfig.base.json" }"#),
+        ],
+        "tsconfig.json",
+    );
+    assert!(!inherited.strict_null_checks);
+    assert!(!inherited.strict_function_types);
+    assert!(!inherited.no_implicit_any);
+    assert_eq!(
+        inherited.target,
+        verter_semantic::resolver_core::ScriptTarget::Es2020
+    );
+
+    let leaf_member = semantic_options_from_files(
+        &[
+            ("tsconfig.base.json", base),
+            (
+                "tsconfig.json",
+                r#"{ "extends": "./tsconfig.base.json", "compilerOptions": { "strictNullChecks": true } }"#,
+            ),
+        ],
+        "tsconfig.json",
+    );
+    assert!(
+        leaf_member.strict_null_checks,
+        "an explicit leaf member overrides the inherited umbrella"
+    );
+    assert!(
+        !leaf_member.strict_function_types,
+        "the other members still follow the inherited umbrella"
+    );
+
+    let spelled_out = semantic_options_from_files(
+        &[(
+            "tsconfig.json",
+            r#"{ "compilerOptions": {
+                "strictNullChecks": false, "strictFunctionTypes": false,
+                "strictBindCallApply": false, "strictPropertyInitialization": false,
+                "noImplicitAny": false, "noImplicitThis": false,
+                "useUnknownInCatchVariables": false, "alwaysStrict": false,
+                "target": "es2020"
+            } }"#,
+        )],
+        "tsconfig.json",
+    );
+    assert_eq!(
+        inherited, spelled_out,
+        "inherited umbrella and spelled-out members are one effective set"
+    );
+
+    let leaf_umbrella_over_base_member = semantic_options_from_files(
+        &[
+            (
+                "tsconfig.base.json",
+                r#"{ "compilerOptions": { "strictNullChecks": true } }"#,
+            ),
+            (
+                "tsconfig.json",
+                r#"{ "extends": "./tsconfig.base.json", "compilerOptions": { "strict": false } }"#,
+            ),
+        ],
+        "tsconfig.json",
+    );
+    assert!(
+        leaf_umbrella_over_base_member.strict_null_checks,
+        "an inherited explicit member is not undone by a nearer umbrella"
+    );
+}
+
+/// `lib` / `noLib` / `target` / the two non-umbrella type options read
+/// through the same layer: `lib` canonicalises to a sorted file-name set
+/// and REPLACES an inherited array wholesale; the rest last-wins per key.
+#[test]
+fn semantic_lib_and_flag_options_parse_and_layer_per_key() {
+    let options = semantic_options_from_files(
+        &[
+            (
+                "tsconfig.base.json",
+                r#"{ "compilerOptions": { "lib": ["esnext", "webworker"], "noLib": true, "exactOptionalPropertyTypes": true } }"#,
+            ),
+            (
+                "tsconfig.json",
+                r#"{ "extends": "./tsconfig.base.json", "compilerOptions": {
+                    "lib": ["DOM", "ES6", "dom"], "noLib": false, "noUncheckedIndexedAccess": true
+                } }"#,
+            ),
+        ],
+        "tsconfig.json",
+    );
+    assert_eq!(
+        options.lib.as_deref(),
+        Some(&["lib.dom.d.ts".to_string(), "lib.es2015.d.ts".to_string()][..]),
+        "the leaf `lib` array replaces the inherited one and canonicalises"
+    );
+    assert!(
+        !options.no_lib,
+        "an explicit leaf false overrides an inherited true"
+    );
+    assert!(
+        options.exact_optional_property_types,
+        "inherited when the leaf is silent"
+    );
+    assert!(options.no_unchecked_indexed_access);
+    assert!(
+        options.strict_null_checks,
+        "undeclared strict family stays default ON"
+    );
+}

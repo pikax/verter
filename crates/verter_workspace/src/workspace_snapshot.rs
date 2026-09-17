@@ -553,6 +553,25 @@ impl WorkspaceSnapshot {
         &self.projects[id.0 as usize]
     }
 
+    /// The EFFECTIVE type-semantic compiler options of project `id`: a
+    /// configured project's parsed tsconfig set, TypeScript's defaults for a
+    /// fallback (tsconfig-less) project, `None` for an id this snapshot does
+    /// not hold.
+    pub fn semantic_compiler_options(
+        &self,
+        id: ProjectId,
+    ) -> Option<verter_semantic::resolver_core::SemanticCompilerOptions> {
+        let project = self.projects.get(id.0 as usize)?;
+        Some(match &project.payload {
+            ProjectPayload::Configured {
+                compiler_options, ..
+            } => compiler_options.semantic.clone(),
+            ProjectPayload::Fallback { .. } => {
+                verter_semantic::resolver_core::SemanticCompilerOptions::default()
+            }
+        })
+    }
+
     /// Check if a project is configured (tsconfig-backed).
     pub fn is_configured(&self, id: ProjectId) -> bool {
         matches!(

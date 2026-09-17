@@ -9,6 +9,7 @@ use crate::traits::WorkspaceRead;
 use crate::ProjectMembership;
 use verter_semantic::resolver_core::{
     join_paths, normalize_canonical_id, parent_dir, IdeProjectCompilerOptions,
+    RawSemanticCompilerOptions,
 };
 
 /// Maximum depth for tsconfig `extends` chain resolution.
@@ -366,18 +367,41 @@ pub fn parse_tsconfig_json(ws: &dyn WorkspaceRead, tsconfig_path: &str) -> Optio
 }
 
 /// Load compiler options from a tsconfig.json, following `extends`.
+///
+/// The type-semantic options (`strict` family, `exactOptionalPropertyTypes`,
+/// `noUncheckedIndexedAccess`, `noLib`, `lib`, `target`) are gathered as
+/// DECLARED spellings across the whole chain first (leaf over ancestors,
+/// last-wins per key) and canonicalised into the effective
+/// [`SemanticCompilerOptions`] exactly once here — so an umbrella `strict`
+/// inherited from a base and a member spelled explicitly on the leaf go
+/// through one rule set, and two configs with the same effective values are
+/// equal however they spelled them.
 pub fn load_compiler_options(
     ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
 ) -> IdeProjectCompilerOptions {
-    load_compiler_options_inner(ws, tsconfig_path, 0).unwrap_or_default()
+    let LoadedCompilerOptions {
+        mut options,
+        semantic,
+    } = load_compiler_options_inner(ws, tsconfig_path, 0).unwrap_or_default();
+    options.semantic = semantic.effective();
+    options
+}
+
+/// The `extends`-recursion carrier: the resolution-facing options merged so
+/// far plus the raw (spelling-level, `Option`-per-key) semantic layer that
+/// [`load_compiler_options`] canonicalises after the whole chain is read.
+#[derive(Default)]
+struct LoadedCompilerOptions {
+    options: IdeProjectCompilerOptions,
+    semantic: RawSemanticCompilerOptions,
 }
 
 fn load_compiler_options_inner(
     ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
     depth: u8,
-) -> Option<IdeProjectCompilerOptions> {
+) -> Option<LoadedCompilerOptions> {
     if depth > MAX_TSCONFIG_EXTENDS_DEPTH {
         return None;
     }
@@ -394,10 +418,20 @@ fn load_compiler_options_inner(
         .and_then(|base_path| load_compiler_options_inner(ws, &base_path, depth + 1))
         .unwrap_or_default();
 
-    let mut compiler_options = inherited;
+    let LoadedCompilerOptions {
+        options: mut compiler_options,
+        semantic: mut raw_semantic,
+    } = inherited;
     let Some(raw_compiler_options) = json.get("compilerOptions") else {
-        return Some(compiler_options);
+        return Some(LoadedCompilerOptions {
+            options: compiler_options,
+            semantic: raw_semantic,
+        });
     };
+
+    // Type-semantic options: this config's DECLARED keys layer over the
+    // inherited raw layer; canonicalisation waits for the chain end.
+    raw_semantic.layer(read_raw_semantic_options(raw_compiler_options));
 
     if let Some(base_url) = raw_compiler_options
         .get("baseUrl")
@@ -462,7 +496,53 @@ fn load_compiler_options_inner(
             .collect();
     }
 
-    Some(compiler_options)
+    Some(LoadedCompilerOptions {
+        options: compiler_options,
+        semantic: raw_semantic,
+    })
+}
+
+/// Read the type-semantic keys ONE `compilerOptions` object declares, as
+/// raw spellings (`None` per absent key). Booleans are taken only when the
+/// JSON value is a boolean, `lib` only when it is an array (its string
+/// entries), `target` only when it is a string — a malformed value reads as
+/// undeclared, exactly like the other keys this loader consumes.
+fn read_raw_semantic_options(
+    raw_compiler_options: &serde_json::Value,
+) -> RawSemanticCompilerOptions {
+    let flag = |key: &str| {
+        raw_compiler_options
+            .get(key)
+            .and_then(serde_json::Value::as_bool)
+    };
+    RawSemanticCompilerOptions {
+        strict: flag("strict"),
+        strict_null_checks: flag("strictNullChecks"),
+        strict_function_types: flag("strictFunctionTypes"),
+        strict_bind_call_apply: flag("strictBindCallApply"),
+        strict_property_initialization: flag("strictPropertyInitialization"),
+        no_implicit_any: flag("noImplicitAny"),
+        no_implicit_this: flag("noImplicitThis"),
+        use_unknown_in_catch_variables: flag("useUnknownInCatchVariables"),
+        always_strict: flag("alwaysStrict"),
+        exact_optional_property_types: flag("exactOptionalPropertyTypes"),
+        no_unchecked_indexed_access: flag("noUncheckedIndexedAccess"),
+        no_lib: flag("noLib"),
+        lib: raw_compiler_options
+            .get("lib")
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            }),
+        target: raw_compiler_options
+            .get("target")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    }
 }
 
 /// Load project membership (files/include/exclude) from a tsconfig.json.

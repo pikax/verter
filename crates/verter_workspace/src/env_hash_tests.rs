@@ -19,7 +19,11 @@ use super::{EnvHashInputs, IdeProjectConfigEnvHash};
 use crate::canonical_path::CanonicalPath;
 use crate::module_resolution::{ConditionSet, ModuleResolutionMode};
 use crate::ProjectMembership;
-use verter_semantic::resolver_core::{IdeProjectCompilerOptions, IdeProjectConfig, WorkspaceAlias};
+use verter_scheduler::invalidation::Hash16;
+use verter_semantic::resolver_core::{
+    IdeProjectCompilerOptions, IdeProjectConfig, RawSemanticCompilerOptions, ScriptTarget,
+    SemanticCompilerOptions, WorkspaceAlias,
+};
 
 /// Baseline `exports`/`imports` condition set, materialised as a `'static`
 /// borrow so the baseline `EnvHashInputs` can carry `&'static ConditionSet`.
@@ -57,9 +61,6 @@ fn baseline() -> (IdeProjectConfig, EnvHashInputs<'static>) {
     let inputs = EnvHashInputs {
         parser_flags: &["preserve_jsx", "vue_macros_v3"],
         resolve_extensions: &[".ts", ".tsx", ".vue"],
-        type_strict: true,
-        type_no_implicit_any: true,
-        lib_names: &["lib.dom.d.ts", "lib.es2022.d.ts"],
         type_roots: &["/ws/node_modules/@types"],
         module_resolution_mode: ModuleResolutionMode::Bundler,
         export_conditions: baseline_conditions(),
@@ -259,18 +260,21 @@ fn resolve_env_does_not_fold_lib_dims() {
     let (cfg, baseline_inputs) = baseline();
     let r0 = cfg.resolve_env_hash(&baseline_inputs);
 
-    // lib_names change → lib_env moves, resolve_env stays.
-    let mut lib_inputs = baseline_inputs;
-    lib_inputs.lib_names = &["lib.dom.d.ts", "lib.es2023.d.ts"];
+    // lib selection change → lib_env moves, resolve_env stays.
+    let mut lib_cfg = cfg.clone();
+    lib_cfg.compiler_options.semantic.lib = Some(vec![
+        "lib.dom.d.ts".to_string(),
+        "lib.es2023.d.ts".to_string(),
+    ]);
     assert_ne!(
         cfg.lib_env_hash(&baseline_inputs),
-        cfg.lib_env_hash(&lib_inputs),
-        "lib_names change MUST change lib_env_hash"
+        lib_cfg.lib_env_hash(&baseline_inputs),
+        "lib selection change MUST change lib_env_hash"
     );
     assert_eq!(
         r0,
-        cfg.resolve_env_hash(&lib_inputs),
-        "R21: lib_names change MUST NOT be folded into resolve_env_hash"
+        lib_cfg.resolve_env_hash(&baseline_inputs),
+        "R21: lib selection change MUST NOT be folded into resolve_env_hash"
     );
 
     // typeRoots change → lib_env moves, resolve_env stays.
@@ -304,47 +308,178 @@ fn resolve_env_does_not_fold_lib_dims() {
 
 // ── type_env_hash discrimination ──
 
-#[test]
-fn type_env_hash_changes_when_strict_flips() {
-    let (cfg, mut inputs) = baseline();
-    let h0 = cfg.type_env_hash(&inputs);
-    inputs.type_strict = false;
-    let h1 = cfg.type_env_hash(&inputs);
-    assert_ne!(h0, h1, "strict flip MUST change type_env_hash");
+/// The five env-hash values of `cfg` under the baseline inputs, in
+/// `[parse, resolve, type, lib, project_identity]` order.
+fn all_dimensions(cfg: &IdeProjectConfig, inputs: &EnvHashInputs<'_>) -> [Hash16; 5] {
+    [
+        cfg.parse_env_hash(inputs),
+        cfg.resolve_env_hash(inputs),
+        cfg.type_env_hash(inputs),
+        cfg.lib_env_hash(inputs),
+        cfg.project_identity(),
+    ]
+}
 
-    // The other 4 dimensions stay identical.
-    let r0 = cfg.resolve_env_hash(&baseline().1);
-    let r1 = cfg.resolve_env_hash(&inputs);
-    assert_eq!(r0, r1, "strict flip MUST NOT change resolve_env_hash");
-    let p0 = cfg.parse_env_hash(&baseline().1);
-    let p1 = cfg.parse_env_hash(&inputs);
-    assert_eq!(p0, p1, "strict flip MUST NOT change parse_env_hash");
-    let l0 = cfg.lib_env_hash(&baseline().1);
-    let l1 = cfg.lib_env_hash(&inputs);
-    assert_eq!(l0, l1, "strict flip MUST NOT change lib_env_hash");
+/// Every effective type-meaning option is a `type_env_hash` input and ONLY
+/// a `type_env_hash` input: flipping any one of them (individually, from
+/// the TS-default baseline) moves `type_env_hash` and leaves the other four
+/// dimensions untouched. Table-driven over the whole strictness family plus
+/// the two non-umbrella type options, so a fold that forgets one member
+/// fails on that member's row.
+#[test]
+fn type_env_hash_changes_when_any_type_meaning_option_flips() {
+    let (cfg, inputs) = baseline();
+    let base = all_dimensions(&cfg, &inputs);
+    let flips: [(&str, fn(&mut SemanticCompilerOptions)); 10] = [
+        ("strictNullChecks", |o| o.strict_null_checks = false),
+        ("strictFunctionTypes", |o| o.strict_function_types = false),
+        ("strictBindCallApply", |o| o.strict_bind_call_apply = false),
+        ("strictPropertyInitialization", |o| {
+            o.strict_property_initialization = false
+        }),
+        ("noImplicitAny", |o| o.no_implicit_any = false),
+        ("noImplicitThis", |o| o.no_implicit_this = false),
+        ("useUnknownInCatchVariables", |o| {
+            o.use_unknown_in_catch_variables = false
+        }),
+        ("alwaysStrict", |o| o.always_strict = false),
+        ("exactOptionalPropertyTypes", |o| {
+            o.exact_optional_property_types = true
+        }),
+        ("noUncheckedIndexedAccess", |o| {
+            o.no_unchecked_indexed_access = true
+        }),
+    ];
+    let mut seen_type_hashes = vec![base[2]];
+    for (name, flip) in flips {
+        let mut flipped = cfg.clone();
+        flip(&mut flipped.compiler_options.semantic);
+        let dims = all_dimensions(&flipped, &inputs);
+        assert_ne!(dims[2], base[2], "{name} flip MUST change type_env_hash");
+        assert!(
+            !seen_type_hashes.contains(&dims[2]),
+            "{name} flip MUST produce a type_env_hash distinct from every other single flip"
+        );
+        seen_type_hashes.push(dims[2]);
+        assert_eq!(
+            dims[0], base[0],
+            "{name} flip MUST NOT change parse_env_hash"
+        );
+        assert_eq!(
+            dims[1], base[1],
+            "{name} flip MUST NOT change resolve_env_hash"
+        );
+        assert_eq!(dims[3], base[3], "{name} flip MUST NOT change lib_env_hash");
+        assert_eq!(
+            dims[4], base[4],
+            "{name} flip MUST NOT change project_identity"
+        );
+    }
+}
+
+/// `type_env_hash` keys on the EFFECTIVE option set: two projects that
+/// reach the same effective values through different spellings (an
+/// inherited umbrella `strict: false` vs. every member spelled out) hash
+/// identically, while a genuinely different effective set does not.
+#[test]
+fn type_env_hash_is_a_function_of_effective_options_not_spelling() {
+    let (cfg, inputs) = baseline();
+    let mut umbrella = cfg.clone();
+    umbrella.compiler_options.semantic = RawSemanticCompilerOptions {
+        strict: Some(false),
+        ..Default::default()
+    }
+    .effective();
+    let mut spelled_out = cfg.clone();
+    spelled_out.compiler_options.semantic = RawSemanticCompilerOptions {
+        strict_null_checks: Some(false),
+        strict_function_types: Some(false),
+        strict_bind_call_apply: Some(false),
+        strict_property_initialization: Some(false),
+        no_implicit_any: Some(false),
+        no_implicit_this: Some(false),
+        use_unknown_in_catch_variables: Some(false),
+        always_strict: Some(false),
+        ..Default::default()
+    }
+    .effective();
+    assert_eq!(
+        umbrella.type_env_hash(&inputs),
+        spelled_out.type_env_hash(&inputs),
+        "equal effective options MUST hash equal regardless of spelling"
+    );
+    assert_ne!(
+        umbrella.type_env_hash(&inputs),
+        cfg.type_env_hash(&inputs),
+        "the relaxed set MUST NOT collide with the TS-default set"
+    );
 }
 
 // ── lib_env_hash discrimination ──
 
+/// R21 scoping: the project's lib SELECTION (`lib`, `noLib`, the
+/// `target`-derived default lib) is a `lib_env_hash` input and never a
+/// `type_env_hash` / `resolve_env_hash` / `parse_env_hash` /
+/// `project_identity` input. A project that changes ONLY its lib selection
+/// moves `lib_env_hash` alone.
 #[test]
-fn lib_env_hash_changes_when_lib_names_changes() {
-    let (cfg, mut inputs) = baseline();
-    let h0 = cfg.lib_env_hash(&inputs);
-    inputs.lib_names = &["lib.dom.d.ts", "lib.es2023.d.ts"]; // ES bump
-    let h1 = cfg.lib_env_hash(&inputs);
-    assert_ne!(h0, h1, "lib names edit MUST change lib_env_hash");
+fn lib_env_hash_changes_when_lib_selection_changes_and_type_env_does_not() {
+    let (cfg, inputs) = baseline();
+    let base = all_dimensions(&cfg, &inputs);
 
-    // CRITICAL R21 scoping rule: lib_names changing MUST NOT change resolve_env_hash.
-    let r0 = cfg.resolve_env_hash(&baseline().1);
-    let r1 = cfg.resolve_env_hash(&inputs);
+    let mut explicit_lib = cfg.clone();
+    explicit_lib.compiler_options.semantic.lib = Some(vec![
+        "lib.dom.d.ts".to_string(),
+        "lib.es2023.d.ts".to_string(),
+    ]);
+    let mut no_lib = cfg.clone();
+    no_lib.compiler_options.semantic.no_lib = true;
+    let mut other_target = cfg.clone();
+    other_target.compiler_options.semantic.target = ScriptTarget::Es2020;
+    let mut explicit_empty = cfg.clone();
+    explicit_empty.compiler_options.semantic.lib = Some(Vec::new());
+
+    let mut lib_hashes = vec![base[3]];
+    for (name, variant) in [
+        ("explicit lib", &explicit_lib),
+        ("noLib", &no_lib),
+        ("target (default lib)", &other_target),
+        ("explicit empty lib", &explicit_empty),
+    ] {
+        let dims = all_dimensions(variant, &inputs);
+        assert_ne!(dims[3], base[3], "{name} change MUST change lib_env_hash");
+        assert!(
+            !lib_hashes.contains(&dims[3]),
+            "{name} change MUST be distinct from the other lib-selection variants"
+        );
+        lib_hashes.push(dims[3]);
+        assert_eq!(
+            dims[2], base[2],
+            "R21: {name} change MUST NOT change type_env_hash"
+        );
+        assert_eq!(
+            dims[1], base[1],
+            "R21: {name} change MUST NOT change resolve_env_hash"
+        );
+        assert_eq!(
+            dims[0], base[0],
+            "{name} change MUST NOT change parse_env_hash"
+        );
+        assert_eq!(
+            dims[4], base[4],
+            "{name} change MUST NOT change project_identity"
+        );
+    }
+
+    // `target` reaches the lib dimension ONLY through the default lib: with
+    // an explicit `lib` selection in force, a target change is invisible.
+    let mut explicit_lib_other_target = explicit_lib.clone();
+    explicit_lib_other_target.compiler_options.semantic.target = ScriptTarget::Es2020;
     assert_eq!(
-        r0, r1,
-        "R21 scoping rule: TS lib change MUST NOT change resolve_env_hash"
+        explicit_lib.lib_env_hash(&inputs),
+        explicit_lib_other_target.lib_env_hash(&inputs),
+        "target MUST NOT change lib_env_hash once an explicit lib selection replaces the default lib"
     );
-    // Also: parse_env_hash and project_identity are independent of libs.
-    let p0 = cfg.parse_env_hash(&baseline().1);
-    let p1 = cfg.parse_env_hash(&inputs);
-    assert_eq!(p0, p1, "lib names edit MUST NOT change parse_env_hash");
 }
 
 #[test]

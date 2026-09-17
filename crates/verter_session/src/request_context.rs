@@ -2273,6 +2273,32 @@ pub fn current_request_context() -> Option<Arc<RequestContext>> {
     CURRENT_REQUEST_CONTEXT.with(|c| c.borrow().as_ref().map(Arc::clone))
 }
 
+/// The canonical id the currently installed request resolves for — the
+/// file whose owning project's configuration (its effective tsconfig
+/// semantic options) governs every checker judgement the request makes.
+/// `None` when no request context is installed on this thread.
+#[must_use]
+pub(crate) fn current_request_canonical() -> Option<Arc<str>> {
+    CURRENT_REQUEST_CONTEXT.with(|c| c.borrow().as_ref().map(|ctx| Arc::clone(&ctx.canonical_id)))
+}
+
+/// TEST-ONLY: install a minimal request context resolving for `canonical`
+/// on this thread, so a bare test dispatch runs under the configuration of
+/// the project owning that file exactly as an audited request would. The
+/// guard restores the previous context on drop.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn install_test_request_for(canonical: &str) -> RequestContextGuard {
+    static NEXT_TEST_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+    let request_id = NEXT_TEST_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    RequestContextGuard::install(RequestContext::new(
+        request_id,
+        Arc::from(canonical),
+        false,
+        None,
+    ))
+}
+
 /// Return a clone of the currently installed accumulator, or `None`.
 /// Same Arc-clone-out-of-borrow pattern as `current_request_context`.
 #[must_use]

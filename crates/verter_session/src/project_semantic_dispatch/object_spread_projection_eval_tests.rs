@@ -2113,25 +2113,40 @@ fn nested_open_program_keeps_post_open_exact_keys_proven() {
     );
 }
 
+/// The projected optional-to-required rule follows the `strictNullChecks`
+/// of the project owning the REQUEST's canonical: a request for the
+/// TS-default project rejects the optional key filling a required slot, a
+/// request for the project whose tsconfig relaxes `strictNullChecks`
+/// relates the pair on the value types alone.
 #[test]
 fn projected_optional_to_required_honors_the_strict_family_config() {
-    let host = host();
+    let host = VerterHost::new_standalone_with_tsconfig_projects(
+        HostConfig::default(),
+        &[
+            ("/strict", r#"{ "compilerOptions": {} }"#),
+            (
+                "/relaxed",
+                r#"{ "compilerOptions": { "strictNullChecks": false } }"#,
+            ),
+        ],
+    );
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let base = object(graph, [surface_member("a", number, true)]);
     let optional_source = program(graph, [ObjectConstructionEffect::Spread(base)]);
     let required_target = object(graph, [surface_member("a", number, false)]);
 
-    let strict_dispatch = ProjectSemanticDispatch::new(&host);
-    assert_eq!(
-        relate(&strict_dispatch, optional_source, required_target),
-        crate::semantic_query::RelationResult::NotAssignable,
-        "strictNullChecks on: an optional source key cannot fill a required slot"
-    );
+    {
+        let _request = crate::request_context::install_test_request_for("/strict/main.ts");
+        let strict_dispatch = ProjectSemanticDispatch::new(&host);
+        assert_eq!(
+            relate(&strict_dispatch, optional_source, required_target),
+            crate::semantic_query::RelationResult::NotAssignable,
+            "strictNullChecks on: an optional source key cannot fill a required slot"
+        );
+    }
 
-    host.relation_knobs
-        .strict_family_relax_bits
-        .store(0b01, std::sync::atomic::Ordering::Relaxed);
+    let _request = crate::request_context::install_test_request_for("/relaxed/main.ts");
     let relaxed_dispatch = ProjectSemanticDispatch::new(&host);
     assert!(
         matches!(
@@ -2603,9 +2618,23 @@ fn key_liveness_keeps_the_getter_of_a_paired_accessor() {
     );
 }
 
+/// `exactOptionalPropertyTypes` reaches the consumer projection policy from
+/// the effective tsconfig options of the project owning the request's
+/// canonical: the TS-default project folds the authored `undefined` out of
+/// the optional write, the project enabling the option preserves it.
 #[test]
 fn exact_optional_property_types_threads_into_consumer_projections() {
-    let host = host();
+    let host = VerterHost::new_standalone_with_tsconfig_projects(
+        HostConfig::default(),
+        &[
+            ("/default", r#"{ "compilerOptions": {} }"#),
+            (
+                "/exact",
+                r#"{ "compilerOptions": { "exactOptionalPropertyTypes": true } }"#,
+            ),
+        ],
+    );
+    let default_request = crate::request_context::install_test_request_for("/default/main.ts");
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
@@ -2648,11 +2677,12 @@ fn exact_optional_property_types_threads_into_consumer_projections() {
         crate::semantic_query::RelationResult::Assignable { .. }
     ));
 
-    // With exactOptionalPropertyTypes on, the authored `undefined` is
-    // preserved — the source only relates to the wide target.
-    host.relation_knobs
-        .strict_family_relax_bits
-        .store(0b100, std::sync::atomic::Ordering::Relaxed);
+    // With exactOptionalPropertyTypes on (a request for the project whose
+    // tsconfig enables it), the authored `undefined` is preserved — the
+    // source only relates to the wide target.
+    drop(dispatch);
+    drop(default_request);
+    let _exact_request = crate::request_context::install_test_request_for("/exact/main.ts");
     let enabled_dispatch = ProjectSemanticDispatch::new(&host);
     assert!(
         matches!(

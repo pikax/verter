@@ -489,6 +489,12 @@ pub struct ProjectSemanticDispatch<'a> {
     /// a cache key, never thread-local — it rides this dispatch exactly
     /// like the other cold-compute cycle guards above.
     pub(super) dispatch_txn: std::cell::RefCell<dispatch_txn::CheckerDispatchTransaction>,
+    /// The relation environment of the project owning the request's
+    /// canonical, resolved lazily ONCE per dispatch
+    /// ([`Self::relation_environment`]): the `R/T/L/J` env every relation
+    /// key carries and the strict-family configuration the reducer
+    /// branches on — two projections of the one effective option set.
+    pub(super) relation_env: std::cell::OnceCell<dispatch_txn::RelationEnvironment>,
     /// Monotonic count of NON-TRIVIAL canonical-evidence deposits (a
     /// deposit carrying file self-roots or an `incomplete` verdict).
     /// Snapshot-and-compare fences an evidence-blind memo publish: the
@@ -643,6 +649,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             dispatch_txn: std::cell::RefCell::new(
                 dispatch_txn::CheckerDispatchTransaction::default(),
             ),
+            relation_env: std::cell::OnceCell::new(),
             canonical_evidence_epoch: std::cell::Cell::new(0),
             connected_demand: ConnectedDemandState::new(
                 MAX_CONNECTED_PROJECTION_WORK,

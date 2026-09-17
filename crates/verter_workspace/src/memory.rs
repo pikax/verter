@@ -1044,6 +1044,14 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         root.project_identity_hashes.get(&project_id).copied()
     }
 
+    fn semantic_compiler_options_for_project(
+        &self,
+        project_id: crate::workspace_snapshot::ProjectId,
+    ) -> Option<verter_semantic::resolver_core::SemanticCompilerOptions> {
+        let root = self.engine.load_published()?;
+        root.snapshot.semantic_compiler_options(project_id)
+    }
+
     fn workspace_default_env_hash_array(&self) -> crate::published_state::ProjectEnvHashArray {
         crate::engine::workspace_default_env_hash_array_for_engine(&self.engine)
     }

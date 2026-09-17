@@ -81,9 +81,9 @@ use super::dispatch_txn::{
     CompletedResolveCallMember, CompletedSccMember, FlowReturnPendingOutcome, InferenceInfoSetup,
     InferenceOccurrence, InferenceSession, InferenceSessionSetup, InferenceSessionState,
     ObligationFrameDomain, ObligationIdentity, PendingObligation, PendingObligationDomain,
-    PendingVerdict, ProvisionalSubstitution, ProvisionalVerdict, RelationFrameState,
-    RelationPendingState, RelationStep, ResolveCallPendingState, ReverseProjectionState,
-    ReverseRecoveredEntry, SessionCheckpoint, StrictFamilyConfig,
+    PendingVerdict, ProvisionalSubstitution, ProvisionalVerdict, RelationEnvironment,
+    RelationFrameState, RelationPendingState, RelationStep, ResolveCallPendingState,
+    ReverseProjectionState, ReverseRecoveredEntry, SessionCheckpoint, StrictFamilyConfig,
 };
 use super::relation_predicates::*;
 use super::ProjectSemanticDispatch;
@@ -906,11 +906,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// The full default relation identity for `(source, target)` under the
-    /// live `R T L J` env (workspace-global host view — the established
-    /// one-engine convention), the EMPTY canonical substitution, and the
-    /// structural-transit reduction context. The strict-family
-    /// configuration in force folds into BOTH the policy (the variance
-    /// regime) and the `type_env_hash` (RI-10 key isolation).
+    /// REQUEST project's `R T L J` env ([`Self::relation_environment`]),
+    /// the EMPTY canonical substitution, and the structural-transit
+    /// reduction context. The project's effective type options reach the
+    /// key twice, as two projections of one option set: the strictness
+    /// family is folded into that project's `type_env_hash`, and the
+    /// variance regime it selects into the policy.
     pub(crate) fn relate_key_for(
         &self,
         source: SemanticNodeId,
@@ -930,40 +931,59 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target: SemanticNodeId,
         relation: RelationKind,
     ) -> RelateMemoKey {
-        let host = self.ctx.host_for_fact_tracer_install();
-        let env = host.host_view_env_hashes();
-        let strict = self.relation_strict_config();
+        let relation_env = self.relation_environment();
         let context = RelationContext {
-            resolve_env_hash: env.resolve_env_hash,
-            type_env_hash: strict.mix_into_type_env_hash(env.type_env_hash),
-            lib_env_hash: env.lib_env_hash,
-            project_identity: host.host_view_project_identity().0,
+            resolve_env_hash: relation_env.env.resolve_env_hash,
+            type_env_hash: relation_env.env.type_env_hash,
+            lib_env_hash: relation_env.env.lib_env_hash,
+            project_identity: relation_env.project_identity,
             substitution: crate::semantic_query::SubstitutionCanonicalHash::empty(),
             projection_reduction: ProjectionReductionContext::structural_transit(),
         };
         let mut key = RelateMemoKey::for_kind(source, target, relation, context);
         key.policy = RelationPolicy {
-            variance: strict.variance_policy(),
+            variance: relation_env.strict.variance_policy(),
             ..RelationPolicy::default()
         };
         key
     }
 
-    /// The normalized strict-family configuration in force on this host
-    /// (RI-10). Production always runs the TS-strict default (matching the
-    /// pre-activation engine); the per-host test knob flips individual
-    /// flags for the paired strict-on/off fixture.
+    /// The relation environment of this dispatch — the `R/T/L/J` env and
+    /// the effective strict-family configuration of the project owning the
+    /// request's canonical, resolved ONCE per dispatch from the published
+    /// project tables (the same tables the env hashes were composed from).
+    ///
+    /// The request canonical comes from the installed request context; a
+    /// dispatch running outside any request (a bare test dispatch, a direct
+    /// non-audited caller) runs the workspace default — TypeScript's default
+    /// options under the workspace-default env — never a project it was
+    /// not asked for.
+    pub(crate) fn relation_environment(&self) -> RelationEnvironment {
+        *self.relation_env.get_or_init(|| {
+            let host = self.ctx.host_for_fact_tracer_install();
+            match crate::request_context::current_request_canonical() {
+                Some(canonical) => RelationEnvironment {
+                    env: host.host_view_env_hashes_for(&canonical),
+                    project_identity: host.host_view_project_identity_for(&canonical).0,
+                    strict: StrictFamilyConfig::from_options(
+                        &host.semantic_compiler_options_for(&canonical),
+                    ),
+                },
+                None => RelationEnvironment {
+                    env: host.host_view_env_hashes(),
+                    project_identity: host.host_view_project_identity().0,
+                    strict: StrictFamilyConfig::TS_STRICT,
+                },
+            }
+        })
+    }
+
+    /// The strict-family configuration in force for this dispatch — the
+    /// request project's effective tsconfig options
+    /// ([`Self::relation_environment`]), which the reducer snapshots at
+    /// every relation root.
     pub(crate) fn relation_strict_config(&self) -> StrictFamilyConfig {
-        let host = self.ctx.host_for_fact_tracer_install();
-        let bits = host
-            .relation_knobs
-            .strict_family_relax_bits
-            .load(std::sync::atomic::Ordering::Relaxed);
-        StrictFamilyConfig {
-            strict_null_checks: bits & 0b01 == 0,
-            strict_function_types: bits & 0b10 == 0,
-            exact_optional_property_types: bits & 0b100 != 0,
-        }
+        self.relation_environment().strict
     }
 
     /// THE relation authority (design §2.1–§2.3). Every relation judgement
