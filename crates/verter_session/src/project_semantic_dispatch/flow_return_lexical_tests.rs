@@ -4045,12 +4045,13 @@ fn reachable_type_param_names(
 ///
 /// The local-binding and parameter routes now resolve through argument
 /// inference: the published value is the un-widened literal of the
-/// checker's widened `string`. Both callees are ROOTLESS — a local arrow
-/// and a parameter's function type have no authored function occurrence —
-/// so the value is served but the slot is never warm-admitted. The IIFE
-/// route is not call-resolved: `unknown` is the recorded interim there —
-/// not the checker's answer, but a leaked binder is not either, and it is
-/// the answer that cannot be substituted into.
+/// checker's widened `string`. Both callees keep Rootless origin as
+/// provenance (a local arrow and a parameter's function type have no
+/// authored function occurrence) but their dependency proof is complete,
+/// so the enclosing FlowReturn warms. The IIFE route is not
+/// call-resolved: `unknown` is the recorded interim there — not the
+/// checker's answer, but a leaked binder is not either, and it is the
+/// answer that cannot be substituted into.
 ///
 /// Mutation recipes (each verified to flip exactly these rows):
 ///
@@ -4064,11 +4065,11 @@ fn reachable_type_param_names(
 fn flow_return_every_call_route_instantiates_the_callees_clause() {
     let host = make_r5_host();
 
-    // The ROOTLESS routes: a local arrow and a generic function-typed
-    // parameter resolve from the literal argument, complete
-    // transaction-locally, and are never warm-admitted.
+    // Rootless-origin callees whose inputs are fully rooted: a local
+    // arrow and a generic function-typed parameter resolve from the
+    // literal argument and warm-admit under the dependency proof.
     for name in ["rvLocalLambdaCall", "rvParamCall"] {
-        r5_node_unadmitted(
+        r5_node(
             &host,
             name,
             FunctionPartIdentity::DeclarationBody,
@@ -4100,7 +4101,7 @@ fn flow_return_every_call_route_instantiates_the_callees_clause() {
     // The MEMBER-ALIASING pair: the local lambda's clause is spelled
     // `RL`, exactly the enclosing class's, so before the fix both members
     // published ONE node.
-    let via_local = r5_node_unadmitted(
+    let via_local = r5_node(
         &host,
         "RvHolder",
         FunctionPartIdentity::Member {
@@ -4792,8 +4793,8 @@ fn flow_return_clause_claim_never_erases_a_foreign_same_named_declaration() {
     // so the resolved same-named head IS the clause parameter and the
     // claim must still reach it. `symCall` is not call-resolved and keeps
     // the claim's `unknown`; `bindDeclCall` infers from the literal
-    // argument — a ROOTLESS winner (a binding's function type has no
-    // authored occurrence), so the value is served but never admitted.
+    // argument — a Rootless-origin winner whose dependency proof is
+    // complete, so the enclosing FlowReturn warms.
     r5_node(
         &host,
         "symCall",
@@ -4807,7 +4808,7 @@ fn flow_return_clause_claim_never_erases_a_foreign_same_named_declaration() {
             );
         },
     );
-    r5_node_unadmitted(
+    r5_node(
         &host,
         "bindDeclCall",
         FunctionPartIdentity::DeclarationBody,
@@ -4848,10 +4849,9 @@ fn flow_return_clause_claim_never_erases_a_foreign_same_named_declaration() {
 /// the control that isolates it: the identical body with the clause
 /// renamed keeps the arm, so the erasure is purely the name collision.
 ///
-/// The two routes agree on the VALUE but not on ADMISSION: the IIFE's
-/// callee has its authored occurrence and warm-admits, while the local
-/// binding's arrow is ROOTLESS — the value is served but the slot is
-/// never warm-admitted.
+/// The two routes agree on the VALUE. Both callees have a complete
+/// dependency proof, so both warm-admit; Rootless origin on the binding
+/// route is provenance only.
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig`,
 /// read through the TWO-STEP probe `const v = f(…); const p: null = v;`
@@ -4872,10 +4872,11 @@ fn flow_return_clause_claim_never_erases_a_foreign_same_named_declaration() {
 fn flow_return_binding_and_iife_routes_agree_about_one_callee() {
     let host = make_r5_host();
 
-    // The BINDING route: the arrow is ROOTLESS, so the value is served
-    // but never warm-admitted — for `ncUse` (renamed clause) alike.
+    // The BINDING route: the arrow is Rootless-origin with a complete
+    // proof, so the enclosing FlowReturn warms — for `ncUse` (renamed
+    // clause) alike.
     for name in ["nbUse", "ncUse"] {
-        r5_node_unadmitted(
+        r5_node(
             &host,
             name,
             FunctionPartIdentity::DeclarationBody,

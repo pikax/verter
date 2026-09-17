@@ -1259,6 +1259,7 @@ fn unrootable_call_is_served_but_never_admitted() {
     // return. The call selects (no parameter to relate), but the proof is
     // incomplete, so the result is refused warm.
     let mut deep = string;
+    // bounded-loop: SELF_ROOT_WALK_CAP-bounded Global chain; extra 8 is the discriminator.
     for _ in 0..(super::build::SELF_ROOT_WALK_CAP + 8) {
         deep = graph.intern_node(SemanticNodeData::Array {
             element: deep,

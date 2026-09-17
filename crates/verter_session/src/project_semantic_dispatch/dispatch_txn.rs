@@ -839,6 +839,9 @@ pub(crate) struct ResolveCallPendingState {
     pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineResolveCallFlight>,
     /// The call site's own file roots.
     pub(crate) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    /// `true` when the call-site file is servable and the transitive
+    /// self-root walk finished. Incomplete proofs stay transaction-local.
+    pub(crate) proof_complete: bool,
 }
 
 /// The domain deferral payload of a popped member.

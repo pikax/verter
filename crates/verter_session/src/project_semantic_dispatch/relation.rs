@@ -2291,7 +2291,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             for (key, state, result) in call_members {
                 // Incomplete proof stays transaction-local. Origin is
                 // provenance and is not the admission oracle.
-                match crate::semantic_query::AdmissibleCallResult::new(result) {
+                match crate::semantic_query::AdmissibleCallResult::new(result, state.proof_complete)
+                {
                     Some(result) => txn.call.completed_members.push(CompletedResolveCallMember {
                         key,
                         result,

@@ -2036,23 +2036,28 @@ pub struct ResolvedUnionArm {
 ///
 /// Admission is the dependency-proof oracle, not the winner's
 /// [`SignatureCandidateOrigin`]: a complete selected / union / dynamic
-/// result is a candidate for publication. The publisher still refuses an
-/// empty or incomplete self-root proof (transaction-local). Origin
-/// `Rootless` is provenance on the result, never this gate.
+/// result whose call-site serve root exists and whose transitive self-root
+/// walk finished is a candidate for publication. An empty or incomplete
+/// self-root proof stays transaction-local. Origin `Rootless` is provenance
+/// on the result, never this gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissibleCallResult(ResolvedCallResult);
 
 impl AdmissibleCallResult {
-    /// `None` when `result` is not a complete selected value.
+    /// `None` when `result` is not a complete selected value or its
+    /// dependency proof is incomplete.
     #[must_use]
-    pub fn new(result: ResolvedCallResult) -> Option<Self> {
-        Self::admits(&result).then_some(Self(result))
+    pub fn new(result: ResolvedCallResult, proof_complete: bool) -> Option<Self> {
+        Self::admits(&result, proof_complete).then_some(Self(result))
     }
 
-    /// Whether `result` is a complete call value that may be admitted
-    /// once its dependency proof is complete. Origin is not consulted.
+    /// Whether `result` is a complete call value whose dependency proof
+    /// is complete. Origin is not consulted.
     #[must_use]
-    pub fn admits(result: &ResolvedCallResult) -> bool {
+    pub fn admits(result: &ResolvedCallResult, proof_complete: bool) -> bool {
+        if !proof_complete {
+            return false;
+        }
         match result {
             ResolvedCallResult::Selected { .. }
             | ResolvedCallResult::UnionSelected { .. }

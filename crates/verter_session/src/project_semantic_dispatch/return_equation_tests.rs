@@ -157,6 +157,7 @@ fn mixed_seeded_component_close_stages_both_domains() {
                 replay_applicability: false,
                 inline_flight: None,
                 self_roots: Vec::new(),
+                proof_complete: true,
             })),
         });
         idx
@@ -297,6 +298,7 @@ fn mixed_empty_component_close_admits_nothing() {
                 replay_applicability: false,
                 inline_flight: None,
                 self_roots: Vec::new(),
+                proof_complete: true,
             })),
         });
         idx
@@ -424,6 +426,7 @@ fn call_budget_trip_poisons_the_whole_mixed_component() {
                 replay_applicability: false,
                 inline_flight: None,
                 self_roots: Vec::new(),
+                proof_complete: true,
             })),
         });
         idx
@@ -504,6 +507,7 @@ fn refused_call_commit_leaves_the_relation_ledger_undrained() {
                 replay_applicability: false,
                 inline_flight: None,
                 self_roots: Vec::new(),
+                proof_complete: true,
             })),
         });
         (idx, relation_session)
@@ -578,6 +582,7 @@ fn mixed_component_relation_member_flip_publishes_nothing() {
                 replay_applicability: false,
                 inline_flight: None,
                 self_roots: Vec::new(),
+                proof_complete: true,
             })),
         });
         idx

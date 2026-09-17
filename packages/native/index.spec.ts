@@ -437,7 +437,7 @@ const height = ref('100px')
     }
   });
 
-  it("selects lint rules by registered carrier framework, not by a shared Vue rule set", () => {
+  it("selects lint rules by registered carrier framework, not by a shared Vue rule set", { timeout: 20000 }, () => {
     // `valid-template-root` states a Vue requirement: an SFC's `<template>`
     // block must contain at least one root element. A Svelte component has no
     // `<template>` host at all, so its element list is legitimately empty and

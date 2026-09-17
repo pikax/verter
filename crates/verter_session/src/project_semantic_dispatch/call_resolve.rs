@@ -39,9 +39,12 @@ pub(crate) enum ResolveCallStep {
 }
 
 enum ResolveCallRootClose {
+    /// A complete selected value plus its SCC-unioned self-roots and
+    /// whether the root's own dependency proof is complete.
     Complete(
         ResolvedCallResult,
         Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+        bool,
     ),
     /// A complete result whose mixed component consumed UNPROVEN
     /// flow-member values: the value flows to the caller, the build is
@@ -172,7 +175,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let outcome = self.run_resolve_call(&key);
         match self.resolve_call_frame_pop(idx, outcome, false) {
             ResolveCallFramePop::Provisional(step) => step,
-            ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, _))
+            ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, _, _))
             | ResolveCallFramePop::RootClose(ResolveCallRootClose::CompleteReturnOnly(result)) => {
                 ResolveCallStep::Complete(result)
             }
@@ -228,10 +231,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         #[cfg(any(test, feature = "test-support"))]
         self.inject_unproven_flow_member_for_tests(idx);
         match self.resolve_call_frame_pop(idx, outcome, true) {
-            ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, self_roots)) => {
+            ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(
+                result,
+                self_roots,
+                proof_complete,
+            )) => {
                 // Origin is provenance. An empty/incomplete self-root proof
                 // stays transaction-local; a complete proof admits.
-                let admits = crate::semantic_query::AdmissibleCallResult::admits(&result);
+                let admits =
+                    crate::semantic_query::AdmissibleCallResult::admits(&result, proof_complete);
                 let mut output = QueryBuildOutput::from((
                     QueryResult::Value(SemanticQueryValue::ResolveCall(Arc::new(result))),
                     fence,
@@ -294,14 +302,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             CallArgKey::ProgramExpression { .. } => None,
         }));
         let mut self_roots = self.observed_self_roots_from_nodes(observed_nodes.iter().copied());
-        if let Ok(transitive) = self.transitive_self_roots_from_nodes(observed_nodes) {
-            for root in transitive {
-                if !self_roots.iter().any(|(c, h)| *c == root.0 && *h == root.1) {
-                    self_roots.push(root);
+        let walk_complete = match self.transitive_self_roots_from_nodes(observed_nodes) {
+            Ok(transitive) => {
+                for root in transitive {
+                    if !self_roots.iter().any(|(c, h)| *c == root.0 && *h == root.1) {
+                        self_roots.push(root);
+                    }
                 }
+                true
             }
-        }
-        if let Some(serve) = self
+            Err(_) => false,
+        };
+        let site_rooted = if let Some(serve) = self
             .ctx
             .ensure_indexed_ready_serve(key.point.canonical_id.as_ref())
         {
@@ -314,7 +326,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     serve.indexed.whole_hash,
                 ));
             }
-        }
+            true
+        } else {
+            false
+        };
         ResolveCallPendingState {
             selection,
             concrete_seeds,
@@ -323,6 +338,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             replay_applicability,
             inline_flight: None,
             self_roots,
+            proof_complete: walk_complete && site_rooted,
         }
     }
 
@@ -760,7 +776,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if !machinery_root {
             // Incomplete proof stays transaction-local (no shared entry).
             // Origin is provenance and is not consulted here.
-            match crate::semantic_query::AdmissibleCallResult::new(root_result.clone()) {
+            match crate::semantic_query::AdmissibleCallResult::new(
+                root_result.clone(),
+                root.proof_complete,
+            ) {
                 Some(result) => self.dispatch_txn.borrow_mut().call.completed_members.push(
                     CompletedResolveCallMember {
                         key: root_key,
@@ -776,6 +795,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(
                 root_result,
                 scc_self_roots,
+                root.proof_complete,
             ))
         } else {
             ResolveCallFramePop::Provisional(ResolveCallStep::Complete(root_result))
@@ -922,6 +942,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         state.self_roots.push(root.clone());
                     }
                 }
+                state.proof_complete &= previous.proof_complete;
                 verter_debug_assert_eq!(idx, self.dispatch_txn.borrow().reentry().depth());
                 Ok(state)
             }
@@ -1273,6 +1294,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut merged_replay = false;
         let mut merged_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
             Vec::new();
+        let mut arm_proofs_complete = true;
         for state in arm_states.into_iter().flatten() {
             let ResolveCallPendingState {
                 selection,
@@ -1282,6 +1304,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 replay_applicability,
                 inline_flight: _,
                 self_roots,
+                proof_complete,
             } = state;
             // Per-arm candidate sessions are per-winner scratch: the arm's
             // substitution is already extracted onto its selection, and the
@@ -1291,6 +1314,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.abandon_session(session);
             }
             merged_replay |= replay_applicability;
+            arm_proofs_complete &= proof_complete;
             merged_seeds.extend(concrete_seeds);
             merged_holds.extend(holds);
             union_self_roots(&mut merged_self_roots, &self_roots);
@@ -1332,6 +1356,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             merged_replay,
         );
         union_self_roots(&mut merged.self_roots, &merged_self_roots);
+        merged.proof_complete &= arm_proofs_complete;
         CandidateVerdict::Selected(merged)
     }
 
