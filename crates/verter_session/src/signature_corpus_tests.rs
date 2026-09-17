@@ -19,7 +19,9 @@
 //!    The comparison bases are STRUCTURAL only — the typed
 //!    checker-syntax projection of the recorded `checker` text, the
 //!    recorded `decl_emit` signature return where the checker column is
-//!    a display-only instantiation, and for diagnostic rows the
+//!    a display-only binder instantiation or a recorded refusal
+//!    (compared ORDER-SENSITIVELY — the declaration bytes carry union
+//!    arm order as a structured field), and for diagnostic rows the
 //!    recorded refusal pinned by a deferred carrier. A
 //!    `MatchesChecker` row fails when the live answer stops matching,
 //!    and an owed/degraded row fails when the live answer STARTS
@@ -118,6 +120,30 @@ fn signature_corpus_observations_parse_and_families_are_covered() {
                 row.id, row.checker
             ));
         }
+        if row.checker_display_only && row.checker.is_empty() {
+            failures.push(format!(
+                "{}: checker_display_only modifies a RECORDED checker column (a diagnostic row \
+                 has no checker text to be display-only)",
+                row.id
+            ));
+        }
+        // Where the declaration bytes are a live comparison basis (a
+        // display-only checker column, or a recorded refusal with no
+        // checker text), the declared return must EXIST and parse into
+        // the typed checker-syntax form — the basis the driver compares
+        // order-sensitively.
+        if row.checker.is_empty() || row.checker_display_only {
+            match recorded_signature_return(row.decl_emit, "witness")
+                .ok_or_else(|| "no `export declare function witness(…): <ret>;` line".to_owned())
+                .and_then(|ret| checker_syntax::parse(ret).map(|_| ()))
+            {
+                Ok(()) => {}
+                Err(error) => failures.push(format!(
+                    "{}: the declared-return comparison basis is unusable: {error}",
+                    row.id
+                )),
+            }
+        }
         if let Some(diagnostic) = row.diagnostic {
             if diagnostic.is_empty() || !row.checker.is_empty() {
                 failures.push(format!(
@@ -205,6 +231,25 @@ fn signature_corpus_observations_parse_and_families_are_covered() {
             failures.push(format!("family coverage: {why} is missing ({needle})"));
         }
     }
+    // The ORDER-HEAVY row's basis is the ORDERED union itself: SV26's
+    // declared return parses to the exact 3-arm sequence the
+    // declaration bytes record (literals in authored order, the binder
+    // last) — the input the order-sensitive comparator observes.
+    let sv26 = CORPUS
+        .iter()
+        .find(|r| r.id == "SV26_literal_generic_union_order")
+        .expect("the SV26 order-claim row");
+    let sv26_basis = recorded_signature_return(sv26.decl_emit, "witness")
+        .unwrap_or_else(|| panic!("SV26's declared-return basis is missing"));
+    assert_eq!(
+        checker_syntax::parse(sv26_basis),
+        Ok(checker_syntax::CheckerType::Union(vec![
+            checker_syntax::CheckerType::StringLit("a".to_owned()),
+            checker_syntax::CheckerType::StringLit("b".to_owned()),
+            checker_syntax::CheckerType::Ref("T".to_owned()),
+        ])),
+        "SV26's declared-return basis must parse to the recorded arm ORDER"
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -249,11 +294,13 @@ struct LiveProbeOutcome {
     /// one). Structured ONLY — a Verter display string is never
     /// semantic identity.
     matched_checker: bool,
-    /// The live answer structurally matches the ORDER claim recorded in
-    /// the row's `decl_emit` signature return (the rows whose checker
-    /// column is a display-only instantiation — e.g. `unknown` for a
-    /// generic binder — while the declaration bytes carry the real
-    /// union order).
+    /// The live answer structurally matches the claim recorded in the
+    /// row's `decl_emit` signature return — the rows whose checker
+    /// column is a DISPLAY-ONLY instantiation of the binders (e.g.
+    /// `unknown` where the declaration bytes carry the dedup and the
+    /// literal/generic arm ORDER) or whose checker text is a recorded
+    /// refusal. The declaration bytes carry union arm order as a
+    /// structured field, so this basis compares ORDER-SENSITIVELY.
     matched_declared_return: bool,
     /// The base declaration name when the live answer is the DEFERRED
     /// instantiation carrier (`InstantiationRef(<operator>)` — the
@@ -318,7 +365,7 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
         },
         None => None,
     };
-    let structural_match = |text: &str| {
+    let structural_match = |text: &str, ordered: bool| {
         let parsed = checker_syntax::parse(text).unwrap_or_else(|err| {
             panic!(
                 "{}: recorded text `{}` does not parse ({err}) — extend the checker-syntax \
@@ -326,13 +373,26 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
                 row.id, text
             )
         });
-        checker_syntax::matches_node(&dispatch, node, &parsed, 0)
+        if ordered {
+            checker_syntax::matches_node_ordered(&dispatch, node, &parsed, 0)
+        } else {
+            checker_syntax::matches_node(&dispatch, node, &parsed, 0)
+        }
     };
-    let matched_checker = !row.checker.is_empty() && structural_match(row.checker);
-    let matched_declared_return = row
-        .checker
-        .is_empty()
-        .then(|| recorded_signature_return(row.decl_emit, "witness").map(structural_match))
+    let matched_checker = !row.checker.is_empty() && structural_match(row.checker, false);
+    // The declared return is a LIVE basis when the checker column is a
+    // display-only binder instantiation (the dedup/order claim lives in
+    // the declaration bytes — SV23/25/26) or when the row records a
+    // refusal (no checker text at all — SV21). Union arm ORDER is a
+    // structured field of the declaration bytes, so this basis rides
+    // the order-sensitive comparator: a wrong-order implementation must
+    // NOT flip the row as if the order matched.
+    let declared_return_basis = row.checker.is_empty() || row.checker_display_only;
+    let matched_declared_return = declared_return_basis
+        .then(|| {
+            recorded_signature_return(row.decl_emit, "witness")
+                .map(|ret| structural_match(ret, true))
+        })
         .flatten()
         .unwrap_or(false);
     LiveProbeOutcome {
@@ -348,8 +408,9 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
 /// `fn_name` — the machine-formatted `export declare function
 /// <name><…>(…): <ret>;` line's return text. The declaration bytes are
 /// the recorded STRUCTURED observation (the checker column may be a
-/// display-only instantiation), so this is the comparison basis for
-/// rows whose order claim lives only there.
+/// display-only binder instantiation), so this is the comparison basis
+/// — order-sensitively — for rows whose checker column is display-only
+/// or a recorded refusal, whose claim lives only here.
 fn recorded_signature_return<'a>(decl_emit: &'a str, fn_name: &str) -> Option<&'a str> {
     let needle = format!("function {fn_name}");
     let line = decl_emit
@@ -382,13 +443,22 @@ fn verdict_failure(row: &Row, live: &LiveProbeOutcome) -> Option<String> {
         let rendered = live.rendered.as_deref().unwrap_or("<no value>");
         let note = match row.verdict {
             Verdict::MatchesChecker => {
-                if !live.matched_checker {
+                if !(live.matched_checker || live.matched_declared_return) {
+                    let bases = if row.checker_display_only {
+                        format!(
+                            "the display-only checker text `{}` nor the declared return `{}`",
+                            row.checker,
+                            recorded_signature_return(row.decl_emit, "witness").unwrap_or("")
+                        )
+                    } else {
+                        format!("the recorded observation `{}`", row.checker)
+                    };
                     Some(format!(
-                        "labelled MatchesChecker but the live answer to the probe `{}` does \
-                         not structurally equal the recorded observation `{}` — measured \
-                         `{}` (degraded: {}). Either the answer regressed or the observation \
-                         was edited; re-measure against the pinned oracle before re-pinning",
-                        row.probe, row.checker, rendered, live.degraded
+                        "labelled MatchesChecker but the live answer to the probe `{}` matches \
+                         NEITHER recorded basis — {bases} — measured `{}` (degraded: {}). \
+                         Either the answer regressed or the observation was edited; \
+                         re-measure against the pinned oracle before re-pinning",
+                        row.probe, rendered, live.degraded
                     ))
                 } else {
                     None
@@ -408,9 +478,10 @@ fn verdict_failure(row: &Row, live: &LiveProbeOutcome) -> Option<String> {
                 } else if live.matched_declared_return {
                     Some(format!(
                         "labelled {:?} but the live answer to the probe `{}` STRUCTURALLY \
-                         EQUALS the order claim recorded in the declaration bytes \
-                         (`{}`) — re-pin the row and update the semantic-difference \
-                         ledger in the same change",
+                         EQUALS the claim recorded in the declaration bytes (`{}`) — the \
+                         checker column is a display-only instantiation, so the declared \
+                         return (union arm ORDER included) is this row's basis. Re-pin the \
+                         row and update the semantic-difference ledger in the same change",
                         row.verdict,
                         row.probe,
                         recorded_signature_return(row.decl_emit, "witness").unwrap_or(""),
@@ -458,11 +529,13 @@ fn signature_corpus_live_answers_follow_their_verdicts() {
 /// The flip law, proven in BOTH directions over the REAL probe lane with
 /// synthetic rows whose probes REDUCE today (a bare primitive annotation,
 /// no deferred wrapper): a matching live answer satisfies a
-/// `MatchesChecker` verdict and CONTRADICTS a `KnownOwed` one, and a
-/// diagnostic row whose probe reduces loses its refusal pin. This is the
-/// control that keeps the corpus driver's row-flip mechanism honest — a
-/// later block implementing a probe reduction flips its row through THIS
-/// rail, never a prose report.
+/// `MatchesChecker` verdict and CONTRADICTS a `KnownOwed` one, a
+/// diagnostic row whose probe reduces loses its refusal pin, and a
+/// DISPLAY-ONLY row flips through its declared-return basis alone (the
+/// rail the V4 ordering rows ride). This is the control that keeps the
+/// corpus driver's row-flip mechanism honest — a later block implementing
+/// a probe reduction flips its row through THIS rail, never a prose
+/// report.
 #[test]
 fn signature_corpus_flip_law_fires_in_both_directions() {
     use crate::signature_corpus_rows_tests::Family;
@@ -474,6 +547,7 @@ fn signature_corpus_flip_law_fires_in_both_directions() {
         checker: "string",
         checker_is_any: false,
         checker_is_never: false,
+        checker_display_only: false,
         diagnostic,
         decl_emit: "export declare function witness(): number;\n",
         verdict,
@@ -508,6 +582,34 @@ fn signature_corpus_flip_law_fires_in_both_directions() {
     assert!(
         verdict_failure(&diagnostic, &live).is_some_and(|failure| failure.contains("REFUSAL")),
         "a reduced probe must flip a diagnostic row's refusal pin"
+    );
+    // A DISPLAY-ONLY row (the checker column is a binder display; the
+    // claim is the DECLARED return) rides the declared basis through
+    // the same rail: a matching live answer satisfies MatchesChecker
+    // WITHOUT the display text matching...
+    let mut display = reduced_row(Verdict::MatchesChecker, None);
+    display.checker = "unknown";
+    display.checker_display_only = true;
+    display.decl_emit = "export declare function witness(): string;\n";
+    let live = live_probe_outcome(&display);
+    assert!(
+        !live.matched_checker && live.matched_declared_return,
+        "the display-only control must match through the declared return alone"
+    );
+    assert_eq!(verdict_failure(&display, &live), None);
+    // ...and CONTRADICTS KnownOwed through that same declared basis
+    // (the flip signal fires on the rail the V4 ordering rows ride).
+    let owed_display = Row {
+        verdict: Verdict::KnownOwed {
+            note: "control: the declared answer is implemented",
+        },
+        ..display
+    };
+    let live = live_probe_outcome(&owed_display);
+    assert!(
+        verdict_failure(&owed_display, &live)
+            .is_some_and(|failure| failure.contains("STRUCTURALLY EQUALS")),
+        "an implemented declared-return claim must flip a KnownOwed display-only row"
     );
 }
 

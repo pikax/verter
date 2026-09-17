@@ -1867,6 +1867,38 @@ pub(crate) mod checker_syntax {
         }
     }
 
+    /// ORDER-SENSITIVE twin of [`matches_node`] for the signature
+    /// corpus's DECLARED-RETURN basis. The declaration bytes carry union
+    /// arm order as a structured field (the order-heavy rows' claim —
+    /// `"a" | "b" | T`), so a union compares member-by-member in the
+    /// recorded order; the checker-column comparator's order-insensitive
+    /// exact set equality would not observe the recorded order at all
+    /// (a wrong-order implementation would flip the row as if the order
+    /// matched). Every other form — and unions nested under generic
+    /// arguments, which no recorded declared return carries — rides
+    /// [`matches_node`] unchanged.
+    pub(crate) fn matches_node_ordered(
+        dispatch: &ProjectSemanticDispatch<'_>,
+        node: SemanticNodeId,
+        expected: &CheckerType,
+        depth: usize,
+    ) -> bool {
+        if depth > MATCH_DEPTH_LIMIT {
+            return false;
+        }
+        if let Some(data) = dispatch.graph().node_data(node) {
+            if let (CheckerType::Union(exp), SemanticNodeData::Union(members)) =
+                (expected, data.as_ref())
+            {
+                return members.len() == exp.len()
+                    && members.iter().zip(exp.iter()).all(|(member, arm)| {
+                        matches_node_ordered(dispatch, *member, arm, depth + 1)
+                    });
+            }
+        }
+        matches_node(dispatch, node, expected, depth)
+    }
+
     /// The shared signature clause: a function print is a Call
     /// signature. Construct (`new (…) => T`) must never satisfy it.
     /// Arity is exact; parameter types are ordered.
