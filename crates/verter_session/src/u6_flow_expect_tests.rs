@@ -56,7 +56,7 @@ use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 /// cell's `checker` column) was measured against. CHECKER only, never
 /// `.d.ts` emission.
 pub(crate) const ORACLE_STAMP: &str =
-    "tsgo 7.0.0-dev.20260526.1 --noEmit --strict --ignoreConfig --pretty false (checker only)";
+    "tsc 7.0.2 --noEmit --strict --ignoreConfig --pretty false (checker only)";
 
 /// The semantic profile in force for every measurement this module
 /// takes: host construction, demand point, and rail.

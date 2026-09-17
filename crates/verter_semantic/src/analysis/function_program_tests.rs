@@ -892,7 +892,7 @@ fn flow_body_hash_walks_nested_function_structure() {
 /// from an argument supplied at a parameter position whose type names
 /// the parameter.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`), read through a TWO-STEP assignment error —
 /// `const v = <call>; const p: null = v;` — over calls whose default is
 /// DIFFERENT from what inference produces.

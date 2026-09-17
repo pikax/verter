@@ -4,7 +4,7 @@
 // lane is driven from it by the shared drivers in the parent module.
 // Nothing else in the tree changes.
 //
-// The `checker` column is what tsgo 7.0.0-dev.20260526.1 prints for the
+// The `checker` column is what TypeScript 7.0.2 (`tsc`) prints for the
 // row's `probe` under `--noEmit --strict --ignoreConfig`. It is a RECORDED
 // measurement: nothing in the default build re-runs the checker — the suite
 // never invokes tsgo (a runtime tsgo driver is separately forbidden here),

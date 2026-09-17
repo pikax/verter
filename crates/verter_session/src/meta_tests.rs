@@ -2162,7 +2162,7 @@ import { obj } from './obj'
 ///  3. the result is reported PARTIAL;
 ///  4. nothing warms `ComponentMetaResultDb` — a replay is cold.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `ReturnType<typeof makeProps>` is
 /// `{ label: string; made: Box }`.
 ///
@@ -2284,7 +2284,7 @@ defineProps<ReturnType<typeof makeProps>>()
 /// REQUEST unmarked — and `mark_request_result_partial` is the sole gate on
 /// `ComponentMetaResultDb`.
 ///
-/// Each row states the checker's answer (tsgo `7.0.0-dev.20260526.1`,
+/// Each row states the checker's answer (TypeScript 7.0.2 `tsc`,
 /// `--noEmit --strict --ignoreConfig`). The boundary triple is asserted for
 /// every one: the published `props`, `synthesis_should_suppress`, and the
 /// `component_meta_result_cache_hits` DELTA across a replay.
@@ -3312,7 +3312,7 @@ fn render_runtime_macro(
 /// factory handling, and dev validation off `type`, so an erased constructor
 /// is a runtime behaviour change, not a cosmetic one.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig`):
 /// `ReturnType<typeof makeProps>` is `{ label: string; made: Box }`.
 ///
 /// Discrimination: restoring the short-circuit fails the `label: { type:
@@ -3380,7 +3380,7 @@ fn runtime_props_derive_each_member_from_that_members_own_evidence() {
 /// call position rides, and the surface publishes with its real
 /// constructors. That is the `SPREADS` block below.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig`):
 /// every spread row's `ReturnType<typeof makeProps>` is an ordinary object
 /// type — `{ label: string; n: number }` for S1/S3/S4/C1, `{ label: string }`
 /// for S2 — which is exactly why publishing `props: {}` for them is wrong
@@ -3529,7 +3529,7 @@ fn a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props() 
 /// done — see `degradation_reason_class` for the counter-example and for the
 /// sound complement.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig`):
 /// row 1 is `{ label: string }`, rows 2 and 3 are `{ label: string; n: number
 /// }` — every row is an ordinary object type, so deleting the module is not a
 /// defensible answer for any of them.
@@ -3598,7 +3598,7 @@ fn an_unverified_flow_return_publishes_its_member_set_with_validation_off() {
 /// under a names-only demand, so a test written that way measures the runtime
 /// lane twice and reports the TSX lane healthy no matter what it does.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig`):
 /// every row's `ReturnType<typeof makeProps>` is an ordinary object type, so
 /// the emitted TSX type-checks in all five cases.
 ///
@@ -34338,7 +34338,7 @@ fn render_runtime_composed(
 /// intersection type argument and an `interface … extends` heritage
 /// clause).
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig`):
 /// for every row here the composed type is an ordinary object type whose
 /// keys are `"label" | "extra"` (`"evA" | "evB"` for the emits row) —
 /// verified with an `Eq<keyof T, …>` probe plus a negative control asserting
@@ -34478,7 +34478,7 @@ fn a_no_surface_flow_return_refuses_even_when_a_sibling_arm_contributes() {
 /// delete every byte over one member's return type, for a component whose
 /// other props the same tree resolves exactly.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig`):
 /// the type argument's keys are `"a" | "b"`, and `b` is `string`.
 ///
 /// Discrimination: refusing fails the `Props` destructure; a fabricated
@@ -34558,7 +34558,7 @@ fn a_no_surface_producer_at_a_member_value_degrades_only_that_member() {
 /// `a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props`,
 /// and nothing pinned the emits side.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig`):
 /// `ReturnType<typeof makeEmits>` is `{ evA: (p: string) => boolean; evB:
 /// (n: number) => boolean }`, so `["evB"]` is a member-missing surface
 /// rather than a conservative one.
@@ -34615,7 +34615,7 @@ fn an_unevaluable_emits_spread_source_refuses_rather_than_dropping_the_event() {
 /// fabricated-value gate refuses. One unmodellable ENTRY therefore failed
 /// the whole RETURN closed, and every module built on it lost every byte.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig`):
 /// the computed-key row is `{ label: string; z: number }`, the `as const`
 /// row `{ readonly label: string; readonly n: 1 }`, the `as const`-only row
 /// `{ readonly label: string }`, and the `satisfies` row `{ label: string;

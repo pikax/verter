@@ -206,7 +206,7 @@ fn assert_string_label(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNod
 /// straight into the whole-frame failure it exists to avoid, and three
 /// programs the PARENT commit answered stopped producing a value at all:
 ///
-/// | program | tsgo `7.0.0-dev.20260526.1` |
+/// | program | TypeScript 7.0.2 `tsc` |
 /// |---|---|
 /// | `const f = () => new Box(); return { label: "x", made: f() }` | `{ label: string; made: Box }` |
 /// | `const f = () => ["s", new Box()]; return { label: "x", made: f() }` | `{ label: string; made: (string \| Box)[] }` |
@@ -357,8 +357,8 @@ fn the_clean_control_is_undegraded_and_warms() {
 /// CHARACTERIZATION, not an endorsement: an unmodelled ELEMENT collapses
 /// the whole ARRAY to one marker.
 ///
-/// `return { label: "x", made: ["s", new Box()] }` — tsgo
-/// `7.0.0-dev.20260526.1` types `made` as `(string | Box)[]`. This
+/// `return { label: "x", made: ["s", new Box()] }` — TypeScript 7.0.2
+/// `tsc` types `made` as `(string | Box)[]`. This
 /// substrate publishes a BARE marker for `made`, losing the modelled
 /// `string` element: the positional rule holds at the OBJECT level
 /// (`label` survives) but NOT inside the array, because an array literal

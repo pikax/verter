@@ -510,7 +510,7 @@ fn flow_return_symbolic_call_resolves_complete() {
 /// The composite-position TWIN — the same unmodelled call as ONE member
 /// of an object literal — is in `flow_return_positional_tests`.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, for the record — the answer the
+/// Oracle (TypeScript 7.0.2 `tsc`, for the record — the answer the
 /// fail-closed arm declines to produce): `number`.
 #[test]
 fn flow_return_this_call_fails_closed() {
@@ -582,8 +582,8 @@ fn flow_return_return_bearing_loop_stays_degraded_switch_and_try_resolve() {
             "{name} must not admit a warm entry"
         );
         // A `switch` joins its arms' returns; both fresh literals stay
-        // pinned (the multi-contributor join widens nothing). tsgo
-        // 7.0.0-dev.20260526.1: `"a" | "b"`.
+        // pinned (the multi-contributor join widens nothing). TypeScript
+        // 7.0.2 `tsc`: `"a" | "b"`.
         let (expr, fallthrough) = flow_result(
             dispatch,
             &host,
@@ -736,7 +736,7 @@ fn flow_return_local_const_reaching_definition() {
             ),
         );
         // A WIDENING-literal `const` binding widens at the return join —
-        // TS7 oracle (`tsgo 7.0.0-dev.20260526.1 --declaration`):
+        // TS7 oracle (`tsc 7.0.2 --declaration`):
         // `function f(){ const x = 1; return x; }` declares `(): number`.
         // (`1 as const` / an annotated `const x: 1` stay pinned — see
         // `flow_return_member_demand_preserves_const_asserted_local`.)
@@ -2903,7 +2903,7 @@ fn flow_return_member_demand_projects_widened_member_and_skips_sibling_binding()
 
 /// `as const` preservation through the member demand: a const-asserted
 /// literal local read stays the pinned literal — TS7 oracle
-/// (`tsgo 7.0.0-dev.20260526.1 --declaration`): `const x = 1 as const; return { x }`
+/// (`tsc 7.0.2 --declaration`): `const x = 1 as const; return { x }`
 /// declares `{ x: 1 }`.
 #[test]
 fn flow_return_member_demand_preserves_const_asserted_local() {
@@ -2963,7 +2963,7 @@ fn flow_return_member_demand_with_bare_return_arm_is_typed_miss() {
 /// Bare-return-as-void keeps its OTHER half: a bare return ALONGSIDE a
 /// value return contributes `undefined` (never `void`, never dropped).
 /// The `undefined` arm is a CONTRIBUTOR, so the value return's fresh
-/// literal is no longer alone and stays pinned — tsgo 7.0.0-dev.20260526.1 on
+/// literal is no longer alone and stays pinned — TypeScript 7.0.2 on
 /// `subMixedBareValue` is `1 | undefined`, not `number | undefined`.
 #[test]
 fn flow_return_mixed_bare_and_value_returns_include_undefined_arm() {
@@ -4365,7 +4365,7 @@ fn projected_function_return(expr: &verter_type_expr::TypeExpr) -> &verter_type_
 
 /// A case that exits via `break` passes NO state to the next case: case 1
 /// is reachable only by the dispatch edge, so `x` there reads the entry
-/// value. tsgo 7.0.0-dev.20260526.1: `{ v: "a" } | { v: "b" }` — joining
+/// value. TypeScript 7.0.2: `{ v: "a" } | { v: "b" }` — joining
 /// the broken-off arm's end state into the next case's start publishes
 /// `{ v: "a" | "b" }` where the checker has `"a"`.
 #[test]

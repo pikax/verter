@@ -159,7 +159,7 @@ fn flow_surface_return_free_loop_stays_fallthrough_transparent() {
 /// the call has no structural arm: the shared shallow pass answers it
 /// with a bare `any` that carries no call-return carrier. Publishing
 /// that `any` was a fabricated value at a call position — clean, warm,
-/// and wrong (tsgo `7.0.0-dev.20260526.1` types `SubThisCall#run` as
+/// and wrong (TypeScript 7.0.2 `tsc` types `SubThisCall#run` as
 /// `number`). The classifier now decides the call position on the FORM,
 /// so this joins the return-bearing-loop / `switch` rows above.
 #[test]
@@ -185,7 +185,7 @@ fn flow_surface_switch_return_resolves_the_arm_join() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubSwitchReturn");
-    // tsgo 7.0.0-dev.20260526.1: `"a" | "b"` — the multi-contributor
+    // TypeScript 7.0.2: `"a" | "b"` — the multi-contributor
     // join keeps both fresh literals.
     let TypeExpr::Union(members) = &expr else {
         panic!("the switch arm join is a literal union, got {expr:?}");

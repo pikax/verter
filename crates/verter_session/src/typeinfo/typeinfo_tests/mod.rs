@@ -67,6 +67,9 @@ mod oracle_gen_spike;
 // tree reaches it via the `oracle::query_specs` alias above.
 mod oracle_query_specs_guard;
 mod oracle_raw_surface_capture;
+// The oracle toolchain record (`oracle_toolchain.json`): version + content
+// digests of the pinned engine, checked from files alone (never spawned).
+mod oracle_toolchain_lock;
 mod recursive_conditional;
 mod recursive_union;
 mod relation_semantics;

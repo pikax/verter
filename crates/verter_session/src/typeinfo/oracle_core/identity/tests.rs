@@ -14,7 +14,7 @@ use super::{
 
 fn base_env() -> PinnedEnv {
     PinnedEnv {
-        tsgo_version: "7.0.0-dev.20260526.1".to_string(),
+        tsgo_version: "7.0.2".to_string(),
         oracle_schema_version: 1,
         normalizer_version: 1,
         probe_synthesis_version: 1,

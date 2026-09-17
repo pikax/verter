@@ -302,7 +302,7 @@ fn value_inference_computed_block_callback_value_resolves_local_return_shape() {
 /// swallowing the literal. The gate keeps refusing exactly what it
 /// refused; nothing reaches it any more for these shapes.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`),
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig`),
 /// every row `Eq<…>`-probed with a negative control the checker REJECTS
 /// (and the `Eq` probe is separately proven `readonly`-discriminating by
 /// `Eq<{ readonly a: 1 }, { a: 1 }>` erroring).

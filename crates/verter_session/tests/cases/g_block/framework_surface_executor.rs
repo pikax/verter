@@ -157,7 +157,7 @@ fn member_keys(
 ///
 /// Each row's props come from `ReturnType<typeof makeProps>` where
 /// `makeProps` returns an object with ONE member this substrate cannot type
-/// (tsgo `7.0.0-dev.20260526.1`: `{ label: string; made: Box }`).
+/// (TypeScript 7.0.2 `tsc`: `{ label: string; made: Box }`).
 ///
 /// The CLEAN controls are the discrimination: an ordinary component must
 /// still encode SUPPORTED + EXACT_RESOLVED, so a blanket downgrade fails
@@ -828,7 +828,7 @@ fn nonexistent_named_export_is_a_malformed_payload() {
 /// that the encoder does not quietly turn a corrected surface into an
 /// empty SUPPORTED one.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`),
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig`),
 /// `Eq<…>`-probed with a rejected negative control: the computed-key row is
 /// `{ label: string; z: number }`, the `as const` row `{ readonly label:
 /// string; readonly n: 1 }`, the `satisfies` row `{ label: string; n:

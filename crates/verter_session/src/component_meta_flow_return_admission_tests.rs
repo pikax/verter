@@ -319,7 +319,7 @@ defineProps<{ m: ReturnType<typeof myGeneric>['m'] }>();
 /// `ReturnType<typeof genericCallee>['m']` publishes the utility's
 /// `unknown`, never the callee's raw type-parameter binder.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict`, read through
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict`, read through
 /// a deliberate `const x: null = …` assignment error):
 ///
 /// ```text
