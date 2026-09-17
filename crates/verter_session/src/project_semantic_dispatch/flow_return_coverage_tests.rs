@@ -5058,3 +5058,127 @@ fn awaited_callback_edge_oracle_matrix() {
         FlowReturnDegradation::UnresolvedValue,
     );
 }
+
+/// A consumer whose callbacks name the lib runtime nominals `Function` and
+/// `Date`, for [`augmented_global_nominal_callbacks_follow_the_merged_interface`].
+const AUGMENT_CONSUMER: &str = "/ws/cov/augment_consumer.ts";
+const AUGMENT_CONSUMER_SRC: &str = r#"
+declare const la: Awaited<{ then(onfulfilled: Function): void }>; export function fa() { return la; }
+declare const lb: Awaited<{ then(onfulfilled: Date): void }>; export function fb() { return lb; }
+declare const lc: Awaited<{ then(onfulfilled: ((v: string) => void) & ((v: number) => void)): void }>; export function fc() { return lc; }
+export async function r1(v: { then(onfulfilled: Function): void }) { return v; }
+export async function r2(v: { then(onfulfilled: Date): void }) { return v; }
+export async function r3(v: { then(onfulfilled: ((v: string) => void) & ((v: number) => void)): void }) { return v; }
+"#;
+/// A separate `declare global` augmenter merging call signatures into both.
+const AUGMENT_GLOBAL: &str = "/ws/cov/augment_global.d.ts";
+const AUGMENT_GLOBAL_SRC: &str = r#"
+export {};
+declare global {
+  interface Function { (value: number): void; }
+  interface Date { (value: string): void; }
+}
+"#;
+
+/// The lib runtime nominals are OPEN interfaces: a pristine `Function` or
+/// `Date` declares no call signature, but a project's `declare global` block
+/// merges them in, and both awaited relations must see the merged interface.
+///
+/// Oracle (tsc 7.0.2, the augmentation in scope): `Awaited<{ then(onfulfilled:
+/// Function): void }>` is `number` and `Date` gives `string` (assignability
+/// diagnostics); the async return over the same `then` publishes
+/// `Promise<number>` / `Promise<string>` (declaration emit). Without the
+/// augmentation the lib results are `never` and the async returns `Promise<any>`
+/// (`awaited_callback_edge_oracle_matrix` rows `f7`, `fe`, `r7`, `s4`).
+///
+/// The rows are measured twice on ONE host: pristine first, then after the
+/// augmenter enters the program — the second read must not serve the pristine
+/// answer, which is what the augmenter-set fact the shared augmentation folder
+/// observes guarantees. A fresh cold read discovers an augmenter nothing
+/// imports through program-completeness indexing.
+///
+/// `fc` / `r3` pin intersection ORDER: `((v: string) => void) & ((v: number)
+/// => void)` is `number` for the lib conditional (last signature) and
+/// `string | number` for the await relation — the reverse of `f2` / `r2`.
+#[test]
+fn augmented_global_nominal_callbacks_follow_the_merged_interface() {
+    let host = host_with(&[(AUGMENT_CONSUMER, AUGMENT_CONSUMER_SRC)]);
+    let lib = |function: &str| {
+        with_dispatch(&host, |dispatch| {
+            let key = key_of(dispatch, AUGMENT_CONSUMER, function);
+            match dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key))) {
+                QueryResult::Value(SemanticQueryOutput {
+                    value: SemanticQueryValue::FlowReturn(result),
+                    ..
+                }) => dispatch
+                    .declaration_carrier_body(result.return_type())
+                    .and_then(|body| host.project_node_to_type_expr_for_test(body)),
+                _ => None,
+            }
+        })
+    };
+    let promise_of = |inner: TypeExpr| TypeExpr::Ref {
+        name: Arc::from("Promise"),
+        type_arguments: Arc::from(vec![inner].into_boxed_slice()),
+    };
+    let never = TypeExpr::Primitive(PrimitiveName::Never);
+    let any = TypeExpr::Primitive(PrimitiveName::Any);
+    // Clean (no degradation) and admitted. After the augmenter enters, the
+    // slot legitimately holds the pristine candidate beside the merged one.
+    let clean = |function: &str| match eval(&host, AUGMENT_CONSUMER, function) {
+        Outcome::Value {
+            ty,
+            degradation: None,
+            candidates,
+        } if candidates >= 1 => Some(ty),
+        _ => None,
+    };
+
+    // Pristine lib interfaces: no call signature.
+    assert_eq!(lib("fa"), Some(never.clone()), "pristine Function");
+    assert_eq!(lib("fb"), Some(never), "pristine Date");
+    assert_eq!(
+        clean("r1"),
+        Some(promise_of(any.clone())),
+        "pristine Function"
+    );
+    assert_eq!(clean("r2"), Some(promise_of(any)), "pristine Date");
+
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(AUGMENT_GLOBAL.to_string()),
+        input_id: AUGMENT_GLOBAL.to_string(),
+        source: Arc::from(AUGMENT_GLOBAL_SRC),
+        file_language: lang(AUGMENT_GLOBAL),
+        aliases: Vec::new(),
+    });
+    // Augmentation discovery is demand-driven: the augmenter enters the program
+    // when its artifact publishes, which is what retires the index rows the
+    // pristine read recorded.
+    host.ensure_indexed_ready(AUGMENT_GLOBAL)
+        .expect("the augmenter must index");
+
+    // Augmented: the merged call signatures decide.
+    assert_eq!(lib("fa"), Some(number()), "augmented Function");
+    assert_eq!(lib("fb"), Some(string()), "augmented Date");
+    assert_eq!(
+        clean("r1"),
+        Some(promise_of(number())),
+        "augmented Function"
+    );
+    assert_eq!(clean("r2"), Some(promise_of(string())), "augmented Date");
+
+    // Intersection order, reversed from `f2` / `r2`.
+    assert_eq!(lib("fc"), Some(number()), "last intersection signature");
+    let r3 = clean("r3").expect("r3 publishes clean");
+    let TypeExpr::Ref { type_arguments, .. } = &r3 else {
+        panic!("r3 must be Promise<…>, got {r3:?}");
+    };
+    assert!(
+        matches!(
+            &type_arguments[0],
+            TypeExpr::Union(members)
+                if members.len() == 2 && members.contains(&string()) && members.contains(&number())
+        ),
+        "the await relation unions every intersection signature: {r3:?}"
+    );
+}

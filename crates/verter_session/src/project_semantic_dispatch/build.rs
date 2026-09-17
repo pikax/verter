@@ -3952,8 +3952,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         aug_scope_payload.as_ref(),
                     );
                 let aug_env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
+                // A `declare global` augmenter is indexed under the global tag;
+                // its retained body lives in the GLOBAL augmentation scope, not
+                // in a module scope named after the tag.
+                let is_global = spec.as_str() == crate::fact_emission::GLOBAL_AUGMENTATION_TAG;
+                let scope_kind = if is_global {
+                    AugmentationScopeKind::Global
+                } else {
+                    AugmentationScopeKind::Module(spec.clone())
+                };
                 let aug_prepared = match bundle.prepare_augmentation_type_decl_outcome_in(
-                    &AugmentationScopeKind::Module(spec.clone()),
+                    &scope_kind,
                     *contributor_owner,
                     decl_name,
                 ) {
@@ -3997,8 +4006,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             symbol: Arc::from(decl_name),
                             space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                         },
-                        scope: verter_type_expr::locators::AuthoredAugmentationScope::Module {
-                            specifier: Arc::from(spec.as_str()),
+                        scope: if is_global {
+                            verter_type_expr::locators::AuthoredAugmentationScope::Global
+                        } else {
+                            verter_type_expr::locators::AuthoredAugmentationScope::Module {
+                                specifier: Arc::from(spec.as_str()),
+                            }
                         },
                         // The whole augmentation contribution body (no sub-slot).
                         path: Arc::from(
@@ -10662,9 +10675,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// An intersection carries every arm's call signatures in arm order (the
     /// checker's `getSignaturesOfType` over an intersection). A lib runtime
-    /// nominal (`Function`, `Date`, `Promise`, …) that did not expand is
-    /// decided by its declaration identity: none of those interfaces declares
-    /// a call signature.
+    /// nominal (`Function`, `Date`, `Promise`, …) is an OPEN interface: the
+    /// pristine lib declaration declares no call signature, but a project's
+    /// `declare global` block can merge some in. Its signatures are therefore
+    /// read from the global augmentation contributors through the shared
+    /// augmentation folder (`collect_augmentation_contributions`), which also
+    /// observes the augmenter-set fingerprint so a later `declare global`
+    /// invalidates the answer; only with no contributor is the set empty.
     fn awaited_call_signatures(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
         // Identity first: the rail would try to expand the lib nominal, and
         // its answer (no call signature) never depends on the expansion.
@@ -10675,16 +10692,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
             .into_active_query_build_node(self);
         let nominal = match self.graph().node_data(settled).as_deref() {
-            Some(SemanticNodeData::DeclRef { identity }) => {
-                self.runtime_nominal_identity(identity).is_some()
+            Some(SemanticNodeData::DeclRef { identity })
+                if self.runtime_nominal_identity(identity).is_some() =>
+            {
+                Some(Arc::clone(&identity.decl_name))
             }
-            Some(SemanticNodeData::InstantiationRef { base, .. }) => {
-                self.runtime_nominal_identity(base).is_some()
+            Some(SemanticNodeData::InstantiationRef { base, .. })
+                if self.runtime_nominal_identity(base).is_some() =>
+            {
+                Some(Arc::clone(&base.decl_name))
             }
-            _ => false,
+            _ => None,
         };
-        if nominal {
-            return Some(Vec::new());
+        if let Some(name) = nominal {
+            return self.runtime_nominal_call_signatures(&name);
         }
         let resolved = self.resolve_signature_source_carrier(
             node,
@@ -10715,6 +10736,48 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => None,
         }
+    }
+
+    /// The call signatures of the lib runtime nominal interface `name`: the
+    /// pristine lib declaration contributes none, and every `declare global`
+    /// augmentation of `name` contributes its own. A torn contributor is served
+    /// but folds the no-warm rail, exactly as the external augmentation path
+    /// does.
+    fn runtime_nominal_call_signatures(&self, name: &str) -> Option<Vec<SemanticNodeId>> {
+        // Program-completeness discovery, as for an ambient external module: a
+        // `declare global` augmenter is typically a program-root `.d.ts` that
+        // nothing imports, and the augmentation index only sees loaded
+        // artifacts, so every known program member is indexed before the scan.
+        // Loads are idempotent and content-hash cached.
+        let host = self.ctx.host_for_fact_tracer_install();
+        for canonical in host.workspace().known_canonicals() {
+            let _ = self.ctx.ensure_indexed_ready_serve(&canonical);
+        }
+        let Some(AugmentationContributions {
+            contributor_nodes,
+            contributor_roots: _,
+            source_env_unobservable,
+        }) = self.collect_augmentation_contributions(
+            crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
+            name,
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Expanded,
+            ),
+        )
+        else {
+            return Some(Vec::new());
+        };
+        if source_env_unobservable {
+            self.fold_into_top_build_local_taint(false, true);
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::UnobservableSource,
+            );
+        }
+        let mut signatures = Vec::new();
+        for contributor in contributor_nodes {
+            signatures.extend(self.awaited_call_signatures(contributor)?);
+        }
+        Some(signatures)
     }
 
     /// The type of a call signature's FIRST parameter, the way the checker's
