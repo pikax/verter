@@ -1,0 +1,73 @@
+error: cannot construct `CompileAttempt<'_>` with struct literal syntax due to private fields
+  --> tests/cases/compile-fail/compile_attempt_struct_literal_not_forgeable.rs:8:13
+   |
+ 8 |     let _ = CompileAttempt {
+   |             ^^^^^^^^^^^^^^
+ 9 |         canonical_id: "",
+   |         ---------------- private field
+10 |         framework: "vue",
+   |         ---------------- private field
+11 |         is_production: false,
+   |         -------------------- private field
+12 |         force_js: false,
+   |         --------------- private field
+13 |         source_digest: [0; 32],
+   |         ---------------------- private field
+14 |         project: CompileAttempt::UNBOUND_PROJECT,
+   |         ---------------------------------------- private field
+15 |         vue_macro_semantics_staged: false,
+   |         --------------------------------- private field
+16 |         cancelled: false,
+   |         ---------------- private field
+   |
+   = note: ...and other private fields `input_basis`, `type_info` and `vue_macro_semantics` that were not provided
+help: you might have meant to use an associated function to build this type
+   |
+ 8 -     let _ = CompileAttempt {
+ 9 -         canonical_id: "",
+10 -         framework: "vue",
+11 -         is_production: false,
+12 -         force_js: false,
+13 -         source_digest: [0; 32],
+14 -         project: CompileAttempt::UNBOUND_PROJECT,
+15 -         vue_macro_semantics_staged: false,
+16 -         cancelled: false,
+17 -     };
+ 8 +     let _ = CompileAttempt::enter_direct(_, _, _);
+   |
+ 8 -     let _ = CompileAttempt {
+ 9 -         canonical_id: "",
+10 -         framework: "vue",
+11 -         is_production: false,
+12 -         force_js: false,
+13 -         source_digest: [0; 32],
+14 -         project: CompileAttempt::UNBOUND_PROJECT,
+15 -         vue_macro_semantics_staged: false,
+16 -         cancelled: false,
+17 -     };
+ 8 +     let _ = CompileAttempt::enter_project(_, _, _, _);
+   |
+ 8 -     let _ = CompileAttempt {
+ 9 -         canonical_id: "",
+10 -         framework: "vue",
+11 -         is_production: false,
+12 -         force_js: false,
+13 -         source_digest: [0; 32],
+14 -         project: CompileAttempt::UNBOUND_PROJECT,
+15 -         vue_macro_semantics_staged: false,
+16 -         cancelled: false,
+17 -     };
+ 8 +     let _ = CompileAttempt::enter_semantic(_);
+   |
+ 8 -     let _ = CompileAttempt {
+ 9 -         canonical_id: "",
+10 -         framework: "vue",
+11 -         is_production: false,
+12 -         force_js: false,
+13 -         source_digest: [0; 32],
+14 -         project: CompileAttempt::UNBOUND_PROJECT,
+15 -         vue_macro_semantics_staged: false,
+16 -         cancelled: false,
+17 -     };
+ 8 +     let _ = CompileAttempt::enter_semantic_for_project(_, _);
+   |

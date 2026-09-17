@@ -389,7 +389,7 @@ pub(crate) fn admit_published_products(
     let minted = mint_admission_identity(&admission, products_digest);
     let input_basis = minted.input_basis;
     let revision = minted.revision;
-    let source_id = mint_direct_source_id(canonical_id, framework);
+    let source_id = mint_direct_source_id(canonical_id, framework, admission.project);
     let mut source_units = Vec::new();
 
     let mut push_unit = |role: &str, bytes: &[u8], span: verter_span::Span| {
@@ -424,6 +424,7 @@ pub(crate) fn admit_published_products(
         &crate::compile_transaction::DirectSetTag {
             canonical_id: "published-products",
             framework,
+            project: admission.project,
         },
     );
     let authored_unit = &source_units[0];
@@ -753,6 +754,9 @@ pub enum DirectCompileError {
     /// caller's `source`/`request` — never silently reused against stale
     /// input.
     StalePreparedInput { reason: StalePreparedReason },
+    /// The compile transaction was cancelled before admission; sealed
+    /// unpublished output cannot be admitted as a complete result.
+    Cancelled,
 }
 
 /// Why [`DirectCompileError::StalePreparedInput`] was raised.
@@ -2325,6 +2329,9 @@ fn transaction_refusal_to_direct_vue(
                 reason: StalePreparedReason::SourceChanged,
             }
         }
+        crate::compile_transaction::CompileTransactionRefusal::Cancelled => {
+            DirectCompileError::Cancelled
+        }
     }
 }
 
@@ -3354,6 +3361,9 @@ impl StandaloneCompiler {
                     DirectCompileError::StalePreparedInput {
                         reason: StalePreparedReason::SourceChanged,
                     }
+                }
+                crate::compile_transaction::CompileTransactionRefusal::Cancelled => {
+                    DirectCompileError::Cancelled
                 }
             })
     }

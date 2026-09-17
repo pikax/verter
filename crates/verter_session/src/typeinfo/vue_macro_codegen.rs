@@ -901,7 +901,10 @@ impl VerterHost {
         // and surface dependency failures all come from
         // `TypeInfoCore::attempt` through the compile transaction — this
         // driver only executes the live I/O each plan row demands.
-        let mut attempt = CompileAttempt::enter_semantic(owner_canonical);
+        let mut attempt = CompileAttempt::enter_semantic_for_project(
+            owner_canonical,
+            self.host_view_project_identity_for(owner_canonical),
+        );
         attempt.stage_script_analysis(Arc::from(owner_canonical), Arc::clone(script_analysis));
         let semantic_input = match attempt
             .type_info()
