@@ -3144,3 +3144,124 @@ kind = "run"
 command = "owned by L1"
 lane = "unbound"
 bound = false
+
+# ─────────────────────────────────────────────────────────────────────────
+# The signature kernel's registered performance/soak baselines.
+#
+# The kernel contract (`docs/arch/signature-kernel.md`, work accounting)
+# requires the memory limits, soak workloads and relative/absolute
+# performance measurements to be REGISTERED before implementation
+# results are known. That is this section: the exact row set the
+# contract names, each REGISTERED and owned by the V8 measurement
+# vertical (p50/p95/p99 latency for the named paths, throughput at
+# 1/2/4/8 workers, the edit/revert soak plateau, the retired-epoch
+# bound, and the reclamation tail latency). No row carries a measured
+# value: the schema admits no measured field while a row is REGISTERED,
+# so an invented number cannot be spelled. V8 lands the measured cells
+# together with their emitters and flips the status; until then the
+# validator holds the row set exactly.
+# ─────────────────────────────────────────────────────────────────────────
+
+[[kernel_baseline]]
+id = "kernel.workload.edit_revert_soak"
+axes = "live memory plateau under sustained unique edit/revert cycles after retired views are released and the implemented retirement policy runs"
+workload = "the churn workload's edit/revert tranche over the frozen manifest, sustained until the plateau is observed (the kernel contract's hard structural gate row 'Editor edit/revert soak')"
+owning_block = "V8"
+status = "REGISTERED"
+registered_evidence = "registered at V0 before implementation results are known; the plateau bound is meaningless until the retirement policy V2/V9 land and V8 runs the soak"
+
+[[kernel_baseline]]
+id = "kernel.workload.retired_epoch_bound"
+axes = "whole-process retained bytes attributable to retired epochs after the last reader drains"
+workload = "the churn workload with epoch replacement active; the bound is the post-drain retained delta per retired epoch"
+owning_block = "V8"
+status = "REGISTERED"
+registered_evidence = "registered at V0; epoch-safe storage (V2) and the real retirement behavior (V9, conditional) precede any measurable bound"
+
+[[kernel_baseline]]
+id = "kernel.workload.reclamation_tail_latency"
+axes = "p50/p95/p99 wall-clock of the reclamation pass that retires an epoch"
+workload = "the churn workload with epoch replacement active; the tail latency of retirement under concurrent readers"
+owning_block = "V8"
+status = "REGISTERED"
+registered_evidence = "registered at V0; the reclamation path the kernel contract's V9 gate measures ('reclaimed bytes and tail latency improve on matched workloads') does not exist yet"
+
+[[kernel_baseline]]
+id = "kernel.latency.cold_project_load"
+axes = "p50/p95/p99 of a cold complete project load"
+workload = "the frozen manifest's project population, cold cache, whole-return demand over every declared witness"
+owning_block = "V8"
+status = "REGISTERED"
+registered_evidence = "registered at V0 before implementation results are known; measured against the pinned hardware the release baselines bind"
+
+[[kernel_baseline]]
+id = "kernel.latency.warm_query"
+axes = "p50/p95/p99 of a warm repeated complete signature/intersection query"
+workload = "the frozen manifest's query population, warm cache; the invariant is no producer rebuild, the measurement is the wall-clock"
+owning_block = "V8"
+status = "REGISTERED"
+registered_evidence = "registered at V0; the warm rail's no-rebuild gate is structural, the latency distribution lands with V8"
+
+[[kernel_baseline]]
+id = "kernel.latency.local_edit"
+axes = "p50/p95/p99 of a local edit's re-answer"
+workload = "the churn workload's local edit tranche; edit then re-demand the affected witness"
+owning_block = "V8"
+status = "REGISTERED"
+registered_evidence = "registered at V0; fine invalidation breadth arrives with the V2/V6 work the latency rides on"
+
+[[kernel_baseline]]
+id = "kernel.latency.declaration_edit"
+axes = "p50/p95/p99 of a declaration-body edit's re-answer"
+workload = "the churn workload's body-edit tranche; edit a declaration body then re-demand its dependents"
+owning_block = "V8"
+status = "REGISTERED"
+registered_evidence = "registered at V0; body/type edits invalidating exactly the consumed work is the V6 gate's own clause"
+
+[[kernel_baseline]]
+id = "kernel.latency.augmentation_edit"
+axes = "p50/p95/p99 of an augmentation edit's re-answer"
+workload = "the churn workload's augmentation tranche; edit an augmented surface then re-demand its consumers"
+owning_block = "V8"
+status = "REGISTERED"
+registered_evidence = "registered at V0; augmented-type lookup with no whole-program scan is the V3 gate's own clause"
+
+[[kernel_baseline]]
+id = "kernel.latency.cancellation_restart"
+axes = "p50/p95/p99 of cancellation and restart recovery"
+workload = "cancel in-flight semantic work mid-demand, then re-demand; the recovery latency distribution"
+owning_block = "V8"
+status = "REGISTERED"
+registered_evidence = "registered at V0; cancelled/retried work determinism is replayed from V2, its latency measured at V8"
+
+[[kernel_baseline]]
+id = "kernel.throughput.workers_1"
+axes = "completed whole-return demands per second at 1 scheduler worker"
+workload = "the frozen manifest's query population under the 1-worker scheduler configuration (the determinism matrix's DET-04 worker axis)"
+owning_block = "V8"
+status = "REGISTERED"
+registered_evidence = "registered at V0; the worker-count determinism axis is replayed today, its throughput baseline lands with V8's pinned-hardware run"
+
+[[kernel_baseline]]
+id = "kernel.throughput.workers_2"
+axes = "completed whole-return demands per second at 2 scheduler workers"
+workload = "the frozen manifest's query population under the 2-worker scheduler configuration"
+owning_block = "V8"
+status = "REGISTERED"
+registered_evidence = "registered at V0; same pinned-hardware obligation as workers_1"
+
+[[kernel_baseline]]
+id = "kernel.throughput.workers_4"
+axes = "completed whole-return demands per second at 4 scheduler workers"
+workload = "the frozen manifest's query population under the 4-worker scheduler configuration"
+owning_block = "V8"
+status = "REGISTERED"
+registered_evidence = "registered at V0; same pinned-hardware obligation as workers_1"
+
+[[kernel_baseline]]
+id = "kernel.throughput.workers_8"
+axes = "completed whole-return demands per second at 8 scheduler workers"
+workload = "the frozen manifest's query population under the 8-worker scheduler configuration"
+owning_block = "V8"
+status = "REGISTERED"
+registered_evidence = "registered at V0; same pinned-hardware obligation as workers_1"

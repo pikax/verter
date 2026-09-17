@@ -29,7 +29,8 @@
     "embedding",
     "workload_materialization",
     "workload_edit_delta",
-    "memory_observation"
+    "memory_observation",
+    "kernel_baseline"
   ],
   "properties": {
     "schema": {
@@ -1393,6 +1394,50 @@
               "discriminating_test",
               "live_assignment"
             ]
+          }
+        }
+      }
+    },
+    "kernel_baseline": {
+      "type": "array",
+      "minItems": 13,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "axes",
+          "workload",
+          "owning_block",
+          "status",
+          "registered_evidence"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^kernel\\.[a-z][a-z0-9_.]*$"
+          },
+          "axes": {
+            "type": "string",
+            "minLength": 1
+          },
+          "workload": {
+            "type": "string",
+            "minLength": 1
+          },
+          "owning_block": {
+            "enum": [
+              "V8"
+            ]
+          },
+          "status": {
+            "enum": [
+              "REGISTERED"
+            ]
+          },
+          "registered_evidence": {
+            "type": "string",
+            "minLength": 1
           }
         }
       }
