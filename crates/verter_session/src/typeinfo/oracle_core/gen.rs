@@ -607,20 +607,6 @@ fn sandbox_relative(canonical: &str) -> &str {
     canonical.strip_prefix('/').unwrap_or(canonical)
 }
 
-<<<<<<< 5366030e10f5f57b4c4fb0f32bf38b1c9336e717
-/// Drive tsgo's `textDocument/hover` over a hermetic sandbox seeded from the
-/// vendored corpus (the canonical `tsconfig.json` + the vendored libs) and the
-/// spec's per-row workspace files, with the probe written in place of the primary
-/// fixture. Returns the raw hover contents, or [`GenError::TsgoUnavailable`] when
-/// tsgo is not installed (a SKIP, mirroring the spike).
-async fn drive_hover(
-    config: &GenConfig,
-    spec: &QuerySpec,
-    synth: &Synthesized,
-) -> Result<String, GenError> {
-    let tsgo_bin = resolve_tsgo_bin().await?;
-    // The per-row workspace files (the primary one REPLACED by the probe source).
-=======
 /// The per-row workspace files (the primary one REPLACED by the probe
 /// source) — the ONE file-set assembly both capture families drive: the
 /// LSP hover and the CLI declaration emit see byte-identical sandboxes.
@@ -628,7 +614,6 @@ fn spec_workspace_files<'a>(
     spec: &'a QuerySpec,
     synth: &'a Synthesized,
 ) -> (Vec<(String, String)>, &'a str) {
->>>>>>> db20c1c67bdc920ea92ae64b8ae3dc30afeb24b9
     let primary_rel = sandbox_relative(spec.primary_canonical);
     let mut files: Vec<(String, String)> = Vec::new();
     for f in spec.workspace_files {
@@ -935,15 +920,10 @@ pub(crate) async fn generate_relation_snapshot(
     let canonical_path = relation_probe::relation_probe_canonical_path(spec.row_function);
     let rel = sandbox_relative(&canonical_path).to_string();
 
-<<<<<<< 5366030e10f5f57b4c4fb0f32bf38b1c9336e717
-    // (3) Drive the pinned tsgo over the corpus-seeded sandbox + the probe file.
-    let tsgo_bin = resolve_tsgo_bin().await?;
-=======
     // (3) Drive the pinned tsgo over the corpus-seeded sandbox + the probe
     //     file: the hover capture AND the declaration-emit bytes.
     let tsgo_bin = resolve_tsgo_bin().await?;
     let probe_files = [(rel.clone(), probe_source)];
->>>>>>> db20c1c67bdc920ea92ae64b8ae3dc30afeb24b9
     let hover_contents = drive_hover_over_files(
         config,
         &tsgo_bin,
