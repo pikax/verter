@@ -161,6 +161,7 @@ pub struct CompileAttempt<'a> {
     input_basis: InputBasisId,
     type_info: CompileTypeInfo,
     vue_macro_semantics: VueMacroSemanticInput,
+    vue_macro_semantics_staged: bool,
 }
 
 static REQUEST_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -201,6 +202,7 @@ impl<'a> CompileAttempt<'a> {
             input_basis,
             type_info,
             vue_macro_semantics: VueMacroSemanticInput::Unavailable,
+            vue_macro_semantics_staged: false,
         }
     }
 
@@ -230,6 +232,7 @@ impl<'a> CompileAttempt<'a> {
             input_basis,
             type_info,
             vue_macro_semantics: VueMacroSemanticInput::Unavailable,
+            vue_macro_semantics_staged: false,
         }
     }
 
@@ -239,7 +242,24 @@ impl<'a> CompileAttempt<'a> {
     /// target demands no macro semantics) once, at transaction entry, and
     /// every codegen consumer reads [`Self::vue_macro_semantics`] — there
     /// is no second handoff channel beside the transaction.
+    ///
+    /// The handoff is one-shot: a second stage would replace the
+    /// authoritative projection codegen already reads and admission
+    /// carries, so it is refused at this boundary. Panics on repeat
+    /// staging (Invariant: misuse-loud, like a token already bound).
+    /// Staged-ness is tracked separately from the value, so an explicitly
+    /// staged `Unavailable` is a valid first — and only — stage.
+    ///
+    /// # Panics
+    ///
+    /// When this transaction has already staged its macro projection.
     pub fn stage_vue_macro_semantics(&mut self, input: VueMacroSemanticInput) {
+        assert!(
+            !self.vue_macro_semantics_staged,
+            "stage_vue_macro_semantics: the macro-semantic handoff is one-shot per \
+             CompileAttempt — a second stage would replace the authoritative projection"
+        );
+        self.vue_macro_semantics_staged = true;
         self.vue_macro_semantics = input;
     }
 

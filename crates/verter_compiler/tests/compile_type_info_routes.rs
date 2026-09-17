@@ -773,3 +773,27 @@ fn staged_vue_macro_semantics_is_the_sole_carrier() {
     );
     let _ = (&out_runtime, &out_tsc);
 }
+
+/// C3 — the staged handoff is ONE-SHOT per transaction: a second
+/// `stage_vue_macro_semantics` would replace the authoritative projection
+/// codegen already reads and admission carries, so the boundary itself must
+/// refuse it. Staged-ness is tracked separately from the value — an
+/// explicitly staged `Unavailable` is a valid first (and only) stage.
+#[test]
+#[should_panic(expected = "stage_vue_macro_semantics")]
+fn restaging_vue_macro_semantics_is_refused_at_the_boundary() {
+    use verter_compiler::compile::types::VueMacroSemanticInput;
+
+    let request = vue_request();
+    let mut attempt =
+        CompileAttempt::enter_direct("<template><p>hi</p></template>", &request, "vue");
+    attempt.stage_vue_macro_semantics(VueMacroSemanticInput::Unavailable);
+    assert!(
+        matches!(
+            attempt.vue_macro_semantics(),
+            VueMacroSemanticInput::Unavailable
+        ),
+        "an explicitly staged Unavailable is a valid staged value"
+    );
+    attempt.stage_vue_macro_semantics(VueMacroSemanticInput::Unavailable);
+}

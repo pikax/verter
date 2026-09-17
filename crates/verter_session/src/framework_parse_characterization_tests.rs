@@ -874,7 +874,11 @@ fn component_meta_props_surface_is_stable() {
 /// None, None)` (different delimiters, custom-element prefixes, or a
 /// re-parse with different options), the rehoused-dispatch parsed SFC
 /// would diverge and `compile_from_parsed` on it would produce different
-/// bytes than the direct `compile()`.
+/// bytes than the direct `compile()`. The macro fixture adds the staged
+/// handoff dimension: a `defineProps` row carries a non-`Unavailable`
+/// `VueMacroSemanticInput` on BOTH paths (direct parameter, staged
+/// `CompileAttempt`), and its generated macro output is asserted on each
+/// path — dropping the handoff cannot hide behind byte-identity.
 #[test]
 fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
     use verter_compiler::compile::types::VueExecutionInputs;
@@ -884,17 +888,66 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
         RuntimeProductRequest, VueCompileRequest,
     };
     use verter_compiler::framework_common::vue_bridge::compile_registered_vue_artifact;
+    use verter_macro_dto::{
+        AuthoredMemberOrdinal, MacroAnchor, MacroRuntimeBundle, MacroRuntimeEntry,
+        MacroRuntimeOutcome, MacroRuntimeShape, OrderedRuntimeConstructors,
+        PropsDefaultsAssociation, PropsRuntimeShape, RuntimeConstructor, RuntimeProp,
+        RuntimePropType,
+    };
 
     // A spread of fixture SFCs covering script-setup, plain script,
-    // template, styles, and JS dialect.
+    // template, styles, JS dialect, and one compiler-macro fixture whose
+    // non-`Unavailable` runtime semantics both paths must carry: each
+    // row's second element is that row's macro-semantic handoff.
     let fixtures = [
-        "<script setup lang=\"ts\">const a: number = 1</script>\n<template><div>{{ a }}</div></template>",
-        "<script>export default { name: 'X' }</script>\n<template><span class=\"c\">hi</span></template>\n<style scoped>.c{color:red}</style>",
-        "<script setup>const n = 1</script>\n<template><p>{{ n }}</p></template>",
-        "<template><button @click=\"go\">{{ label }}</button></template>\n<script setup lang=\"ts\">const label='x'; function go(){}</script>",
+        (
+            "<script setup lang=\"ts\">const a: number = 1</script>\n<template><div>{{ a }}</div></template>",
+            VueMacroSemanticInput::Unavailable,
+        ),
+        (
+            "<script>export default { name: 'X' }</script>\n<template><span class=\"c\">hi</span></template>\n<style scoped>.c{color:red}</style>",
+            VueMacroSemanticInput::Unavailable,
+        ),
+        (
+            "<script setup>const n = 1</script>\n<template><p>{{ n }}</p></template>",
+            VueMacroSemanticInput::Unavailable,
+        ),
+        (
+            "<template><button @click=\"go\">{{ label }}</button></template>\n<script setup lang=\"ts\">const label='x'; function go(){}</script>",
+            VueMacroSemanticInput::Unavailable,
+        ),
+        (
+            "<script setup lang=\"ts\">defineProps<{ authoritative: string }>()</script>",
+            VueMacroSemanticInput::Runtime(Arc::new(MacroRuntimeBundle {
+                entries: vec![MacroRuntimeEntry {
+                    syntax_index: 0,
+                    macro_index: 0,
+                    outcome: MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(
+                        PropsRuntimeShape {
+                            defaults: PropsDefaultsAssociation::None,
+                            props: vec![RuntimeProp {
+                                name: "authoritative".to_string(),
+                                optional: false,
+                                type_shape: RuntimePropType::Resolved {
+                                    constructors: OrderedRuntimeConstructors::from_ordered([
+                                        RuntimeConstructor::Boolean,
+                                        RuntimeConstructor::Unknown,
+                                    ]),
+                                    skip_check: true,
+                                },
+                                anchor: MacroAnchor::Authored {
+                                    macro_index: 0,
+                                    member_ordinal: AuthoredMemberOrdinal::new(0),
+                                },
+                            }],
+                        },
+                    )),
+                }],
+            })),
+        ),
     ];
 
-    for source in fixtures {
+    for (source, macros) in fixtures {
         let request = CompileRequest::new(
             vec![
                 CompileProduct::RuntimeClient(RuntimeProductRequest {
@@ -924,7 +977,7 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
             source,
             &request,
             &VueExecutionInputs::default(),
-            &VueMacroSemanticInput::Unavailable,
+            &macros,
             &alloc_direct,
         )
         .expect("a plain RuntimeClient + IdeCompanion compile must not be refused");
@@ -932,7 +985,8 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
         // Rehoused path: the session's carrier dispatch produces the
         // framework-neutral artifact, the host reaches its parsed SFC back
         // out, and `compile_from_parsed` drives the SAME compile from the
-        // SAME canonical request.
+        // SAME canonical request — staging the SAME macro-semantic handoff
+        // the direct path received.
         let (_snapshot, artifact) = crate::parse::carrier_parse_snapshot(
             "App.vue",
             source,
@@ -942,14 +996,16 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
         )
         .expect("Vue carrier dispatch yields a snapshot");
         let alloc_b = oxc_allocator::Allocator::new();
+        let mut attempt = verter_compiler::compile_transaction::CompileAttempt::enter_direct(
+            source, &request, "vue",
+        );
+        attempt.stage_vue_macro_semantics(macros.clone());
         let rehoused = compile_registered_vue_artifact(
             source,
             &artifact,
             &request,
             &VueExecutionInputs::default(),
-            &verter_compiler::compile_transaction::CompileAttempt::enter_direct(
-                source, &request, "vue",
-            ),
+            &attempt,
             &alloc_b,
         )
         .expect("registered Vue artifact compiles");
@@ -975,6 +1031,37 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
             direct_styles, rehoused_styles,
             "style code drifted between direct and rehoused-dispatch compile for:\n{source}"
         );
+
+        // The macro fixture must prove its staged semantics reached BOTH
+        // paths' generated output: the bundle's props constructors appear
+        // in the emitted script on either route, and the bytes differ from
+        // an `Unavailable` compile of the same source — a regression that
+        // drops the handoff on either path cannot hide behind the
+        // byte-identity asserts above.
+        if macros.runtime().is_some() {
+            for (label, result) in [("direct", &direct), ("rehoused", &rehoused)] {
+                let script = result.script.as_ref().map_or("", |s| s.code.as_str());
+                assert!(
+                    script.contains("authoritative") && script.contains("Boolean"),
+                    "the staged macro semantics did not reach the {label} path's \
+                     generated script:\n{script}"
+                );
+            }
+            let alloc_unstaged = oxc_allocator::Allocator::new();
+            let unstaged = verter_compiler::compile::compile(
+                source,
+                &request,
+                &VueExecutionInputs::default(),
+                &VueMacroSemanticInput::Unavailable,
+                &alloc_unstaged,
+            )
+            .expect("an Unavailable macro-semantic compile must not be refused");
+            assert_ne!(
+                direct.script.as_ref().map(|s| &s.code),
+                unstaged.script.as_ref().map(|s| &s.code),
+                "staging the runtime bundle must change the emitted props constructors"
+            );
+        }
     }
 }
 
