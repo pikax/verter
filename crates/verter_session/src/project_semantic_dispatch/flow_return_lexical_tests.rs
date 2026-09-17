@@ -6482,10 +6482,11 @@ fn flow_return_labeled_break_drops_the_arm_assertion() {
 }
 
 /// A conditional labeled break joins the break path's value with the
-/// fall-through path's write. Oracle: `number | boolean`, recorded on tsgo
-/// 7.0.0-dev.20260526.1; TypeScript 7.0.2 `tsc` prints `number | true` (the
-/// `boolean` arm assignment-reduced to its `true` constituent). The
-/// assertion below still records this substrate's `boolean` arm.
+/// fall-through path's write. Oracle: TypeScript 7.0.2 `tsc` prints
+/// `number | true` (the `boolean` arm assignment-reduced to its `true`
+/// constituent; first recorded as `number | boolean` on tsgo
+/// 7.0.0-dev.20260526.1 — the version difference is ledgered as SDL-1).
+/// The assertion below still records this substrate's `boolean` arm.
 #[test]
 fn flow_return_conditional_labeled_break_joins_the_write() {
     let host = make_r1_host();

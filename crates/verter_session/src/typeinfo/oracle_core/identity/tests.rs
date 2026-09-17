@@ -97,8 +97,10 @@ fn snapshot_id_v2_includes_probe_rhs_kind() {
         "the snapshot_id HASH-INPUT field set is unchanged by v4; the domain tag stays v2"
     );
     assert_eq!(
-        ORACLE_SCHEMA_VERSION, 4,
-        "the relation_verdict kind addition is the v4 schema-shape change"
+        ORACLE_SCHEMA_VERSION, 5,
+        "v4 was the relation_verdict kind addition; v5 is the raw_capture.decl_emit \
+         field-set change (the declaration-emit bytes recorded beside hover) — the \
+         hash-input field set is unchanged, but every snapshot_id still changes"
     );
     assert_eq!(
         PROBE_SYNTHESIS_VERSION, 2,

@@ -46,14 +46,16 @@ pub(crate) const TSGO_VERSION: &str = "7.0.2";
 /// `identity.probe_rhs_kind` + `raw_capture.probe_scaffold` (the capture-
 /// strategy axis); v3 added the REQUIRED top-level `migration_fingerprint_version` +
 /// `migration_fingerprint` migration-fidelity mirror (§Q4); v4 added the CLOSED
-/// `relation_verdict` value kind (the relation-tuple-wire capture family — the
-/// migration-fidelity mirror becomes kind-keyed: required for
+/// `relation_verdict` value kind (the relation-tuple-wire capture family —
+/// the migration-fidelity mirror becomes kind-keyed: required for
 /// `structured_type_expr`, forbidden as a cross-kind field on
-/// `relation_verdict`). Because it flows into `snapshot_id` through
-/// `PinnedEnv`, the bump changes every `snapshot_id` (hence every checked-in
-/// snapshot filename).
+/// `relation_verdict`); v5 added the REQUIRED `raw_capture.decl_emit` (the
+/// pinned executable's `--declaration --emitDeclarationOnly` bytes recorded
+/// beside the hover capture, for BOTH capture families). Because it flows into
+/// `snapshot_id` through `PinnedEnv`, the bump changes every `snapshot_id`
+/// (hence every checked-in snapshot filename).
 #[allow(dead_code)]
-pub(crate) const ORACLE_SCHEMA_VERSION: u32 = 4;
+pub(crate) const ORACLE_SCHEMA_VERSION: u32 = 5;
 
 /// Version of the PROBE-SYNTHESIS + hover-driver + hover-extraction +
 /// admissibility algorithm. Distinct from `normalizer_version`. Enters

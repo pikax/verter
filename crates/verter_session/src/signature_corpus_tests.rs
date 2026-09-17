@@ -9,13 +9,23 @@
 //!    never exempting silently), the `decl_emit` bytes through the tree's
 //!    own TypeScript parser, and the `any`/`never`/diagnostic legs
 //!    through their recorded conventions;
-//! 2. **compares the current implementation's answers** under the row's
-//!    recorded verdict (`MatchesChecker | KnownOwed | Degraded`) against
-//!    the live flow-return rail, exactly the u6 corpus's verdict-directed
-//!    discipline: a `MatchesChecker` row fails when the live answer stops
-//!    matching, and an owed/degraded row fails when the live answer
-//!    STARTS matching — a later block that changes an answer FLIPS A ROW
-//!    here instead of a prose report;
+//! 2. **compares the current implementation's answer TO THE RECORDED
+//!    PROBE** under the row's recorded verdict (`MatchesChecker |
+//!    KnownOwed | Degraded`): the live observation lane drives the
+//!    row's probe in TYPE position (a declared binding annotated with
+//!    the probe, read back through the public audited flow-return
+//!    boundary — never the witness's own return, which for wrapper
+//!    probes like `Awaited<ReturnType<...>>` is a different question).
+//!    The comparison bases are STRUCTURAL only — the typed
+//!    checker-syntax projection of the recorded `checker` text, the
+//!    recorded `decl_emit` signature return where the checker column is
+//!    a display-only instantiation, and for diagnostic rows the
+//!    recorded refusal pinned by a deferred carrier. A
+//!    `MatchesChecker` row fails when the live answer stops matching,
+//!    and an owed/degraded row fails when the live answer STARTS
+//!    matching — a later block that changes an answer FLIPS A ROW here
+//!    instead of a prose report (both directions proven by
+//!    `signature_corpus_flip_law_fires_in_both_directions`);
 //! 3. **locks the corpus identity** into the evidence manifest — the
 //!    digest of the recorded observations is re-hashed and compared with
 //!    `docs/evidence/signature-kernel/manifest.json`, so an edited
@@ -27,10 +37,8 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::signature_corpus_rows_tests::{Verdict, CORPUS};
-use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{
-    checker_syntax, render_node, with_live_flow_node,
-};
+use crate::signature_corpus_rows_tests::{Row, Verdict, CORPUS};
+use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
 
 /// The corpus identity this driver locks. Mirrored verbatim in
 /// `docs/evidence/signature-kernel/manifest.json` (`corpus.identity`).
@@ -217,77 +225,290 @@ fn parse_declarations(text: &str) -> Result<(), String> {
     }
 }
 
-/// V0-AC3 (compare): the live flow-return answer follows every row's
-/// recorded verdict. The comparison basis is the typed checker-syntax
-/// projection where the checker text parses into it (order-insensitive
-/// exact union sets, ordered intersections, exact object member sets —
-/// one canonical projection, no normalization that hides drift), and
-/// the rendered-node string otherwise. A checker text that fails to
-/// parse into EITHER basis is a failure naming the gap: extend the
-/// parser deliberately, never exempt the row.
-#[test]
-fn signature_corpus_live_answers_follow_their_verdicts() {
-    let mut failures: Vec<String> = Vec::new();
-    for row in CORPUS {
-        // Diagnostic rows record the CHECKER's own refusal; the live
-        // comparison basis is the rendered string.
-        let (parsed, rendered_live) = with_live_flow_node(
-            "",
-            &format!("{}__sig", row.id),
-            row.source,
-            "witness",
-            |dispatch, node| match node {
-                Some(node) => (
-                    checker_syntax::parse(row.checker)
-                        .map(|parsed| checker_syntax::matches_node(dispatch, node, &parsed, 0)),
-                    Some(render_node(dispatch, node, 0)),
-                ),
-                None => (Ok(false), None),
-            },
-        );
+/// The fixed, versioned PROBE LANE appended to every row's module: the
+/// recorded probe in TYPE position — a declared binding whose annotation
+/// IS the probe, read back through the same public audited flow-return
+/// boundary every other corpus row rides. The lane asks the live rail
+/// the RECORDED QUESTION (the probe), never the witness's own return,
+/// which for wrapper probes (`Awaited<ReturnType<...>>`) is a different
+/// question entirely.
+fn probe_lane_source(row: &Row) -> String {
+    format!(
+        "{}\nexport function __sig_probe_lane() {{ \
+            const __probeWitness: {} = null as any; \
+            return __probeWitness; \
+        }}\n",
+        row.source, row.probe
+    )
+}
+
+/// What the live rail answered for one row's probe.
+struct LiveProbeOutcome {
+    /// The live answer structurally matches the row's recorded checker
+    /// text through the checker-syntax projection (when the row records
+    /// one). Structured ONLY — a Verter display string is never
+    /// semantic identity.
+    matched_checker: bool,
+    /// The live answer structurally matches the ORDER claim recorded in
+    /// the row's `decl_emit` signature return (the rows whose checker
+    /// column is a display-only instantiation — e.g. `unknown` for a
+    /// generic binder — while the declaration bytes carry the real
+    /// union order).
+    matched_declared_return: bool,
+    /// The base declaration name when the live answer is the DEFERRED
+    /// instantiation carrier (`InstantiationRef(<operator>)` — the
+    /// substrate has not reduced the probe's outer operator), else
+    /// `None`.
+    deferred_operator: Option<std::sync::Arc<str>>,
+    /// The rendered live answer (diagnostics only — never a comparison
+    /// basis).
+    rendered: Option<String>,
+    /// The typed degradation on a completed answer.
+    degraded: bool,
+}
+
+/// Drive one row's probe lane through the public audited boundary and
+/// evaluate both structural bases against the live node.
+fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host;
+    let host = make_audit_host();
+    let canonical = "/wb/signature_probe.ts";
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        canonical,
+        &crate::u6_flow_shape_corpus_tests::module_script(&probe_lane_source(row)),
+        crate::FileLanguage::script_ts(),
+    );
+    let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: std::sync::Arc::from(canonical),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: std::sync::Arc::from("__sig_probe_lane"),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    };
+    let carrier = host.get_flow_return_type_with_audit(
+        &identity,
+        crate::semantic_query::ReturnProjectionDemand::whole_return(),
+    );
+    let Ok(result) = carrier.as_result() else {
+        return LiveProbeOutcome {
+            matched_checker: false,
+            matched_declared_return: false,
+            deferred_operator: None,
+            rendered: None,
+            degraded: false,
+        };
+    };
+    let degraded = result.degradation().is_some();
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
+    let node = result.return_type();
+    let rendered = Some(render_node(&dispatch, node, 0));
+    let deferred_operator = match dispatch.graph().node_data(node) {
+        Some(data) => match data.as_ref() {
+            crate::semantic_query::SemanticNodeData::InstantiationRef { base, .. } => {
+                Some(std::sync::Arc::clone(&base.decl_name))
+            }
+            _ => None,
+        },
+        None => None,
+    };
+    let structural_match = |text: &str| {
+        let parsed = checker_syntax::parse(text).unwrap_or_else(|err| {
+            panic!(
+                "{}: recorded text `{}` does not parse ({err}) — extend the checker-syntax \
+                 parser deliberately, never exempt the row",
+                row.id, text
+            )
+        });
+        checker_syntax::matches_node(&dispatch, node, &parsed, 0)
+    };
+    let matched_checker = !row.checker.is_empty() && structural_match(row.checker);
+    let matched_declared_return = row
+        .checker
+        .is_empty()
+        .then(|| recorded_signature_return(row.decl_emit, "witness").map(structural_match))
+        .flatten()
+        .unwrap_or(false);
+    LiveProbeOutcome {
+        matched_checker,
+        matched_declared_return,
+        deferred_operator,
+        rendered,
+        degraded,
+    }
+}
+
+/// The signature return recorded in a row's `decl_emit` bytes for
+/// `fn_name` — the machine-formatted `export declare function
+/// <name><…>(…): <ret>;` line's return text. The declaration bytes are
+/// the recorded STRUCTURED observation (the checker column may be a
+/// display-only instantiation), so this is the comparison basis for
+/// rows whose order claim lives only there.
+fn recorded_signature_return<'a>(decl_emit: &'a str, fn_name: &str) -> Option<&'a str> {
+    let needle = format!("function {fn_name}");
+    let line = decl_emit
+        .lines()
+        .find(|line| line.contains(&needle) && line.contains("): "))
+        .map(|line| line.trim())?;
+    let ret_start = line.rfind("): ")? + 3;
+    let ret = line[ret_start..].trim_end_matches(';').trim();
+    (!ret.is_empty()).then_some(ret)
+}
+
+/// V0-AC3 (compare): the live answer to the RECORDED PROBE follows
+/// every row's recorded verdict. The observation lane is the probe lane
+/// above (the probe in type position through the public flow-return
+/// boundary); the comparison bases are STRUCTURAL ONLY — the typed
+/// checker-syntax projection of the recorded `checker` text, the
+/// recorded `decl_emit` signature return where the checker column is a
+/// display-only instantiation, and (for diagnostic rows) the recorded
+/// REFUSAL: the checker refused to print a type, so the row pins that
+/// the live rail still holds the probe DEFERRED (an unreduced carrier
+/// is the honest non-answer; any reduction flips the row). A later
+/// block that changes the answer to any recorded probe FLIPS its row
+/// here instead of a prose report — in BOTH directions.
+/// One row's verdict evaluation: `Some(failure)` when the live answer to
+/// the recorded probe contradicts the row's recorded verdict (either
+/// direction), or when a diagnostic row's recorded refusal is no longer
+/// pinned by a deferred live carrier.
+fn verdict_failure(row: &Row, live: &LiveProbeOutcome) -> Option<String> {
+    {
+        let rendered = live.rendered.as_deref().unwrap_or("<no value>");
         let note = match row.verdict {
             Verdict::MatchesChecker => {
-                let matched = parsed.clone().unwrap_or_else(|err| {
-                    panic!(
-                        "{}: checker text `{}` parses in neither basis ({err}) — extend the \
-                         parser deliberately",
-                        row.id, row.checker
-                    )
-                });
-                if !matched && rendered_live.as_deref() != Some(row.checker) {
+                if !live.matched_checker {
                     Some(format!(
-                        "labelled MatchesChecker but the live answer does not equal the \
-                         recorded observation `{}` — measured `{}`. Either the answer \
-                         regressed or the observation was edited; re-measure against the \
-                         pinned oracle before re-pinning",
-                        row.checker,
-                        rendered_live.as_deref().unwrap_or("<no value>")
+                        "labelled MatchesChecker but the live answer to the probe `{}` does \
+                         not structurally equal the recorded observation `{}` — measured \
+                         `{}` (degraded: {}). Either the answer regressed or the observation \
+                         was edited; re-measure against the pinned oracle before re-pinning",
+                        row.probe, row.checker, rendered, live.degraded
                     ))
                 } else {
                     None
                 }
             }
             Verdict::KnownOwed { .. } | Verdict::Degraded { .. } => {
-                let matched = parsed.unwrap_or(false);
-                if matched || rendered_live.as_deref() == Some(row.checker) {
+                if live.matched_checker {
                     Some(format!(
-                        "labelled {:?} but the live answer EQUALS the recorded observation \
-                         `{}` — the recorded divergence is GONE. This failure is the \
-                         INTENDED signal: the answer looks implemented (or the observation \
-                         was edited to the live value); re-pin the row and update the \
-                         semantic-difference ledger in the same change",
-                        row.verdict, row.checker
+                        "labelled {:?} but the live answer to the probe `{}` STRUCTURALLY \
+                         EQUALS the recorded observation `{}` — the recorded divergence is \
+                         GONE. This failure is the INTENDED signal: the answer looks \
+                         implemented (or the observation was edited to the live value); \
+                         re-pin the row and update the semantic-difference ledger in the \
+                         same change",
+                        row.verdict, row.probe, row.checker
+                    ))
+                } else if live.matched_declared_return {
+                    Some(format!(
+                        "labelled {:?} but the live answer to the probe `{}` STRUCTURALLY \
+                         EQUALS the order claim recorded in the declaration bytes \
+                         (`{}`) — re-pin the row and update the semantic-difference \
+                         ledger in the same change",
+                        row.verdict,
+                        row.probe,
+                        recorded_signature_return(row.decl_emit, "witness").unwrap_or(""),
                     ))
                 } else {
                     None
                 }
             }
         };
-        if let Some(note) = note {
-            failures.push(format!("{}: {note}", row.id));
+        let note = note.map(|note| format!("{}: {note}", row.id));
+        // The diagnostic row pins the recorded REFUSAL: 7.0.2 printed no
+        // type (TS2589), so the only honest live answer is the probe held
+        // DEFERRED by its outer operator. A reduction to any value — or a
+        // clean structural match of a type — flips the row for a re-pin
+        // and a ledger review against the recorded refusal.
+        if let Some(diagnostic) = row.diagnostic {
+            let outer_operator = row.probe.split('<').next().unwrap_or("");
+            if live.deferred_operator.as_deref() != Some(outer_operator) {
+                return Some(format!(
+                    "{}: the recorded observation is the checker's REFUSAL (`{diagnostic}`) \
+                     but the live answer to the probe `{}` is no longer the deferred \
+                     `{outer_operator}` carrier — measured `{}`. The substrate now has a \
+                     disposition where the checker refused; re-pin the row and review the \
+                     semantic-difference ledger",
+                    row.id, row.probe, rendered
+                ));
+            }
+        }
+        note
+    }
+}
+
+#[test]
+fn signature_corpus_live_answers_follow_their_verdicts() {
+    let mut failures: Vec<String> = Vec::new();
+    for row in CORPUS {
+        let live = live_probe_outcome(row);
+        if let Some(failure) = verdict_failure(row, &live) {
+            failures.push(failure);
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The flip law, proven in BOTH directions over the REAL probe lane with
+/// synthetic rows whose probes REDUCE today (a bare primitive annotation,
+/// no deferred wrapper): a matching live answer satisfies a
+/// `MatchesChecker` verdict and CONTRADICTS a `KnownOwed` one, and a
+/// diagnostic row whose probe reduces loses its refusal pin. This is the
+/// control that keeps the corpus driver's row-flip mechanism honest — a
+/// later block implementing a probe reduction flips its row through THIS
+/// rail, never a prose report.
+#[test]
+fn signature_corpus_flip_law_fires_in_both_directions() {
+    use crate::signature_corpus_rows_tests::Family;
+    let reduced_row = |verdict, diagnostic| Row {
+        id: "SV_CONTROL_reduced_probe",
+        family: Family::UnionValuedThen,
+        source: "export function witness() { return 1; }",
+        probe: "string",
+        checker: "string",
+        checker_is_any: false,
+        checker_is_never: false,
+        diagnostic,
+        decl_emit: "export declare function witness(): number;\n",
+        verdict,
+    };
+    // A reduced live answer satisfies MatchesChecker...
+    let matches = reduced_row(Verdict::MatchesChecker, None);
+    let live = live_probe_outcome(&matches);
+    assert_eq!(verdict_failure(&matches, &live), None);
+    assert!(
+        live.matched_checker,
+        "the control probe must reduce and match"
+    );
+    // ...and CONTRADICTS KnownOwed (the flip signal fires).
+    let owed = reduced_row(
+        Verdict::KnownOwed {
+            note: "control: the answer is implemented",
+        },
+        None,
+    );
+    let live = live_probe_outcome(&owed);
+    assert!(
+        verdict_failure(&owed, &live)
+            .is_some_and(|failure| failure.contains("STRUCTURALLY EQUALS")),
+        "an implemented answer must flip a KnownOwed row"
+    );
+    // A diagnostic row whose probe REDUCES loses its refusal pin.
+    let diagnostic = reduced_row(
+        Verdict::KnownOwed { note: "control" },
+        Some("TS9999 control"),
+    );
+    let live = live_probe_outcome(&diagnostic);
+    assert!(
+        verdict_failure(&diagnostic, &live).is_some_and(|failure| failure.contains("REFUSAL")),
+        "a reduced probe must flip a diagnostic row's refusal pin"
+    );
 }
 
 /// V0-AC3 (identity): the recorded observations digest to the corpus

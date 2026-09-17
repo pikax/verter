@@ -180,6 +180,12 @@ pub(crate) struct RawCapture {
     /// decoder re-checks it.
     pub(crate) probe_scaffold: Option<String>,
     pub(crate) hover_contents: String,
+    /// The pinned executable's `--declaration --emitDeclarationOnly` output
+    /// bytes for the primary (probe-carrying) file — the canonical SIGNATURE
+    /// observation in executable bytes, recorded BESIDE the hover capture
+    /// (schema v5). Non-exported declarations (including the probe alias
+    /// itself) are legitimately absent from the emitted surface.
+    pub(crate) decl_emit: String,
 }
 
 #[allow(dead_code)]
@@ -415,6 +421,17 @@ pub(crate) fn decode_strict(json: &Value) -> Result<OracleSnapshot, SnapshotDeco
                 ));
             }
         }
+    }
+
+    // The declaration-emit observation (v5): REQUIRED and non-empty for
+    // BOTH capture families — a snapshot whose recorded declaration bytes
+    // are absent or blank is an unverified capture, never a valid file.
+    if snapshot.raw_capture.decl_emit.trim().is_empty() {
+        return Err(SnapshotDecodeError::Envelope(
+            "raw_capture.decl_emit (the --declaration --emitDeclarationOnly bytes) is \
+             empty — the declaration observation is REQUIRED, never optional"
+                .to_string(),
+        ));
     }
 
     // Kind-specific identity strict decode + tag validation.

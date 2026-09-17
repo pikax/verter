@@ -1064,7 +1064,9 @@ pub(crate) fn check_boundary_refusal(
 /// arrays only), `Name<T, …>` generic arguments, objects whose members
 /// are properties (`name: T` with `readonly` / `?` modifiers), methods
 /// (`name(p: T, …): R`), accessors (`get name(): R`, `set name(p: T);`)
-/// and the `... N more ...` print elision, plus `(p: T, …) => T`.
+/// and the `... N more ...` print elision, plus `(p: T, …) => T` and the
+/// predicate prints `… => p is T` / `… => asserts p is T` (parsed;
+/// fail-closed at match time until the substrate carries predicates).
 /// Unsupported text is a loud parse error — never a silent exemption.
 ///
 /// Unions are order-insensitive exact sets; intersections are source-
@@ -1116,6 +1118,27 @@ pub(crate) mod checker_syntax {
         Function {
             params: Vec<CheckerType>,
             ret: Box<CheckerType>,
+            /// `x is Foo` / `asserts x is Foo` / `asserts x` — the
+            /// checker's predicate print on a function's return. Parses
+            /// (the print is load-bearing checker text); matches NOTHING
+            /// live today — the substrate's `Signature` node carries no
+            /// predicate — so a predicate print is fail-closed until
+            /// predicate propagation lands, at which point this arm
+            /// compares the live predicate against [`CheckerPredicate`].
+            predicate: Option<CheckerPredicate>,
+        },
+    }
+
+    /// A printed type predicate: `x is Foo` on a call signature, or the
+    /// assertion form `asserts x is Foo` / bare `asserts x`.
+    #[derive(Clone, Debug, PartialEq)]
+    pub(crate) enum CheckerPredicate {
+        /// `x is Foo` — the parameter named `param` is narrowed to `ty`.
+        TypePredicate { param: String, ty: Box<CheckerType> },
+        /// `asserts x is Foo` (or bare `asserts x`, `ty: None`).
+        Assertion {
+            param: String,
+            ty: Option<Box<CheckerType>>,
         },
     }
 
@@ -1338,11 +1361,18 @@ pub(crate) mod checker_syntax {
                 _ => {
                     let mut name = self.ident()?;
                     // A dotted reference print (`Intl.NumberFormatOptions`)
-                    // carries its qualification inside the name.
+                    // carries its qualification inside the name, including
+                    // the checker's anonymous-class print segment
+                    // (`Mixin.(Anonymous class)`) — a name that can never
+                    // resolve to a live DeclRef, so it stays fail-closed at
+                    // match time while still parsing as checker text.
                     loop {
                         self.skip_ws();
                         let rest = self.rest();
-                        if rest.starts_with('.')
+                        if rest.starts_with(".(Anonymous class)") {
+                            self.pos += ".(Anonymous class)".len();
+                            name.push_str(".(Anonymous class)");
+                        } else if rest.starts_with('.')
                             && rest[1..]
                                 .chars()
                                 .next()
@@ -1578,11 +1608,61 @@ pub(crate) mod checker_syntax {
                 ));
             }
             self.pos += 2;
-            let ret = self.union()?;
+            self.skip_ws();
+            // A predicate print (`x is Foo` / `asserts x is Foo`) follows
+            // the arrow; try it first and fall back to the plain return
+            // union so `(p: T) => R` behavior is unchanged.
+            let save = self.pos;
+            // A predicate print IS the return: `(x) => x is Foo` returns
+            // boolean while narrowing `x`, so the parsed return is the
+            // boolean primitive and the predicate rides beside it.
+            let (predicate, ret) = match self.try_predicate() {
+                Some(predicate) => (
+                    Some(predicate),
+                    CheckerType::Primitive(PrimitiveKind::Boolean),
+                ),
+                None => {
+                    self.pos = save;
+                    (None, self.union()?)
+                }
+            };
             Ok(CheckerType::Function {
                 params,
                 ret: Box::new(ret),
+                predicate,
             })
+        }
+
+        /// Parse a predicate print at the current position, or restore and
+        /// return `None` when the text is not one. `asserts x is T` /
+        /// `asserts x` / `x is T`.
+        fn try_predicate(&mut self) -> Option<CheckerPredicate> {
+            if self.eat_keyword("asserts") {
+                let param = self.ident().ok()?;
+                self.skip_ws();
+                if self.eat_keyword("is") {
+                    let ty = self.union().ok()?;
+                    Some(CheckerPredicate::Assertion {
+                        param,
+                        ty: Some(Box::new(ty)),
+                    })
+                } else {
+                    Some(CheckerPredicate::Assertion { param, ty: None })
+                }
+            } else {
+                let save = self.pos;
+                let param = self.ident().ok()?;
+                self.skip_ws();
+                if !self.eat_keyword("is") {
+                    self.pos = save;
+                    return None;
+                }
+                let ty = self.union().ok()?;
+                Some(CheckerPredicate::TypePredicate {
+                    param,
+                    ty: Box::new(ty),
+                })
+            }
         }
     }
 
@@ -1757,22 +1837,32 @@ pub(crate) mod checker_syntax {
                 spread_formula_matches(dispatch, node, expected, depth)
             }
             (
-                CheckerType::Function { params, ret },
+                CheckerType::Function {
+                    params,
+                    ret,
+                    predicate,
+                },
                 SemanticNodeData::Signature {
                     kind,
                     params: got_params,
                     return_type,
                     ..
                 },
-            ) => function_matches(
-                dispatch,
-                *kind,
-                got_params,
-                *return_type,
-                params,
-                ret,
-                depth,
-            ),
+            ) => {
+                // A printed predicate demands an equal live predicate; the
+                // live Signature carries none today, so a predicate print
+                // fails closed (never matches a predicate-less signature).
+                predicate.is_none()
+                    && function_matches(
+                        dispatch,
+                        *kind,
+                        got_params,
+                        *return_type,
+                        params,
+                        ret,
+                        depth,
+                    )
+            }
             _ => false,
         }
     }

@@ -96,6 +96,11 @@ pub enum GenError {
     TsgoUnavailable(String),
     /// The tsgo LSP driver failed to spawn / respond.
     TsgoDriver(String),
+    /// The pinned executable's `--declaration --emitDeclarationOnly` run
+    /// failed (non-zero exit, timeout, or no emitted `.d.ts` for the
+    /// primary file). The declaration bytes are a REQUIRED recorded
+    /// observation, so this is loud, never a skip.
+    DeclEmit(String),
     /// tsgo returned no hover at the probe offset.
     NoHover,
     /// The hover-extraction grammar could not recover the probe RHS.
@@ -443,8 +448,9 @@ pub(crate) async fn generate_snapshot_with_migration(
     let source_walk = source_side_walk(spec);
     cross_check_probe_strategy(spec, &source_walk)?;
 
-    // (3) Drive tsgo over the corpus-seeded sandbox + the probe.
-    let hover_contents = drive_hover(config, spec, &synth).await?;
+    // (3) Drive the pinned engine over the corpus-seeded sandbox + the
+    //     probe: the hover capture AND the declaration-emit bytes.
+    let (hover_contents, decl_emit) = drive_hover(config, spec, &synth).await?;
 
     // (4) Extract the probe RHS from the markdown hover.
     let probe_name = probe::probe_name(spec.query_ordinal);
@@ -485,6 +491,7 @@ pub(crate) async fn generate_snapshot_with_migration(
         "probe_header": probe::probe_header(spec.query_ordinal, &synth.rhs),
         "probe_scaffold": synth.scaffold,
         "hover_contents": hover_contents,
+        "decl_emit": decl_emit,
     });
     let source_admission_digest = build_source_digest(spec, contributors)?;
     let (oracle_env_files, oracle_env_hash) = build_env_files(config)?;
@@ -600,18 +607,13 @@ fn sandbox_relative(canonical: &str) -> &str {
     canonical.strip_prefix('/').unwrap_or(canonical)
 }
 
-/// Drive tsgo's `textDocument/hover` over a hermetic sandbox seeded from the
-/// vendored corpus (the canonical `tsconfig.json` + the vendored libs) and the
-/// spec's per-row workspace files, with the probe written in place of the primary
-/// fixture. Returns the raw hover contents, or [`GenError::TsgoUnavailable`] when
-/// tsgo is not installed (a SKIP, mirroring the spike).
-async fn drive_hover(
-    config: &GenConfig,
-    spec: &QuerySpec,
-    synth: &Synthesized,
-) -> Result<String, GenError> {
-    let tsgo_bin = resolve_tsgo_bin().await?;
-    // The per-row workspace files (the primary one REPLACED by the probe source).
+/// The per-row workspace files (the primary one REPLACED by the probe
+/// source) — the ONE file-set assembly both capture families drive: the
+/// LSP hover and the CLI declaration emit see byte-identical sandboxes.
+fn spec_workspace_files<'a>(
+    spec: &'a QuerySpec,
+    synth: &'a Synthesized,
+) -> (Vec<(String, String)>, &'a str) {
     let primary_rel = sandbox_relative(spec.primary_canonical);
     let mut files: Vec<(String, String)> = Vec::new();
     for f in spec.workspace_files {
@@ -623,14 +625,34 @@ async fn drive_hover(
         };
         files.push((rel.to_string(), content));
     }
-    drive_hover_over_files(
+    (files, primary_rel)
+}
+
+/// Drive tsgo's `textDocument/hover` AND the pinned executable's
+/// `--declaration --emitDeclarationOnly` emit over one hermetic sandbox
+/// seeded from the vendored corpus (the canonical `tsconfig.json` + the
+/// vendored libs) and the spec's per-row workspace files, with the probe
+/// written in place of the primary fixture. Returns the raw hover
+/// contents plus the primary file's emitted declaration bytes, or
+/// [`GenError::TsgoUnavailable`] when tsgo is not installed (a SKIP,
+/// mirroring the spike).
+async fn drive_hover(
+    config: &GenConfig,
+    spec: &QuerySpec,
+    synth: &Synthesized,
+) -> Result<(String, String), GenError> {
+    let tsgo_bin = resolve_tsgo_bin().await?;
+    let (files, primary_rel) = spec_workspace_files(spec, synth);
+    let hover_contents = drive_hover_over_files(
         config,
         &tsgo_bin,
         &files,
         primary_rel,
         synth.probe_name_offset as u32,
     )
-    .await
+    .await?;
+    let decl_emit = drive_declaration_emit(config, &tsgo_bin, &files, primary_rel).await?;
+    Ok((hover_contents, decl_emit))
 }
 
 /// Resolve the PINNED engine binary the oracle harness generates with —
@@ -783,6 +805,70 @@ async fn drive_hover_over_files(
     Ok(hover.contents)
 }
 
+/// Drive the PINNED executable's declaration emit over the SAME hermetic
+/// sandbox layout the hover drive uses (corpus-seeded `tsconfig.json` +
+/// the identical file set, probe source in place of the primary), and
+/// return the primary file's emitted `.d.ts` bytes. The engine runs as a
+/// CLI child (`<bin> --declaration --emitDeclarationOnly -p <sandbox>`);
+/// a non-zero exit or a missing emitted declaration is a LOUD failure —
+/// the declaration bytes are a first-class recorded observation (stored
+/// beside `hover_contents` in `raw_capture`), never optional garnish.
+async fn drive_declaration_emit(
+    config: &GenConfig,
+    tsgo_bin: &str,
+    files: &[(String, String)],
+    primary_rel: &str,
+) -> Result<String, GenError> {
+    let sandbox = tempfile::tempdir().map_err(|e| GenError::Io(e.to_string()))?;
+    seed_corpus(&config.corpus_root, sandbox.path())?;
+    for (rel, content) in files {
+        let abs = sandbox.path().join(rel);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| GenError::Io(e.to_string()))?;
+        }
+        std::fs::write(&abs, content).map_err(|e| GenError::Io(e.to_string()))?;
+    }
+    let emit = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::process::Command::new(tsgo_bin)
+            .arg("--declaration")
+            .arg("--emitDeclarationOnly")
+            // Some oracle fixtures intentionally carry checker diagnostics
+            // (the rows record them); `--noCheck` keeps the emit from
+            // gating on them — the declaration SURFACE is the recorded
+            // observation, diagnostics are their own recorded column.
+            .arg("--noCheck")
+            .arg("-p")
+            .arg(sandbox.path())
+            .current_dir(sandbox.path())
+            .output(),
+    )
+    .await
+    .map_err(|_| GenError::DeclEmit("declaration emit timed out".to_string()))?
+    .map_err(|e| GenError::DeclEmit(e.to_string()))?;
+    if !emit.status.success() {
+        // The native CLI prints its diagnostics to STDOUT (stderr is for
+        // crashes) — both are included so a failed emit is diagnosable
+        // from the error alone.
+        return Err(GenError::DeclEmit(format!(
+            "declaration emit exited {}: stdout: {} stderr: {}",
+            emit.status,
+            String::from_utf8_lossy(&emit.stdout),
+            String::from_utf8_lossy(&emit.stderr)
+        )));
+    }
+    let decl_rel = primary_rel
+        .strip_suffix(".ts")
+        .map(|stem| format!("{stem}.d.ts"))
+        .unwrap_or_else(|| format!("{primary_rel}.d.ts"));
+    let decl_abs = sandbox.path().join(&decl_rel);
+    std::fs::read_to_string(&decl_abs).map_err(|e| {
+        GenError::DeclEmit(format!(
+            "the emitted declaration `{decl_rel}` was not produced: {e}"
+        ))
+    })
+}
+
 /// The per-spec v4 relation generation pipeline
 /// (the TS7 oracle contract): a relation-specific
 /// capture path BESIDE the TypeExpr pipeline — NOT through the two-sided
@@ -834,16 +920,19 @@ pub(crate) async fn generate_relation_snapshot(
     let canonical_path = relation_probe::relation_probe_canonical_path(spec.row_function);
     let rel = sandbox_relative(&canonical_path).to_string();
 
-    // (3) Drive the pinned tsgo over the corpus-seeded sandbox + the probe file.
+    // (3) Drive the pinned tsgo over the corpus-seeded sandbox + the probe
+    //     file: the hover capture AND the declaration-emit bytes.
     let tsgo_bin = resolve_tsgo_bin().await?;
+    let probe_files = [(rel.clone(), probe_source)];
     let hover_contents = drive_hover_over_files(
         config,
         &tsgo_bin,
-        &[(rel.clone(), probe_source)],
+        &probe_files,
         &rel,
         probe_name_offset as u32,
     )
     .await?;
+    let decl_emit = drive_declaration_emit(config, &tsgo_bin, &probe_files, &rel).await?;
 
     // (4) Extract the probe RHS from the markdown hover and STRICT-decode the
     //     tuple wire — hover is ONLY the transport; anything off the fixed
@@ -989,6 +1078,7 @@ pub(crate) async fn generate_relation_snapshot(
         "probe_header": probe_header,
         "probe_scaffold": Value::Null,
         "hover_contents": hover_contents,
+        "decl_emit": decl_emit,
     });
     let (oracle_env_files, oracle_env_hash) = build_env_files(config)?;
     let document = snapshot::assemble_relation_snapshot_document(

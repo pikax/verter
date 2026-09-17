@@ -229,7 +229,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_is_never: false,
         diagnostic: None,
         decl_emit: "export declare function identity<T>(v: T): T;\nexport declare function witness(): number;\n",
-        verdict: Verdict::MatchesChecker,
+        verdict: Verdict::KnownOwed { note: "Under the probe-driven observation lane the substrate DEFERS a type-position `ReturnType<typeof ...>` instantiation (measured `InstantiationRef(ReturnType)`); the witness's own return rail already answers `number`, but reducing the recorded PROBE question is owned by V5 (SignaturesOfType)." },
     },
     Row {
         id: "SV10_nested_instantiation",
@@ -241,7 +241,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_is_never: false,
         diagnostic: None,
         decl_emit: "type F<T> = {\n    f: T;\n};\ntype G<U> = F<U[]>;\nexport declare function witness(): G<boolean>;\nexport {};\n",
-        verdict: Verdict::MatchesChecker,
+        verdict: Verdict::KnownOwed { note: "The nested-instantiation probe `ReturnType<typeof witness>` defers in type position (measured `InstantiationRef(ReturnType)`); the recorded answer is the alias-applied `G<boolean>`. Owned by V5 (SignaturesOfType) with the alias-preserving display." },
     },
     Row {
         id: "SV11_constrained_substitution",
@@ -253,7 +253,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_is_never: false,
         diagnostic: None,
         decl_emit: "export declare function pickA<T extends {\n    a: 1;\n}>(v: T): T['a'];\nexport declare function witness(): 1;\n",
-        verdict: Verdict::KnownOwed { note: "Constrained substitution through an indexed access (T['a'] over T extends { a: 1 }): the checker reduces to the literal 1; the current substrate keeps the DEFERRED IndexedAccess shell (measured `IndexedAccess(...)`). Forcing the indexed access through the constraint is owned by V5." },
+        verdict: Verdict::KnownOwed { note: "Constrained substitution through an indexed access (T['a'] over T extends { a: 1 }): the checker reduces to the literal 1; the current substrate defers the probe (measured `InstantiationRef(ReturnType)`, with the signature-level indexed-access shell behind it). Forcing the indexed access through the constraint is owned by V5." },
     },
     Row {
         id: "SV12_grouping_witness_L",
@@ -289,7 +289,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_is_never: false,
         diagnostic: None,
         decl_emit: "export declare function witness(): {\n    a: 1;\n} & {\n    b: 2;\n};\n",
-        verdict: Verdict::MatchesChecker,
+        verdict: Verdict::KnownOwed { note: "The transparent intersection group records `{ a: 1 } & { b: 2 }` (declared order); the probe `ReturnType<typeof witness>` defers in type position (measured `InstantiationRef(ReturnType)`). Owned by V5 (SignaturesOfType) — the intersection itself reduces through V4's grouping once the ReturnType wrapper does." },
     },
     Row {
         id: "SV15_awaited_plain_primitive",
@@ -301,7 +301,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_is_never: false,
         diagnostic: None,
         decl_emit: "export declare function witness(): number;\n",
-        verdict: Verdict::MatchesChecker,
+        verdict: Verdict::KnownOwed { note: "The `Awaited<...>` wrapper defers in type position (measured `InstantiationRef(Awaited)`); the witness's own return is already `number`. The runtime/lib Awaited instantiation through the probe lane is owned by V7." },
     },
     Row {
         id: "SV16_awaited_plain_object",
@@ -313,7 +313,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_is_never: false,
         diagnostic: None,
         decl_emit: "export declare function witness(): {\n    a: number;\n};\n",
-        verdict: Verdict::MatchesChecker,
+        verdict: Verdict::KnownOwed { note: "The `Awaited<...>` wrapper defers in type position (measured `InstantiationRef(Awaited)`); the object residual past the wrapper is V7 (runtime/lib Awaited)." },
     },
     Row {
         id: "SV17_awaited_any",
@@ -325,7 +325,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_is_never: false,
         diagnostic: None,
         decl_emit: "export declare function witness(v: any): any;\n",
-        verdict: Verdict::MatchesChecker,
+        verdict: Verdict::KnownOwed { note: "The `Awaited<...>` wrapper defers in type position (measured `InstantiationRef(Awaited)`); the any-residual (`any` absorbs the wrapper) is V7 (runtime/lib Awaited)." },
     },
     Row {
         id: "SV18_awaited_never",

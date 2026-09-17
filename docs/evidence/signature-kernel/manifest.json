@@ -27,10 +27,10 @@
     "verification": "oracle_core::identity tests + typeinfo_tests::oracle_toolchain_lock re-hash the installed platform package bytes against this record"
   },
   "generator": {
-    "oracle_schema_version": 4,
+    "oracle_schema_version": 5,
     "probe_synthesis_version": 2,
     "normalizer_version": 1,
-    "note": "snapshot regeneration is idempotent against the pinned engine (oracle_gen binary; 93 snapshots, 0 stale on the implementing host); the oracle_core::identity test re-verifies these pinned constants against the manifest"
+    "note": "snapshot regeneration is idempotent against the pinned engine (oracle_gen binary; 93 snapshots re-keyed to schema v5 with the raw_capture.decl_emit declaration-emit observation recorded beside hover, superseded v4 files pruned, on the implementing host); the oracle_core::identity test re-verifies these pinned constants against the manifest"
   },
   "corpus": {
     "identity": "verter-signature-corpus-v0@typescript-7.0.2",
@@ -50,7 +50,7 @@
   },
   "port_witness": {
     "u6_checker_columns": "344/344 rows byte-identical when re-measured on the installed 7.0.2 executable on the implementing host (the E01 any-convention row verified through its IsAny leg)",
-    "oracle_snapshots": "regenerating with the pinned engine rewrites 93 snapshots with zero byte differences and prunes 0 stale files"
+    "oracle_snapshots": "344/344 u6 checker columns re-measured byte-identical on 7.0.2 before the schema-v5 regeneration; the current tree was regenerated with the pinned engine (93 snapshots re-keyed to schema v5, each now carrying the raw_capture.decl_emit declaration-emit observation beside hover; 93 superseded v4 files pruned) and the regeneration is idempotent"
   },
   "out_of_scope": [
     "typescript 7.1.0-dev nightlies (moving target; their content-mapper work is unrelated to this train)"
