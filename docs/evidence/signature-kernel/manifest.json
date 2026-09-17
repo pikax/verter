@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "product": "rev11.signature-kernel",
+  "node": "V0",
+  "contract": {
+    "path": "docs/arch/signature-kernel.md",
+    "revision": "4.1",
+    "sha256": "97735eb2f8cf658d25c4b6c81e799d3cda0a6cb96a237189f77e521564ed3839"
+  },
+  "oracle": {
+    "typescript": "7.0.2",
+    "engine_version_report": "Version 7.0.2",
+    "harness_pin": "crates/verter_session/src/typeinfo/oracle_core/identity.rs::TSGO_VERSION",
+    "toolchain_record": {
+      "path": "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_toolchain.json",
+      "sha256": "da2be8884c02eff402fce3acd430e67097ebc0b09c31a1ab0fb6086cd6451c59",
+      "platforms": [
+        "darwin-arm64",
+        "darwin-x64",
+        "linux-arm64",
+        "linux-x64",
+        "win32-arm64",
+        "win32-x64"
+      ],
+      "per_platform": "executable + 108 lib/*.d.ts sha256 digests (see the record)"
+    },
+    "verification": "oracle_core::identity tests + typeinfo_tests::oracle_toolchain_lock re-hash the installed platform package bytes against this record"
+  },
+  "generator": {
+    "oracle_schema_version": 5,
+    "probe_synthesis_version": 2,
+    "normalizer_version": 1,
+    "note": "snapshot regeneration is idempotent against the pinned engine (oracle_gen binary; 93 snapshots re-keyed to schema v5 with the raw_capture.decl_emit declaration-emit observation recorded beside hover, superseded v4 files pruned, on the implementing host); the oracle_core::identity test re-verifies these pinned constants against the manifest"
+  },
+  "corpus": {
+    "identity": "verter-signature-corpus-v0@typescript-7.0.2",
+    "rows": 26,
+    "seeds": "hand-authored fixed rows; no random generator (the reported 9,300-case generator was not recovered)",
+    "observation_digest": "24538e14cdee37149774c5e2dc1a1c33c9bccfbbbf964f0f38fe4ac16e9bb955",
+    "digest_input": "for each row in table order: little-endian u64 byte length then bytes of id, checker, decl_emit",
+    "homes": [
+      "crates/verter_session/src/signature_corpus_rows_tests.rs",
+      "crates/verter_session/src/signature_corpus_tests.rs"
+    ]
+  },
+  "unrecovered_report": {
+    "claim": "9,300-union / 56,548-observation corpus measured on tsgo 7.0.0-dev.20260526.1",
+    "status": "NOT RECOVERED",
+    "disposition": "no reproduction claim is made; the new corpus carries its own identity and is never presented as the reported corpus"
+  },
+  "port_witness": {
+    "u6_checker_columns": "344/344 rows byte-identical when re-measured on the installed 7.0.2 executable on the implementing host (the E01 any-convention row verified through its IsAny leg)",
+    "oracle_snapshots": "344/344 u6 checker columns re-measured byte-identical on 7.0.2 before the schema-v5 regeneration; the current tree was regenerated with the pinned engine (93 snapshots re-keyed to schema v5, each now carrying the raw_capture.decl_emit declaration-emit observation beside hover; 93 superseded v4 files pruned) and the regeneration is idempotent"
+  },
+  "out_of_scope": [
+    "typescript 7.1.0-dev nightlies (moving target; their content-mapper work is unrelated to this train)"
+  ]
+}

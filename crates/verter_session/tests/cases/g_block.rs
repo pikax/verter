@@ -86,6 +86,8 @@ mod framework_surface_executor;
 mod harness;
 #[path = "g_block/r6_query_identity_keys_content_free.rs"]
 mod r6_query_identity_keys_content_free;
+#[path = "g_block/semantic_determinism_matrix.rs"]
+mod semantic_determinism_matrix;
 #[path = "g_block/separation_of_concerns.rs"]
 mod separation_of_concerns;
 #[path = "g_block/typeinfo_audit_contract_guards.rs"]

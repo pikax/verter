@@ -10129,7 +10129,7 @@ fn flow_expr_cold_warm(
 /// the refined root's own member is a different case: it holds, and the
 /// read keeps it. A member fact that OVERLAPS the refined member — each
 /// says something the other does not — narrows it: the read is the
-/// refined member filtered by the fact. tsgo 7.0.0-dev, per row.
+/// refined member filtered by the fact. Oracle, per row.
 #[test]
 fn flow_return_switch_case_refinement_outranks_enclosing_guard_fact() {
     const TYPES: &str = "type P = { k: \"a\", v: \"A\" } | { k: \"b\", v: \"B\" } | { k: \"c\", v: number }\ntype Q = { k: \"a\", v: string | number } | { k: \"b\", v: object }\ntype O = { k: \"a\", v?: \"A\" } | { k: \"b\", v?: \"B\" } | { k: \"c\", v: number }\n";

@@ -283,7 +283,8 @@ fn synthetic_snapshot(spec: &QuerySpec) -> Value {
             "probe_name": "__oracle_probe__0",
             "probe_header": "type __oracle_probe__0 = Foo;",
             "probe_scaffold": null,
-            "hover_contents": "```typescript\ntype __oracle_probe__0 = number;\n```"
+            "hover_contents": "```typescript\ntype __oracle_probe__0 = number;\n```",
+            "decl_emit": "export declare function foo(): number;\n"
         },
         "source_admission_digest": {
             "source_locator": { "reference_canonical": FIXTURE_PATH, "reference_name": SYMBOL, "symbol_space": "Type" },

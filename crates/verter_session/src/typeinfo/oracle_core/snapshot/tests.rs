@@ -145,7 +145,8 @@ fn valid_snapshot() -> Value {
             "probe_name": "__oracle_probe__0",
             "probe_header": "type __oracle_probe__0 = ComposedProps;",
             "probe_scaffold": null,
-            "hover_contents": "```typescript\ntype __oracle_probe__0 = {\n    id: number;\n}\n```"
+            "hover_contents": "```typescript\ntype __oracle_probe__0 = {\n    id: number;\n}\n```",
+            "decl_emit": "export declare function usesProbe(): {\n    id: number;\n};\n"
         },
         "source_admission_digest": {
             "source_locator": {
@@ -432,9 +433,11 @@ fn identity_is_kind_specific_schema_bumped() {
     // (`migration_fingerprint_version` + `migration_fingerprint`); schema v4 is
     // the SECOND kind addition (`relation_verdict` — the migration mirror
     // becomes kind-keyed: required for structured_type_expr, forbidden on
-    // relation_verdict).
+    // relation_verdict); schema v5 adds the REQUIRED `raw_capture.decl_emit`
+    // (the `--declaration --emitDeclarationOnly` bytes recorded beside the
+    // hover capture).
     assert_eq!(KNOWN_VALUE_KINDS.len(), 2);
-    assert_eq!(ORACLE_SCHEMA_VERSION, 4);
+    assert_eq!(ORACLE_SCHEMA_VERSION, 5);
 }
 
 // -- probe_scaffold_recorded_and_rederivable --------------------------------
@@ -661,6 +664,7 @@ fn valid_relation_snapshot() -> Value {
             "probe_header": probe_header,
             "probe_scaffold": null,
             "hover_contents": hover_contents,
+            "decl_emit": "export declare function relate(): readonly [true, readonly []];\n",
         }),
         &json!({ "manifest": [], "files": [] }),
         "blake3:placeholder",
@@ -867,6 +871,7 @@ fn failed_infer_row_with_nonempty_layout_decodes_and_round_trips() {
             "probe_header": probe_header,
             "probe_scaffold": null,
             "hover_contents": "```typescript\ntype __oracle_probe__0 = readonly [false, readonly []];\n```",
+            "decl_emit": "export declare function relate(): readonly [false, readonly []];\n",
         }),
         &json!({ "manifest": [], "files": [] }),
         "blake3:placeholder",
@@ -1006,6 +1011,7 @@ fn constrained_infer_row_does_not_alias_the_unconstrained_row() {
             "probe_header": probe_header,
             "probe_scaffold": null,
             "hover_contents": "```typescript\ntype __oracle_probe__0 = readonly [false, readonly []];\n```",
+            "decl_emit": "export declare function relate(): readonly [false, readonly []];\n",
         }),
         &json!({ "manifest": [], "files": [] }),
         "blake3:placeholder",

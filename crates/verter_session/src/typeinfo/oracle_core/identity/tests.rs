@@ -97,8 +97,10 @@ fn snapshot_id_v2_includes_probe_rhs_kind() {
         "the snapshot_id HASH-INPUT field set is unchanged by v4; the domain tag stays v2"
     );
     assert_eq!(
-        ORACLE_SCHEMA_VERSION, 4,
-        "the relation_verdict kind addition is the v4 schema-shape change"
+        ORACLE_SCHEMA_VERSION, 5,
+        "v4 was the relation_verdict kind addition; v5 is the raw_capture.decl_emit \
+         field-set change (the declaration-emit bytes recorded beside hover) — the \
+         hash-input field set is unchanged, but every snapshot_id still changes"
     );
     assert_eq!(
         PROBE_SYNTHESIS_VERSION, 2,
@@ -627,5 +629,101 @@ fn relation_snapshot_id_discriminates_every_axis() {
             variance: VarianceTag::MethodParameterBivariance,
         },
         "the default policy record is the only admissible capture policy"
+    );
+}
+
+/// V0-AC1 — the evidence manifest's digests REPRODUCE from the
+/// checked-in inputs. `docs/evidence/signature-kernel/manifest.json`
+/// locks the contract bytes, the toolchain record bytes and the pinned
+/// engine version; this test re-hashes both files and compares, and
+/// cross-checks the recorded oracle version against THIS module's
+/// `TSGO_VERSION` pin. A changed `docs/arch/signature-kernel.md` or
+/// `oracle_toolchain.json` without a re-locked manifest fails here —
+/// exactly the "a changed lib file or executable fails it" clause,
+/// extended from the installed-bytes comparison
+/// (`typeinfo_tests::oracle_toolchain_lock`) to the checked-in inputs.
+#[test]
+fn evidence_manifest_digests_reproduce_from_checked_in_inputs() {
+    use sha2::{Digest, Sha256};
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let read = |rel: &str| {
+        let path = manifest_dir.join(rel);
+        std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    };
+    let sha256_hex = |bytes: &[u8]| {
+        let digest = Sha256::digest(bytes);
+        digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&read("../../docs/evidence/signature-kernel/manifest.json"))
+            .expect("parse docs/evidence/signature-kernel/manifest.json");
+
+    let contract = &manifest["contract"];
+    assert_eq!(
+        contract["path"].as_str(),
+        Some("docs/arch/signature-kernel.md"),
+        "the manifest names the contract path"
+    );
+    assert_eq!(
+        contract["sha256"].as_str(),
+        Some(sha256_hex(&read("../../docs/arch/signature-kernel.md")).as_str()),
+        "the contract digest must reproduce from the checked-in bytes"
+    );
+
+    let oracle = &manifest["oracle"];
+    assert_eq!(
+        oracle["typescript"].as_str(),
+        Some(super::TSGO_VERSION),
+        "the manifest's oracle version is this module's harness pin"
+    );
+    assert_eq!(
+        oracle["engine_version_report"].as_str(),
+        Some(format!("Version {}", super::TSGO_VERSION).as_str()),
+        "the manifest's engine report is the harness pin's spelling"
+    );
+    let record_rel = "src/typeinfo/typeinfo_tests/oracle_toolchain.json";
+    assert_eq!(
+        oracle["toolchain_record"]["path"].as_str(),
+        Some("crates/verter_session/src/typeinfo/typeinfo_tests/oracle_toolchain.json"),
+        "the manifest names the toolchain record path"
+    );
+    assert_eq!(
+        oracle["toolchain_record"]["sha256"].as_str(),
+        Some(sha256_hex(&read(record_rel)).as_str()),
+        "the toolchain-record digest must reproduce from the checked-in bytes (the record \
+         itself re-digests the installed engine)"
+    );
+
+    let generator = &manifest["generator"];
+    assert_eq!(
+        generator["oracle_schema_version"].as_u64(),
+        Some(u64::from(super::ORACLE_SCHEMA_VERSION)),
+        "the manifest's oracle schema version is the pinned generator constant"
+    );
+    assert_eq!(
+        generator["probe_synthesis_version"].as_u64(),
+        Some(u64::from(super::PROBE_SYNTHESIS_VERSION)),
+        "the manifest's probe synthesis version is the pinned generator constant"
+    );
+    assert_eq!(
+        generator["normalizer_version"].as_u64(),
+        Some(u64::from(super::super::normalize::NORMALIZER_VERSION)),
+        "the manifest's normalizer version is the pinned generator constant"
+    );
+
+    assert_eq!(
+        manifest["corpus"]["identity"].as_str(),
+        Some("verter-signature-corpus-v0@typescript-7.0.2"),
+        "the manifest names the signature corpus's OWN identity — never the unrecovered \
+         9,300-case report"
+    );
+    assert_eq!(
+        manifest["unrecovered_report"]["status"].as_str(),
+        Some("NOT RECOVERED"),
+        "the unreported corpus stays explicitly unrecovered"
     );
 }

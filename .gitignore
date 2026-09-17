@@ -122,3 +122,6 @@ packages/native/npm/*/*.node
 # Build-system directory stamps.
 .dirstamp
 **/.dirstamp
+
+# Local nextest CI-replication archives (not committed)
+artifacts/

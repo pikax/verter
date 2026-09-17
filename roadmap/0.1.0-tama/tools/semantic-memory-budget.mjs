@@ -1277,6 +1277,49 @@ function readSetting(config, dotted) {
 }
 
 /**
+ * The signature kernel's registered performance/soak baselines (the
+ * V0 registration the kernel contract's work-accounting section
+ * demands: register the measurements BEFORE implementation results are
+ * known). Every row is REGISTERED and owned by the V8 measurement
+ * vertical; the exact id set is the contract's named surface — a
+ * missing row is a lost registration, an extra row is an invented one,
+ * and no row may claim a measured value while REGISTERED (the schema
+ * admits no measured field until V8 lands one with its emitter).
+ */
+function kernelBaselineErrors(catalog) {
+  const errors = [];
+  const expected = [
+    "kernel.workload.edit_revert_soak",
+    "kernel.workload.retired_epoch_bound",
+    "kernel.workload.reclamation_tail_latency",
+    "kernel.latency.cold_project_load",
+    "kernel.latency.warm_query",
+    "kernel.latency.local_edit",
+    "kernel.latency.declaration_edit",
+    "kernel.latency.augmentation_edit",
+    "kernel.latency.cancellation_restart",
+    "kernel.throughput.workers_1",
+    "kernel.throughput.workers_2",
+    "kernel.throughput.workers_4",
+    "kernel.throughput.workers_8",
+  ];
+  const rows = catalog.kernel_baseline || [];
+  const ids = rows.map((row) => row.id);
+  for (const id of ids)
+    if (ids.filter((other) => other === id).length > 1)
+      errors.push(`kernel baseline: duplicate id ${id}`);
+  for (const id of expected)
+    if (!ids.includes(id))
+      errors.push(
+        `kernel baseline: ${id} is missing — the kernel contract registers exactly this row set`,
+      );
+  for (const row of rows)
+    if (!expected.includes(row.id))
+      errors.push(`kernel baseline ${row.id}: not part of the registered row set`);
+  return errors;
+}
+
+/**
  * Configuration deltas name an exact setting with exact values, and the
  * baseline value they name has to be the one the materialized projects
  * actually start from.
@@ -1936,6 +1979,7 @@ export function validateSemanticMemoryBudgetModel(
     errors.push(...fixtureErrors(catalog, packageRoot));
     errors.push(...editDeltaErrors(catalog, packageRoot));
     errors.push(...configurationDeltaErrors(catalog));
+    errors.push(...kernelBaselineErrors(catalog));
     errors.push(...workloadErrors(catalog, packageRoot));
     // Last, so the trigger coverage it checks sees every path read above.
     errors.push(...commandErrors(catalog, packageRoot, workflowFile));

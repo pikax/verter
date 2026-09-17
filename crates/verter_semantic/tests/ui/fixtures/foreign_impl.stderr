@@ -1,0 +1,25 @@
+error[E0277]: the trait bound `ForeignSource: core::sealed::Sealed` is not satisfied
+  --> tests/ui/fixtures/foreign_impl.rs:13:29
+   |
+13 | impl NonFlowObservation for ForeignSource {
+   |                             ^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `core::sealed::Sealed` is not implemented for `ForeignSource`
+  --> tests/ui/fixtures/foreign_impl.rs:11:1
+   |
+11 | struct ForeignSource;
+   | ^^^^^^^^^^^^^^^^^^^^
+   = note: `ForeignSource` implements similarly named trait `unicode_width::private::Sealed`, but not `core::sealed::Sealed`
+help: the trait `core::sealed::Sealed` is implemented for `NonFlowObservationSnapshot`
+  --> src/type_info/core.rs
+   |
+   | impl sealed::Sealed for NonFlowObservationSnapshot {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `NonFlowObservation`
+  --> src/type_info/core.rs
+   |
+   | pub trait NonFlowObservation: sealed::Sealed + Send + Sync {
+   |                               ^^^^^^^^^^^^^^ required by this bound in `NonFlowObservation`
+   = note: `NonFlowObservation` is a "sealed trait", because to implement it you also need to implement `verter_semantic::type_info::core::sealed::Sealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+   = help: the following type implements the trait:
+             verter_semantic::type_info::NonFlowObservationSnapshot
