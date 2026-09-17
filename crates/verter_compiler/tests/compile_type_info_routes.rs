@@ -23,9 +23,9 @@ use verter_semantic::analysis::{
     MacroTypeDepUsage, ScriptAnalysisSnapshot, TypeResolutionSource,
 };
 use verter_semantic::type_info::{
-    ImportedComponentResolution, MacroSemanticLane, ObservedMacroSurface, ObservedSurfaceMember,
-    MISSING_PROOF_EMITS, MISSING_PROOF_EXPOSE, MISSING_PROOF_IMPORTED_COMPONENT,
-    MISSING_PROOF_MODEL, MISSING_PROOF_PROPS, MISSING_PROOF_VUE_MACRO,
+    ImportedComponentResolution, ObservedMacroSurface, ObservedSurfaceMember, MISSING_PROOF_EMITS,
+    MISSING_PROOF_EXPOSE, MISSING_PROOF_IMPORTED_COMPONENT, MISSING_PROOF_MODEL,
+    MISSING_PROOF_PROPS, MISSING_PROOF_VUE_MACRO,
 };
 use verter_span::Span;
 use verter_type_expr::TopLevelOwnerId;
@@ -230,56 +230,114 @@ fn all_missing_routes_refuse_with_their_proof_ids() {
     );
 }
 
-/// Complete/preloaded equivalence: preloading every observation before
-/// the first route call and staging it after a missing round produce the
-/// identical complete payload — incremental equals fresh.
+/// Complete/preloaded equivalence across the whole six-row table:
+/// preloading every observation before the first route call and staging
+/// it after a missing round produce the IDENTICAL complete payload for
+/// every `CompileTypeInfo` method — incremental equals fresh, with no
+/// warm-state advantage or penalty on any route.
 #[test]
 fn preloaded_and_staged_route_results_are_equivalent() {
     let request = vue_request();
 
     let mut preloaded = CompileAttempt::enter_direct("", &request, "vue");
     stage_all(&mut preloaded);
-    let preloaded_plan = preloaded
-        .type_info()
+    let type_info = preloaded.type_info();
+    let preloaded_plan = type_info
         .project_vue_macro_semantics(Arc::from(OWNER))
         .expect("preloaded completes");
-    let preloaded_props = preloaded
-        .type_info()
+    let preloaded_imported = type_info
+        .resolve_imported_component_surface(
+            Arc::from(OWNER),
+            Arc::from("BadgeProps"),
+            Some(Arc::from("/src/Badge.vue")),
+        )
+        .expect("preloaded completes");
+    let preloaded_props = type_info
         .project_runtime_props(Arc::from(OWNER), 0)
+        .expect("preloaded completes");
+    let preloaded_emits = type_info
+        .project_runtime_emits(Arc::from(OWNER), 1)
+        .expect("preloaded completes");
+    let preloaded_model = type_info
+        .project_runtime_model(Arc::from(OWNER), 2)
+        .expect("preloaded completes");
+    let preloaded_expose = type_info
+        .project_expose_surface(Arc::from(OWNER), 3)
         .expect("preloaded completes");
 
+    // Staged: every route refuses once on the empty transaction, then the
+    // same observations are staged and every route completes.
     let mut staged = CompileAttempt::enter_direct("", &request, "vue");
-    assert!(staged
-        .type_info()
+    let type_info = staged.type_info();
+    assert!(type_info
         .project_vue_macro_semantics(Arc::from(OWNER))
         .is_err());
-    assert!(staged
-        .type_info()
+    assert!(type_info
+        .resolve_imported_component_surface(
+            Arc::from(OWNER),
+            Arc::from("BadgeProps"),
+            Some(Arc::from("/src/Badge.vue")),
+        )
+        .is_err());
+    assert!(type_info
         .project_runtime_props(Arc::from(OWNER), 0)
+        .is_err());
+    assert!(type_info
+        .project_runtime_emits(Arc::from(OWNER), 1)
+        .is_err());
+    assert!(type_info
+        .project_runtime_model(Arc::from(OWNER), 2)
+        .is_err());
+    assert!(type_info
+        .project_expose_surface(Arc::from(OWNER), 3)
         .is_err());
     stage_all(&mut staged);
-    let staged_plan = staged
-        .type_info()
-        .project_vue_macro_semantics(Arc::from(OWNER))
-        .expect("staged completes");
-    let staged_props = staged
-        .type_info()
-        .project_runtime_props(Arc::from(OWNER), 0)
-        .expect("staged completes");
-
-    assert_eq!(preloaded_plan.demands().len(), staged_plan.demands().len());
+    let type_info = staged.type_info();
     assert_eq!(
-        preloaded_plan.demands()[0].lane(),
-        MacroSemanticLane::CodegenPayload
+        preloaded_plan,
+        type_info
+            .project_vue_macro_semantics(Arc::from(OWNER))
+            .expect("staged completes"),
+        "vue-macro semantics: preloaded and staged agree"
     );
     assert_eq!(
-        preloaded_props.rows().len(),
-        staged_props.rows().len(),
-        "preloaded and staged route results agree"
+        preloaded_imported,
+        type_info
+            .resolve_imported_component_surface(
+                Arc::from(OWNER),
+                Arc::from("BadgeProps"),
+                Some(Arc::from("/src/Badge.vue")),
+            )
+            .expect("staged completes"),
+        "imported-component surface: preloaded and staged agree"
     );
     assert_eq!(
-        preloaded_props.rows()[0].name(),
-        staged_props.rows()[0].name()
+        preloaded_props,
+        type_info
+            .project_runtime_props(Arc::from(OWNER), 0)
+            .expect("staged completes"),
+        "runtime props: preloaded and staged agree"
+    );
+    assert_eq!(
+        preloaded_emits,
+        type_info
+            .project_runtime_emits(Arc::from(OWNER), 1)
+            .expect("staged completes"),
+        "runtime emits: preloaded and staged agree"
+    );
+    assert_eq!(
+        preloaded_model,
+        type_info
+            .project_runtime_model(Arc::from(OWNER), 2)
+            .expect("staged completes"),
+        "runtime model: preloaded and staged agree"
+    );
+    assert_eq!(
+        preloaded_expose,
+        type_info
+            .project_expose_surface(Arc::from(OWNER), 3)
+            .expect("staged completes"),
+        "expose surface: preloaded and staged agree"
     );
 }
 
@@ -375,25 +433,37 @@ fn disappeared_input_discards_the_sealed_output() {
     );
 }
 
-/// Cancellation discards the sealed output: after `cancel`, the same
-/// request re-derives from the current state instead of resuming.
+/// Cancellation discards the continuation on THIS transaction: a route
+/// that already demanded its inputs, once cancelled, reports
+/// `NeedInputs` again from a fresh continuation instead of degrading
+/// into `NoProgress` off the discarded demanded set.
 #[test]
 fn cancellation_discards_sealed_output() {
     let request = vue_request();
     let mut attempt = CompileAttempt::enter_direct("", &request, "vue");
-    stage_all(&mut attempt);
-    assert!(attempt
+    // First round: nothing staged — the operation demands its inputs and
+    // the continuation records the demand.
+    let first = attempt
         .type_info()
         .project_runtime_props(Arc::from(OWNER), 0)
-        .is_ok());
+        .expect_err("nothing staged refuses");
+    assert!(matches!(first, TypeInfoRouteFailure::NeedInputs { .. }));
+
+    // Cancel: the continuation — demanded set, sealed output, identity —
+    // is discarded on this same transaction.
     attempt.cancel();
-    // A fresh (empty) attempt state after cancellation still refuses
-    // honestly rather than resuming anything.
-    let mut fresh = CompileAttempt::enter_direct("", &request, "vue");
-    assert!(fresh
+
+    // Same attempt, still nothing staged. A no-op `cancel()` would keep
+    // the demanded set and make this round `NoProgress`; a real discard
+    // re-derives the demand and reports `NeedInputs` again.
+    let second = attempt
         .type_info()
         .project_runtime_props(Arc::from(OWNER), 0)
-        .is_err());
+        .expect_err("a cancelled transaction never resumes");
+    assert!(
+        matches!(second, TypeInfoRouteFailure::NeedInputs { .. }),
+        "cancel must discard the continuation, not resume it: {second:?}"
+    );
 }
 
 /// No-progress: a re-entered operation whose demanded inputs did not

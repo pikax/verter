@@ -30,6 +30,28 @@ fn host_with(source: &'static str) -> Arc<VerterHost> {
     host
 }
 
+/// The authored public prop names of the props macro in one runtime
+/// bundle — the member set a stale pre-edit answer would get wrong.
+fn props_names(bundle: &verter_macro_dto::MacroRuntimeBundle) -> Vec<String> {
+    bundle
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.outcome {
+            verter_macro_dto::MacroRuntimeOutcome::Complete(
+                verter_macro_dto::MacroRuntimeShape::Props(shape),
+            ) => Some(
+                shape
+                    .props
+                    .iter()
+                    .map(|prop| prop.name.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .concat()
+}
+
 const TARGET: CompileTarget = CompileTarget::BUNDLER
     .union(CompileTarget::TSC)
     .union(CompileTarget::TSX);
@@ -59,36 +81,45 @@ fn incremental_revalidation_equals_fresh_recompute() {
     let fresh_host = host_with(SFC_A_EDITED);
     let fresh = fresh_host.vue_macro_semantic_input("/src/App.vue", TARGET);
 
-    // Both must be the SAME semantic answer: whichever bundles the target
-    // demands agree, and neither reports a stale (pre-edit) member set.
-    assert_eq!(
-        matches!(
-            incremental,
-            verter_compiler::compile::VueMacroSemanticInput::Unavailable
-        ),
-        matches!(
-            fresh,
-            verter_compiler::compile::VueMacroSemanticInput::Unavailable
-        ),
-        "incremental and fresh agree on availability"
-    );
+    // Both must be the SAME semantic answer: the complete runtime and tsc
+    // payloads are equal, and neither reports a stale (pre-edit) member
+    // set — the new `extra` prop row is present on BOTH sides.
     match (incremental, fresh) {
         (
             verter_compiler::compile::VueMacroSemanticInput::RuntimeAndTsc {
                 runtime: incremental_runtime,
-                ..
+                tsc: incremental_tsc,
             },
             verter_compiler::compile::VueMacroSemanticInput::RuntimeAndTsc {
                 runtime: fresh_runtime,
-                ..
+                tsc: fresh_tsc,
             },
         ) => {
-            let incremental_rows = &incremental_runtime.entries;
-            let fresh_rows = &fresh_runtime.entries;
             assert_eq!(
-                incremental_rows.len(),
-                fresh_rows.len(),
-                "incremental revalidation equals fresh recompute"
+                incremental_runtime, fresh_runtime,
+                "incremental revalidation equals fresh recompute on the complete runtime bundle"
+            );
+            assert_eq!(
+                incremental_tsc, fresh_tsc,
+                "incremental revalidation equals fresh recompute on the complete tsc bundle"
+            );
+            assert_eq!(
+                props_names(&incremental_runtime),
+                vec![
+                    "count".to_string(),
+                    "label".to_string(),
+                    "extra".to_string()
+                ],
+                "the incremental answer carries the post-edit member set"
+            );
+            assert_eq!(
+                props_names(&fresh_runtime),
+                vec![
+                    "count".to_string(),
+                    "label".to_string(),
+                    "extra".to_string()
+                ],
+                "the fresh answer carries the post-edit member set"
             );
         }
         (left, right) => assert_eq!(
@@ -113,13 +144,25 @@ fn repeated_derivation_under_unchanged_input_is_stable() {
     let host = host_with(SFC_A);
     let first = host.vue_macro_semantic_input("/src/App.vue", TARGET);
     let second = host.vue_macro_semantic_input("/src/App.vue", TARGET);
+    // Stability is over the WHOLE payload, not just availability: the
+    // resumed answer equals the computed one member-for-member.
+    assert_eq!(
+        first.runtime(),
+        second.runtime(),
+        "the resumed runtime bundle equals the computed one"
+    );
+    assert_eq!(
+        first.tsc(),
+        second.tsc(),
+        "the resumed tsc bundle equals the computed one"
+    );
     assert_eq!(
         matches!(
-            first,
+            &first,
             verter_compiler::compile::VueMacroSemanticInput::Unavailable
         ),
         matches!(
-            second,
+            &second,
             verter_compiler::compile::VueMacroSemanticInput::Unavailable
         ),
         "unchanged input yields a stable answer"

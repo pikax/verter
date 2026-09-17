@@ -32,16 +32,13 @@ pub mod type_info;
 
 pub use type_info::{CompileTypeInfo, TypeInfoRouteFailure};
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use verter_identity::identity::InputBasisId;
 use verter_macro_dto::RuntimePropType;
 use verter_semantic::analysis::ScriptAnalysisSnapshot;
 use verter_semantic::resolver_core::ResolutionBasis;
-use verter_semantic::type_info::{
-    ImportedComponentResolution, NonFlowObservationKey, ObservedMacroSurface,
-};
+use verter_semantic::type_info::{ImportedComponentResolution, ObservedMacroSurface};
 
 use crate::assembly::publish::ArtifactSchemaError;
 use crate::compile_request::CompileRequest;
@@ -129,7 +126,6 @@ pub struct CompileAttempt<'a> {
     is_production: bool,
     force_js: bool,
     source_digest: [u8; 32],
-    request_nonce: u64,
     type_info: CompileTypeInfo,
 }
 
@@ -153,7 +149,6 @@ impl<'a> CompileAttempt<'a> {
             is_production: request.is_production(),
             force_js: request.force_js(),
             source_digest: set_content_digest(source.as_bytes()),
-            request_nonce,
             type_info,
         }
     }
@@ -172,7 +167,6 @@ impl<'a> CompileAttempt<'a> {
             is_production: false,
             force_js: false,
             source_digest: set_content_digest(owner_canonical.as_bytes()),
-            request_nonce,
             type_info,
         }
     }
@@ -229,27 +223,10 @@ impl<'a> CompileAttempt<'a> {
             .stage_model_value_type_shape(owner_canonical, macro_index, value_type_shape);
     }
 
-    /// The canonically ordered frontier of every staged observation, with
-    /// its versions — the continuation identity's binding surface.
-    pub fn observation_frontier(
-        &self,
-    ) -> (
-        Vec<NonFlowObservationKey>,
-        BTreeMap<NonFlowObservationKey, u64>,
-    ) {
-        self.type_info.observed_state()
-    }
-
     /// Cancel the in-flight operation: the continuation and its sealed
     /// unpublished output are discarded immediately.
     pub fn cancel(&mut self) {
         self.type_info.cancel();
-    }
-
-    /// The request-local nonce binding every continuation this
-    /// transaction mints (diagnostic identity only — never a cache key).
-    pub const fn request_nonce(&self) -> u64 {
-        self.request_nonce
     }
 
     /// Whether `source` still hashes to the entry-bound digest — the

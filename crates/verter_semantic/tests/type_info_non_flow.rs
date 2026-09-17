@@ -385,6 +385,11 @@ fn preloaded_and_staged_snapshots_are_equivalent() {
         NonFlowOperation::ProjectVueMacroSemantics {
             owner_canonical: Arc::from(OWNER),
         },
+        NonFlowOperation::ResolveImportedComponentSurface {
+            owner_canonical: Arc::from(OWNER),
+            type_reference: Arc::from("BadgeProps"),
+            referenced_canonical: Some(Arc::from("/src/Badge.vue")),
+        },
         NonFlowOperation::ProjectRuntimeProps {
             owner_canonical: Arc::from(OWNER),
             macro_index: 0,

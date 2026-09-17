@@ -94,16 +94,10 @@ pub struct CompileTypeInfo {
 
 impl std::fmt::Debug for CompileTypeInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The continuation identity (request nonce, sealed state) is
+        // request-local and deliberately absent from the debug surface.
         f.debug_struct("CompileTypeInfo")
-            .field("request_nonce", &self.request_nonce)
             .field("staged_observations", &self.versions.len())
-            .field(
-                "continuation_sealed",
-                &self
-                    .continuation
-                    .as_ref()
-                    .is_some_and(|c| c.sealed.is_some()),
-            )
             .finish()
     }
 }
@@ -181,15 +175,6 @@ impl CompileTypeInfo {
             owner_canonical,
             macro_index,
         });
-    }
-
-    pub(super) fn observed_state(
-        &self,
-    ) -> (
-        Vec<NonFlowObservationKey>,
-        BTreeMap<NonFlowObservationKey, u64>,
-    ) {
-        (self.snapshot.observation_frontier(), self.versions.clone())
     }
 
     pub(super) fn cancel(&mut self) {

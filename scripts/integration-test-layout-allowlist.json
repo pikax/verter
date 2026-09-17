@@ -31,6 +31,36 @@
       "target": "allocator_canaries",
       "src_path": "crates/verter_compiler/tests/allocator_canaries.rs",
       "reason": "single counting #[global_allocator] for style-pipeline allocation canaries (pre-cutover legacy baseline and, later, the converged style_planner ceiling)"
+    },
+    {
+      "package": "verter_compiler",
+      "target": "compile_type_info_routes",
+      "src_path": "crates/verter_compiler/tests/compile_type_info_routes.rs",
+      "reason": "C2 ratified entry contract pins this exact test home; its route/continuation evidence is independently accepted per charter and cannot be consolidated into tests/main.rs without abandoning the frozen path"
+    },
+    {
+      "package": "verter_semantic",
+      "target": "type_info_non_flow",
+      "src_path": "crates/verter_semantic/tests/type_info_non_flow.rs",
+      "reason": "C2 ratified entry contract pins this exact test home; the GAP-3 table-row evidence is independently accepted per charter and cannot be consolidated into tests/main.rs without abandoning the frozen path"
+    },
+    {
+      "package": "verter_semantic",
+      "target": "type_info_privacy",
+      "src_path": "crates/verter_semantic/tests/ui/type_info_privacy.rs",
+      "reason": "trybuild compile-fail UI control drives rustc child processes and needs its own test binary; C2 ratified entry contract also pins this exact home"
+    },
+    {
+      "package": "verter_session",
+      "target": "c2_continuation_mutations",
+      "src_path": "crates/verter_session/tests/c2_continuation_mutations.rs",
+      "reason": "C2 ratified entry contract (C2-AC-C1-A6-CONTINUATION-001) pins this exact test home; the resume-mutation evidence is independently accepted per charter and cannot be consolidated into tests/main.rs without abandoning the frozen path"
+    },
+    {
+      "package": "verter_session",
+      "target": "c2_continuation_revalidation",
+      "src_path": "crates/verter_session/tests/c2_continuation_revalidation.rs",
+      "reason": "C2 ratified entry contract (C2-AC-C1-A6-CONTINUATION-001) pins this exact test home; the incremental-equals-fresh evidence is independently accepted per charter and cannot be consolidated into tests/main.rs without abandoning the frozen path"
     }
   ]
 }
