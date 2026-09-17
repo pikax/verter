@@ -19,7 +19,10 @@ use crate::analysis::{AnalyzedMacro, AnalyzedMacroKind};
 use crate::resolver_core::ResolutionBasis;
 use verter_type_expr::DeclBindingKey;
 
-use super::core::{NonFlowObservation, NonFlowObservationKey, NonFlowObservationSnapshot};
+use super::core::{
+    import_surface_walk, ImportSurfaceWalk, NonFlowObservation, NonFlowObservationKey,
+    NonFlowObservationSnapshot,
+};
 
 /// Missing-input proof id for [`NonFlowOperation::ProjectVueMacroSemantics`].
 pub const MISSING_PROOF_VUE_MACRO: &str = "C2-GAP3-MISSING-VUE-MACRO";
@@ -101,13 +104,15 @@ impl NonFlowOperation {
     /// The single derivation of the load set this operation reports when
     /// its inputs are missing: exactly the observation slots the
     /// kernel's route for this operation READS and the current snapshot
-    /// has not staged yet — the owner's script analysis, plus the
-    /// macro's demanded surface or model value classification for the
-    /// per-macro rows. Already-staged slots are never re-demanded: a
-    /// driver that stages exactly the returned set always satisfies the
-    /// next round, so a satisfied demand can never loop through
-    /// restaging and continuation resets. Every key names a slot the
-    /// transaction driver stages
+    /// has not staged yet — the owner's script analysis, the unstaged
+    /// `ImportResolution` slots the imported-component walk reads (once
+    /// the analysis is staged and can enumerate them), plus the macro's
+    /// demanded surface or model value classification for the per-macro
+    /// rows. Already-staged slots are never re-demanded: a driver that
+    /// stages exactly the returned set always satisfies the next round,
+    /// so a satisfied demand can never loop through restaging and
+    /// continuation resets. Every key names a slot the transaction
+    /// driver stages
     /// ([`NonFlowObservationKey`](super::core::NonFlowObservationKey)
     /// maps one-to-one onto the staging methods).
     ///
@@ -127,9 +132,28 @@ impl NonFlowOperation {
             });
         }
         match self {
-            Self::ProjectVueMacroSemantics { .. }
-            | Self::ResolveImportedComponentSurface { .. }
-            | Self::ProjectExposeSurface { .. } => {}
+            Self::ProjectVueMacroSemantics { .. } | Self::ProjectExposeSurface { .. } => {}
+            Self::ResolveImportedComponentSurface {
+                referenced_canonical,
+                ..
+            } => {
+                // The import-resolution demand is derived by the same
+                // walk the route runs
+                // ([`import_surface_walk`](super::core::import_surface_walk)),
+                // so this derivation and the route's `NeedInputs`
+                // outcome can never disagree. While the analysis is not
+                // staged the `ScriptAnalysis` key above is the whole
+                // demand — the next round derives the import slots.
+                if let ImportSurfaceWalk::Unresolved {
+                    missing_resolutions,
+                } = import_surface_walk(
+                    snapshot,
+                    self.owner_canonical(),
+                    referenced_canonical.as_ref(),
+                ) {
+                    keys.extend(missing_resolutions);
+                }
+            }
             Self::ProjectRuntimeProps { macro_index, .. }
             | Self::ProjectRuntimeEmits { macro_index, .. } => {
                 if snapshot

@@ -831,6 +831,16 @@ fn unstaged_import_resolutions_demand_their_slots() {
         }],
         "the demand names the exact unstaged import-resolution slot"
     );
+    // Single-derivation contract: for this partially-staged state
+    // (analysis staged, resolution not) the operation's load-set
+    // derivation names the same slot the route's NeedInputs does.
+    assert_eq!(
+        load_set.keys(),
+        operation()
+            .missing_input_load_set(&snapshot, basis())
+            .keys(),
+        "the load-set derivation matches the route's NeedInputs keys"
+    );
     drop(core);
 
     // A staged negative completes the route with no match: absence of a
@@ -866,6 +876,53 @@ fn unstaged_import_resolutions_demand_their_slots() {
         panic!("a staged positive resolution completes the route");
     };
     assert_eq!(positive.import_specifier(), Some("./Badge.vue"));
+}
+
+/// The walk stops at the reaching import: once a staged resolution
+/// reaches the referenced declaration, the resolution of an import the
+/// route read past is not demanded — the route completes and the
+/// load-set derivation stays empty, so the single derivation cannot
+/// regress into demanding every unstaged resolution.
+#[test]
+fn import_surface_walk_stops_at_the_reaching_import() {
+    let mut analysis = fixture_analysis();
+    analysis.imports.insert(
+        0,
+        AnalyzedImport {
+            source: "./Missing.vue".to_owned(),
+            owner: TopLevelOwnerId::default(),
+            is_type_only: true,
+            bindings: Vec::new(),
+            span: span(0, 9),
+            resolved_canonical_id: None,
+        },
+    );
+    let mut snapshot = NonFlowObservationSnapshot::new();
+    snapshot.stage_script_analysis(Arc::from(OWNER), Arc::new(analysis));
+    snapshot.stage_import_resolution(
+        Arc::from(OWNER),
+        ImportedComponentResolution {
+            specifier: Arc::from("./Badge.vue"),
+            resolved_canonical: Some(Arc::from("/src/Badge.vue")),
+        },
+    );
+    let operation = NonFlowOperation::ResolveImportedComponentSurface {
+        owner_canonical: Arc::from(OWNER),
+        type_reference: Arc::from("BadgeProps"),
+        referenced_canonical: Some(Arc::from("/src/Badge.vue")),
+    };
+    let core = core_of(Arc::new(snapshot.clone()));
+    let NonFlowOutcome::Complete(NonFlowPayload::ImportedComponentSurface(surface)) =
+        core.attempt(&operation)
+    else {
+        panic!("a reaching staged resolution completes without the earlier import");
+    };
+    assert_eq!(surface.import_specifier(), Some("./Badge.vue"));
+    assert_eq!(
+        operation.missing_input_load_set(&snapshot, basis()).keys(),
+        [],
+        "no slot the route did not read is demanded"
+    );
 }
 
 /// A directly-imported bare name is retained by the scope requirements,

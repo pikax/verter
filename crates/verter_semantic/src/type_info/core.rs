@@ -307,6 +307,79 @@ pub struct TypeInfoCore {
     basis: ResolutionBasis,
 }
 
+/// How one reference's import-surface walk ends — the single derivation
+/// behind both [`TypeInfoCore::resolve_imported_component_surface`]'s
+/// conclusion and its `NeedInputs` demand
+/// ([`NonFlowOperation::missing_input_load_set`]), so the two can never
+/// disagree about which `ImportResolution` slots a request still needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ImportSurfaceWalk {
+    /// A staged resolution reaches the referenced declaration through
+    /// this authored specifier: the route concludes, demanding nothing —
+    /// resolutions of imports the walk read past are irrelevant to this
+    /// reference.
+    Reached { specifier: String },
+    /// The walk examined every declared import and none reached the
+    /// referenced declaration. The carried slots are the resolutions it
+    /// could not read: non-empty is missing input (`NeedInputs`), empty
+    /// is the observed conclusion "no import reaches it".
+    Unresolved {
+        missing_resolutions: Vec<NonFlowObservationKey>,
+    },
+}
+
+/// Walk the owner's authored imports against the staged resolutions —
+/// the single derivation the
+/// [`NonFlowOperation::ResolveImportedComponentSurface`] route and its
+/// load-set contract share. Every import the owner declares must carry
+/// a staged resolution observation before the walk may conclude "no
+/// import reaches the referenced declaration": an unstaged resolution is
+/// missing input (`NeedInputs` naming its exact `ImportResolution`
+/// slot), never a completed non-match — a staged negative (`Some(None)`)
+/// is the explicit form of "observed to resolve to nothing". A reference
+/// that names no canonical, or one that resolved to the owner itself,
+/// reads no import resolution, and an unstaged script analysis cannot
+/// enumerate imports (its own slot is demanded separately), so all three
+/// walk to [`ImportSurfaceWalk::Unresolved`] with no missing slots.
+pub(super) fn import_surface_walk(
+    snapshot: &NonFlowObservationSnapshot,
+    owner_canonical: &Arc<str>,
+    referenced_canonical: Option<&Arc<str>>,
+) -> ImportSurfaceWalk {
+    let unresolved = || ImportSurfaceWalk::Unresolved {
+        missing_resolutions: Vec::new(),
+    };
+    let Some(referenced) = referenced_canonical else {
+        return unresolved();
+    };
+    // A reference that resolved to the owner itself is local, never a
+    // cross-file import.
+    if referenced.as_ref() == owner_canonical.as_ref() {
+        return unresolved();
+    }
+    let Some(analysis) = snapshot.script_analysis(owner_canonical) else {
+        return unresolved();
+    };
+    let mut missing = Vec::new();
+    for import in &analysis.imports {
+        match snapshot.import_resolution(owner_canonical, &import.source) {
+            Some(Some(resolved)) if resolved.as_ref() == referenced.as_ref() => {
+                return ImportSurfaceWalk::Reached {
+                    specifier: import.source.clone(),
+                };
+            }
+            Some(Some(_)) | Some(None) => {}
+            None => missing.push(NonFlowObservationKey::ImportResolution {
+                owner_canonical: Arc::clone(owner_canonical),
+                specifier: Arc::from(import.source.as_str()),
+            }),
+        }
+    }
+    ImportSurfaceWalk::Unresolved {
+        missing_resolutions: missing,
+    }
+}
+
 impl TypeInfoCore {
     /// Bind the kernel to one immutable snapshot under one resolution
     /// basis. The basis flows into every `NeedInputs` load set this
@@ -467,46 +540,28 @@ impl TypeInfoCore {
             .any(|binding| binding.name.as_str() == type_reference.as_ref());
         // The authored specifier whose resolution reaches the referenced
         // declaration — reused verbatim so the sibling testing surface
-        // resolves the same target the component's own import does. A
-        // reference that resolved to no canonical (or to the owner
-        // itself) is not a cross-file import. Every import the owner
-        // declares must carry a staged resolution observation before the
-        // route can conclude "no import reaches the referenced
-        // declaration": an unstaged resolution is missing input
-        // (`NeedInputs` naming its exact `ImportResolution` slot), never
-        // a completed non-match — a staged negative (`Some(None)`) is
-        // the explicit form of "observed to resolve to nothing".
-        let import_specifier = 'specifier: {
-            let Some(canonical) = referenced_canonical.as_ref() else {
-                break 'specifier None;
-            };
-            // A reference that resolved to the owner itself is local,
-            // never a cross-file import.
-            if canonical.as_ref() == owner_canonical.as_ref() {
-                break 'specifier None;
-            }
-            let mut missing = Vec::new();
-            for import in &analysis.imports {
-                match self
-                    .snapshot
-                    .import_resolution(owner_canonical, &import.source)
-                {
-                    Some(Some(resolved)) => {
-                        if resolved.as_ref() == canonical.as_ref() {
-                            break 'specifier Some(import.source.clone());
-                        }
-                    }
-                    Some(None) => {}
-                    None => missing.push(NonFlowObservationKey::ImportResolution {
-                        owner_canonical: Arc::clone(owner_canonical),
-                        specifier: Arc::from(import.source.as_str()),
-                    }),
+        // resolves the same target the component's own import does. The
+        // walk (and with it the exact `ImportResolution` slots this route
+        // reports missing) is the single derivation
+        // [`import_surface_walk`] — the same one the operation's
+        // load-set contract derives from.
+        let import_specifier = match import_surface_walk(
+            &self.snapshot,
+            owner_canonical,
+            referenced_canonical.as_ref(),
+        ) {
+            ImportSurfaceWalk::Reached { specifier } => Some(specifier),
+            ImportSurfaceWalk::Unresolved {
+                missing_resolutions,
+            } => {
+                if !missing_resolutions.is_empty() {
+                    return NonFlowOutcome::NeedInputs(NonFlowLoadSet::new(
+                        missing_resolutions,
+                        self.basis,
+                    ));
                 }
+                None
             }
-            if !missing.is_empty() {
-                return NonFlowOutcome::NeedInputs(NonFlowLoadSet::new(missing, self.basis));
-            }
-            None
         };
         NonFlowOutcome::Complete(NonFlowPayload::ImportedComponentSurface(
             ImportedComponentSurface {
