@@ -3,7 +3,7 @@
 //! in their closing "axes I did not test" section.
 //!
 //! Every expected value here is anchored against
-//! `tsgo 7.0.0-dev.20260526.1 --noEmit --strict --ignoreConfig` through
+//! `tsc 7.0.2 --noEmit --strict --ignoreConfig` through
 //! one of two probe forms:
 //!
 //! - the two-step WRAPPER probe
@@ -3966,7 +3966,7 @@ fn assert_unresolved_value(
 ///                                shallow ingress check could see
 /// ```
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `tlFreeUnresolvedRead` is a program tsgo REJECTS
 /// (`Cannot find name 'noSuchGlobalValue'.`), so there is no honest value
 /// to publish for it at all. The array row's `string[]` is the answer
@@ -4055,7 +4055,7 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// published clean and WARM with `candidates: 1`. The promise was
 /// therefore broader than the mechanism, which is the defect.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`) — the answers the fail-closed arm declines to
 /// produce, every one of them different from `any`:
 ///
@@ -4105,7 +4105,7 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 /// `Promise<number>` clean and warm — the await's own verdict, kept by
 /// the sequence exactly as the resolved bare call's is.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`) — the answers the fail-closed rows decline to
 /// produce:
 ///

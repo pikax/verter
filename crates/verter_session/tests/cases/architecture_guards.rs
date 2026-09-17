@@ -5423,6 +5423,10 @@ pub(crate) mod foundations_guards {
             "TS7 oracle harness consumption driver (`#[cfg(test)] mod typeinfo_tests`) — loads checked-in snapshot TEST FIXTURES + re-enumerates the vendored env corpus via runtime `std::fs::read`, the mechanism the locked design (the TS7 oracle contract §Q1) mandates and the `snapshot_loading_is_runtime_fs` guard pins. Not a NativeFs/VFS disk-boundary bypass — it reads in-repo test fixtures, never workspace/semantic state.",
         ),
         (
+            "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_toolchain_lock.rs",
+            "Oracle toolchain LOCK (`#[cfg(test)]` typeinfo test). Re-reads the checked-in toolchain record TEST FIXTURE (oracle_toolchain.json), the workspace package.json pin, and the INSTALLED `@typescript/typescript-<platform>` package bytes under node_modules to re-hash them against the record — the evidence manifest's installed-bytes clause. External-toolchain + in-repo test-fixture I/O with no VerterHost/NativeFs context, never workspace/semantic state — the same category as the TS7 oracle harness fixture readers above.",
+        ),
+        (
             "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_gen_spike.rs",
             "TS7 oracle harness §4 GENERATION SPIKE (`#[cfg(all(test, feature = \"oracle-gen\"))]`, excluded from the default gate). Writes a tsconfig + fixture into a temp dir for the EXTERNAL tsgo subprocess to read off real disk (tsgo cannot read Verter's in-memory VFS), then re-validates the design's BLOCKING tsgo assumptions. External-tool scaffolding, not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
         ),

@@ -4943,7 +4943,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // the aggregate's freshness depend on which contributor
             // happened to come first and publish `number` for
             // `if (c) return 1; return 1 as const` while publishing `1`
-            // for its reverse (tsgo 7.0.0-dev.20260526.1: `1` for both).
+            // for its reverse (TypeScript 7.0.2: `1` for both).
             //
             // Freshness deliberately does NOT enter the dedup identity:
             // these two arms ARE the same type, and separating them would

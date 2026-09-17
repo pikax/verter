@@ -89,6 +89,10 @@ path = "crates/verter_session/src/typeinfo/oracle_core/gen.rs"
 rationale = "TS7 oracle harness snapshot GENERATOR (#[cfg(feature = \"oracle-gen\")], excluded from the default gate). Seeds a hermetic temp tsgo sandbox + WRITES the checked-in snapshot TEST FIXTURES + enumerates/copies the vendored env corpus via std::fs — the build/test-time generation step the locked design (the TS7 oracle contract §2, §4) mandates. External-tool scaffolding (tsgo cannot read Verter's in-memory VFS), not semantic/VFS state — the same category as the consumption driver + tsgo IPC scratch-dir entries."
 
 [[entries]]
+path = "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_toolchain_lock.rs"
+rationale = "Oracle toolchain LOCK (#[cfg(test)] typeinfo test). Re-reads the checked-in toolchain record TEST FIXTURE (oracle_toolchain.json), the workspace package.json pin, and the INSTALLED @typescript/typescript-<platform> package bytes under node_modules to re-hash them against the record — the evidence manifest's V0-AC1 installed-bytes clause. External-toolchain + in-repo test-fixture I/O with no VerterHost/WorkspaceAccess context, never workspace/semantic state — the same category as the TS7 oracle harness fixture readers above."
+
+[[entries]]
 path = "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_gen_spike.rs"
 rationale = "TS7 oracle harness §4 GENERATION SPIKE (#[cfg(all(test, feature = \"oracle-gen\"))], excluded from the default gate). Writes a tsconfig + fixture into a temp dir for the EXTERNAL tsgo subprocess to read off real disk (tsgo cannot read Verter's in-memory VFS), then re-validates the design's BLOCKING tsgo assumptions. External-tool scaffolding, not semantic/VFS state — the same category as the tsserver/tsgo IPC scratch-dir entries above."
 

@@ -1498,8 +1498,8 @@ pub enum ObjectMemberPolicy {
     /// member literal survives in that source type depends on whether the
     /// TARGET contextually types it — `{ mode: "dark" } satisfies { mode:
     /// "dark" | "light" }` is `{ mode: "dark" }`, while `{ n: 1 }
-    /// satisfies object` is `{ n: number }` (both pinned against tsgo
-    /// `7.0.0-dev.20260526.1`). This substrate performs no contextual
+    /// satisfies object` is `{ n: number }` (both pinned against TypeScript
+    /// 7.0.2 `tsc`). This substrate performs no contextual
     /// typing, so it takes the PRESERVING side of that split uniformly,
     /// which is the shallow pass's own long-standing choice; the
     /// target-driven half is the separate deferred contextual-widening
@@ -2283,7 +2283,7 @@ fn paths_may_overlap(
 ///
 /// A type ASSERTION is not on this list and must never be added: `1 as 1`
 /// PINS to `1` even though the asserted type is the literal's own
-/// (tsgo 7.0.0-dev.20260526.1: `(): 1`).
+/// (TypeScript 7.0.2: `(): 1`).
 fn unwrap_freshness_transparent<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a> {
     match expression {
         Expression::ParenthesizedExpression(paren) => {

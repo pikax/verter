@@ -5,7 +5,7 @@
 //! Primary columns:
 //!
 //! * `script` — authored program, spliced verbatim into every lane.
-//! * `checker` — recorded tsgo `7.0.0-dev.20260526.1` (`--noEmit
+//! * `checker` — recorded TypeScript 7.0.2 `tsc` (`--noEmit
 //!   --strict --ignoreConfig`, checker only, never `.d.ts`) print for
 //!   `probe`. The suite never invokes tsgo. The column must be
 //!   non-empty, the probe derivable
@@ -2087,7 +2087,7 @@ mod corpus_suite {
         }
         println!(
             "PROBE ── write each block below as <id>.ts, then run:\n\
-             PROBE     ls *.ts | xargs <tsgo {TSGO_VERSION}> --noEmit --strict \
+             PROBE     ls *.ts | xargs <tsc {TSGO_VERSION}> --noEmit --strict \
              --ignoreConfig --pretty false"
         );
         for row in CORPUS {
@@ -3944,9 +3944,13 @@ mod corpus_suite {
 
 // Oracle — how the `checker` column is obtained
 
-/// The pinned checker. CHECKER only, never `.d.ts`.
+/// The pinned checker: the TypeScript 7 native compiler (`tsc[.exe]
+/// --version` → `Version 7.0.2`, the workspace `typescript` devDependency's
+/// platform package). CHECKER only, never `.d.ts`. Every `checker` column
+/// in the corpus was measured against exactly this version; the oracle
+/// harness pins the same engine for its snapshots.
 #[cfg(test)]
-pub(crate) const TSGO_VERSION: &str = "7.0.0-dev.20260526.1";
+pub(crate) const TSGO_VERSION: &str = "7.0.2";
 
 /// One generated probe program for a row.
 ///
@@ -3999,7 +4003,7 @@ mod oracle {
     /// writes one `<row_id>.ts` per row (plus `<row_id>__aux.ts`) into a fresh
     /// temp directory and prints it. Then, from that directory:
     /// ```text
-    /// ls *.ts | xargs <tsgo> --noEmit --strict --ignoreConfig --pretty false
+    /// ls *.ts | xargs <tsc> --noEmit --strict --ignoreConfig --pretty false
     /// ```
     /// Each row yields `Type 'X' is not assignable to type 'null'.` twice: the
     /// first is the row's `checker`, the second is `true`/`false` for
@@ -5067,8 +5071,8 @@ mod conformance {
     }
 
     fn render(tally: &[(Owner, usize, usize, usize)]) -> String {
-        let mut out = String::from(
-            "\n╔═══ U6 SHAPE CORPUS — CONFORMANCE AGAINST tsgo 7.0.0-dev.20260526.1 ═══\n\
+        let mut out = format!(
+            "\n╔═══ U6 SHAPE CORPUS — CONFORMANCE AGAINST tsc {TSGO_VERSION} ═══\n\
              ║ owner                                    rows  match   conf   PARKED\n\
              ╟───────────────────────────────────────────────────────────────────────\n",
         );

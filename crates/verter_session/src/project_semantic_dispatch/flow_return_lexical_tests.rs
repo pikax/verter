@@ -1,7 +1,7 @@
 //! @ai-generated - Lexical-authority regression tests for the demand-sliced
 //! `FlowReturn` evaluator.
 //!
-//! Every case here is oracle-anchored against `tsgo 7.0.0-dev.20260526.1 --strict
+//! Every case here is oracle-anchored against `tsc 7.0.2 --strict
 //! --declaration`. They characterise ONE invariant class: the content
 //! lowering resolves every identifier through the SAME lexical authority
 //! the demand plan uses (the `FunctionBodySkeleton`), so a
@@ -2071,7 +2071,7 @@ fn flow_return_unmodelable_local_binding_never_falls_through_to_file_scope() {
 
 /// A destructured object-pattern parameter element binds its annotation
 /// member — plain (`{ b }`) and aliased (`{ b: renamed }`) spellings
-/// alike. tsgo 7.0.0-dev.20260526.1: both are `number`.
+/// alike. TypeScript 7.0.2: both are `number`.
 #[test]
 fn flow_return_destructured_param_element_binds_the_annotation_member() {
     let host = make_r5_host();
@@ -2119,7 +2119,7 @@ fn flow_return_nested_function_captures_the_enclosing_binding_not_the_file_scope
 }
 
 /// A block-scoped `let` SHADOWS a same-named parameter: the local wins.
-/// tsgo 7.0.0-dev.20260526.1: `r5BlockLetShadowsParam(p: string): number`.
+/// TypeScript 7.0.2: `r5BlockLetShadowsParam(p: string): number`.
 ///
 /// Mutation recipe: testing the parameter list before the local scope
 /// publishes the parameter's `string`.
@@ -2141,7 +2141,7 @@ fn flow_return_block_local_shadows_a_same_named_parameter() {
 /// `TransparentLoop` and NEVER lowered its body, so every construct
 /// nested under a label bypassed all of them.
 ///
-/// tsgo 7.0.0-dev.20260526.1 (`--strict`): each of these is `number` (the loop / if /
+/// TypeScript 7.0.2 (`--strict`): each of these is `number` (the loop / if /
 /// switch shapes additionally report "used before being assigned" — the
 /// conditional-definition degradation is the substrate's twin of it).
 #[test]
@@ -2171,8 +2171,8 @@ fn flow_return_labeled_statement_body_reaches_every_inner_rail() {
     // A `try` whose block binds the `var`, with NO catch: the abrupt
     // paths leave the frame, so past the statement the normal-completion
     // path is the only reaching one and the write is unconditional —
-    // tsgo's clean `number`, exactly (measured: tsgo
-    // `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`). The
+    // tsgo's clean `number`, exactly (measured: TypeScript 7.0.2 `tsc`,
+    // `--noEmit --strict --ignoreConfig`). The
     // clause-write flag keeps its reason only where a catch lets a throw
     // path reach the read.
     assert_clean_warm(&host, "r5LabeledTryVar", number());
@@ -2185,7 +2185,7 @@ fn flow_return_labeled_statement_body_reaches_every_inner_rail() {
 /// `using` / `await using` declare BLOCK-scoped bindings (like `const`),
 /// not function-scoped `var`s. Classifying them as `var` makes a
 /// return-free loop containing one trip the "a `var` escapes the loop"
-/// fail-close. tsgo 7.0.0-dev.20260526.1: `r5UsingInLoop(f: boolean): number`.
+/// fail-close. TypeScript 7.0.2: `r5UsingInLoop(f: boolean): number`.
 #[test]
 fn flow_return_using_declaration_is_block_scoped_not_a_hoisted_var() {
     let host = make_r5_host();
@@ -2201,7 +2201,7 @@ fn flow_return_using_declaration_is_block_scoped_not_a_hoisted_var() {
 /// whose initializer failed degrades. Before the fix the call site took
 /// the bound node WITHOUT the flags, so
 /// `r5CallOnConditionalVar` published the literal `1` clean and warm
-/// where tsgo 7.0.0-dev.20260526.1 says `1 | 2`.
+/// where TypeScript 7.0.2 says `1 | 2`.
 #[test]
 fn flow_return_call_on_binding_folds_the_read_membership_flags() {
     let host = make_r5_host();
@@ -2223,7 +2223,7 @@ fn flow_return_call_on_binding_folds_the_read_membership_flags() {
 
 /// `getTypeAtFlowAssignment`: an annotated declarator whose declared
 /// type is NOT a union takes the DECLARED type verbatim — never the
-/// initializer's literal, never the widened initializer. tsgo 7.0.0-dev.20260526.1:
+/// initializer's literal, never the widened initializer. TypeScript 7.0.2:
 /// `unknown`, `"s"`, `number`.
 #[test]
 fn flow_return_non_union_declared_type_supplies_the_binding_verbatim() {
@@ -2240,7 +2240,7 @@ fn flow_return_non_union_declared_type_supplies_the_binding_verbatim() {
 /// `getAssignmentReducedType`: an annotated declarator whose declared
 /// type IS a union takes the union of the DECLARED constituents the
 /// initializer is comparable to — made of declared constituents, never
-/// the initializer's own (fresh or widened) type. tsgo 7.0.0-dev.20260526.1: `string`,
+/// the initializer's own (fresh or widened) type. TypeScript 7.0.2: `string`,
 /// `string`, `1`, `{ a: number }`.
 #[test]
 fn flow_return_union_declared_type_reduces_to_the_comparable_constituents() {
@@ -2274,7 +2274,7 @@ fn flow_return_union_declared_type_reduces_to_the_comparable_constituents() {
 // ──────────────────────────────────────────────────────────────────────
 
 /// An expression-bodied arrow's synthesized return is a RETURN position
-/// like any other: a single fresh literal widens. tsgo 7.0.0-dev.20260526.1:
+/// like any other: a single fresh literal widens. TypeScript 7.0.2:
 /// `r5ArrowBodyLiteral(): () => number`,
 /// `r5ArrowBodyConstAssert(): () => 1`,
 /// `r5ObjectMethodArrow(): { m: () => number }`.
@@ -2299,7 +2299,7 @@ fn flow_return_expression_bodied_arrow_widens_a_fresh_literal() {
 
 /// Literal widening at the return join is a SINGLE-contributor rule:
 /// tsc aggregates the return-expression types (deduplicated, plus the
-/// `undefined` arm), and only a lone contributor widens. tsgo 7.0.0-dev.20260526.1:
+/// `undefined` arm), and only a lone contributor widens. TypeScript 7.0.2:
 /// `r5MultiReturnLiterals(c): 0 | 1`,
 /// `r5MultiReturnSameLiteral(c): number` (deduplicated to one),
 /// `r5SingleReturnLiteral(): number`,
@@ -2334,7 +2334,7 @@ fn flow_return_multi_contributor_literal_join_does_not_widen() {
 
 /// Object-literal MEMBER widening is independent of the return join:
 /// a fresh member literal always widens, a const-asserted member never
-/// does. tsgo 7.0.0-dev.20260526.1: `{ b: number }` and `{ b: 1 }`.
+/// does. TypeScript 7.0.2: `{ b: number }` and `{ b: 1 }`.
 #[test]
 fn flow_return_object_member_literals_widen_independently_of_the_join() {
     let host = make_r5_host();
@@ -2359,7 +2359,7 @@ fn flow_return_object_member_literals_widen_independently_of_the_join() {
 /// literal's element type widens at lowering time, unconditionally —
 /// the decision is not aggregate-dependent and the interned node carries
 /// no freshness bit, so a join-side recursive widener could not tell
-/// `[1]` from `[1 as const]`. tsgo 7.0.0-dev.20260526.1:
+/// `[1]` from `[1 as const]`. TypeScript 7.0.2:
 /// `r5ArrayLiteralJoin(c): number[]` (TWO arms, still widened),
 /// `r5ArrayLiteralSingle(): number[]`,
 /// `r5ArrayConstElement(): 1[]`,
@@ -2400,7 +2400,7 @@ fn flow_return_array_element_widening_is_a_producer_rule_not_a_join_rule() {
 /// The transparent producer arms propagate the caller's top-level policy
 /// instead of hardcoding a widen. A return-position conditional is a
 /// union of TWO fresh literals — an aggregate of two, which tsc never
-/// widens. tsgo 7.0.0-dev.20260526.1: `r5ConditionalReturn(c): 1 | 2`,
+/// widens. TypeScript 7.0.2: `r5ConditionalReturn(c): 1 | 2`,
 /// `r5ParenLiteralReturn(): number` (one contributor, widened at the
 /// join).
 ///
@@ -2427,7 +2427,7 @@ fn flow_return_conditional_arms_propagate_the_top_level_literal_policy() {
 /// FRESHNESS is a syntactic classification of the return ARGUMENT, and
 /// `satisfies` is transparent to it: `1 satisfies number` is still the
 /// bare literal `1`, so the lone-contributor join widens it. An `as`
-/// assertion — even to the literal type itself — PINS. tsgo 7.0.0-dev.20260526.1:
+/// assertion — even to the literal type itself — PINS. TypeScript 7.0.2:
 /// `r5SatisfiesReturn(): number`, `r5AsLiteralReturn(): 1`.
 ///
 /// Mutation recipe: unwrapping `TSAsExpression` alongside
@@ -2444,7 +2444,7 @@ fn flow_return_satisfies_is_freshness_transparent_and_as_is_not() {
 /// node — that is why the second dedupes — but only the first is FRESH,
 /// so the aggregate is not all-fresh and must not widen. Folding after
 /// the dedup `continue` makes the answer depend on which contributor came
-/// first. tsgo 7.0.0-dev.20260526.1: `1` for BOTH orders.
+/// first. TypeScript 7.0.2: `1` for BOTH orders.
 ///
 /// Mutation recipe: folding `all_fresh` after the `continue` publishes
 /// `number` for `r5DedupFreshThenPinned` and `1` for its reverse — the
@@ -2461,7 +2461,7 @@ fn flow_return_freshness_folds_over_deduplicated_contributors_in_both_orders() {
 /// function value alike. The nested frame is seeded with the enclosing
 /// frame's widening-local set, so a capture that skipped the widen would
 /// publish a pinned literal from a set that has no other consumer.
-/// tsgo 7.0.0-dev.20260526.1: `r5CapturedWideningConst(): { a: number; b: () => number }`.
+/// TypeScript 7.0.2: `r5CapturedWideningConst(): { a: number; b: () => number }`.
 ///
 /// Mutation recipe: matching only the direct-read carrier republishes
 /// `b` as `() => 1`.
@@ -2639,7 +2639,7 @@ fn flow_return_type_space_names_are_not_classified_against_the_value_inventory()
 /// separate scope lookups. So when the frame declares `QE`, the whole
 /// reference belongs to the frame and the owner-scope answer is wrong.
 ///
-/// tsgo `7.0.0-dev.20260526.1` `--strict --declaration
+/// TypeScript 7.0.2 `tsc` `--strict --declaration
 /// --emitDeclarationOnly`, on exactly
 /// these bodies:
 ///
@@ -2726,7 +2726,7 @@ fn nested_return(host: &Arc<VerterHost>, name: &str) -> TypeExpr {
 /// | `class` + `namespace`  | yes          | yes                    |
 /// | `function` + `namespace` | NO         | yes                    |
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, checker not emitter — `const c: "outerNs" =
+/// Oracle (TypeScript 7.0.2 `tsc`, checker not emitter — `const c: "outerNs" =
 /// qClassHead(0)` and friends): every row below assigns cleanly exactly
 /// when the module declaration is the answer, and reports TS2322 exactly
 /// when the local one is.
@@ -4465,7 +4465,7 @@ fn flow_return_overloaded_callee_never_publishes_the_hidden_implementation() {
 /// reached through a composite expression — so the value is the picked
 /// overload's own return.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict`):
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict`):
 ///
 /// ```text
 /// ovXCall():   string   ← the FIRST visible overload, inferred
@@ -4541,7 +4541,7 @@ fn flow_return_resolved_overload_never_publishes_a_fabricated_any() {
 /// Where the executor cannot read the candidate (a non-literal argument)
 /// the pre-existing interim `unknown` stands — still never the default.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`), read as the WRAPPER's return type through
 /// `declare const w: ReturnType<typeof zzMismACall>; const p: null = w;`.
 ///
@@ -4675,7 +4675,7 @@ fn flow_return_callee_clause_default_applies_only_when_inference_has_no_candidat
 /// A NAME-scoped claim erases it — an exactly-correct arm destroyed and
 /// republished as `unknown`, cleanly and warm.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict`):
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict`):
 ///
 /// ```text
 /// callAye():   1 | QQ            ← arm 2 is `bee`'s declared return, the INTERFACE
@@ -4853,7 +4853,7 @@ fn flow_return_clause_claim_never_erases_a_foreign_same_named_declaration() {
 /// binding's arrow is ROOTLESS — the value is served but the slot is
 /// never warm-admitted.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`,
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig`,
 /// read through the TWO-STEP probe `const v = f(…); const p: null = v;`
 /// — a one-step `const p: null = f(…)` contextually types the call and
 /// is not a sound reading here):
@@ -4945,7 +4945,7 @@ fn flow_return_binding_and_iife_routes_agree_about_one_callee() {
 /// both halves of the class alike: the FIRST APPLICABLE signature in
 /// declaration order, never whichever entry the index happens to hold.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict`):
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict`):
 ///
 /// ```text
 /// amb3Call():     "A"       ← the FIRST matching overload
@@ -5037,7 +5037,7 @@ fn flow_return_ambient_overload_group_resolves_like_a_bodied_one() {
 /// the flow return's raw member position, publishing the callee's own
 /// binder as the consumer's value.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict`), over
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict`), over
 /// `mpFlow<MG = number>(x?: MG) { return { m: x }; }`:
 ///
 /// ```text
@@ -5142,7 +5142,7 @@ fn flow_return_type_member_route_shares_the_whole_return_clause_policy() {
 /// the gate and is not a carrier. Those rows are asserted as `any` in
 /// `flow_return_leaf_answered_call_forms_publish_any_not_a_carrier`.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`, read as the wrapper's `ReturnType` through
 /// `declare const w: ReturnType<typeof f>; const p: null = w;`):
 ///
@@ -5276,7 +5276,7 @@ fn flow_return_calls_in_composite_expressions_never_publish_the_raw_callee_retur
 /// real arity and `select_signature_function` keeps reading the LAST
 /// overload for the signature utilities, exactly as it does for `f`.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`, read as the wrapper's `ReturnType` through
 /// `declare const w: ReturnType<typeof f>; const p: null = w;`):
 ///
@@ -5292,7 +5292,7 @@ fn flow_return_calls_in_composite_expressions_never_publish_the_raw_callee_retur
 /// contributor — which for these fixtures is the SECOND overload, exactly
 /// as the checker picks it — never first-wins and never the marker.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`, read as the wrapper's `ReturnType` through
 /// `declare const w: ReturnType<typeof f>; const p: null = w;`):
 ///
@@ -5371,7 +5371,7 @@ fn flow_return_method_position_overload_groups_resolve_by_arguments() {
 /// leaf-lowers), because over-selection is harmless and under-selection
 /// is this bug.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`, read as the wrapper's `ReturnType` through
 /// `declare const w: ReturnType<typeof f>; const p: null = w;`):
 ///
@@ -5558,7 +5558,7 @@ fn shape_of(ty: &TypeExpr) -> String {
 /// implementation-FREE, so the suite structurally could not catch it;
 /// `OvImpl` below is the bodied fixture that closes that gap.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`):
 ///
 /// ```text
@@ -5691,7 +5691,7 @@ fn method_overload_group_carrier_hides_the_implementation_signature() {
 /// reads like a parity gap in this substrate. It is not: tsgo makes the
 /// SAME distinction, and makes it louder.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`, UNANNOTATED — the annotated spellings both trivially
 /// answer `number` from the annotation and say nothing about body-derived
 /// inference, which is the only thing this rail computes):
@@ -5774,7 +5774,7 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 /// The `any` that still stands is the AUTHORED one: `x as any` answers
 /// `any` because the program says so, and no call composes into it.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`):
 ///
 /// ```text
@@ -6001,7 +6001,7 @@ fn visible_overload_ordinals_covers_every_group_shape() {
 /// not one. Pre-existing (the reviewer proved it by mutation control
 /// against the pre-carrier tree).
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `hbClassCall()` is `"BASE"`, `ebIfaceCall()` is
 /// `"EB"`.
 ///
@@ -6034,7 +6034,7 @@ fn heritage_redeclared_method_answers_the_derived_declaration() {
 /// projection. Structurally untouched by the flow-return substrate — the
 /// flow rail only reads whatever the member hop published.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `gaRead()` is `"GA"`.
 ///
 /// Verbatim failure, un-ignored on this tree:
@@ -6087,7 +6087,7 @@ fn accessor_pair_read_publishes_the_getters_return() {
 /// the conditional's structural arm (before it, the whole ternary folded
 /// through one leaf answer), not newly wrong.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `undefTernary(k)` is `1 | undefined`.
 ///
 /// Verbatim failure, un-ignored on this tree:
@@ -6162,7 +6162,7 @@ fn undefined_identifier_publishes_the_undefined_primitive() {
 /// pins the fail-closed disposition; this row pins the answer it must
 /// eventually give.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `tnAmbLogical(k)` is `"TA" | true`. (The `"TA"` half
 /// additionally needs argument-driven overload resolution —
 /// `U6.CALL_RESOLVE` — so this row does not close until both land.)
@@ -6197,7 +6197,7 @@ fn call_in_a_logical_operand_publishes_the_operand_union() {
 // adversarial review — control-flow EDGE STATES and guard edge wiring
 // ──────────────────────────────────────────────────────────────────────
 //
-// Every case here is oracle-anchored against tsgo `7.0.0-dev.20260526.1`
+// Every case here is oracle-anchored against TypeScript 7.0.2 `tsc`
 // (`--noEmit --strict --ignoreConfig`, checker only). The class: a
 // multi-path construct's edge carries the layer state AT the edge point
 // (a `break`, a throw point), never the end state of the region the edge
@@ -6482,7 +6482,11 @@ fn flow_return_labeled_break_drops_the_arm_assertion() {
 }
 
 /// A conditional labeled break joins the break path's value with the
-/// fall-through path's write. Oracle: `number | boolean`.
+/// fall-through path's write. Oracle: TypeScript 7.0.2 `tsc` prints
+/// `number | true` (the `boolean` arm assignment-reduced to its `true`
+/// constituent; first recorded as `number | boolean` on tsgo
+/// 7.0.0-dev.20260526.1 — the version difference is ledgered as SDL-1).
+/// The assertion below still records this substrate's `boolean` arm.
 #[test]
 fn flow_return_conditional_labeled_break_joins_the_write() {
     let host = make_r1_host();
@@ -6606,7 +6610,7 @@ fn flow_return_destructured_default_strips_aliased_undefined() {
 // adversarial review, second pass — edge-state follow-ups
 // ──────────────────────────────────────────────────────────────────────
 //
-// Oracle-anchored against tsgo `7.0.0-dev.20260526.1` (`--noEmit --strict
+// Oracle-anchored against TypeScript 7.0.2 `tsc` (`--noEmit --strict
 // --ignoreConfig`, checker only). The corpus rows X44 through X53 pin the
 // member-level spellings; these probes pin the raw-value answers the
 // corpus's graph-node granularity cannot see (the literal-level chain

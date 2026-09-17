@@ -1974,3 +1974,36 @@ test("the expansion is deterministic", () => {
   };
   assert.equal(serializeManifest(expandWorkload(spec)), serializeManifest(expandWorkload(spec)));
 });
+
+// ── kernel baselines ─────────────────────────────────────────────────────
+
+test("a missing kernel baseline row is refused", () => {
+  const catalog = freshCatalog();
+  const soak = catalog.kernel_baseline.find((row) => row.id === "kernel.workload.edit_revert_soak");
+  assert.ok(soak, "pre-state: the edit/revert soak row is registered before removal");
+  catalog.kernel_baseline = catalog.kernel_baseline.filter((row) => row !== soak);
+  assert.ok(
+    !catalog.kernel_baseline.some((row) => row.id === "kernel.workload.edit_revert_soak"),
+    "post-state: the mutation did not apply",
+  );
+  refusedBecause(validate(catalog), "kernel.workload.edit_revert_soak is missing");
+});
+
+test("an invented kernel baseline row is refused", () => {
+  const catalog = freshCatalog();
+  const before = catalog.kernel_baseline.length;
+  catalog.kernel_baseline.push({
+    id: "kernel.latency.made_up",
+    axes: "not part of the registered row set",
+    workload: "none",
+    owning_block: "V8",
+    status: "REGISTERED",
+    registered_evidence: "planted",
+  });
+  assert.equal(
+    catalog.kernel_baseline.length,
+    before + 1,
+    "post-state: the mutation did not apply",
+  );
+  refusedBecause(validate(catalog), "kernel.latency.made_up");
+});

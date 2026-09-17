@@ -2,9 +2,11 @@
 
 use super::*;
 
-/// The EXACT hover the pinned tsgo 7.0.0-dev.20260526.1 returns for the design's
-/// canonical example (verified empirically). The nested member `;`s inside the
-/// object body must NOT terminate the RHS.
+/// The fenced hover a markdown-capable client receives for the design's
+/// canonical example (the live empty-caps driver receives the unfenced twin
+/// below — every checked-in snapshot generated on TypeScript 7.0.2 records
+/// that plaintext shape). The nested member `;`s inside the object body must
+/// NOT terminate the RHS.
 #[test]
 fn extracts_canonical_object_body_with_nested_semicolons() {
     let hover = "```typescript\ntype __oracle_probe__0 = {\n    id: number;\n    label: string;\n    tag?: \"a\" | \"b\";\n}\n```\n";

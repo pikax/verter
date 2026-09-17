@@ -1,7 +1,7 @@
 //! @ai-generated - The ROOT-IDENTIFIER GATE and its two lexical siblings.
 //!
-//! Every case is oracle-anchored against tsgo 7.0.0-dev.20260526.1 /
-//! `tsgo 7.0.0-dev.20260526.1` (`--strict --declaration`). Three invariant classes:
+//! Every case is oracle-anchored against TypeScript 7.0.2
+//! (`tsc --strict --declaration`). Three invariant classes:
 //!
 //! 1. **The root-identifier gate.** The shared shallow-pass leaf
 //!    lowering has no frame — it resolves every name in FILE OWNER
@@ -402,7 +402,7 @@ fn flow_return_leaf_answer_never_binds_a_frame_owned_name_in_owner_scope() {
     // frame's own lexical authority — never the file-scope
     // `spreadBait: { a: "OUTERSPREAD" }`.
     //
-    // Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+    // Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
     // --ignoreConfig`): `ReturnType<typeof gateObjectSpread>` is
     // `{ a: number; x: number }`.
     assert_clean_warm_object(

@@ -58,7 +58,13 @@ test-util = []
 # `env_corpus_id` via BLAKE3, and the generator compiles `oracle_core` in
 # NON-test mode (where the `[dev-dependencies]` blake3 is absent). It stays out
 # of the default/production closure — `default` does not list it.
-oracle-gen = ["dep:verter_type_runtime", "dep:tokio", "dep:blake3", "dep:tempfile"]
+# `test-support` rides along for the same reason: the generator's source-side
+# walk (`oracle_core::source_digest`) reads the resolver store through the
+# `#[cfg(any(test, feature = "test-support"))]` raw-view escape hatch, which a
+# bin target (unlike this crate's own test targets) does not get from the
+# `[dev-dependencies]` self-edge below. The generator IS test support; the
+# default build still enables neither feature.
+oracle-gen = ["dep:verter_type_runtime", "dep:tokio", "dep:blake3", "dep:tempfile", "test-support"]
 # The AUDITED LIFT COMMAND (`src/bin/oracle_lift.rs`) — the sole writer of the
 # retained `LIFTED_ROW_MIGRATIONS` provenance. It reads the ORIGINAL `#[ignore]`d
 # test body through the closed `syn` migration-fidelity extractor and derives the

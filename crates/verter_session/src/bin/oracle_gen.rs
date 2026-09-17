@@ -8,16 +8,17 @@
 //! SKIPS it entirely — the default closure stays tsgo-free
 //! (`oracle_tsgo_forbidden::tsgo_not_reachable_from_resolver`).
 //!
-//! It drives the pinned tsgo, applies the two-sided positive-allowlist admission,
-//! and writes the checked-in snapshots — NEVER from a `#[test]`. It walks the
-//! oracle-query registry (the 19 lifted rows) and writes one snapshot per spec;
-//! the per-spec body is the same one the `oracle_gen_is_idempotent` gated test
-//! exercises against real tsgo.
+//! It drives the pinned engine, applies the two-sided positive-allowlist
+//! admission, writes one snapshot per registry spec, and removes every
+//! snapshot file the run did not write (a pinned-env bump re-keys every
+//! `snapshot_id`, so the superseded files would otherwise linger as orphans) —
+//! NEVER from a `#[test]`. The per-spec body is the same one the
+//! `oracle_gen_is_idempotent` gated test exercises against the real engine.
 
 fn main() {
     match verter_session::run_oracle_gen() {
-        Ok(written) => {
-            eprintln!("oracle_gen: wrote {written} snapshot(s)");
+        Ok((written, deleted)) => {
+            eprintln!("oracle_gen: wrote {written} snapshot(s), removed {deleted} stale file(s)");
         }
         Err(verter_session::GenError::TsgoUnavailable(msg)) => {
             // A tsgo-less environment is a SKIP, not a failure (no tsgo to drive).

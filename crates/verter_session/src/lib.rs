@@ -816,3 +816,10 @@ mod framework_parse_characterization_tests;
 mod plain_script_dialect_tests;
 #[cfg(test)]
 mod u6_flow_shape_corpus_tests;
+// The signature-kernel evidence lock's signature observation corpus
+// (rows + driver): recorded 7.0.2 observations with verdict-directed
+// live comparison.
+#[cfg(test)]
+mod signature_corpus_rows_tests;
+#[cfg(test)]
+mod signature_corpus_tests;

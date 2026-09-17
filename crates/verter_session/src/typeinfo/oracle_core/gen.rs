@@ -34,11 +34,18 @@
 //! is also exercised end-to-end against the pinned tsgo over a SYNTHETIC spec
 //! by `gen_tests::oracle_gen_is_idempotent`.
 
+use std::collections::BTreeSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use verter_type_runtime::tsgo::discovery;
 use verter_type_runtime::tsgo::ipc::TsgoTypeProvider;
+use verter_type_runtime::tsgo::validation::{
+    CandidateValidator, Capability, ProcessValidator, RejectionReason, ValidatedCandidate,
+};
 use verter_type_runtime::{path_to_file_uri_string, TypeProvider};
 
 use super::admission::{self, AdmissionVerdict, SourceWalkResult};
@@ -89,6 +96,11 @@ pub enum GenError {
     TsgoUnavailable(String),
     /// The tsgo LSP driver failed to spawn / respond.
     TsgoDriver(String),
+    /// The pinned executable's `--declaration --emitDeclarationOnly` run
+    /// failed (non-zero exit, timeout, or no emitted `.d.ts` for the
+    /// primary file). The declaration bytes are a REQUIRED recorded
+    /// observation, so this is loud, never a skip.
+    DeclEmit(String),
     /// tsgo returned no hover at the probe offset.
     NoHover,
     /// The hover-extraction grammar could not recover the probe RHS.
@@ -175,17 +187,52 @@ impl GenConfig {
     }
 }
 
-/// Generate + write every registry snapshot, returning the count written (one
-/// per `ORACLE_QUERY_SPECS` entry plus one per `RELATION_QUERY_SPECS` entry).
-/// The per-spec bodies ([`generate_snapshot`] / [`generate_relation_snapshot`])
-/// are additionally exercised against real tsgo by the idempotence tests.
-pub fn run_oracle_gen() -> Result<usize, GenError> {
+/// Generate + write every registry snapshot, then PRUNE every snapshot file the
+/// run did not write. Returns `(written, deleted)`: one write per
+/// `ORACLE_QUERY_SPECS` entry plus one per `RELATION_QUERY_SPECS` entry, and the
+/// count of superseded files removed. The prune is what keeps the on-disk tree
+/// EXACTLY the registries' derived id set
+/// (`oracle_snapshot_tree_is_exact_no_orphans_no_missing`) across a pinned-env
+/// change: `snapshot_id` folds the env pins in, so bumping any of them re-keys
+/// EVERY file, and a generator that only ever added files would leave the whole
+/// superseded set behind as orphans. Pruning runs only after every spec
+/// generated — a failed run leaves the tree untouched apart from the files it
+/// already wrote (loud, caught by the exactness guard), never half-pruned. The
+/// per-spec bodies ([`generate_snapshot`] / [`generate_relation_snapshot`]) are
+/// additionally exercised against the real engine by the idempotence tests.
+pub fn run_oracle_gen() -> Result<(usize, usize), GenError> {
+    // The reducer preflight and the source-side walk recurse as deeply as the
+    // resolver does, and `block_on` runs them on the calling thread — a
+    // process main thread (1 MiB on Windows) is not sized for that. The whole
+    // run therefore lives on a dedicated thread with an explicit stack, the
+    // same posture as the LSP's serve thread.
+    std::thread::Builder::new()
+        .name("oracle-gen".to_string())
+        .stack_size(GEN_THREAD_STACK_BYTES)
+        .spawn(run_oracle_gen_on_current_thread)
+        .map_err(|e| GenError::Runtime(format!("spawn the generation thread: {e}")))?
+        .join()
+        .map_err(|_| GenError::Runtime("the generation thread panicked".to_string()))?
+}
+
+/// The generation thread's stack. Eight MiB — the size the LSP serve thread
+/// runs the same resolver work with, chosen for the same reason: headroom
+/// over the measured debug-profile peak, not a licence for unbounded
+/// recursion.
+const GEN_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+/// The [`run_oracle_gen`] body, on whatever thread calls it.
+fn run_oracle_gen_on_current_thread() -> Result<(usize, usize), GenError> {
     let config = GenConfig::checked_in();
+    // Every snapshot present BEFORE the run; whatever this run does not
+    // (re)write is superseded and removed at the end.
+    let before = collect_snapshot_files(&config.snapshot_root)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| GenError::Runtime(e.to_string()))?;
     let mut written = 0usize;
+    let mut written_paths: BTreeSet<PathBuf> = BTreeSet::new();
     for spec in ORACLE_QUERY_SPECS {
         // Attribute a rejection to the row that produced it — a bare verdict
         // is undiagnosable across a multi-row registry.
@@ -197,7 +244,7 @@ pub fn run_oracle_gen() -> Result<usize, GenError> {
                 }
                 other => other,
             })?;
-        write_snapshot(&config, spec.oracle_family, &document)?;
+        written_paths.insert(write_snapshot(&config, spec.oracle_family, &document)?);
         written += 1;
     }
     // The v4 `relation_verdict` capture family (the relation tuple-wire probe —
@@ -212,10 +259,42 @@ pub fn run_oracle_gen() -> Result<usize, GenError> {
                 }
                 other => other,
             })?;
-        write_snapshot(&config, spec.oracle_family, &document)?;
+        written_paths.insert(write_snapshot(&config, spec.oracle_family, &document)?);
         written += 1;
     }
-    Ok(written)
+    let mut deleted = 0usize;
+    for stale in before {
+        if !written_paths.contains(&stale) {
+            std::fs::remove_file(&stale)
+                .map_err(|e| GenError::Io(format!("{}: {e}", stale.display())))?;
+            deleted += 1;
+        }
+    }
+    Ok((written, deleted))
+}
+
+/// Every `*.json` snapshot under `root` (one family directory deep), sorted.
+/// Shared by the generator's prune and the schema re-key so both see the same
+/// on-disk set the exactness guard walks. An unreadable root is an error, not
+/// an empty set — a mis-rooted run must not silently "prune nothing".
+fn collect_snapshot_files(root: &Path) -> Result<Vec<PathBuf>, GenError> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for fam in
+        std::fs::read_dir(root).map_err(|e| GenError::Io(format!("{}: {e}", root.display())))?
+    {
+        let fam_dir = fam.map_err(|e| GenError::Io(e.to_string()))?.path();
+        if !fam_dir.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&fam_dir).map_err(|e| GenError::Io(e.to_string()))? {
+            let p = entry.map_err(|e| GenError::Io(e.to_string()))?.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("json") {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 /// Deterministic, TSGO-FREE v3→v4 snapshot re-keying (§Q4 +
@@ -245,20 +324,7 @@ pub fn upgrade_snapshots_to_v4() -> Result<(usize, usize), GenError> {
 pub(crate) fn upgrade_snapshots_to_v4_in(root: &Path) -> Result<(usize, usize), GenError> {
     // Collect every current snapshot path FIRST, so the newly-written v4 files are
     // not re-processed mid-walk.
-    let mut files: Vec<PathBuf> = Vec::new();
-    for fam in std::fs::read_dir(root).map_err(|e| GenError::Io(e.to_string()))? {
-        let fam_dir = fam.map_err(|e| GenError::Io(e.to_string()))?.path();
-        if !fam_dir.is_dir() {
-            continue;
-        }
-        for entry in std::fs::read_dir(&fam_dir).map_err(|e| GenError::Io(e.to_string()))? {
-            let p = entry.map_err(|e| GenError::Io(e.to_string()))?.path();
-            if p.extension().and_then(|e| e.to_str()) == Some("json") {
-                files.push(p);
-            }
-        }
-    }
-    files.sort();
+    let files = collect_snapshot_files(root)?;
 
     let mut written = 0usize;
     let mut deleted = 0usize;
@@ -324,10 +390,10 @@ pub(crate) fn upgrade_snapshots_to_v4_in(root: &Path) -> Result<(usize, usize), 
 }
 
 /// Write `document` to `oracle_snapshots/<family>/<snapshot_id>.json` under the
-/// canonical encoding. The `snapshot_id` is read back from the assembled
-/// document (which derived it from identity + env) so the filename and the stored
-/// id can never disagree.
-fn write_snapshot(config: &GenConfig, family: &str, document: &Value) -> Result<(), GenError> {
+/// canonical encoding and return that path. The `snapshot_id` is read back from
+/// the assembled document (which derived it from identity + env) so the
+/// filename and the stored id can never disagree.
+fn write_snapshot(config: &GenConfig, family: &str, document: &Value) -> Result<PathBuf, GenError> {
     let snapshot_id = document
         .get("snapshot_id")
         .and_then(Value::as_str)
@@ -337,7 +403,7 @@ fn write_snapshot(config: &GenConfig, family: &str, document: &Value) -> Result<
     let path = family_dir.join(format!("{snapshot_id}.json"));
     let text = normalize::canonical_json_string(document);
     std::fs::write(&path, text).map_err(|e| GenError::Io(e.to_string()))?;
-    Ok(())
+    Ok(path)
 }
 
 /// The per-spec generation pipeline (§4 generator-side row). Produces the full
@@ -382,8 +448,9 @@ pub(crate) async fn generate_snapshot_with_migration(
     let source_walk = source_side_walk(spec);
     cross_check_probe_strategy(spec, &source_walk)?;
 
-    // (3) Drive tsgo over the corpus-seeded sandbox + the probe.
-    let hover_contents = drive_hover(config, spec, &synth).await?;
+    // (3) Drive the pinned engine over the corpus-seeded sandbox + the
+    //     probe: the hover capture AND the declaration-emit bytes.
+    let (hover_contents, decl_emit) = drive_hover(config, spec, &synth).await?;
 
     // (4) Extract the probe RHS from the markdown hover.
     let probe_name = probe::probe_name(spec.query_ordinal);
@@ -424,6 +491,7 @@ pub(crate) async fn generate_snapshot_with_migration(
         "probe_header": probe::probe_header(spec.query_ordinal, &synth.rhs),
         "probe_scaffold": synth.scaffold,
         "hover_contents": hover_contents,
+        "decl_emit": decl_emit,
     });
     let source_admission_digest = build_source_digest(spec, contributors)?;
     let (oracle_env_files, oracle_env_hash) = build_env_files(config)?;
@@ -539,18 +607,13 @@ fn sandbox_relative(canonical: &str) -> &str {
     canonical.strip_prefix('/').unwrap_or(canonical)
 }
 
-/// Drive tsgo's `textDocument/hover` over a hermetic sandbox seeded from the
-/// vendored corpus (the canonical `tsconfig.json` + the vendored libs) and the
-/// spec's per-row workspace files, with the probe written in place of the primary
-/// fixture. Returns the raw hover contents, or [`GenError::TsgoUnavailable`] when
-/// tsgo is not installed (a SKIP, mirroring the spike).
-async fn drive_hover(
-    config: &GenConfig,
-    spec: &QuerySpec,
-    synth: &Synthesized,
-) -> Result<String, GenError> {
-    let tsgo_bin = resolve_tsgo_bin()?;
-    // The per-row workspace files (the primary one REPLACED by the probe source).
+/// The per-row workspace files (the primary one REPLACED by the probe
+/// source) — the ONE file-set assembly both capture families drive: the
+/// LSP hover and the CLI declaration emit see byte-identical sandboxes.
+fn spec_workspace_files<'a>(
+    spec: &'a QuerySpec,
+    synth: &'a Synthesized,
+) -> (Vec<(String, String)>, &'a str) {
     let primary_rel = sandbox_relative(spec.primary_canonical);
     let mut files: Vec<(String, String)> = Vec::new();
     for f in spec.workspace_files {
@@ -562,114 +625,126 @@ async fn drive_hover(
         };
         files.push((rel.to_string(), content));
     }
-    drive_hover_over_files(
+    (files, primary_rel)
+}
+
+/// Drive tsgo's `textDocument/hover` AND the pinned executable's
+/// `--declaration --emitDeclarationOnly` emit over one hermetic sandbox
+/// seeded from the vendored corpus (the canonical `tsconfig.json` + the
+/// vendored libs) and the spec's per-row workspace files, with the probe
+/// written in place of the primary fixture. Returns the raw hover
+/// contents plus the primary file's emitted declaration bytes, or
+/// [`GenError::TsgoUnavailable`] when tsgo is not installed (a SKIP,
+/// mirroring the spike).
+async fn drive_hover(
+    config: &GenConfig,
+    spec: &QuerySpec,
+    synth: &Synthesized,
+) -> Result<(String, String), GenError> {
+    let tsgo_bin = resolve_tsgo_bin().await?;
+    let (files, primary_rel) = spec_workspace_files(spec, synth);
+    let hover_contents = drive_hover_over_files(
         config,
         &tsgo_bin,
         &files,
         primary_rel,
         synth.probe_name_offset as u32,
     )
-    .await
+    .await?;
+    let decl_emit = drive_declaration_emit(config, &tsgo_bin, &files, primary_rel).await?;
+    Ok((hover_contents, decl_emit))
 }
 
-/// Resolve the PINNED tsgo binary the oracle harness generates with — EXACTLY
-/// `@typescript/native-preview` `identity::TSGO_VERSION` (`7.0.0-dev.20260526.1`).
-/// The dev-only generation harness does NOT ride the product toolchain
-/// resolver: the resolver's stable-only support window (`>=7.0.2, <7.1.0`)
-/// governs the PRODUCT's engine provisioning, while this harness pins an exact
-/// nightly — every snapshot records that version and the consumption driver
-/// validates it, so ANY other engine (a stable the product would accept
-/// included) would produce snapshots the env-pin rail rejects. Resolution
-/// order: (1) `VERTER_TSGO_BIN` naming an existing file, then (2) the
-/// project-local `node_modules` install (flat + pnpm-store layouts) walking
-/// the crate manifest's ancestors. Every candidate must report `--version`
-/// EXACTLY `Version {TSGO_VERSION}` — a version mismatch is a generation
-/// error, never a silent fallthrough. [`GenError::TsgoUnavailable`] (skip)
-/// when no exact-pin binary is found.
-fn resolve_tsgo_bin() -> Result<String, GenError> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(override_path) = std::env::var_os("VERTER_TSGO_BIN").filter(|v| !v.is_empty()) {
-        candidates.push(PathBuf::from(override_path));
-    }
-    let exe_name = if cfg!(windows) { "tsgo.exe" } else { "tsgo" };
-    let platform = tsgo_platform_key().ok_or_else(|| {
-        GenError::TsgoUnavailable(format!(
-            "no @typescript/native-preview platform package for {}-{}",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        ))
-    })?;
-    for ancestor in Path::new(env!("CARGO_MANIFEST_DIR")).ancestors() {
-        // Flat layout: `node_modules/@typescript/native-preview-<platform>/lib/tsgo`.
-        candidates.push(
-            ancestor
-                .join("node_modules")
-                .join("@typescript")
-                .join(format!("native-preview-{platform}"))
-                .join("lib")
-                .join(exe_name),
-        );
-        // pnpm-store layout:
-        // `node_modules/.pnpm/@typescript+native-preview-<platform>@<version>/node_modules/…`.
-        candidates.push(
-            ancestor
-                .join("node_modules")
-                .join(".pnpm")
-                .join(format!(
-                    "@typescript+native-preview-{platform}@{}",
-                    identity::TSGO_VERSION
-                ))
-                .join("node_modules")
-                .join("@typescript")
-                .join(format!("native-preview-{platform}"))
-                .join("lib")
-                .join(exe_name),
-        );
-    }
-    let expected = format!("Version {}", identity::TSGO_VERSION);
-    for candidate in candidates {
-        if !candidate.is_file() {
-            continue;
-        }
-        let output = std::process::Command::new(&candidate)
-            .arg("--version")
-            .output()
-            .map_err(|e| {
-                GenError::TsgoUnavailable(format!(
-                    "{}: --version probe failed: {e}",
-                    candidate.display()
-                ))
-            })?;
-        let reported = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if reported != expected {
-            return Err(GenError::TsgoUnavailable(format!(
-                "{} reports `{reported}`, not the harness pin `{expected}` — generation with a \
-                 different engine would produce snapshots the env-pin rail rejects",
-                candidate.display()
-            )));
-        }
-        return Ok(candidate.to_string_lossy().into_owned());
-    }
-    Err(GenError::TsgoUnavailable(format!(
-        "no @typescript/native-preview {platform} binary at the exact harness pin {} \
-         (searched VERTER_TSGO_BIN + project-local node_modules)",
-        identity::TSGO_VERSION
-    )))
+/// Resolve the PINNED engine binary the oracle harness generates with —
+/// EXACTLY `identity::TSGO_VERSION` (`tsc --version` → `Version 7.0.2`): the
+/// platform binary `lib/tsc[.exe]` of the `@typescript/typescript-<os>-<arch>`
+/// package the workspace `typescript` devDependency installs.
+///
+/// The harness rides the ONE product toolchain resolver
+/// (`verter_tsgo_api::toolchain::discovery`, re-exported through
+/// `verter_type_runtime::tsgo::discovery`): the same ordered first-working walk
+/// every consumer shares — `VERTER_TSGO_BIN`, `PATH`, the project-local
+/// `node_modules` (flat + pnpm-store layouts, walked upward from this crate's
+/// manifest dir), the update cache, the bundled sidecar — with the real
+/// `--version` probe, the version policy and the `--lsp` capability handshake.
+/// The harness pin is STRICTER than the product's support window
+/// (`>=7.0.2, <7.1.0`): every snapshot records the exact engine version and the
+/// consumption driver validates it, so a supported-but-unpinned engine (a later
+/// `7.0.x` on `PATH`) would produce snapshots the env-pin rail rejects.
+/// [`ExactPinValidator`] expresses that as a validator layered on the product
+/// one — an unpinned candidate is REJECTED with an actionable reason and the
+/// walk continues to the next tier, so a stray `PATH` install never shadows the
+/// pinned project-local one and never silently generates. No candidate at the
+/// exact pin is [`GenError::TsgoUnavailable`] (a skip) carrying the resolver's
+/// per-candidate rejection report.
+///
+/// The harness used to carry its own `node_modules` walk because it pinned a
+/// nightly build the product policy refuses outright; the pin is a stable
+/// release inside the supported window now, so a second discovery
+/// implementation has no reason to exist. The resolution is memoised per
+/// process — every spec drives the same binary, and the capability handshake is
+/// not free.
+async fn resolve_tsgo_bin() -> Result<String, GenError> {
+    static RESOLVED: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+    RESOLVED
+        .get_or_try_init(resolve_pinned_engine)
+        .await
+        .cloned()
 }
 
-/// The `@typescript/native-preview-<platform>` package key for this host.
-fn tsgo_platform_key() -> Option<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => Some("darwin-arm64"),
-        ("macos", "x86_64") => Some("darwin-x64"),
-        ("linux", "aarch64") => Some("linux-arm64"),
-        ("linux", "x86_64") => Some("linux-x64"),
-        ("windows", "aarch64") => Some("win32-arm64"),
-        ("windows", "x86_64") => Some("win32-x64"),
-        _ => None,
+/// One resolution walk through the product resolver under the exact-pin
+/// validator (the body [`resolve_tsgo_bin`] memoises).
+async fn resolve_pinned_engine() -> Result<String, GenError> {
+    let request = discovery::ResolutionRequest::for_environment(
+        Capability::Lsp,
+        Some(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
+    );
+    let validator = ExactPinValidator {
+        product: ProcessValidator::from_env(),
+    };
+    match discovery::resolve_with(&request, &validator).await {
+        Ok(resolution) => Ok(resolution.path.to_string_lossy().into_owned()),
+        Err(e) => Err(GenError::TsgoUnavailable(format!(
+            "no engine at the exact oracle harness pin `{}`: {e}",
+            identity::TSGO_VERSION
+        ))),
     }
 }
 
+/// The harness's exact-pin validator: the product's real `--version` probe,
+/// version policy and `--lsp` handshake first, then EXACT equality of the
+/// probed version with `identity::TSGO_VERSION`. Any other engine — a nightly,
+/// a later supported stable, a pre-7 `tsc` — is a rejection carrying the
+/// reported version, never an accepted candidate. (The product validator's
+/// dev-nightly environment override is moot under the exact pin: a nightly it
+/// let through is rejected here.)
+struct ExactPinValidator {
+    product: ProcessValidator,
+}
+
+impl CandidateValidator for ExactPinValidator {
+    fn validate<'a>(
+        &'a self,
+        path: &'a Path,
+        requirement: Capability,
+    ) -> Pin<Box<dyn Future<Output = Result<ValidatedCandidate, RejectionReason>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let validated = self.product.validate(path, requirement).await?;
+            if validated.version.to_string() != identity::TSGO_VERSION {
+                return Err(RejectionReason::VersionProbeFailed {
+                    detail: format!(
+                        "reports `{}`, not the oracle harness pin `{}` — generating with a \
+                         different engine would produce snapshots the env-pin rail rejects",
+                        validated.version_string,
+                        identity::TSGO_VERSION
+                    ),
+                });
+            }
+            Ok(validated)
+        })
+    }
+}
 /// The shared hover drive: seed the corpus sandbox, write `files`
 /// (sandbox-relative path + content), spawn the pinned tsgo LSP, open every
 /// file, and hover `hover_rel` at `hover_offset`. Both capture families ride
@@ -730,6 +805,70 @@ async fn drive_hover_over_files(
     Ok(hover.contents)
 }
 
+/// Drive the PINNED executable's declaration emit over the SAME hermetic
+/// sandbox layout the hover drive uses (corpus-seeded `tsconfig.json` +
+/// the identical file set, probe source in place of the primary), and
+/// return the primary file's emitted `.d.ts` bytes. The engine runs as a
+/// CLI child (`<bin> --declaration --emitDeclarationOnly -p <sandbox>`);
+/// a non-zero exit or a missing emitted declaration is a LOUD failure —
+/// the declaration bytes are a first-class recorded observation (stored
+/// beside `hover_contents` in `raw_capture`), never optional garnish.
+async fn drive_declaration_emit(
+    config: &GenConfig,
+    tsgo_bin: &str,
+    files: &[(String, String)],
+    primary_rel: &str,
+) -> Result<String, GenError> {
+    let sandbox = tempfile::tempdir().map_err(|e| GenError::Io(e.to_string()))?;
+    seed_corpus(&config.corpus_root, sandbox.path())?;
+    for (rel, content) in files {
+        let abs = sandbox.path().join(rel);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| GenError::Io(e.to_string()))?;
+        }
+        std::fs::write(&abs, content).map_err(|e| GenError::Io(e.to_string()))?;
+    }
+    let emit = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::process::Command::new(tsgo_bin)
+            .arg("--declaration")
+            .arg("--emitDeclarationOnly")
+            // Some oracle fixtures intentionally carry checker diagnostics
+            // (the rows record them); `--noCheck` keeps the emit from
+            // gating on them — the declaration SURFACE is the recorded
+            // observation, diagnostics are their own recorded column.
+            .arg("--noCheck")
+            .arg("-p")
+            .arg(sandbox.path())
+            .current_dir(sandbox.path())
+            .output(),
+    )
+    .await
+    .map_err(|_| GenError::DeclEmit("declaration emit timed out".to_string()))?
+    .map_err(|e| GenError::DeclEmit(e.to_string()))?;
+    if !emit.status.success() {
+        // The native CLI prints its diagnostics to STDOUT (stderr is for
+        // crashes) — both are included so a failed emit is diagnosable
+        // from the error alone.
+        return Err(GenError::DeclEmit(format!(
+            "declaration emit exited {}: stdout: {} stderr: {}",
+            emit.status,
+            String::from_utf8_lossy(&emit.stdout),
+            String::from_utf8_lossy(&emit.stderr)
+        )));
+    }
+    let decl_rel = primary_rel
+        .strip_suffix(".ts")
+        .map(|stem| format!("{stem}.d.ts"))
+        .unwrap_or_else(|| format!("{primary_rel}.d.ts"));
+    let decl_abs = sandbox.path().join(&decl_rel);
+    std::fs::read_to_string(&decl_abs).map_err(|e| {
+        GenError::DeclEmit(format!(
+            "the emitted declaration `{decl_rel}` was not produced: {e}"
+        ))
+    })
+}
+
 /// The per-spec v4 relation generation pipeline
 /// (the TS7 oracle contract): a relation-specific
 /// capture path BESIDE the TypeExpr pipeline — NOT through the two-sided
@@ -781,16 +920,19 @@ pub(crate) async fn generate_relation_snapshot(
     let canonical_path = relation_probe::relation_probe_canonical_path(spec.row_function);
     let rel = sandbox_relative(&canonical_path).to_string();
 
-    // (3) Drive the pinned tsgo over the corpus-seeded sandbox + the probe file.
-    let tsgo_bin = resolve_tsgo_bin()?;
+    // (3) Drive the pinned tsgo over the corpus-seeded sandbox + the probe
+    //     file: the hover capture AND the declaration-emit bytes.
+    let tsgo_bin = resolve_tsgo_bin().await?;
+    let probe_files = [(rel.clone(), probe_source)];
     let hover_contents = drive_hover_over_files(
         config,
         &tsgo_bin,
-        &[(rel.clone(), probe_source)],
+        &probe_files,
         &rel,
         probe_name_offset as u32,
     )
     .await?;
+    let decl_emit = drive_declaration_emit(config, &tsgo_bin, &probe_files, &rel).await?;
 
     // (4) Extract the probe RHS from the markdown hover and STRICT-decode the
     //     tuple wire — hover is ONLY the transport; anything off the fixed
@@ -876,7 +1018,7 @@ pub(crate) async fn generate_relation_snapshot(
             "fixtures/relation_verdict/{}_constraint_checks.ts",
             spec.row_function
         );
-        let tsgo_bin = resolve_tsgo_bin()?;
+        let tsgo_bin = resolve_tsgo_bin().await?;
         for (ordinal, _, constraint_text) in &checks {
             let check_name = relation_probe::relation_check_probe_name(*ordinal);
             let check_offset = check_source.find(&check_name).ok_or_else(|| {
@@ -936,6 +1078,7 @@ pub(crate) async fn generate_relation_snapshot(
         "probe_header": probe_header,
         "probe_scaffold": Value::Null,
         "hover_contents": hover_contents,
+        "decl_emit": decl_emit,
     });
     let (oracle_env_files, oracle_env_hash) = build_env_files(config)?;
     let document = snapshot::assemble_relation_snapshot_document(

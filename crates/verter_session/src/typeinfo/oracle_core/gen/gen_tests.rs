@@ -628,11 +628,16 @@ fn synthetic_v3_snapshot(root_family: &str) -> (serde_json::Value, String) {
         &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
             .to_json_value(),
         &probe_locator,
+        // The synthetic capture carries `decl_emit` even though the REAL v3
+        // files never did: the re-key's postcondition is that the upgraded
+        // file STRICT-DECODES under the CURRENT decoder, and from schema v5
+        // the declaration-emit observation is a required field.
         &serde_json::json!({
             "probe_name": "__oracle_probe__0",
             "probe_header": "type __oracle_probe__0 = GenProbe;",
             "probe_scaffold": null,
             "hover_contents": "```typescript\ntype __oracle_probe__0 = number;\n```",
+            "decl_emit": "export declare function genProbe(): number;\n",
         }),
         &serde_json::json!({ "manifest": [], "files": [] }),
         "blake3:placeholder",
@@ -693,7 +698,12 @@ fn upgrade_to_v4_in_is_tsgo_free_deterministic_and_relation_safe() {
     assert_eq!(entries.len(), 1);
     let v4_text = std::fs::read_to_string(entries[0].path()).expect("read v4");
     let v4_doc: serde_json::Value = serde_json::from_str(&v4_text).expect("parse v4");
-    assert_eq!(v4_doc["oracle_schema_version"], 4);
+    // The re-key writes the CURRENT pinned schema version (the historical
+    // v3->v4 lane; the pinned constant moves with the schema).
+    assert_eq!(
+        v4_doc["oracle_schema_version"],
+        u64::from(identity::ORACLE_SCHEMA_VERSION)
+    );
     assert_eq!(v3_doc["oracle_schema_version"], 3);
     assert_ne!(v4_doc["snapshot_id"], v3_doc["snapshot_id"]);
     for key in v3_doc.as_object().expect("v3 object").keys() {

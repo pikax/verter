@@ -29,9 +29,16 @@ use super::normalize::{canonical_json_string, ProjectionModeKind};
 // Pinned-env constants (the registry-known, tsgo-free `snapshot_id` inputs)
 // ---------------------------------------------------------------------------
 
-/// The pinned tsgo version that produces every oracle snapshot value.
+/// The pinned engine version that produces every oracle snapshot value: the
+/// TypeScript 7 native compiler (`tsc[.exe] --version` → `Version 7.0.2`) that
+/// the workspace `typescript` devDependency installs through its platform
+/// package (`@typescript/typescript-<os>-<arch>`). The generator resolves the
+/// binary through the product toolchain resolver and refuses any other
+/// version; the consumption driver validates the stored `tsgo_version` on every
+/// read. Bumping this re-keys EVERY `snapshot_id` (hence every checked-in
+/// snapshot filename) and every value must be re-measured.
 #[allow(dead_code)]
-pub(crate) const TSGO_VERSION: &str = "7.0.0-dev.20260526.1";
+pub(crate) const TSGO_VERSION: &str = "7.0.2";
 
 /// Version of THIS snapshot FILE SHAPE (field set + per-kind `identity` shape).
 /// Bumped on any schema-field change AND whenever a new `oracle_value_kind` is
@@ -39,14 +46,16 @@ pub(crate) const TSGO_VERSION: &str = "7.0.0-dev.20260526.1";
 /// `identity.probe_rhs_kind` + `raw_capture.probe_scaffold` (the capture-
 /// strategy axis); v3 added the REQUIRED top-level `migration_fingerprint_version` +
 /// `migration_fingerprint` migration-fidelity mirror (§Q4); v4 added the CLOSED
-/// `relation_verdict` value kind (the relation-tuple-wire capture family — the
-/// migration-fidelity mirror becomes kind-keyed: required for
+/// `relation_verdict` value kind (the relation-tuple-wire capture family —
+/// the migration-fidelity mirror becomes kind-keyed: required for
 /// `structured_type_expr`, forbidden as a cross-kind field on
-/// `relation_verdict`). Because it flows into `snapshot_id` through
-/// `PinnedEnv`, the bump changes every `snapshot_id` (hence every checked-in
-/// snapshot filename).
+/// `relation_verdict`); v5 added the REQUIRED `raw_capture.decl_emit` (the
+/// pinned executable's `--declaration --emitDeclarationOnly` bytes recorded
+/// beside the hover capture, for BOTH capture families). Because it flows into
+/// `snapshot_id` through `PinnedEnv`, the bump changes every `snapshot_id`
+/// (hence every checked-in snapshot filename).
 #[allow(dead_code)]
-pub(crate) const ORACLE_SCHEMA_VERSION: u32 = 4;
+pub(crate) const ORACLE_SCHEMA_VERSION: u32 = 5;
 
 /// Version of the PROBE-SYNTHESIS + hover-driver + hover-extraction +
 /// admissibility algorithm. Distinct from `normalizer_version`. Enters

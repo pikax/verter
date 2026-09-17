@@ -9480,7 +9480,7 @@ fn parameters_utilities_absorb_any_to_unknown_array_and_never_to_never() {
 }
 
 /// `Pick` / `Omit` / `Partial` / `Required` over an `any` SOURCE materialise
-/// the tsgo-verified shapes (pinned tsgo 7.0.0-dev.20260526.1) — NOT `any`:
+/// the tsgo-verified shapes (pinned TypeScript 7.0.2) — NOT `any`:
 ///
 /// - `Partial<any>` / `Required<any>` = `{ [x: string]: any }` (the
 ///   materialised homomorphic-over-`any` surface).

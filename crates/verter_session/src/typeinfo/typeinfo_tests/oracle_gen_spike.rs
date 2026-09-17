@@ -1,5 +1,5 @@
-//! The §4 GENERATION SPIKE — empirically validates, against the PINNED tsgo
-//! `7.0.0-dev.20260526.1`, the BLOCKING assumptions the harness's generation
+//! The §4 GENERATION SPIKE — empirically validates, against the PINNED engine
+//! (TypeScript 7.0.2 `tsc`), the BLOCKING assumptions the harness's generation
 //! side rests on (the TS7 oracle contract §4 "Spike").
 //!
 //! FEATURE-GATED (`oracle-gen`) and `#[cfg(test)]`: it drives tsgo via
@@ -508,8 +508,8 @@ async fn spike_nolib_forces_off_bundled_libs() {
 // The OFFLINE normalizer-confluence guards (`oracle_normalization_is_confluent`
 // et al., `oracle/normalize/tests.rs`) prove the closed rewrite system drives
 // differently-spelled SYNTHETIC inputs to one form. These spike proofs are the
-// EMPIRICAL complement: they confirm tsgo's ACTUAL hover spellings at the pinned
-// `7.0.0-dev.20260526.1` are exactly the spellings the offline rules reconcile —
+// EMPIRICAL complement: they confirm tsgo's ACTUAL hover spellings at the pinned engine
+// (TypeScript 7.0.2) are exactly the spellings the offline rules reconcile —
 // so a class is admitted only after its tsgo spelling is observed and proven
 // confluent, never on an assumed spelling. A class whose two spellings are NOT
 // proven to converge stays DEFAULT-REJECTED (mapped / conditional below).
