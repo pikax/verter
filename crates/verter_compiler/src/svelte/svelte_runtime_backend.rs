@@ -185,6 +185,7 @@ fn map_parsed_runtime(err: DirectCompileError) -> SvelteRuntimeError {
         | DirectCompileError::SvelteOption(_)
         | DirectCompileError::UnsupportedSvelteNamespace
         | DirectCompileError::Publish(_)
+        | DirectCompileError::ArtifactSchema(_)
         // Vue construction/execution refusals are not Svelte-reachable
         // (`CompileRequest::new` refuses them). Leave them Direct — never
         // rewrite as a Svelte request-execution refusal.

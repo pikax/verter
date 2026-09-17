@@ -111,7 +111,6 @@ const label = "module"
         .unwrap_or_else(|error| panic!("{lang} IDE compile must succeed: {error:?}"));
 
     output
-        .artifacts
         .artifact(ProductKind::IdeCompanion)
         .expect("the requested IDE companion must be published")
         .code()

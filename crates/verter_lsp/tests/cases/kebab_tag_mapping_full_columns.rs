@@ -59,7 +59,6 @@ fn compile_to_mapper(source: &str) -> (String, PositionMapper) {
         output.diagnostics
     );
     let tsx = output
-        .artifacts
         .artifact(ProductKind::IdeCompanion)
         .expect("the requested IdeCompanion artifact must be present");
     let mapper = PositionMapper::from_json(tsx.source_projection_map().unwrap_or(""))

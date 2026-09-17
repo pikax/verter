@@ -866,7 +866,6 @@ fn compile_multi_root_template_uses_fragment() {
     // template-codegen fact this test pins survives as a substring of the
     // published artifact.
     let code = output
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("RuntimeClient must produce an artifact")
         .code();

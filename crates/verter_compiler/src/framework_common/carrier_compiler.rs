@@ -803,21 +803,6 @@ impl QualifiedRuntimeStyle {
     }
 }
 
-/// A framework-neutral custom block (`<i18n>`, `<docs>`, …).
-///
-/// Legacy declaration, retained unreferenced for terminal deletion: the
-/// legacy adapter's conversion helpers were removed when consumers moved
-/// to [`RuntimeCompileOutput::custom_block_descriptors`], and no
-/// production route fills this shape anymore. Nothing may read it —
-/// custom-block facts travel on the source-backed descriptors only.
-#[derive(Debug, Clone)]
-pub struct RuntimeCustomBlock {
-    /// The block tag (e.g. `"i18n"`).
-    pub block_type: String,
-    /// Raw block content.
-    pub content: String,
-}
-
 /// The neutral runtime bundle a carrier runtime compile produces.
 ///
 /// NOT `VerterCompileResult` (which is Vue-shaped). It losslessly carries
@@ -855,13 +840,9 @@ pub struct RuntimeCompileOutput {
     /// bytes, so there is no shape in which an unqualified stylesheet
     /// travels beside a qualified one.
     pub qualified_styles: Vec<QualifiedRuntimeStyle>,
-    /// Custom blocks, legacy adapter shape. Retained as an unreferenced
-    /// declaration for terminal deletion; no production route fills it.
-    /// Consumers take [`Self::custom_block_descriptors`] instead.
-    pub custom_blocks: Vec<RuntimeCustomBlock>,
-    /// Source-backed custom-block descriptors beside the retired legacy
-    /// adapter, admitted to their own compile-artifact set: one `"sfc"`
-    /// source unit bound to the registered carrier (registered file
+    /// Source-backed custom-block descriptors admitted to their own
+    /// compile-artifact set: one `"sfc"` source unit bound to the registered
+    /// carrier (registered file
     /// lineage, carrier-bytes revision), one `"sfc"` analysis artifact, and
     /// one attached descriptor per block in source order. Minted once by the
     /// Vue bridge from the admitted artifact, whether or not Main is

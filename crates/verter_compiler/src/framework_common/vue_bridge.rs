@@ -559,8 +559,7 @@ pub(crate) fn vue_carrier_bundle(
             });
         };
         bundle = backend.compile_bundle_runtime(grant, source, parsed, opts, alloc)?;
-        // Descriptors exist beside the legacy adapter the runtime leg just
-        // produced, whether or not Main is demanded.
+        // Descriptors are minted whether or not Main is demanded.
         stage_custom_block_artifacts(&mut bundle, artifact);
     }
 
@@ -779,7 +778,7 @@ fn vue_script_lang_from_parsed(parsed: &ParsedSfc) -> Option<String> {
 
 /// Retained custom-block parse facts in transit from the runtime leg to the
 /// Vue bridge. Only this module reads or fills them, so they never become a
-/// third custom-block surface beside the legacy adapter and the descriptors.
+/// custom-block surface beside the descriptors they mint.
 #[derive(Debug, Default)]
 pub struct StagedCustomBlockFacts(Vec<crate::compile::VerterCustomBlock>);
 
@@ -1077,8 +1076,7 @@ pub(crate) fn vue_result_to_runtime_parts(
         .collect();
     // The parse facts feed the descriptor mint: the Vue bridge takes them
     // to mint `custom_block_artifacts` against the admitted artifact
-    // (`stage_custom_block_artifacts`). The retired legacy adapter no
-    // longer receives a converted copy.
+    // (`stage_custom_block_artifacts`).
     let custom_block_facts = result.custom_blocks;
     let tsx = result.tsx.map(|tsx| {
         let output_descriptor = RuntimeOutputDescriptor::generated(
@@ -1146,9 +1144,6 @@ pub(crate) fn vue_result_to_runtime_parts(
         script,
         template,
         qualified_styles: Vec::new(),
-        // Legacy adapter declaration retained unfilled for terminal
-        // deletion; consumers read `custom_block_descriptors`.
-        custom_blocks: Vec::new(),
         // Minted by the Vue bridge, which holds the registered artifact; a
         // direct conversion has none and publishes no descriptors.
         custom_block_artifacts: None,
@@ -1672,11 +1667,10 @@ mod tests {
     /// AC1/AC2: every custom block gets exactly one complete, source-backed
     /// descriptor, minted by the Vue bridge without a Main demand, bound to
     /// one `"sfc"` unit over the registered carrier bytes and attached to
-    /// that unit's `"sfc"` artifact. The retired legacy
-    /// [`RuntimeCustomBlock`] adapter stays empty — the descriptors are the
-    /// bundle's only custom-block surface.
+    /// that unit's `"sfc"` artifact. The descriptors are the bundle's only
+    /// custom-block surface.
     #[test]
-    fn custom_blocks_produce_source_backed_descriptors_and_no_legacy_copy() {
+    fn custom_blocks_produce_source_backed_descriptors() {
         use crate::assembly::{
             ArtifactContent, ContentId, CustomBlockContent, CustomBlockLifecycle,
         };
@@ -1689,10 +1683,6 @@ mod tests {
         let output = compile_registered(source, &RuntimeCompileOptions::default());
         assert!(output.main.is_none(), "Main is not demanded here");
 
-        assert!(
-            output.custom_blocks.is_empty(),
-            "the legacy adapter stays unfilled; descriptors are the only surface"
-        );
         assert_eq!(output.custom_block_descriptors().len(), 3);
 
         let set = custom_block_set(&output);
@@ -2078,7 +2068,7 @@ mod tests {
             "<script setup>const n = 1</script><template><div>{{ n }}</div></template>",
             &RuntimeCompileOptions::default(),
         );
-        assert!(output.custom_blocks.is_empty());
+        assert!(output.custom_block_descriptors().is_empty());
         assert!(output.custom_block_artifacts.is_none());
     }
 

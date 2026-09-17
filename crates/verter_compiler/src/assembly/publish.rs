@@ -28,6 +28,11 @@ pub enum ArtifactSchemaError {
     StaleMapInputBasis,
     MapSourceOutsideProvenance,
     UnavailableMappedContent,
+    /// A produced map addressed a declared source row that carries no
+    /// content, so its authored identity cannot be presented as a source
+    /// unit. The segment is refused rather than rebound to another unit
+    /// or silently dropped.
+    MapSourceWithoutContent,
     InvalidGeneratedRange,
     InvalidSourceRange,
     OverlappingMappings,

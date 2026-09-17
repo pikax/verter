@@ -211,27 +211,19 @@ fn compile_via_standalone(
 
 fn assert_runtime_parity(via_backend: &DirectCompileOutput, via_standalone: &DirectCompileOutput) {
     let backend_kinds: Vec<_> = via_backend
-        .artifacts
         .artifacts()
         .iter()
         .map(|artifact| artifact.kind())
         .collect();
     let standalone_kinds: Vec<_> = via_standalone
-        .artifacts
         .artifacts()
         .iter()
         .map(|artifact| artifact.kind())
         .collect();
     assert_eq!(backend_kinds, standalone_kinds);
     for kind in &backend_kinds {
-        let backend = via_backend
-            .artifacts
-            .artifact(*kind)
-            .expect("backend artifact");
-        let standalone = via_standalone
-            .artifacts
-            .artifact(*kind)
-            .expect("standalone artifact");
+        let backend = via_backend.artifact(*kind).expect("backend artifact");
+        let standalone = via_standalone.artifact(*kind).expect("standalone artifact");
         assert_eq!(backend.code(), standalone.code());
         assert_eq!(
             backend.runtime_source_map(),
@@ -317,19 +309,12 @@ fn svelte_runtime_backend_matches_parsed_core_on_kitchen_sink() {
         .expect("runtime backend kitchen sink");
     assert_runtime_parity(&via_backend, &via_standalone);
     let client = via_backend
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client artifact");
     assert!(!client.code().is_empty());
     assert!(client.runtime_source_map().is_some());
-    assert!(via_backend
-        .artifacts
-        .artifact(ProductKind::RuntimeServer)
-        .is_none());
-    assert!(via_backend
-        .artifacts
-        .artifact(ProductKind::IdeCompanion)
-        .is_none());
+    assert!(via_backend.artifact(ProductKind::RuntimeServer).is_none());
+    assert!(via_backend.artifact(ProductKind::IdeCompanion).is_none());
     assert!(via_backend.diagnostics.is_empty());
 }
 
@@ -365,13 +350,11 @@ fn runtime_source_map_option_is_honored() {
     let with_map = compile_via_backend(SIMPLE, &artifact, &mapped).expect("mapped");
     let without_map = compile_via_backend(SIMPLE, &artifact, &unmapped).expect("unmapped");
     assert!(with_map
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .runtime_source_map()
         .is_some());
     assert!(without_map
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client")
         .runtime_source_map()
@@ -410,12 +393,10 @@ fn css_hash_override_is_preserved_and_does_not_hide_an_absent_override() {
         compile_via_backend_with_inputs(STYLED, &artifact, &request, &absent).expect("absent");
     assert_ne!(
         via_override
-            .artifacts
             .artifact(ProductKind::RuntimeClient)
             .expect("client")
             .code(),
         via_absent
-            .artifacts
             .artifact(ProductKind::RuntimeClient)
             .expect("client")
             .code(),
@@ -825,7 +806,6 @@ fn compile_backend_and_core(
 
 fn client_js(output: &DirectCompileOutput) -> &str {
     output
-        .artifacts
         .artifact(ProductKind::RuntimeClient)
         .expect("client artifact")
         .code()

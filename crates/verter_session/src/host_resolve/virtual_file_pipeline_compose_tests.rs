@@ -378,9 +378,8 @@ fn staged_svelte_main_carries_bytes_language_and_artifact_relations() {
 // ── Custom virtual nodes: descriptor-driven publication ──────────────────
 //
 // The publish path's custom-block authority is the bundle's source-backed
-// descriptors: identity/order/role/lang/content state come from them, bytes
-// come from them OR from the host's sealed block-content selection, and the
-// retired legacy adapter list is never consulted.
+// descriptors: identity/order/role/lang/content state come from them, and
+// bytes come from them OR from the host's sealed block-content selection.
 
 /// A Vue bundle with a staged Main plus a custom-block descriptor set, the
 /// shape every custom-node publication consumes.
@@ -537,44 +536,4 @@ fn custom_node_bytes_come_from_the_admitted_selection() {
             "the admitted selection is the byte authority for slot {index}"
         );
     }
-}
-
-/// AC1: a bundle whose only custom-block surface is the retired legacy
-/// adapter list publishes no custom nodes and claims no runtime surface —
-/// planted reconstruction through that list fails closed.
-#[test]
-fn legacy_adapter_carrying_bundles_publish_no_custom_nodes() {
-    use crate::host_resolve::compile_request_build::BoundCompiledProducts;
-    use verter_compiler::framework_common::RuntimeCustomBlock;
-    let input = vue_compile_input(
-        "Comp.vue",
-        "<script setup>const n = 1</script><i18n>{}</i18n>",
-        false,
-    );
-    let bundle = verter_compiler::framework_common::RuntimeCompileOutput {
-        custom_blocks: vec![RuntimeCustomBlock {
-            block_type: "i18n".to_string(),
-            content: "{}".to_string(),
-        }],
-        ..Default::default()
-    };
-    assert!(
-        !bundle.has_runtime_surface(),
-        "the legacy list alone is not a runtime surface"
-    );
-    let products = BoundCompiledProducts::Vue(
-        verter_compiler::framework_common::VueHostCompiledProducts::from_admitted_runtime_bundle(
-            bundle,
-            verter_compiler::compile_request::ProductKind::RuntimeClient,
-        ),
-    );
-    let mut outputs = FxHashMap::default();
-    publish_runtime_nodes(&input, &products, &runtime_publication(), &mut outputs)
-        .expect("no runtime surface means nothing to refuse");
-    assert!(
-        outputs
-            .keys()
-            .all(|kind| !matches!(kind, crate::types::VirtualNodeKind::Custom { .. })),
-        "the retired adapter must not publish custom nodes"
-    );
 }

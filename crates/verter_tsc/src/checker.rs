@@ -470,9 +470,7 @@ fn generate_all_tsx(
                         vue_path.display()
                     ))
                 })?;
-            let set = output.artifacts;
-
-            let tsx_block = set.artifact(ProductKind::IdeCompanion).ok_or_else(|| {
+            let tsx_block = output.artifact(ProductKind::IdeCompanion).ok_or_else(|| {
                 api_check::TypecheckError::new(format!(
                     "verter-tsc: compiler produced no validation carrier for {}",
                     vue_path.display()

@@ -239,7 +239,6 @@ fn identity_corpus_actually_populates_the_map_and_diagnostic_digest_slots() {
         .compile(mapped.source, &mapped.request, mapped.inputs)
         .expect("the map fixture must compile");
     let map = output
-        .artifacts
         .artifacts()
         .iter()
         .find_map(|a| a.runtime_source_map())
@@ -290,12 +289,7 @@ fn every_route_exposes_artifacts_in_the_same_order() {
         CompileProduct::RuntimeServer(RuntimeProductRequest::default()),
     ]);
     let kinds = |output: &DirectCompileOutput| -> Vec<ProductKind> {
-        output
-            .artifacts
-            .artifacts()
-            .iter()
-            .map(|a| a.kind())
-            .collect()
+        output.artifacts().iter().map(|a| a.kind()).collect()
     };
 
     let direct = compiler
@@ -660,7 +654,7 @@ fn compile_batch_partial_failure_does_not_affect_other_items() {
         .as_ref()
         .expect("item 1 must compile fully despite item 0's refusal");
     assert!(
-        ok.artifacts.artifact(ProductKind::RuntimeClient).is_some(),
+        ok.artifact(ProductKind::RuntimeClient).is_some(),
         "item 1's own artifact must still be the real, complete compile"
     );
 }
@@ -719,18 +713,15 @@ fn compile_batch_shares_one_prepare_across_items_with_identical_source_and_parse
     let client = batch.results[0].as_ref().expect("client item");
     let ide = batch.results[1].as_ref().expect("ide item");
     assert!(
-        client
-            .artifacts
-            .artifact(ProductKind::RuntimeClient)
-            .is_some(),
+        client.artifact(ProductKind::RuntimeClient).is_some(),
         "results[0] must carry the requested RuntimeClient, not the sibling's product"
     );
     assert!(
-        ide.artifacts.artifact(ProductKind::IdeCompanion).is_some(),
+        ide.artifact(ProductKind::IdeCompanion).is_some(),
         "results[1] must carry the requested IdeCompanion, not the first item's product"
     );
-    assert_eq!(client.artifacts.artifacts().len(), 1);
-    assert_eq!(ide.artifacts.artifacts().len(), 1);
+    assert_eq!(client.artifacts().len(), 1);
+    assert_eq!(ide.artifacts().len(), 1);
 }
 
 #[test]
@@ -1337,12 +1328,12 @@ fn compile_batch_aba_cb_slot_correspondence_preserves_requested_product_and_dige
             .as_ref()
             .unwrap_or_else(|e| panic!("{label}: expected Ok, got {e:?}"));
         assert_eq!(
-            output.artifacts.artifacts().len(),
+            output.artifacts().len(),
             1,
             "{label}: must publish exactly the requested product, not a sibling's"
         );
         assert!(
-            output.artifacts.artifact(kind).is_some(),
+            output.artifact(kind).is_some(),
             "{label}: results[{index}] must carry {kind:?}"
         );
         assert_eq!(
@@ -1410,7 +1401,7 @@ fn vue_route_produces_exactly_the_kinds_it_declares_producible() {
                 panic!("{kind:?} must be producible by the direct Vue route, got refusal {e:?}")
             });
             assert!(
-                output.artifacts.artifact(kind).is_some(),
+                output.artifact(kind).is_some(),
                 "{kind:?} is admitted by the preflight but published no artifact of that kind — \
                  the producible-kind declaration over-promises"
             );
@@ -1482,7 +1473,7 @@ fn svelte_route_produces_exactly_the_kinds_it_declares_producible() {
                     panic!("the Svelte client surface must be producible, got refusal {e:?}")
                 });
                 assert!(
-                    output.artifacts.artifact(kind).is_some(),
+                    output.artifact(kind).is_some(),
                     "the Svelte client compile published no RuntimeClient artifact"
                 );
             }
@@ -2107,7 +2098,6 @@ fn mixed_product_runtime_legs_delegate_to_the_catalog_runtime_backend() {
         .expect("runtime-only compile succeeds");
     let client_code = |output: &DirectCompileOutput| {
         output
-            .artifacts
             .artifacts()
             .iter()
             .find(|a| a.kind() == ProductKind::RuntimeClient)
@@ -2180,7 +2170,6 @@ fn direct_runtime_compile_honors_caller_runtime_template_hole() {
         )
         .expect("script-only inline runtime compile succeeds");
     let client = output
-        .artifacts
         .artifacts()
         .iter()
         .find(|a| a.kind() == ProductKind::RuntimeClient)
