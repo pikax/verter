@@ -260,6 +260,20 @@ pub(super) fn call_key(
     receiver: Option<SemanticNodeId>,
     args: Vec<CallArgKey>,
 ) -> ResolveCallKey {
+    call_key_at(dispatch, CANONICAL, callee, kind, receiver, args)
+}
+
+/// Same as [`call_key`], but the call-site file is `canonical`. Admission
+/// roots on that file being served, so a host that does not upsert
+/// [`CANONICAL`] must pass its own servable path.
+pub(super) fn call_key_at(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    canonical: &str,
+    callee: SemanticNodeId,
+    kind: CallKind,
+    receiver: Option<SemanticNodeId>,
+    args: Vec<CallArgKey>,
+) -> ResolveCallKey {
     let ResolveCallContext {
         parse_env_hash,
         resolve_env_hash,
@@ -267,10 +281,10 @@ pub(super) fn call_key(
         lib_env_hash,
         project_identity,
         substitution,
-    } = dispatch.resolve_call_context_for(CANONICAL);
+    } = dispatch.resolve_call_context_for(canonical);
     ResolveCallKey {
         point: ProgramPointId {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: Arc::from(canonical),
             offset: 41,
         },
         callee,
