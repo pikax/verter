@@ -36,6 +36,16 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          # The tag this job pushes has to START release.yml, and a push made
+          # with the workflow's own GITHUB_TOKEN never starts another workflow
+          # run (GitHub's anti-recursion rule). v0.0.1-beta.4 was tagged here
+          # on 2026-09-18 and release.yml did not fire at all, while every
+          # earlier tag — pushed by hand, with a person's credentials — did.
+          # A deploy key is not GITHUB_TOKEN, so its push triggers normally.
+          # The key is repo-scoped, write-enabled and has no expiry:
+          # Settings > Deploy keys > "release-tag: tag pushes that trigger
+          # release.yml".
+          ssh-key: ${{ secrets.RELEASE_TAG_SSH_KEY }}
 
       - uses: actions/setup-node@v5
         with:
