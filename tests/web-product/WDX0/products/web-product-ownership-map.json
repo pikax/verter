@@ -1,0 +1,244 @@
+{
+  "id": "web-product-ownership-map.v1",
+  "schema": 1,
+  "contractNode": "WDX0",
+  "finalOwner": "expansion.web-product-convergence",
+  "outcomes": [
+    {
+      "id": "web-product-disposition-matrix.v1",
+      "currentOwner": "WDX0",
+      "finalOwner": "WDX0",
+      "receivingAcceptance": "WDX0-AC1: every recommendation has exactly one final owner, head and terminal in one producing train, extension or explicit exclusion"
+    },
+    {
+      "id": "evidence-class-policy.v1",
+      "currentOwner": "WDX0",
+      "finalOwner": "WDX0",
+      "receivingAcceptance": "WDX0-AC2: static proof, runtime observation and estimates are distinct; proof-only or two-owner items fail coverage review"
+    },
+    {
+      "id": "historical-completions-preservation",
+      "currentOwner": "WDX0",
+      "finalOwner": "WDX0",
+      "receivingAcceptance": "implemented-ledger completions and the vue/svelte advertised catalog keep their standing; nothing is reopened or downgraded"
+    },
+    {
+      "id": "evidence-routing-obligations",
+      "currentOwner": "WDX0",
+      "finalOwner": "WDX0",
+      "receivingAcceptance": "WDX1 routes fixtures and evidence, WDX2 qualifies authority and lifecycle, WDX3 checks completed artifacts"
+    }
+  ],
+  "receivingAmendments": [
+    {
+      "receiver": "AGT0",
+      "product": "Agent capability, trust and semantic-output under this constitution (portfolioClass product)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "ALP0",
+      "product": "Alpine delivery and exact-version under this constitution (portfolioClass framework)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "ANG0",
+      "product": "Angular delivery and exact-version under this constitution (portfolioClass framework)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "AST0",
+      "product": "Astro delivery and exact-version under this constitution (portfolioClass framework)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "AX0",
+      "product": "Accessibility algorithm and evidence constitution under this constitution (portfolioClass product)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "CENV0",
+      "product": "Configuration provenance and secret-handling constitution under this constitution (portfolioClass product)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "CSS0",
+      "product": "CSS semantic authority and support constitution under this constitution (portfolioClass product)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "CWB0",
+      "product": "Component workbench and design-system under this constitution (portfolioClass product)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "DATA0",
+      "product": "Document-language and schema authority under this constitution (portfolioClass extension)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "DBG0",
+      "product": "Debugging, mapping and backend authority under this constitution (portfolioClass product)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "DIAL0",
+      "product": "Dialect syntax, preprocessing and mapping under this constitution (portfolioClass product)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "DOC5",
+      "product": "web-product guide templates and executable journeys under the evidence-class policy",
+      "productionCapable": true
+    },
+    {
+      "receiver": "DX1",
+      "product": "exposure descriptor contract and promotion rule consuming the claim laws and evidence classes",
+      "productionCapable": true
+    },
+    {
+      "receiver": "ENV0",
+      "product": "Realm and capability constitution under this constitution (portfolioClass product)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "GLM0",
+      "product": "Ember and Glimmer delivery and exact-version under this constitution (portfolioClass framework)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "GQL0",
+      "product": "GraphQL schema and operation authority under this constitution (portfolioClass extension)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "HTX0",
+      "product": "htmx delivery and exact-version under this constitution (portfolioClass framework)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "I18N0",
+      "product": "i18n profile and locale under this constitution (portfolioClass extension)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "LIT0",
+      "product": "Lit delivery and exact-version under this constitution (portfolioClass framework)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "MDX0",
+      "product": "MDX with React delivery and exact-version under this constitution (portfolioClass framework)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "MIG0",
+      "product": "Migration versus refactor ownership under this constitution (portfolioClass product)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "MRK0",
+      "product": "Marko delivery and exact-version under this constitution (portfolioClass framework)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "NXT0",
+      "product": "Next.js versioned project-profile under this constitution (portfolioClass profile)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "OAPI0",
+      "product": "OpenAPI dialect and endpoint-link constitution under this constitution (portfolioClass extension)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "PRE0",
+      "product": "Preact delivery and exact-version under this constitution (portfolioClass framework)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "PWA0",
+      "product": "PWA scope and browser evidence under this constitution (portfolioClass extension)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "QWK0",
+      "product": "Qwik 2 delivery and exact-version under this constitution (portfolioClass framework)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "RCT0",
+      "product": "React delivery and exact-version under this constitution (portfolioClass framework)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "RTI0",
+      "product": "Runtime observation and source-correlation constitution under this constitution (portfolioClass product)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "SEC0",
+      "product": "Security threat model and analysis authority under this constitution (portfolioClass product)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "SEO0",
+      "product": "Document metadata and rendering evidence under this constitution (portfolioClass extension)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "SLD0",
+      "product": "Solid 2 delivery and exact-version under this constitution (portfolioClass framework)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "STN0",
+      "product": "Stencil delivery and exact-version under this constitution (portfolioClass framework)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "TST0",
+      "product": "Test-product and runner integration under this constitution (portfolioClass product)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "TW0",
+      "product": "Tailwind profile and version admission under this constitution (portfolioClass product)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "WBC0",
+      "product": "Compatibility target and data authority under this constitution (portfolioClass product)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "WDX1",
+      "product": "cross-domain scenario fixtures and evidence routing on the ratified disposition matrix",
+      "productionCapable": true
+    },
+    {
+      "receiver": "WPF0",
+      "product": "Application-performance measurement constitution under this constitution (portfolioClass product)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "WSI0",
+      "product": "Workspace intelligence and reachability under this constitution (portfolioClass product)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "XEC0",
+      "product": "Execution-intent and permission under this constitution (portfolioClass product)",
+      "productionCapable": false
+    },
+    {
+      "receiver": "XSDK0",
+      "product": "Extension authority and capability constitution under this constitution (portfolioClass product)",
+      "productionCapable": false
+    }
+  ],
+  "displacedRoutes": [],
+  "deletionPopulationThisNode": [],
+  "acBasisDownstreamTestOwner": "WDX0 touches no state, query or map boundary (0 production LOC): the fresh-vs-incremental, edit/revert, cancellation and ordering cases are bound to WDX1 (fixtures and routing), WDX2 (authority and lifecycle qualification) and WDX3 (acceptance terminal); a runtime test here would be fabricated",
+  "acResourceRationale": "no hot paths, no UI, no runtime: the ratified performance methodology binds when a producing train first measures; WDX0 adds no budget and reports none",
+  "acPublicDeliveryObligation": "this constitution specifies the producers obligations only: each head updates its VIM/DX capability and exact host/profile evidence; DOC5/DOC1 own DOC1-tested public examples/reference; WDX3 checks real completed artifacts, not templates or screenshots"
+}

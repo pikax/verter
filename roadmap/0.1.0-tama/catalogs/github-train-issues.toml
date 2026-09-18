@@ -385,3 +385,12 @@ expected_outcome = "JetBrainsBaselineManifest with IDE/build/plugins/engines/set
 acceptance = ["The official comparator is benchmarked in its recommended/default mode with diagnostics enabled; an alternate service-powered mode is recorded, never substituted as a weakened comparator.", "Promotion requires parity on every required workflow plus measured predeclared margins and Verter-specific semantic tooling.", "Measurement uses the shared equal-work corpus, real-client application/paint, provider costs, bytes and retained memory, with unavailable metrics labelled.", "Protocol smoke, installation, or a single microbenchmark never certifies superiority."]
 problem_label = "problem:architecture"
 gh_milestone = "0.0.4"
+
+[[train_issue]]
+train = "expansion.web-product-convergence"
+title = "Make web-product ownership and claims one constitution"
+problem = "Framework, extension, profile and product-capability proposals each carry their own scope and evidence conventions, which lets ownership overlap, lets architecture proofs pose as support, mixes static proof with runtime observation in public claims, and risks eroding historical completions."
+expected_outcome = "One disposition matrix, evidence-class policy and claim law ratified before any producing train lands, with historical completions preserved and evidence routing bound to WDX1 fixtures, WDX2 qualification and the WDX3 acceptance terminal."
+acceptance = ["Each attached recommendation is ratified into exactly one producing train, extension or explicit exclusion with a named terminal.", "Static proof, runtime observation and estimates are distinct classes; no proof-only or two-owner item passes coverage review.", "Implemented-ledger completions and the vue/svelte capability catalog are preserved untouched.", "The added portfolio starts with zero advertised catalog surfaces and zero support claims."]
+problem_label = "problem:architecture"
+gh_milestone = "0.0.4"
