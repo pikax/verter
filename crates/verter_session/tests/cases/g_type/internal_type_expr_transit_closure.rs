@@ -68,6 +68,21 @@ fn macro_dtos(
     })
 }
 
+fn macro_dtos_fresh_and_warm(
+    host: &VerterHost,
+    canonical: &str,
+    kind: AnalyzedMacroKind,
+) -> Arc<verter_session::typeinfo::framework_surface::MacroSurfaceDtos> {
+    let first = macro_dtos(host, canonical, kind);
+    let second = macro_dtos(host, canonical, kind);
+    assert_eq!(
+        first.as_ref(),
+        second.as_ref(),
+        "{kind:?} warm MacroSurfaceDtos must equal the fresh bundle"
+    );
+    first
+}
+
 fn member<'a>(members: &'a [NamedTypeMember], name: &str) -> &'a NamedTypeMember {
     members.iter().find(|m| m.name == name).unwrap_or_else(|| {
         panic!(
@@ -79,7 +94,8 @@ fn member<'a>(members: &'a [NamedTypeMember], name: &str) -> &'a NamedTypeMember
 
 /// Regression: Vue options/expose classification published names + required
 /// flags only. A Primitive/Literal/Ref/EmptyObject/Opaque mis-map on this
-/// path failed no behavioral test.
+/// path failed no behavioral test. Same-key warm `vue_macro_dtos` must
+/// equal the fresh bundle.
 #[test]
 fn vue_options_expose_named_members_classify_into_sealed_vocabulary() {
     let host = harness::build_hermetic_host_with_lib(
@@ -88,7 +104,7 @@ fn vue_options_expose_named_members_classify_into_sealed_vocabulary() {
     );
     upsert_vue(&host, "/Vocab.vue", VOCAB_VUE);
 
-    let options = macro_dtos(&host, "/Vocab.vue", AnalyzedMacroKind::DefineOptions);
+    let options = macro_dtos_fresh_and_warm(&host, "/Vocab.vue", AnalyzedMacroKind::DefineOptions);
     let options_members = &options
         .options
         .as_ref()
@@ -131,7 +147,7 @@ fn vue_options_expose_named_members_classify_into_sealed_vocabulary() {
         "`mixed: string | number` degrades to Opaque"
     );
 
-    let expose = macro_dtos(&host, "/Vocab.vue", AnalyzedMacroKind::DefineExpose);
+    let expose = macro_dtos_fresh_and_warm(&host, "/Vocab.vue", AnalyzedMacroKind::DefineExpose);
     let expose_members = &expose
         .expose
         .as_ref()
