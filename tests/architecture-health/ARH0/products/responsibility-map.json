@@ -23,11 +23,6 @@
       "reason": "web-product delta train expansion.documentation is trusted-plan authority not yet synced into repo authority DAG files"
     },
     {
-      "id": "DX0",
-      "kind": "node",
-      "reason": "DX0 is tracked by the trusted plan (successor of ORC0, phase FIXING) but its train is not present in repo authority DAG files"
-    },
-    {
       "id": "ARH2",
       "kind": "node",
       "reason": "web-product delta train expansion.architecture-health is trusted-plan authority not yet synced into repo authority DAG files"

@@ -367,3 +367,12 @@ expected_outcome = "ProjectionPolicy v1, CurrentFeatureObligation, InferencePart
 acceptance = ["TypeScript remains the sole published type-answer authority and CodeTransform remains the sole mapping owner.", "Every shipped valid Vue feature including InstanceType stays RequiredCurrent.", "Default inheritAttrs equals explicit true; only false is a runtime distinction.", "Receiving amendments name STP1 through STP59 and STS retirement without reverse edges to TCM4 or BR0."]
 problem_label = "problem:architecture"
 gh_milestone = "0.0.4"
+
+[[train_issue]]
+train = "expansion.product-observability"
+title = "Make product observability, exposure and reproducibility one constitution"
+problem = "Product surfaces consume producers through informal feature lists and ad-hoc adapters, which lets exposure claims outrun executable routes, hide native-only constraints, and publish results whose source, project, engine and host basis cannot be reproduced."
+expected_outcome = "FeatureExposureContract, HostExecutionClass, ProductReceiptBasis, the semantic/inspection/comparison rails, and the shared-producer adapter architecture are ratified before consumers are added, with current desktop, playground and editor behavior inventoried."
+acceptance = ["Every inventoried operation names its producer owner, profile, maturity and RequiredCurrent obligation.", "Portable, NativeOnly and ExternalOwner execution classes are pinned; browser capability claims without a build are rejected.", "Playground gaps keep product promotion blocked until an executable route and replay case exist.", "Inspection-rail answers are separately labelled and never substitute TypeScript semantic answers."]
+problem_label = "problem:architecture"
+gh_milestone = "0.0.4"
