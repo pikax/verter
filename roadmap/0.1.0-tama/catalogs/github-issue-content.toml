@@ -31,6 +31,12 @@ problem = "Dialect preprocessors, formatters, and framework style consumers need
 expected_outcome = "The style owner exposes one completed, stage-qualified preprocessing result for compiler and editor consumers, with deterministic formatter recovery and no residual unqualified output path."
 acceptance = ["Completed preprocessing results use `QualifiedStyleResult` and an exact `StyleStage`.", "Dialect, source identity, revision basis, diagnostics, and composed maps survive recovery deterministically.", "Partial, stale, cancelled, or mismatched results cannot enter downstream compilation.", "Style-owner-local unqualified preprocessing output and competing fallback routes are removed."]
 [[issue]]
+node_id = "JBT0"
+title = "Ratify the official JetBrains baseline and superiority constitution"
+problem = "Better-than-official-tooling claims are unverifiable without a pinned official comparator, a required-workflow matrix, and a predeclared measurement methodology, so cherry-picked benchmarks, weakened comparators, and missing-workflow gaps can pass as product superiority."
+expected_outcome = "JetBrainsBaselineManifest (IDE/build/plugins/engines/settings/corpus pins), RequiredWorkflowMatrix with non-regression conditions, and SuperiorityPredicate with a predeclared equal-work methodology are ratified as the falsifiable product gate, with promotion owned by the downstream JetBrains nodes."
+acceptance = ["A comparator run with diagnostics disabled, or any pin guessed instead of captured, is invalid.", "A single selected microbenchmark cannot certify overall superiority.", "A missing required official workflow blocks promotion even when Verter is faster.", "Superiority requires full-matrix parity, measured predeclared margins, and Verter-specific semantic tooling on the same receipt basis."]
+[[issue]]
 node_id = "CCA2D0"
 title = "Add a stage-qualified external-style boundary"
 problem = "Compiler style inputs can carry supplied or prepared CSS without proving the completed processing stage, source identity, revision basis, diagnostics, provenance, or map lineage. The compiler therefore cannot reliably reject stale, partial, or mismatched external-style results."

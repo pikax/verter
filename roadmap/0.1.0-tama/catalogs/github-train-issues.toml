@@ -378,6 +378,15 @@ problem_label = "problem:architecture"
 gh_milestone = "0.0.4"
 
 [[train_issue]]
+train = "expansion.jetbrains-product"
+title = "Make the official JetBrains baseline and superiority falsifiable"
+problem = "A JetBrains web-development product claims to beat official tooling without a pinned official comparator, a required-workflow matrix with non-regression conditions, or a predeclared measurement methodology, so superiority claims can rest on cherry-picked benchmarks, weakened comparators, or missing official workflows."
+expected_outcome = "JetBrainsBaselineManifest with IDE/build/plugins/engines/settings/corpus pins, a RequiredWorkflowMatrix covering completion through run/debug workflows, and a SuperiorityPredicate with an equal-work predeclared methodology are ratified before any adapter promotion claim."
+acceptance = ["The official comparator is benchmarked in its recommended/default mode with diagnostics enabled; an alternate service-powered mode is recorded, never substituted as a weakened comparator.", "Promotion requires parity on every required workflow plus measured predeclared margins and Verter-specific semantic tooling.", "Measurement uses the shared equal-work corpus, real-client application/paint, provider costs, bytes and retained memory, with unavailable metrics labelled.", "Protocol smoke, installation, or a single microbenchmark never certifies superiority."]
+problem_label = "problem:architecture"
+gh_milestone = "0.0.4"
+
+[[train_issue]]
 train = "expansion.web-product-convergence"
 title = "Make web-product ownership and claims one constitution"
 problem = "Framework, extension, profile and product-capability proposals each carry their own scope and evidence conventions, which lets ownership overlap, lets architecture proofs pose as support, mixes static proof with runtime observation in public claims, and risks eroding historical completions."
