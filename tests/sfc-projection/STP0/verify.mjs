@@ -55,6 +55,35 @@ const FIVE_AUTHORITIES = [
 
 const DOCS_ONLY_KINDS = new Set(["lock", "contract", "constitution", "history"]);
 
+/** Pinned independently of product JSON rows and of each row's self-declared `shipped` flag. */
+const REQUIRED_FEATURE_IDS = Object.freeze([
+  "instancetype-typeof-comp",
+  "vue-constructor-default-export",
+  "define-options-name-inheritattrs-literals",
+  "define-props",
+  "define-emits",
+  "define-model",
+  "define-slots",
+  "define-expose",
+  "with-defaults",
+  "script-setup-macros",
+  "options-api",
+  "generic-components",
+  "typed-directives",
+  "native-event-handler-inference",
+  "jsx-tsx-interop",
+  "vue-jsx-runtime",
+  "public-instance-members",
+  "v-for-loops",
+  "typed-fallthrough-inheritattrs",
+  "class-style-never-consumed",
+]);
+
+const REQUIRED_DISPLACED_ROUTES = Object.freeze([
+  { id: "vue-legacy-projection-route", deletionOwner: "STP58" },
+  { id: "svelte-legacy-projection-route", deletionOwner: "STS15" },
+]);
+
 export function loadProducts() {
   return {
     policy: readJson("projection-policy.v1.json"),
@@ -167,7 +196,6 @@ function validateFeatures(features) {
   const rows = features?.rows || [];
   if (rows.length === 0) {
     errors.push(err("STP0-required-current", "zero-rows", "no RequiredCurrent rows"));
-    return errors;
   }
   const ids = new Set();
   for (const row of rows) {
@@ -179,7 +207,7 @@ function validateFeatures(features) {
       errors.push(err("STP0-required-current", "duplicate-id", `duplicate feature row ${row.id}`));
     }
     ids.add(row.id);
-    if (row.shipped === true && row.obligation !== "RequiredCurrent") {
+    if (row.obligation !== "RequiredCurrent") {
       errors.push(
         err(
           "STP0-required-current",
@@ -188,15 +216,24 @@ function validateFeatures(features) {
         ),
       );
     }
+    if (row.shipped !== true) {
+      errors.push(
+        err(
+          "STP0-required-current",
+          "removed",
+          `shipped valid feature ${row.id} is not marked shipped`,
+        ),
+      );
+    }
   }
-  if (!ids.has("instancetype-typeof-comp")) {
-    errors.push(
-      err(
-        "STP0-required-current",
-        "removed",
-        "InstanceType row instancetype-typeof-comp is missing",
-      ),
-    );
+  for (const id of REQUIRED_FEATURE_IDS) {
+    if (!ids.has(id)) {
+      const message =
+        id === "instancetype-typeof-comp"
+          ? "InstanceType row instancetype-typeof-comp is missing"
+          : `shipped valid feature ${id} is missing`;
+      errors.push(err("STP0-required-current", "removed", message));
+    }
   }
   return errors;
 }
@@ -261,10 +298,36 @@ function validateOwnership(ownership, authority) {
     }
   }
 
+  const displacedRoutes = Array.isArray(ownership?.displacedRoutes)
+    ? ownership.displacedRoutes
+    : [];
+  if (!Array.isArray(ownership?.displacedRoutes) || displacedRoutes.length === 0) {
+    errors.push(err("STP0-ratification", "missing-owner", "displaced routes are missing"));
+  }
+  const displacedById = new Map(displacedRoutes.map((row) => [row?.id, row]));
+  for (const required of REQUIRED_DISPLACED_ROUTES) {
+    const row = displacedById.get(required.id);
+    if (!row) {
+      errors.push(
+        err("STP0-ratification", "missing-owner", `displaced route ${required.id} is missing`),
+      );
+      continue;
+    }
+    if (row.deletionOwner !== required.deletionOwner) {
+      errors.push(
+        err(
+          "STP0-ratification",
+          "missing-owner",
+          `displaced route ${required.id} deletion owner is not ${required.deletionOwner}`,
+        ),
+      );
+    }
+  }
+
   const populations = [
     ...(ownership?.outcomes || []),
     ...(ownership?.consumers || []),
-    ...(ownership?.displacedRoutes || []),
+    ...displacedRoutes,
   ];
   if (populations.length === 0) {
     errors.push(err("STP0-ratification", "missing-owner", "ownership map has empty population"));

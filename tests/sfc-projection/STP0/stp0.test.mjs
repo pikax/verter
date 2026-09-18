@@ -132,6 +132,53 @@ test("STP0-required-current dirty twin: marking a shipped row external is reject
   );
 });
 
+test("STP0-required-current dirty twin: removing a non-InstanceType shipped row is rejected", () => {
+  const dirty = cloneProducts(clean);
+  dirty.features.rows = dirty.features.rows.filter((row) => row.id !== "define-props");
+  const result = validate(dirty, contracts, authority);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (error) =>
+        error.caseId === "STP0-required-current" &&
+        error.code === "removed" &&
+        String(error.message).includes("define-props"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("STP0-required-current dirty twin: unshipping a row and marking it external is rejected", () => {
+  const dirty = cloneProducts(clean);
+  const row = dirty.features.rows.find((entry) => entry.id === "define-slots");
+  row.shipped = false;
+  row.obligation = "external";
+  const result = validate(dirty, contracts, authority);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (error) => error.caseId === "STP0-required-current" && error.code === "external",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("STP0-ratification dirty twin: emptying displacedRoutes is rejected", () => {
+  const dirty = cloneProducts(clean);
+  dirty.ownership.displacedRoutes = [];
+  const result = validate(dirty, contracts, authority);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (error) =>
+        error.caseId === "STP0-ratification" &&
+        error.code === "missing-owner" &&
+        /displaced route/u.test(error.message),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
 test("STP0-policy dirty twin: default inheritAttrs vs explicit true split is rejected", () => {
   const dirty = cloneProducts(clean);
   dirty.policy.inheritAttrs.explicitTrue = "no-inherit";
