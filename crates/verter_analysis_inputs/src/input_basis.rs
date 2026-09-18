@@ -39,6 +39,24 @@ impl LoadWave {
     pub fn keys(&self) -> &[Arc<str>] {
         &self.keys
     }
+
+    /// True when this wave has no keys.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// True when `key` is in this wave.
+    #[must_use]
+    pub fn contains(&self, key: &str) -> bool {
+        self.keys.binary_search_by(|k| k.as_ref().cmp(key)).is_ok()
+    }
+
+    /// Sorted union of two waves.
+    #[must_use]
+    pub fn union(&self, other: &Self) -> Self {
+        Self::from_keys(self.keys.iter().cloned().chain(other.keys.iter().cloned()))
+    }
 }
 
 /// Why a probed input is absent from the committed basis.
@@ -330,6 +348,107 @@ impl InputBasis {
         }
         Err(ObserveError::Unrecorded)
     }
+
+    /// Unrecorded keys among `keys`, sorted and deduplicated.
+    ///
+    /// Already-committed positives and negatives are not rediscovered.
+    #[must_use]
+    pub fn discovery_wave<I, S>(&self, keys: I) -> LoadWave
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<Arc<str>>,
+    {
+        LoadWave::from_keys(keys.into_iter().filter_map(|key| {
+            let key = key.into();
+            match self.observe(key.as_ref()) {
+                Err(ObserveError::Unrecorded) => Some(key),
+                _ => None,
+            }
+        }))
+    }
+
+    /// Commit a newly discovered wave onto this basis.
+    ///
+    /// `wave` rows replace matching prior rows. Unprobed prior rows carry
+    /// forward. A negative whose justifying directory revision changed and
+    /// was not re-recorded is refused. Empty or identity-equal discovery is
+    /// [`RetryOutcome::Terminal`].
+    pub fn retry(
+        &self,
+        wave: LoadWave,
+        observations: impl IntoIterator<Item = Observation>,
+        negatives: impl IntoIterator<Item = NegativeFact>,
+    ) -> Result<RetryOutcome, RetryError> {
+        if wave.is_empty() {
+            return Ok(RetryOutcome::Terminal);
+        }
+
+        let fragment = Self::commit(wave, observations, negatives).map_err(RetryError::Commit)?;
+        let combined_wave = self.wave.union(&fragment.wave);
+
+        let mut observations = self.observations.clone();
+        let mut negatives = self.negatives.clone();
+        for canonical in fragment.wave.keys() {
+            observations.remove(canonical);
+            negatives.remove(canonical);
+        }
+
+        for (canonical, new_obs) in &fragment.observations {
+            if !matches!(new_obs.kind, ObservationKind::Directory { .. }) {
+                continue;
+            }
+            let Some(old) = self.observations.get(canonical) else {
+                continue;
+            };
+            if old.revision == new_obs.revision {
+                continue;
+            }
+            if let Some(stale) = negatives
+                .keys()
+                .find(|child| {
+                    is_strict_child(canonical.as_ref(), child.as_ref())
+                        && !fragment.wave.contains(child.as_ref())
+                })
+                .cloned()
+            {
+                return Err(RetryError::StaleNegative { canonical: stale });
+            }
+        }
+
+        observations.extend(fragment.observations);
+        negatives.extend(fragment.negatives);
+
+        let extended = Self::commit(
+            combined_wave,
+            observations.into_values(),
+            negatives.into_values(),
+        )
+        .map_err(RetryError::Commit)?;
+        if extended.id == self.id {
+            Ok(RetryOutcome::Terminal)
+        } else {
+            Ok(RetryOutcome::Extended(extended))
+        }
+    }
+}
+
+/// Why [`InputBasis::retry`] refused or stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetryError {
+    /// The retry wave itself was not a coherent commit.
+    Commit(CommitError),
+    /// A carried negative's justifying directory revision changed and the
+    /// producer did not re-record that key.
+    StaleNegative { canonical: Arc<str> },
+}
+
+/// Result of a load-wave retry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetryOutcome {
+    /// No new keys, or the extension is identity-equal to the prior basis.
+    Terminal,
+    /// Newly committed coherent basis for the extended wave.
+    Extended(InputBasis),
 }
 
 /// Publication fence bound to one [`InputBasisId`].
@@ -411,6 +530,13 @@ fn kind_tag(kind: &ObservationKind) -> u8 {
 
 fn content_revision(bytes: &[u8]) -> [u8; 32] {
     *ContentId::from_content_bytes(bytes).digest().as_bytes()
+}
+
+fn is_strict_child(parent: &str, child: &str) -> bool {
+    let parent = parent.trim_end_matches('/');
+    child.starts_with(parent)
+        && child.len() > parent.len()
+        && child.as_bytes()[parent.len()] == b'/'
 }
 
 fn directory_revision(entries: &[DirectoryEntry]) -> [u8; 32] {

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 pub use verter_analysis_inputs::{
     CommitError, DirectoryEntry, InputBasis, LoadWave, NegativeFact, NegativeKind, Observation,
-    ObservationKind, ObserveError, SnapshotFence, TornSnapshot,
+    ObservationKind, ObserveError, RetryError, RetryOutcome, SnapshotFence, TornSnapshot,
 };
 
 /// One request's sole committed input and the fence that admits publication.
@@ -63,4 +63,33 @@ pub fn commit_workspace_canonical(
         None => InputBasis::commit(wave, [], [NegativeFact::absent(canonical)])
             .expect("single-file negative commit cannot mix or overlap"),
     }
+}
+
+/// Extend `previous` by probing only unrecorded `discovered` keys.
+///
+/// Already-recorded keys are not re-read. Empty discovery is
+/// [`RetryOutcome::Terminal`]. Consumers still observe through the returned
+/// basis; they do not read the workspace.
+pub fn retry_workspace_wave<I, S>(
+    workspace: &dyn verter_workspace::WorkspaceRead,
+    previous: &InputBasis,
+    discovered: I,
+) -> Result<RetryOutcome, RetryError>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<Arc<str>>,
+{
+    let wave = previous.discovery_wave(discovered);
+    if wave.is_empty() {
+        return Ok(RetryOutcome::Terminal);
+    }
+    let mut observations = Vec::new();
+    let mut negatives = Vec::new();
+    for key in wave.keys() {
+        match workspace.read_file(key.as_ref()) {
+            Some(content) => observations.push(Observation::file(Arc::clone(key), content)),
+            None => negatives.push(NegativeFact::absent(Arc::clone(key))),
+        }
+    }
+    previous.retry(wave, observations, negatives)
 }
