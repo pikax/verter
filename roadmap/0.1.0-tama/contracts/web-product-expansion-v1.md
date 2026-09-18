@@ -1,4 +1,4 @@
-# Web-product expansion v1: ownership, disposition and claim constitution
+# Part I — Web-product expansion v1: ownership, disposition and claim constitution
 
 Status: RATIFIED by WDX0 (charter `charters/expansion-web-product-convergence/WDX0.md`), consuming the accepted DX0 cross-surface feature preservation and exposure constitution (`contracts/product-experience.md`). Machine products: `tests/web-product/WDX0/products/`. Train plan: `plans/expansion-web-product-convergence.md`.
 
@@ -86,9 +86,11 @@ Machine product `web-product-ownership-map.json` pins the full population: the 4
 
 ---
 
-# Web product expansion contract v1 — live responsibility and debt inventory
+# Part II — Web product expansion contract v1 — live responsibility and debt inventory
 
 Established by ARH0 (Live responsibility and debt inventory), train `expansion.architecture-health`. This is the normative companion of `charters/expansion-architecture-health/ARH0.md`. ARH1 (responsibility, visibility and dependency contracts), ARH2 (behavioral characterization and complexity measurements), ARH12 (architecture-drift prevention) and DOC1/DOC2 amend this file; they do not fork it.
+
+This file is one constitution in two namespaced parts: Part I (WDX0) owns ownership, disposition and claim law; Part II (this part) owns the live inventory. § numbers restart in each part and are unique only within it, so every citation that crosses a part boundary must name the part (for example `Part II §3`); `---` above is the part separator and renumbering either part is forbidden (Part I `## 10. Receiving amendments` is machine-pinned).
 
 ## Inventory identity
 
@@ -139,7 +141,7 @@ The full table is `products/responsibility-map.json`; the load-bearing rows:
 | `packages/nuxt` | `expansion.project-profiles` | Nuxt project profile |
 | `packages/component-meta` | `expansion.kernel` (component-meta native/compat boundary per `/component-meta`) | component-meta TS surface |
 | `packages/typeinfo`, `packages/types` | `rev11.public-typeinfo` (typeinfo), `expansion.language-service` (TS utility types) | public typeinfo surface, injection utility types |
-| `packages/playground`, `packages/example`, `examples/` | `expansion.kernel` playground surface; `examples/reference` obligations specified in §7 | in-repo apps |
+| `packages/playground`, `packages/example`, `examples/` | `expansion.kernel` playground surface; `examples/reference` obligations specified in Part II §7 | in-repo apps |
 | conformance: `verter_vue_conformance`, `verter_svelte_conformance`, `packages/framework-conformance-harness`, `packages/vue-conformance-oracle`, `packages/svelte-runtime-tests` | `compiler-vue-compiler` / `compiler-svelte-compiler` | framework conformance oracles and harnesses |
 | `verter_diagnostics`, `verter_actions` | `expansion.lint` | lint rules and code actions |
 | `verter_bench`, `packages/benchmark` | `compiler.compiler-perf` | benchmark corpora and harnesses |
@@ -149,7 +151,7 @@ The full table is `products/responsibility-map.json`; the load-bearing rows:
 | `scripts/`, `xtask/`, `tools/` | `governance.github-control-plane` (CI/gate), release tooling under `governance.release-control` | build, gate, release scripts |
 | `tests/` (root), `test-corpora/` | per-feature test owners; aggregate rules in `/testing` | cross-cutting test evidence |
 
-Modules with no single surviving owner are not silently absorbed; they are debt rows (§5) assigned to ARH1 for an explicit visibility decision.
+Modules with no single surviving owner are not silently absorbed; they are debt rows (Part II §5) assigned to ARH1 for an explicit visibility decision.
 
 ## 3. Fan-in / fan-out and mutable state
 
@@ -173,7 +175,7 @@ Most-touched production files in the window: `crates/verter_scheduler/src/schedu
 
 - A file is a **god-module candidate** only with responsibility evidence: at least two distinct named responsibilities plus coupling evidence (shared-commit count or fan-in). Size alone never qualifies.
 - The five previously-split Phase 11 targets are **retired debt**, not god modules; reclassifying any of them (or their successors) requires the same fresh multi-responsibility evidence, not the pre-split history.
-- Current top candidates by evidence (full rows in the product): `verter_scheduler/src/scheduler.rs` (20,743 LOC; admission + batching + pool routing + cancellation in one file — three responsibilities; crate fan-in 5 and 19 file touches in the §4 window), `verter_session/src/project_semantic_dispatch/flow_return.rs` (15,021; flow-return dispatch + tests-adjacent fixtures), `verter_session/src/semantic_query.rs` (10,634; query envelope assembly), `verter_session/src/flow_slice_content.rs` (9,427; crate fan-in 9, 34 touches). `verter_semantic/src/analysis/html_intrinsics_data.rs` (9,971) is a generated data source and is explicitly not a god-module candidate.
+- Current top candidates by evidence (full rows in the product): `verter_scheduler/src/scheduler.rs` (20,743 LOC; admission + batching + pool routing + cancellation in one file — three responsibilities; crate fan-in 5 and 19 file touches in the Part II §4 window), `verter_session/src/project_semantic_dispatch/flow_return.rs` (15,021; flow-return dispatch + tests-adjacent fixtures), `verter_session/src/semantic_query.rs` (10,634; query envelope assembly), `verter_session/src/flow_slice_content.rs` (9,427; crate fan-in 9, 34 touches). `verter_semantic/src/analysis/html_intrinsics_data.rs` (9,971) is a generated data source and is explicitly not a god-module candidate.
 - Disposition: measurement and behavioral characterization are ARH2's independently acceptable work; ARH0 records the evidence and declares nothing split. No LOC target exists (forbidden design), and lower LOC alone is not success (ARH0-AC5).
 
 ## 6. Required capability matrix
@@ -198,11 +200,11 @@ Required-but-not-yet-implemented cells (web-product delta) stay owned by their t
 
 ARH0 ships contract bytes only; the following are binding on the named producers, not deliverables of this node:
 
-- **DOC1 — `examples/reference`:** build the executable example/reference-validation harness under `examples/reference` (currently absent; `examples/` today is the Vue examples app). Every capability row in §6 that is `implemented` must be demonstrable from `examples/reference` with the exact pinned versions above; `required-planned` rows must have a referenced example stub that fails honestly, not a green placeholder. Permissions, uncertainty and migration notes live with the examples DOC1 tests.
-- **ARH1 — responsibility/visibility/dependency contracts:** consume `products/responsibility-map.json` as the baseline; convert each `unassigned` debt row into an explicit visibility decision; do not reopen owners that survive per §2 without a charter amendment.
-- **ARH2 — measurements:** re-derive §1 populations with the recorded classification rules before making any complexity claim; bind budgets to the ratified performance methodology (`performance-gates.toml`) before measuring.
-- **ARH12 — drift prevention:** extend the existing `architecture_guards.rs` pattern (not a new status system) for any rule that survives review; coupling thresholds come from §4 re-measured, not from this snapshot.
-- **Public docs:** DOC2 updates contributor architecture documentation from §2–§5 when those nodes land.
+- **DOC1 — `examples/reference`:** build the executable example/reference-validation harness under `examples/reference` (currently absent; `examples/` today is the Vue examples app). Every capability row in Part II §6 that is `implemented` must be demonstrable from `examples/reference` with the exact pinned versions above; `required-planned` rows must have a referenced example stub that fails honestly, not a green placeholder. Permissions, uncertainty and migration notes live with the examples DOC1 tests.
+- **ARH1 — responsibility/visibility/dependency contracts:** consume `products/responsibility-map.json` as the baseline; convert each `unassigned` debt row into an explicit visibility decision; do not reopen owners that survive per Part II §2 without a charter amendment.
+- **ARH2 — measurements:** re-derive Part II §1 populations with the recorded classification rules before making any complexity claim; bind budgets to the ratified performance methodology (`performance-gates.toml`) before measuring.
+- **ARH12 — drift prevention:** extend the existing `architecture_guards.rs` pattern (not a new status system) for any rule that survives review; coupling thresholds come from Part II §4 re-measured, not from this snapshot.
+- **Public docs:** DOC2 updates contributor architecture documentation from Part II §2–§5 when those nodes land.
 
 ## 8. Deletion and retirement register
 
@@ -221,8 +223,8 @@ Dispositions with concrete owners; ARH0 deletes nothing (empty production mutati
 - **AC1:** outcome and consumers are the charter + this contract + the four products, validated by the sole owning interface `tests/architecture-health/ARH0/verify.mjs` (structural contract enforcement; a compile-time boundary does not exist for markdown contracts, and pretending one does would be a second authority).
 - **AC2:** the verifier rejects a god-module row whose only evidence is size, and rejects re-classifying a previously split module on split history alone; dirty twins in `arh0.test.mjs` prove both rejections fail-closed. This extends the existing `god_module_size_budget` evidence rather than duplicating it.
 - **AC3:** no state/query/map boundary is touched (zero production mutation). Fresh-vs-incremental, edit/revert, cancellation and ordering remain owned by their untouched owners (B4R0 lineage, LSO snapshot publication, scheduler admission); rationale recorded in `products/responsibility-map.json#ac3Rationale`.
-- **AC4:** VIM/DX capability evidence is §6 with exact host/profile pins; `examples/reference` obligations are specified for DOC1 (§7); uncertainty (rc/preview pins, `required-planned` rows) is stated, not hidden.
-- **AC5:** no new latency/work/allocation/RSS budget is created (none measured); obsolete-path retirement is out of scope for a zero-production node and bound to §8 owners. No LOC-reduction claim is made.
+- **AC4:** VIM/DX capability evidence is Part II §6 with exact host/profile pins; `examples/reference` obligations are specified for DOC1 (Part II §7); uncertainty (rc/preview pins, `required-planned` rows) is stated, not hidden.
+- **AC5:** no new latency/work/allocation/RSS budget is created (none measured); obsolete-path retirement is out of scope for a zero-production node and bound to Part II §8 owners. No LOC-reduction claim is made.
 
 ## Amendment rule
 

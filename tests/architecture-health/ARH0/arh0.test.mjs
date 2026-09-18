@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   loadAuthority,
+  loadContract,
   loadProducts,
   mandatoryCases,
   selectedCaseIds,
@@ -39,6 +40,22 @@ test("ARH0-ratification: clean products validate and cover every mandatory case 
     (c) => c.module === "crates/verter_session",
   );
   assert.ok(session.productionLoc > 400_000 && session.testLoc > session.productionLoc);
+});
+
+test("ARH0-ratification dirty twin: contract retaining only the WDX0 half fails (AC1)", () => {
+  const contract = loadContract();
+  const partTwo = contract.indexOf("# Part II");
+  assert.ok(partTwo > 0, "contract lost its Part II namespacing");
+  const wdx0Only = contract.slice(0, partTwo);
+  const result = validate(cloneProducts(), authority, wdx0Only);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH0-ratification" && e.code === "missing-contract-marker",
+    ),
+    JSON.stringify(result.errors),
+  );
+  assert.ok(selectedCaseIds(result).includes("ARH0-ratification"));
 });
 
 test("ARH0-god-evidence dirty twin: size-only god module is rejected (AC2)", () => {

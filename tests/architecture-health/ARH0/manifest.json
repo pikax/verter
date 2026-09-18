@@ -56,12 +56,12 @@
     },
     {
       "id": "ARH0-ratification",
-      "disposition": "accept",
-      "twins": ["clean products", "any recorded error"]
+      "disposition": "reject",
+      "twins": ["clean products", "missing-contract-marker (WDX0 Part I only)"]
     }
   ],
   "verify": "node tests/architecture-health/ARH0/verify.mjs",
   "test": "node --test tests/architecture-health/ARH0/arh0.test.mjs",
   "runtimeCorrectness": false,
-  "notes": "Contract-only constitution (0 production LOC). Products are measured evidence of candidate f69c7eee7; the verifier re-checks internal consistency, repo-authority owner resolution, on-disk path existence, verbatim version pins and the inventory-to-ownership coverage join (every inventoried module and every pnpm workspace package outside the inventoried packages/ globs has exactly one owner row or debt-row disposition). It does not re-walk the tree: re-derivation of populations is ARH2's obligation with the recorded classification rules."
+  "notes": "Contract-only constitution (0 production LOC). Products are measured evidence of candidate f69c7eee7; the verifier re-checks internal consistency, repo-authority owner resolution, on-disk path existence, verbatim version pins, the inventory-to-ownership coverage join (every inventoried module and every pnpm workspace package outside the inventoried packages/ globs has exactly one owner row or debt-row disposition) and the co-owned contract text (the ARH0 Part II markers of web-product-expansion-v1.md must be present; the two parts are namespaced because § numbers restart per part). It does not re-walk the tree: re-derivation of populations is ARH2's obligation with the recorded classification rules."
 }

@@ -927,7 +927,7 @@
       ],
       "evidence": [
         "documented: crate contract (sole sanctioned entry point)",
-        "documented: web-product-expansion-v1.md §3 substrate fan-in list",
+        "documented: web-product-expansion-v1.md Part II §3 substrate fan-in list",
         "graph: leaf, fan-in 13"
       ]
     },
@@ -1120,7 +1120,7 @@
         "generated TS transport-schema mirror of crates/verter_protocol/proto (buf/protoc-gen-es, freshness-gated)"
       ],
       "evidence": [
-        "documented: web-product-expansion-v1.md §1 generated classification and §6 transport schemas",
+        "documented: web-product-expansion-v1.md Part II §1 generated classification and Part II §6 transport schemas",
         "documented: capability matrix names it consumer of the transport-schemas row"
       ]
     },
@@ -1134,7 +1134,7 @@
         "published verter-mcp npm launcher for the MCP server binary surface"
       ],
       "evidence": [
-        "documented: web-product-expansion-v1.md §2 load-bearing table (expansion.cli MCP tool surface)"
+        "documented: web-product-expansion-v1.md Part II §2 load-bearing table (expansion.cli MCP tool surface)"
       ]
     },
     {
@@ -1147,7 +1147,7 @@
         "debug and capability-gate tooling (lldb attach helper, tsgo --api gate harness)"
       ],
       "evidence": [
-        "documented: web-product-expansion-v1.md §2 (tools/ under gate governance)",
+        "documented: web-product-expansion-v1.md Part II §2 (tools/ under gate governance)",
         "documented: tools/tsgo-api-gate README"
       ]
     },
@@ -1162,7 +1162,7 @@
       ],
       "evidence": [
         "workspace: pnpm-workspace.yaml literal package entry docs (outside the inventoried packages/ globs)",
-        "charter-declared: web-product-expansion-v1.md §7 public-docs obligation (DOC2)",
+        "charter-declared: web-product-expansion-v1.md Part II §7 public-docs obligation (DOC2)",
         "coupling: 103 shared commits with crates/verter_session (changeCoupling.topPairs)"
       ]
     }

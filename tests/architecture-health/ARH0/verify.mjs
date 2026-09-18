@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 /**
  * ARH0 inventory verifier — the sole owning interface of the live
- * responsibility and debt inventory (contracts/web-product-expansion-v1.md).
+ * responsibility and debt inventory (contracts/web-product-expansion-v1.md
+ * Part II, the ARH0 half of the co-owned two-part contract).
  *
  * Validates the four products against each other, against the repo authority
- * (trains = roadmap charters dirs, nodes = authority DAG ids) and against the
+ * (trains = roadmap charters dirs, nodes = authority DAG ids), against the
  * working tree (paths exist; implemented capability pins appear verbatim in
- * their pinned source file). ARH0-AC2's counterexample is enforced here:
+ * their pinned source file) and against the contract text itself (the ARH0
+ * Part II markers must be present; a merge that keeps only the WDX0 Part I
+ * fails ARH0-ratification). ARH0-AC2's counterexample is enforced here:
  * a god-module row whose only evidence is size is rejected, and a previously
  * split Phase 11 target cannot be reclassified without fresh multi-
  * responsibility evidence.
@@ -26,6 +29,25 @@ export const PRODUCT_FILES = Object.freeze([
   "capability-matrix.json",
   "debt-register.json",
 ]);
+
+export const CONTRACT_FILE = "web-product-expansion-v1.md";
+
+/**
+ * Markers identifying the ARH0 half of the co-owned contract. The file is
+ * namespaced in two parts (Part I = WDX0 ownership/disposition/claim law,
+ * Part II = this inventory) because § numbers restart per part; losing the
+ * Part II half or its namespacing must fail the ratification case.
+ */
+const ARH0_RATIFICATION_MARKERS = Object.freeze([
+  "# Part II",
+  "live responsibility and debt inventory",
+  "## 5. Complexity debt and god-module evidence",
+  "## Amendment rule",
+]);
+
+export function loadContract() {
+  return fs.readFileSync(path.join(ROADMAP_ROOT, "contracts", CONTRACT_FILE), "utf8");
+}
 
 export function loadProducts() {
   const products = {};
@@ -99,7 +121,7 @@ let authorityRef = null;
 const trainsHas = (id) => authorityRef?.trains.has(id) ?? false;
 const nodesHas = (id) => authorityRef?.nodeIds.has(id) ?? false;
 
-export function validate(products, authority) {
+export function validate(products, authority, contract = loadContract()) {
   authorityRef = authority;
   const errors = [];
   const gapIds = new Set((products["responsibility-map"].planAuthorityGap || []).map((g) => g.id));
@@ -120,8 +142,32 @@ export function validate(products, authority) {
   validateCapabilityMatrix(products["capability-matrix"], errors);
   validateDebtRegister(products["debt-register"], gapIds, errors);
   validateOwnershipCoverage(products, errors);
+  validateRatification(contract, errors);
   authorityRef = null;
   return { ok: errors.length === 0, errors };
+}
+
+/**
+ * ARH0-AC1: the outcome is the charter + this contract's Part II + the four
+ * products, validated by this sole owning interface. The verifier therefore
+ * fails closed when the co-owned contract loses its ARH0 half (a merge that
+ * keeps only the WDX0 Part I) or its part namespacing.
+ */
+function validateRatification(contract, errors) {
+  const caseId = "ARH0-ratification";
+  if (typeof contract !== "string" || contract.length === 0) {
+    errors.push({ caseId, code: "missing-contract-marker", detail: "contract text missing" });
+    return;
+  }
+  for (const marker of ARH0_RATIFICATION_MARKERS) {
+    if (!contract.includes(marker)) {
+      errors.push({
+        caseId,
+        code: "missing-contract-marker",
+        detail: `contract missing ARH0 Part II marker ${JSON.stringify(marker)}`,
+      });
+    }
+  }
 }
 
 function validateInventory(inv, errors) {
