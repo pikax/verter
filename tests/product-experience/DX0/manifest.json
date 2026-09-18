@@ -19,7 +19,8 @@
         "clean products",
         "gap-claimed-exposed",
         "unblocked-gap",
-        "missing-gap-row"
+        "missing-gap-row",
+        "partial-blocked-gap-without-owners"
       ]
     },
     {
@@ -29,7 +30,8 @@
         "clean products",
         "native-only-browser-claim",
         "unknown-host-class",
-        "portable-not-browser-executable"
+        "portable-not-browser-executable",
+        "native-playground-exposure"
       ]
     },
     {
@@ -39,7 +41,10 @@
         "clean products",
         "rail-substitution",
         "unlabelled-inspection",
-        "implicit-comparison"
+        "implicit-comparison",
+        "implicit-comparison-default",
+        "stale-implicit-comparison-gap",
+        "rail-population-drift"
       ]
     },
     {
@@ -56,7 +61,12 @@
         "lint-count-drift",
         "missing-contract-marker",
         "missing-preserved-client",
-        "provider-modes"
+        "provider-modes",
+        "missing-typeinfo-inventory",
+        "missing-mapping-inventory",
+        "missing-typeinfo-row",
+        "missing-mapping-row",
+        "docs-only-production-capable"
       ]
     }
   ],

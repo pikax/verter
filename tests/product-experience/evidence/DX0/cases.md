@@ -11,7 +11,7 @@ Commands (run on the candidate; do not treat this file as an execution transcrip
 
 Deletion population this node: empty. No route is displaced or retired by DX0.
 
-DX0.1 grounding: all five editor clients (VS Code, Neovim, Helix, Lapce, Zed) were inventoried from their shipped sources before this constitution proposed anything; no replacement is proposed. Playground gaps (tsgo project check, project-wide lint, component-meta, formatting, flow facts) are catalogued with promotion blocked.
+DX0.1 grounding: all five editor clients (VS Code, Neovim, Helix, Lapce, Zed) were inventoried from their shipped sources before this constitution proposed anything; no replacement is proposed. Playground gaps (tsgo project check, project-wide lint, component-meta, formatting, flow facts, native editor hover/diagnostics/rename, LSP-channel lint and component-usage diagnostics, TypeInfo queries, VS Code source-map commands) are catalogued with promotion blocked. NativeOnly editor operations are catalogued as gaps on their own rows; their browser TS-worker analogues are separate Portable rows (playground.hover/diagnostics/rename), and the playground.hover row records the live unlabelled TypeScript+analysis hover merge as an implicit-comparison gap with promotion blocked.
 
 AC-BASIS is bound to DX2/DX8 as downstream runtime-test owners; AC-RESOURCE is not applicable (no hot paths, no UI, 0 production LOC); AC-EXPOSURE registration is owned by DX1.
 

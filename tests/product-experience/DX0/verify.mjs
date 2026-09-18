@@ -41,6 +41,26 @@ const REQUIRED_PLAYGROUND_GAPS = ["tsc.project-check.vue", "tsc.project-check.sv
 const REQUIRED_SEMANTIC_ROWS = ["lsp.hover", "lsp.diagnostics"];
 const REQUIRED_INSPECTION_FLOW_ROW = "inspection.flow-return";
 
+/** Pinned DX0.1 populations: TypeInfo queries and mappings must have rows, not just prose. */
+const REQUIRED_TYPEINFO_ROWS = [
+  "typeinfo.graph-operations",
+  "mcp.type-queries",
+  "lsp.binding-types",
+];
+const REQUIRED_MAPPING_ROWS = ["vscode.source-map", "playground.source-map-view"];
+const REQUIRED_TYPEINFO_EVIDENCE = [
+  "crates/verter_protocol/proto/verter/v1/typeinfo.proto",
+  "packages/typeinfo/package.json",
+  "crates/verter_mcp/src/server.rs",
+];
+const REQUIRED_MAPPING_EVIDENCE = [
+  "packages/vue-vscode/package.json",
+  "packages/playground/src/core/sourcemap.ts",
+];
+
+/** STP0 lineage: docs-only DAG kinds with a zero production budget are not production-capable receivers. */
+const DOCS_ONLY_KINDS = new Set(["lock", "contract", "constitution", "history"]);
+
 const REQUIRED_RECEIVERS = [
   "DX1",
   "DX1G",
@@ -110,7 +130,18 @@ export function loadRepositoryFacts() {
     "utf8",
   );
   const lintRuleCount = (rulesSource.match(/registry\.register/g) || []).length;
-  return { surfaceIds, domainIds, lintRuleCount };
+  // DX0-AC3 grounding: does the live playground hover provider still concatenate
+  // compiler-analysis hover into the TypeScript hover contents array? Both
+  // pushes live in provideHover in lspProviders.ts; the product must catalogue
+  // the merge as long as the live route has it, and drop the gap once it is
+  // split or labelled.
+  const hoverSource = fs.readFileSync(
+    path.join(REPO_ROOT, "packages/playground/src/editor/lspProviders.ts"),
+    "utf8",
+  );
+  const playgroundHoverMergesAnalysis =
+    hoverSource.includes("tsBridge.getHover") && hoverSource.includes("hoverForWord");
+  return { surfaceIds, domainIds, lintRuleCount, playgroundHoverMergesAnalysis };
 }
 
 function missingEvidence(caseId, paths) {
@@ -139,7 +170,7 @@ export function validate(
   errors.push(...validateExposure(products.exposure, products.hostClass, facts));
   errors.push(...validateHostClass(products.hostClass));
   errors.push(...validateReceipt(products.receipt));
-  errors.push(...validateInventory(products.inventory, facts));
+  errors.push(...validateInventory(products.inventory, products.exposure, facts));
   errors.push(...validateRails(products.rails, products.exposure));
   errors.push(...validateOwnership(products.ownership, authority));
   errors.push(...validateRatification(products, contracts, authority, facts));
@@ -287,13 +318,26 @@ function validateExposure(exposure, hostClass, facts) {
         );
       }
     } else if (playground.promotionBlocked === true) {
-      errors.push(
-        err(
-          "DX0-AC1",
-          "unblocked-playground-gap",
-          `exposed/partial feature ${row.id} must not claim promotion-blocked`,
-        ),
-      );
+      // A partial exposure may carry an open gap, but only with a named owner.
+      if (playground.status !== "partial") {
+        errors.push(
+          err(
+            "DX0-AC1",
+            "unblocked-playground-gap",
+            `exposed feature ${row.id} must not claim promotion-blocked`,
+          ),
+        );
+      }
+      const blocked = playground.blockedUntil || {};
+      if (!blocked.route || !blocked.replayCase) {
+        errors.push(
+          err(
+            "DX0-AC1",
+            "unblocked-playground-gap",
+            `partial blocked feature ${row.id} lacks route/replayCase owners`,
+          ),
+        );
+      }
     }
     if (
       (playground.status === "exposed" || playground.status === "partial") &&
@@ -304,6 +348,69 @@ function validateExposure(exposure, hostClass, facts) {
           "DX0-AC1",
           "playground-gap-claimed-exposed",
           `playground feature ${row.id} is ${playground.status} without an executable browser route and test`,
+        ),
+      );
+    }
+    // DX0-AC2 / contracts §3: a NativeOnly or ExternalOwner-native operation
+    // may appear in a browser product only as a companion route or labelled
+    // gap, so presenting its own browser exposure requires shipped build
+    // evidence; the browser analog is a separate Portable/ExternalOwner row.
+    if (
+      (row.hostExecutionClass === "NativeOnly" || row.hostExecutionClass === "ExternalOwner") &&
+      (playground.status === "exposed" || playground.status === "partial") &&
+      !row.browserBuildEvidence
+    ) {
+      errors.push(
+        err(
+          "DX0-AC2",
+          "native-playground-exposure",
+          `${row.hostExecutionClass} operation ${row.id} is playground ${playground.status} without companion/build evidence`,
+        ),
+      );
+    }
+    // DX0-AC3: while the live playground hover route concatenates TypeScript
+    // and compiler-analysis content into one default answer, that implicit
+    // comparison must be catalogued as a blocked gap, never claimed as a clean
+    // exposure; once the live route is split or labelled, the gap goes stale.
+    const merge = playground.unlabelledAnalysisMerge;
+    if (merge) {
+      if (
+        playground.status !== "partial" ||
+        playground.promotionBlocked !== true ||
+        !Array.isArray(merge.evidence) ||
+        merge.evidence.length === 0
+      ) {
+        errors.push(
+          err(
+            "DX0-AC3",
+            "implicit-comparison-default",
+            `implicit-comparison gap on ${row.id} must be partial, promotion-blocked and evidence-backed`,
+          ),
+        );
+      }
+      if (!facts.playgroundHoverMergesAnalysis) {
+        errors.push(
+          err(
+            "DX0-AC3",
+            "stale-implicit-comparison-gap",
+            `${row.id} still catalogues a hover merge the live route no longer has`,
+          ),
+        );
+      }
+      if (Array.isArray(merge.evidence)) {
+        errors.push(...missingEvidence("DX0-AC3", merge.evidence));
+      }
+    } else if (
+      facts.playgroundHoverMergesAnalysis &&
+      row.answerRail === "semantic" &&
+      typeof playground.route === "string" &&
+      playground.route.includes("lspProviders.ts")
+    ) {
+      errors.push(
+        err(
+          "DX0-AC3",
+          "implicit-comparison-default",
+          `semantic-rail playground route on ${row.id} cites lspProviders.ts, whose provideHover concatenates TypeScript and analysis hover as the default answer`,
         ),
       );
     }
@@ -455,7 +562,7 @@ function validateReceipt(receipt) {
   return errors;
 }
 
-function validateInventory(inventory, facts) {
+function validateInventory(inventory, exposure, facts) {
   const errors = [];
   if (inventory?.id !== "cross-surface-inventory.v1") {
     return [err("DX0-ratification", "missing-product", "cross-surface inventory id is absent")];
@@ -524,6 +631,120 @@ function validateInventory(inventory, facts) {
   }
   if (inventory.analysis?.lint?.evidence) {
     errors.push(...missingEvidence("DX0-ratification", inventory.analysis.lint.evidence));
+  }
+  // DX0.1: the capturedAt note claims TypeInfo queries and mappings are
+  // inventoried, so the categories, their evidence, and exposure rows must
+  // exist; the claim may not stay prose-only.
+  const typeInfo = inventory.analysis?.typeInfoQueries;
+  if (!typeInfo) {
+    errors.push(
+      err(
+        "DX0-ratification",
+        "missing-typeinfo-inventory",
+        "DX0.1 TypeInfo query inventory is absent",
+      ),
+    );
+  } else {
+    const graphOps = typeInfo.protocolGraphOperations || [];
+    if (graphOps.length !== 8) {
+      errors.push(
+        err(
+          "DX0-ratification",
+          "missing-typeinfo-inventory",
+          `TypeInfo graph operations must list the 8 GRAPH_OPERATION_* values, got ${graphOps.length}`,
+        ),
+      );
+    }
+    const mcpTools = typeInfo.mcpTools || [];
+    for (const tool of ["get_framework_surface", "get_component_types", "get_type_errors"]) {
+      if (!mcpTools.includes(tool)) {
+        errors.push(
+          err(
+            "DX0-ratification",
+            "missing-typeinfo-inventory",
+            `TypeInfo MCP tool ${tool} is missing`,
+          ),
+        );
+      }
+    }
+    if (!(typeInfo.lspCustomMethods || []).includes("$/verter/getBindingTypes")) {
+      errors.push(
+        err(
+          "DX0-ratification",
+          "missing-typeinfo-inventory",
+          "$/verter/getBindingTypes is not inventoried as a TypeInfo custom method",
+        ),
+      );
+    }
+    for (const evidence of REQUIRED_TYPEINFO_EVIDENCE) {
+      if (!(typeInfo.evidence || []).includes(evidence)) {
+        errors.push(
+          err(
+            "DX0-ratification",
+            "missing-typeinfo-inventory",
+            `TypeInfo inventory does not cite ${evidence}`,
+          ),
+        );
+      }
+    }
+    errors.push(...missingEvidence("DX0-ratification", typeInfo.evidence || []));
+  }
+  const mappings = inventory.analysis?.mappings;
+  if (!mappings) {
+    errors.push(
+      err(
+        "DX0-ratification",
+        "missing-mapping-inventory",
+        "DX0.1 mapping/source-map inventory is absent",
+      ),
+    );
+  } else {
+    for (const command of ["verter.showSourceMapForFile", "verter.showSourceMapVisualization"]) {
+      if (!(mappings.vscodeCommands || []).includes(command)) {
+        errors.push(
+          err(
+            "DX0-ratification",
+            "missing-mapping-inventory",
+            `mapping command ${command} is not inventoried`,
+          ),
+        );
+      }
+    }
+    for (const evidence of REQUIRED_MAPPING_EVIDENCE) {
+      if (!(mappings.evidence || []).includes(evidence)) {
+        errors.push(
+          err(
+            "DX0-ratification",
+            "missing-mapping-inventory",
+            `mapping inventory does not cite ${evidence}`,
+          ),
+        );
+      }
+    }
+    errors.push(...missingEvidence("DX0-ratification", mappings.evidence || []));
+  }
+  const rowIds = new Set((exposure?.operations || []).map((row) => row.id));
+  for (const id of REQUIRED_TYPEINFO_ROWS) {
+    if (!rowIds.has(id)) {
+      errors.push(
+        err(
+          "DX0-ratification",
+          "missing-typeinfo-row",
+          `required TypeInfo exposure row ${id} is missing`,
+        ),
+      );
+    }
+  }
+  for (const id of REQUIRED_MAPPING_ROWS) {
+    if (!rowIds.has(id)) {
+      errors.push(
+        err(
+          "DX0-ratification",
+          "missing-mapping-row",
+          `required mapping exposure row ${id} is missing`,
+        ),
+      );
+    }
   }
   const gaps = inventory.playgroundGaps || [];
   if (!gaps.some((gap) => gap.status === "missing")) {
@@ -599,6 +820,45 @@ function validateRails(rails, exposure) {
       ),
     );
   }
+  // Rail closure: the rails-policy operation lists are closed against the
+  // exposure contract's answerRail values in both directions, so relabelling
+  // a listed operation (or adding an unlisted rail member) is a failure.
+  const byRail = (rail) =>
+    new Set(rows.filter((row) => row.answerRail === rail).map((row) => row.id));
+  for (const [railName, listed] of [
+    ["semantic", rails.semanticRail?.operations],
+    ["inspection", rails.inspectionRail?.operations],
+  ]) {
+    if (!Array.isArray(listed)) {
+      errors.push(
+        err("DX0-AC3", "rail-population-drift", `${railName} rail operations list is missing`),
+      );
+      continue;
+    }
+    const live = byRail(railName);
+    for (const id of listed) {
+      if (!live.has(id)) {
+        errors.push(
+          err(
+            "DX0-AC3",
+            "rail-population-drift",
+            `${railName} rail lists ${id}, but its exposure row is not on the ${railName} rail`,
+          ),
+        );
+      }
+    }
+    for (const id of live) {
+      if (!listed.includes(id)) {
+        errors.push(
+          err(
+            "DX0-AC3",
+            "rail-population-drift",
+            `${railName}-rail operation ${id} is missing from the ${railName} operations list`,
+          ),
+        );
+      }
+    }
+  }
   return errors;
 }
 
@@ -641,6 +901,25 @@ function validateOwnership(ownership, authority) {
           "DX0-ratification",
           "missing-amendment",
           `receiving amendment ${row.receiver || "?"} is malformed`,
+        ),
+      );
+    }
+  }
+  // DX0-AC-OWNER (STP0 DOCS_ONLY_KINDS lineage): a receiver whose DAG kind is
+  // lock/contract/constitution/history with a zero production budget is not a
+  // production-capable receiver; the bit is the production-authority claim
+  // future nodes read.
+  const nodesById = new Map((authority.nodes || []).map((node) => [node.id, node]));
+  for (const row of ownership?.receivingAmendments || []) {
+    const node = nodesById.get(row.receiver);
+    if (!node) continue;
+    const docsOnly = DOCS_ONLY_KINDS.has(node.kind) && node.max_production_loc === 0;
+    if (docsOnly && row.productionCapable === true) {
+      errors.push(
+        err(
+          "DX0-ratification",
+          "docs-only-production-capable",
+          `receiver ${row.receiver} is a ${node.kind} node with zero production budget and must not claim productionCapable`,
         ),
       );
     }

@@ -109,6 +109,97 @@ test("DX0-AC2: a Portable operation denied browser execution is rejected", () =>
   );
 });
 
+test("DX0-AC2: a NativeOnly operation presented as playground-exposed is rejected", () => {
+  const dirty = cloneProducts(clean);
+  const row = operation(dirty, "lsp.hover");
+  row.playground = {
+    status: "exposed",
+    route:
+      "Monaco hover provider over the browser TS worker (packages/playground/src/editor/lspProviders.ts)",
+    test: "packages/playground vitest provider suites",
+    evidence: ["packages/playground/src/editor/tsWorker.ts"],
+  };
+  const result = validate(dirty, contracts, authority, facts);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (error) => error.caseId === "DX0-AC2" && error.code === "native-playground-exposure",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("DX0-AC3: an unlabelled TS+analysis hover merge claimed as a clean exposure is rejected", () => {
+  const dirty = cloneProducts(clean);
+  const row = operation(dirty, "playground.hover");
+  delete row.playground.unlabelledAnalysisMerge;
+  row.playground.status = "exposed";
+  delete row.playground.promotionBlocked;
+  delete row.playground.blockedUntil;
+  const result = validate(dirty, contracts, authority, facts);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (error) => error.caseId === "DX0-AC3" && error.code === "implicit-comparison-default",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("DX0-AC3: a catalogued hover merge must stay partial, blocked and evidence-backed", () => {
+  const dirty = cloneProducts(clean);
+  const row = operation(dirty, "playground.hover");
+  row.playground.status = "exposed";
+  const result = validate(dirty, contracts, authority, facts);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (error) => error.caseId === "DX0-AC3" && error.code === "implicit-comparison-default",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("DX0-AC3: a stale implicit-comparison gap after the live split is rejected", () => {
+  const split = { ...facts, playgroundHoverMergesAnalysis: false };
+  const result = validate(clean, contracts, authority, split);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (error) => error.caseId === "DX0-AC3" && error.code === "stale-implicit-comparison-gap",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("DX0-AC3: relabelling a rail-listed operation is rejected", () => {
+  const dirty = cloneProducts(clean);
+  const row = operation(dirty, "lsp.component-meta");
+  row.answerRail = "semantic";
+  row.semanticAuthority = "typescript";
+  const result = validate(dirty, contracts, authority, facts);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (error) => error.caseId === "DX0-AC3" && error.code === "rail-population-drift",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("DX0-AC1: a partial blocked playground gap without owners is rejected", () => {
+  const dirty = cloneProducts(clean);
+  delete operation(dirty, "playground.hover").playground.blockedUntil;
+  const result = validate(dirty, contracts, authority, facts);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (error) => error.caseId === "DX0-AC1" && error.code === "unblocked-playground-gap",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
 test("DX0-AC3: routing native flow facts onto the semantic rail is rejected", () => {
   const dirty = cloneProducts(clean);
   const row = operation(dirty, "inspection.flow-return");
@@ -224,6 +315,68 @@ test("DX0-ratification: inventory lint rule count drift is rejected", () => {
   assert.equal(result.ok, false);
   assert.ok(
     result.errors.some((error) => error.code === "lint-count-drift"),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("DX0-ratification: dropping the TypeInfo query inventory is rejected", () => {
+  const dirty = cloneProducts(clean);
+  delete dirty.inventory.analysis.typeInfoQueries;
+  const result = validate(dirty, contracts, authority, facts);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((error) => error.code === "missing-typeinfo-inventory"),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("DX0-ratification: dropping the mapping/source-map inventory is rejected", () => {
+  const dirty = cloneProducts(clean);
+  delete dirty.inventory.analysis.mappings;
+  const result = validate(dirty, contracts, authority, facts);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((error) => error.code === "missing-mapping-inventory"),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("DX0-ratification: dropping a required TypeInfo exposure row is rejected", () => {
+  const dirty = cloneProducts(clean);
+  dirty.exposure.operations = dirty.exposure.operations.filter(
+    (row) => row.id !== "typeinfo.graph-operations",
+  );
+  const result = validate(dirty, contracts, authority, facts);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((error) => error.code === "missing-typeinfo-row"),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("DX0-ratification: dropping a required mapping exposure row is rejected", () => {
+  const dirty = cloneProducts(clean);
+  dirty.exposure.operations = dirty.exposure.operations.filter(
+    (row) => row.id !== "vscode.source-map",
+  );
+  const result = validate(dirty, contracts, authority, facts);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((error) => error.code === "missing-mapping-row"),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("DX0-ratification: a docs-only receiver claiming productionCapable is rejected", () => {
+  const dirty = cloneProducts(clean);
+  const row = dirty.ownership.receivingAmendments.find(
+    (candidate) => candidate.receiver === "EPR0",
+  );
+  row.productionCapable = true;
+  const result = validate(dirty, contracts, authority, facts);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((error) => error.code === "docs-only-production-capable"),
     JSON.stringify(result.errors),
   );
 });

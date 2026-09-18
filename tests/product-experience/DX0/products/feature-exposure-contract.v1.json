@@ -36,19 +36,60 @@
         "test": "editors/nvim/tests/smoke_spec.lua; extensions lapce/zed contract_plan examples"
       },
       "playground": {
-        "status": "exposed",
-        "route": "Monaco hover provider over the browser TS worker (packages/playground/src/editor/lspProviders.ts)",
-        "test": "packages/playground vitest provider suites",
-        "evidence": ["packages/playground/src/editor/tsWorker.ts"]
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "explicitly selected local-native execution via the DX4/DX5 companion route; the browser TS-worker hover is a separate Portable producer (playground.hover), not this operation's exposure",
+          "replayCase": "DX1 exposure registration plus a DX6/DX6R-lineage replay case"
+        },
+        "evidence": ["packages/playground/src/editor/tsWorker.ts", "packages/playground/src/editor/lspProviders.ts"],
+        "reason": "the playground hover route runs on the pinned browser typescript@6.0.3 worker, a different engine from the session TypeProvider; presenting it as this NativeOnly operation's exposure would catalogue a hidden replacement engine"
       },
       "browserExecutable": false
+    },
+    {
+      "id": "playground.hover",
+      "operation": "playground in-browser hover over the pinned browser TS worker",
+      "profile": "browser",
+      "version": "1",
+      "producerOwner": "Monaco hover provider over the browser typescript@6.0.3 worker (packages/playground/src/editor/lspProviders.ts); a distinct producer from crates/verter_lsp, not a port of it",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "Portable",
+      "answerRail": "semantic",
+      "semanticAuthority": "typescript",
+      "catalogSurfaces": [],
+      "exposure": {
+        "state": "executable",
+        "route": "Monaco hover provider (packages/playground/src/editor/lspProviders.ts provideHover)",
+        "replayCase": "playground hover provider suites",
+        "test": "packages/playground vitest provider suites"
+      },
+      "playground": {
+        "status": "partial",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "labelled split of provideHover: the TypeScript answer as the default, compiler-analysis hover as an explicitly labelled inspection supplement or a per-request comparison selection (rails-policy comparisonRail)",
+          "replayCase": "DX1 exposure registration plus a playground provider suite that fails on unlabelled concatenation"
+        },
+        "route": "Monaco hover provider (packages/playground/src/editor/lspProviders.ts provideHover)",
+        "test": "packages/playground vitest provider suites",
+        "scope": "TypeScript hover via the browser worker is executable; the provider additionally concatenates compiler-analysis hover into the same contents array as the default answer",
+        "unlabelledAnalysisMerge": {
+          "defect": "provideHover concatenates tsBridge.getHover and hoverForWord(file.compiled.analysis) into one Monaco contents array with no labelling and no explicit comparison selection, so an implicit comparison is the default hover answer",
+          "comparisonRailSelection": "absent",
+          "evidence": ["packages/playground/src/editor/lspProviders.ts"]
+        },
+        "evidence": ["packages/playground/src/editor/lspProviders.ts", "packages/playground/src/editor/tsWorker.ts"]
+      },
+      "browserExecutable": true
     },
     {
       "id": "lsp.diagnostics",
       "operation": "textDocument/publishDiagnostics (TypeScript projection diagnostics)",
       "profile": "editor",
       "version": "lsp-3.17",
-      "producerOwner": "crates/verter_lsp diagnostics bridge over the session TypeProvider",
+      "producerOwner": "crates/verter_lsp diagnostics mapper over the session TypeProvider snapshot",
       "maturity": "preview",
       "obligation": "RequiredCurrent",
       "hostExecutionClass": "NativeOnly",
@@ -57,16 +98,108 @@
       "catalogSurfaces": ["vue.language_service.typing", "svelte.language_service.typing"],
       "exposure": {
         "state": "executable",
-        "route": "push diagnostics (crates/verter_lsp/src/features/diagnostics_bridge.rs)",
+        "route": "push diagnostics from the session DiagnosticsSnapshot, including TypeProvider type errors (crates/verter_lsp/src/features/diagnostics.rs map_diagnostics)",
         "replayCase": "editor client diagnostic publications suites",
         "test": "editors/nvim/tests/diagnostic_publications_spec.lua"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "explicitly selected local-native execution via the DX4/DX5 companion route; the browser TS-worker diagnostics are a separate Portable producer (playground.diagnostics), not this operation's exposure",
+          "replayCase": "DX1 exposure registration plus a DX6/DX6R-lineage replay case"
+        },
+        "evidence": ["packages/playground/src/editor/tsService.ts", "packages/playground/src/editor/tsWorker.ts"],
+        "reason": "the playground diagnostics route queries the pinned browser typescript@6.0.3 worker, a different engine from the session TypeProvider; presenting it as this NativeOnly operation's exposure would catalogue a hidden replacement engine"
+      },
+      "browserExecutable": false
+    },
+    {
+      "id": "playground.diagnostics",
+      "operation": "playground in-browser per-file TypeScript diagnostics over the pinned browser TS worker",
+      "profile": "browser",
+      "version": "1",
+      "producerOwner": "playground diagnostics tab over the browser typescript@6.0.3 worker (packages/playground/src/editor/tsService.ts); a distinct producer from crates/verter_lsp, not a port of it",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "Portable",
+      "answerRail": "semantic",
+      "semanticAuthority": "typescript",
+      "catalogSurfaces": [],
+      "exposure": {
+        "state": "executable",
+        "route": "Diagnostics tab badge over per-file browser TS worker queries (packages/playground/src/editor/tsService.ts)",
+        "replayCase": "playground diagnostics suites",
+        "test": "packages/playground vitest diagnostics suites"
       },
       "playground": {
         "status": "exposed",
         "route": "Diagnostics tab badge over per-file browser TS worker queries (packages/playground/src/editor/tsService.ts)",
         "test": "packages/playground vitest diagnostics suites",
-        "scope": "per-file TypeScript diagnostics via the pinned browser worker",
-        "evidence": ["packages/playground/src/editor/tsWorker.ts"]
+        "scope": "per-file TypeScript diagnostics via the pinned browser worker; lint lives on the separately labelled playground.lint-file operation, not this channel",
+        "evidence": ["packages/playground/src/editor/tsService.ts", "packages/playground/src/editor/tsWorker.ts"]
+      },
+      "browserExecutable": true
+    },
+    {
+      "id": "lsp.lint-diagnostics",
+      "operation": "textDocument/publishDiagnostics (verter lint rules share the method)",
+      "profile": "editor",
+      "version": "lsp-3.17",
+      "producerOwner": "crates/verter_lsp diagnostics bridge running crates/verter_diagnostics lint rules",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "labelled": true,
+      "provenanceField": "lint diagnostic codes/source distinguish lint items on the shared publishDiagnostics channel (concatenated in crates/verter_lsp/src/server_utils.rs publishDiagnostics)",
+      "catalogSurfaces": ["vue.host_lint", "svelte.host_lint"],
+      "exposure": {
+        "state": "executable",
+        "route": "linter bridge on push diagnostics (crates/verter_lsp/src/features/diagnostics_bridge.rs run_linter; concatenated in crates/verter_lsp/src/server_utils.rs)",
+        "replayCase": "editor client diagnostic publications suites",
+        "test": "editors/nvim/tests/diagnostic_publications_spec.lua"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "registered browser adapter through the DX2 inspection facade; the browser analog is the separately labelled playground.lint-file Portable operation",
+          "replayCase": "DX1 exposure registration plus a replay case"
+        },
+        "evidence": ["packages/playground/src/core/compiler.ts"],
+        "reason": "no LSP-channel lint exists in the browser; the playground lints the active file only through the WASM host (playground.lint-file)"
+      },
+      "browserExecutable": false
+    },
+    {
+      "id": "lsp.component-usage-diagnostics",
+      "operation": "textDocument/publishDiagnostics (component usage: unknown props, unknown v-models)",
+      "profile": "editor",
+      "version": "lsp-3.17",
+      "producerOwner": "crates/verter_lsp component diagnostics over the host component resolution",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "labelled": true,
+      "provenanceField": "component-usage diagnostic codes distinguish unknown-prop/unknown-v-model items on the shared publishDiagnostics channel (concatenated in crates/verter_lsp/src/server_utils.rs publishDiagnostics)",
+      "catalogSurfaces": [],
+      "exposure": {
+        "state": "executable",
+        "route": "component usage diagnostics on push diagnostics (crates/verter_lsp/src/features/component_diagnostics.rs; concatenated in crates/verter_lsp/src/server_utils.rs)",
+        "replayCase": "editor client diagnostic publications suites",
+        "test": "crates/verter_lsp diagnostics suites"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "registered browser adapter through the DX2 inspection facade",
+          "replayCase": "DX1 exposure registration plus a replay case"
+        },
+        "evidence": ["packages/playground/src/core/compiler.ts"],
+        "reason": "the playground analysis snapshot surfaces template usage facts but publishes no component-usage diagnostics stream"
       },
       "browserExecutable": false
     },
@@ -88,12 +221,41 @@
         "test": "editors/nvim/tests/smoke_spec.lua"
       },
       "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "explicitly selected local-native execution via the DX4/DX5 companion route; the browser TS-worker rename is a separate Portable producer (playground.rename), not this operation's exposure",
+          "replayCase": "DX1 exposure registration plus a DX6/DX6R-lineage replay case"
+        },
+        "evidence": ["packages/playground/src/editor/lspProviders.ts", "packages/playground/src/editor/tsWorker.ts"],
+        "reason": "the playground rename route runs on the pinned browser typescript@6.0.3 worker, a different engine from the session TypeProvider edit operations; presenting it as this NativeOnly operation's exposure would catalogue a hidden replacement engine"
+      },
+      "browserExecutable": false
+    },
+    {
+      "id": "playground.rename",
+      "operation": "playground in-browser rename over the pinned browser TS worker",
+      "profile": "browser",
+      "version": "1",
+      "producerOwner": "Monaco rename provider over the browser typescript@6.0.3 worker (packages/playground/src/editor/lspProviders.ts); a distinct producer from crates/verter_lsp, not a port of it",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "Portable",
+      "answerRail": "none",
+      "catalogSurfaces": [],
+      "exposure": {
+        "state": "executable",
+        "route": "Monaco rename provider (packages/playground/src/editor/lspProviders.ts)",
+        "replayCase": "playground rename provider suites",
+        "test": "packages/playground vitest provider suites"
+      },
+      "playground": {
         "status": "exposed",
         "route": "Monaco rename provider over the browser TS worker (packages/playground/src/editor/lspProviders.ts)",
         "test": "packages/playground vitest provider suites",
         "evidence": ["packages/playground/src/editor/tsWorker.ts"]
       },
-      "browserExecutable": false
+      "browserExecutable": true
     },
     {
       "id": "tsc.project-check.vue",
@@ -282,6 +444,157 @@
         "reason": "flow facts are session-internal with audit-record edges only; no browser surface exists"
       },
       "browserExecutable": false
+    },
+    {
+      "id": "typeinfo.graph-operations",
+      "operation": "TypeInfo graph queries (resolve-symbol, evaluate-expression, project-path, relate, framework-surfaces, expand-around, flow-narrowing-at, contextual-type-at)",
+      "profile": "inspection",
+      "version": "1",
+      "producerOwner": "crates/verter_session typeinfo substrate over the verter_protocol graph operations; JS bindings in @verter/typeinfo (list symbols, resolve named symbol, evaluate type expression)",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "labelled": true,
+      "provenanceField": "GRAPH_OPERATION_* ids and typeinfo DTO provenance on verter_protocol payloads (crates/verter_protocol/proto/verter/v1/typeinfo.proto); the substrate is Verter-native inspection and never supplies replacement TypeScript answers",
+      "catalogSurfaces": [],
+      "exposure": {
+        "state": "executable",
+        "route": "proto GraphOperation surface executed by the verter_session typeinfo substrate; @verter/typeinfo list/resolve/evaluate bindings",
+        "replayCase": "packages/typeinfo vitest suites",
+        "test": "packages/typeinfo vitest suites"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "registered inspection projection through the DX2 inspection facade or the DX3 evidence projections",
+          "replayCase": "DX1 exposure registration plus a replay case"
+        },
+        "evidence": ["packages/typeinfo/package.json", "crates/verter_protocol/proto/verter/v1/typeinfo.proto"],
+        "reason": "session-internal substrate with JS bindings only; no browser surface exists"
+      },
+      "browserExecutable": false
+    },
+    {
+      "id": "mcp.type-queries",
+      "operation": "verter-mcp type query tools (get_framework_surface, get_component_types, get_type_errors)",
+      "profile": "agent",
+      "version": "1",
+      "producerOwner": "crates/verter_mcp over the verter_session typeinfo substrate and framework-surface executor",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "labelled": true,
+      "provenanceField": "per-tool result payloads name their substrate (framework-surface executor, component types, type-level diagnostics); native type inspection, never replacement TypeScript answers",
+      "catalogSurfaces": [],
+      "exposure": {
+        "state": "executable",
+        "route": "MCP tools (crates/verter_mcp/src/server.rs get_framework_surface, get_component_types, get_type_errors)",
+        "replayCase": "mcp/README.md tool table scenarios",
+        "test": "crates/verter_mcp test suite"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "registered inspection projection through the DX2 inspection facade or explicit local-native execution",
+          "replayCase": "DX1 exposure registration plus a replay case"
+        },
+        "evidence": ["crates/verter_mcp/src/server.rs", "mcp/README.md"],
+        "reason": "agent-tool surface with no browser adapter; native type inspection is separately labelled from TypeScript answers"
+      },
+      "browserExecutable": false
+    },
+    {
+      "id": "lsp.binding-types",
+      "operation": "$/verter/getBindingTypes custom method",
+      "profile": "inspection",
+      "version": "1",
+      "producerOwner": "crates/verter_lsp custom method over the session analysis snapshot",
+      "maturity": "experimental",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "labelled": true,
+      "provenanceField": "the $/verter method namespace itself labels the payload as Verter-native inspection, distinct from textDocument semantic answers",
+      "catalogSurfaces": [],
+      "exposure": {
+        "state": "executable",
+        "route": "LSP custom method (crates/verter_lsp/src/main.rs registration; listed in crates/verter_lsp/src/capabilities.rs custom methods)",
+        "replayCase": "editor custom-method contract suites",
+        "test": "crates/verter_lsp test suite"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "registered browser adapter through the DX2 inspection facade",
+          "replayCase": "DX1 exposure registration plus a replay case"
+        },
+        "evidence": ["crates/verter_lsp/src/main.rs"],
+        "reason": "LSP custom method with no browser surface; the playground analysis snapshot is a different, separately catalogued producer"
+      },
+      "browserExecutable": false
+    },
+    {
+      "id": "vscode.source-map",
+      "operation": "VS Code source-map commands (verter.showSourceMapForFile, verter.showSourceMapVisualization)",
+      "profile": "editor",
+      "version": "1",
+      "producerOwner": "packages/vue-vscode commands over the compiler source-map outputs",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "labelled": true,
+      "provenanceField": "the source-map views present generated coordinates as mapped compiler output, never as authored coordinates",
+      "catalogSurfaces": [],
+      "exposure": {
+        "state": "executable",
+        "route": "contributed commands (packages/vue-vscode/package.json verter.showSourceMapForFile, verter.showSourceMapVisualization)",
+        "replayCase": "vscode e2e launch acceptance",
+        "test": "packages/vue-vscode e2e/acceptance/launch.ts"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "explicitly selected local-native execution via the DX4/DX5 companion route; the browser analog is the separately labelled playground.source-map-view Portable operation",
+          "replayCase": "DX1 exposure registration plus a replay case"
+        },
+        "evidence": ["packages/vue-vscode/package.json"],
+        "reason": "VS Code command surfaces are desktop-only; the playground exposes its own source-map view over compiled output (playground.source-map-view)"
+      },
+      "browserExecutable": false
+    },
+    {
+      "id": "playground.source-map-view",
+      "operation": "playground source-map view over compiled output",
+      "profile": "browser",
+      "version": "1",
+      "producerOwner": "playground source-map view over the @verter/wasm compile outputs",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "Portable",
+      "answerRail": "inspection",
+      "labelled": true,
+      "provenanceField": "the source-map view labels mapped positions as compiled-output mappings, never as authored coordinates",
+      "catalogSurfaces": [],
+      "exposure": {
+        "state": "executable",
+        "route": "playground source-map view (packages/playground/src/core/sourcemap.ts)",
+        "replayCase": "playground source-map suites",
+        "test": "packages/playground vitest suites"
+      },
+      "playground": {
+        "status": "exposed",
+        "route": "playground source-map view (packages/playground/src/core/sourcemap.ts)",
+        "test": "packages/playground vitest suites",
+        "evidence": ["packages/playground/src/core/sourcemap.ts"]
+      },
+      "browserExecutable": true
     },
     {
       "id": "lsp.format-document",

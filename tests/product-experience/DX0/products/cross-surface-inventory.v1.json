@@ -11,6 +11,24 @@
       "kind": "full TypeScript extension (verter-vscode)",
       "launch": "native verter-lsp over stdio; binary precedence e2e copy > setting > dev target > bundled > PATH; optional verter-mcp HTTP spawn",
       "capabilities": "16 contributed commands, virtual-file/source-map/component-tree/analysis/routes views, decorations, TS server plugin, MCP setup command",
+      "commands": [
+        "verter.showOutputChannel",
+        "verter.restartLanguageServer",
+        "verter.selectTypeProvider",
+        "verter.showCompiledCodeToSide",
+        "verter.writeVirtualFiles",
+        "verter.showStatistics",
+        "verter.showRecentAuditRecords",
+        "verter.openVirtualFile",
+        "verter.showSourceMapForFile",
+        "verter.refreshVirtualFiles",
+        "verter.refreshAnalysis",
+        "verter.refreshRoutes",
+        "verter.showSourceMapVisualization",
+        "verter.goToComponent",
+        "verter.goToParentFile",
+        "verter.setupMcpForClaudeCode"
+      ],
       "evidence": ["packages/vue-vscode/package.json", "packages/vue-vscode/src/extension.ts"],
       "tests": ["packages/vue-vscode/e2e/acceptance/launch.ts"]
     },
@@ -64,7 +82,7 @@
     {
       "id": "verter-lsp",
       "kind": "npm launcher over the native Rust LSP server (crates/verter_lsp)",
-      "capabilities": "LSP capabilities declared in crates/verter_lsp/src/capabilities.rs (hover, definition, typeDefinition, references, rename, push diagnostics, completion, semanticTokens full, formatting, onTypeFormatting, codeAction, codeLens, inlayHint, callHierarchy, workspaceSymbol, colorProvider, linkedEditingRange) plus custom methods",
+      "capabilities": "LSP capabilities declared in crates/verter_lsp/src/capabilities.rs (hover, definition, typeDefinition, references, rename, push diagnostics, completion, semanticTokens full, formatting, onTypeFormatting, codeAction, codeLens, inlayHint, callHierarchy, workspaceSymbol, colorProvider, linkedEditingRange, documentSymbol, signatureHelp, foldingRange, selectionRange, documentLink, documentHighlight) plus custom methods",
       "customMethods": [
         "$/onDidChangeTsOrJsFile",
         "$/onFileChanged",
@@ -152,6 +170,34 @@
     },
     "providerModes": ["auto", "tsgo", "shared-tsgo", "tsserver", "editor-tsserver", "extension", "off"],
     "providerModesEvidence": ["crates/verter_lsp/src/main.rs"],
+    "typeInfoQueries": {
+      "protocolGraphOperations": [
+        "resolve-symbol",
+        "evaluate-expression",
+        "project-path",
+        "relate",
+        "framework-surfaces",
+        "expand-around",
+        "flow-narrowing-at",
+        "contextual-type-at"
+      ],
+      "jsBindings": "@verter/typeinfo wraps the Rust host typeinfo substrate: list symbols, resolve named symbol, evaluate type expression",
+      "mcpTools": ["get_framework_surface", "get_component_types", "get_type_errors"],
+      "lspCustomMethods": ["$/verter/getBindingTypes"],
+      "rail": "inspection (Verter-native type inspection; never replacement TypeScript answers)",
+      "evidence": [
+        "crates/verter_protocol/proto/verter/v1/typeinfo.proto",
+        "packages/typeinfo/package.json",
+        "crates/verter_mcp/src/server.rs",
+        "crates/verter_lsp/src/main.rs"
+      ]
+    },
+    "mappings": {
+      "vscodeCommands": ["verter.showSourceMapForFile", "verter.showSourceMapVisualization"],
+      "playground": "source-map view over compiled output (packages/playground/src/core/sourcemap.ts)",
+      "rail": "inspection (generated coordinates presented as mapped compiler output, never authored coordinates)",
+      "evidence": ["packages/vue-vscode/package.json", "packages/playground/src/core/sourcemap.ts"]
+    },
     "typeScriptPlugin": {
       "id": "@verter/typescript-plugin",
       "role": "TS server plugin resolving .vue/.svelte carrier imports to *.verter.ts virtual files",
