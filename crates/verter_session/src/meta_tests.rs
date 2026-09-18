@@ -3650,10 +3650,10 @@ fn the_tsx_lane_emits_for_every_flow_return_degradation_class() {
             )
             .unwrap();
         let host = project.host();
-        // The LSP's own IDE profile (`Documents::tsx_profile`). A default
-        // (BUNDLER) profile normalized with the TSX bit still demands runtime
-        // PROP CONSTRUCTORS, so a test written that way measures the runtime
-        // lane's constructor demand and calls it the TSX lane.
+        // The LSP's own IDE profile (`Documents::tsx_profile`). IDE
+        // normalization strips STYLE/SCRIPT/TEMPLATE so a leftover bundler
+        // target cannot admit runtime-render; this test still uses the LSP
+        // profile so it measures the hover/TSX lane.
         let profile = crate::types::CompileProfile {
             source_map: true,
             target: crate::CompileTarget::IDE | crate::CompileTarget::TEMPLATE_DATA,
