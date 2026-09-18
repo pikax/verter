@@ -70,8 +70,6 @@
       ]
     }
   ],
-  "verify": "node tests/product-experience/DX0/verify.mjs",
-  "test": "node --test tests/product-experience/DX0/dx0.test.mjs",
   "runtimeCorrectness": false,
   "notes": "Contract/inventory node: 0 production LOC. DX0-AC-BASIS binds incremental-vs-fresh and receipt-binding runtime tests to DX2 and DX8 instead of fabricating one here. DX0-AC-RESOURCE: no hot paths or UI touched; the WSP equal-work obligation does not apply. DX0-AC-EXPOSURE: DX1 owns the registration schema; promotion stays blocked on executable exposure. The harness grounds itself in the live repository (authority DAG, conflict-domain catalog, product-surface catalog, lint rule count, evidence files), so drift in any of them is a failing case, not a stale pass."
 }

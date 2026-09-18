@@ -66,8 +66,6 @@
       ]
     }
   ],
-  "verify": "node tests/jetbrains-baseline/JBT0/verify.mjs",
-  "test": "node --test tests/jetbrains-baseline/JBT0/jbt0.test.mjs",
   "runtimeCorrectness": false,
   "notes": "Contract/inventory node: 0 production LOC. JBT0-AC-BASIS binds incremental-vs-fresh and same-basis runtime evidence to JBT1H (real-IDE comparison harness) and JBT10 (comparative qualification) instead of fabricating a runtime test here. JBT0-AC-RESOURCE: no hot paths or UI touched; the WSP equal-work corpus and client-paint obligations bind every later claim in this train. JBT0-AC-EXPOSURE: DX1 owns the registration schema; product promotion stays blocked on executable exposure. Comparator pin values are pending-capture by design: JBT1H captures them with the real harness, and guessed pins are never admissible. The harness grounds itself in the live repository (authority DAG, conflict-domain catalog, implementation ledger, adapter-presence facts, evidence files), so drift in any of them is a failing case, not a stale pass."
 }

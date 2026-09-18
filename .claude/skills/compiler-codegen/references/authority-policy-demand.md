@@ -1,7 +1,7 @@
 # Compiler authority, policy, demand, and admission
 
 Operational pointer for implementers. **Normative text** lives in
-[`roadmap/0.1.0-tama/contracts/compiler-architecture.md`](../../../../roadmap/0.1.0-tama/contracts/compiler-architecture.md).
+the `compiler-architecture.md` contract, a DAG asset owned by the TAMA controller (not a file in this repository).
 Do not treat this skill file as a second constitution.
 
 The combined carrier-compiler registry (`CarrierCompilerRegistry`) is

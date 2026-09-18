@@ -30,7 +30,6 @@ jobs:
       svelte_client_smokes: ${{ steps.filter.outputs.svelte_client_smokes }}
       svelte_perf: ${{ steps.filter.outputs.svelte_perf }}
       editors: ${{ steps.filter.outputs.editors }}
-      tama: ${{ steps.filter.outputs.tama }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v4
@@ -276,151 +275,6 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
-            tama:
-              - 'roadmap/0.1.0-tama/**'
-              - '.claude/skills/multi-agent-orchestration/**'
-              - 'CLAUDE.md'
-              - '.github/workflows/ci.yml'
-              # The paths below are inputs to the closure-register VALIDATOR,
-              # not only to the Rust lane that re-runs those records' tests.
-              # `--check` reads these bytes directly: a negative control's
-              # replaced text must occur exactly once in its subject, a
-              # directory-counted record's selection is re-derived by reading
-              # its fixture directory, and every cited fixture, evidence anchor,
-              # and package manifest must resolve. An ordinary Rust-only change
-              # can therefore turn `--check` red, so this lane has to be
-              # eligible on it — otherwise the break merges green here and
-              # surfaces later on an unrelated roadmap pull request, attributed
-              # to an author who touched none of it. The validator refuses an
-              # artifact it opens that no pattern here covers, so this list can
-              # never be too narrow; it is kept at file granularity anyway, so
-              # that it is not needlessly too broad either. Two crate trees are
-              # listed whole because the instrument cites the crate ROOT — one
-              # as a fixture directory whose contents are counted, the other as
-              # an evidence anchor for a record covering the crate's whole test
-              # surface — and a root is only covered by its own subtree pattern.
-              - 'crates/verter_identity/**'
-              - 'crates/verter_session/**'
-              # The mapping-product geometry the instrument cites at file
-              # granularity: one record's evidence anchor and negative-control
-              # subject, plus the case file that record executes.
-              - 'crates/verter_compiler/Cargo.toml'
-              - 'crates/verter_compiler/src/code_transform/mapping_product.rs'
-              - 'crates/verter_compiler/src/code_transform/mapping_product_tests.rs'
-              - 'crates/verter_compile_contracts/Cargo.toml'
-              - 'crates/verter_type_runtime/Cargo.toml'
-              - 'crates/verter_type_runtime/tests/main.rs'
-              - 'crates/verter_protocol/Cargo.toml'
-              - 'crates/verter_protocol/tests/cases/typeinfo_proto_roundtrip.rs'
-              # The lane that re-runs those crates' tests spells its own selection
-              # `-E "$VERTER_NEXTEST_FILTER"` and computes that value from these
-              # scripts, so the narrowing this instrument publishes resolves
-              # through them. A change to any of them changes what that lane
-              # selects, which is exactly the kind of change this view has to be
-              # re-derived on — a change to the core filter can turn this job red
-              # until the affected record is re-derived, which is the intended
-              # cost of publishing a narrowing nobody re-checks. The entry file
-              # alone is not enough: the excluded package set and the name-scoped
-              # selectors this instrument decomposes are declared in the modules
-              # it imports, so the whole first-party import graph is listed here
-              # exactly as the validator cites it.
-              - 'scripts/provider-ci*.mjs'
-              - 'scripts/gate-internals.mjs'
-              # Same reason for the compile-contract lane: the owner set it
-              # iterates is declared in this script, the instrument resolves a
-              # record's own owner against that list, and dropping an entry
-              # changes which records that lane still refreshes.
-              - 'scripts/compile-contracts.mjs'
-              # The probe-state manifests and promotion join records whose
-              # citations the validation-probe authority validator checks.
-              - 'crates/verter_validation_probe/manifest/**'
-              - 'crates/verter_validation_probe/join/**'
-              # Inputs to the semantic-memory-budget validator, for the same
-              # reason as the closure-register inputs above: it opens these
-              # bytes directly. The locked gate file supplies the ratified
-              # baseline it re-cites, including the recorded measurements and
-              # the cell's own metric limits; the benchmark harness IS the
-              # measured corpus and is re-hashed to decide whether that
-              # recorded measurement is still equivalent work on this tree;
-              # the audit site schema is the closed vocabulary its metric
-              # rows must come from; and the production field lists of
-              # `VerterHost` and of every struct its `delegated` fields reach
-              # (`ProjectTypeStore`, `SemanticGraphStore`,
-              # `UnifiedResolverRuntime`, `FallthroughResolverState`,
-              # `FrameworkRegistration`, `FrameworkScriptCaches` and the rest)
-              # are the INDEPENDENT retained-storage inventory the allocation
-              # classes are checked for completeness against, so adding a
-              # host-lifetime field to any of them turns this job red until
-              # the contract accounts for it. The session, semantic,
-              # workspace, scheduler and language source trees are taken
-              # whole because the allocation-owner and emitter anchors are
-              # spread across them, and the audit tree is taken whole rather
-              # than just its attribution subtree because the live memory
-              # observations resolve `memory.rs` as well; renaming one of
-              # those owners turns this job red on purpose — the contract has
-              # to be repinned, not left describing a symbol that no longer
-              # exists. That validator refuses any repository path it reads,
-              # and any first-party module it or its lane scripts import, that
-              # no pattern here covers, so this block cannot silently fall
-              # behind what the contract cites or runs.
-              - 'performance-gates.toml'
-              # Product-surface catalog: advertised docs and package
-              # entrypoints the L0 validator re-resolves, so a new advertised
-              # surface without a catalog row turns this job red.
-              - 'docs/index.md'
-              - 'docs/api-stability.md'
-              - 'docs/guide/getting-started.md'
-              - 'docs/guide/linting.md'
-              - 'docs/guide/performance.md'
-              - 'packages/unplugin/package.json'
-              - 'packages/component-meta/package.json'
-              - 'packages/verter-tsc/package.json'
-              - 'packages/verter-lsp/package.json'
-              - 'packages/vue-vscode/package.json'
-              - 'packages/typeinfo/package.json'
-              - 'packages/nuxt/package.json'
-              - 'packages/verter-mcp/package.json'
-              - 'packages/native/package.json'
-              - 'crates/verter_audit/src/**'
-              - 'crates/verter_bench/examples/attribution_baseline.rs'
-              - 'crates/verter_session/src/**'
-              - 'crates/verter_semantic/src/**'
-              - 'crates/verter_workspace/src/**'
-              - 'crates/verter_scheduler/src/**'
-              - 'crates/verter_language/src/**'
-              - 'crates/verter_compiler/src/code_transform/code_transform.rs'
-              - 'crates/verter_compiler/src/code_transform/source_map.rs'
-              - 'crates/verter_napi/src/**'
-              - 'crates/verter_wasm/src/**'
-              - 'crates/verter_lsp/src/**'
-
-  tama-roadmap:
-    name: Tama Roadmap
-    needs: detect-changes
-    if: needs.detect-changes.outputs.tama == 'true'
-    runs-on: ubuntu-latest
-    # Focused validator tests run here; repository mutation replay is manual.
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v5
-      - name: Validate DAG-managed files
-        run: |
-          node roadmap/0.1.0-tama/tools/validate-program-dag.mjs --strict
-          node --test roadmap/0.1.0-tama/tools/implementation-ledger.test.mjs
-          node --test roadmap/0.1.0-tama/tools/ledger.test.mjs
-          node roadmap/0.1.0-tama/tools/closure-register.mjs --check
-          node --test roadmap/0.1.0-tama/tools/closure-register.test.mjs
-          node --test roadmap/0.1.0-tama/tools/closure-replay.test.mjs
-          node roadmap/0.1.0-tama/tools/validate-probe-authorities.mjs --manifest crates/verter_validation_probe/manifest --join crates/verter_validation_probe/join
-          node --test roadmap/0.1.0-tama/tools/validate-probe-authorities.test.mjs
-          node roadmap/0.1.0-tama/tools/validate-semantic-memory-budget.mjs
-          node --test roadmap/0.1.0-tama/tools/semantic-memory-budget.test.mjs
-          node roadmap/0.1.0-tama/tools/validate-product-surface-catalog.mjs
-          node --test roadmap/0.1.0-tama/tools/product-surface-catalog.test.mjs
-      - name: CI aggregate completeness
-        run: |
-          node scripts/check-ci-aggregate.mjs
-          node --test scripts/check-ci-aggregate.test.mjs
 
   # ---------------------------------------------------------------------------
   # `dtolnay/rust-toolchain@1.97.1` (not `@stable`) in every job below, and in
@@ -911,6 +765,12 @@ jobs:
         # so `pnpm -r run test` never reaches these specs — same convention as
         # the carrier-routing guards step above.
         run: pnpm run test:scripts
+      - name: CI aggregate completeness
+        # Every job in this workflow must be listed in the `CI Required`
+        # aggregate; the checker fails this lane when one is missing.
+        run: |
+          node scripts/check-ci-aggregate.mjs
+          node --test scripts/check-ci-aggregate.test.mjs
       - name: Binary distribution guards (platform packages + release wiring)
         # Each binary family's platform matrix reconciled against its platform
         # packages, the release build matrix, and the derived publish set. Run
@@ -2091,7 +1951,6 @@ jobs:
     timeout-minutes: 5
     needs:
       - detect-changes
-      - tama-roadmap
       - rust-fmt
       - proto-fmt
       - rust-clippy

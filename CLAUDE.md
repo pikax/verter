@@ -2,7 +2,7 @@
 
 > **SUPERSEDED WHERE IT CONFLICTS — an architecture program is in flight.**
 >
-> The live Tama roadmap for Verter 0.1.0 lives at [`roadmap/0.1.0-tama/`](roadmap/0.1.0-tama/); its normative entry point is [`APPLICATION.md`](roadmap/0.1.0-tama/APPLICATION.md).
+> The Verter 0.1.0 program DAG — nodes, charters, contracts, plans, decision records and the implementation state — is **database-owned by the TAMA controller**. This repository carries no `roadmap/` directory, no repository-side DAG validator and no ledger file, and CI has no roadmap lane. Read a node's charter and contracts from the TAMA packet you were dispatched with. Propose DAG changes through the controller; never add roadmap files, ledgers or node tables to this repository, and never ship a test that reads them.
 >
 > **Precedence:** where this file and the Tama authority disagree, **the live Tama authority wins**.
 >
@@ -505,7 +505,7 @@ Production file/module names and comments, plus every test artifact—file/modul
 
 Name the durable invariant or regression boundary instead: what input fails, what behavior is required, which authority owns the answer, or which compatibility/performance contract is protected. Durable architecture insights belong in `.claude/skills/*` or `docs/arch/`, not in code/test archaeology. The roadmap's own document tree and policy files are exempt.
 
-A code or test comment may cite a GitHub issue only when it records a specific independently reported product defect that is outside the DAG-controlled `[[github_issue]]` mappings. The comment must still state the durable behavior; the issue reference is supplemental. Never cite a DAG-managed issue, PR, node, or charter as code/test rationale, because the DAG coordinates implementation rather than defining the defect.
+A code or test comment may cite a GitHub issue only when it records a specific independently reported product defect that is outside the DAG-controlled issue mappings. The comment must still state the durable behavior; the issue reference is supplemental. Never cite a DAG-managed issue, PR, node, or charter as code/test rationale, because the DAG coordinates implementation rather than defining the defect.
 
 This rule is implementer- and reviewer-enforced across production source, tests, and non-Rust code. It carries no runtime source scanner: a guard that detected roadmap vocabulary would itself be the name-keyed source scanner the landed-guard policy above forbids.
 
@@ -548,7 +548,7 @@ Execute approved plans fully in one pass, end-to-end, without intermediate check
 
 For a large multi-block plan, refactor, migration, or staged cutover executed autonomously, drive it via the `/multi-agent-orchestration` skill: the parent owns ordering and landing, train managers coordinate bounded node implementations, every independently landable node uses its own worktree/branch/candidate by default and its own PR when GitHub control is active, and stable candidate patches receive the risk-scaled fresh review set declared by their profile. A shared train worktree is allowed only for an explicitly requested atomic multi-node landing.
 
-Tama orchestration derives readiness from one trusted implementation ledger: a node is implemented when `roadmap/0.1.0-tama/authority/state/implemented.toml` has transitioned that node's predeclared line to implemented, and a dispatchable node is READY when every transitive DAG ancestor is implemented. Each row's commit message, approximate timezone-bearing date, and optional PR number are locator hints only and are never resolved or validated. The implementation patch transitions its predeclared line to implemented before squash and review. Review remains risk-scaled and provider-neutral, with a soft two-cycle review/fix cap and neutral Architect escalation only for real unresolved ambiguity. See `roadmap/0.1.0-tama/APPLICATION.md` and `/multi-agent-orchestration`.
+Tama orchestration derives readiness from the controller's database-owned DAG: a node is implemented when the TAMA controller records its merge, and a dispatchable node is READY when every transitive DAG ancestor is implemented. The repository holds no implementation ledger, node table or charter tree, so an implementation patch never edits DAG state, adds a `roadmap/` file, or ships a per-node harness that reads one; landing the reviewed PR is what marks the node implemented. Review remains risk-scaled and provider-neutral, with a soft two-cycle review/fix cap and neutral Architect escalation only for real unresolved ambiguity. See `/multi-agent-orchestration`.
 
 When a block runs in a dedicated `git worktree`, run `pnpm install --frozen-lockfile` in the worktree root once at creation time, before any JS/TS test or workspace-importing Node script — fresh worktrees do not get the gitignored `node_modules/`, and a missing install makes JS/TS tests fail spuriously and read as a false regression. See the skill's "Implementation and worktrees" section.
 
@@ -629,7 +629,7 @@ not a committed implementation language for those paths.
 
 This project uses **conventional commits** (`<type>(<scope>): <description>`) for automatic changelog generation via [git-cliff](https://git-cliff.org/).
 
-For DAG-managed work explicitly landing without a GitHub PR, the final squash commit body includes one `Closes #<gh_issue>` line for every included node's local `[[github_issue]]` mapping. These closing lines are reviewed with the candidate and close the issues only when the commit reaches the origin default branch. They are commit coordination metadata and never belong in source comments or test artifacts.
+For DAG-managed work explicitly landing without a GitHub PR, the final squash commit body includes one `Closes #<n>` line for every GitHub issue the TAMA controller has mapped to an included node. These closing lines are reviewed with the candidate and close the issues only when the commit reaches the origin default branch. They are commit coordination metadata and never belong in source comments or test artifacts.
 
 Types: `feat` (new feature), `fix` (bug fix), `perf` (performance), `refactor` (no behavior change), `docs`, `test`, `chore` (build/CI/tooling), `release` (version bump).
 
@@ -668,6 +668,6 @@ Detailed reference material is available as on-demand skills (loaded automatical
 | `/e2e-vscode-testing`    | VS Code E2E test fixtures, helpers API, adding new tests                                         |
 | `/wsl-e2e-testing`       | WSL E2E tests to reproduce Linux/CI failures, fixture matrix                                     |
 | `/rust-performance`      | Rust optimization patterns, allocation hierarchy, CodeTransform API                              |
-| `/multi-agent-orchestration` | Driving a large multi-block plan, refactor, migration, or staged cutover with trusted ledger-row readiness, risk-scaled fresh review, Architect escalation, and cleanup |
+| `/multi-agent-orchestration` | Driving a large multi-block plan, refactor, migration, or staged cutover with controller-owned DAG readiness, risk-scaled fresh review, Architect escalation, and cleanup |
 | `/scheduler`             | Scheduler submission/admission APIs (`submit_request`/`submit_batch`/`submit_batch_atomic`), CPU vs I/O pool routing, host CPU-pool coordination |
 | `/debug-tooling`         | Hangs, unexpectedly slow paths, stack snapshots: backtrace watchdog, LLDB attach wrapper, release-dbg profile |

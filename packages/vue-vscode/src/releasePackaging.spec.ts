@@ -237,7 +237,7 @@ describe("release gating", () => {
     expect(pullRequest).toContain("if: github.event_name == 'pull_request'");
     expect(pullRequest).toContain("pnpm --filter verter-vscode exec vitest run");
     expect(pullRequest).toContain("src/releasePackaging.spec.ts");
-    expect(pullRequest).toContain("node --test scripts/githubctl/tests/release-plan.test.mjs");
+    expect(pullRequest).toContain("node --test scripts/githubctl/tests/clean-room.test.mjs");
 
     const dispatched = jobs.get("dry-run") ?? "";
     expect(dispatched).toContain("if: github.event_name == 'workflow_dispatch'");

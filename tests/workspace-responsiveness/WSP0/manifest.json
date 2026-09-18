@@ -32,7 +32,10 @@
     {
       "id": "WSP0-AC3",
       "disposition": "reject",
-      "twins": ["unverified-issue-claim", "fabricated-version-capture"]
+      "twins": [
+        "unverified-issue-claim",
+        "fabricated-version-capture"
+      ]
     },
     {
       "id": "WSP0-AC-OWNER",
@@ -47,7 +50,10 @@
     {
       "id": "WSP0-AC-BASIS",
       "disposition": "reject",
-      "twins": ["downstream-owner-drift", "basis-vocabulary-drift"]
+      "twins": [
+        "downstream-owner-drift",
+        "basis-vocabulary-drift"
+      ]
     },
     {
       "id": "WSP0-AC-RESOURCE",
@@ -68,7 +74,10 @@
     {
       "id": "WSP0-AC-EXPOSURE",
       "disposition": "reject",
-      "twins": ["unregistered-introduced-operation", "slo-population-drift"]
+      "twins": [
+        "unregistered-introduced-operation",
+        "slo-population-drift"
+      ]
     },
     {
       "id": "WSP0-ratification",

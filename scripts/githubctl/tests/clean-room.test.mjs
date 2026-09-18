@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { GitHubAdapterError, rehearsalIdentity, releasePlan } from "../index.mjs";
+import { GitHubAdapterError } from "../index.mjs";
 
 import {
   CLEAN_ROOM_KIND,
@@ -15,12 +15,9 @@ import {
   inspectConsumer,
   runCleanRoomCheck,
 } from "../clean-room.mjs";
-import { FakeGitHubAdapter } from "../fake.mjs";
-import { writeLedgerFixture } from "./ledger-fixture.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../../..");
-const MILESTONE = "v0.1.0";
 
 // REL3 performance N/A: the check runs once per rehearsal and owns no hot parse/resolve path.
 
@@ -475,60 +472,6 @@ jobs:
   assert.equal(hosted.kind, CLEAN_ROOM_KIND);
   assert.equal(hosted.hosted, true);
   assert.equal(hosted.skipped, false);
-});
-
-test("REL3 rehearsal evidence records the hosted clean-room check", () => {
-  const identity = rehearsalIdentity(REPO_ROOT);
-  assert.equal(identity.workflow, "release-check.yml");
-  const fxLedger = writeLedgerFixture("githubctl-rel3-", {
-    implemented: ["A"],
-    issues: [{ node_id: "B", gh_issue: 10, sync_to_github: true }],
-  });
-  const adapter = new FakeGitHubAdapter({
-    owner: "pikax",
-    repo: "verter",
-    milestones: [{ title: MILESTONE, number: 1 }],
-    issues: [{ number: 10, title: "B", body: "b", milestone: MILESTONE }],
-  });
-  const report = releasePlan({
-    adapter,
-    mode: "check",
-    milestone: MILESTONE,
-    ledgerPath: fxLedger,
-    authority: {
-      nodes: [
-        {
-          id: "A",
-          name: "A",
-          train: "t",
-          predecessors: [],
-          dispatchable: true,
-          conflict_domains: [],
-          resource_class: "ts-heavy",
-        },
-        {
-          id: "B",
-          name: "B",
-          train: "t",
-          predecessors: ["A"],
-          dispatchable: true,
-          conflict_domains: [],
-          resource_class: "ts-heavy",
-        },
-      ],
-      ledgerFile: fxLedger,
-      ledger: {
-        implemented: [{ node_id: "A" }],
-        github_issue: [{ node_id: "B", gh_issue: 10, sync_to_github: true }],
-        github_train_issue: [],
-      },
-    },
-  });
-  assert.equal(report.rehearsal.clean_room.kind, CLEAN_ROOM_KIND);
-  assert.equal(report.rehearsal.clean_room.hosted, true);
-  assert.equal(report.rehearsal.clean_room.skipped, false);
-  assert.equal(identity.clean_room.hosted, true);
-  assert.equal(identity.clean_room.skipped, false);
 });
 
 test("REL3-AC1 a packaged module that imports the source tree fails the check", () => {
