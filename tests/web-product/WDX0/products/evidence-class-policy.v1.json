@@ -1,0 +1,87 @@
+{
+  "id": "evidence-class-policy.v1",
+  "schema": 1,
+  "contractNode": "WDX0",
+  "classes": [
+    {
+      "id": "static-proof",
+      "definition": "Evidence obtained without executing the capability on a real host: schema validation, structural invariants, compile/import boundaries, DAG and ownership checks.",
+      "mayClaim": [
+        "a contract, disposition or ownership fact is ratified",
+        "a structural invariant holds on the reviewed artifacts"
+      ],
+      "mayNotClaim": [
+        "executed behavior on any host or profile",
+        "framework or version support",
+        "performance, latency, allocation or RSS results"
+      ]
+    },
+    {
+      "id": "runtime-observation",
+      "definition": "Evidence from real execution on a named host/profile with the ProductReceiptBasis bound: source revisions, project/configuration, engine and host identity, completeness state.",
+      "mayClaim": [
+        "observed behavior with its exact host, profile and engine identity",
+        "reproducible scenario outcomes under the receipt basis"
+      ],
+      "requires": [
+        "receipt basis per contracts/product-experience.md section 4",
+        "exact engine and host identity",
+        "replayable scenario"
+      ]
+    },
+    {
+      "id": "estimate",
+      "definition": "Projected or extrapolated numbers not obtained on the required workload under the ratified performance methodology.",
+      "mayClaim": [
+        "a labelled estimate, explicitly marked as such"
+      ],
+      "mayNotClaim": [
+        "completion, conformance or support",
+        "speedup or resource figures presented as measured"
+      ]
+    }
+  ],
+  "claimLaws": [
+    "A support claim for a framework, extension or profile requires runtime observation from that item's own producing train terminal; a static proof (architecture proof, installed parser, syntax highlighting) never satisfies it (WDX0-AC2).",
+    "An estimate is never promotable to a completion, conformance, source-revision, speedup or supported-version claim.",
+    "Qualifying an upstream feature as Verter support requires the owned authored integration and public operation evidence; pinning or installing upstream alone is static proof at best.",
+    "Negative, partial, conditional and unsupported results are truthful states, not routes for hiding unfinished required scope."
+  ],
+  "historicalCompletions": {
+    "authority": "authority/state/implemented.toml (the implementation ledger stays the sole completion truth; this constitution adds no second status store)",
+    "statement": "Every implemented-ledger completion keeps its standing. This constitution ratifies the added portfolio on top of history; it reopens, downgrades or deletes nothing. The added portfolio starts with zero completions and zero advertised catalog surfaces.",
+    "anchors": [
+      {
+        "id": "ORC0",
+        "outcome": "trusted implementation-ledger cutover",
+        "evidenceClass": "static-proof",
+        "ledgerStatus": "implemented"
+      },
+      {
+        "id": "STP0",
+        "outcome": "SFC TypeScript projection constitution and current-feature contract",
+        "evidenceClass": "static-proof",
+        "ledgerStatus": "implemented"
+      },
+      {
+        "id": "DX0",
+        "outcome": "cross-surface feature preservation and exposure constitution (FeatureExposureContract v1, HostExecutionClass, ProductReceiptBasis, rails, inventory)",
+        "evidenceClass": "static-proof",
+        "ledgerStatus": "implemented"
+      }
+    ],
+    "advertisedCatalog": {
+      "file": "catalogs/product-surface-catalog.toml",
+      "surfaceCount": 24,
+      "families": ["vue", "svelte"],
+      "addedPortfolioSurfaces": 0
+    },
+    "preservedContracts": [
+      "contracts/product-experience.md",
+      "contracts/sfc-typescript-projection.md",
+      "charters/expansion-product-observability/DX0.md"
+    ]
+  },
+  "ratificationEvidenceClass": "static-proof",
+  "portfolioClaimBasisAtRatification": "none"
+}
