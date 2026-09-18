@@ -1,0 +1,42 @@
+{
+  "id": "WDX1-FIX-worker-001",
+  "domain": "worker",
+  "title": "Dedicated worker realm with typed message boundary",
+  "sources": ["src/main.ts", "src/worker.ts"],
+  "profileIdentity": {
+    "profile": "web-worker-module",
+    "workerApi": "dedicated-worker-esm"
+  },
+  "buildIdentity": {
+    "target": "static-conformance-fixture",
+    "harness": "web-product-scenario-harness",
+    "schema": 1
+  },
+  "expectedResults": [
+    {
+      "dimension": "semantic-facts",
+      "source": "src/main.ts",
+      "expectation": "new Worker(new URL(\"./worker.ts\", import.meta.url), { type: \"module\" }) resolves a dedicated-worker realm separate from the main realm",
+      "terminalProofClass": "runtime-observation"
+    },
+    {
+      "dimension": "type-projection",
+      "source": "src/worker.ts",
+      "expectation": "the postMessage payload narrows to WorkerRequest and the reply event to WorkerReply across the realm boundary through the TypeScript projection rail",
+      "terminalProofClass": "runtime-observation"
+    },
+    {
+      "dimension": "diagnostics",
+      "source": "src/worker.ts",
+      "expectation": "a comparison against a kind other than ping inside the narrowed branch is flagged as an impossible comparison, not silently accepted",
+      "terminalProofClass": "runtime-observation"
+    },
+    {
+      "dimension": "exposure",
+      "source": "src/worker.ts",
+      "expectation": "executing code inside the worker realm requires explicit trust and a permission grant through the execution-intent surface; nothing executes by default",
+      "terminalProofClass": "static-proof"
+    }
+  ],
+  "producers": ["expansion.execution-services", "expansion.runtime-environments"]
+}

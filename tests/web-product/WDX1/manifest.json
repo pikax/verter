@@ -1,0 +1,90 @@
+{
+  "node": "WDX1",
+  "kind": "implementation",
+  "products": [
+    "scenario-coverage-matrix.v1 (41 recommendation rows over the WDX0 disposition matrix; 5 fixture domains; integrated scenario evidence)",
+    "fixture corpus: mixed-framework, css, worker, configuration and security cases with source/profile/build identities and per-domain expected results",
+    "terminal-receipt-binding recording with content-addressed source digest (stale detection)"
+  ],
+  "cases": [
+    {
+      "id": "WDX1-AC1",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "unknown-domain",
+        "domain-population-drift",
+        "duplicate-case-id",
+        "missing-source",
+        "missing-identity",
+        "unknown-producer",
+        "producer-route-mismatch",
+        "routing-population-drift",
+        "dangling-case-route",
+        "silent-recommendation",
+        "orphan-fixture",
+        "routing-claim-drift"
+      ]
+    },
+    {
+      "id": "WDX1-AC2",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "stale-recording (tampered digest)",
+        "stale-recording (authored snapshot edit on disk)",
+        "premature-runtime-claim (qualifies)",
+        "premature-runtime-claim (evidence class)",
+        "premature-runtime-claim (completeness)",
+        "premature-runtime-claim (bound engine identity)",
+        "stale-recording after terminal lands",
+        "recorded-claim-class-drift",
+        "terminal-proof-class-drift",
+        "incomplete-receipt-basis"
+      ]
+    },
+    {
+      "id": "WDX1-AC3",
+      "disposition": "accept",
+      "twins": [
+        "clean products",
+        "partial-fixture",
+        "deterministic ordering under perturbed discovery",
+        "missing-lifecycle-rationale"
+      ]
+    },
+    {
+      "id": "WDX1-AC4",
+      "disposition": "accept",
+      "twins": [
+        "clean products",
+        "missing-evidence-file",
+        "catalog-family-drift",
+        "missing-uncertainty-note"
+      ]
+    },
+    {
+      "id": "WDX1-AC5",
+      "disposition": "accept",
+      "twins": [
+        "clean products",
+        "missing-resource-rationale",
+        "nonempty-deletion-population",
+        "displaced-route"
+      ]
+    },
+    {
+      "id": "WDX1-delivery",
+      "disposition": "accept",
+      "twins": [
+        "clean products",
+        "missing-dag-node",
+        "node-profile-drift",
+        "missing-ledger-row",
+        "missing-charter-file"
+      ]
+    }
+  ],
+  "runtimeCorrectness": false,
+  "notes": "Implementation node over the existing tests/web-product conformance harness: 0 production LOC (fixture data, machine products and harness glue only; nothing under crates/ or packages/ changes). Every fixture expectation stays pinned-pending-terminal: recordings are basis bindings, not executed evidence, and no support claim exists at this node. The harness grounds itself in the live repository (WDX0 machine products, DAG node, implementation ledger, capability-surface catalog), so drift in any of them is a failing case, not a stale pass."
+}

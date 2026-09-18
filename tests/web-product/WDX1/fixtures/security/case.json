@@ -1,0 +1,42 @@
+{
+  "id": "WDX1-FIX-security-001",
+  "domain": "security",
+  "title": "Hardcoded credential, dynamic code evaluation and XSS sink flow",
+  "sources": ["src/leaky.ts"],
+  "profileIdentity": {
+    "profile": "web-security-threat-model",
+    "surface": "typescript-source"
+  },
+  "buildIdentity": {
+    "target": "static-conformance-fixture",
+    "harness": "web-product-scenario-harness",
+    "schema": 1
+  },
+  "expectedResults": [
+    {
+      "dimension": "diagnostics",
+      "source": "src/leaky.ts",
+      "expectation": "the hardcoded ghp_ credential literal is flagged with severity error at its exact span",
+      "terminalProofClass": "runtime-observation"
+    },
+    {
+      "dimension": "diagnostics",
+      "source": "src/leaky.ts",
+      "expectation": "the eval(userInput) dynamic-code execution is flagged as a security finding with the sink span pinned",
+      "terminalProofClass": "runtime-observation"
+    },
+    {
+      "dimension": "semantic-facts",
+      "source": "src/leaky.ts",
+      "expectation": "the template string returned from render is recognized as an XSS sink when consumed as innerHTML and the finding names the flow from the userInput parameter to the sink",
+      "terminalProofClass": "runtime-observation"
+    },
+    {
+      "dimension": "exposure",
+      "source": "src/leaky.ts",
+      "expectation": "security findings publish through the standard result envelope with a completeness state; an unsupported analysis is a labelled gap, never silence",
+      "terminalProofClass": "static-proof"
+    }
+  ],
+  "producers": ["expansion.web-security"]
+}

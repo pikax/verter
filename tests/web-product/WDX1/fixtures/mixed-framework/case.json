@@ -1,0 +1,58 @@
+{
+  "id": "WDX1-FIX-mixed-framework-001",
+  "domain": "mixed-framework",
+  "title": "Added-portfolio framework sources in one workspace scenario",
+  "sources": ["src/angular-counter.ts", "src/astro-counter.astro", "src/react-counter.tsx"],
+  "profileIdentity": {
+    "profile": "added-portfolio-mixed-workspace",
+    "frameworks": [
+      { "name": "angular", "version": "20.0.0" },
+      { "name": "astro", "version": "5.0.0" },
+      { "name": "react", "version": "19.2.0" }
+    ]
+  },
+  "buildIdentity": {
+    "target": "static-conformance-fixture",
+    "harness": "web-product-scenario-harness",
+    "schema": 1
+  },
+  "expectedResults": [
+    {
+      "dimension": "parse",
+      "source": "src/react-counter.tsx",
+      "expectation": "the JSX button element with one attribute expression and one child expression parses without error under the pinned react@19.2.0 jsx runtime import",
+      "terminalProofClass": "runtime-observation"
+    },
+    {
+      "dimension": "type-projection",
+      "source": "src/react-counter.tsx",
+      "expectation": "setCount(count + 1) type-checks against the pinned react@19.2.0 Dispatch<SetStateAction<number>> signature through the TypeScript projection rail",
+      "terminalProofClass": "runtime-observation"
+    },
+    {
+      "dimension": "parse",
+      "source": "src/angular-counter.ts",
+      "expectation": "the @angular/core@20.0.0 decorator metadata with selector and inline template parses and count.set(count() + 1) resolves on the signal",
+      "terminalProofClass": "runtime-observation"
+    },
+    {
+      "dimension": "semantic-facts",
+      "source": "src/angular-counter.ts",
+      "expectation": "the readonly count signal member is exported as a component fact bound to the template reference {{ count() }}",
+      "terminalProofClass": "runtime-observation"
+    },
+    {
+      "dimension": "parse",
+      "source": "src/astro-counter.astro",
+      "expectation": "the astro@5.0.0 frontmatter fence and the data-start attribute expression parse and the island renders the literal start value",
+      "terminalProofClass": "runtime-observation"
+    },
+    {
+      "dimension": "exposure",
+      "source": "src/react-counter.tsx",
+      "expectation": "any framework.react operation on this source registers through the DX1 descriptor contract with this file as a replay case before a support claim may exist",
+      "terminalProofClass": "static-proof"
+    }
+  ],
+  "producers": ["framework.angular", "framework.astro", "framework.react"]
+}
