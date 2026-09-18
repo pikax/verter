@@ -1756,6 +1756,12 @@ problem = "Later projection work can drop a current fixture from selected covera
 expected_outcome = "CurrentFeatureInventory, ProbeManifest v1, EngineMatrix, ProjectionProbeRunner, and PerformanceMethodology reject empty selection, missing fixtures, vacuous type matches, clean-twin noise, and executable substitution, while one real positive and one anchored negative run on each admitted engine."
 acceptance = ["Removing one selected current fixture is rejected.", "A node filter that selects zero cases is rejected.", "Type equality cannot succeed via any or vacuous never.", "Substituting a different executable under the same engine label is rejected.", "Each admitted engine runs one clean positive and one anchored negative probe."]
 [[issue]]
+node_id = "STP2"
+title = "Prove Vue constructor InstanceType compatibility and specialization"
+problem = "Without constructor-shaped Vue default-export evidence, later ABI work can ship a callable SFC type, a broad any constructor, or an erased generic InstanceType and still look complete."
+expected_outcome = "ConstructorCompatibilityEvidence and InstanceTypeCompatibilityTable prove imported .vue constructor InstanceType, generic specialization, inferred construction, and Vue utilities on every admitted engine, and reject broad overloads, callable default exports, and explicit input mismatches."
+acceptance = ["InstanceType of an imported concrete .vue exposes reset(): void and exact $props.", "Unbound generic InstanceType retains non-generic members without any/never collapse.", "Comp<number> and new Comp({ test: 0 }) preserve the selected T on public members.", "Broad construct overloads, callable SFC default exports, and explicit number/string mismatches are rejected."]
+[[issue]]
 node_id = "STP5"
 title = "Qualify Content Mapper diagnostics and authored-operation feasibility"
 problem = "Without selected-build mapper evidence, later projection work can treat a 7.1.0-dev label or the dormant TCM2 plane as a complete capability, map diagnostics through a Verter-only postprocessor as if they were stock CLI, reuse the querying file snapshot for a foreign definition, treat Alias spans as kebab/Pascal rename codecs, or hide blame behind repeated guards and feature masks."

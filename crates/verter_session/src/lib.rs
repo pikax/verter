@@ -369,6 +369,7 @@ pub(crate) mod semantic_query_memo;
 pub(crate) mod session_runtime;
 pub mod session_view;
 mod shared;
+pub(crate) mod signature_kernel;
 #[cfg(test)]
 mod source_root_retention_tests;
 #[cfg(test)]

@@ -894,3 +894,46 @@ mod flow_product_allocation;
 
 #[path = "allocation_cases/flow_literal_provenance.rs"]
 mod flow_literal_provenance_allocation;
+
+mod signature_kernel_warm_positional {
+    //! Warm positional Empty/One read: no per-candidate `Arc` clone and no
+    //! intern-shard lock. The counting allocator is process-global in this
+    //! binary; the measured window is the repeated read after the fixture is
+    //! interned.
+
+    use std::hint::black_box;
+
+    use verter_session::for_tests::{
+        warm_positional_read, warm_positional_read_many, WarmPositionalLockProbe,
+        WarmPositionalStore,
+    };
+
+    use super::{alloc_count, reset_alloc_counter};
+
+    #[test]
+    fn warm_positional_read_does_not_allocate_or_lock() {
+        let fixture = WarmPositionalStore::fixture();
+        let _ = warm_positional_read(&fixture);
+
+        reset_alloc_counter();
+        // bounded-loop: repeated warm positional reads of interned One and Many.
+        for _ in 0..10_000 {
+            black_box(warm_positional_read(&fixture));
+            black_box(warm_positional_read_many(&fixture));
+        }
+        let allocations = alloc_count();
+        assert_eq!(
+            allocations, 0,
+            "warm positional read allocated {allocations} times (per-candidate Arc clone?)"
+        );
+
+        let WarmPositionalLockProbe {
+            acquires_before,
+            acquires_after,
+        } = fixture.lock_probe();
+        assert_eq!(
+            acquires_after, acquires_before,
+            "warm positional read acquired intern-shard locks ({acquires_before} -> {acquires_after})"
+        );
+    }
+}

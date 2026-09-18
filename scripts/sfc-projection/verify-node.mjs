@@ -24,29 +24,49 @@ const SCHEMA_PATH = "scripts/sfc-projection/manifest.schema.json";
 const TYPE_FLAGS_ANY = 1;
 const TYPE_FLAGS_NEVER = 262144;
 
-export const MANDATORY_CASES = Object.freeze([
-  "STP1-inventory",
-  "STP1-zero-selection",
-  "STP1-clean-twin",
-  "STP1-types",
-  "STP1-provenance",
-  "STP1-harness",
-]);
+export const NODE_MANDATORY_CASES = Object.freeze({
+  STP1: Object.freeze([
+    "STP1-inventory",
+    "STP1-zero-selection",
+    "STP1-clean-twin",
+    "STP1-types",
+    "STP1-provenance",
+    "STP1-harness",
+  ]),
+  STP2: Object.freeze([
+    "STP2-instance-concrete",
+    "STP2-instance-generic",
+    "STP2-instance-explicit",
+    "STP2-constructor-escape",
+    "STP2-vue-utilities",
+    "STP2-not-callable",
+    "STP2-constructor-inferred",
+    "STP2-explicit-input-mismatch",
+  ]),
+  STP5: Object.freeze([
+    "STP5-encoding",
+    "STP5-guard-duplicate",
+    "STP5-alias-edit",
+    "STP5-stale-target",
+    "STP5-raw-cli",
+    "STP5-capability",
+  ]),
+});
 
-export const STP5_MANDATORY_CASES = Object.freeze([
-  "STP5-encoding",
-  "STP5-guard-duplicate",
-  "STP5-alias-edit",
-  "STP5-stale-target",
-  "STP5-raw-cli",
-  "STP5-capability",
-]);
+export const MANDATORY_CASES = NODE_MANDATORY_CASES.STP1;
+
+export function canonicalMandatoryCases(nodeId) {
+  return NODE_MANDATORY_CASES[nodeId] || [];
+}
+
+export const STP5_MANDATORY_CASES = NODE_MANDATORY_CASES.STP5;
 
 export function mandatoryCasesFor(nodeManifest) {
   const nodeId = nodeManifest?.node;
+  const canonical = canonicalMandatoryCases(nodeId);
+  if (canonical.length) return [...canonical];
   if (!nodeId || nodeId === "STP1") return [...MANDATORY_CASES];
-  if (nodeId === "STP5") return [...STP5_MANDATORY_CASES];
-  return [...(nodeManifest.mandatoryCases || [])];
+  return [...(nodeManifest?.mandatoryCases || [])];
 }
 
 const REQUIRED_PROBE_STRINGS = Object.freeze([
@@ -148,7 +168,9 @@ export function validateProbeManifest(doc, { role }) {
       );
     } else {
       const declared = new Set(doc.mandatoryCases);
-      for (const id of mandatoryCasesFor(doc)) {
+      const canonical = canonicalMandatoryCases(doc.node);
+      const required = canonical.length ? canonical : mandatoryCasesFor(doc);
+      for (const id of required) {
         if (!declared.has(id)) {
           errors.push(
             err(
@@ -292,6 +314,90 @@ export function assertInventoryComplete(inventory, obligation, repoRoot) {
     }
   }
   return errors;
+}
+
+const STP2_SPECIALIZATION_KINDS = Object.freeze([
+  "unbound-extraction",
+  "explicit-specialization",
+  "props-inferred-construction",
+  "template-use",
+]);
+
+export function assertStp2Products(repoRoot, nodeManifest) {
+  const errors = [];
+  const declared = new Set(nodeManifest?.products || []);
+  for (const product of ["ConstructorCompatibilityEvidence", "InstanceTypeCompatibilityTable"]) {
+    if (!declared.has(product)) {
+      errors.push(err("STP2-instance-concrete", "removed-fixture", `missing product ${product}`));
+    }
+  }
+  const evidenceRel = "tests/sfc-projection/STP2/products/constructor-compatibility-evidence.json";
+  const tableRel = "tests/sfc-projection/STP2/products/instance-type-compatibility-table.json";
+  const evidenceAbs = repoPath(repoRoot, evidenceRel);
+  const tableAbs = repoPath(repoRoot, tableRel);
+  if (!fs.existsSync(evidenceAbs)) {
+    errors.push(err("STP2-instance-concrete", "removed-fixture", `missing ${evidenceRel}`));
+    return errors;
+  }
+  if (!fs.existsSync(tableAbs)) {
+    errors.push(err("STP2-instance-concrete", "removed-fixture", `missing ${tableRel}`));
+    return errors;
+  }
+  const evidence = readJson(evidenceAbs);
+  const table = readJson(tableAbs);
+  if (evidence.schema !== "ConstructorCompatibilityEvidence") {
+    errors.push(
+      err("STP2-instance-concrete", "removed-fixture", "ConstructorCompatibilityEvidence schema"),
+    );
+  }
+  if (table.schema !== "InstanceTypeCompatibilityTable") {
+    errors.push(
+      err("STP2-instance-concrete", "removed-fixture", "InstanceTypeCompatibilityTable schema"),
+    );
+  }
+  const kinds = new Set((evidence.specializationKinds || []).map((row) => row.id));
+  for (const kind of STP2_SPECIALIZATION_KINDS) {
+    if (!kinds.has(kind)) {
+      errors.push(
+        err("STP2-instance-generic", "removed-fixture", `missing specialization kind ${kind}`),
+      );
+    }
+  }
+  const tableIds = new Set((table.rows || []).map((row) => row.id));
+  for (const id of NODE_MANDATORY_CASES.STP2) {
+    if (!tableIds.has(id)) {
+      errors.push(
+        err("STP2-instance-concrete", "removed-fixture", `compatibility table missing ${id}`),
+      );
+    }
+  }
+  errors.push(...assertFooSyntaxControl(evidence));
+  if (!String(evidence.publicOptionsStaticBehavior?.rationale || "").trim()) {
+    errors.push(
+      err(
+        "STP2-instance-concrete",
+        "removed-fixture",
+        "missing public options/static behavior rationale",
+      ),
+    );
+  }
+  if (!String(evidence.componentPublicInstanceAssignability?.rationale || "").trim()) {
+    errors.push(
+      err(
+        "STP2-instance-concrete",
+        "removed-fixture",
+        "missing ComponentPublicInstance assignability rationale",
+      ),
+    );
+  }
+  return errors;
+}
+
+export function assertFooSyntaxControl(evidence) {
+  if (!String(evidence?.syntaxControl?.spelling || "").includes("declare class Foo")) {
+    return [err("STP2-instance-explicit", "removed-fixture", "missing Foo syntax control")];
+  }
+  return [];
 }
 
 function pinExe(pin, pkgDir) {
@@ -447,6 +553,29 @@ function offsetOf(text, needle) {
   return pos;
 }
 
+function identifierPattern(name) {
+  const escaped = String(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![A-Za-z0-9_$])${escaped}(?![A-Za-z0-9_$])`);
+}
+
+export function hasIdentifier(text, name) {
+  if (!name) return false;
+  return identifierPattern(name).test(text);
+}
+
+export function identifierOffset(text, name) {
+  if (!name) return -1;
+  const match = identifierPattern(name).exec(text);
+  return match ? match.index : -1;
+}
+
+export function resolveDefinitionName(text, probes = {}) {
+  const needle = probes.definitionNeedle;
+  if (needle && hasIdentifier(text, needle)) return needle;
+  if (hasIdentifier(text, "Comp")) return "Comp";
+  return null;
+}
+
 function jsTypeFlags(ts, type) {
   return type?.flags ?? 0;
 }
@@ -463,7 +592,7 @@ function createJsProgram(ts, fileAbs, options, checkCounts, fileKey) {
   return ts.createProgram({ rootNames: [fileAbs], options, host });
 }
 
-function runJsFile(ts, fileAbs, options, checkCounts, fileKey, probes) {
+function runJsFile(ts, fileAbs, options, checkCounts, fileKey, probes = {}) {
   const program = createJsProgram(ts, fileAbs, options, checkCounts, fileKey);
   const sf = program.getSourceFile(fileAbs);
   const checker = program.getTypeChecker();
@@ -476,12 +605,18 @@ function runJsFile(ts, fileAbs, options, checkCounts, fileKey, probes) {
   return { diags, observations };
 }
 
-function observeJs(ts, checker, sf, text, probes) {
+function instanceTypeAlias(text) {
+  const match = text.match(/export type (\w+)\s*=\s*InstanceType/);
+  return match ? match[1] : null;
+}
+
+function observeJs(ts, checker, sf, text, probes = {}) {
   const out = { types: {}, hover: null, definition: null, references: 0, edits: [] };
   if (!sf) return out;
-  const instancePos = text.indexOf("export type Instance");
-  if (instancePos >= 0) {
-    const node = findIdentifier(ts, sf, "Instance");
+  const alias =
+    instanceTypeAlias(text) || (text.includes("export type Instance") ? "Instance" : null);
+  if (alias) {
+    const node = findIdentifier(ts, sf, alias);
     if (node) {
       const type = checker.getTypeAtLocation(node);
       out.types.Instance = {
@@ -490,27 +625,27 @@ function observeJs(ts, checker, sf, text, probes) {
       };
     }
   }
-  const hoverNeedle = probes?.hoverNeedle || "stp1HoverTarget";
-  const hoverPos = text.indexOf(hoverNeedle);
-  if (hoverPos >= 0) {
-    const node = findIdentifier(ts, sf, hoverNeedle);
+  const hoverName = probes.hoverNeedle || "stp1HoverTarget";
+  if (text.includes(hoverName)) {
+    const node = findIdentifier(ts, sf, hoverName);
     if (node) {
       const type = checker.getTypeAtLocation(node);
       out.hover = {
-        name: hoverNeedle,
+        name: hoverName,
         printed: checker.typeToString(type),
         flags: jsTypeFlags(ts, type),
         pos: node.getStart(sf),
       };
     }
   }
-  const defNode = findIdentifier(ts, sf, "Comp");
+  const defName = resolveDefinitionName(text, probes);
+  const defNode = defName ? findIdentifier(ts, sf, defName) : null;
   if (defNode) {
     const sym = checker.getSymbolAtLocation(defNode);
-    out.definition = { name: sym?.getName?.() || "Comp", pos: defNode.getStart(sf) };
-    out.edits = [{ name: "Comp", pos: defNode.getStart(sf), end: defNode.getEnd() }];
+    out.definition = { name: sym?.getName?.() || defName, pos: defNode.getStart(sf) };
+    out.edits = [{ name: defName, pos: defNode.getStart(sf), end: defNode.getEnd() }];
   }
-  out.references = countIdentifier(ts, sf, "Comp");
+  out.references = defName ? countIdentifier(ts, sf, defName) : 0;
   return out;
 }
 
@@ -605,9 +740,9 @@ function observeNative(project, fileAbs, probes, checkCounts, fileKey) {
   const diags = nativeSemanticDiagnostics(project, fileAbs, checkCounts, fileKey);
   const text = fs.readFileSync(fileAbs, "utf8");
   const observations = { types: {}, hover: null, definition: null, references: 0, edits: [] };
-  const instanceNeedle = "Instance";
-  if (text.includes("export type Instance")) {
-    const pos = offsetOf(text, "export type Instance") + "export type ".length;
+  const alias = instanceTypeAlias(text);
+  if (alias) {
+    const pos = offsetOf(text, `export type ${alias}`) + "export type ".length;
     const type = project.checker.getTypeAtPosition(fileAbs, pos);
     if (type) {
       observations.types.Instance = {
@@ -616,30 +751,36 @@ function observeNative(project, fileAbs, probes, checkCounts, fileKey) {
       };
     }
   }
-  if (text.includes(probes.hoverNeedle)) {
-    const pos = offsetOf(text, probes.hoverNeedle);
+  const hoverName = probes.hoverNeedle || "stp1HoverTarget";
+  if (text.includes(hoverName)) {
+    const pos = offsetOf(text, hoverName);
     const type = project.checker.getTypeAtPosition(fileAbs, pos);
     if (type) {
       observations.hover = {
-        name: probes.hoverNeedle,
+        name: hoverName,
         printed: project.checker.typeToString(type),
         flags: type.flags ?? 0,
         pos,
       };
     }
   }
-  if (text.includes("Comp")) {
-    const pos = offsetOf(text, "class Comp") + "class ".length;
-    const sym = project.checker.getSymbolAtPosition(fileAbs, pos);
-    observations.definition = { name: sym?.name || "Comp", pos };
-    observations.edits = [{ name: "Comp", pos, end: pos + 4 }];
+  const defName = resolveDefinitionName(text, probes);
+  let defPos = null;
+  if (defName) {
+    const identPos = identifierOffset(text, defName);
+    defPos = identPos >= 0 ? identPos : offsetOf(text, defName);
+  }
+  if (defPos != null) {
+    const sym = project.checker.getSymbolAtPosition(fileAbs, defPos);
+    observations.definition = { name: sym?.name || defName, pos: defPos };
+    observations.edits = [{ name: defName, pos: defPos, end: defPos + defName.length }];
     let refs = [];
     try {
       refs = sym ? project.checker.getReferencesToSymbolInFile(fileAbs, sym) : [];
     } catch {
       refs = [];
     }
-    observations.references = Array.isArray(refs) ? refs.length : text.split("Comp").length - 1;
+    observations.references = Array.isArray(refs) ? refs.length : text.split(defName).length - 1;
   }
   return { diags, observations };
 }
@@ -663,6 +804,289 @@ export function assertCheckCounts(checkCounts, engineId, probeFiles, max = 1) {
       );
     }
   }
+  return errors;
+}
+
+export function caseProbeFiles(cases = []) {
+  const files = [];
+  for (const row of cases) {
+    if (row.file) files.push(row.file);
+    if (row.dirtyTwin) files.push(row.dirtyTwin);
+    if (Array.isArray(row.files)) files.push(...row.files);
+  }
+  return [...new Set(files.map(posix))];
+}
+
+function sourceFileOf(program, absPath) {
+  const want = path.resolve(absPath);
+  for (const sf of program.getSourceFiles()) {
+    if (path.resolve(sf.fileName) === want) return sf;
+  }
+  return program.getSourceFile(absPath) || null;
+}
+
+function loadJsTsconfig(ts, tsconfigAbs) {
+  const raw = ts.readConfigFile(tsconfigAbs, ts.sys.readFile);
+  if (raw.error) {
+    throw new Error(ts.flattenDiagnosticMessageText(raw.error.messageText, "\n"));
+  }
+  return ts.parseJsonConfigFileContent(
+    raw.config,
+    ts.sys,
+    path.dirname(tsconfigAbs),
+    undefined,
+    tsconfigAbs,
+  );
+}
+
+export function runJsStp2(resolved, probes, repoRoot, cases) {
+  const ts = loadJsTypeScript(resolved, repoRoot);
+  const tsconfigAbs = repoPath(repoRoot, probes.tsconfig);
+  const parsed = loadJsTsconfig(ts, tsconfigAbs);
+  const host = ts.createCompilerHost(parsed.options, true);
+  const program = ts.createProgram({
+    rootNames: parsed.fileNames,
+    options: parsed.options,
+    host,
+  });
+  const checker = program.getTypeChecker();
+  const checkCounts = {};
+  const files = {};
+  const wanted = caseProbeFiles(cases);
+  if (probes.positive) wanted.unshift(posix(probes.positive));
+  if (probes.negative) wanted.push(posix(probes.negative));
+  const unique = [...new Set(wanted)];
+  for (const rel of unique) {
+    const abs = repoPath(repoRoot, rel);
+    bumpCheckCount(checkCounts, rel);
+    const sf = sourceFileOf(program, abs);
+    const text = fs.existsSync(abs) ? fs.readFileSync(abs, "utf8") : "";
+    const diags = [];
+    if (sf) {
+      diags.push(
+        ...program
+          .getSemanticDiagnostics(sf)
+          .concat(program.getSyntacticDiagnostics(sf))
+          .map(normalizeDiag),
+      );
+    }
+    files[rel] = {
+      diags,
+      observations: observeJs(ts, checker, sf, text, probes),
+    };
+  }
+  return {
+    engine: resolved.id,
+    positive: files[posix(probes.positive)],
+    negative: files[posix(probes.negative)],
+    files,
+    checkCounts,
+  };
+}
+
+export async function runNativeStp2(resolved, probes, repoRoot, cases) {
+  const { API } = await loadNativeApi(repoRoot);
+  const probesDir = path.dirname(repoPath(repoRoot, probes.tsconfig));
+  const tsconfig = repoPath(repoRoot, probes.tsconfig);
+  const api = new API({ tsserverPath: resolved.executable, cwd: probesDir });
+  try {
+    const snap = api.updateSnapshot({ openProject: tsconfig });
+    const project = snap.getProject(tsconfig);
+    if (!project) {
+      throw new Error(`native engine did not open ${posix(probes.tsconfig)}`);
+    }
+    const checkCounts = {};
+    const files = {};
+    const wanted = caseProbeFiles(cases);
+    if (probes.positive) wanted.unshift(posix(probes.positive));
+    if (probes.negative) wanted.push(posix(probes.negative));
+    const unique = [...new Set(wanted)];
+    for (const rel of unique) {
+      const abs = repoPath(repoRoot, rel);
+      files[rel] = observeNative(project, abs, probes, checkCounts, rel);
+    }
+    snap.dispose();
+    return {
+      engine: resolved.id,
+      positive: files[posix(probes.positive)],
+      negative: files[posix(probes.negative)],
+      files,
+      checkCounts,
+    };
+  } finally {
+    api.close();
+  }
+}
+
+function fileResult(run, rel) {
+  return run.files?.[posix(rel)] || null;
+}
+
+function extraExpectedCode(row, extraRel) {
+  const key = posix(extraRel);
+  const keyed = row.fileExpectedCodes?.[key] ?? row.fileExpectedCodes?.[extraRel];
+  if (Number.isInteger(keyed)) return keyed;
+  if (Number.isInteger(row.expectedCode)) return row.expectedCode;
+  return null;
+}
+
+function evaluateStp2Run(run, probes, cases, engineId, { maxChecksPerFile = 1 } = {}) {
+  const errors = [];
+  const measured = [];
+  for (const row of cases) {
+    const caseId = row.id;
+    const primary = row.file ? fileResult(run, row.file) : null;
+    if (row.file && !primary) {
+      errors.push(err(caseId, "missing-probes", `${engineId} missing probe ${row.file}`));
+      continue;
+    }
+    if (row.file) measured.push(row.file);
+    if (row.disposition === "accept") {
+      errors.push(
+        ...assertCleanTwin(primary.diags, { fileLabel: `${engineId} ${caseId}` }).map((item) => ({
+          ...item,
+          caseId,
+        })),
+      );
+      if (row.expectedInstanceType) {
+        const instance = primary.observations.types.Instance;
+        if (!instance) {
+          errors.push(err(caseId, "vacuous-type", `${engineId} missing Instance type`));
+        } else {
+          errors.push(
+            ...assertExactType({
+              actual: instance.printed,
+              expected: row.expectedInstanceType,
+              flags: instance.flags,
+            }).map((item) => ({ ...item, caseId })),
+          );
+        }
+      }
+      if (row.expectedHoverType) {
+        const hover = primary.observations.hover;
+        const needle = row.hoverNeedle || probes.hoverNeedle;
+        if (
+          !hover ||
+          (needle && hover.name !== needle && hover.printed !== row.expectedHoverType)
+        ) {
+          if (!hover) {
+            errors.push(err(caseId, "type-mismatch", `${engineId} missing hover type`));
+          } else {
+            errors.push(
+              ...assertExactType({
+                actual: hover.printed,
+                expected: row.expectedHoverType,
+                flags: hover.flags,
+              }).map((item) => ({ ...item, caseId })),
+            );
+          }
+        } else {
+          errors.push(
+            ...assertExactType({
+              actual: hover.printed,
+              expected: row.expectedHoverType,
+              flags: hover.flags,
+            }).map((item) => ({ ...item, caseId })),
+          );
+        }
+      }
+      if (!primary.observations.definition) {
+        errors.push(err(caseId, "missing-definition", `${engineId} missing definition target`));
+      } else if (
+        probes.definitionNeedle &&
+        primary.observations.definition.name !== probes.definitionNeedle
+      ) {
+        errors.push(
+          err(
+            caseId,
+            "missing-definition",
+            `${engineId} definition target ${primary.observations.definition.name} is not ${probes.definitionNeedle}`,
+          ),
+        );
+      }
+      if ((primary.observations.edits || []).length === 0) {
+        errors.push(err(caseId, "missing-edit", `${engineId} missing edit participation`));
+      }
+      if (
+        !Number.isInteger(primary.observations.references) ||
+        primary.observations.references < 1
+      ) {
+        errors.push(
+          err(caseId, "missing-references", `${engineId} missing references participation`),
+        );
+      }
+      if (Array.isArray(row.files)) {
+        for (const extraRel of row.files) {
+          measured.push(extraRel);
+          const extra = fileResult(run, extraRel);
+          const expectedCode = extraExpectedCode(row, extraRel);
+          if (!Number.isInteger(expectedCode)) {
+            errors.push(
+              err(
+                caseId,
+                "missing-negative",
+                `${engineId} ${extraRel} has no expectedCode/fileExpectedCodes entry`,
+              ),
+            );
+            continue;
+          }
+          const anchored = (extra?.diags || []).filter((diag) => diag.code === expectedCode);
+          if (anchored.length === 0) {
+            errors.push(
+              err(
+                caseId,
+                "missing-negative",
+                `${engineId} ${extraRel} lacked TS${expectedCode}; got ${JSON.stringify(extra?.diags || [])}`,
+              ),
+            );
+          }
+        }
+      }
+    } else {
+      const expectedCode = row.expectedCode;
+      const anchored = (primary.diags || []).filter((diag) => diag.code === expectedCode);
+      if (!Number.isInteger(expectedCode) || anchored.length === 0) {
+        errors.push(
+          err(
+            caseId,
+            "missing-negative",
+            `${engineId} ${row.file} lacked anchored TS${expectedCode}; got ${JSON.stringify(primary.diags)}`,
+          ),
+        );
+      }
+      if (row.dirtyTwin) {
+        measured.push(row.dirtyTwin);
+        const dirty = fileResult(run, row.dirtyTwin);
+        if (!dirty) {
+          errors.push(
+            err(caseId, "missing-probes", `${engineId} missing dirty twin ${row.dirtyTwin}`),
+          );
+        } else if (Number.isInteger(row.dirtyExpectedCode)) {
+          const dirtyAnchored = (dirty.diags || []).filter(
+            (diag) => diag.code === row.dirtyExpectedCode,
+          );
+          if (dirtyAnchored.length === 0) {
+            errors.push(
+              err(
+                caseId,
+                "missing-negative",
+                `${engineId} dirty twin ${row.dirtyTwin} lacked TS${row.dirtyExpectedCode}; got ${JSON.stringify(dirty.diags)}`,
+              ),
+            );
+          }
+        } else if ((dirty.diags || []).some((diag) => diag.code === expectedCode)) {
+          errors.push(
+            err(
+              caseId,
+              "unrelated-generated-error",
+              `${engineId} dirty twin ${row.dirtyTwin} unexpectedly reported TS${expectedCode}`,
+            ),
+          );
+        }
+      }
+    }
+  }
+  errors.push(...assertCheckCounts(run.checkCounts, engineId, measured, maxChecksPerFile));
   return errors;
 }
 
@@ -695,6 +1119,17 @@ function evaluateHarnessRun(run, probes, engineId, { maxChecksPerFile = 1 } = {}
   }
   if (!run.positive.observations.definition) {
     errors.push(err("STP1-harness", "missing-definition", `${engineId} missing definition target`));
+  } else if (
+    probes.definitionNeedle &&
+    run.positive.observations.definition.name !== probes.definitionNeedle
+  ) {
+    errors.push(
+      err(
+        "STP1-harness",
+        "missing-definition",
+        `${engineId} definition target ${run.positive.observations.definition.name} is not ${probes.definitionNeedle}`,
+      ),
+    );
   }
   if ((run.positive.observations.edits || []).length === 0) {
     errors.push(err("STP1-harness", "missing-edit", `${engineId} missing edit participation`));
@@ -797,6 +1232,9 @@ export async function verifyNode(options) {
   const inventory = options.inventory || readJson(repoPath(repoRoot, rootLoad.manifest.inventory));
   const obligation = options.obligation || loadObligation(repoRoot, inventory);
   errors.push(...assertInventoryComplete(inventory, obligation, repoRoot));
+  if (nodeId === "STP2") {
+    errors.push(...assertStp2Products(repoRoot, nodeLoad.manifest));
+  }
 
   const matrix =
     options.engineMatrix || readJson(repoPath(repoRoot, rootLoad.manifest.engineMatrix));
@@ -842,13 +1280,21 @@ export async function verifyNode(options) {
     }
   } else if (shouldRun) {
     const maxChecksPerFile = methodology?.boundedWork?.maxChecksPerFilePerEngine ?? 1;
+    const stp2 = nodeId === "STP2";
     for (const engine of resolvedEngines) {
-      const run =
-        engine.kind === "javascript"
+      const run = stp2
+        ? engine.kind === "javascript"
+          ? runJsStp2(engine, probes, repoRoot, cases)
+          : await runNativeStp2(engine, probes, repoRoot, cases)
+        : engine.kind === "javascript"
           ? runJsEngine(engine, probes, repoRoot)
           : await runNativeEngine(engine, probes, repoRoot);
       harnessRuns.push(run);
-      errors.push(...evaluateHarnessRun(run, probes, engine.id, { maxChecksPerFile }));
+      if (stp2) {
+        errors.push(...evaluateStp2Run(run, probes, cases, engine.id, { maxChecksPerFile }));
+      } else {
+        errors.push(...evaluateHarnessRun(run, probes, engine.id, { maxChecksPerFile }));
+      }
     }
     if (harnessRuns.length === 0) {
       errors.push(err("STP1-harness", "missing-probes", "zero probe executions"));
@@ -856,7 +1302,8 @@ export async function verifyNode(options) {
   }
 
   if (options.requireAll) {
-    for (const id of mandatoryCasesFor(nodeLoad.manifest)) {
+    const required = mandatoryCasesFor(nodeLoad.manifest);
+    for (const id of required) {
       if (!selected.includes(id)) {
         errors.push(
           err("STP1-zero-selection", "zero-cases", `mandatory case ${id} was not selected`),
@@ -1005,9 +1452,20 @@ function summarize({
     for (const error of errors) selectedCaseIds.add(error.caseId);
   }
   const probeSizes = {};
-  const probeFiles = [nodeManifest?.probes?.positive, nodeManifest?.probes?.negative].filter(
-    Boolean,
-  );
+  const probeFiles = [
+    nodeManifest?.probes?.positive,
+    nodeManifest?.probes?.negative,
+    "tests/sfc-projection/STP1/probes/positive.ts",
+    "tests/sfc-projection/STP1/probes/negative.ts",
+    "tests/sfc-projection/STP2/probes/accept-instance-concrete.ts",
+    "tests/sfc-projection/STP2/probes/accept-instance-generic.ts",
+    "tests/sfc-projection/STP2/probes/accept-instance-explicit.ts",
+    "tests/sfc-projection/STP2/probes/accept-constructor-inferred.ts",
+    "tests/sfc-projection/STP2/probes/accept-vue-utilities.tsx",
+    "tests/sfc-projection/STP2/probes/reject-not-callable.ts",
+    "tests/sfc-projection/STP2/probes/reject-constructor-escape-clean.ts",
+    "tests/sfc-projection/STP2/probes/reject-explicit-input-mismatch.ts",
+  ].filter(Boolean);
   for (const rel of probeFiles) {
     const abs = repoPath(repoRoot, rel);
     if (fs.existsSync(abs)) probeSizes[rel] = fs.statSync(abs).size;
@@ -1055,10 +1513,10 @@ export function selectedCaseIds(result) {
   return [...(result.selectedCaseIds || [])];
 }
 
-const HELP = `ProjectionProbeRunner — STP1/STP5 feature inventory and mapper proof harness
+const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP5 mapper)
 
 USAGE
-  node scripts/sfc-projection/verify-node.mjs --node STP1|STP5 [--engine all|ts-js|ts-native] [--require-all] [--json]
+  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP5 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
 vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted

@@ -76,6 +76,43 @@ rescope_files = 12
 rescope_unrelated_packages = 3
 
 [[node]]
+id = "STP2"
+name = "Public Vue constructor compatibility and specialization feasibility"
+predecessors = ["STP1"]
+phase = "compiler"
+train = "compiler.sfc-ts-projection"
+product = "vue_typescript_tooling"
+kind = "proof"
+semantic_role = "delivery"
+class = "compiler"
+owner = "compiler.sfc-ts-projection:abi-proof"
+conflict_domains = ["vue_product"]
+resource_class = "ts-heavy"
+gate_profile = "targeted-domain"
+review_profile = "public-3"
+dispatchable = true
+optional = false
+release_gating = "none"
+gh_milestone = "0.0.4"
+external_requirements = []
+charter = "charters/compiler-sfc-ts-projection/STP2.md"
+implementation_effort_min = "high"
+implementation_effort_default = "high"
+review_effort_min = "high"
+review_effort_default = "high"
+verification_effort_min = "high"
+verification_effort_default = "high"
+confirmation_effort_min = "high"
+confirmation_effort_default = "high"
+size = "M"
+max_production_loc = 0
+max_production_files = 0
+max_related_packages = 0
+rescope_loc = 1500
+rescope_files = 12
+rescope_unrelated_packages = 3
+
+[[node]]
 id = "STP5"
 name = "Content Mapper diagnostic and authored-operation feasibility"
 predecessors = ["STP1", "TCM1", "TCM2"]

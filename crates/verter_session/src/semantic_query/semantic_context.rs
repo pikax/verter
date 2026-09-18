@@ -226,7 +226,7 @@ fn intern_order_domain(key: OrderDomainKey) -> OrderDomainId {
 
 impl SemanticContextId {
     #[must_use]
-    pub fn as_u32(self) -> u32 {
+    pub const fn as_u32(self) -> u32 {
         self.0
     }
 }

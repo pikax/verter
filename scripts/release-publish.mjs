@@ -63,6 +63,7 @@ import {
 } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { computePublishSet, PUBLISHED_CRATES, scanWorkspacePackages } from "./lib/publish-set.mjs";
 import {
   BINARY_FAMILIES,
@@ -134,7 +135,7 @@ function heading(title) {
 // used here (git, gh, cargo, node) is a real executable.
 const SHELL_TOOLS = new Set(["npm", "pnpm"]);
 
-function quoteForShell(arg) {
+export function quoteForShell(arg) {
   return /[\s"]/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg;
 }
 
@@ -366,7 +367,7 @@ function prepare() {
  * Pack one package with pnpm (which rewrites `workspace:` ranges to the real
  * versions) and return the tarball path.
  */
-function packTarball(target, packDir) {
+export function packTarball(target, packDir) {
   const result = capture("pnpm", ["pack", "--pack-destination", packDir, "--json"], {
     cwd: target.dir,
   });
@@ -389,7 +390,7 @@ function packTarball(target, packDir) {
  * installs fine and cannot be spawned. Fail closed when a declared binary is
  * not in the archive.
  */
-function fixExecutableBits(target, tarball) {
+export function fixExecutableBits(target, tarball) {
   if (target.executableFiles.length === 0) return;
   const { bytes, patched } = markTarballEntriesExecutable(
     readFileSync(tarball),
@@ -729,30 +730,33 @@ async function local(flags) {
 // Entry
 // ---------------------------------------------------------------------------
 
-const { flags, positional } = parseArgs(process.argv.slice(2));
-const command = positional[0];
+const invoked = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invoked) {
+  const { flags, positional } = parseArgs(process.argv.slice(2));
+  const command = positional[0];
 
-const COMMANDS = {
-  list: async () => listTargets(flags),
-  stage: async () => stage(flags),
-  prepare: async () => prepare(),
-  "publish-npm": () => publishNpm(flags),
-  "tag-npm": () => tagNpm(flags),
-  "verify-npm": () => verifyNpm(flags),
-  "publish-crates": () => publishCrates(flags),
-  local: () => local(flags),
-};
+  const COMMANDS = {
+    list: async () => listTargets(flags),
+    stage: async () => stage(flags),
+    prepare: async () => prepare(),
+    "publish-npm": () => publishNpm(flags),
+    "tag-npm": () => tagNpm(flags),
+    "verify-npm": () => verifyNpm(flags),
+    "publish-crates": () => publishCrates(flags),
+    local: () => local(flags),
+  };
 
-if (!command || !COMMANDS[command]) {
-  console.error(
-    `usage: node scripts/release-publish.mjs <${Object.keys(COMMANDS).join("|")}> [options]\n` +
-      "see the header comment of scripts/release-publish.mjs for each subcommand's options",
-  );
-  process.exit(2);
-}
+  if (!command || !COMMANDS[command]) {
+    console.error(
+      `usage: node scripts/release-publish.mjs <${Object.keys(COMMANDS).join("|")}> [options]\n` +
+        "see the header comment of scripts/release-publish.mjs for each subcommand's options",
+    );
+    process.exit(2);
+  }
 
-try {
-  await COMMANDS[command]();
-} catch (error) {
-  fail(error instanceof Error ? error.message : String(error));
+  try {
+    await COMMANDS[command]();
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
 }

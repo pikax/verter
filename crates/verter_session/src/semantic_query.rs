@@ -79,8 +79,8 @@ pub use semantic_context::{
 pub mod outcome;
 pub use outcome::{
     DependencyProofId, DiagnosticRecipeSetId, IncompleteReason, OutcomeEvidence, OutcomeEvidenceId,
-    QueryOutcome, Ready, RecoveryProvenanceId, CONTEXT_FREE_EVIDENCE, EMPTY_DIAGNOSTICS,
-    EMPTY_PROOF, NO_RECOVERY,
+    QueryOutcome, Ready, RecoveryProvenanceId, ResultEvaluationContextId, CONTEXT_FREE_EVALUATION,
+    CONTEXT_FREE_EVIDENCE, EMPTY_DIAGNOSTICS, EMPTY_PROOF, NO_RECOVERY,
 };
 #[cfg(test)]
 mod outcome_tests;

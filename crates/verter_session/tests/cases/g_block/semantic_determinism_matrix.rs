@@ -1234,3 +1234,26 @@ fn det_09_policy_change_with_resident_parents() {
          change that must not rebuild resolution changed the answer"
     );
 }
+
+/// Schedule-independent intern: duplicate publishers and opposite intern
+/// orders yield one logical candidate set on a shared store.
+#[test]
+fn signature_kernel_interned_identities_are_schedule_independent() {
+    // bounded-loop: one race per worker-count in the AC3 matrix.
+    for workers in [1usize, 2, 4, 8] {
+        let ids = verter_session::for_tests::duplicate_publisher_one_sets(workers);
+        assert_eq!(ids.len(), workers, "publisher count {workers}");
+        let first = &ids[0];
+        for id in &ids {
+            assert_eq!(
+                id, first,
+                "duplicate publishers diverged at {workers} workers"
+            );
+        }
+    }
+    let (fwd, rev) = verter_session::for_tests::opposite_order_one_call_binder_tokens();
+    assert_eq!(
+        fwd, rev,
+        "opposite intern order changed logical binder identity"
+    );
+}
