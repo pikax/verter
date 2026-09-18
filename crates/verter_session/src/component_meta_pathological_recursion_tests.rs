@@ -340,8 +340,9 @@ fn pathological_exclude_self_recursive() {
 //   3. Survive within the depth budget (the chain is short and
 //      well within MAX_DEPTH).
 //
-// Expected: terminate with the correct extracted union
-// `'a' | 'b'`. Discriminating: stack overflow OR a wrongly-cached
+// Expected: terminate with the correct extracted union — the members
+// `\"a\"` and `\"b\"`, rendered in `VerterStableV1` order. Discriminating:
+// stack overflow OR a wrongly-cached
 // `Value(_)` for the wrong shape would mark a regression.
 // `kind: Extract<typeof y, R>` is written inline rather than behind
 // a `type X = Extract<...>` alias because the component-meta shallow-
@@ -351,8 +352,8 @@ fn pathological_exclude_self_recursive() {
 // concern this test pins is the Extract/typeof evaluation's
 // termination, which is exercised when the consumer explicitly walks
 // the operator chain (here: `Extract<...>` is a generic instantiation,
-// so the projector reduces it path-precisely to the literal union
-// "a" | "b").
+// so the projector reduces it path-precisely to the literal union of
+// "a" and "b" in VerterStableV1 order).
 const PATHOLOGICAL_EXTRACT_THROUGH_TYPEOF_VUE: &str = r#"<script setup lang="ts">
 const y: 'a' | 'b' | 'c' = 'a';
 type R = 'a' | 'b';
@@ -368,8 +369,9 @@ defineProps<{ kind: Extract<typeof y, R> }>();
 /// `Instantiate(Extract, [TypeOf{y}, R])` -> `evaluate_deferred`
 /// of `TypeOf{y}` -> per-member `relate_nodes(member, R)`.
 /// Expected: terminate within MAX_DEPTH and produce
-/// `kind: "a" | "b"`. The component-meta surface is therefore
-/// `props = [{ name: "kind", type_signature: "\"a\" | \"b\"" }]`.
+/// `kind: "b" | "a"` — the extracted members in `VerterStableV1`
+/// `(fingerprint, exact)` order. The component-meta surface is therefore
+/// `props = [{ name: "kind", type_signature: "\"b\" | \"a\"" }]`.
 #[test]
 fn pathological_extract_through_typeof() {
     let host = build_hermetic_host(&[("/A.vue", PATHOLOGICAL_EXTRACT_THROUGH_TYPEOF_VUE)]);
@@ -404,11 +406,18 @@ fn pathological_extract_through_typeof() {
     .unwrap_or_else(|| panic!("`kind`'s published source must demand-materialize"));
     let signature =
         crate::component_meta_pathological_recursion_tests::render_signature_for_test(&kind_type);
+    // The extracted pair renders in `VerterStableV1` order — the
+    // `(fingerprint, exact)` pair order of the two string-literal keys,
+    // which orders `"b"` before `"a"` — NOT in the authored `'a' | 'b'`
+    // order the retired arena-id sort happened to preserve. The strict
+    // equality pin discriminates both ways: a regression to arena-id
+    // ordering flips it back to `"a" | "b"`.
     assert_eq!(
-        signature, "\"a\" | \"b\"",
-        "Extract<typeof y, R> must reduce to the literal union \"a\" | \"b\" \
-         after the typeof carrier unwrap dispatches the source union through the \
-         new per-member relation engine path; got {signature}"
+        signature, "\"b\" | \"a\"",
+        "Extract<typeof y, R> must reduce to the literal union of \"a\" and \
+         \"b\", rendered in the VerterStableV1 (fingerprint, exact) order, \
+         after the typeof carrier unwrap dispatches the source union through \
+         the per-member relation engine path; got {signature}"
     );
 }
 
