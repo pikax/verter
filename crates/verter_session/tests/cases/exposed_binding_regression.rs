@@ -1082,7 +1082,12 @@ function reset() {
   value.value = 0;
 }
 
-defineExpose({ focus, reset, value });
+function box(n: number) {
+  return { value: n };
+}
+const boxed = box(0);
+
+defineExpose({ focus, reset, value, boxed });
 </script>
 <template>
   <div>{{ value }}</div>
@@ -1104,17 +1109,11 @@ defineExpose({ focus, reset, value });
         lanes.exposed.len(),
         "every exposed member must keep a materialized type"
     );
-    for member in &analysis.exposed {
-        assert!(
-            analysis.exposed.iter().any(|row| row.name == member.name),
-            "exposed member {} dropped",
-            member.name
-        );
-    }
     let names: Vec<_> = analysis.exposed.iter().map(|e| e.name.as_str()).collect();
     assert!(names.contains(&"focus"));
     assert!(names.contains(&"reset"));
     assert!(names.contains(&"value"));
+    assert!(names.contains(&"boxed"));
     for name in ["focus", "reset"] {
         let index = analysis
             .exposed
@@ -1130,15 +1129,28 @@ defineExpose({ focus, reset, value });
             lanes.exposed[index]
         );
     }
+    let boxed_idx = analysis
+        .exposed
+        .iter()
+        .position(|e| e.name == "boxed")
+        .unwrap();
+    assert!(
+        !matches!(
+            lanes.exposed[boxed_idx],
+            verter_type_expr::TypeExpr::Unknown(_)
+        ),
+        "exposed local call-init `boxed` must keep a live type, got {:?}",
+        lanes.exposed[boxed_idx]
+    );
     let value_idx = analysis
         .exposed
         .iter()
         .position(|e| e.name == "value")
         .unwrap();
     assert_eq!(
-        lanes.exposed.len(),
-        analysis.exposed.len(),
-        "exposed ref `value` must not drop the member, got {:?}",
+        lanes.exposed[value_idx],
+        verter_type_expr::TypeExpr::Unknown(verter_type_expr::UnknownValue::missing_output()),
+        "standalone host cannot resolve `vue.ref`; AC3 keeps the member as typed unsupported, got {:?}",
         lanes.exposed[value_idx]
     );
 }
@@ -1192,6 +1204,21 @@ defineExpose({ query, isEmpty, clear });
         "clear must materialize as a function, got {:?}",
         lanes.exposed[clear_idx]
     );
+    let unsupported =
+        verter_type_expr::TypeExpr::Unknown(verter_type_expr::UnknownValue::missing_output());
+    for name in ["query", "isEmpty"] {
+        let index = analysis
+            .exposed
+            .iter()
+            .position(|e| e.name == name)
+            .unwrap();
+        assert_eq!(
+            lanes.exposed[index],
+            unsupported,
+            "standalone host cannot resolve vue.{name}; AC3 keeps the member as typed unsupported",
+            name = name
+        );
+    }
 }
 
 /// vue-benchmarks `prop-type-factory-defaults`: `PropType<T>` must retain T.

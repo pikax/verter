@@ -1670,8 +1670,15 @@ defineExpose({ focus, reset, value });
     for (const member of native) {
       expect(member.name).toBeTruthy();
       expect(member.type).toBeDefined();
-      expect(member.type).not.toEqual({ kind: "primitive", name: "unknown" });
     }
+    for (const name of ["focus", "reset"] as const) {
+      const member = native.find((row) => row.name === name);
+      expect(member).toBeDefined();
+      expect(member!.type.kind).not.toBe("unknown");
+    }
+    const value = native.find((member) => member.name === "value");
+    expect(value).toBeDefined();
+    expect(value!.type.kind).toBe("unknown");
   });
 
   it("extracts an exposed ref and computed without a terminal materialization error", async () => {
@@ -1701,6 +1708,17 @@ defineExpose({ query, isEmpty, clear });
       expect.arrayContaining(["query", "isEmpty", "clear"]),
     );
     expect(meta.exposed).toHaveLength(3);
+    const native = meta._verter!.exposed;
+    expect(native).toHaveLength(3);
+    const clear = native.find((row) => row.name === "clear");
+    expect(clear).toBeDefined();
+    expect(clear!.type.kind).not.toBe("unknown");
+    for (const name of ["query", "isEmpty"] as const) {
+      const member = native.find((row) => row.name === name);
+      expect(member).toBeDefined();
+      expect(member!.type).toBeDefined();
+      expect(member!.type.kind).toBe("unknown");
+    }
   });
 
   it("retains PropType factory-default declared types", async () => {
