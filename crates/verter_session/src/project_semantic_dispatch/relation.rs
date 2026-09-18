@@ -2369,7 +2369,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             many => {
                 let mut dedup: Vec<SemanticNodeId> = many.to_vec();
                 crate::semantic_query::stable_key::sort_by_stable_key(graph, &mut dedup);
-                dedup.dedup();
+                dedup.dedup_by(|a, b| {
+                    crate::semantic_query::stable_key::stable_key_for_node(graph, *a)
+                        == crate::semantic_query::stable_key::stable_key_for_node(graph, *b)
+                });
                 if dedup.len() == 1 {
                     return dedup[0];
                 }
@@ -4145,7 +4148,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         crate::semantic_query::stable_key::sort_by_stable_key(graph, &mut targets);
-        targets.dedup();
+        targets.dedup_by(|a, b| {
+            crate::semantic_query::stable_key::stable_key_for_node(graph, *a)
+                == crate::semantic_query::stable_key::stable_key_for_node(graph, *b)
+        });
         targets
     }
 
