@@ -238,7 +238,13 @@ pub(crate) fn props_from_typeinfo_surface(
             // is an own-body `member_index` member).
             let declared_in_macro_type_arg = member.declared_in_macro_type_arg
                 && member.origin.merge_role != crate::semantic_query::MemberMergeRole::Heritage;
-            Some(
+            let member_type = crate::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
+                &dispatch,
+                member.value,
+            )
+            .map(crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::from_raised_shallow);
+            Some({
+                let mut field =
                 crate::typeinfo::framework_surface::results::ResolvedPropField::from_source_position(
                     AnalyzedPropField {
                         name: member_name,
@@ -256,8 +262,10 @@ pub(crate) fn props_from_typeinfo_surface(
                     },
                     type_source,
                     verter_type_expr::PropCallableRole::Other,
-                ),
-            )
+                );
+                field.member_type = member_type;
+                field
+            })
         })
         .collect()
 }

@@ -239,6 +239,10 @@ pub struct ResolvedPropField {
     pub authored_evidence: Option<verter_type_expr::AuthoredTypeEvidence>,
     /// Typed callable role established from semantic identity.
     pub callable_role: verter_type_expr::PropCallableRole,
+    /// Sealed shallow member type for the zero-dispatch wire encoder.
+    /// `None` when no resolved type was available; `Some(Opaque)` when a
+    /// resolved value lies outside the shallow vocabulary.
+    pub member_type: Option<NamedTypeMemberOutput>,
 }
 
 impl ResolvedPropField {
@@ -268,6 +272,7 @@ impl ResolvedPropField {
             ),
             authored_evidence,
             callable_role,
+            member_type: None,
         }
     }
 }
@@ -327,12 +332,14 @@ pub struct ModelBinding {
 }
 
 /// The sealed shallow OUTPUT value of a named object-surface member — the
-/// CLOSED vocabulary the zero-dispatch wire encoder publishes for an
-/// options / expose member value. One arm per shallow-encodable shape:
-/// a primitive / literal leaf, a bare named reference (type arguments are
-/// NOT carried — expanding them would be an eager second walk), the empty
-/// object surface, and the [`Self::Opaque`] degradation for every value
-/// outside the shallow vocabulary (never a fabricated ref, never a raw
+/// CLOSED vocabulary the zero-dispatch wire encoder publishes for a
+/// member value. One arm per shallow-encodable shape: a primitive /
+/// literal leaf, a bare named reference (type arguments are NOT
+/// carried — expanding them would be an eager second walk), the empty
+/// object surface, a one-level object (function-parameter slot
+/// bindings), a root function with one-level parameter/return
+/// structure, and the [`Self::Opaque`] degradation for every value
+/// outside that vocabulary (never a fabricated ref, never a raw
 /// `TypeExpr`). `NoTypeExpr` by derive; there is no public unwrap back to
 /// a `TypeExpr`.
 #[derive(Debug, Clone, PartialEq, verter_no_typeexpr::NoTypeExpr)]
@@ -350,10 +357,74 @@ pub enum NamedTypeMemberOutput {
     /// The empty object surface (`{}`) — the one structural shape the shallow
     /// vocabulary encodes directly.
     EmptyObject,
+    /// A root callable with one-level parameter/return structure.
+    Function {
+        /// Source-ordered parameters.
+        parameters: Vec<NamedCallableParam>,
+        /// Return type; `None` is honest absence (the wire signature uses
+        /// node id 0 rather than fabricating `void`).
+        return_type: Option<NamedTypeLeaf>,
+    },
     /// A resolved value outside the shallow output vocabulary — degraded at
     /// CONSTRUCTION time (the producer classifies and discards its transient
     /// raised form), encoded as a structurally-unencodable opaque on the wire.
     Opaque,
+}
+
+/// A non-recursive leaf in the sealed vocabulary (function return / object
+/// property). Nested callables degrade to [`Self::Opaque`].
+#[derive(Debug, Clone, PartialEq, verter_no_typeexpr::NoTypeExpr)]
+pub enum NamedTypeLeaf {
+    /// A primitive leaf.
+    Primitive(verter_type_expr::PrimitiveName),
+    /// A literal leaf.
+    Literal(verter_type_expr::LiteralValue),
+    /// A bare named reference.
+    Ref {
+        /// The referenced type name.
+        name: Arc<str>,
+    },
+    /// The empty object surface.
+    EmptyObject,
+    /// Outside the leaf vocabulary.
+    Opaque,
+}
+
+/// One named property of a one-level object in the sealed vocabulary.
+#[derive(Debug, Clone, PartialEq, verter_no_typeexpr::NoTypeExpr)]
+pub struct NamedObjectProperty {
+    /// Property name.
+    pub name: Arc<str>,
+    /// Sealed property type (a leaf — no nested objects).
+    pub ty: NamedTypeLeaf,
+    /// Whether the property is optional.
+    pub optional: bool,
+}
+
+/// One callable parameter in the sealed vocabulary.
+#[derive(Debug, Clone, PartialEq, verter_no_typeexpr::NoTypeExpr)]
+pub struct NamedCallableParam {
+    /// Parameter name, when present.
+    pub name: Option<Arc<str>>,
+    /// Sealed parameter type: a leaf or a one-level bindings object.
+    pub ty: NamedParamType,
+    /// Whether the parameter is optional.
+    pub optional: bool,
+    /// Whether the parameter is a rest parameter.
+    pub rest: bool,
+}
+
+/// A function parameter's sealed type: a leaf, or a one-level object of
+/// leaves (Vue slot bindings). Not recursive.
+#[derive(Debug, Clone, PartialEq, verter_no_typeexpr::NoTypeExpr)]
+pub enum NamedParamType {
+    /// A primitive / literal / ref / empty-object / opaque leaf.
+    Leaf(NamedTypeLeaf),
+    /// A one-level named-property object.
+    Object {
+        /// Source-ordered named properties.
+        properties: Vec<NamedObjectProperty>,
+    },
 }
 
 impl NamedTypeMemberOutput {
@@ -369,7 +440,61 @@ impl NamedTypeMemberOutput {
             RaisedShallowMemberOutput::Literal(lit) => Self::Literal(lit),
             RaisedShallowMemberOutput::Ref { name } => Self::Ref { name },
             RaisedShallowMemberOutput::EmptyObject => Self::EmptyObject,
+            RaisedShallowMemberOutput::Object { .. } => Self::Opaque,
+            RaisedShallowMemberOutput::Function {
+                parameters,
+                return_type,
+            } => Self::Function {
+                parameters: parameters
+                    .into_iter()
+                    .map(|param| NamedCallableParam {
+                        name: param.name,
+                        ty: NamedParamType::from_raised_shallow(param.ty),
+                        optional: param.optional,
+                        rest: param.rest,
+                    })
+                    .collect(),
+                return_type: return_type.map(|ty| NamedTypeLeaf::from_raised_shallow(*ty)),
+            },
             RaisedShallowMemberOutput::Opaque => Self::Opaque,
+        }
+    }
+}
+
+impl NamedTypeLeaf {
+    fn from_raised_shallow(
+        raised: crate::project_semantic_dispatch::raise::RaisedShallowMemberOutput,
+    ) -> Self {
+        use crate::project_semantic_dispatch::raise::RaisedShallowMemberOutput;
+        match raised {
+            RaisedShallowMemberOutput::Primitive(name) => Self::Primitive(name),
+            RaisedShallowMemberOutput::Literal(lit) => Self::Literal(lit),
+            RaisedShallowMemberOutput::Ref { name } => Self::Ref { name },
+            RaisedShallowMemberOutput::EmptyObject => Self::EmptyObject,
+            RaisedShallowMemberOutput::Object { .. }
+            | RaisedShallowMemberOutput::Function { .. }
+            | RaisedShallowMemberOutput::Opaque => Self::Opaque,
+        }
+    }
+}
+
+impl NamedParamType {
+    fn from_raised_shallow(
+        raised: crate::project_semantic_dispatch::raise::RaisedShallowMemberOutput,
+    ) -> Self {
+        use crate::project_semantic_dispatch::raise::RaisedShallowMemberOutput;
+        match raised {
+            RaisedShallowMemberOutput::Object { properties } => Self::Object {
+                properties: properties
+                    .into_iter()
+                    .map(|property| NamedObjectProperty {
+                        name: property.name,
+                        ty: NamedTypeLeaf::from_raised_shallow(property.ty),
+                        optional: property.optional,
+                    })
+                    .collect(),
+            },
+            other => Self::Leaf(NamedTypeLeaf::from_raised_shallow(other)),
         }
     }
 }
@@ -420,6 +545,10 @@ pub struct MacroSurfaceDtos {
     /// framework boundary; `None` within the vector means that slot has no
     /// typed return source.
     pub slot_return_publications: Vec<Option<verter_type_expr::TypePublication>>,
+    /// Sealed per-slot member types keyed by slot name for the
+    /// zero-dispatch encoder. Empty when the slot normalizer did not
+    /// classify callables.
+    pub slot_member_types: Vec<NamedTypeMember>,
     /// The resolved options object surface.
     pub options: Option<OptionsSurface>,
     /// The resolved expose object surface (the framework-neutral
@@ -710,6 +839,7 @@ mod tests {
             emits,
             slots,
             slot_return_publications,
+            slot_member_types,
             options,
             expose,
             exposed_fields,
@@ -719,6 +849,7 @@ mod tests {
         assert!(emits.is_none());
         assert!(slots.is_none());
         assert!(slot_return_publications.is_empty());
+        assert!(slot_member_types.is_empty());
         assert!(options.is_none());
         assert!(expose.is_none());
         assert!(exposed_fields.is_empty());

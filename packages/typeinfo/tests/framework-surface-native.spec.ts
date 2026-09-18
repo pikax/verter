@@ -26,7 +26,17 @@ import {
 import { VerterHost } from "@verter/native";
 import { describe, expect, it } from "vitest";
 
+import type { FunctionType, TypeDescriptor } from "@verter/type-ir";
+
 import { decodeFrameworkSurfaceResponse, type FrameworkSurface } from "../src/framework-surface.js";
+
+function expectFunction(type: TypeDescriptor | undefined): FunctionType {
+  expect(type?.kind).toBe("function");
+  if (type?.kind !== "function") {
+    throw new Error(`expected a function descriptor, got ${String(type?.kind)}`);
+  }
+  return type;
+}
 
 const VUE_SFC = `<script setup lang="ts">
 interface Props { count: number; label?: string }
@@ -94,6 +104,8 @@ describe("resolveFrameworkSurfaceWithAudit (native binding)", () => {
     expect(props.isSupported).toBe(true);
     const propNames = props.members.map((m) => m.name).sort();
     expect(propNames).toEqual(["count", "label"]);
+    const count = props.members.find((m) => m.name === "count");
+    expect(count?.type).toEqual({ kind: "primitive", name: "number" });
 
     const emits = surface.kinds.get(FrameworkSurfaceKind.EMITS)!;
     expect(emits.isSupported).toBe(true);
@@ -102,6 +114,15 @@ describe("resolveFrameworkSurfaceWithAudit (native binding)", () => {
     const slots = surface.kinds.get(FrameworkSurfaceKind.SLOTS)!;
     expect(slots.isSupported).toBe(true);
     expect(slots.members.map((m) => m.name)).toContain("default");
+
+    // Vue slot-binding type: the slot member is a callable whose first
+    // parameter is the bindings object. An opaque node cannot claim this.
+    const defaultSlot = slots.members.find((m) => m.name === "default");
+    const slotFn = expectFunction(defaultSlot?.type);
+    expect(slotFn.parameters[0]?.type).toEqual({
+      kind: "object",
+      properties: [{ name: "item", type: { kind: "primitive", name: "string" }, optional: false }],
+    });
   });
 
   it("returns the typed error arm for an unknown adapter id", () => {
@@ -156,15 +177,17 @@ describe("resolveFrameworkSurfaceWithAudit (native binding)", () => {
  * The Svelte framework-surface response's OWN contract.
  *
  * Structural framework metadata answers names / requiredness / runtime
- * defaults. It carries NO member type: a callback prop's signature is
- * obtained from the named-symbol type query
- * (`tests/resolve-symbol.spec.ts`), never by reading a type field off a
- * surface member.
+ * defaults AND the public type-bearing member DTO: inline callbacks
+ * publish parameter/return structure, aliases stay shallow refs, and an
+ * opaque node cannot claim a complete signature. Named-symbol query
+ * (`tests/resolve-symbol.spec.ts`) remains the ECRS4 control — its
+ * success does not close this member-type acceptance.
  *
- * REGRESSION — fails if a member type field is invented on the public
- * decoded member, if the derived callback-event surface starts trusting
- * the `on` name prefix instead of the resolved callable arm, or if the
- * requiredness / default projection drifts.
+ * REGRESSION — fails if member types are dropped, if a callback
+ * signature is recovered from the `on` name prefix / display text, if
+ * the derived callback-event surface starts trusting the `on` name
+ * prefix instead of the resolved callable arm, or if the requiredness /
+ * default projection drifts.
  */
 
 const SVELTE_CALLBACKS = `<script lang="ts">
@@ -182,7 +205,7 @@ let { onMove, onToggle, onSelect, onlabel, label = "untitled" }: Props = $props(
 `;
 
 describe("resolveFrameworkSurfaceWithAudit (Svelte callback props)", () => {
-  it("answers names / requiredness / defaults and carries no member type", () => {
+  it("answers names / requiredness / defaults and type-bearing callback members", () => {
     const host = new VerterHost({ auditEnabled: false });
     const canonicalId = "/fixtures/Callbacks.svelte";
     host.upsert({
@@ -228,14 +251,29 @@ describe("resolveFrameworkSurfaceWithAudit (Svelte callback props)", () => {
     expect(emits.isSupported).toBe(true);
     expect([...emits.members.map((m) => m.name)].sort()).toEqual(["Move", "Select", "Toggle"]);
 
-    // No surface member advertises a type / signature: member-type information
-    // is genuinely ABSENT from this response, not shallow or opaque.
-    for (const member of [...props.members, ...emits.members]) {
-      const keys = Object.keys(member);
-      expect(keys).not.toContain("type");
-      expect(keys).not.toContain("signature");
-      expect(keys).not.toContain("parameters");
-    }
+    const byName = Object.fromEntries(props.members.map((m) => [m.name, m]));
+    const onMove = expectFunction(byName.onMove?.type);
+    expect(onMove.parameters.map((p) => p.name)).toEqual(["x", "y"]);
+    expect(onMove.parameters.map((p) => p.type)).toEqual([
+      { kind: "primitive", name: "number" },
+      { kind: "primitive", name: "number" },
+    ]);
+    expect(onMove.returnType).toEqual({ kind: "primitive", name: "void" });
+
+    const onToggle = expectFunction(byName.onToggle?.type);
+    expect(onToggle.parameters).toHaveLength(1);
+    expect(onToggle.parameters[0]?.name).toBe("on");
+    expect(onToggle.parameters[0]?.optional).toBe(true);
+    expect(onToggle.parameters[0]?.type).toEqual({ kind: "primitive", name: "boolean" });
+
+    // Shallow: the alias is a ref, not an inlined complete signature.
+    expect(byName.onSelect?.type).toMatchObject({
+      kind: "ref",
+      name: "Handler",
+    });
+    // Name prefix is not callable: `onlabel` stays a primitive.
+    expect(byName.onlabel?.type).toEqual({ kind: "primitive", name: "string" });
+    expect(byName.label?.type).toEqual({ kind: "primitive", name: "string" });
 
     host.close();
   });

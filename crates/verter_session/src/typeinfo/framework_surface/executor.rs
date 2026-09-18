@@ -758,6 +758,9 @@ fn fold_requested_slot(
                 aggregate
                     .slot_return_publications
                     .extend(dtos.slot_return_publications().iter().cloned());
+                aggregate
+                    .slot_member_types
+                    .extend(dtos.slot_member_types.iter().cloned());
             } else {
                 // A slots macro that resolved an empty surface still establishes
                 // the slot bundle as present (supported-empty), distinct from a

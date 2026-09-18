@@ -10,7 +10,9 @@
  * - {@link FrameworkSurface} — `framework` tag + a per-kind map carrying
  *   each kind's support status and resolved members (member names are
  *   resolved through the graph string table here, so consumers never
- *   touch the interned id space).
+ *   touch the interned id space). Member types decode from the payload
+ *   graph's `type_node_id`; an opaque/unknown descriptor is an explicit
+ *   unsupported outcome, never a complete callback signature.
  * - {@link FrameworkSurfaceError} — the typed wire error arm.
  *
  * **Status semantics.** Per-kind status is surfaced VERBATIM from
@@ -35,9 +37,25 @@ import {
   FrameworkSurfaceOriginHopKind,
   type FrameworkSurfacePayload,
   type FrameworkTag,
+  GraphPrimitiveKind,
+  type GraphSignature,
+  type GraphTypeNode,
+  type SemanticTypeGraph,
   TypeInfoGraphResponseSchema,
   type TypeInfoRequestError,
 } from "@verter/proto";
+import {
+  func,
+  literal,
+  object,
+  primitive,
+  ref,
+  unknown,
+  type FunctionParameter,
+  type ObjectProperty,
+  type PrimitiveName,
+  type TypeDescriptor,
+} from "@verter/type-ir";
 
 /**
  * One hop in a framework-surface member's declaration ORIGIN chain
@@ -123,6 +141,17 @@ export interface FrameworkSurfaceMember {
    * multi-origin member, or an adapter that does not derive origins).
    */
   readonly origin?: FrameworkSurfaceMemberOrigin;
+  /**
+   * Member type decoded from the payload graph. Absent when the wire
+   * `type_node_id` is the 0 sentinel. An `unknown` / opaque descriptor
+   * is an explicit unsupported outcome — it cannot claim a complete
+   * callback signature. A `function` descriptor carries parameter and
+   * return structure: an honestly-absent return (`return_type_node_id`
+   * 0) is `unknown("absent")`, never fabricated `void`; rest-ness is
+   * spelled as a `...` name prefix (`FunctionParameter` has no rest
+   * field). A `ref` is the shallow-by-default alias.
+   */
+  readonly type?: TypeDescriptor;
 }
 
 /** A single framework-surface kind's resolved status and members. */
@@ -206,11 +235,14 @@ export function decodeFrameworkSurfaceResponse(
  */
 export function decodeFrameworkSurfacePayload(payload: FrameworkSurfacePayload): FrameworkSurface {
   const strings = payload.graph?.strings?.entries ?? [];
+  const graph = payload.graph;
 
   const kinds = new Map<FrameworkSurfaceKind, FrameworkSurfaceKindResult>();
   for (const entry of payload.surfaces) {
     const support = entry.status?.support ?? FrameworkSurfaceKindSupport.UNSPECIFIED;
-    const members: FrameworkSurfaceMember[] = entry.members.map((m) => decodeMember(strings, m));
+    const members: FrameworkSurfaceMember[] = entry.members.map((m) =>
+      decodeMember(strings, graph, m),
+    );
     const diagnostics: string[] =
       entry.status?.diagnostics.map((d) => resolveString(strings, d.messageNameId)) ?? [];
 
@@ -239,15 +271,173 @@ export function decodeFrameworkSurfacePayload(payload: FrameworkSurfacePayload):
  */
 function decodeMember(
   strings: readonly string[],
+  graph: SemanticTypeGraph | undefined,
   m: WireFrameworkSurfaceMember,
 ): FrameworkSurfaceMember {
-  return {
+  const member: FrameworkSurfaceMember = {
     name: resolveString(strings, m.nameId),
     required: m.required,
     readonly: m.readonly,
     default: m.defaultValueId === undefined ? undefined : resolveString(strings, m.defaultValueId),
     origin: m.origin === undefined ? undefined : decodeMemberOrigin(strings, m.origin),
   };
+  // Node id 0 is the absent sentinel — no type field, not an opaque claim.
+  if (graph === undefined || m.typeNodeId === 0) {
+    return member;
+  }
+  return { ...member, type: memberTypeFromGraph(graph, m.typeNodeId) };
+}
+
+/**
+ * Project one payload-graph node into the public `TypeDescriptor` space.
+ *
+ * Bounded and total: a cycle or a kind outside the member-type vocabulary
+ * becomes `unknown(...)`. An opaque node stays opaque — callers must not
+ * treat it as a complete callback signature.
+ */
+function memberTypeFromGraph(graph: SemanticTypeGraph, nodeId: number): TypeDescriptor {
+  return walkMemberType(graph, nodeId, new Set());
+}
+
+function walkMemberType(
+  graph: SemanticTypeGraph,
+  nodeId: number,
+  visited: ReadonlySet<number>,
+): TypeDescriptor {
+  if (nodeId === 0) {
+    return unknown("absent");
+  }
+  if (visited.has(nodeId)) {
+    return unknown("[cycle]");
+  }
+  const node: GraphTypeNode | undefined = graph.nodes[nodeId];
+  const kind = node?.kind;
+  if (!kind || kind.case === undefined) {
+    return unknown(kind ? "graph node without kind" : "absent graph node");
+  }
+  const next = new Set(visited);
+  next.add(nodeId);
+  const walk = (id: number): TypeDescriptor => walkMemberType(graph, id, next);
+  const strings = graph.strings?.entries ?? [];
+
+  switch (kind.case) {
+    case "primitive":
+      return primitive(primitiveName(kind.value.kind));
+    case "literal": {
+      const inner = kind.value.value?.kind;
+      if (!inner || inner.case === undefined) return unknown("literal");
+      switch (inner.case) {
+        case "stringNameId":
+          return literal(strings[inner.value] ?? "");
+        case "numberBits":
+          return literal(f64FromBits(inner.value));
+        case "booleanValue":
+          return literal(inner.value);
+        default:
+          return unknown("literal");
+      }
+    }
+    case "reference": {
+      const symbol = graph.symbols[kind.value.symbolId];
+      const name = symbol ? (strings[symbol.nameId] ?? "") : "";
+      return ref(name);
+    }
+    case "object": {
+      if (kind.value.callSignatureRefs.length > 0) {
+        return signatureDescriptor(graph, strings, walk, kind.value.callSignatureRefs[0]);
+      }
+      if (kind.value.constructSignatureRefs.length > 0) {
+        return signatureDescriptor(graph, strings, walk, kind.value.constructSignatureRefs[0]);
+      }
+      const properties: ObjectProperty[] = kind.value.members.map((member) => {
+        const key = member.propertyKey?.key;
+        const name = key?.case === "stringId" ? (strings[Number(key.value ?? 0)] ?? "") : "";
+        return {
+          name,
+          type: walk(member.valueNodeId),
+          optional: member.optional,
+        };
+      });
+      return object(properties);
+    }
+    case "opaque":
+      return unknown(opaqueMessage(strings, kind.value.error));
+    default:
+      return unknown(String(kind.case));
+  }
+}
+
+function signatureDescriptor(
+  graph: SemanticTypeGraph,
+  strings: readonly string[],
+  walk: (id: number) => TypeDescriptor,
+  sigRef: number | undefined,
+): TypeDescriptor {
+  const signature: GraphSignature | undefined =
+    sigRef === undefined ? undefined : graph.signatures[sigRef];
+  if (!signature) {
+    return unknown("callable without a signature");
+  }
+  const parameters: FunctionParameter[] = signature.parameters.map((param, idx) => {
+    const name = strings[param.nameId] ?? "";
+    const baseName = name !== "" ? name : `arg${idx}`;
+    return {
+      name: param.rest ? `...${baseName}` : baseName,
+      type: walk(param.typeNodeId),
+      optional: param.optional,
+    };
+  });
+  // Node id 0 is honest absence (the producer does not fabricate void).
+  return func(parameters, walk(signature.returnTypeNodeId));
+}
+
+function opaqueMessage(
+  strings: readonly string[],
+  error: { kind?: { case?: string; value?: Record<string, unknown> } } | undefined,
+): string {
+  const kind = error?.kind;
+  if (kind?.case === "other") {
+    const payload = (kind.value ?? {}) as Record<string, unknown>;
+    return strings[Number(payload.messageNameId ?? 0)] ?? "opaque";
+  }
+  return kind?.case ?? "opaque";
+}
+
+function primitiveName(kind: GraphPrimitiveKind): PrimitiveName {
+  switch (kind) {
+    case GraphPrimitiveKind.STRING:
+      return "string";
+    case GraphPrimitiveKind.NUMBER:
+      return "number";
+    case GraphPrimitiveKind.BOOLEAN:
+      return "boolean";
+    case GraphPrimitiveKind.SYMBOL:
+      return "symbol";
+    case GraphPrimitiveKind.BIGINT:
+      return "bigint";
+    case GraphPrimitiveKind.ANY:
+      return "any";
+    case GraphPrimitiveKind.UNKNOWN:
+      return "unknown";
+    case GraphPrimitiveKind.VOID:
+      return "void";
+    case GraphPrimitiveKind.NEVER:
+      return "never";
+    case GraphPrimitiveKind.NULL:
+      return "null";
+    case GraphPrimitiveKind.UNDEFINED:
+      return "undefined";
+    case GraphPrimitiveKind.OBJECT:
+      return "object";
+    default:
+      return "unknown";
+  }
+}
+
+function f64FromBits(bits: bigint): number {
+  const buffer = new ArrayBuffer(8);
+  new BigUint64Array(buffer)[0] = bits;
+  return new Float64Array(buffer)[0];
 }
 
 /** Decode a wire member origin into the public shape (string ids resolved). */

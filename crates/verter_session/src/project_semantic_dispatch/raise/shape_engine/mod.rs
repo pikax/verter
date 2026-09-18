@@ -34,8 +34,8 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_span::Span;
 use verter_type_expr::{
-    CompilerIntrinsicTypeOp, LiteralValue, MappedModifier, MemberVisibility, PrimitiveName,
-    TypeExpr, UnknownValue,
+    AuthoredPropertyKey, CompilerIntrinsicTypeOp, LiteralValue, MappedModifier, MemberVisibility,
+    PrimitiveName, TypeExpr, UnknownValue,
 };
 
 use super::super::ProjectSemanticDispatch;
@@ -76,13 +76,43 @@ pub(in crate::project_semantic_dispatch) struct RaisedShapeKey(u32);
 
 /// Closed shallow member-value vocabulary projected directly from a node's
 /// normalized raised shape, without allocating a `TypeExpr`.
+///
+/// Depth is bounded: a root function may carry one-level parameter/return
+/// leaves (and a one-level object as a parameter — Vue slot bindings);
+/// anything deeper or outside this vocabulary is [`Self::Opaque`].
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RaisedShallowMemberOutput {
     Primitive(PrimitiveName),
     Literal(LiteralValue),
-    Ref { name: Arc<str> },
+    Ref {
+        name: Arc<str>,
+    },
     EmptyObject,
+    Object {
+        properties: Vec<RaisedShallowObjectProperty>,
+    },
+    Function {
+        parameters: Vec<RaisedShallowParam>,
+        return_type: Option<Box<RaisedShallowMemberOutput>>,
+    },
     Opaque,
+}
+
+/// One named property of a one-level object in the shallow vocabulary.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RaisedShallowObjectProperty {
+    pub name: Arc<str>,
+    pub ty: RaisedShallowMemberOutput,
+    pub optional: bool,
+}
+
+/// One callable parameter in the shallow vocabulary.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RaisedShallowParam {
+    pub name: Option<Arc<str>>,
+    pub ty: RaisedShallowMemberOutput,
+    pub optional: bool,
+    pub rest: bool,
 }
 
 /// A faithful structural mirror of the raised `TypeExpr` shape, with nested
@@ -882,15 +912,97 @@ pub(in crate::project_semantic_dispatch) fn project_node_shallow_member_output(
         let mut active = FxHashSet::default();
         fold_node(&mut alg, dispatch, node, &mut active)?
     };
-    Some(match interner.term(result.key) {
+    Some(project_shallow_term(&interner, result.key, 0))
+}
+
+/// Maximum nesting for the sealed shallow member vocabulary: a root
+/// function (depth 0) may carry a one-level object parameter (depth 1)
+/// whose properties are leaves (depth 2).
+const SHALLOW_MEMBER_DEPTH: u32 = 2;
+
+fn project_shallow_term(
+    interner: &ShapeInterner,
+    key: RaisedShapeKey,
+    depth: u32,
+) -> RaisedShallowMemberOutput {
+    if depth > SHALLOW_MEMBER_DEPTH {
+        return RaisedShallowMemberOutput::Opaque;
+    }
+    match interner.term(key) {
         RaisedTerm::Primitive(name) => RaisedShallowMemberOutput::Primitive(*name),
         RaisedTerm::Literal(lit) => RaisedShallowMemberOutput::Literal(lit.clone()),
         RaisedTerm::Ref { name, .. } => RaisedShallowMemberOutput::Ref {
             name: Arc::clone(name),
         },
         RaisedTerm::Object(members) if members.is_empty() => RaisedShallowMemberOutput::EmptyObject,
+        // A call-signature / method object is the TS spelling of a
+        // function-valued member (`default(props: T): U`).
+        RaisedTerm::Object(members) if depth == 0 => match members.as_slice() {
+            [RaisedObjectMember::CallSignature(function)]
+            | [RaisedObjectMember::Method { function, .. }] => {
+                project_shallow_function(interner, function, depth)
+            }
+            _ => RaisedShallowMemberOutput::Opaque,
+        },
+        // Non-empty objects are published as surface members at depth 0;
+        // encode them only as a function *parameter* (slot bindings).
+        RaisedTerm::Object(members) if depth == 1 => {
+            project_shallow_object(interner, members, depth)
+        }
+        RaisedTerm::Function(function) if depth == 0 => {
+            project_shallow_function(interner, function, depth)
+        }
         _ => RaisedShallowMemberOutput::Opaque,
-    })
+    }
+}
+
+fn project_shallow_object(
+    interner: &ShapeInterner,
+    members: &[RaisedObjectMember],
+    depth: u32,
+) -> RaisedShallowMemberOutput {
+    let mut properties = Vec::with_capacity(members.len());
+    for member in members {
+        let RaisedObjectMember::Property {
+            key, ty, optional, ..
+        } = member
+        else {
+            return RaisedShallowMemberOutput::Opaque;
+        };
+        let AuthoredPropertyKey::String(name) = key else {
+            return RaisedShallowMemberOutput::Opaque;
+        };
+        properties.push(RaisedShallowObjectProperty {
+            name: Arc::clone(name),
+            ty: project_shallow_term(interner, *ty, depth + 1),
+            optional: *optional,
+        });
+    }
+    RaisedShallowMemberOutput::Object { properties }
+}
+
+fn project_shallow_function(
+    interner: &ShapeInterner,
+    function: &RaisedFunction,
+    depth: u32,
+) -> RaisedShallowMemberOutput {
+    let parameters = function
+        .parameters
+        .iter()
+        .map(|param| RaisedShallowParam {
+            name: param.name.clone(),
+            ty: project_shallow_term(interner, param.ty, depth + 1),
+            optional: param.optional,
+            rest: param.rest,
+        })
+        .collect();
+    let return_type = function
+        .return_type
+        .map(|key| Box::new(project_shallow_term(interner, key, depth + 1)));
+    RaisedShallowMemberOutput::Function {
+        parameters,
+        return_type,
+    }
 }
 
 /// The node-domain declaration facts of `node` in ONE facts-only fold:

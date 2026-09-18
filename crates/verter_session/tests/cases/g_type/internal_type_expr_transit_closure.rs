@@ -10,7 +10,9 @@
 use std::sync::Arc;
 
 use verter_semantic::analysis::types::AnalyzedMacroKind;
-use verter_session::typeinfo::framework_surface::{NamedTypeMember, NamedTypeMemberOutput};
+use verter_session::typeinfo::framework_surface::{
+    NamedTypeLeaf, NamedTypeMember, NamedTypeMemberOutput,
+};
 use verter_session::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 use verter_session::{LanguageRegistry, UpsertRequest, VerterHost};
 use verter_type_expr::{LiteralValue, PrimitiveName};
@@ -181,8 +183,11 @@ fn vue_options_expose_named_members_classify_into_sealed_vocabulary() {
     );
     assert_eq!(
         member(expose_members, "focus").value,
-        Some(NamedTypeMemberOutput::Opaque),
-        "`focus(): void` degrades to Opaque"
+        Some(NamedTypeMemberOutput::Function {
+            parameters: Vec::new(),
+            return_type: Some(NamedTypeLeaf::Primitive(PrimitiveName::Void)),
+        }),
+        "`focus(): void` classifies as a sealed Function"
     );
     assert!(
         !member(expose_members, "count").is_optional,

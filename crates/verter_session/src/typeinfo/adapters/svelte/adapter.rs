@@ -252,6 +252,15 @@ fn merge_source_into(
                     }
                 }
             }
+            for member in &source.slot_member_types {
+                if !aggregate
+                    .slot_member_types
+                    .iter()
+                    .any(|existing| existing.name == member.name)
+                {
+                    aggregate.slot_member_types.push(member.clone());
+                }
+            }
         }
         FrameworkSurfaceKind::Model => {
             if let Some(model) = &source.model {
