@@ -125,3 +125,7 @@ packages/native/npm/*/*.node
 
 # Local nextest CI-replication archives (not committed)
 artifacts/
+
+# Local release state: downloaded release-run artifacts and packed tarballs
+# (scripts/release-publish.mjs local)
+.release/

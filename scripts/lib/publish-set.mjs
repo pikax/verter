@@ -34,6 +34,15 @@ export const PRODUCT_ROOTS = [
 /** In the product, but published to the VS Code Marketplace only — never npm. */
 export const MARKETPLACE_ONLY = ["verter-vscode"];
 
+/**
+ * Rust crates published to crates.io, in dependency order. Only the compiler
+ * ships as a crate (the binding crates are consumed through npm), and
+ * `verter_compiler` depends on `verter_span`, which must be on the index
+ * first. Consumed by check-versions.mjs and release-publish.mjs so the two
+ * cannot drift.
+ */
+export const PUBLISHED_CRATES = ["verter_span", "verter_compiler"];
+
 /** Runtime dependency fields. devDependencies do NOT propagate. */
 const RUNTIME_DEP_FIELDS = ["dependencies", "optionalDependencies", "peerDependencies"];
 

@@ -45,7 +45,6 @@
     "copy-windows-artefact": "node ./scripts/copy-windows-artefact.mjs",
     "build": "pnpm run clean:dist && napi build -o dist --dts napi.generated.d.ts --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types && pnpm run copy-windows-artefact",
     "build:debug": "pnpm run clean:dist && napi build -o dist --dts napi.generated.d.ts --platform --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types && pnpm run copy-windows-artefact",
-    "prepublishOnly": "pnpm run build && napi prepublish -t npm",
     "artifacts": "napi artifacts",
     "ensure-native-loader": "node ./scripts/ensure-native-loader.mjs",
     "pretest": "pnpm run ensure-native-loader",
