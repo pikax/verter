@@ -60,7 +60,7 @@
     { "receiver": "RFX0", "product": "semantic refactor and preservation constitution keeps rail separation", "productionCapable": true },
     { "receiver": "SVI0", "product": "semantic visual vocabulary on the inspection rail", "productionCapable": true },
     { "receiver": "TIF1", "product": "TypeInfo-first ComponentInfo consumes inspection-rail labelling", "productionCapable": true },
-    { "receiver": "VSC0", "product": "desktop feature inventory and host-separation contract consumes the client inventory", "productionCapable": true }
+    { "receiver": "VSC0", "product": "desktop feature inventory and host-separation contract consumes the client inventory", "productionCapable": false }
   ],
   "displacedRoutes": [],
   "deletionPopulationThisNode": [],
