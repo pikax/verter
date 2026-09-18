@@ -378,9 +378,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// delegator, kept so the carrier round-trip tests can drive
     /// materialisation from a `HotTypeRef` handle. Production callers hold a
     /// [`SemanticNodeId`] and go through the sealed [`OutputProjector`]
-    /// capability boundary; this helper exists ONLY under test (the
-    /// structural guard `materialize_type_expr_is_not_production_visible`
-    /// asserts it is `#[cfg(test)]`-gated and not production-visible).
+    /// capability boundary; this helper exists ONLY under test
+    /// (`#[cfg(test)]` — not production-visible). The syn guard
+    /// `materialize_type_expr_is_not_production_visible` is retired with
+    /// SIMP5.
     ///
     /// [`OutputProjector`]: super::output_materialization::OutputProjector
     #[cfg(test)]
