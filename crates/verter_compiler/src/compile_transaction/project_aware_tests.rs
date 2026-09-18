@@ -128,3 +128,17 @@ fn enter_semantic_for_project_binds_project_into_the_same_facade() {
     assert_eq!(project_bound.project_identity(), project(7));
     assert_ne!(unbound.input_basis(), project_bound.input_basis());
 }
+
+#[test]
+fn same_owner_and_project_share_semantic_input_basis_across_entries() {
+    let project = project(7);
+    let first = CompileAttempt::enter_semantic_for_project("Owner.vue", project);
+    let second = CompileAttempt::enter_semantic_for_project("Owner.vue", project);
+    assert_eq!(first.input_basis(), second.input_basis());
+    assert_eq!(first.project_identity(), second.project_identity());
+    assert_ne!(
+        first.input_basis(),
+        CompileAttempt::enter_semantic("Owner.vue").input_basis(),
+        "unbound semantic entry must not alias a project-bound one"
+    );
+}

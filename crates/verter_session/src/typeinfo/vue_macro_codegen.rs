@@ -561,6 +561,19 @@ fn cancelled_vue_macro_codegen_output(
     )
 }
 
+/// One semantic-transaction entry for this owner's Vue-macro plan.
+/// Compute and terminal-partial share it so a project-owned file cannot
+/// mint two input bases for the same owner.
+fn enter_vue_macro_semantic_attempt<'a>(
+    host: &VerterHost,
+    owner_canonical: &'a str,
+) -> CompileAttempt<'a> {
+    CompileAttempt::enter_semantic_for_project(
+        owner_canonical,
+        host.host_view_project_identity_for(owner_canonical),
+    )
+}
+
 /// Build the ReturnOnly handoff for a terminal scheduler failure without
 /// entering semantic classification. Inventory reads are permitted so each
 /// demanded macro retains its stable identity and typed `Partial` outcome;
@@ -606,7 +619,8 @@ fn terminal_partial_vue_macro_codegen_output(
     // row identity. Only each projected outcome is replaced with the
     // terminal failure.
     if let Some(script_analysis) = script_analysis.as_ref() {
-        let mut attempt = CompileAttempt::enter_semantic(owner_canonical);
+        let mut attempt =
+            enter_vue_macro_semantic_attempt(ctx.host_for_fact_tracer_install(), owner_canonical);
         attempt.stage_script_analysis(Arc::from(owner_canonical), Arc::clone(script_analysis));
         if let Ok(plan) = attempt
             .type_info()
@@ -901,10 +915,7 @@ impl VerterHost {
         // and surface dependency failures all come from
         // `TypeInfoCore::attempt` through the compile transaction — this
         // driver only executes the live I/O each plan row demands.
-        let mut attempt = CompileAttempt::enter_semantic_for_project(
-            owner_canonical,
-            self.host_view_project_identity_for(owner_canonical),
-        );
+        let mut attempt = enter_vue_macro_semantic_attempt(self, owner_canonical);
         attempt.stage_script_analysis(Arc::from(owner_canonical), Arc::clone(script_analysis));
         let semantic_input = match attempt
             .type_info()
