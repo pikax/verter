@@ -3779,6 +3779,63 @@ fn options_api_prop_without_locator_does_not_fabricate_authored_evidence() {
     );
 }
 
+/// A runtime `as PropType<T>` payload must survive a host-resolved closed-
+/// unknown placeholder (the runtime-object DTO surface publishes unknown
+/// for member presence). The declared payload is T, not `unknown`.
+#[test]
+fn runtime_prop_type_payload_wins_over_host_unknown_placeholder() {
+    let (payload, type_expr_scope) = lower_for_test(Some("Filter[]"));
+    let macros = vec![AnalyzedMacro {
+        is_type_based: false,
+        prop_fields: vec![AnalyzedPropField {
+            name: "filters".to_string(),
+            is_optional: true,
+            span: verter_span::Span::default(),
+            type_annotation: Some("Filter[]".to_string()),
+            payload,
+            type_expr_scope,
+            description: None,
+            tags: Vec::new(),
+            resolution_source: crate::analysis::types::TypeResolutionSource::Rust,
+            resolution_error: None,
+            declared_in_macro_type_arg: true,
+            constructor_bindings: Vec::new(),
+        }],
+        ..make_define_props(vec![])
+    }];
+    let unknown_authority = ResolvedTypeAuthority::from_source_position(
+        &SourcePosition::Present(closed_leaf(PrimitiveName::Unknown)),
+        ResolutionExactness::ExactConcrete,
+        ResolutionProvenance::SessionProjector,
+        Arc::from([]),
+    );
+    let resolved = [ResolvedMacroInput {
+        macro_index: 0,
+        props: vec![ResolvedPropInput {
+            field: macros[0].prop_fields[0].clone(),
+            authority: unknown_authority,
+            authored_evidence: None,
+            callable_role: verter_type_expr::PropCallableRole::default(),
+        }],
+        emits: Vec::new(),
+        slots: Vec::new(),
+        slot_return_publications: Vec::new(),
+        exposed: Vec::new(),
+        default_keys: Vec::new(),
+    }];
+    let mut input = empty_input(&macros);
+    input.resolved_macros = &resolved;
+
+    let result = extract_component_meta(input);
+    assert_eq!(result.props.len(), 1);
+    assert_eq!(
+        result.props[0].publication.source_position(),
+        SourcePosition::Present(authored_source(0)),
+        "PropType<T> payload must win over the host unknown placeholder, got {:?}",
+        result.props[0].publication.source_position()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Flags
 // ---------------------------------------------------------------------------
