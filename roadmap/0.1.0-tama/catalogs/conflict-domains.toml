@@ -296,3 +296,15 @@ id = "product_inspection"
 path_roots = ["crates/verter_protocol/src/inspection","crates/verter_session/src/inspection","packages/language-shared/src/inspection","tests/product-experience"]
 symbols = ["FeatureExposureContract","HostExecutionClass","ProductReceiptBasis"]
 description = "Exclusive mutation lease for the product inspection facade, exposure vocabulary, receipt basis, and their harness."
+
+[[domain]]
+id = "jetbrains_product"
+path_roots = ["extensions/jetbrains","packages/dx-harness/jetbrains","tests/jetbrains-baseline"]
+symbols = ["JetBrainsBaselineManifest","RequiredWorkflowMatrix","SuperiorityPredicate"]
+description = "Exclusive mutation lease for the JetBrains adapter product surface, its official-baseline comparison constitution, and their harness."
+
+[[domain]]
+id = "semantic_presentation"
+path_roots = ["extensions/jetbrains"]
+symbols = ["SemanticPresentation","InlaySurface","CompletionPresentation"]
+description = "Exclusive mutation lease for how semantic answers are presented in the JetBrains adapter surface (labelling, hover, inlay and completion presentation); semantic algorithms and the other editor clients stay with their producing owners."

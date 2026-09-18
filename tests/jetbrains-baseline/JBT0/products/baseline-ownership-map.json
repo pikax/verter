@@ -1,0 +1,57 @@
+{
+  "id": "baseline-ownership-map.v1",
+  "schema": 1,
+  "contractNode": "JBT0",
+  "finalOwner": "expansion.jetbrains-product:JetBrains differentiated web-development product",
+  "outcomes": [
+    {
+      "id": "jetbrains-baseline-manifest.v1",
+      "currentOwner": "JBT0",
+      "finalOwner": "JBT0",
+      "receivingAcceptance": "JBT0-AC1: the comparator stays the recommended/default official mode with diagnostics enabled; JBT1H captures every pending-capture pin with the real-IDE harness and no pin is ever guessed"
+    },
+    {
+      "id": "required-workflow-matrix.v1",
+      "currentOwner": "JBT0",
+      "finalOwner": "JBT0",
+      "receivingAcceptance": "JBT0-AC3: a missing required workflow blocks promotion even when Verter is faster; only JBT9 records measured parity outcomes"
+    },
+    {
+      "id": "superiority-predicate.v1",
+      "currentOwner": "JBT0",
+      "finalOwner": "JBT0",
+      "receivingAcceptance": "JBT0-AC2: no single selected microbenchmark certifies superiority; JBT10 measures margins under the predeclared methodology and JBT11 evaluates the conjunction"
+    },
+    {
+      "id": "contracts/jetbrains-baseline.md",
+      "currentOwner": "JBT0",
+      "finalOwner": "JBT0",
+      "receivingAcceptance": "the falsifiable product gate replaces subjective better-than-official claims; promotion stays blocked until the gate passes"
+    }
+  ],
+  "receivingAmendments": [
+    { "receiver": "JBT1", "product": "plugin build skeleton, pinned SDK and JVM gate runner under the constitution's gate", "productionCapable": true },
+    { "receiver": "JBT1S", "product": "native-seam feasibility probes and gap ledger against the workflow matrix", "productionCapable": true },
+    { "receiver": "JBT1H", "product": "real-IDE comparison harness and fixture driver capturing every manifest pin and owning the JBT0-AC-BASIS binding", "productionCapable": true },
+    { "receiver": "JBT2", "product": "plugin lifecycle and engine integration without a second semantic engine", "productionCapable": true },
+    { "receiver": "JBT3", "product": "official-tool coexistence and feature ownership (no two active semantic authorities)", "productionCapable": true },
+    { "receiver": "JBT4", "product": "light PSI presentation and authored-target mapping adapter", "productionCapable": true },
+    { "receiver": "JBT4N", "product": "native navigation, usages, hierarchy and structure integration on the matrix rows", "productionCapable": true },
+    { "receiver": "JBT5", "product": "native refactor preview, intentions and atomic edits through the edit transaction authority", "productionCapable": true },
+    { "receiver": "JBT6", "product": "semantic colours, inlays and Code Vision native UX preserving meaning under reduced capabilities", "productionCapable": true },
+    { "receiver": "JBT7", "product": "semantic workbench and debug explanations on the inspection rail", "productionCapable": true },
+    { "receiver": "JBT8", "product": "preserved run/debug and framework workflows (matrix row run-debug-workflows)", "productionCapable": true },
+    { "receiver": "JBT9", "product": "official-tool workflow parity and correctness qualification against the matrix", "productionCapable": true },
+    { "receiver": "JBT10", "product": "comparative responsiveness and memory qualification under the predeclared methodology", "productionCapable": true },
+    { "receiver": "JBT11", "product": "superiority and product terminal evaluating the full conjunction", "productionCapable": true },
+    { "receiver": "WSP1", "product": "performance instrumentation for the equal-work measurement consumed by JBT10", "productionCapable": true },
+    { "receiver": "DX1", "product": "exposure-descriptor registration consumed by every operation this train exposes", "productionCapable": true },
+    { "receiver": "TST10J", "product": "JetBrains test tree and run adapter binds through its own charter", "productionCapable": true },
+    { "receiver": "DBG9J", "product": "JetBrains authored-debugger integration binds through its own charter", "productionCapable": true }
+  ],
+  "displacedRoutes": [],
+  "deletionPopulationThisNode": [],
+  "acBasisDownstreamTestOwner": "JBT1H (real-IDE comparison harness) and JBT10 (comparative qualification) own the incremental-vs-fresh and same-basis runtime evidence; JBT0 is contract-only and adds no runtime test",
+  "acResourceRationale": "JBT0 touches no hot paths and no UI: 0 production LOC across 0 files, so the WSP equal-work corpus and client-paint obligations do not apply to this node; they bind every later claim in this train",
+  "acExposureRegistration": "DX1 owns the exposure-descriptor registration schema; every operation this train exposes stays promotion-blocked until its executable adapter and replay case exist (JBT0-AC-EXPOSURE)"
+}
