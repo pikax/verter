@@ -216,6 +216,14 @@ pub fn family_key_size_for_tests() -> usize {
     std::mem::size_of::<family::FamilyKey>()
 }
 
+/// Test-only: `std::mem::size_of::<MemoEntry>()` for layout reporting.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn memo_entry_size_for_tests() -> usize {
+    std::mem::size_of::<family::MemoEntry>()
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // (NodeArena moved to `arena.rs` — see that module for the structural-
 // interning sharded dedup hot path.)

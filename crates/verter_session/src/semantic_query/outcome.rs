@@ -25,6 +25,12 @@ pub struct DiagnosticRecipeSetId(u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RecoveryProvenanceId(u32);
 
+/// Handle of one result-evaluation context: contextual typing, captured
+/// environment, flow/narrowing, receiver, and wrapper/result mode consumed
+/// by a body/return demand. Zero is context-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ResultEvaluationContextId(u32);
+
 /// Genuinely context-free evidence (no proof, no diagnostics, no recovery).
 pub const CONTEXT_FREE_EVIDENCE: OutcomeEvidenceId = OutcomeEvidenceId(0);
 /// Empty diagnostic-recipe set.
@@ -34,6 +40,8 @@ pub const NO_RECOVERY: RecoveryProvenanceId = RecoveryProvenanceId(0);
 /// Empty dependency proof. Ready results that recorded dependencies must
 /// not use this id.
 pub const EMPTY_PROOF: DependencyProofId = DependencyProofId(0);
+/// Context-free result evaluation (no body/return contextual inputs).
+pub const CONTEXT_FREE_EVALUATION: ResultEvaluationContextId = ResultEvaluationContextId(0);
 
 /// Shared immutable outcome metadata. Not embedded or cloned at each read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -118,6 +126,23 @@ impl RecoveryProvenanceId {
     #[must_use]
     pub const fn is_none(self) -> bool {
         self.0 == NO_RECOVERY.0
+    }
+}
+
+impl ResultEvaluationContextId {
+    #[must_use]
+    pub const fn from_raw(id: u32) -> Self {
+        Self(id)
+    }
+
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn is_context_free(self) -> bool {
+        self.0 == CONTEXT_FREE_EVALUATION.0
     }
 }
 

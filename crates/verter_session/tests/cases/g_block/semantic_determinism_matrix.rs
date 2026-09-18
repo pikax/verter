@@ -1234,3 +1234,27 @@ fn det_09_policy_change_with_resident_parents() {
          change that must not rebuild resolution changed the answer"
     );
 }
+
+/// Schedule-independent intern: duplicate publishers and opposite intern
+/// orders yield one logical candidate set on a shared store.
+#[test]
+fn signature_kernel_interned_identities_are_schedule_independent() {
+    use std::sync::Arc;
+    use verter_session::for_tests::WarmPositionalStore;
+
+    let fixture = Arc::new(WarmPositionalStore::fixture());
+    let first = verter_session::for_tests::warm_positional_read(&fixture);
+    std::thread::scope(|scope| {
+        let mut joins = Vec::new();
+        // bounded-loop: concurrent warm readers of one interned set.
+        for _ in 0..8 {
+            let fixture = Arc::clone(&fixture);
+            joins.push(
+                scope.spawn(move || verter_session::for_tests::warm_positional_read(&fixture)),
+            );
+        }
+        for join in joins {
+            assert_eq!(join.join().expect("reader"), first);
+        }
+    });
+}

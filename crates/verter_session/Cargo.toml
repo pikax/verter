@@ -200,6 +200,11 @@ ts-rs = "12"
 # trait-object construction inside an inert const, so no runtime code is
 # emitted.
 static_assertions = "1.1.0"
+# Concurrent append-only intern backend (pinned). MSRV 1.72; 0.2.8+ supports
+# targets without 64-bit atomics, including wasm32-unknown-unknown. Adapter
+# correctness is asserted by this crate; do not treat crate internals as the
+# contract. count() is not a published-handle range.
+boxcar = "=0.2.14"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1.1"

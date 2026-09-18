@@ -39,6 +39,10 @@ pub use crate::semantic_query_memo::family_variant_label_for_tests;
 /// the keyspace size discipline (the `Relate` payload must stay boxed, never
 /// embedded by value) without exposing the `pub(super)` taxonomy.
 pub use crate::semantic_query_memo::family_key_size_for_tests;
+pub use crate::semantic_query_memo::memo_entry_size_for_tests;
+pub use crate::signature_kernel::test_support::{
+    warm_positional_read, WarmPositionalLockProbe, WarmPositionalStore,
+};
 
 /// Re-export the canonical display projection so the `g_block` integration
 /// guards can call it. `display` is `pub` (forced by E0364: it lives in a
