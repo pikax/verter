@@ -2972,6 +2972,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
       semantic_queries: [
         "IndexedAccess",
         "Instantiate",
+        "ReduceIntersection",
         "ProjectPath",
         "ResolveDecl",
         "LowerLocator",
@@ -3047,7 +3048,13 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "IndexedAccessUnionDistribution",
       proof: "ProofRequirement::Ts7Oracle(OracleId::ApparentType)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "IndexedAccess", "LowerLocator"],
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "IndexedAccess",
+        "ReduceIntersection",
+        "LowerLocator",
+      ],
       consumed_mechanisms: ["QueryValueDomainFoundation"],
       unblocker:
         'lifted by U2.CLASS_SURFACES-era E1 grammar: `UserId["__brand"]` reduces the string-literal index chain over the brand intersection to the literal tag `"UserId"`, proven against the checked-in tsgo oracle snapshot via oracle::run_row',
@@ -3058,7 +3065,13 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "IndexedAccessUnionDistribution",
       proof: "ProofRequirement::Ts7Oracle(OracleId::ApparentType)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "IndexedAccess", "LowerLocator"],
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "IndexedAccess",
+        "ReduceIntersection",
+        "LowerLocator",
+      ],
       consumed_mechanisms: ["QueryValueDomainFoundation"],
       unblocker:
         'lifted by U2.CLASS_SURFACES-era E1 grammar: `Cents["__cents"]` reduces the string-literal index chain over the numeric-brand intersection to the boolean literal `true`, proven against the checked-in tsgo oracle snapshot via oracle::run_row',
