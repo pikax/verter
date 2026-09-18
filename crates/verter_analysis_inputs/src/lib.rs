@@ -1,14 +1,12 @@
-//! `verter_analysis_inputs` — the neutral foundation for local-analysis-input
-//! handling: opaque project ids, the config schema, path-privacy types, the
-//! producer-side redactor, and the redacted error type.
+//! `verter_analysis_inputs` — committed analysis-input authority and the
+//! local-analysis-input privacy types.
 //!
-//! Real-world projects are run through Verter as LOCAL ANALYSIS INPUTS to find
-//! deviations against reference tooling. Their on-disk paths are private bytes: no
-//! project name, path, relative filename, or basename may appear in any committed
-//! or emitted artifact. This crate is the cross-cutting home for the types and the
-//! single redactor that enforce that — consumed by the analysis runners and the
-//! workspace hermetic guard, never by the compiler/LSP/session layers.
+//! This crate is filesystem-free: it never reads a file. Producers hand already-read
+//! bytes to [`parse_config`] or [`InputBasis::commit`]. Consumers observe committed
+//! rows only — never by a consumer-local filesystem read.
 //!
+//! - [`InputBasis`] / [`LoadWave`] / [`NegativeFact`] / [`SnapshotFence`] — one
+//!   committed input and coherent snapshot authority.
 //! - [`ProjectId`] — the opaque `p[0-9]{4}` identity, validated at construction.
 //! - [`AnalysisProjects`] / [`AnalysisProject`] — the config schema, with real
 //!   paths held PRIVATELY (not `Serialize`, hand-written redacted `Debug`/`Display`).
@@ -16,14 +14,15 @@
 //!   `analysis://<id>/file-<NNNN>.<ext>` virtual ids.
 //! - [`AnalysisInputError`] — a redacted error type whose `Display`/`Debug` never
 //!   print a raw path.
-//! - [`parse_config`] — parses config CONTENT a caller hands it. This crate is
-//!   filesystem-free: it never reads a file. The consumer that owns an allow-listed
-//!   disk boundary (the TS dx-harness, or the future Rust analysis runner) reads the
-//!   file and feeds the bytes here. The shared env-var name lives in [`loader`].
+//! - [`parse_config`] — parses config CONTENT a caller hands it.
+//!
+//! Corpus-privacy types remain the analysis-runner / hermetic-guard surface.
+//! [`InputBasis`] is the committed-input IR consumed by the session host.
 
 mod config;
 mod error;
 mod id;
+pub mod input_basis;
 pub mod loader;
 mod redact;
 
@@ -33,6 +32,10 @@ pub use config::{
 };
 pub use error::AnalysisInputError;
 pub use id::{ProjectId, ProjectIdError};
+pub use input_basis::{
+    CommitError, DirectoryEntry, InputBasis, LoadWave, NegativeFact, NegativeKind, Observation,
+    ObservationKind, ObserveError, SnapshotFence, TornSnapshot,
+};
 pub use loader::ANALYSIS_CORPUS_ENV;
 pub use redact::Redactor;
 

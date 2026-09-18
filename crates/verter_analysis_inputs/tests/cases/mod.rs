@@ -1,2 +1,3 @@
 mod analysis_config_paths_never_committed;
+mod committed_input_basis;
 mod example_config_parses;

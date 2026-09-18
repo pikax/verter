@@ -1157,6 +1157,9 @@ pub struct RequestContext {
     /// request, shared across the worker threads the request fans out
     /// to via `install_tls`).
     pub dep_canonical_memo: parking_lot::Mutex<rustc_hash::FxHashMap<String, String>>,
+    /// Sole committed input for this request. Bound once by
+    /// [`Self::bind_committed_input`] before semantic work.
+    committed_input: std::sync::OnceLock<crate::input_basis::RequestInputBinding>,
 }
 
 /// Identity tuple for the mapped-member materialization
@@ -1429,6 +1432,7 @@ impl RequestContext {
             mapped_member_seen: parking_lot::Mutex::new(rustc_hash::FxHashSet::default()),
             mapper_source_ordinals: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             dep_canonical_memo: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            committed_input: std::sync::OnceLock::new(),
         })
     }
 
@@ -1445,6 +1449,22 @@ impl RequestContext {
         registration: Arc<crate::host_audit_runtime::AuditRequestRegistration>,
     ) -> Result<(), Arc<crate::host_audit_runtime::AuditRequestRegistration>> {
         self.audit_registration.set(registration)
+    }
+
+    /// Bind this request's sole [`crate::InputBasis`]. A second bind is
+    /// refused — two bases on one request would be torn snapshot authority.
+    pub fn bind_committed_input(
+        &self,
+        basis: crate::InputBasis,
+    ) -> Result<(), crate::input_basis::RequestInputBinding> {
+        self.committed_input
+            .set(crate::input_basis::RequestInputBinding::from_basis(basis))
+    }
+
+    /// Bound committed input, if [`Self::bind_committed_input`] has run.
+    #[must_use]
+    pub fn committed_input(&self) -> Option<&crate::input_basis::RequestInputBinding> {
+        self.committed_input.get()
     }
 
     /// Audit-side request kind. Returns the kind set at construction

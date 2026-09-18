@@ -60,6 +60,15 @@ impl VerterHost {
             accumulator.clone(),
             self.config.projection_op_budget,
         );
+        let basis = crate::input_basis::commit_workspace_canonical(
+            self.workspace_read().as_ref(),
+            canonical,
+        );
+        verter_debug_assert!(
+            ctx.committed_input().is_none(),
+            "fresh RequestContext must not already hold a committed InputBasis"
+        );
+        let _ = ctx.bind_committed_input(basis);
 
         // Construct the audit registration BEFORE installing the TLS
         // guard. The `Active` arm enters the host's active-request
