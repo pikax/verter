@@ -89,13 +89,19 @@ pub struct SemanticContext {
 }
 
 impl SemanticContext {
-    /// Production default: default effective options, empty env hashes,
-    /// production policy set.
+    /// Production default: default effective options, the canonical
+    /// all-zero env bundle (spelled field-by-field — the bundle's
+    /// `Default` is reserved for test fixtures), production policy set.
     #[must_use]
     pub fn production() -> Self {
         Self {
             effective_semantic_options: SemanticCompilerOptions::default(),
-            resolver_library_project_environment: EnvHashes::default(),
+            resolver_library_project_environment: EnvHashes {
+                parse_env_hash: Hash16::default(),
+                resolve_env_hash: Hash16::default(),
+                type_env_hash: Hash16::default(),
+                lib_env_hash: Hash16::default(),
+            },
             policy_set: SemanticPolicySetId::default(),
             project_identity: Hash16::default(),
         }
