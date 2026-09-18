@@ -298,15 +298,13 @@ fn every_route_exposes_artifacts_in_the_same_order() {
     // Pinned, not merely self-consistent. Comparing the routes only against
     // each other cannot see a reorder they all share, because publication is
     // downstream of the route split — so the observable sequence is named
-    // here. Since the C2 sealed-facade cutover, per-product views derive
-    // from the canonical `CompileArtifactSet`, so the observable sequence is
-    // the SET's canonical order (not the pre-cutover publication order, and
-    // not the request order). A change to this sequence is a change to what
-    // callers observe and should have to be written down, not absorbed
-    // silently.
+    // here. Dual-target views follow parsed-core contribution order
+    // (server, then client), not request order and not artifact-id byte
+    // order. A change to this sequence is a change to what callers observe
+    // and should have to be written down, not absorbed silently.
     assert_eq!(
         direct_kinds,
-        vec![ProductKind::RuntimeClient, ProductKind::RuntimeServer],
+        vec![ProductKind::RuntimeServer, ProductKind::RuntimeClient],
         "canonical set artifact order changed"
     );
 

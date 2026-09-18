@@ -359,6 +359,24 @@ impl ProjectEnvRoot {
             .unwrap_or(self.env_hashes.resolve_env_hash)
     }
 
+    /// Per-canonical project identity AS OF this root.
+    ///
+    /// Mirrors `VerterHost::host_view_project_identity_for` — owning
+    /// project from the published snapshot, its identity hash, else the
+    /// captured workspace default — but reads the CAPTURED published root
+    /// so the answer cannot drift under a live re-publication.
+    #[must_use]
+    pub(crate) fn project_identity_for(&self, canonical: &str) -> ProjectIdentity {
+        self.published
+            .as_ref()
+            .and_then(|root| {
+                let project = root.snapshot.owners_for_file(canonical).first().copied()?;
+                root.project_identity_hashes.get(&project).copied()
+            })
+            .map(ProjectIdentity)
+            .unwrap_or(self.project_identity)
+    }
+
     #[cfg(test)]
     fn apply_override(&self, parse_env_hash: Hash16) -> Hash16 {
         self.parse_env_override.unwrap_or(parse_env_hash)

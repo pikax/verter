@@ -1,11 +1,15 @@
 //! # `compile_transaction` — the staged compile transaction (C2)
 //!
 //! [`CompileAttempt`] is the single transaction every compile route
-//! enters: the direct facade stages its publication through
-//! [`CompileAttempt::admit_published_products`], and the semantic
-//! projections that feed a compile ride the same transaction through
-//! [`CompileAttempt::type_info`] — the sealed [`CompileTypeInfo`]
-//! gateway over `verter_semantic`'s non-flow kernel.
+//! enters: the direct facade and the project-aware host facade stage
+//! publication through [`CompileAttempt::admit_published_products`], and
+//! the semantic projections that feed a compile ride the same
+//! transaction through [`CompileAttempt::type_info`] — the sealed
+//! [`CompileTypeInfo`] gateway over `verter_semantic`'s non-flow kernel.
+//! Direct entry ([`CompileAttempt::enter_direct`]) binds the unbound
+//! project sentinel; project-aware entry
+//! ([`CompileAttempt::enter_project`]) binds the owning project's
+//! identity into [`InputBasisId`], source identity, and revision.
 //!
 //! The transaction owns three invariants the facade previously held
 //! inline, plus the new request-local continuation contract
@@ -40,22 +44,28 @@ use verter_semantic::analysis::ScriptAnalysisSnapshot;
 use verter_semantic::resolver_core::ResolutionBasis;
 use verter_semantic::type_info::{ImportedComponentResolution, ObservedMacroSurface};
 
+pub use verter_semantic::resolver_core::ProjectIdentity;
+
 use crate::assembly::publish::ArtifactSchemaError;
 use crate::compile::types::VueMacroSemanticInput;
 use crate::compile_request::CompileRequest;
 
-/// Domain identity of the direct facade's artifact-set conversion: one
-/// stable logical source identity per `(carrier id, framework)` compile.
+/// Domain identity of the facade's artifact-set conversion: one stable
+/// logical source identity per `(carrier id, framework, project)` compile.
+/// Direct entry binds the unbound (all-zero) project sentinel; project-aware
+/// entry binds the owning project's identity so two projects never alias.
 pub(crate) struct DirectSetTag<'a> {
     pub(crate) canonical_id: &'a str,
     pub(crate) framework: &'static str,
+    pub(crate) project: ProjectIdentity,
 }
 
 impl verter_identity::encoding::CanonicalEncode for DirectSetTag<'_> {
-    const DOMAIN_TAG: &'static str = "verter.compiler.direct.compile.v1";
+    const DOMAIN_TAG: &'static str = "verter.compiler.direct.compile.v2";
     fn encode_fields(&self, e: &mut verter_identity::encoding::CanonicalEncoder) {
         e.field_str(1, self.canonical_id);
         e.field_str(2, self.framework);
+        e.field_bytes(3, &self.project.0);
     }
 }
 
@@ -73,16 +83,18 @@ struct DirectSetInputBasis<'a> {
     is_production: bool,
     force_js: bool,
     source_digest: [u8; 32],
+    project: ProjectIdentity,
 }
 
 impl verter_identity::encoding::CanonicalEncode for DirectSetInputBasis<'_> {
-    const DOMAIN_TAG: &'static str = "verter.compiler.direct.compile.input_basis.v2";
+    const DOMAIN_TAG: &'static str = "verter.compiler.direct.compile.input_basis.v3";
     fn encode_fields(&self, e: &mut verter_identity::encoding::CanonicalEncoder) {
         e.field_str(1, self.canonical_id);
         e.field_str(2, self.framework);
         e.field_bool(3, self.is_production);
         e.field_bool(4, self.force_js);
         e.field_bytes(5, &self.source_digest);
+        e.field_bytes(6, &self.project.0);
     }
 }
 
@@ -99,10 +111,11 @@ struct DirectSetRevisionBasis<'a> {
     force_js: bool,
     source_digest: [u8; 32],
     products_digest: [u8; 32],
+    project: ProjectIdentity,
 }
 
 impl verter_identity::encoding::CanonicalEncode for DirectSetRevisionBasis<'_> {
-    const DOMAIN_TAG: &'static str = "verter.compiler.direct.compile.revision.v1";
+    const DOMAIN_TAG: &'static str = "verter.compiler.direct.compile.revision.v2";
     fn encode_fields(&self, e: &mut verter_identity::encoding::CanonicalEncoder) {
         e.field_str(1, self.canonical_id);
         e.field_str(2, self.framework);
@@ -110,6 +123,7 @@ impl verter_identity::encoding::CanonicalEncode for DirectSetRevisionBasis<'_> {
         e.field_bool(4, self.force_js);
         e.field_bytes(5, &self.source_digest);
         e.field_bytes(6, &self.products_digest);
+        e.field_bytes(7, &self.project.0);
     }
 }
 
@@ -121,7 +135,8 @@ pub(crate) fn set_content_digest(bytes: &[u8]) -> [u8; 32] {
 
 /// How a transaction can refuse to admit a publication. The schema arm
 /// wraps the assembly's own typed refusals; the source arm is the
-/// transaction's no-stale-publication rail.
+/// transaction's no-stale-publication rail; the cancelled arm is the
+/// fail-closed discard of sealed unpublished output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileTransactionRefusal {
     /// The publication failed the canonical artifact schema.
@@ -129,6 +144,9 @@ pub enum CompileTransactionRefusal {
     /// The source presented at admission no longer hashes to the
     /// digest bound when the transaction was entered.
     SourceChangedBetweenEnterAndAdmit,
+    /// [`CompileAttempt::cancel`] ran before admission; sealed unpublished
+    /// output is discarded and cannot be admitted as a complete result.
+    Cancelled,
 }
 
 impl CompileTransactionRefusal {
@@ -136,7 +154,7 @@ impl CompileTransactionRefusal {
     pub const fn artifact_schema(&self) -> Option<&ArtifactSchemaError> {
         match self {
             Self::ArtifactSchema(error) => Some(error),
-            Self::SourceChangedBetweenEnterAndAdmit => None,
+            Self::SourceChangedBetweenEnterAndAdmit | Self::Cancelled => None,
         }
     }
 }
@@ -158,15 +176,58 @@ pub struct CompileAttempt<'a> {
     is_production: bool,
     force_js: bool,
     source_digest: [u8; 32],
+    project: ProjectIdentity,
     input_basis: InputBasisId,
     type_info: CompileTypeInfo,
     vue_macro_semantics: VueMacroSemanticInput,
     vue_macro_semantics_staged: bool,
+    cancelled: bool,
 }
 
 static REQUEST_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+fn bind_attempt<'a>(
+    canonical_id: &'a str,
+    framework: &'static str,
+    is_production: bool,
+    force_js: bool,
+    source_digest: [u8; 32],
+    project: ProjectIdentity,
+) -> CompileAttempt<'a> {
+    let request_nonce = REQUEST_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut type_info = CompileTypeInfo::new(ResolutionBasis::unbound_placeholder());
+    type_info.bind_request_nonce(request_nonce);
+    let input_basis = InputBasisId::from_canonical(&DirectSetInputBasis {
+        canonical_id,
+        framework,
+        is_production,
+        force_js,
+        source_digest,
+        project,
+    });
+    CompileAttempt {
+        canonical_id,
+        framework,
+        is_production,
+        force_js,
+        source_digest,
+        project,
+        input_basis,
+        type_info,
+        vue_macro_semantics: VueMacroSemanticInput::Unavailable,
+        vue_macro_semantics_staged: false,
+        cancelled: false,
+    }
+}
+
 impl<'a> CompileAttempt<'a> {
+    /// The project-identity sentinel for a compile with no owning project:
+    /// all-zero, matching the workspace convention that an all-zero hash
+    /// means "no owning project" rather than a default project. Direct
+    /// entry always binds this; a real project identity is unrepresentable
+    /// on [`Self::enter_direct`].
+    pub const UNBOUND_PROJECT: ProjectIdentity = ProjectIdentity([0; 16]);
+
     /// Enter one direct compile transaction: binds the carrier identity,
     /// the request axes, and the authored source digest every later
     /// admission in this transaction must still agree with. The
@@ -174,66 +235,70 @@ impl<'a> CompileAttempt<'a> {
     /// entry-bound input axes — before any semantic compilation or
     /// product generation — so identical inputs always share one input
     /// basis and generated output can never perturb it.
+    ///
+    /// Direct entry always binds [`Self::UNBOUND_PROJECT`]. A project
+    /// identity is not a parameter here: managed/project construction on
+    /// the direct path is unrepresentable.
     pub fn enter_direct(
         source: &str,
         request: &'a CompileRequest,
         framework: &'static str,
     ) -> Self {
-        let request_nonce = REQUEST_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut type_info = CompileTypeInfo::new(ResolutionBasis::unbound_placeholder());
-        type_info.bind_request_nonce(request_nonce);
-        let canonical_id = request.filename().unwrap_or("");
-        let is_production = request.is_production();
-        let force_js = request.force_js();
-        let source_digest = set_content_digest(source.as_bytes());
-        let input_basis = InputBasisId::from_canonical(&DirectSetInputBasis {
-            canonical_id,
+        bind_attempt(
+            request.filename().unwrap_or(""),
             framework,
-            is_production,
-            force_js,
-            source_digest,
-        });
-        Self {
-            canonical_id,
+            request.is_production(),
+            request.force_js(),
+            set_content_digest(source.as_bytes()),
+            Self::UNBOUND_PROJECT,
+        )
+    }
+
+    /// Enter one project-aware compile transaction: the same sealed
+    /// facade as [`Self::enter_direct`], with the owning project's
+    /// identity bound into [`InputBasisId`], source identity, and
+    /// revision so project-specific facts cannot alias across projects.
+    /// [`Self::UNBOUND_PROJECT`] is the explicit no-owning-project
+    /// sentinel and shares identity with [`Self::enter_direct`].
+    pub fn enter_project(
+        source: &str,
+        request: &'a CompileRequest,
+        framework: &'static str,
+        project: ProjectIdentity,
+    ) -> Self {
+        bind_attempt(
+            request.filename().unwrap_or(""),
             framework,
-            is_production,
-            force_js,
-            source_digest,
-            input_basis,
-            type_info,
-            vue_macro_semantics: VueMacroSemanticInput::Unavailable,
-            vue_macro_semantics_staged: false,
-        }
+            request.is_production(),
+            request.force_js(),
+            set_content_digest(source.as_bytes()),
+            project,
+        )
     }
 
     /// Enter a semantic-only transaction: the session's TypeInfo producer
     /// enters here to drive the six projections, without a compile
     /// publication. Same transaction, same continuation contract, no
     /// admission facts (the minted basis is bound to the semantic entry
-    /// axes and is never presented to an admission).
+    /// axes and is never presented to an admission). Binds
+    /// [`Self::UNBOUND_PROJECT`]; project-aware TypeInfo entry is
+    /// [`Self::enter_semantic_for_project`].
     pub fn enter_semantic(owner_canonical: &str) -> Self {
-        let request_nonce = REQUEST_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut type_info = CompileTypeInfo::new(ResolutionBasis::unbound_placeholder());
-        type_info.bind_request_nonce(request_nonce);
-        let source_digest = set_content_digest(owner_canonical.as_bytes());
-        let input_basis = InputBasisId::from_canonical(&DirectSetInputBasis {
-            canonical_id: "",
-            framework: "semantic",
-            is_production: false,
-            force_js: false,
-            source_digest,
-        });
-        Self {
-            canonical_id: "",
-            framework: "semantic",
-            is_production: false,
-            force_js: false,
-            source_digest,
-            input_basis,
-            type_info,
-            vue_macro_semantics: VueMacroSemanticInput::Unavailable,
-            vue_macro_semantics_staged: false,
-        }
+        Self::enter_semantic_for_project(owner_canonical, Self::UNBOUND_PROJECT)
+    }
+
+    /// Project-aware semantic-only entry: same sealed TypeInfo facade as
+    /// [`Self::enter_semantic`], with the owning project bound into the
+    /// transaction's [`InputBasisId`].
+    pub fn enter_semantic_for_project(owner_canonical: &str, project: ProjectIdentity) -> Self {
+        bind_attempt(
+            "",
+            "semantic",
+            false,
+            false,
+            set_content_digest(owner_canonical.as_bytes()),
+            project,
+        )
     }
 
     /// Stage the closed Vue runtime macro projection: the sole carrier of
@@ -277,11 +342,17 @@ impl<'a> CompileAttempt<'a> {
     }
 
     /// The transaction's entry-bound input basis: minted at entry from
-    /// the request input axes and the authored source digest, before any
-    /// semantic work or product generation — generated products can
-    /// never perturb it.
+    /// the request input axes, the authored source digest, and the
+    /// project identity, before any semantic work or product generation
+    /// — generated products can never perturb it.
     pub fn input_basis(&self) -> &InputBasisId {
         &self.input_basis
+    }
+
+    /// The project identity bound at entry. Direct entry is always
+    /// [`Self::UNBOUND_PROJECT`].
+    pub fn project_identity(&self) -> ProjectIdentity {
+        self.project
     }
 
     /// Stage the immutable script analysis observation for one owner.
@@ -330,8 +401,11 @@ impl<'a> CompileAttempt<'a> {
     }
 
     /// Cancel the in-flight operation: the continuation and its sealed
-    /// unpublished output are discarded immediately.
+    /// unpublished output are discarded immediately. Subsequent admission
+    /// is a typed [`CompileTransactionRefusal::Cancelled`], never a
+    /// complete result.
     pub fn cancel(&mut self) {
+        self.cancelled = true;
         self.type_info.cancel();
     }
 
@@ -354,7 +428,8 @@ impl<'a> CompileAttempt<'a> {
     ///
     /// # Errors
     ///
-    /// [`CompileTransactionRefusal::SourceChangedBetweenEnterAndAdmit`]
+    /// [`CompileTransactionRefusal::Cancelled`] when [`Self::cancel`]
+    /// already ran; [`CompileTransactionRefusal::SourceChangedBetweenEnterAndAdmit`]
     /// when `source` no longer hashes to the entry-bound digest;
     /// [`CompileTransactionRefusal::ArtifactSchema`] on any schema
     /// refusal during admission.
@@ -366,6 +441,9 @@ impl<'a> CompileAttempt<'a> {
         custom_block_artifacts: Option<crate::assembly::publish::CompileArtifactSet>,
         diagnostics: Vec<crate::compile::CompileDiagnostic>,
     ) -> Result<crate::standalone::DirectCompileOutput, CompileTransactionRefusal> {
+        if self.cancelled {
+            return Err(CompileTransactionRefusal::Cancelled);
+        }
         if set_content_digest(source.as_bytes()) != self.source_digest {
             return Err(CompileTransactionRefusal::SourceChangedBetweenEnterAndAdmit);
         }
@@ -377,6 +455,7 @@ impl<'a> CompileAttempt<'a> {
                 is_production: self.is_production,
                 force_js: self.force_js,
                 source_digest: self.source_digest,
+                project: self.project,
             },
             source,
             published,
@@ -401,6 +480,7 @@ pub(crate) struct DirectSetAdmission<'a> {
     pub(crate) is_production: bool,
     pub(crate) force_js: bool,
     pub(crate) source_digest: [u8; 32],
+    pub(crate) project: ProjectIdentity,
 }
 
 /// The identities one admission mints: the transaction's entry-bound
@@ -426,6 +506,7 @@ pub(crate) fn mint_admission_identity(
             force_js: admission.force_js,
             source_digest: admission.source_digest,
             products_digest,
+            project: admission.project,
         });
     MintedAdmissionIdentity {
         input_basis: admission.input_basis.clone(),
@@ -436,9 +517,15 @@ pub(crate) fn mint_admission_identity(
 pub(crate) fn mint_direct_source_id(
     canonical_id: &str,
     framework: &'static str,
+    project: ProjectIdentity,
 ) -> crate::assembly::source_unit::SourceId {
     crate::assembly::source_unit::SourceId::from_canonical(&DirectSetTag {
         canonical_id,
         framework,
+        project,
     })
 }
+
+#[cfg(test)]
+#[path = "project_aware_tests.rs"]
+mod project_aware_tests;

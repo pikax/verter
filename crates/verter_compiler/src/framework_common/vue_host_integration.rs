@@ -333,6 +333,9 @@ pub struct VueHostExecutionInputs {
     pub style_specifiers: Vec<String>,
     /// Host-rendered custom-block virtual-file specifiers, in inventory order.
     pub custom_specifiers: Vec<String>,
+    /// Owning project identity bound into the compile transaction.
+    /// Direct/unbound compiles leave this as the all-zero sentinel.
+    pub project_identity: crate::compile_transaction::ProjectIdentity,
     /// Assemble Main. False for STYLE-only runtime compilation.
     pub want_main: bool,
     /// Authored `<script>` inventory.
@@ -356,6 +359,7 @@ impl Default for VueHostExecutionInputs {
             canonical_id: String::new(),
             style_specifiers: Vec::new(),
             custom_specifiers: Vec::new(),
+            project_identity: crate::compile_transaction::CompileAttempt::UNBOUND_PROJECT,
             want_main: false,
             has_script: true,
             has_template: true,
@@ -695,8 +699,12 @@ impl VueHostIntegrationBackend {
         // facts. The admission's remainder is consumed for good when it
         // falls out of this scope — there is no re-execution channel.
         let request = admission.request;
-        let mut attempt =
-            crate::compile_transaction::CompileAttempt::enter_direct(source, &request, "vue");
+        let mut attempt = crate::compile_transaction::CompileAttempt::enter_project(
+            source,
+            &request,
+            "vue",
+            inputs.project_identity,
+        );
         attempt.stage_vue_macro_semantics(inputs.vue_macros.clone());
         let opts = derive_admitted_runtime_options(&request, inputs);
         let grants = execution_grants_for_request(&request);

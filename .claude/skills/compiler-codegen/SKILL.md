@@ -153,9 +153,12 @@ The rule has NO scoped exceptions: the Svelte scoped-CSS renderer (`crates/verte
 
 `assembly::CompileArtifactSet` owns the immutable terminal schema for
 already-produced compiler artifacts. Its constructor validates facts only;
-it does not parse, compile, assemble, or publish. `CompileArtifact` inputs are
-mutable builders, while a validated set exposes immutable accessors and is the
-only schema container implementing `Serialize`.
+it does not parse, compile, assemble, or publish. Artifact rows keep the
+caller-supplied contribution/plan order (identity bytes are not an ordering
+key); terminal JSON still sorts artifacts by id so the wire stays
+identity-canonical. `CompileArtifact` inputs are mutable builders, while a
+validated set exposes immutable accessors and is the only schema container
+implementing `Serialize`.
 
 Artifact lineage is the canonical tuple `(SourceUnitId, ProductKind, LanguageId,
 producer-owned slot name)`. Revision, source content, output availability, and

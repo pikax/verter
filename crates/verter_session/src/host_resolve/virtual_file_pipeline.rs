@@ -3606,6 +3606,7 @@ impl VerterHost {
                     canonical_id: snapshot.canonical_id.clone(),
                     style_specifiers,
                     custom_specifiers,
+                    project_identity: self.host_view_project_identity_for(&snapshot.canonical_id),
                     want_main: true,
                     has_script: snapshot.meta.has_script,
                     has_template: snapshot.meta.has_template,

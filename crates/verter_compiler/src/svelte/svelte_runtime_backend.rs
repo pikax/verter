@@ -191,7 +191,8 @@ fn map_parsed_runtime(err: DirectCompileError) -> SvelteRuntimeError {
         // rewrite as a Svelte request-execution refusal.
         | DirectCompileError::Vue(_)
         | DirectCompileError::VueComposition(_)
-        | DirectCompileError::StalePreparedInput { .. } => SvelteRuntimeError::Direct(err),
+        | DirectCompileError::StalePreparedInput { .. }
+        | DirectCompileError::Cancelled => SvelteRuntimeError::Direct(err),
     }
 }
 

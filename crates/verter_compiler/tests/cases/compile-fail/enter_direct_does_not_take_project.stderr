@@ -1,0 +1,16 @@
+error[E0061]: this function takes 3 arguments but 4 arguments were supplied
+  --> tests/cases/compile-fail/enter_direct_does_not_take_project.rs:24:13
+   |
+24 |     let _ = CompileAttempt::enter_direct("", &request, "vue", ProjectIdentity([1; 16]));
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^                      ------------------------ unexpected argument #4 of type `ProjectIdentity`
+   |
+note: associated function defined here
+  --> src/compile_transaction/mod.rs
+   |
+   |     pub fn enter_direct(
+   |            ^^^^^^^^^^^^
+help: remove the extra argument
+   |
+24 -     let _ = CompileAttempt::enter_direct("", &request, "vue", ProjectIdentity([1; 16]));
+24 +     let _ = CompileAttempt::enter_direct("", &request, "vue");
+   |

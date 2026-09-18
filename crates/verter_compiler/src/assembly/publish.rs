@@ -55,8 +55,12 @@ impl std::error::Error for ArtifactSchemaError {}
 
 /// Immutable compiler-owned schema over already-produced facts. Creation
 /// validates references and coordinate qualification, and sorts set-valued
-/// data; it performs no parsing, lowering, code generation or publication.
-/// Only validated sets serialize. This is not an assembly/publication receipt.
+/// data (source units, map families). Artifact rows keep the caller-supplied
+/// contribution/plan order — identity bytes are not an ordering key.
+/// Terminal JSON sorts artifacts by id separately so the wire stays
+/// identity-canonical. Creation performs no parsing, lowering, code
+/// generation or publication. Only validated sets serialize. This is not
+/// an assembly/publication receipt.
 #[derive(Debug, Clone)]
 pub struct CompileArtifactSet {
     source_units: std::collections::BTreeMap<
@@ -95,7 +99,10 @@ impl CompileArtifactSet {
                 return Err(E::DuplicateSourceUnit);
             }
         }
-        artifacts.sort_by(|a, b| a.id().cmp(b.id()));
+        // Contribution/plan order is the stored order. Sorting by artifact-id
+        // bytes would reshuffle multi-product sets whenever the identity
+        // scheme changes (domain tag, project axis) even though the plan
+        // did not. Duplicate ids still fail closed below.
         let ids: BTreeSet<_> = artifacts.iter().map(|a| a.id().clone()).collect();
         if ids.len() != artifacts.len() {
             return Err(E::DuplicateArtifact);
@@ -213,10 +220,7 @@ impl CompileArtifactSet {
         &self,
         id: &super::fragment::ArtifactId,
     ) -> Option<&super::fragment::CompileArtifact> {
-        self.artifacts
-            .binary_search_by(|a| a.id().cmp(id))
-            .ok()
-            .map(|index| &self.artifacts[index])
+        self.artifacts.iter().find(|artifact| artifact.id() == id)
     }
 
     /// Deterministic terminal JSON. Identities retain full canonical bytes as
@@ -244,7 +248,9 @@ impl serde::Serialize for CompileArtifactSet {
                 })
             })
             .collect();
-        let artifacts: Vec<_> = self.artifacts.iter().map(|a| {
+        let mut artifacts: Vec<_> = self.artifacts.iter().collect();
+        artifacts.sort_by(|a, b| a.id().cmp(b.id()));
+        let artifacts: Vec<_> = artifacts.into_iter().map(|a| {
             let content = match &a.content {
                 ArtifactContent::Available(text) => {
                     json!({"availability": "available", "text": text.as_ref()})

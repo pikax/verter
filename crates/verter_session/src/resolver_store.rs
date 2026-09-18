@@ -2271,6 +2271,19 @@ impl HostStoreView {
         self.canonical_view(canonical_id).whole_hash
     }
 
+    /// Per-canonical project identity under this view's captured published
+    /// root. A live workspace republish cannot change the answer.
+    #[must_use]
+    pub(crate) fn project_identity_for(
+        &self,
+        canonical: &str,
+    ) -> crate::file_artifact_store::ProjectIdentity {
+        self.snapshot
+            .roots
+            .project_env_root
+            .project_identity_for(canonical)
+    }
+
     fn is_tombstoned(&self, canonical_id: &str) -> bool {
         self.snapshot.roots.is_tombstoned(canonical_id)
     }

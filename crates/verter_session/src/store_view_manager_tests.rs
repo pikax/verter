@@ -2533,3 +2533,63 @@ fn reentrant_base_view_on_the_claim_holding_thread_refuses_to_park() {
         );
     }
 }
+
+/// A republish after view capture must not change the pinned per-canonical
+/// project identity. Live `host_view_project_identity_for` may move; the
+/// captured view must not, or Vue-macro `InputBasisId` aliases across snapshots.
+#[test]
+fn captured_view_project_identity_survives_live_republish() {
+    use verter_semantic::resolver_core::IdeProjectCompilerOptions;
+    use verter_workspace::{
+        MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig,
+        WorkspaceAccess,
+    };
+
+    let memory = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    let canonical = "/projZ/src/lib.ts";
+    let graph = |tsconfig: &str| {
+        ProjectGraph::from_configs(vec![VfsProjectConfig {
+            root: "/projZ".to_string(),
+            rank: ProjectRank::Explicit,
+            tsconfig_path: Some(tsconfig.to_string()),
+            root_files: vec![canonical.to_string()],
+            extensions: vec![".ts".to_string()],
+            workspace_root: "/projZ".to_string(),
+            workspace_aliases: vec![],
+            compiler_options: IdeProjectCompilerOptions::default(),
+            references: vec![],
+            membership: verter_workspace::configured_membership_match_all_under_root(
+                &verter_workspace::CanonicalPath::new("/projZ"),
+            ),
+        }])
+    };
+    memory.set_project_graph(graph("/projZ/tsconfig.json"));
+    memory.inject_file(canonical.to_string(), Arc::from("export const Z = 0;\n"));
+    let workspace: Arc<dyn WorkspaceAccess> = memory.clone();
+    let host = Arc::new(VerterHost::new(HostConfig::default(), workspace));
+
+    let view = host.resolver_store_view_read().into_owned_view();
+    let pinned_before = view.project_identity_for(canonical);
+    let live_before = host.host_view_project_identity_for(canonical);
+    assert_eq!(
+        pinned_before, live_before,
+        "pinned view and live host must agree before a republish"
+    );
+    assert_ne!(
+        pinned_before,
+        crate::file_artifact_store::ProjectIdentity([0u8; 16]),
+        "owned canonical must not collapse to the all-zero sentinel"
+    );
+
+    memory.set_project_graph(graph("/projZ/tsconfig.app.json"));
+    let live_after = host.host_view_project_identity_for(canonical);
+    assert_ne!(
+        live_after, pinned_before,
+        "tsconfig_path change must move live project identity"
+    );
+    assert_eq!(
+        view.project_identity_for(canonical),
+        pinned_before,
+        "captured view must keep the pre-republish identity"
+    );
+}

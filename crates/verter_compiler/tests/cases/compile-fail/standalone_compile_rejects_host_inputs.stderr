@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+  --> tests/cases/compile-fail/standalone_compile_rejects_host_inputs.rs:23:54
+   |
+23 |     let _ = StandaloneCompiler.compile("", &request, VueHostExecutionInputs::default());
+   |                                -------               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `DirectExecutionInputs<'_>`, found `VueHostExecutionInputs`
+   |                                |
+   |                                arguments to this method are incorrect
+   |
+note: method defined here
+  --> src/standalone.rs
+   |
+   |     pub fn compile<'a>(
+   |            ^^^^^^^

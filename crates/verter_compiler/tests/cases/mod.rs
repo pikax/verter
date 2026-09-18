@@ -12,6 +12,7 @@ mod no_post_codegen_string_surgery;
 mod no_session_dependency;
 mod official_parse_manifest_guard;
 mod parse_diagnostic_determinism;
+mod project_aware_equivalence;
 mod projection_catalog;
 mod style_codetransform_map_coverage;
 mod style_continuation_boundary;
