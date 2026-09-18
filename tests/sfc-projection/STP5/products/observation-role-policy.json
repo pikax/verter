@@ -25,5 +25,6 @@
   "nonOverlappingVirtualSpans": true,
   "foreignDefinitionUsesTargetSnapshot": true,
   "featureParticipationIsNotEditSafety": true,
-  "observationChannels": ["hover", "definition", "references", "edits"]
+  "observationChannels": ["hover", "definition", "references", "edits"],
+  "ac2EditApplicationRationale": "STP5 records AC2 edit participation as the definition-symbol span observed on each selected engine. Applied rename/write-back uses the existing provider/LSO snapshot authority (charter section 7); this proof does not add a production edit applicator. Alias-as-rename is rejected by STP5-alias-edit; Verbatim length-preserving write-back is the owned edit contract."
 }

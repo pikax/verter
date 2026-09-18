@@ -56,7 +56,7 @@
     {
       "id": "STP5-capability",
       "disposition": "accept",
-      "twins": ["executable-selected-build", "version-label", "dormant-tcm2"]
+      "twins": ["executable-selected-build", "version-label", "dormant-tcm2", "silent-degrade"]
     }
   ],
   "verify": "node scripts/sfc-projection/verify-node.mjs --node STP5 --engine all --require-all --json",

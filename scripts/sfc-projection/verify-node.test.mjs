@@ -16,6 +16,7 @@ import {
   loadObligation,
   loadRootManifest,
   parseArgs,
+  probeMapperHost,
   readJson,
   repoPath,
   resolveEngine,
@@ -328,6 +329,32 @@ test("STP5 verify: encoding, reject twins, and selected-build capability on both
     assert.ok(run.edits >= 1);
   }
   assert.equal(result.incremental, "fresh");
+  const jsInit = result.capabilityRows.find(
+    (row) => row.operation === "initialize" && row.engineId === "ts-js",
+  );
+  const nativeInit = result.capabilityRows.find(
+    (row) => row.operation === "initialize" && row.engineId === "ts-native",
+  );
+  assert.ok(jsInit, JSON.stringify(result.capabilityRows));
+  assert.ok(nativeInit, JSON.stringify(result.capabilityRows));
+  assert.equal(jsInit.status, "blocking-upstream-defect");
+  assert.equal(nativeInit.status, "blocking-upstream-defect");
+  assert.match(jsInit.evidence, /ts-js@6\.0\.3 tsc --help/);
+  assert.match(nativeInit.evidence, /ts-native@7\.0\.2 tsc --help/);
+  assert.equal(
+    result.capabilityRows.filter((row) => row.operation === "encoding-negotiation").length,
+    2,
+  );
+});
+
+test("STP5 mapper-host probe uses tsc --help on the selected engine", () => {
+  const skipped = probeMapperHost(
+    { id: "ts-js", version: "6.0.3", kind: "javascript" },
+    { helpTextHasMapperHost: () => true },
+  );
+  assert.equal(skipped.performed, false);
+  assert.match(skipped.evidence, /ts-js@6\.0\.3 mapper-host probe skipped/);
+  assert.doesNotMatch(skipped.evidence, /help\/API/);
 });
 
 test("STP5 --require-all does not demand STP1 cases", async () => {

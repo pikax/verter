@@ -32,8 +32,8 @@
     "silent-degrade"
   ],
   "hostProbe": {
-    "engine": "ts-native",
-    "method": "tsc --help plus typescript/unstable/sync API surface",
+    "engines": ["ts-js", "ts-native"],
+    "method": "tsc --help",
     "flags": ["runExternalCode", "contentMappers"]
   }
 }

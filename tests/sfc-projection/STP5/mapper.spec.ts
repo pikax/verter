@@ -8,10 +8,13 @@ import {
   CLEAN_STOCK_CLI,
   CLEAN_TRANSFORM,
   DIRTY_ALIAS_EDIT,
+  DIRTY_BLOCKED_EMPTY_EVIDENCE,
   DIRTY_DORMANT_CLAIM,
   DIRTY_GUARD_DUPLICATE,
   DIRTY_RAW_CLI,
+  DIRTY_SILENT_DEGRADE_CLAIM,
   DIRTY_STALE_TARGET,
+  DIRTY_UNUSED_EXPECT,
   DIRTY_VERSION_LABEL_CLAIM,
   ENCODING_FIXTURE,
   POSITION_ENCODINGS,
@@ -25,6 +28,8 @@ import {
   evaluateRejectTwins,
   evaluateStp5,
   helpTextHasMapperHost,
+  validateStp5Products,
+  validateUnusedExpectReportedInOriginal,
   originalToVirtual,
   spanForToken,
   validateCapabilityClaim,
@@ -101,6 +106,63 @@ test("STP5-capability: version labels and dormant TCM2 are not complete-capabili
   );
 });
 
+test("STP5-capability: neither-status is silent-degrade; blocked empty evidence is rejected", () => {
+  assert.ok(
+    validateCapabilityClaim(DIRTY_SILENT_DEGRADE_CLAIM).some(
+      (error) => error.code === "silent-degrade",
+    ),
+  );
+  assert.ok(
+    validateCapabilityClaim(DIRTY_BLOCKED_EMPTY_EVIDENCE).some(
+      (error) => error.code === "missing-defect-evidence",
+    ),
+  );
+});
+
+test("STP5-guard-duplicate: unused Expect must be reported in the original file", () => {
+  const dirty = validateUnusedExpectReportedInOriginal(DIRTY_UNUSED_EXPECT);
+  assert.ok(dirty.some((error) => error.code === "unused-expect-not-in-original"));
+});
+
+test("STP5-capability: encoding-negotiation follows encoding identity, not a hard-coded supported row", () => {
+  const probe = {
+    mapperHostPresent: false,
+    mapperHostEvidence: "ts-native@7.0.2 tsc --help has no content mapper host",
+    observation: {
+      diagnostics: true,
+      hover: true,
+      definition: true,
+      references: true,
+      edits: true,
+    },
+    engineId: "ts-native",
+    engineVersion: "7.0.2",
+  };
+  const ok = capabilityRowsFromProbe({ ...probe, encodingIdentityOk: true });
+  const failed = capabilityRowsFromProbe({ ...probe, encodingIdentityOk: false });
+  assert.ok(
+    ok.some(
+      (row) =>
+        row.operation === "encoding-negotiation" &&
+        row.status === "supported" &&
+        row.evidence === "executable-selected-build",
+    ),
+  );
+  assert.ok(
+    failed.some(
+      (row) =>
+        row.operation === "encoding-negotiation" && row.status === "blocking-upstream-defect",
+    ),
+  );
+  const omitted = capabilityRowsFromProbe(probe);
+  assert.ok(
+    omitted.some(
+      (row) =>
+        row.operation === "encoding-negotiation" && row.status === "blocking-upstream-defect",
+    ),
+  );
+});
+
 test("STP5.2 geometry: verbatim, alias, multi-observation, synthesized scaffolding, non-overlapping virtual spans", () => {
   assert.equal(assertCleanGeometry(CLEAN_TRANSFORM).length, 0);
   assert.equal(assertNonOverlappingVirtualSpans(CLEAN_TRANSFORM.mappings).length, 0);
@@ -142,6 +204,8 @@ test("STP5-capability: selected-build rows accept blocking upstream defects; hel
   assert.equal(helpTextHasMapperHost("tsc: The TypeScript Compiler"), false);
   const rows = capabilityRowsFromProbe({
     mapperHostPresent: false,
+    mapperHostEvidence:
+      "ts-native@7.0.2 tsc --help has no content mapper host (--runExternalCode / contentMappers)",
     observation: {
       diagnostics: true,
       hover: true,
@@ -151,6 +215,7 @@ test("STP5-capability: selected-build rows accept blocking upstream defects; hel
     },
     engineId: "ts-native",
     engineVersion: "7.0.2",
+    encodingIdentityOk: true,
   });
   const errors = evaluateCapabilityRows(rows);
   assert.equal(errors.length, 0, JSON.stringify(errors));
@@ -158,6 +223,7 @@ test("STP5-capability: selected-build rows accept blocking upstream defects; hel
     rows.some((row) => row.operation === "initialize" && row.status === "blocking-upstream-defect"),
   );
   assert.ok(rows.some((row) => row.operation === "hover" && row.status === "supported"));
+  assert.match(rows.find((row) => row.operation === "initialize").evidence, /tsc --help/);
 });
 
 test("STP5 evaluateStp5: clean twins plus reject dirty twins", async () => {
@@ -175,4 +241,5 @@ test("STP5 evaluateStp5: clean twins plus reject dirty twins", async () => {
   });
   assert.equal(result.errors.length, 0, JSON.stringify(result.errors, null, 2));
   assert.equal(evaluateRejectTwins().length, 0);
+  assert.equal(validateStp5Products().length, 0);
 });

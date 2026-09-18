@@ -6,6 +6,12 @@
  * observation roles). Does not implement a production Vue mapper.
  */
 
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const STP5_DIR = path.dirname(fileURLToPath(import.meta.url));
+
 export const PROTOCOL_VERSION = 1;
 
 export const REQUIRED_HOST_OPERATIONS = Object.freeze([
@@ -336,6 +342,40 @@ export function validateDiagnosticDirectives(directives, originalText) {
   return errors;
 }
 
+export function validateUnusedExpectReportedInOriginal({
+  directives,
+  virtualDiagnostics,
+  originalReports,
+} = {}) {
+  const errors = [];
+  for (const directive of directives || []) {
+    const [originalStart, originalLength, virtualStart, virtualEnd, policy] = directive;
+    if (policy !== DiagnosticDirectivePolicy.Expect) continue;
+    const used = (virtualDiagnostics || []).some((diag) => {
+      const diagStart = diag.start;
+      const diagEnd = diag.end ?? diagStart + (diag.length || 0);
+      return diagStart < virtualEnd && virtualStart < diagEnd;
+    });
+    if (used) continue;
+    const reported = (originalReports || []).some((report) => {
+      if (report.file && report.file !== "original") return false;
+      const reportEnd = report.start + (report.length || 0);
+      const originalEnd = originalStart + originalLength;
+      return report.start < originalEnd && originalStart < reportEnd;
+    });
+    if (!reported) {
+      errors.push(
+        err(
+          "STP5-guard-duplicate",
+          "unused-expect-not-in-original",
+          "unused Expect directive must be reported in the original file",
+        ),
+      );
+    }
+  }
+  return errors;
+}
+
 export function assertFeatureMaskDoesNotSuppressDiagnostics(claim) {
   if (
     claim?.diagnosticsDroppedBecause === "feature-mask" ||
@@ -639,6 +679,39 @@ export const DIRTY_DORMANT_CLAIM = Object.freeze({
   completeFromDormantProduct: true,
 });
 
+export const DIRTY_SILENT_DEGRADE_CLAIM = Object.freeze({
+  operation: "transform",
+  status: "unavailable",
+  evidence: "not-built",
+});
+
+export const DIRTY_BLOCKED_EMPTY_EVIDENCE = Object.freeze({
+  operation: "initialize",
+  status: "blocking-upstream-defect",
+  evidence: "",
+});
+
+export const CLEAN_UNUSED_EXPECT = Object.freeze({
+  original: '<!-- @vue-expect-error -->\n<div :id="ok"></div>',
+  directives: [[0, 24, 0, 40, DiagnosticDirectivePolicy.Expect]],
+  virtualDiagnostics: [],
+  originalReports: [{ file: "original", start: 0, length: 24 }],
+});
+
+export const DIRTY_UNUSED_EXPECT = Object.freeze({
+  original: CLEAN_UNUSED_EXPECT.original,
+  directives: CLEAN_UNUSED_EXPECT.directives,
+  virtualDiagnostics: [],
+  originalReports: [],
+});
+
+export const USED_EXPECT_NO_UNUSED_REPORT = Object.freeze({
+  original: CLEAN_GUARD.original,
+  directives: CLEAN_GUARD.directives,
+  virtualDiagnostics: [{ start: 0, end: 40 }],
+  originalReports: [],
+});
+
 export function evaluateRejectTwins() {
   const errors = [];
   const cleanGuard = validateDiagnosticDirectives(CLEAN_GUARD.directives, CLEAN_GUARD.original);
@@ -700,6 +773,40 @@ export function evaluateRejectTwins() {
       ),
     );
   }
+  const dirtySilent = validateCapabilityClaim(DIRTY_SILENT_DEGRADE_CLAIM);
+  if (!dirtySilent.some((error) => error.code === "silent-degrade")) {
+    errors.push(
+      err(
+        "STP5-capability",
+        "missed-silent-degrade",
+        "neither-status capability row was not rejected as silent-degrade",
+      ),
+    );
+  }
+  const dirtyBlockedEmpty = validateCapabilityClaim(DIRTY_BLOCKED_EMPTY_EVIDENCE);
+  if (!dirtyBlockedEmpty.some((error) => error.code === "missing-defect-evidence")) {
+    errors.push(
+      err(
+        "STP5-capability",
+        "missed-defect-evidence",
+        "blocking row with empty evidence was not rejected",
+      ),
+    );
+  }
+  const cleanUnused = validateUnusedExpectReportedInOriginal(CLEAN_UNUSED_EXPECT);
+  if (cleanUnused.length) errors.push(...cleanUnused);
+  const usedExpect = validateUnusedExpectReportedInOriginal(USED_EXPECT_NO_UNUSED_REPORT);
+  if (usedExpect.length) errors.push(...usedExpect);
+  const dirtyUnused = validateUnusedExpectReportedInOriginal(DIRTY_UNUSED_EXPECT);
+  if (!dirtyUnused.some((error) => error.code === "unused-expect-not-in-original")) {
+    errors.push(
+      err(
+        "STP5-guard-duplicate",
+        "missed-unused-expect",
+        "unused Expect without an original-file report was not rejected",
+      ),
+    );
+  }
   const dirtyMask = assertFeatureMaskDoesNotSuppressDiagnostics({
     featureMaskSuppressesDiagnostics: true,
     diagnosticsDroppedBecause: "feature-mask",
@@ -730,15 +837,18 @@ export function helpTextHasMapperHost(helpText) {
 
 export function capabilityRowsFromProbe({
   mapperHostPresent,
+  mapperHostEvidence,
   observation,
   engineId,
   engineVersion,
+  encodingIdentityOk,
 }) {
   const hostEvidence = mapperHostPresent
     ? { status: "supported", evidence: "executable-selected-build" }
     : {
         status: "blocking-upstream-defect",
-        evidence: `${engineId}@${engineVersion} tsc help/API has no content mapper host (--runExternalCode / contentMappers)`,
+        evidence:
+          mapperHostEvidence || `${engineId}@${engineVersion} mapper-host probe not performed`,
       };
   const rows = REQUIRED_HOST_OPERATIONS.map((operation) => ({
     operation,
@@ -758,12 +868,21 @@ export function capabilityRowsFromProbe({
           },
     );
   }
-  rows.push({
-    operation: "encoding-negotiation",
-    engineId,
-    status: "supported",
-    evidence: "executable-selected-build",
-  });
+  rows.push(
+    encodingIdentityOk
+      ? {
+          operation: "encoding-negotiation",
+          engineId,
+          status: "supported",
+          evidence: "executable-selected-build",
+        }
+      : {
+          operation: "encoding-negotiation",
+          engineId,
+          status: "blocking-upstream-defect",
+          evidence: `${engineId} encoding identity (emoji/CRLF UTF-8/UTF-16) failed`,
+        },
+  );
   return rows;
 }
 
@@ -792,9 +911,76 @@ export function evaluateCapabilityRows(rows) {
   return errors;
 }
 
-export async function evaluateStp5({ mapperHostPresent, observation, engineId, engineVersion }) {
+export function loadStp5Product(name) {
+  return JSON.parse(fs.readFileSync(path.join(STP5_DIR, "products", name), "utf8"));
+}
+
+export function validateStp5Products({
+  originPolicy = loadStp5Product("diagnostic-origin-policy.json"),
+  rolePolicy = loadStp5Product("observation-role-policy.json"),
+  evidenceText = fs.readFileSync(path.join(STP5_DIR, "../evidence/STP5/cases.md"), "utf8"),
+} = {}) {
   const errors = [];
-  errors.push(...assertEncodingIdentity());
+  if (originPolicy?.diagnosticDirectives?.unusedExpectReportedInOriginal !== true) {
+    errors.push(
+      err(
+        "STP5-guard-duplicate",
+        "unused-expect-policy",
+        "DiagnosticOriginPolicy must declare unusedExpectReportedInOriginal",
+      ),
+    );
+  }
+  if (
+    !rolePolicy?.ac2EditApplicationRationale ||
+    String(rolePolicy.ac2EditApplicationRationale).trim().length === 0
+  ) {
+    errors.push(
+      err(
+        "STP5-capability",
+        "missing-ac2-rationale",
+        "ObservationRolePolicy must record AC2 edit-application untouched-owner rationale",
+      ),
+    );
+  }
+  if (!/[0-9a-f]{40}/.test(evidenceText)) {
+    errors.push(
+      err(
+        "STP5-capability",
+        "missing-source-revision",
+        "STP5 evidence must record a 40-character source revision",
+      ),
+    );
+  }
+  if (!/6\.0\.3/.test(evidenceText) || !/7\.0\.2/.test(evidenceText)) {
+    errors.push(
+      err(
+        "STP5-capability",
+        "missing-engine-pins",
+        "STP5 evidence must record ts-js 6.0.3 and ts-native 7.0.2 engine pins",
+      ),
+    );
+  }
+  return errors;
+}
+
+function engineInputsFrom(input = {}) {
+  if (Array.isArray(input.engines) && input.engines.length > 0) return input.engines;
+  return [
+    {
+      mapperHostPresent: input.mapperHostPresent,
+      mapperHostEvidence: input.mapperHostEvidence,
+      observation: input.observation,
+      engineId: input.engineId,
+      engineVersion: input.engineVersion,
+    },
+  ];
+}
+
+export async function evaluateStp5(input = {}) {
+  const errors = [];
+  errors.push(...validateStp5Products());
+  const encodingErrors = assertEncodingIdentity();
+  errors.push(...encodingErrors);
   errors.push(...assertCleanGeometry());
   errors.push(...evaluateRejectTwins());
   const session = createMapperSession();
@@ -828,7 +1014,10 @@ export async function evaluateStp5({ mapperHostPresent, observation, engineId, e
       ),
     );
   }
-  const rows = capabilityRowsFromProbe({ mapperHostPresent, observation, engineId, engineVersion });
+  const encodingIdentityOk = encodingErrors.length === 0;
+  const rows = engineInputsFrom(input).flatMap((engine) =>
+    capabilityRowsFromProbe({ ...engine, encodingIdentityOk }),
+  );
   errors.push(...evaluateCapabilityRows(rows));
   return { errors, capabilityRows: rows };
 }

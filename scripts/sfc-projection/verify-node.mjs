@@ -865,16 +865,17 @@ export async function verifyNode(options) {
     }
   }
 
+  let capabilityRows = [];
   if (nodeId === "STP5") {
-    errors.push(
-      ...(await evaluateStp5Node({
-        repoRoot,
-        resolvedEngines,
-        harnessRuns,
-        skipProbes: options.skipProbes,
-        runnable,
-      })),
-    );
+    const stp5 = await evaluateStp5Node({
+      repoRoot,
+      resolvedEngines,
+      harnessRuns,
+      skipProbes: options.skipProbes,
+      runnable,
+    });
+    errors.push(...stp5.errors);
+    capabilityRows = stp5.capabilityRows;
   }
 
   return summarize({
@@ -887,7 +888,61 @@ export async function verifyNode(options) {
     inventory,
     methodology,
     nodeManifest: nodeLoad.manifest,
+    capabilityRows,
   });
+}
+
+export function probeMapperHost(engine, { helpTextHasMapperHost }) {
+  const id = engine?.id || "unknown";
+  const version = engine?.version || "unknown";
+  if (!engine?.executable) {
+    return {
+      present: false,
+      performed: false,
+      method: null,
+      evidence: `${id}@${version} mapper-host probe skipped: no executable`,
+    };
+  }
+  const spawned =
+    engine.kind === "native"
+      ? spawnSync(engine.executable, ["--help"], {
+          encoding: "utf8",
+          windowsHide: true,
+          timeout: 20000,
+        })
+      : spawnSync(process.execPath, [engine.executable, "--help"], {
+          encoding: "utf8",
+          windowsHide: true,
+          timeout: 20000,
+        });
+  if (spawned.error && !spawned.stdout && !spawned.stderr) {
+    return {
+      present: false,
+      performed: false,
+      method: "tsc --help",
+      evidence: `${id}@${version} tsc --help probe failed: ${spawned.error.message}`,
+    };
+  }
+  const text = `${spawned.stdout || ""}${spawned.stderr || ""}`;
+  const present = helpTextHasMapperHost(text);
+  return {
+    present,
+    performed: true,
+    method: "tsc --help",
+    evidence: present
+      ? "executable-selected-build"
+      : `${id}@${version} tsc --help has no content mapper host (--runExternalCode / contentMappers)`,
+  };
+}
+
+function observationFromRun(run) {
+  return {
+    diagnostics: (run?.negative?.diags || []).length > 0,
+    hover: Boolean(run?.positive?.observations?.hover),
+    definition: Boolean(run?.positive?.observations?.definition),
+    references: (run?.positive?.observations?.references || 0) > 0,
+    edits: (run?.positive?.observations?.edits || []).length > 0,
+  };
 }
 
 async function evaluateStp5Node({ repoRoot, resolvedEngines, harnessRuns, skipProbes, runnable }) {
@@ -900,36 +955,33 @@ async function evaluateStp5Node({ repoRoot, resolvedEngines, harnessRuns, skipPr
     errors.push(...protocol.assertEncodingIdentity());
     errors.push(...protocol.assertCleanGeometry());
     errors.push(...protocol.evaluateRejectTwins());
-    return errors;
+    errors.push(...protocol.validateStp5Products());
+    return { errors, capabilityRows: [] };
   }
   if (!runnable) {
     errors.push(err("STP5-capability", "missing-probes", "STP5 omitted runnable probes"));
-    return errors;
+    return { errors, capabilityRows: [] };
   }
-  const native = resolvedEngines.find((engine) => engine.kind === "native") || resolvedEngines[0];
-  let mapperHostPresent = false;
-  if (native?.kind === "native" && native.executable) {
-    const help = spawnSync(native.executable, ["--help"], {
-      encoding: "utf8",
-      windowsHide: true,
-    });
-    mapperHostPresent = protocol.helpTextHasMapperHost(`${help.stdout || ""}${help.stderr || ""}`);
+  if (resolvedEngines.length === 0) {
+    errors.push(
+      err("STP5-capability", "missing-probes", "STP5 selected zero engines for capability rows"),
+    );
+    return { errors, capabilityRows: [] };
   }
-  const observation = {
-    diagnostics: harnessRuns.some((run) => (run.negative?.diags || []).length > 0),
-    hover: harnessRuns.some((run) => Boolean(run.positive?.observations?.hover)),
-    definition: harnessRuns.some((run) => Boolean(run.positive?.observations?.definition)),
-    references: harnessRuns.some((run) => (run.positive?.observations?.references || 0) > 0),
-    edits: harnessRuns.some((run) => (run.positive?.observations?.edits || []).length > 0),
-  };
-  const stp5 = await protocol.evaluateStp5({
-    mapperHostPresent,
-    observation,
-    engineId: native?.id || "ts-native",
-    engineVersion: native?.version || "unknown",
+  const engines = resolvedEngines.map((engine) => {
+    const probe = probeMapperHost(engine, protocol);
+    const run = harnessRuns.find((row) => row.engine === engine.id);
+    return {
+      mapperHostPresent: probe.present,
+      mapperHostEvidence: probe.evidence,
+      observation: observationFromRun(run),
+      engineId: engine.id,
+      engineVersion: engine.version,
+    };
   });
+  const stp5 = await protocol.evaluateStp5({ engines });
   errors.push(...stp5.errors);
-  return errors;
+  return { errors, capabilityRows: stp5.capabilityRows };
 }
 
 function summarize({
@@ -942,6 +994,7 @@ function summarize({
   inventory,
   methodology,
   nodeManifest,
+  capabilityRows = [],
 }) {
   const ok = errors.length === 0;
   const required = mandatoryCasesFor(nodeManifest || { node: options.node });
@@ -994,6 +1047,7 @@ function summarize({
       checkCounts: run.checkCounts,
     })),
     errors,
+    capabilityRows,
   };
 }
 
