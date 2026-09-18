@@ -33,6 +33,14 @@ acceptance = "MEM0-AC1 through MEM0-AC4"
 evidence = "catalogs/semantic-memory-budget.toml and its fixture/workload validation, produced by MEM0"
 
 [[contract]]
+id = "product-surface-catalog"
+producer = "L0"
+consumers = ["L2", "L4"]
+outcome = "Ratified public product-surface stability classes and controlling performance rows"
+acceptance = "L0-AC1 through L0-AC4"
+evidence = "catalogs/product-surface-catalog.toml and its schema/fixture validation, produced by L0"
+
+[[contract]]
 id = "aggregate-retention-admission"
 producer = "MEM1"
 consumers = ["G4", "L1", "L4"]
