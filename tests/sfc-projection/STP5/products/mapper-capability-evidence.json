@@ -1,0 +1,39 @@
+{
+  "schema": "MapperCapabilityEvidence",
+  "version": 1,
+  "product": "MapperCapabilityEvidence",
+  "selectedMapperProtocol": {
+    "transport": "json-rpc-stdio",
+    "methods": ["initialize", "openProject", "transform", "closeProject"],
+    "positionEncodings": ["utf-8", "utf-16"],
+    "projectHandleKeyed": true,
+    "fullContentTransform": true,
+    "closeProjectReleasesState": true,
+    "versionLabelIsNotProof": true,
+    "dormantProductIsNotComplete": "TCM2"
+  },
+  "requiredOperations": [
+    "initialize",
+    "openProject",
+    "transform",
+    "closeProject",
+    "encoding-negotiation",
+    "diagnostics",
+    "hover",
+    "definition",
+    "references",
+    "edits"
+  ],
+  "proofRule": "executable-selected-build-or-blocking-upstream-defect",
+  "forbiddenClaims": [
+    "7.1.0-dev-label",
+    "version-label",
+    "dormant-tcm2",
+    "silent-degrade"
+  ],
+  "hostProbe": {
+    "engines": ["ts-js", "ts-native"],
+    "method": "tsc --help",
+    "flags": ["runExternalCode", "contentMappers"]
+  }
+}
