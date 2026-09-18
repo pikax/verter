@@ -117,6 +117,10 @@ fn vue_options_expose_named_members_classify_into_sealed_vocabulary() {
         "options members keep source order"
     );
 
+    assert!(
+        !member(options_members, "name").is_optional,
+        "`name` is required"
+    );
     assert_eq!(
         member(options_members, "name").value,
         Some(NamedTypeMemberOutput::Literal(LiteralValue::String(
@@ -131,15 +135,27 @@ fn vue_options_expose_named_members_classify_into_sealed_vocabulary() {
         Some(NamedTypeMemberOutput::Primitive(PrimitiveName::Boolean)),
         "`inheritAttrs?: boolean` classifies as Primitive"
     );
+    assert!(
+        !member(options_members, "empty").is_optional,
+        "`empty` is required"
+    );
     assert_eq!(
         member(options_members, "empty").value,
         Some(NamedTypeMemberOutput::EmptyObject),
         "`empty: {{}}` classifies as EmptyObject"
     );
+    assert!(
+        !member(options_members, "boxed").is_optional,
+        "`boxed` is required"
+    );
     assert_eq!(
         member(options_members, "boxed").value,
         Some(NamedTypeMemberOutput::Ref { name: "Box".into() }),
         "`boxed: Box<string>` classifies as name-only generic Ref"
+    );
+    assert!(
+        !member(options_members, "mixed").is_optional,
+        "`mixed` is required"
     );
     assert_eq!(
         member(options_members, "mixed").value,
@@ -159,10 +175,18 @@ fn vue_options_expose_named_members_classify_into_sealed_vocabulary() {
         ["focus", "count"],
         "expose members keep source order"
     );
+    assert!(
+        !member(expose_members, "focus").is_optional,
+        "`focus` is required"
+    );
     assert_eq!(
         member(expose_members, "focus").value,
         Some(NamedTypeMemberOutput::Opaque),
         "`focus(): void` degrades to Opaque"
+    );
+    assert!(
+        !member(expose_members, "count").is_optional,
+        "`count` is required"
     );
     assert_eq!(
         member(expose_members, "count").value,
