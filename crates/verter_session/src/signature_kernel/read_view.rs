@@ -65,13 +65,7 @@ impl SemanticReadView {
 
     #[must_use]
     pub fn shard_lock_acquires(&self) -> u64 {
-        self.inner.shapes.shard_lock_acquires()
-            + self.inner.templates.shard_lock_acquires()
-            + self.inner.descriptors.shard_lock_acquires()
-            + self.inner.recipes.shard_lock_acquires()
-            + self.inner.provenances.shard_lock_acquires()
-            + self.inner.sets.shard_lock_acquires()
-            + self.inner.results.shard_lock_acquires()
+        self.inner.shard_lock_acquires()
     }
 
     pub fn descriptor(&self, id: SignatureDescriptorId) -> Result<&SignatureDescriptor, ReadError> {

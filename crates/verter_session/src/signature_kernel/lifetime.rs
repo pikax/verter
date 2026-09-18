@@ -15,7 +15,7 @@ use crate::semantic_query::{CanonicalTypeSubstitution, SemanticNodeId};
 
 use super::provenance::{ConstituentSequence, SignatureProvenance};
 use super::records::{
-    pack_handle, AppliedResult, BinderSpace, BinderSpaceId, BodyLocatorId, CallSubstitutionId,
+    AppliedResult, BinderSpace, BinderSpaceId, BodyLocatorId, CallSubstitutionId,
     DeclarationInstantiationId, GraphEpoch, ParameterLayout, ParameterLayoutId, ParameterSlot,
     ParameterSlotId, SignatureCandidate, SignatureDescriptor, SignatureDescriptorId,
     SignatureInputShape, SignatureInputShapeId, SignatureProvenanceId, SignatureResultRecipe,
@@ -36,6 +36,8 @@ pub enum StoreError {
     Missing,
     EscapingInferenceVar,
     WrongBinderSpace,
+    InvalidBinderToken,
+    UnresolvedCompose,
 }
 
 impl From<InternError> for StoreError {
@@ -53,6 +55,7 @@ impl From<SubstError> for StoreError {
         match err {
             SubstError::EscapingInferenceVar => Self::EscapingInferenceVar,
             SubstError::WrongBinderSpace => Self::WrongBinderSpace,
+            SubstError::UnresolvedCompose => Self::UnresolvedCompose,
         }
     }
 }
@@ -104,24 +107,43 @@ impl EpochInner {
         }
     }
 
-    fn shard_lock_acquires(&self) -> u64 {
+    pub(super) fn shard_lock_acquires(&self) -> u64 {
         self.shapes.shard_lock_acquires()
             + self.templates.shard_lock_acquires()
             + self.descriptors.shard_lock_acquires()
             + self.recipes.shard_lock_acquires()
             + self.provenances.shard_lock_acquires()
             + self.substitutions.shard_lock_acquires()
+            + self.layouts.shard_lock_acquires()
+            + self.slots.shard_lock_acquires()
+            + self.spaces.shard_lock_acquires()
             + self.sets.shard_lock_acquires()
             + self.results.shard_lock_acquires()
+            + self.strings.shard_lock_acquires()
+            + self.sequences.shard_lock_acquires()
+            + self.environments.shard_lock_acquires()
+            + self.locators.shard_lock_acquires()
     }
 }
 
+/// Intentionally retained result: owns the epoch tables it was published in.
+struct RetainedRoot {
+    epoch: Arc<EpochInner>,
+    result: AppliedResult,
+}
+
+/// High bit marks binder tokens so they never collide with interned graph nodes.
+const BINDER_TOKEN_NAMESPACE: u64 = 1 << 63;
+const MAX_BINDER_SPACE_KEY: u64 = (1 << 31) - 1;
+
 /// Epoch-safe signature store. Replacement publishes a new empty epoch;
-/// retained results and live readers keep the old tables alive.
+/// retained results and live readers keep the old tables alive. The live
+/// `ArcSwap` slot is the live-project-state root.
 pub struct SignatureStore {
     current: ArcSwap<EpochInner>,
-    retained_results: Mutex<Vec<AppliedResult>>,
+    retained_results: Mutex<Vec<RetainedRoot>>,
     next_epoch: AtomicU64,
+    epoch_publish: Mutex<()>,
 }
 
 impl SignatureStore {
@@ -132,6 +154,7 @@ impl SignatureStore {
             current: ArcSwap::from(inner),
             retained_results: Mutex::new(Vec::new()),
             next_epoch: AtomicU64::new(GraphEpoch::FIRST.as_u32() as u64 + 1),
+            epoch_publish: Mutex::new(()),
         }
     }
 
@@ -159,7 +182,10 @@ impl SignatureStore {
     }
 
     /// Replace the current epoch. Old pinned readers keep their `Arc`.
+    /// Publication is serialized so concurrent callers cannot leave a
+    /// lower-numbered epoch current.
     pub fn replace_epoch(&self) -> Result<GraphEpoch, StoreError> {
+        let _gate = self.epoch_publish.lock();
         let next_raw = self.next_epoch.fetch_add(1, Ordering::Relaxed);
         let next = u32::try_from(next_raw).map_err(|_| StoreError::Overflow)?;
         if next == 0 {
@@ -170,8 +196,15 @@ impl SignatureStore {
         Ok(epoch)
     }
 
-    pub fn retain_result(&self, result: AppliedResult) {
-        self.retained_results.lock().push(result);
+    /// Pin `result` as a lifetime root of the epoch it was published in.
+    pub fn retain_result(&self, result: AppliedResult) -> Result<(), StoreError> {
+        let inner = self.current.load_full();
+        self.check_applied(&inner, &result)?;
+        self.retained_results.lock().push(RetainedRoot {
+            epoch: inner,
+            result,
+        });
+        Ok(())
     }
 
     pub fn drain_retained(&self) {
@@ -183,8 +216,168 @@ impl SignatureStore {
         self.retained_results.lock().len()
     }
 
+    /// Read a retained result's descriptor against its pinned epoch.
+    pub fn retained_descriptor(&self, index: usize) -> Result<SignatureDescriptor, StoreError> {
+        let guard = self.retained_results.lock();
+        let entry = guard.get(index).ok_or(StoreError::Missing)?;
+        check_epoch(entry.epoch.epoch, entry.result.descriptor.epoch())?;
+        entry
+            .epoch
+            .descriptors
+            .get(entry.result.descriptor.index())
+            .copied()
+            .ok_or(StoreError::Missing)
+    }
+
+    pub fn retained_result(&self, index: usize) -> Result<AppliedResult, StoreError> {
+        let guard = self.retained_results.lock();
+        let entry = guard.get(index).ok_or(StoreError::Missing)?;
+        Ok(entry.result.clone())
+    }
+
     fn inner(&self) -> arc_swap::Guard<Arc<EpochInner>> {
         self.current.load()
+    }
+
+    fn require_id<T>(
+        inner: &EpochInner,
+        epoch: GraphEpoch,
+        index: u32,
+        table: &AppendInterner<T>,
+    ) -> Result<(), StoreError> {
+        check_epoch(inner.epoch, epoch)?;
+        if table.get(index).is_none() {
+            Err(StoreError::Missing)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn check_applied(&self, inner: &EpochInner, result: &AppliedResult) -> Result<(), StoreError> {
+        Self::require_id(
+            inner,
+            result.descriptor.epoch(),
+            result.descriptor.index(),
+            &inner.descriptors,
+        )?;
+        Self::require_id(
+            inner,
+            result.substitution.epoch(),
+            result.substitution.index(),
+            &inner.substitutions,
+        )?;
+        Self::require_id(
+            inner,
+            result.recipe.epoch(),
+            result.recipe.index(),
+            &inner.recipes,
+        )
+    }
+
+    fn check_shape(
+        &self,
+        inner: &EpochInner,
+        shape: &SignatureInputShape,
+    ) -> Result<(), StoreError> {
+        Self::require_id(
+            inner,
+            shape.binder_declarations.epoch(),
+            shape.binder_declarations.index(),
+            &inner.spaces,
+        )?;
+        Self::require_id(
+            inner,
+            shape.parameter_layout.epoch(),
+            shape.parameter_layout.index(),
+            &inner.layouts,
+        )?;
+        if let Some(slot) = shape.this_parameter {
+            Self::require_id(inner, slot.epoch(), slot.index(), &inner.slots)?;
+        }
+        Ok(())
+    }
+
+    fn check_template(
+        &self,
+        inner: &EpochInner,
+        template: &SignatureTemplate,
+    ) -> Result<(), StoreError> {
+        Self::require_id(
+            inner,
+            template.input_shape.epoch(),
+            template.input_shape.index(),
+            &inner.shapes,
+        )?;
+        Self::require_id(
+            inner,
+            template.result_recipe.epoch(),
+            template.result_recipe.index(),
+            &inner.recipes,
+        )
+    }
+
+    fn check_descriptor(
+        &self,
+        inner: &EpochInner,
+        descriptor: &SignatureDescriptor,
+    ) -> Result<(), StoreError> {
+        Self::require_id(
+            inner,
+            descriptor.template.epoch(),
+            descriptor.template.index(),
+            &inner.templates,
+        )?;
+        Self::require_id(
+            inner,
+            descriptor.declaration_environment.epoch(),
+            descriptor.declaration_environment.index(),
+            &inner.environments,
+        )?;
+        Self::require_id(
+            inner,
+            descriptor.residual_binders.epoch(),
+            descriptor.residual_binders.index(),
+            &inner.spaces,
+        )
+    }
+
+    fn check_candidate(
+        &self,
+        inner: &EpochInner,
+        candidate: &SignatureCandidate,
+    ) -> Result<(), StoreError> {
+        Self::require_id(
+            inner,
+            candidate.signature.epoch(),
+            candidate.signature.index(),
+            &inner.descriptors,
+        )?;
+        Self::require_id(
+            inner,
+            candidate.provenance.epoch(),
+            candidate.provenance.index(),
+            &inner.provenances,
+        )
+    }
+
+    fn check_subst_node(
+        &self,
+        inner: &EpochInner,
+        subst: &CallSubstitution,
+    ) -> Result<(), StoreError> {
+        match subst {
+            CallSubstitution::Compose { first, second, .. } => {
+                Self::require_id(inner, first.epoch(), first.index(), &inner.substitutions)?;
+                Self::require_id(inner, second.epoch(), second.index(), &inner.substitutions)
+            }
+            CallSubstitution::Identity { domain, codomain }
+            | CallSubstitution::Map {
+                domain, codomain, ..
+            } => {
+                Self::require_id(inner, domain.epoch(), domain.index(), &inner.spaces)?;
+                Self::require_id(inner, codomain.epoch(), codomain.index(), &inner.spaces)
+            }
+        }
     }
 
     pub fn intern_spelling(
@@ -253,6 +446,7 @@ impl SignatureStore {
         cancelled: Option<&AtomicBool>,
     ) -> Result<SignatureInputShapeId, StoreError> {
         let inner = self.inner();
+        self.check_shape(&inner, &shape)?;
         let raw = inner.shapes.intern(shape, cancelled)?;
         Ok(SignatureInputShapeId::from_raw(raw))
     }
@@ -263,6 +457,32 @@ impl SignatureStore {
         cancelled: Option<&AtomicBool>,
     ) -> Result<SignatureResultRecipeId, StoreError> {
         let inner = self.inner();
+        match recipe {
+            SignatureResultRecipe::Body {
+                return_obligation_key,
+            } => {
+                Self::require_id(
+                    &inner,
+                    return_obligation_key.body_locator.epoch(),
+                    return_obligation_key.body_locator.index(),
+                    &inner.locators,
+                )?;
+            }
+            SignatureResultRecipe::UnionCommon { constituents, .. }
+            | SignatureResultRecipe::UnionSynthesized { constituents, .. }
+            | SignatureResultRecipe::IntersectionConstruct {
+                mixins: constituents,
+                ..
+            } => {
+                Self::require_id(
+                    &inner,
+                    constituents.epoch(),
+                    constituents.index(),
+                    &inner.sequences,
+                )?;
+            }
+            SignatureResultRecipe::Declared { .. } => {}
+        }
         let raw = inner.recipes.intern(recipe, cancelled)?;
         Ok(SignatureResultRecipeId::from_raw(raw))
     }
@@ -273,6 +493,7 @@ impl SignatureStore {
         cancelled: Option<&AtomicBool>,
     ) -> Result<SignatureTemplateId, StoreError> {
         let inner = self.inner();
+        self.check_template(&inner, &template)?;
         let raw = inner.templates.intern(template, cancelled)?;
         Ok(SignatureTemplateId::from_raw(raw))
     }
@@ -283,6 +504,7 @@ impl SignatureStore {
         cancelled: Option<&AtomicBool>,
     ) -> Result<SignatureDescriptorId, StoreError> {
         let inner = self.inner();
+        self.check_descriptor(&inner, &descriptor)?;
         let raw = inner.descriptors.intern(descriptor, cancelled)?;
         Ok(SignatureDescriptorId::from_raw(raw))
     }
@@ -293,6 +515,13 @@ impl SignatureStore {
         cancelled: Option<&AtomicBool>,
     ) -> Result<SignatureProvenanceId, StoreError> {
         let inner = self.inner();
+        match provenance.origin {
+            super::provenance::OriginRelation::Synthesized { from }
+            | super::provenance::OriginRelation::Instantiated { from } => {
+                Self::require_id(&inner, from.epoch(), from.index(), &inner.provenances)?;
+            }
+            super::provenance::OriginRelation::Authored => {}
+        }
         let raw = inner.provenances.intern(provenance, cancelled)?;
         Ok(SignatureProvenanceId::from_raw(raw))
     }
@@ -303,6 +532,26 @@ impl SignatureStore {
         cancelled: Option<&AtomicBool>,
     ) -> Result<super::records::ConstituentSequenceId, StoreError> {
         let inner = self.inner();
+        for edge in sequence.edges.iter() {
+            Self::require_id(
+                &inner,
+                edge.declaration.epoch(),
+                edge.declaration.index(),
+                &inner.descriptors,
+            )?;
+            Self::require_id(
+                &inner,
+                edge.residual.epoch(),
+                edge.residual.index(),
+                &inner.descriptors,
+            )?;
+            Self::require_id(
+                &inner,
+                edge.arm.contributor.epoch(),
+                edge.arm.contributor.index(),
+                &inner.descriptors,
+            )?;
+        }
         let raw = inner.sequences.intern(sequence, cancelled)?;
         Ok(super::records::ConstituentSequenceId::from_raw(raw))
     }
@@ -313,6 +562,9 @@ impl SignatureStore {
         cancelled: Option<&AtomicBool>,
     ) -> Result<SignatureSetId, StoreError> {
         let inner = self.inner();
+        for candidate in candidates.iter() {
+            self.check_candidate(&inner, candidate)?;
+        }
         let raw = inner.sets.intern(SignatureSet { candidates }, cancelled)?;
         Ok(SignatureSetId::from_raw(raw))
     }
@@ -323,6 +575,7 @@ impl SignatureStore {
         cancelled: Option<&AtomicBool>,
     ) -> Result<CallSubstitutionId, StoreError> {
         let inner = self.inner();
+        self.check_subst_node(&inner, &subst)?;
         let raw = inner.substitutions.intern(subst, cancelled)?;
         Ok(CallSubstitutionId::from_raw(raw))
     }
@@ -335,13 +588,18 @@ impl SignatureStore {
     where
         F: FnOnce() -> SignatureInputShape,
     {
-        let inner = self.inner();
-        let raw = inner.shapes.intern_with(cancelled, build)?;
-        Ok(SignatureInputShapeId::from_raw(raw))
+        if cancelled.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err(StoreError::Cancelled);
+        }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(build)) {
+            Ok(shape) => self.intern_shape(shape, cancelled),
+            Err(_) => Err(StoreError::Panicked),
+        }
     }
 
     /// `compose_after(first, second)` interned. Identity is elided; chains
-    /// deeper than [`MAX_SUBSTITUTION_CHAIN_DEPTH`] flatten.
+    /// deeper than [`MAX_SUBSTITUTION_CHAIN_DEPTH`] flatten. Requires
+    /// `first.codomain == second.domain`.
     pub fn compose_after(
         &self,
         first: CallSubstitutionId,
@@ -351,23 +609,24 @@ impl SignatureStore {
         let inner = self.inner();
         let a = self.subst(&inner, first)?;
         let b = self.subst(&inner, second)?;
-        if a.space() != b.space() {
+        if a.codomain() != b.domain() {
             return Err(StoreError::WrongBinderSpace);
         }
-        if a.is_identity() {
+        if a.is_same_space_identity() {
             return Ok(second);
         }
-        if b.is_identity() {
+        if b.is_same_space_identity() {
             return Ok(first);
         }
-        let depth = compose_depth(a) + 1;
-        if depth > MAX_SUBSTITUTION_CHAIN_DEPTH {
+        let depth = compose_depth(a).max(compose_depth(b)).saturating_add(1);
+        if depth >= MAX_SUBSTITUTION_CHAIN_DEPTH {
             let flat = self.flatten_subst(&inner, first, second)?;
             return self.intern_substitution(flat, cancelled);
         }
         self.intern_substitution(
             CallSubstitution::Compose {
-                space: a.space(),
+                domain: a.domain(),
+                codomain: b.codomain(),
                 first,
                 second,
                 depth,
@@ -396,8 +655,10 @@ impl SignatureStore {
     ) -> Result<CallSubstitution, StoreError> {
         let a = self.flatten_to_map(inner, first)?;
         let b = self.flatten_to_map(inner, second)?;
-        Ok(CallSubstitution::map(
-            a.space(),
+        inner.descriptor_chain_walks.fetch_add(1, Ordering::Relaxed);
+        Ok(CallSubstitution::map_across(
+            a.domain(),
+            b.codomain(),
             compose_canonical(a_map(&a), a_map(&b)),
         ))
     }
@@ -409,8 +670,18 @@ impl SignatureStore {
     ) -> Result<CallSubstitution, StoreError> {
         let node = self.subst(inner, id)?;
         match node {
-            CallSubstitution::Identity { space } => Ok(CallSubstitution::identity(*space)),
-            CallSubstitution::Map { space, map } => Ok(CallSubstitution::map(*space, map.clone())),
+            CallSubstitution::Identity { domain, codomain } => {
+                Ok(CallSubstitution::identity_across(*domain, *codomain))
+            }
+            CallSubstitution::Map {
+                domain,
+                codomain,
+                map,
+            } => Ok(CallSubstitution::map_across(
+                *domain,
+                *codomain,
+                map.clone(),
+            )),
             CallSubstitution::Compose { first, second, .. } => {
                 self.flatten_subst(inner, *first, *second)
             }
@@ -437,6 +708,7 @@ impl SignatureStore {
         let node = self.subst(inner, subst)?;
         match node {
             CallSubstitution::Compose { first, second, .. } => {
+                inner.descriptor_chain_walks.fetch_add(1, Ordering::Relaxed);
                 let mid = self.apply_inner(inner, *first, term)?;
                 self.apply_inner(inner, *second, &mid)
             }
@@ -451,15 +723,20 @@ impl SignatureStore {
         cancelled: Option<&AtomicBool>,
     ) -> Result<u64, StoreError> {
         let inner = self.inner();
+        self.check_applied(&inner, &result)?;
         Ok(inner.results.intern(result, cancelled)?)
     }
 
+    /// Look up a previously published result. Does not intern on miss.
     pub fn lookup_result(&self, result: &AppliedResult) -> Result<Option<u64>, StoreError> {
         let inner = self.inner();
-        match inner.results.intern(result.clone(), None) {
-            Ok(id) => Ok(Some(id)),
-            Err(e) => Err(e.into()),
-        }
+        self.check_applied(&inner, result)?;
+        Ok(inner.results.lookup(result))
+    }
+
+    pub fn substitution(&self, id: CallSubstitutionId) -> Result<CallSubstitution, StoreError> {
+        let inner = self.inner();
+        Ok(self.subst(&inner, id)?.clone())
     }
 
     #[must_use]
@@ -512,14 +789,29 @@ impl SignatureStore {
         ))
     }
 
-    /// Binder token unique to `space` and ordinal (same spelling, other space
-    /// is a different node).
-    #[must_use]
-    pub fn binder_token(space: BinderSpaceId, ordinal: u32) -> SemanticNodeId {
-        SemanticNodeId(pack_handle(
-            space.epoch(),
-            (space.index() << 8) | (ordinal & 0xff),
+    /// Logical binder token from a space key and ordinal. Independent of
+    /// intern order. High bit is a dedicated namespace so tokens never
+    /// collide with interned graph nodes. Rejects keys that do not fit.
+    pub fn binder_token(space_key: u64, ordinal: u32) -> Result<SemanticNodeId, StoreError> {
+        if space_key > MAX_BINDER_SPACE_KEY {
+            return Err(StoreError::InvalidBinderToken);
+        }
+        Ok(SemanticNodeId(
+            BINDER_TOKEN_NAMESPACE | (space_key << 32) | u64::from(ordinal),
         ))
+    }
+
+    /// Binder token for an interned space: identity is the space's logical
+    /// key plus ordinal, not the intern slot.
+    pub fn binder_token_for(
+        &self,
+        space: BinderSpaceId,
+        ordinal: u32,
+    ) -> Result<SemanticNodeId, StoreError> {
+        let inner = self.inner();
+        Self::require_id(&inner, space.epoch(), space.index(), &inner.spaces)?;
+        let rec = inner.spaces.get(space.index()).ok_or(StoreError::Missing)?;
+        Self::binder_token(rec.key, ordinal)
     }
 }
 

@@ -8,7 +8,7 @@ use super::lifetime::SignatureStore;
 use super::records::{
     ParameterOptionality, ReturnObligationKey, SignatureDescriptor, SignatureInputShape,
     SignatureKind, SignatureResultRecipe, SignatureSemanticFlags, SignatureSetRef,
-    SignatureTemplate, TypeToken, LAYOUT_QUERY_OUTCOME_SET, LAYOUT_READY_SET,
+    SignatureTemplate, TypeToken, LAYOUT_MEMO_ENTRY, LAYOUT_QUERY_OUTCOME_SET, LAYOUT_READY_SET,
     LAYOUT_SIGNATURE_CANDIDATE, LAYOUT_SIGNATURE_SET_REF,
 };
 use super::test_support::intern_one_call;
@@ -28,9 +28,9 @@ fn layouts_are_the_measured_64_bit_sizes() {
     let family = crate::semantic_query_memo::family_key_size_for_tests();
     let memo = crate::semantic_query_memo::memo_entry_size_for_tests();
     assert_eq!(family, 136, "hot family key");
-    assert!(
-        memo >= 64,
-        "persisted memo record must occupy a measured envelope, got {memo}"
+    assert_eq!(
+        memo, LAYOUT_MEMO_ENTRY,
+        "persisted memo record must occupy the measured 64-bit envelope, got {memo}"
     );
     eprintln!(
         "signature_kernel layouts: candidate={} set_ref={} ready={} query_outcome={} family_key={} memo_entry={}",

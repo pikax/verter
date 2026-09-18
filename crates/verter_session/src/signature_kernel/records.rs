@@ -348,6 +348,8 @@ pub const LAYOUT_SIGNATURE_CANDIDATE: usize = 16;
 pub const LAYOUT_SIGNATURE_SET_REF: usize = 24;
 pub const LAYOUT_READY_SET: usize = 32;
 pub const LAYOUT_QUERY_OUTCOME_SET: usize = 32;
+/// Measured `MemoEntry` size on 64-bit. Pinned by `layouts_are_the_measured_64_bit_sizes`.
+pub const LAYOUT_MEMO_ENTRY: usize = 160;
 
 #[cfg(target_pointer_width = "64")]
 const _: () = {

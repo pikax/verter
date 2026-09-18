@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread;
 
@@ -93,10 +93,31 @@ fn intern_order_does_not_change_logical_identity() {
     let b_fwd = intern_shape(&forward, 2);
     let b_rev = intern_shape(&reverse, 2);
     let a_rev = intern_shape(&reverse, 1);
-    let vf = super::read_view::SemanticReadView::pin(&forward);
-    let vr = super::read_view::SemanticReadView::pin(&reverse);
     assert_ne!(a_fwd, b_fwd);
-    let _ = (a_rev, b_rev);
+    assert_ne!(b_fwd, b_rev);
+    let space_fwd = forward
+        .intern_binder_space(
+            BinderSpace {
+                key: 7,
+                binders: Box::from([]),
+            },
+            None,
+        )
+        .unwrap();
+    let space_rev = reverse
+        .intern_binder_space(
+            BinderSpace {
+                key: 7,
+                binders: Box::from([]),
+            },
+            None,
+        )
+        .unwrap();
+    assert_ne!(a_fwd.index(), a_rev.index());
+    assert_eq!(
+        forward.binder_token_for(space_fwd, 0).unwrap(),
+        reverse.binder_token_for(space_rev, 0).unwrap()
+    );
     let one_f = intern_one_call(&forward);
     let one_r = intern_one_call(&reverse);
     let super::records::SignatureSetRef::One(cf) = one_f else {
@@ -105,9 +126,18 @@ fn intern_order_does_not_change_logical_identity() {
     let super::records::SignatureSetRef::One(cr) = one_r else {
         panic!();
     };
-    let df = vf.descriptor(cf.signature).unwrap();
-    let dr = vr.descriptor(cr.signature).unwrap();
-    assert_eq!(df.residual_binders.index(), dr.residual_binders.index());
+    let df = super::read_view::SemanticReadView::pin(&forward)
+        .descriptor(cf.signature)
+        .unwrap()
+        .residual_binders;
+    let dr = super::read_view::SemanticReadView::pin(&reverse)
+        .descriptor(cr.signature)
+        .unwrap()
+        .residual_binders;
+    assert_eq!(
+        forward.binder_token_for(df, 0).unwrap(),
+        reverse.binder_token_for(dr, 0).unwrap()
+    );
 }
 
 #[test]
@@ -133,21 +163,31 @@ fn panic_in_builder_publishes_no_handle() {
 #[test]
 fn no_first_writer_state_on_shared_record() {
     let store = Arc::new(SignatureStore::new());
-    let seen = Arc::new(AtomicUsize::new(0));
-    thread::scope(|scope| {
+    let ids: Vec<_> = thread::scope(|scope| {
+        let mut joins = Vec::new();
         // bounded-loop: concurrent identical publishers.
         for _ in 0..4 {
             let store = Arc::clone(&store);
-            let seen = Arc::clone(&seen);
-            scope.spawn(move || {
-                let id = intern_one_call(&store);
-                seen.fetch_add(1, Ordering::Relaxed);
-                id
-            });
+            joins.push(scope.spawn(move || intern_one_call(&store)));
         }
+        joins.into_iter().map(|j| j.join().unwrap()).collect()
     });
-    assert_eq!(seen.load(Ordering::Relaxed), 4);
+    let first = ids[0];
+    assert!(ids.iter().all(|id| *id == first));
     let a = intern_one_call(&store);
     let b = intern_one_call(&store);
     assert_eq!(a, b);
+    assert_eq!(a, first);
+}
+
+#[test]
+fn intern_overflow_publishes_no_handle() {
+    use super::records::GraphEpoch;
+    use super::storage::AppendInterner;
+    let table: AppendInterner<u64> = AppendInterner::with_max_index(GraphEpoch::FIRST, 0);
+    let _first = table.intern(1, None).unwrap();
+    assert!(table.get(0).is_some());
+    let err = table.intern(2, None).unwrap_err();
+    assert_eq!(err, InternError::Overflow);
+    assert!(table.lookup(&2).is_none());
 }

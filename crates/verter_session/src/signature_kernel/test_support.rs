@@ -14,6 +14,7 @@ use crate::semantic_query::{CanonicalTypeSubstitution, ResultEvaluationContextId
 pub struct WarmPositionalStore {
     store: SignatureStore,
     set: SignatureSetRef,
+    many: SignatureSetRef,
 }
 
 /// Shard-lock counts around a warm positional read.
@@ -28,7 +29,11 @@ impl WarmPositionalStore {
     pub fn fixture() -> Self {
         let store = SignatureStore::new();
         let set = intern_one_call(&store);
-        Self { store, set }
+        let many = match set {
+            SignatureSetRef::One(c) => store.set_ref_many(Box::from([c]), None).expect("many"),
+            _ => panic!("fixture One"),
+        };
+        Self { store, set, many }
     }
 
     #[must_use]
@@ -36,8 +41,11 @@ impl WarmPositionalStore {
         let view = SemanticReadView::pin(&self.store);
         let acquires_before = view.shard_lock_acquires();
         let _ = view
-            .read_set_ref(self.set)
+            .read_set(self.set)
             .expect("fixture set is live on this epoch");
+        let _ = view
+            .read_set(self.many)
+            .expect("fixture many is live on this epoch");
         let acquires_after = view.shard_lock_acquires();
         WarmPositionalLockProbe {
             acquires_before,
@@ -47,12 +55,31 @@ impl WarmPositionalStore {
 }
 
 /// Warm Empty/One positional read: no intern-shard lock, no allocation of the
-/// set itself.
+/// set itself. Drives the borrowing `read_set` path, not the identity-only
+/// `read_set_ref`.
 #[must_use]
 pub fn warm_positional_read(store: &WarmPositionalStore) -> SignatureSetRef {
     let view = SemanticReadView::pin(&store.store);
-    view.read_set_ref(store.set)
+    match view
+        .read_set(store.set)
         .expect("fixture set is live on this epoch")
+    {
+        super::read_view::BorrowedSet::One { candidate, .. } => SignatureSetRef::One(candidate),
+        _ => panic!("fixture One"),
+    }
+}
+
+/// Warm Many positional read: borrows the interned slice, no shard lock.
+#[must_use]
+pub fn warm_positional_read_many(store: &WarmPositionalStore) -> usize {
+    let view = SemanticReadView::pin(&store.store);
+    match view
+        .read_set(store.many)
+        .expect("fixture many is live on this epoch")
+    {
+        super::read_view::BorrowedSet::Many(candidates) => candidates.len(),
+        _ => panic!("fixture Many"),
+    }
 }
 
 pub(crate) fn intern_one_call(store: &SignatureStore) -> SignatureSetRef {

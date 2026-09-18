@@ -21,6 +21,9 @@ pub const MAX_SUBSTITUTION_CHAIN_DEPTH: u8 = 8;
 pub enum SubstError {
     EscapingInferenceVar,
     WrongBinderSpace,
+    /// A Compose node cannot be applied except through the store, which
+    /// walks `first` then `second`. Direct `apply_term` is a misuse.
+    UnresolvedCompose,
 }
 
 /// Kernel-local term the substitution laws are stated over.
@@ -38,18 +41,29 @@ pub enum SubstTerm {
     },
 }
 
-/// Interned substitution node.
+/// Interned substitution node. Domain is the binder space of parameters
+/// this map substitutes; codomain is the space of residual/call binders
+/// the image lives in. Same-space maps have `domain == codomain`.
+///
+/// Map payloads are [`CanonicalTypeSubstitution`] (the existing node-id
+/// substitution authority). Structured kernel terms ([`SubstTerm::Constructed`])
+/// are rewritten by recursive projection onto referenced binders; rewriting
+/// an interned graph node that *contains* binders is `substitute_canonical`
+/// on the type graph and is not duplicated here.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum CallSubstitution {
     Identity {
-        space: BinderSpaceId,
+        domain: BinderSpaceId,
+        codomain: BinderSpaceId,
     },
     Map {
-        space: BinderSpaceId,
+        domain: BinderSpaceId,
+        codomain: BinderSpaceId,
         map: CanonicalTypeSubstitution,
     },
     Compose {
-        space: BinderSpaceId,
+        domain: BinderSpaceId,
+        codomain: BinderSpaceId,
         first: CallSubstitutionId,
         second: CallSubstitutionId,
         depth: u8,
@@ -59,30 +73,74 @@ pub enum CallSubstitution {
 impl CallSubstitution {
     #[must_use]
     pub fn identity(space: BinderSpaceId) -> Self {
-        Self::Identity { space }
-    }
-
-    #[must_use]
-    pub fn map(space: BinderSpaceId, map: CanonicalTypeSubstitution) -> Self {
-        if map.bindings().is_empty() {
-            Self::Identity { space }
-        } else {
-            Self::Map { space, map }
+        Self::Identity {
+            domain: space,
+            codomain: space,
         }
     }
 
     #[must_use]
-    pub fn space(&self) -> BinderSpaceId {
-        match *self {
-            Self::Identity { space } | Self::Map { space, .. } | Self::Compose { space, .. } => {
-                space
+    pub fn identity_across(domain: BinderSpaceId, codomain: BinderSpaceId) -> Self {
+        Self::Identity { domain, codomain }
+    }
+
+    #[must_use]
+    pub fn map(space: BinderSpaceId, map: CanonicalTypeSubstitution) -> Self {
+        Self::map_across(space, space, map)
+    }
+
+    #[must_use]
+    pub fn map_across(
+        domain: BinderSpaceId,
+        codomain: BinderSpaceId,
+        map: CanonicalTypeSubstitution,
+    ) -> Self {
+        if map.bindings().is_empty() {
+            Self::Identity { domain, codomain }
+        } else {
+            Self::Map {
+                domain,
+                codomain,
+                map,
             }
         }
     }
 
     #[must_use]
+    pub fn domain(&self) -> BinderSpaceId {
+        match *self {
+            Self::Identity { domain, .. }
+            | Self::Map { domain, .. }
+            | Self::Compose { domain, .. } => domain,
+        }
+    }
+
+    #[must_use]
+    pub fn codomain(&self) -> BinderSpaceId {
+        match *self {
+            Self::Identity { codomain, .. }
+            | Self::Map { codomain, .. }
+            | Self::Compose { codomain, .. } => codomain,
+        }
+    }
+
+    /// Domain of this map (binders it substitutes).
+    #[must_use]
+    pub fn space(&self) -> BinderSpaceId {
+        self.domain()
+    }
+
+    #[must_use]
     pub fn is_identity(&self) -> bool {
         matches!(self, Self::Identity { .. })
+    }
+
+    #[must_use]
+    pub fn is_same_space_identity(&self) -> bool {
+        match *self {
+            Self::Identity { domain, codomain } => domain == codomain,
+            _ => false,
+        }
     }
 }
 
@@ -134,11 +192,8 @@ impl CallSubstitution {
     pub fn apply_term(&self, term: &SubstTerm) -> Result<SubstTerm, SubstError> {
         match self {
             Self::Identity { .. } => reject_escaping(term.cloned_if_var()?),
-            Self::Map { map, space, .. } => apply_map_term(map, *space, term),
-            Self::Compose { .. } => {
-                // Callers flatten through the store before apply on a compose node.
-                reject_escaping(term.cloned_if_var()?)
-            }
+            Self::Map { map, domain, .. } => apply_map_term(map, *domain, term),
+            Self::Compose { .. } => Err(SubstError::UnresolvedCompose),
         }
     }
 }

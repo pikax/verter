@@ -904,7 +904,8 @@ mod signature_kernel_warm_positional {
     use std::hint::black_box;
 
     use verter_session::for_tests::{
-        warm_positional_read, WarmPositionalLockProbe, WarmPositionalStore,
+        warm_positional_read, warm_positional_read_many, WarmPositionalLockProbe,
+        WarmPositionalStore,
     };
 
     use super::{alloc_count, reset_alloc_counter};
@@ -915,9 +916,10 @@ mod signature_kernel_warm_positional {
         let _ = warm_positional_read(&fixture);
 
         reset_alloc_counter();
-        // bounded-loop: repeated warm positional reads of one interned set.
+        // bounded-loop: repeated warm positional reads of interned One and Many.
         for _ in 0..10_000 {
             black_box(warm_positional_read(&fixture));
+            black_box(warm_positional_read_many(&fixture));
         }
         let allocations = alloc_count();
         assert_eq!(

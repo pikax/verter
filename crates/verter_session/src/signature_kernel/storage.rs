@@ -50,16 +50,24 @@ pub struct AppendInterner<T> {
     shards: [Mutex<DedupShard>; DEDUP_SHARDS],
     slots: boxcar::Vec<T>,
     shard_lock_acquires: AtomicU64,
+    /// Inclusive maximum published index. Production uses `u32::MAX`.
+    max_index: u32,
 }
 
 impl<T> AppendInterner<T> {
     #[must_use]
     pub fn new(epoch: GraphEpoch) -> Self {
+        Self::with_max_index(epoch, u32::MAX)
+    }
+
+    #[must_use]
+    pub fn with_max_index(epoch: GraphEpoch, max_index: u32) -> Self {
         Self {
             epoch,
             shards: std::array::from_fn(|_| Mutex::new(DedupShard::new())),
             slots: boxcar::Vec::new(),
             shard_lock_acquires: AtomicU64::new(0),
+            max_index,
         }
     }
 
@@ -115,8 +123,15 @@ impl<T> AppendInterner<T> {
         if cancelled.is_some_and(|c| c.load(Ordering::Acquire)) {
             return Err(InternError::Cancelled);
         }
+        // Refuse before push so overflow never plants an unpublished hole.
+        if self.slots.count() > self.max_index as usize {
+            return Err(InternError::Overflow);
+        }
         let index = self.slots.push(value);
-        let index_u32 = u32::try_from(index).map_err(|_| InternError::Overflow)?;
+        let index_u32 = match u32::try_from(index) {
+            Ok(i) if i <= self.max_index => i,
+            _ => return Err(InternError::Overflow),
+        };
         {
             let mut shard = self.lock_shard(shard_idx);
             if let Some(ids) = shard.by_hash.get(&hash) {
@@ -133,6 +148,18 @@ impl<T> AppendInterner<T> {
             shard.insert(hash, index_u32);
         }
         Ok(pack_handle(self.epoch, index_u32))
+    }
+
+    /// Look up `value` without publishing. Miss is `None`.
+    #[must_use]
+    pub fn lookup(&self, value: &T) -> Option<u64>
+    where
+        T: Eq + Hash,
+    {
+        let hash = Self::digest(value);
+        let shard_idx = Self::shard_index(hash);
+        self.lookup_equal(shard_idx, hash, value)
+            .map(|index| pack_handle(self.epoch, index))
     }
 
     /// Build then intern. A panic in `build` publishes no handle.

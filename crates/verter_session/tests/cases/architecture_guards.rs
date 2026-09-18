@@ -4909,6 +4909,10 @@ pub(crate) mod foundations_guards {
         // and `HostFenceValidator`; Stage 4d retires the
         // overlay-mutation machinery the trait replaces.
         "pub mod session_view",
+        // Signature records/substitutions/epoch-safe storage. Crate-private:
+        // no consumer is cut over; integration tests reach fixtures through
+        // `for_tests`. Adding this seam is a deliberate Guard 5 snapshot bump.
+        "pub(crate) mod signature_kernel",
         "pub(crate) mod template_convert",
         "pub(crate) mod capture_token",
         // ─── test-only re-export shim ──────────────────────────────
