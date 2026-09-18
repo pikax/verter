@@ -1,0 +1,75 @@
+{
+  "node": "JBT1",
+  "kind": "implementation",
+  "products": [
+    "IdeSupportRange v1",
+    "extensions/jetbrains Gradle plugin skeleton (pinned WebStorm SDK, health action, JVM tests, verifier, installable packaging)",
+    "scripts/jetbrains-gate.mjs (jetbrains-product gate profile)"
+  ],
+  "cases": [
+    {
+      "id": "JBT1-AC1",
+      "disposition": "reject",
+      "binding": "scripts/jetbrains-gate.test.mjs (runGate twins: missing JDK, failed Gradle run, zero test suites, zero executed tests, no distribution zip) + the real gate run",
+      "twins": [
+        "clean evidence",
+        "missing JDK",
+        "gradle build failure (includes unresolvable pinned SDK)",
+        "no JUnit XML",
+        "zero executed tests",
+        "no packaged distribution"
+      ]
+    },
+    {
+      "id": "JBT1-AC2",
+      "disposition": "reject",
+      "binding": "the gate unpacks the packaged distribution into a plugins directory outside the repository (real extraction, unsafe entry names rejected); full real-IDE install/boot evidence binds to the JBT1H real-IDE harness",
+      "twins": [
+        "clean evidence",
+        "distribution not a zip / unpackable",
+        "unsafe zip entry (.. or absolute path)",
+        "packaged descriptor missing",
+        "packaged id/range drift"
+      ]
+    },
+    {
+      "id": "JBT1-AC3",
+      "disposition": "reject",
+      "binding": "verifyPlugin with failureLevel ALL against the pinned WebStorm 2026.2.3 build only; the gate additionally requires non-empty verifier reports (a silently skipped verifier fails)",
+      "twins": [
+        "clean evidence",
+        "no verifier reports",
+        "verifier incompatibility (gradle failure)",
+        "range drift between declaration, gradle.properties and packaged descriptor"
+      ]
+    },
+    {
+      "id": "JBT1-AC-OWNER",
+      "disposition": "accept",
+      "binding": "final owner expansion.jetbrains-product recorded by the JBT0 baseline ownership map (JBT1 receiving amendment); the JBT0 manifest adapterState row for extensions/jetbrains is updated from absent to skeleton-inert by this node; the scaffolding retirement obligation transfers to JBT2 (plugin lifecycle)",
+      "twins": [
+        "clean evidence",
+        "stale adapterState row (absent)",
+        "second semantic engine inside the client",
+        "feature work beyond the loading skeleton"
+      ]
+    },
+    {
+      "id": "JBT1-AC-BASIS",
+      "disposition": "accept",
+      "binding": "this node changes no caching, mapping, snapshot, result-handle or incremental-publication surface; the incremental-vs-fresh and same-basis runtime evidence owners remain JBT1H (real-IDE comparison harness) and JBT10 (comparative qualification), so no runtime basis test is fabricated here"
+    },
+    {
+      "id": "JBT1-AC-RESOURCE",
+      "disposition": "accept",
+      "binding": "no hot paths and no UI beyond one Tools-menu action are touched; the WSP equal-work corpus and client-paint obligations do not apply to the skeleton and bind every later claim in this train"
+    },
+    {
+      "id": "JBT1-AC-EXPOSURE",
+      "disposition": "accept",
+      "binding": "the skeleton exposes no supported semantic operation (a health notification is not an operation); DX1 owns the exposure-descriptor registration schema, and every semantic operation exposed by later nodes in this train supplies its registration, playground adapter and replay case before promotion"
+    }
+  ],
+  "runtimeCorrectness": true,
+  "notes": "The runtime harness IS scripts/jetbrains-gate.mjs plus the Gradle build it drives (real JVM tests against a booted test IDE from the pinned WebStorm SDK, real plugin verifier, real packaging). The Node selftest scripts/jetbrains-gate.test.mjs proves every fail-closed discrimination without a JVM. The supported-IDE range declaration product is pinned to the live build inputs by the same gate (declaration vs gradle.properties vs packaged descriptor)."
+}
