@@ -1349,8 +1349,13 @@ bitflags::bitflags! {
         /// Extract raw template data for cross-file analysis.
         const TEMPLATE_DATA = 0b0010_0000;
 
+        /// Runtime-module demand: STYLE | SCRIPT | TEMPLATE. Same membership
+        /// as [`Self::needs_runtime_module`]. Named so IDE-lane stripping
+        /// cannot re-enumerate the bits and silently re-admit (or over-strip)
+        /// a future runtime-render capability.
+        const RUNTIME_MODULE = Self::STYLE.bits() | Self::SCRIPT.bits() | Self::TEMPLATE.bits();
         /// Bundler preset: style + script + template VDOM codegen.
-        const BUNDLER  = Self::STYLE.bits() | Self::SCRIPT.bits() | Self::TEMPLATE.bits();
+        const BUNDLER  = Self::RUNTIME_MODULE.bits();
         /// IDE/LSP preset: TSX only (independent of style/script/template).
         const IDE      = Self::TSX.bits();
         /// MCP analysis preset: script (for bindings) + template data extraction.
@@ -1396,7 +1401,14 @@ impl CompileTarget {
     }
 
     pub fn needs_runtime_module(self) -> bool {
-        self.intersects(Self::STYLE | Self::SCRIPT | Self::TEMPLATE)
+        self.intersects(Self::RUNTIME_MODULE)
+    }
+
+    /// Drop every bit that constitutes runtime-module demand. The IDE
+    /// admission lane uses this so leftover bundler bits cannot pull the
+    /// runtime emitter into a projection request.
+    pub(crate) fn without_runtime_module(self) -> Self {
+        self.difference(Self::RUNTIME_MODULE)
     }
 
     /// Whether VDOM/Vapor/SSR template codegen should run.
@@ -4915,6 +4927,30 @@ pub(crate) struct HostMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn without_runtime_module_clears_needs_runtime_module_for_every_runtime_bit() {
+        for bit in [
+            CompileTarget::STYLE,
+            CompileTarget::SCRIPT,
+            CompileTarget::TEMPLATE,
+            CompileTarget::RUNTIME_MODULE,
+            CompileTarget::BUNDLER,
+            CompileTarget::default(),
+        ] {
+            let stripped =
+                (bit | CompileTarget::TSX | CompileTarget::TEMPLATE_DATA).without_runtime_module();
+            assert!(
+                !stripped.needs_runtime_module(),
+                "{bit:?} survived without_runtime_module: {stripped:?}"
+            );
+            assert!(stripped.needs_tsx(), "{bit:?}: TSX bit was dropped");
+            assert!(
+                stripped.needs_template_data(),
+                "{bit:?}: TEMPLATE_DATA is not runtime-module demand and must stay"
+            );
+        }
+    }
 
     #[test]
     fn host_config_shape_has_no_module_resolution_budget_ingress() {

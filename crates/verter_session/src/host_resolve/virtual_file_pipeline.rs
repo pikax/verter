@@ -2425,22 +2425,18 @@ impl VerterHost {
     /// `profile_hash` is stable across both paths: `ensure_ide_compiled`
     /// populates exactly the slot `get_ide` peeks.
     ///
-    /// STYLE / SCRIPT / TEMPLATE bits are runtime-module demand
-    /// (`CompileTarget::needs_runtime_module`). Leaving them set on an IDE
-    /// product request makes `compile_entry` admit a runtime-render capability
-    /// the projection does not consume, so an unsupported runtime construct
-    /// fail-closes the whole IDE request. Those bits are stripped here; non-
-    /// runtime bits (TEMPLATE_DATA, TSC) and every other knob (source-map,
-    /// production, SSR flag, overrides) stay, so the IDE projection still
-    /// reflects the caller's source-map / production choices without demanding
-    /// runtime codegen.
+    /// Runtime-module demand (`CompileTarget::needs_runtime_module` /
+    /// `without_runtime_module`) is stripped here. Leaving those bits set on
+    /// an IDE product request makes `compile_entry` admit a runtime-render
+    /// capability the projection does not consume, so an unsupported runtime
+    /// construct fail-closes the whole IDE request. Non-runtime bits
+    /// (TEMPLATE_DATA, TSC) and every other knob (source-map, production, SSR
+    /// flag, overrides) stay, so the IDE projection still reflects the
+    /// caller's source-map / production choices without demanding runtime
+    /// codegen.
     fn ide_normalized_profile(profile: &CompileProfile) -> CompileProfile {
         let mut normalized = profile.clone();
-        normalized.target.remove(
-            crate::CompileTarget::STYLE
-                | crate::CompileTarget::SCRIPT
-                | crate::CompileTarget::TEMPLATE,
-        );
+        normalized.target = normalized.target.without_runtime_module();
         normalized.target |= crate::CompileTarget::TSX;
         normalized
     }
@@ -3957,4 +3953,55 @@ pub(super) fn publish_runtime_nodes(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod ide_normalization_tests {
+    use super::*;
+    use crate::types::CompileProfile;
+    use crate::CompileTarget;
+
+    #[test]
+    fn ide_normalized_default_profile_never_needs_runtime_module() {
+        let normalized = VerterHost::ide_normalized_profile(&CompileProfile::default());
+        assert!(
+            !normalized.target.needs_runtime_module(),
+            "IDE normalization must strip every bit needs_runtime_module admits; leftover demand was {:?}",
+            normalized.target
+        );
+        assert!(
+            normalized.target.needs_tsx(),
+            "IDE normalization must still request the TSX surface"
+        );
+    }
+
+    #[test]
+    fn ide_normalized_profile_strips_every_runtime_module_bit_and_keeps_non_runtime() {
+        for bit in [
+            CompileTarget::STYLE,
+            CompileTarget::SCRIPT,
+            CompileTarget::TEMPLATE,
+            CompileTarget::RUNTIME_MODULE,
+            CompileTarget::BUNDLER,
+        ] {
+            let profile = CompileProfile {
+                target: bit | CompileTarget::TSX | CompileTarget::TEMPLATE_DATA,
+                ..CompileProfile::default()
+            };
+            let normalized = VerterHost::ide_normalized_profile(&profile);
+            assert!(
+                !normalized.target.needs_runtime_module(),
+                "{bit:?} survived IDE normalization: {:?}",
+                normalized.target
+            );
+            assert!(
+                normalized.target.needs_tsx(),
+                "{bit:?}: TSX bit was dropped"
+            );
+            assert!(
+                normalized.target.needs_template_data(),
+                "{bit:?}: TEMPLATE_DATA is not runtime-module demand and must stay"
+            );
+        }
+    }
 }

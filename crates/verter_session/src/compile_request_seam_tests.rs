@@ -191,6 +191,26 @@ fn published_node_kinds(response: &crate::types::CompileRequestResponse) -> Vec<
     kinds
 }
 
+/// The legacy IDE route: ensure then peek. `get_ide` is a pure cached
+/// read of the IDE-normalized slot; leftover STYLE/SCRIPT/TEMPLATE bits
+/// on `profile` are stripped there, so a prior runtime compile under the
+/// un-normalized hash does not populate this slot.
+fn legacy_ide(
+    host: &VerterHost,
+    canonical_id: &str,
+    profile: &CompileProfile,
+) -> crate::types::IdeResponse {
+    let ensured = host
+        .ensure_ide_compiled(canonical_id, profile)
+        .unwrap_or_else(|e| panic!("legacy IDE-ensure of {canonical_id}: {e:?}"));
+    assert!(
+        ensured,
+        "legacy IDE-ensure of {canonical_id} reported no IDE surface"
+    );
+    host.get_ide(canonical_id, profile)
+        .expect("the legacy route projects the IDE surface")
+}
+
 /// The legacy profile-derived route's response for the SAME demand, read
 /// through its own public entry. The oracle for equivalence — the WHOLE
 /// response, because a node carries more than bytes.
@@ -386,9 +406,7 @@ fn vue_products_are_byte_equivalent_to_the_legacy_route() {
         ],
     );
 
-    let legacy_ide = host
-        .get_ide("/src/App.vue", &profile)
-        .expect("the legacy route projects the IDE surface");
+    let legacy_ide = legacy_ide(&host, "/src/App.vue", &profile);
     let ide_row = response
         .products
         .iter()
@@ -468,9 +486,7 @@ fn svelte_products_are_byte_equivalent_to_the_legacy_route() {
         &["Main", "Style { index: 0 }"],
     );
 
-    let legacy_ide = host
-        .get_ide("/src/Widget.svelte", &profile)
-        .expect("the legacy route projects the Svelte IDE surface");
+    let legacy_ide = legacy_ide(&host, "/src/Widget.svelte", &profile);
     let ide_row = response
         .products
         .iter()
