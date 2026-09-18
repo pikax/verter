@@ -510,12 +510,12 @@ pub(super) enum FamilyKey {
     /// rail, so it must be caught by the key (mirrors
     /// [`Self::Instantiate`]'s `body_source` rule).
     ///
-    /// The payload is BOXED (mirroring [`Self::Relate`]'s
-    /// `Box<RelateMemoKey>`): a Rust enum is sized to its largest variant,
+    /// The payload is BOXED: a Rust enum is sized to its largest variant,
     /// and the locator key's slot + locator composites would inflate EVERY
     /// entry of the hot single-node `FamilyKey → FamilySlots` keyspace.
     /// `Box` delegates `Hash`/`Eq`/`Clone` to the inner key, so the family
-    /// IDENTITY (and `variant_label`) is unchanged.
+    /// IDENTITY (and `variant_label`) is unchanged. [`Self::Relate`] interned
+    /// its payload instead; this composite still boxes.
     LowerLocator {
         key: Box<crate::locator_identity::LocatorLoweringKey>,
     },
@@ -531,9 +531,9 @@ pub(super) enum FamilyKey {
     /// identity (R6); version-rooting lives on the cached value's read-set
     /// facts + observed self-roots.
     ///
-    /// The payload is BOXED (mirroring [`Self::Relate`]'s
-    /// `Box<RelateMemoKey>`): the root slot composite would inflate EVERY
+    /// The payload is BOXED: the root slot composite would inflate EVERY
     /// entry of the hot single-node `FamilyKey → FamilySlots` keyspace.
+    /// [`Self::Relate`] interned its payload instead; this composite still boxes.
     ClassifyMaterializationCycleGate {
         key: Box<crate::semantic_query::MaterializationCycleGateKey>,
     },
@@ -585,8 +585,9 @@ pub(super) enum FamilyKey {
     /// `ProgramAnalysisFactRef::FlowBody` fact + consumed subquery facts
     /// + self roots.
     ///
-    /// BOXED (mirroring [`Self::Relate`]): the key composite would
-    /// inflate EVERY entry of the hot keyspace.
+    /// BOXED: the key composite would inflate EVERY entry of the hot
+    /// keyspace. [`Self::Relate`] interned its payload; this composite
+    /// still boxes.
     FlowReturn {
         key: Box<crate::semantic_query::FlowReturnKey>,
     },
@@ -601,8 +602,10 @@ pub(super) enum FamilyKey {
     /// staged/ReturnOnly until the return-equation boundary commits it; the
     /// family identity is already final so `family_and_slot` stays total.
     ///
-    /// BOXED (mirroring [`Self::Relate`]): the key composite would
-    /// inflate EVERY entry of the hot keyspace.
+    /// The `ResolveCallKey` payload is INTERNED (matching [`Self::Relate`]):
+    /// embedding the composite by value would inflate EVERY entry of the
+    /// hot keyspace. The interned handle is 16 bytes (id + `Arc`) and
+    /// `Hash`/`Eq` by intern id.
     ResolveCall {
         key: super::family_intern::InternedResolveCallKey,
     },

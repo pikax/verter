@@ -1413,7 +1413,11 @@ fn semantic_options_from_files(
     );
     let tmp = tempfile::TempDir::new().unwrap();
     for (name, json) in files {
-        std::fs::write(tmp.path().join(name), json).unwrap();
+        let path = tmp.path().join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, json).unwrap();
     }
     let leaf_path = tmp.path().join(leaf).to_string_lossy().replace('\\', "/");
     load_compiler_options(&ws, &leaf_path).semantic
@@ -1558,5 +1562,80 @@ fn semantic_lib_and_flag_options_parse_and_layer_per_key() {
     assert!(
         options.strict_null_checks,
         "undeclared strict family stays default ON"
+    );
+}
+
+/// Ordered array `extends`: later bases override earlier declared keys,
+/// then the leaf wins. Mutation: `as_str()` on `extends` skips the array
+/// and both bases are ignored.
+#[test]
+fn semantic_options_layer_ordered_array_extends() {
+    let options = semantic_options_from_files(
+        &[
+            (
+                "first.json",
+                r#"{ "compilerOptions": { "strict": false, "target": "ES2018" } }"#,
+            ),
+            (
+                "second.json",
+                r#"{ "compilerOptions": { "strictNullChecks": true, "target": "ES2020" } }"#,
+            ),
+            (
+                "tsconfig.json",
+                r#"{ "extends": ["./first.json", "./second.json"], "compilerOptions": { "noImplicitAny": false } }"#,
+            ),
+        ],
+        "tsconfig.json",
+    );
+    assert!(
+        options.strict_null_checks,
+        "later array base overrides the earlier umbrella for this member"
+    );
+    assert!(
+        !options.strict_function_types,
+        "undeclared members on the later base keep the earlier umbrella"
+    );
+    assert!(
+        !options.no_implicit_any,
+        "the leaf declared key wins over both bases"
+    );
+    assert_eq!(
+        options.target,
+        verter_semantic::resolver_core::ScriptTarget::Es2020,
+        "later array base last-wins per key"
+    );
+}
+
+/// A bare package specifier whose `package.json` `tsconfig` field points
+/// at a non-root config. Mutation: only `<package>/tsconfig.json` is
+/// probed, so the leaf runs on TypeScript defaults instead of the package
+/// base.
+#[test]
+fn semantic_options_resolve_package_tsconfig_field() {
+    let options = semantic_options_from_files(
+        &[
+            (
+                "node_modules/pkg-config/package.json",
+                r#"{ "name": "pkg-config", "tsconfig": "./configs/strict.json" }"#,
+            ),
+            (
+                "node_modules/pkg-config/configs/strict.json",
+                r#"{ "compilerOptions": { "strict": false, "target": "ES2019" } }"#,
+            ),
+            (
+                "node_modules/pkg-config/tsconfig.json",
+                r#"{ "compilerOptions": { "strict": true, "target": "ESNext" } }"#,
+            ),
+            ("tsconfig.json", r#"{ "extends": "pkg-config" }"#),
+        ],
+        "tsconfig.json",
+    );
+    assert!(
+        !options.strict_null_checks,
+        "package.json tsconfig field must win over <package>/tsconfig.json"
+    );
+    assert_eq!(
+        options.target,
+        verter_semantic::resolver_core::ScriptTarget::Es2019
     );
 }

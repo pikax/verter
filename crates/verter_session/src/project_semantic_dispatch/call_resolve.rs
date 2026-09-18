@@ -40,7 +40,8 @@ pub(crate) enum ResolveCallStep {
 
 enum ResolveCallRootClose {
     /// A complete selected value plus its SCC-unioned self-roots and
-    /// whether the root's own dependency proof is complete.
+    /// whether the component's dependency proof is complete (root AND
+    /// every drained call member).
     Complete(
         ResolvedCallResult,
         Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
@@ -164,6 +165,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
             state.inline_flight = inline_flight;
         }
         idx
+    }
+
+    /// Close a two-call SCC whose member assumes the root. Discriminates
+    /// component-level proof: a truncated member walk must refuse the root
+    /// even when the root's own walk finished.
+    #[cfg(test)]
+    pub(super) fn close_mutual_call_component_for_tests(
+        &self,
+        root_key: ResolveCallKey,
+        member_key: ResolveCallKey,
+    ) -> (ResolvedCallResult, bool) {
+        let root_idx = self.resolve_call_frame_open(&root_key);
+        let member_idx = self.resolve_call_frame_open(&member_key);
+        self.dispatch_txn
+            .borrow_mut()
+            .obligations
+            .record_assumption(root_idx);
+        let member_outcome = self.run_resolve_call(&member_key);
+        let _ = self.resolve_call_frame_pop(member_idx, member_outcome, false);
+        let root_outcome = self.run_resolve_call(&root_key);
+        match self.resolve_call_frame_pop(root_idx, root_outcome, true) {
+            ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(
+                result,
+                _,
+                proof_complete,
+            )) => (result, proof_complete),
+            ResolveCallFramePop::RootClose(ResolveCallRootClose::CompleteReturnOnly(result)) => {
+                (result, false)
+            }
+            ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(_))
+            | ResolveCallFramePop::Provisional(_) => {
+                panic!("mutual call component must close with a selected value")
+            }
+        }
     }
 
     fn execute_resolve_call_inline(&self, key: ResolveCallKey) -> ResolveCallStep {
@@ -685,6 +720,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let root_result =
             root_result.expect("the call-root close always solves its own root equation");
+        // A truncated member walk can leave `root.proof_complete` true
+        // while a drained nested call omitted dependency roots. The
+        // component is complete only when every member finished its walk.
+        let component_proof_complete = root.proof_complete
+            && call_results
+                .iter()
+                .all(|(_, state, _)| state.proof_complete);
 
         let cyclic = self_cycle
             || !relation_members.is_empty()
@@ -778,7 +820,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // Origin is provenance and is not consulted here.
             match crate::semantic_query::AdmissibleCallResult::new(
                 root_result.clone(),
-                root.proof_complete,
+                component_proof_complete,
             ) {
                 Some(result) => self.dispatch_txn.borrow_mut().call.completed_members.push(
                     CompletedResolveCallMember {
@@ -795,7 +837,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(
                 root_result,
                 scc_self_roots,
-                root.proof_complete,
+                component_proof_complete,
             ))
         } else {
             ResolveCallFramePop::Provisional(ResolveCallStep::Complete(root_result))

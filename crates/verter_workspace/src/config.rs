@@ -383,6 +383,7 @@ pub fn load_compiler_options(
     let LoadedCompilerOptions {
         mut options,
         semantic,
+        ..
     } = load_compiler_options_inner(ws, tsconfig_path, 0).unwrap_or_default();
     options.semantic = semantic.effective();
     options
@@ -391,10 +392,50 @@ pub fn load_compiler_options(
 /// The `extends`-recursion carrier: the resolution-facing options merged so
 /// far plus the raw (spelling-level, `Option`-per-key) semantic layer that
 /// [`load_compiler_options`] canonicalises after the whole chain is read.
+///
+/// Declared flags keep array-`extends` overlay last-wins-per-key: a later
+/// base that never mentioned `allowJs` must not reset an earlier `true`
+/// to the `IdeProjectCompilerOptions` default.
 #[derive(Default)]
 struct LoadedCompilerOptions {
     options: IdeProjectCompilerOptions,
     semantic: RawSemanticCompilerOptions,
+    paths_declared: bool,
+    allow_js_declared: bool,
+    check_js_declared: bool,
+    allow_importing_ts_extensions_declared: bool,
+    disable_solution_searching_declared: bool,
+}
+
+fn overlay_loaded_compiler_options(
+    mut earlier: LoadedCompilerOptions,
+    later: LoadedCompilerOptions,
+) -> LoadedCompilerOptions {
+    earlier.semantic.layer(later.semantic);
+    if later.options.base_url.is_some() {
+        earlier.options.base_url = later.options.base_url;
+    }
+    if later.paths_declared {
+        earlier.options.paths = later.options.paths;
+        earlier.paths_declared = true;
+    }
+    if later.allow_js_declared {
+        earlier.options.allow_js = later.options.allow_js;
+        earlier.allow_js_declared = true;
+    }
+    if later.check_js_declared {
+        earlier.options.check_js = later.options.check_js;
+        earlier.check_js_declared = true;
+    }
+    if later.allow_importing_ts_extensions_declared {
+        earlier.options.allow_importing_ts_extensions = later.options.allow_importing_ts_extensions;
+        earlier.allow_importing_ts_extensions_declared = true;
+    }
+    if later.disable_solution_searching_declared {
+        earlier.options.disable_solution_searching = later.options.disable_solution_searching;
+        earlier.disable_solution_searching_declared = true;
+    }
+    earlier
 }
 
 fn load_compiler_options_inner(
@@ -411,21 +452,26 @@ fn load_compiler_options_inner(
     let cleaned = strip_json_comments(&content);
     let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
 
-    let inherited = json
-        .get("extends")
-        .and_then(|value| value.as_str())
-        .and_then(|extends| resolve_tsconfig_extends(ws, &tsconfig_dir, extends))
-        .and_then(|base_path| load_compiler_options_inner(ws, &base_path, depth + 1))
-        .unwrap_or_default();
+    let inherited = load_inherited_compiler_options(ws, &tsconfig_dir, &json, depth);
 
     let LoadedCompilerOptions {
         options: mut compiler_options,
         semantic: mut raw_semantic,
+        mut paths_declared,
+        mut allow_js_declared,
+        mut check_js_declared,
+        mut allow_importing_ts_extensions_declared,
+        mut disable_solution_searching_declared,
     } = inherited;
     let Some(raw_compiler_options) = json.get("compilerOptions") else {
         return Some(LoadedCompilerOptions {
             options: compiler_options,
             semantic: raw_semantic,
+            paths_declared,
+            allow_js_declared,
+            check_js_declared,
+            allow_importing_ts_extensions_declared,
+            disable_solution_searching_declared,
         });
     };
 
@@ -448,12 +494,14 @@ fn load_compiler_options_inner(
         .and_then(serde_json::Value::as_bool)
     {
         compiler_options.allow_js = allow_js;
+        allow_js_declared = true;
     }
     if let Some(check_js) = raw_compiler_options
         .get("checkJs")
         .and_then(serde_json::Value::as_bool)
     {
         compiler_options.check_js = check_js;
+        check_js_declared = true;
     }
 
     if let Some(allow_importing_ts_extensions) = raw_compiler_options
@@ -461,6 +509,7 @@ fn load_compiler_options_inner(
         .and_then(serde_json::Value::as_bool)
     {
         compiler_options.allow_importing_ts_extensions = allow_importing_ts_extensions;
+        allow_importing_ts_extensions_declared = true;
     }
 
     // `disableSolutionSearching` stops default-project selection from climbing a
@@ -471,6 +520,7 @@ fn load_compiler_options_inner(
         .and_then(serde_json::Value::as_bool)
     {
         compiler_options.disable_solution_searching = disable_solution_searching;
+        disable_solution_searching_declared = true;
     }
 
     if let Some(paths) = raw_compiler_options
@@ -494,11 +544,17 @@ fn load_compiler_options_inner(
                 (pattern.clone(), targets)
             })
             .collect();
+        paths_declared = true;
     }
 
     Some(LoadedCompilerOptions {
         options: compiler_options,
         semantic: raw_semantic,
+        paths_declared,
+        allow_js_declared,
+        check_js_declared,
+        allow_importing_ts_extensions_declared,
+        disable_solution_searching_declared,
     })
 }
 
@@ -648,12 +704,7 @@ fn load_project_membership_inner(
     let cleaned = strip_json_comments(&content);
     let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
 
-    let inherited = json
-        .get("extends")
-        .and_then(|value| value.as_str())
-        .and_then(|extends| resolve_tsconfig_extends(ws, &tsconfig_dir, extends))
-        .and_then(|base_path| load_project_membership_inner(ws, &base_path, depth + 1))
-        .unwrap_or_else(ResolvedMembership::match_all);
+    let inherited = load_inherited_membership(ws, &tsconfig_dir, &json, depth);
 
     let has_files = json.get("files").is_some();
     let has_include = json.get("include").is_some();
@@ -827,11 +878,7 @@ fn raw_paths_json_inner(
     let cleaned = strip_json_comments(&content);
     let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
 
-    let inherited = json
-        .get("extends")
-        .and_then(|v| v.as_str())
-        .and_then(|extends| resolve_tsconfig_extends(ws, &tsconfig_dir, extends))
-        .and_then(|base_path| raw_paths_json_inner(ws, &base_path, depth + 1));
+    let inherited = load_inherited_raw_paths(ws, &tsconfig_dir, &json, depth);
 
     let co = json.get("compilerOptions");
     let own_base_url = co
@@ -870,7 +917,93 @@ fn raw_paths_json_inner(
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Resolve `extends` field from tsconfig.json.
+/// String or array `extends` specs in declaration order. Later array
+/// entries override earlier bases (TypeScript 5.0 last-wins).
+fn extends_specs(json: &serde_json::Value) -> Vec<&str> {
+    match json.get("extends") {
+        Some(serde_json::Value::String(spec)) => vec![spec.as_str()],
+        Some(serde_json::Value::Array(specs)) => {
+            specs.iter().filter_map(serde_json::Value::as_str).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn load_inherited_compiler_options(
+    ws: &dyn WorkspaceRead,
+    tsconfig_dir: &str,
+    json: &serde_json::Value,
+    depth: u8,
+) -> LoadedCompilerOptions {
+    let mut acc = LoadedCompilerOptions::default();
+    for spec in extends_specs(json) {
+        if let Some(path) = resolve_tsconfig_extends(ws, tsconfig_dir, spec) {
+            if let Some(base) = load_compiler_options_inner(ws, &path, depth + 1) {
+                acc = overlay_loaded_compiler_options(acc, base);
+            }
+        }
+    }
+    acc
+}
+
+fn overlay_membership(
+    mut earlier: ResolvedMembership,
+    later: ResolvedMembership,
+) -> ResolvedMembership {
+    if later.files_declared {
+        earlier.files = later.files;
+        earlier.files_declared = true;
+    }
+    if later.include_declared {
+        earlier.include = later.include;
+        earlier.include_declared = true;
+    }
+    if later.exclude_declared {
+        earlier.exclude = later.exclude;
+        earlier.exclude_declared = true;
+    }
+    earlier
+}
+
+fn load_inherited_membership(
+    ws: &dyn WorkspaceRead,
+    tsconfig_dir: &str,
+    json: &serde_json::Value,
+    depth: u8,
+) -> ResolvedMembership {
+    let mut acc = ResolvedMembership::match_all();
+    for spec in extends_specs(json) {
+        if let Some(path) = resolve_tsconfig_extends(ws, tsconfig_dir, spec) {
+            if let Some(base) = load_project_membership_inner(ws, &path, depth + 1) {
+                acc = overlay_membership(acc, base);
+            }
+        }
+    }
+    acc
+}
+
+fn load_inherited_raw_paths(
+    ws: &dyn WorkspaceRead,
+    tsconfig_dir: &str,
+    json: &serde_json::Value,
+    depth: u8,
+) -> Option<(String, serde_json::Value)> {
+    let mut acc = None;
+    for spec in extends_specs(json) {
+        if let Some(path) = resolve_tsconfig_extends(ws, tsconfig_dir, spec) {
+            if let Some(base) = raw_paths_json_inner(ws, &path, depth + 1) {
+                acc = Some(base);
+            }
+        }
+    }
+    acc
+}
+
+/// Resolve one `extends` specifier from tsconfig.json.
+///
+/// Relative specs resolve against `tsconfig_dir`. Bare package specs walk
+/// `node_modules` looking for the file, its `.json` form, the package's
+/// `package.json` `"tsconfig"` field, then `<package>/tsconfig.json`.
 pub fn resolve_tsconfig_extends(
     ws: &dyn WorkspaceRead,
     tsconfig_dir: &str,
@@ -897,6 +1030,9 @@ pub fn resolve_tsconfig_extends(
             if ws.file_exists(&with_json) {
                 return Some(with_json);
             }
+            if let Some(from_pkg) = resolve_package_tsconfig_field(ws, &candidate) {
+                return Some(from_pkg);
+            }
             let as_dir = join_paths(&candidate, "tsconfig.json");
             if ws.file_exists(&as_dir) {
                 return Some(as_dir);
@@ -907,6 +1043,25 @@ pub fn resolve_tsconfig_extends(
             }
             dir = next;
         }
+    }
+    None
+}
+
+/// TypeScript package-specifier lookup: `package.json`'s `tsconfig` field
+/// names a config that is not necessarily `<package>/tsconfig.json`.
+fn resolve_package_tsconfig_field(ws: &dyn WorkspaceRead, package_dir: &str) -> Option<String> {
+    let manifest = join_paths(package_dir, "package.json");
+    let content = ws.read_file(&manifest)?;
+    let cleaned = strip_json_comments(&content);
+    let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
+    let tsconfig = json.get("tsconfig")?.as_str()?;
+    let resolved = join_paths(package_dir, tsconfig);
+    if ws.file_exists(&resolved) && !ws.is_dir(&resolved) {
+        return Some(resolved);
+    }
+    let with_json = format!("{resolved}.json");
+    if ws.file_exists(&with_json) {
+        return Some(with_json);
     }
     None
 }

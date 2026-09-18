@@ -71,7 +71,8 @@ impl SemanticPolicySet {
 
 impl Default for SemanticPolicySetId {
     fn default() -> Self {
-        SemanticPolicySet::production().intern()
+        static PRODUCTION: OnceLock<SemanticPolicySetId> = OnceLock::new();
+        *PRODUCTION.get_or_init(|| SemanticPolicySet::production().intern())
     }
 }
 

@@ -1295,6 +1295,76 @@ fn unrootable_call_is_served_but_never_admitted() {
     );
 }
 
+/// A mutually dependent call SCC whose nested member's transitive walk is
+/// truncated must refuse the ROOT even when the root's own proof finished.
+/// Mutation: admit on `root.proof_complete` alone and the incomplete
+/// member's omitted roots stay out of the published set while the root
+/// warms.
+#[test]
+fn incomplete_nested_call_proof_refuses_component_admission() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let graph = dispatch.graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let root_sig = anonymous_signature(
+        &dispatch,
+        vec![FunctionParam::synthetic(None, string, false, false)],
+        Vec::new(),
+        string,
+    );
+    let root_callee = callable(&dispatch, vec![root_sig], Vec::new());
+    let root_key = call_key(
+        &dispatch,
+        root_callee,
+        CallKind::Call,
+        None,
+        vec![eager(string)],
+    );
+
+    let mut deep = string;
+    // bounded-loop: SELF_ROOT_WALK_CAP-bounded Global chain; extra 8 is the discriminator.
+    for _ in 0..(super::build::SELF_ROOT_WALK_CAP + 8) {
+        deep = graph.intern_node(SemanticNodeData::Array {
+            element: deep,
+            readonly: false,
+        });
+    }
+    let nested_sig = anonymous_signature(&dispatch, Vec::new(), Vec::new(), deep);
+    let nested_callee = callable(&dispatch, vec![nested_sig], Vec::new());
+    let mut nested_key = call_key(&dispatch, nested_callee, CallKind::Call, None, Vec::new());
+    nested_key.point.offset = 99;
+
+    let (result, proof_complete) =
+        dispatch.close_mutual_call_component_for_tests(root_key.clone(), nested_key);
+    assert!(
+        matches!(result, ResolvedCallResult::Selected { .. }),
+        "the root value still serves, got {result:?}"
+    );
+    assert!(
+        !proof_complete,
+        "an incomplete nested member proof must poison the component flag"
+    );
+    assert!(
+        crate::semantic_query::AdmissibleCallResult::new(result, proof_complete).is_none(),
+        "the poisoned component must not be admissible"
+    );
+
+    let shallow_sig = anonymous_signature(&dispatch, Vec::new(), Vec::new(), string);
+    let shallow_callee = callable(&dispatch, vec![shallow_sig], Vec::new());
+    let mut shallow_key = call_key(&dispatch, shallow_callee, CallKind::Call, None, Vec::new());
+    shallow_key.point.offset = 100;
+    let (control, control_proof) =
+        dispatch.close_mutual_call_component_for_tests(root_key, shallow_key);
+    assert!(
+        matches!(control, ResolvedCallResult::Selected { .. }),
+        "control value serves, got {control:?}"
+    );
+    assert!(
+        control_proof,
+        "a mutual component whose every member finished its walk stays complete"
+    );
+}
+
 /// A context-sensitive argument (a function value with an un-annotated
 /// parameter) is withheld from the FIRST inference pass: the eager argument
 /// alone fixes `T`, and the withheld argument is then checked for
