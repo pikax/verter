@@ -1,0 +1,133 @@
+{
+  "id": "required-workflow-matrix.v1",
+  "schema": 1,
+  "charterSource": "JBT0.2 fixes the required workflow population; a workflow absent from this matrix is not required, and a required workflow absent from a candidate is a parity gap",
+  "candidateStates": ["parity", "gap", "partial", "unsupported", "pending"],
+  "stateRules": [
+    "parity, gap, partial, unsupported and pending are distinct states and never collapse into one another or into a success theater row",
+    "every state is per comparator row (default vs alternate official mode) and per pinned corpus; a workflow parity on a different basis is not evidence"
+  ],
+  "workflows": [
+    {
+      "id": "completion",
+      "officialBaseline": "official default-mode completion in .vue/.ts web sources, scoped by the manifest pins",
+      "passPredicate": "the adapter's completion answers the same trigger positions with typed items whose types come from the TypeScript semantic rail",
+      "nonRegressionConditions": [
+        "no completion item types fabricated outside the semantic rail",
+        "no trigger positions the official tool answers and the adapter silently drops"
+      ]
+    },
+    {
+      "id": "diagnostics",
+      "officialBaseline": "official default-mode diagnostics and error reporting",
+      "passPredicate": "diagnostics at least as correct as the official baseline on the pinned corpus, from the TypeScript semantic rail",
+      "nonRegressionConditions": [
+        "no dropped diagnostics and no weakened typing to meet timing",
+        "diagnostic severity/scope never narrowed relative to the official baseline"
+      ]
+    },
+    {
+      "id": "source-navigation",
+      "officialBaseline": "go to definition/declaration navigation in templates, scripts and web sources",
+      "passPredicate": "navigation targets resolve through authored coordinates on the same positions the official tool resolves",
+      "nonRegressionConditions": [
+        "generated coordinates are never passed off as authored coordinates",
+        "no navigation target silently unsupported where the official tool navigates"
+      ]
+    },
+    {
+      "id": "find-usages",
+      "officialBaseline": "find usages across project sources including template usages",
+      "passPredicate": "usage population matches the official baseline's on the pinned corpus with authored-coordinate hits",
+      "nonRegressionConditions": [
+        "usages computed by regex/name matching are forbidden",
+        "no usages population silently narrowed to script-only"
+      ]
+    },
+    {
+      "id": "generics",
+      "officialBaseline": "generic component/type support in the official default mode",
+      "passPredicate": "generic specialization and inference preserved through the TypeScript semantic rail on the pinned corpus",
+      "nonRegressionConditions": [
+        "no generic collapse to any/never to reduce work",
+        "specialization answers stay typed, not stringified"
+      ]
+    },
+    {
+      "id": "public-types",
+      "officialBaseline": "public type surfaces (props/emits/exposed types) surfaced by the official tool",
+      "passPredicate": "public types resolved from the canonical projection and surfaced through the adapter",
+      "nonRegressionConditions": [
+        "no public type replaced by a synthesized approximate shape",
+        "type answers keep semantic-rail authority"
+      ]
+    },
+    {
+      "id": "component-extraction",
+      "officialBaseline": "official component-extraction/refactoring workflow",
+      "passPredicate": "extraction produces compilable results through authored, atomic edits",
+      "nonRegressionConditions": [
+        "cross-file edits are authored, version-checked and atomic through the existing transaction authority",
+        "no partial extraction published as complete"
+      ]
+    },
+    {
+      "id": "rename-move-import-updates",
+      "officialBaseline": "official rename/move with import updates across web sources",
+      "passPredicate": "rename/move updates the same population the official tool updates, through the edit transaction authority",
+      "nonRegressionConditions": [
+        "textual rename without semantic resolution is forbidden",
+        "no stale references left in files the official tool updates"
+      ]
+    },
+    {
+      "id": "formatting",
+      "officialBaseline": "official formatting for web sources",
+      "passPredicate": "formatting routes through the owning format logic with stable idempotent output on the pinned corpus",
+      "nonRegressionConditions": [
+        "no formatter output divergence introduced by presentation-layer reformatting",
+        "formatting never edits authored coordinates without source maps"
+      ]
+    },
+    {
+      "id": "inlays",
+      "officialBaseline": "official inlay hints in web sources",
+      "passPredicate": "inlay values typed by the semantic rail and rendered on the client surface",
+      "nonRegressionConditions": [
+        "inlay types never fabricated outside the semantic rail",
+        "reduced client capabilities degrade presentation, not meaning"
+      ]
+    },
+    {
+      "id": "styles",
+      "officialBaseline": "official style support (style blocks, navigation, completion in styles)",
+      "passPredicate": "style support served by the owning CSS analysis through the adapter",
+      "nonRegressionConditions": [
+        "no second CSS parser inside the client",
+        "style diagnostics never dropped relative to the official baseline"
+      ]
+    },
+    {
+      "id": "run-debug-workflows",
+      "officialBaseline": "official run/debug workflows for web development preserved through the adapter",
+      "passPredicate": "existing run/debug workflows keep working with the adapter installed; JBT8 owns the preserved-workflow qualification",
+      "nonRegressionConditions": [
+        "unexplained removal or degradation of an official workflow is forbidden",
+        "debug mappings stay authored, never generated-coordinate stand-ins"
+      ]
+    }
+  ],
+  "measuredOutcomeOwner": "JBT9",
+  "promotionGate": {
+    "rule": "product promotion requires parity-or-better on every required workflow row, qualified by JBT9 on the pinned corpus",
+    "missingWorkflowBlocksPromotion": true,
+    "speedNeverBuysOutParity": true,
+    "note": "a missing required official workflow blocks promotion even when Verter is faster on every measured row (JBT0-AC3)",
+    "voidResults": "a performance result obtained by doing less required work on any row is void and is an abort condition for the claiming node"
+  },
+  "evidence": [
+    "roadmap/0.1.0-tama/contracts/product-experience.md",
+    "packages/verter-lsp/package.json",
+    "crates/verter-editor-client/src/init_options.rs"
+  ]
+}
