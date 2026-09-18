@@ -1,0 +1,58 @@
+{
+  "id": "platform-host-services.v1",
+  "schema": 1,
+  "law": "The browser dependency closure may only reach the outside world through these five service classes; each records today's native assumption, today's wasm32 seam, and the owning node for the real boundary.",
+  "services": [
+    {
+      "id": "io",
+      "nativeAssumption": "ambient-library reads plus a filesystem-backed workspace",
+      "wasmRoute": "host-provided in-memory virtual workspace (resolve/upsert/remove/listVirtualFiles); ambient-library reads are compiled out behind cfg(not(target_arch = \"wasm32\"))",
+      "boundaryOwner": "BWH2 (portable platform-services boundary); BWH4 (browser VFS and project snapshot adapter)",
+      "evidence": [
+        "crates/verter_session/src/host_construction.rs",
+        "crates/verter_wasm/src/lib.rs"
+      ]
+    },
+    {
+      "id": "time",
+      "nativeAssumption": "std::time::Instant",
+      "wasmRoute": "web_time::Instant",
+      "boundaryOwner": "BWH2",
+      "evidence": ["crates/verter_session/src/instant.rs"]
+    },
+    {
+      "id": "scheduling",
+      "nativeAssumption": "scheduler driver thread plus CPU/IO worker pools plus rayon batch compile",
+      "wasmRoute": "sync inline drive (wait_or_drive drives stages inline); driver thread, blocking semaphore and rayon batch are compiled out on wasm32; no thread is available to an admitted portable operation",
+      "boundaryOwner": "BWH2 (boundary); BWH5 (worker protocol, prioritization and the optional threaded strategy)",
+      "evidence": [
+        "crates/verter_session/src/host_construction.rs",
+        "crates/verter_scheduler/src/lib.rs",
+        "crates/verter_session/Cargo.toml"
+      ]
+    },
+    {
+      "id": "persistence",
+      "nativeAssumption": "env-hash artifact stores and durable cache roots (FileArtifactStore)",
+      "wasmRoute": "in-memory caches only; the browser closure has no durable artifact store",
+      "boundaryOwner": "BWH8 (browser cache, artifact loading and offline integrity)",
+      "evidence": ["crates/verter_workspace/src/env_hash.rs"]
+    },
+    {
+      "id": "process",
+      "nativeAssumption": "tsgo provider spawn through verter_type_runtime (tokio process), feature-gated and absent from the default closure",
+      "wasmRoute": "none; the browser closure has no process capability; the only sanctioned browser-to-native route is the explicitly selected authenticated local companion (DX4/DX5)",
+      "boundaryOwner": "DX4/DX5 (companion route); BWH10 (browser native-connection adapter)",
+      "evidence": ["crates/verter_session/Cargo.toml"]
+    }
+  ],
+  "environmentNotes": [
+    "Randomness: getrandom uses the wasm_js backend (.cargo/config.toml) and uuid uses its js feature (WebCrypto) on wasm32; native uses rng-getrandom behind cfg(not(target_arch = \"wasm32\")).",
+    "Allocator: the default Rust global allocator with console_error_panic_hook (verter_wasm default feature); no custom allocator is pinned."
+  ],
+  "rules": [
+    "A service class may not gain a native assumption inside the browser closure; a new assumption is a receiving-owner amendment before code.",
+    "Threads, filesystem, processes and sockets are not available to admitted portable operations; reaching for one is a build blocker (BWH0-AC1), not a degraded mode.",
+    "Adapters inherit the DX0 receipt basis: reduced client capabilities preserve semantic meaning and create no background semantic work in closed views."
+  ]
+}
