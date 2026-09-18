@@ -121,21 +121,17 @@ impl VerterHost {
         if crate::request_context::current_request_context().is_some() {
             return None;
         }
-        let ctx = crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
-            request_id,
-            std::sync::Arc::<str>::from(canonical_id),
-            verter_audit::RequestKind::ComponentMeta,
-            false,
-            timing_capture,
-            None,
-            self.config.projection_op_budget,
-        );
-        let basis = crate::input_basis::commit_workspace_canonical(
-            self.workspace_read().as_ref(),
-            canonical_id,
-        );
-        let _ = ctx.bind_committed_input(basis);
-        Some(crate::request_context::RequestContextGuard::install(ctx))
+        Some(crate::request_context::RequestContextGuard::install(
+            crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
+                request_id,
+                std::sync::Arc::<str>::from(canonical_id),
+                verter_audit::RequestKind::ComponentMeta,
+                false,
+                timing_capture,
+                None,
+                self.config.projection_op_budget,
+            ),
+        ))
     }
 
     /// [`Self::resolve_component_meta_with_view`] with an optional

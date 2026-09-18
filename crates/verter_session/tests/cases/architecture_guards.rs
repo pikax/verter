@@ -4742,6 +4742,11 @@ pub(crate) mod foundations_guards {
         "pub mod route_analysis_inputs",
         // tests/cases/g_misc0/host_tests.rs (semantic_query::* in integration tests)
         "pub mod semantic_query",
+        // tests/cases/g_session/committed_input_basis.rs — session bind of
+        // one committed InputBasis + SnapshotFence (crate-root re-exports
+        // wrap, so the line-based extractor records the bare prefix).
+        "pub mod input_basis",
+        "pub use input_basis::",
         // tests/cases/g_misc0/invalidation_coverage.rs, tests/cases/g_misc0/invalidation_perf.rs
         "pub mod invalidation_domain",
         // tests/cases/g_misc0/invalidation_perf.rs (ImportedRegistryDb /
