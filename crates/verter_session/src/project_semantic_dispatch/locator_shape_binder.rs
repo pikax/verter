@@ -307,6 +307,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // taints the enclosing `LowerLocator` / `Instantiate` build, and a
             // later demand under a live lease recovers.
             Err(deref_error) => {
+                if matches!(
+                    deref_error,
+                    crate::decl_body_memo::LocatorBodyDerefError::ValueAnnotationAbsent
+                ) {
+                    if let Some(node) = self
+                        .lower_locator_value_expression_source(key.locator(), canonical.as_ref())
+                    {
+                        let output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
+                            QueryResult::Value(node),
+                            self.project_generation_signature(),
+                        )
+                            .into();
+                        return output.with_observed_self_roots(observed_self_roots);
+                    }
+                }
                 let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
                     QueryResult::Error(QueryError::Miss),
                     self.project_generation_signature(),
@@ -526,6 +541,41 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
             .into();
         output.with_observed_self_roots(observed_self_roots)
+    }
+
+    /// Empty-path value `DeclBody` locators address the binding's type
+    /// surface. A call-initializer (`const value = ref(0)`) stores no
+    /// authored annotation / object-shape / signature, so the syntactic
+    /// deref is `ValueAnnotationAbsent`; the live type is the recorded
+    /// [`ValueTypeAnnotationFact::expression_source`], the same source
+    /// `typeof` already evaluates. Raise it here so public construction
+    /// that published the locator does not lose the graph representation.
+    fn lower_locator_value_expression_source(
+        &self,
+        locator: &AuthoredBodyLocator,
+        canonical: &str,
+    ) -> Option<SemanticNodeId> {
+        let AuthoredBodyLocator::DeclBody(slot) = locator else {
+            return None;
+        };
+        if !slot.path.is_empty()
+            || slot.anchor.space != verter_type_expr::locators::LocatorSymbolSpace::Value
+        {
+            return None;
+        }
+        let prepared = self.ctx.prepared_value_decl_return_only(
+            canonical,
+            slot.anchor.owner,
+            slot.anchor.symbol.as_ref(),
+        )?;
+        let source = prepared.type_annotation.expression_source.as_ref()?;
+        self.execute_semantic_expression_source(source, slot.anchor.owner)
+            .or_else(|| {
+                self.execute_semantic_expression_source(
+                    source,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                )
+            })
     }
 
     fn navigate_lowered_locator(

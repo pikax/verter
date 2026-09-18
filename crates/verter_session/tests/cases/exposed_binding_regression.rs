@@ -1016,3 +1016,405 @@ defineExpose({ label, enabled })
         "the overlay edit must not leak into the base session view"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// ECRV8 diagnostics: public output materialization of ordinary surfaces
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Smallest expose: an inline method. Analysis admission is not enough —
+/// the public output envelope must materialize `exposed[].type`.
+#[test]
+fn ecrv8_inline_method_expose_output_materializes() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Ecrv8InlineExpose.vue",
+            r#"<script setup lang="ts">
+defineExpose({
+  focus() {}
+})
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/Ecrv8InlineExpose.vue")
+        .unwrap_or_else(|error| {
+            panic!("inline defineExpose method failed output materialization: {error}")
+        })
+        .expect("component resolves");
+    let (analysis, _resolution, types) = output.into_parts();
+    let index = analysis
+        .exposed
+        .iter()
+        .position(|e| e.name == "focus")
+        .expect("focus must be exposed");
+    let lanes = types.into_lanes();
+    assert_eq!(
+        analysis.exposed.len(),
+        lanes.exposed.len(),
+        "inline method expose must keep the member, type={:?}",
+        lanes.exposed[index]
+    );
+}
+
+/// vue-benchmarks `expose`: referenced functions + a ref. Index 0 is the
+/// first exposed member; a terminal UnraisableSource here fails the whole
+/// component.
+#[test]
+fn ecrv8_expose_ref_and_functions_output_materializes() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Ecrv8Expose.vue",
+            r#"<script setup lang="ts">
+import { ref } from "vue";
+
+const value = ref(0);
+
+function focus() {
+  value.value += 1;
+}
+
+function reset() {
+  value.value = 0;
+}
+
+defineExpose({ focus, reset, value });
+</script>
+<template>
+  <div>{{ value }}</div>
+</template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/Ecrv8Expose.vue")
+        .unwrap_or_else(|error| {
+            panic!("expose(ref+functions) failed output materialization: {error}")
+        })
+        .expect("component resolves");
+    let (analysis, _resolution, types) = output.into_parts();
+    let lanes = types.into_lanes();
+    assert_eq!(
+        analysis.exposed.len(),
+        lanes.exposed.len(),
+        "every exposed member must keep a materialized type"
+    );
+    for member in &analysis.exposed {
+        assert!(
+            analysis.exposed.iter().any(|row| row.name == member.name),
+            "exposed member {} dropped",
+            member.name
+        );
+    }
+    let names: Vec<_> = analysis.exposed.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"focus"));
+    assert!(names.contains(&"reset"));
+    assert!(names.contains(&"value"));
+    for name in ["focus", "reset"] {
+        let index = analysis
+            .exposed
+            .iter()
+            .position(|e| e.name == name)
+            .unwrap();
+        assert!(
+            matches!(
+                lanes.exposed[index],
+                verter_type_expr::TypeExpr::Function(_)
+            ),
+            "{name} must materialize as a function, got {:?}",
+            lanes.exposed[index]
+        );
+    }
+    let value_idx = analysis
+        .exposed
+        .iter()
+        .position(|e| e.name == "value")
+        .unwrap();
+    assert_eq!(
+        lanes.exposed.len(),
+        analysis.exposed.len(),
+        "exposed ref `value` must not drop the member, got {:?}",
+        lanes.exposed[value_idx]
+    );
+}
+
+/// vue-benchmarks `expose-ref-computed`.
+#[test]
+fn ecrv8_expose_ref_computed_output_materializes() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Ecrv8ExposeRefComputed.vue",
+            r#"<script setup lang="ts">
+import { computed, ref } from "vue";
+
+const query = ref("");
+const isEmpty = computed(() => query.value.length === 0);
+
+function clear(): void {
+  query.value = "";
+}
+
+defineExpose({ query, isEmpty, clear });
+</script>
+<template>
+  <input v-model="query" />
+</template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/Ecrv8ExposeRefComputed.vue")
+        .unwrap_or_else(|error| {
+            panic!("expose-ref-computed failed output materialization: {error}")
+        })
+        .expect("component resolves");
+    let (analysis, _, types) = output.into_parts();
+    let lanes = types.into_lanes();
+    assert_eq!(analysis.exposed.len(), 3);
+    assert_eq!(lanes.exposed.len(), 3);
+    let clear_idx = analysis
+        .exposed
+        .iter()
+        .position(|e| e.name == "clear")
+        .unwrap();
+    assert!(
+        matches!(
+            lanes.exposed[clear_idx],
+            verter_type_expr::TypeExpr::Function(_)
+        ),
+        "clear must materialize as a function, got {:?}",
+        lanes.exposed[clear_idx]
+    );
+}
+
+/// vue-benchmarks `prop-type-factory-defaults`: `PropType<T>` must retain T.
+#[test]
+fn ecrv8_prop_type_factory_defaults_retain_declared_t() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Ecrv8FactoryDefaults.vue",
+            r#"<script setup lang="ts">
+import type { PropType } from "vue";
+
+interface Filter {
+  field: string;
+  value: string;
+}
+
+const props = defineProps({
+  filters: {
+    type: Array as PropType<Filter[]>,
+    default: () => [],
+  },
+  pagination: {
+    type: Object as PropType<{ page: number; size: number }>,
+    default: () => ({ page: 1, size: 20 }),
+  },
+  scope: {
+    type: String as PropType<"all" | "active">,
+    required: true,
+  },
+  unlabeled: String,
+});
+</script>
+<template>
+  <div>{{ props.scope }} {{ props.filters.length }} {{ props.pagination.page }}</div>
+</template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/Ecrv8FactoryDefaults.vue")
+        .unwrap_or_else(|error| panic!("factory-defaults failed output materialization: {error}"))
+        .expect("component resolves");
+    let (analysis, _, types) = output.into_parts();
+    let lanes = types.into_lanes();
+
+    let unlabeled = analysis
+        .props
+        .iter()
+        .position(|p| p.name == "unlabeled")
+        .expect("control unlabeled: String");
+    assert!(
+        matches!(
+            lanes.props[unlabeled].materialized_type(),
+            Some(verter_type_expr::TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::String
+            ))
+        ),
+        "control String constructor must stay string, got {:?}",
+        lanes.props[unlabeled].materialized_type()
+    );
+
+    let filters = analysis
+        .props
+        .iter()
+        .position(|p| p.name == "filters")
+        .expect("filters");
+    match lanes.props[filters].materialized_type() {
+        Some(verter_type_expr::TypeExpr::Array { element, .. }) => {
+            assert!(
+                !matches!(
+                    element.as_ref(),
+                    verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Unknown)
+                        | verter_type_expr::TypeExpr::Unknown(_)
+                ),
+                "filters PropType<Filter[]> must retain Filter, got {element:?}"
+            );
+        }
+        other => panic!(
+            "filters PropType<Filter[]> must retain an array of Filter, not unknown; got {other:?}"
+        ),
+    }
+
+    let pagination = analysis
+        .props
+        .iter()
+        .position(|p| p.name == "pagination")
+        .expect("pagination");
+    match lanes.props[pagination].materialized_type() {
+        Some(verter_type_expr::TypeExpr::Object(obj)) => {
+            let names: Vec<_> = obj
+                .properties
+                .iter()
+                .filter_map(|member| match member {
+                    verter_type_expr::ObjectMember::Property(property) => match &property.key {
+                        verter_type_expr::TypeAuthoredPropertyKey::String(name) => {
+                            Some(name.as_ref())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                names.contains(&"page") && names.contains(&"size"),
+                "pagination PropType must retain {{ page, size }}, got {names:?}"
+            );
+        }
+        other => panic!(
+            "pagination PropType<object> must retain the object shape, not unknown; got {other:?}"
+        ),
+    }
+
+    let scope = analysis
+        .props
+        .iter()
+        .position(|p| p.name == "scope")
+        .expect("scope");
+    match lanes.props[scope].materialized_type() {
+        Some(verter_type_expr::TypeExpr::Union(arms)) => {
+            assert!(
+                arms.iter().any(|arm| matches!(
+                    arm,
+                    verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(s))
+                        if s == "all"
+                )),
+                "scope PropType<'all' | 'active'> must retain literals, got {arms:?}"
+            );
+        }
+        other => panic!("scope must retain the string-literal union, got {other:?}"),
+    }
+}
+
+/// vue-benchmarks `emits-multi-payload`: nested + optional parameters.
+#[test]
+fn ecrv8_emits_multi_payload_retains_nested_and_optional() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Ecrv8EmitsMulti.vue",
+            r#"<script setup lang="ts">
+const emit = defineEmits<{
+  move: [x: number, y: number];
+  toggle: [value?: boolean];
+  "item-click": [id: number, meta: { shift: boolean }];
+}>();
+
+function fire() {
+  emit("move", 1, 2);
+  emit("toggle");
+  emit("item-click", 7, { shift: true });
+}
+</script>
+<template>
+  <button type="button" @click="fire">go</button>
+</template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/Ecrv8EmitsMulti.vue")
+        .unwrap_or_else(|error| {
+            panic!("emits-multi-payload failed output materialization: {error}")
+        })
+        .expect("component resolves");
+    let (analysis, _, types) = output.into_parts();
+    let lanes = types.into_lanes();
+
+    let move_idx = analysis
+        .events
+        .iter()
+        .position(|e| e.name == "move")
+        .expect("move");
+    match lanes.events[move_idx].payload.materialized_type() {
+        Some(verter_type_expr::TypeExpr::Tuple { elements, .. }) => {
+            assert_eq!(elements.len(), 2, "move payload arity, got {elements:?}");
+        }
+        other => panic!("move must retain a two-element payload tuple, got {other:?}"),
+    }
+
+    let toggle_idx = analysis
+        .events
+        .iter()
+        .position(|e| e.name == "toggle")
+        .expect("toggle");
+    match lanes.events[toggle_idx].payload.materialized_type() {
+        Some(verter_type_expr::TypeExpr::Tuple { elements, .. }) => {
+            assert_eq!(elements.len(), 1);
+            assert!(
+                elements[0].optional
+                    || matches!(
+                        &elements[0].ty,
+                        verter_type_expr::TypeExpr::Union(_)
+                            | verter_type_expr::TypeExpr::Primitive(
+                                verter_type_expr::PrimitiveName::Boolean
+                            )
+                    ),
+                "toggle optional boolean payload lost optionality/type, got {:?}",
+                elements[0]
+            );
+        }
+        other => panic!("toggle must retain an optional boolean payload, got {other:?}"),
+    }
+
+    let click_idx = analysis
+        .events
+        .iter()
+        .position(|e| e.name == "item-click")
+        .expect("item-click");
+    match lanes.events[click_idx].payload.materialized_type() {
+        Some(verter_type_expr::TypeExpr::Tuple { elements, .. }) => {
+            assert_eq!(elements.len(), 2);
+            assert!(
+                matches!(
+                    &elements[1].ty,
+                    verter_type_expr::TypeExpr::Object(_) | verter_type_expr::TypeExpr::Ref { .. }
+                ),
+                "item-click nested meta parameter must retain its object facts, got {:?}",
+                elements[1]
+            );
+        }
+        other => panic!("item-click must retain nested parameter facts, got {other:?}"),
+    }
+}

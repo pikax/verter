@@ -2040,21 +2040,35 @@ fn resolve_prop_type(
     TypePublication,
     Option<crate::analysis::type_expand::ExpansionMetadata>,
 ) {
-    // A runtime-constructor position (`defineProps({ label: String })`) is
-    // never authored (`field.payload` is always `None` in this branch — the
-    // two are mutually exclusive at extraction, see macros.rs), so it takes
-    // priority over the row's base authority (which for such a field is
-    // just the PROVEN unannotated absence) whenever the binding index found
-    // one or more constructor identifiers at this prop's value position.
+    let metadata = evaluated.and_then(|eval| {
+        eval.props
+            .iter()
+            .find(|f| f.name == row.field.name)
+            .map(field_expansion_metadata)
+    });
+    // An authored `as PropType<T>` / `as () => T` payload is the declared
+    // type. It must win over both the runtime-constructor fold (`Array` /
+    // `Object` have no primitive fact and would otherwise keep a display-
+    // only unknown) and a host-resolved closed-unknown placeholder the
+    // runtime-object DTO surface publishes for member presence. Matches
+    // the Options-API order in [`extract_props_from_options`].
+    if let Some(source) = authored_payload_source(row.field.payload.as_ref()) {
+        let position = SourcePosition::Present(source);
+        let publication = publication_from_position(
+            &position,
+            metadata.as_ref(),
+            row.authored_evidence.clone(),
+            ResolutionProvenance::SemanticEvaluator,
+        );
+        return (publication, metadata);
+    }
+    // A payload-less runtime-constructor position (`defineProps({ label:
+    // String })`) folds through the binding index: closed primitive fact
+    // for `Global` String/Number/Boolean, a resolved local reference for
+    // `Local`, a typed failure for `Indeterminate`.
     if let Some(position) =
         constructor_binding_source_position(&row.field.constructor_bindings, evaluated)
     {
-        let metadata = evaluated.and_then(|eval| {
-            eval.props
-                .iter()
-                .find(|f| f.name == row.field.name)
-                .map(field_expansion_metadata)
-        });
         let publication = publication_from_position(
             &position,
             metadata.as_ref(),
@@ -2064,16 +2078,8 @@ fn resolve_prop_type(
         return (publication, metadata);
     }
 
-    // The row's own session-resolved source is the authority; the flat
-    // evaluated lane contributes ONLY expansion metadata (an INCOMPLETE
-    // expansion still falls back to the author's own annotation position —
-    // the honest symbolic surface, never a torn partial).
-    let metadata = evaluated.and_then(|eval| {
-        eval.props
-            .iter()
-            .find(|f| f.name == row.field.name)
-            .map(field_expansion_metadata)
-    });
+    // The row's own session-resolved source is the residual authority;
+    // the flat evaluated lane contributes ONLY expansion metadata.
     let publication = TypePublication::new(
         row.authority.clone(),
         row.authored_evidence.clone(),
