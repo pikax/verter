@@ -1,0 +1,49 @@
+{
+  "schema": "PerformanceMethodology",
+  "version": 1,
+  "product": "PerformanceMethodology",
+  "policy": [
+    "performance-gates.toml",
+    "roadmap/0.1.0-tama/charters/rev11-cache-runtime/MEM0.md"
+  ],
+  "timingClaim": "none",
+  "reason": "STP1 is a proof harness. Equivalent-work units and the denominator are declared before any candidate timing. This node does not invent a timing claim.",
+  "equivalentWork": {
+    "unit": "one-probe-case-on-one-admitted-engine",
+    "includes": [
+      "one parse",
+      "one check",
+      "type/hover/definition/references/edit-location observation on the touched identifiers"
+    ],
+    "forbids": [
+      "hidden duplicate parse/check/emit",
+      "fixture-sensitive compiler options",
+      "denominator shrinking by dropping an admitted engine or selected case"
+    ]
+  },
+  "denominator": {
+    "formula": "selectedMandatoryCases × admittedEngines",
+    "retainFailedOrNoisy": true,
+    "mayNotDropFailedRows": true
+  },
+  "sizeCapture": {
+    "probeSourceBytes": true,
+    "helperExpansion": "not-applicable-no-production-emit",
+    "rationale": "STP1 does not change production generated text. Probe file sizes are recorded in the runner report."
+  },
+  "stateSafety": {
+    "incremental": "fresh",
+    "incompleteCannotWarmComplete": true,
+    "cancelledCannotWarmComplete": true,
+    "configurationMissingCannotWarmComplete": true
+  },
+  "boundedWork": {
+    "maxChecksPerFilePerEngine": 1,
+    "retainEnginesAcrossCases": false,
+    "closeNativeApiAfterUse": true
+  },
+  "ac3UntouchedOwners": ["B4R0", "LSO0", "CCA1J", "TCM0R"],
+  "ac3Rationale": "STP1 owns harness state only. Incremental=fresh and stale/cancelled publication for production projection remain with B4R0 lineage, LSO snapshot publication, CCA1J projection route, and TCM0R observation identity.",
+  "ac4UntouchedOwners": ["CCA1J", "CCA1H"],
+  "ac4Rationale": "STP1 does not touch production projection hot paths. Bounded parse/check/emit stays with the existing ProjectionBackend route."
+}

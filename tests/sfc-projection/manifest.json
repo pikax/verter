@@ -1,0 +1,14 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "engines": ["ts-js", "ts-native"],
+  "inventory": "tests/sfc-projection/STP1/products/current-feature-inventory.json",
+  "engineMatrix": "tests/sfc-projection/STP1/products/engine-matrix.json",
+  "performanceMethodology": "tests/sfc-projection/STP1/products/performance-methodology.json",
+  "nodes": [
+    {
+      "id": "STP1",
+      "manifest": "tests/sfc-projection/STP1/manifest.json"
+    }
+  ]
+}

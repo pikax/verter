@@ -1,0 +1,68 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP1",
+  "kind": "proof",
+  "products": [
+    "CurrentFeatureInventory",
+    "ProbeManifest v1",
+    "EngineMatrix",
+    "ProjectionProbeRunner",
+    "PerformanceMethodology"
+  ],
+  "mandatoryCases": [
+    "STP1-inventory",
+    "STP1-zero-selection",
+    "STP1-clean-twin",
+    "STP1-types",
+    "STP1-provenance",
+    "STP1-harness"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP1/probes/positive.ts",
+    "negative": "tests/sfc-projection/STP1/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STP1/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STP1/probes/tsconfig.json",
+    "hoverNeedle": "stp1HoverTarget",
+    "definitionNeedle": "stp1DefinitionTarget",
+    "expectedNegativeCode": 2322,
+    "expectedHoverType": "number",
+    "expectedInstanceType": "Comp"
+  },
+  "cases": [
+    {
+      "id": "STP1-inventory",
+      "disposition": "reject",
+      "twins": ["clean inventory", "removed-fixture"]
+    },
+    {
+      "id": "STP1-zero-selection",
+      "disposition": "reject",
+      "twins": ["clean node filter", "zero-cases"]
+    },
+    {
+      "id": "STP1-clean-twin",
+      "disposition": "reject",
+      "twins": ["clean twin", "unrelated-generated-error"]
+    },
+    {
+      "id": "STP1-types",
+      "disposition": "reject",
+      "twins": ["constructor InstanceType", "any", "vacuous-never"]
+    },
+    {
+      "id": "STP1-provenance",
+      "disposition": "reject",
+      "twins": ["pinned executable", "substituted-executable"]
+    },
+    {
+      "id": "STP1-harness",
+      "disposition": "accept",
+      "twins": ["positive", "anchored-negative"]
+    }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP1 --engine all --require-all --json",
+  "test": "node --test scripts/sfc-projection/verify-node.test.mjs",
+  "runtimeCorrectness": true,
+  "notes": "Proof harness. Does not implement Vue SFC projection. Expected failures are harness data."
+}

@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProbeManifest",
+  "$id": "ProbeManifest.v1",
+  "description": "STP1 ProbeManifest v1. Root catalog plus per-node case lists. Expected failures are harness data, not customer-source suppressions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version"],
+  "properties": {
+    "schema": { "const": "ProbeManifest" },
+    "version": { "const": 1 },
+    "engines": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "manifest"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "manifest": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "inventory": { "type": "string", "minLength": 1 },
+    "engineMatrix": { "type": "string", "minLength": 1 },
+    "performanceMethodology": { "type": "string", "minLength": 1 },
+    "node": { "type": "string", "minLength": 1 },
+    "kind": { "type": "string", "minLength": 1 },
+    "products": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "mandatoryCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "positive": { "type": "string", "minLength": 1 },
+        "negative": { "type": "string", "minLength": 1 },
+        "cleanTwin": { "type": "string", "minLength": 1 },
+        "tsconfig": { "type": "string", "minLength": 1 },
+        "hoverNeedle": { "type": "string", "minLength": 1 },
+        "definitionNeedle": { "type": "string", "minLength": 1 },
+        "expectedNegativeCode": { "type": "integer" },
+        "expectedHoverType": { "type": "string", "minLength": 1 },
+        "expectedInstanceType": { "type": "string", "minLength": 1 }
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "disposition"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "disposition": { "enum": ["accept", "reject"] },
+          "twins": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "verify": { "type": "string" },
+    "test": { "type": "string" },
+    "runtimeCorrectness": { "type": "boolean" },
+    "notes": { "type": "string" }
+  }
+}

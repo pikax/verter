@@ -1,0 +1,256 @@
+{
+  "schema": "CurrentFeatureInventory",
+  "version": 1,
+  "product": "CurrentFeatureInventory",
+  "obligationSource": "tests/sfc-projection/STP0/products/current-feature-obligation.json",
+  "rule": "all-RequiredCurrent-rows-and-charter-families-are-selected",
+  "inputSnapshot": {
+    "typescriptJs": { "package": "typescript", "version": "6.0.3", "source": "packages/playground/package.json" },
+    "typescriptNative": { "package": "typescript", "version": "7.0.2", "source": "package.json" },
+    "vue": { "package": "vue", "version": "3.6.0-rc.5", "source": "package.json" },
+    "compilerSfc": { "package": "@vue/compiler-sfc", "version": "3.6.0-rc.5", "source": "package.json" },
+    "tsconfigs": [
+      "tsconfig.json",
+      "tsconfig.base.json",
+      "packages/types/tsconfig.json",
+      "packages/types/tsconfig.test.json",
+      "tests/sfc-projection/STP1/probes/tsconfig.json"
+    ],
+    "featureFlags": {
+      "strict": true,
+      "noEmit": true,
+      "perFixtureCompilerOptions": false
+    }
+  },
+  "fixtureRoots": {
+    "compiler": "crates/verter_vue_conformance/corpus/cases",
+    "ide": "packages/vue-vscode/e2e/fixtures",
+    "publicTypes": "packages/types/src",
+    "style": "crates/verter_bench/examples/codegen/source",
+    "cli": "crates/verter_tsc/tests/cases/fixtures"
+  },
+  "benchmarkManifests": [
+    {
+      "id": "vue-conformance-corpus",
+      "path": "crates/verter_vue_conformance/corpus/manifest.json",
+      "role": "compiler-golden-manifest"
+    },
+    {
+      "id": "synthetic-15k",
+      "path": "test-corpora/perf/synthetic-15k/manifest.json",
+      "role": "selected-sfc-perf-manifest"
+    }
+  ],
+  "rows": [
+    {
+      "id": "instancetype-typeof-comp",
+      "family": "constructor",
+      "requiredCurrent": true,
+      "path": "packages/types/src/components/components.ts",
+      "surface": "public-types"
+    },
+    {
+      "id": "vue-constructor-default-export",
+      "family": "constructor",
+      "requiredCurrent": true,
+      "path": "packages/types/src/components/components.ts",
+      "surface": "public-types"
+    },
+    {
+      "id": "define-options-name-inheritattrs-literals",
+      "family": "macros",
+      "requiredCurrent": true,
+      "path": "packages/types/src/components/components.ts",
+      "surface": "public-types"
+    },
+    {
+      "id": "define-props",
+      "family": "macros",
+      "requiredCurrent": true,
+      "path": "packages/types/src/props/props.ts",
+      "surface": "public-types"
+    },
+    {
+      "id": "define-emits",
+      "family": "macros",
+      "requiredCurrent": true,
+      "path": "packages/types/src/emits/emits.ts",
+      "surface": "public-types"
+    },
+    {
+      "id": "define-model",
+      "family": "macros",
+      "requiredCurrent": true,
+      "path": "packages/types/src/model/model.ts",
+      "surface": "public-types"
+    },
+    {
+      "id": "define-slots",
+      "family": "macros",
+      "requiredCurrent": true,
+      "path": "packages/types/src/slots/slots.ts",
+      "surface": "public-types"
+    },
+    {
+      "id": "define-expose",
+      "family": "macros",
+      "requiredCurrent": true,
+      "path": "packages/types/src/setup/setup.ts",
+      "surface": "public-types"
+    },
+    {
+      "id": "with-defaults",
+      "family": "macros",
+      "requiredCurrent": true,
+      "path": "packages/types/src/setup/setup.ts",
+      "surface": "public-types"
+    },
+    {
+      "id": "script-setup-macros",
+      "family": "macros",
+      "requiredCurrent": true,
+      "path": "packages/types/src/vue/vue.macros.ts",
+      "surface": "public-types"
+    },
+    {
+      "id": "options-api",
+      "family": "script-dialect",
+      "requiredCurrent": true,
+      "path": "crates/verter_tsc/tests/cases/fixtures/diagnostics/src/OptionsApiClean.vue",
+      "surface": "cli"
+    },
+    {
+      "id": "generic-components",
+      "family": "generics",
+      "requiredCurrent": true,
+      "path": "crates/verter_tsc/tests/cases/fixtures/diagnostics/src/GenericComp.vue",
+      "surface": "cli"
+    },
+    {
+      "id": "typed-directives",
+      "family": "directives",
+      "requiredCurrent": true,
+      "path": "packages/types/src/directives/directives.ts",
+      "surface": "public-types"
+    },
+    {
+      "id": "native-event-handler-inference",
+      "family": "events",
+      "requiredCurrent": true,
+      "path": "packages/dx-harness/fixtures/hermetic/template-events/App.vue",
+      "surface": "ide"
+    },
+    {
+      "id": "jsx-tsx-interop",
+      "family": "jsx",
+      "requiredCurrent": true,
+      "path": "packages/types/src/tsx/tsx.tsx",
+      "surface": "public-types"
+    },
+    {
+      "id": "vue-jsx-runtime",
+      "family": "jsx",
+      "requiredCurrent": true,
+      "path": "packages/types/src/vue/jsx-runtime.ts",
+      "surface": "public-types"
+    },
+    {
+      "id": "public-instance-members",
+      "family": "instance",
+      "requiredCurrent": true,
+      "path": "packages/types/src/instance/instance.ts",
+      "surface": "public-types"
+    },
+    {
+      "id": "v-for-loops",
+      "family": "template",
+      "requiredCurrent": true,
+      "path": "packages/types/src/loops/loops.ts",
+      "surface": "public-types"
+    },
+    {
+      "id": "typed-fallthrough-inheritattrs",
+      "family": "fallthrough",
+      "requiredCurrent": true,
+      "path": "crates/verter_tsc/tests/cases/fixtures/fallthrough/src/AcceptClassStyle.vue",
+      "surface": "cli"
+    },
+    {
+      "id": "class-style-never-consumed",
+      "family": "fallthrough",
+      "requiredCurrent": true,
+      "path": "crates/verter_tsc/tests/cases/fixtures/fallthrough/src/AcceptClassStyle.vue",
+      "surface": "cli"
+    },
+    {
+      "id": "normal-script",
+      "family": "script-dialect",
+      "requiredCurrent": false,
+      "path": "crates/verter_tsc/tests/cases/fixtures/js_carrier/src/TsClean.vue",
+      "surface": "cli"
+    },
+    {
+      "id": "custom-global-async-components",
+      "family": "components",
+      "requiredCurrent": false,
+      "path": "crates/verter_vue_conformance/corpus/cases/components/component-is.vue",
+      "surface": "compiler"
+    },
+    {
+      "id": "template-refs",
+      "family": "refs",
+      "requiredCurrent": false,
+      "path": "packages/dx-harness/fixtures/hermetic/semantic-oracle/template-ref.vue",
+      "surface": "ide"
+    },
+    {
+      "id": "style-preprocessing",
+      "family": "preprocessing",
+      "requiredCurrent": false,
+      "path": "crates/verter_bench/examples/codegen/source/preprocessor.vue",
+      "surface": "style"
+    },
+    {
+      "id": "recovery-editor-operations",
+      "family": "recovery",
+      "requiredCurrent": false,
+      "path": "packages/dx-harness/scenarios/recovery.yaml",
+      "surface": "ide"
+    },
+    {
+      "id": "editor-hover",
+      "family": "editor",
+      "requiredCurrent": false,
+      "path": "packages/dx-harness/scenarios/hover.yaml",
+      "surface": "ide"
+    },
+    {
+      "id": "editor-definition",
+      "family": "editor",
+      "requiredCurrent": false,
+      "path": "packages/dx-harness/scenarios/definition.yaml",
+      "surface": "ide"
+    },
+    {
+      "id": "ide-vue-contract",
+      "family": "editor",
+      "requiredCurrent": false,
+      "path": "packages/vue-vscode/e2e/fixtures/vue-contract/src/App.vue",
+      "surface": "ide"
+    },
+    {
+      "id": "compiler-script-setup",
+      "family": "macros",
+      "requiredCurrent": false,
+      "path": "crates/verter_vue_conformance/corpus/cases/script-setup/props-type-withdefaults.vue",
+      "surface": "compiler"
+    },
+    {
+      "id": "cli-diagnostics-base-button",
+      "family": "cli",
+      "requiredCurrent": false,
+      "path": "crates/verter_tsc/tests/cases/fixtures/diagnostics/src/BaseButton.vue",
+      "surface": "cli"
+    }
+  ]
+}

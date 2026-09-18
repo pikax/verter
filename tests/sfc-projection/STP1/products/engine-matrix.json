@@ -1,0 +1,55 @@
+{
+  "schema": "EngineMatrix",
+  "version": 1,
+  "product": "EngineMatrix",
+  "rule": "pin-stock-js-and-mapper-capable-native",
+  "noDenominatorShrinking": true,
+  "noFixtureSensitiveOptions": true,
+  "vue": {
+    "admitted": [
+      {
+        "id": "vue-3.6",
+        "package": "vue",
+        "version": "3.6.0-rc.5",
+        "source": "package.json",
+        "compilerSfc": { "package": "@vue/compiler-sfc", "version": "3.6.0-rc.5" }
+      }
+    ],
+    "visibleLockfileLanes": [
+      {
+        "id": "vue-3.5-lockfile-transitive",
+        "package": "vue",
+        "version": "3.5.34",
+        "admitted": false,
+        "note": "Present in the lockfile as a transitive lane. Not a second projection type policy."
+      }
+    ]
+  },
+  "engines": [
+    {
+      "id": "ts-js",
+      "label": "ts-js",
+      "kind": "javascript",
+      "package": "typescript",
+      "version": "6.0.3",
+      "resolveFrom": "packages/playground/node_modules/typescript",
+      "executableRel": "lib/tsc.js",
+      "api": "typescript.createProgram",
+      "mapperCapable": false,
+      "notes": "Stock JS TypeScript. typescript@7 is native-only; this pin is the workspace JS 6.0.3 compiler."
+    },
+    {
+      "id": "ts-native",
+      "label": "ts-native",
+      "kind": "native",
+      "package": "typescript",
+      "version": "7.0.2",
+      "resolveFrom": "node_modules/typescript",
+      "platformPackage": "@typescript/typescript-${platform}-${arch}",
+      "executableRel": "lib/tsc",
+      "api": "typescript/unstable/sync",
+      "mapperCapable": true,
+      "notes": "Mapper-capable native TypeScript 7 (typescript-go) via the pinned platform optional dependency."
+    }
+  ]
+}
