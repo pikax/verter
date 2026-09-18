@@ -1,0 +1,8 @@
+{
+  "lint": {
+    "preset": "strict"
+  },
+  "viteConfig": {
+    "trust": "pinned"
+  }
+}

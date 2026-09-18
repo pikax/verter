@@ -1,0 +1,36 @@
+{
+  "id": "WDX1-REC-worker-001",
+  "kind": "terminal-receipt-binding",
+  "caseId": "WDX1-FIX-worker-001",
+  "producer": "expansion.runtime-environments",
+  "terminal": "ENV9",
+  "qualifies": false,
+  "evidenceClass": "static-proof",
+  "basis": {
+    "sourceDigest": "56e2aeea5fad47e87f53adf7642a7ca35d11a8930faf5f66a03cfce39f52afa4",
+    "profileIdentity": {
+      "profile": "web-worker-module",
+      "workerApi": "dedicated-worker-esm"
+    },
+    "buildIdentity": {
+      "target": "static-conformance-fixture",
+      "harness": "web-product-scenario-harness",
+      "schema": 1
+    },
+    "engineIdentity": {
+      "engineKind": "unbound",
+      "engineVersion": "unbound"
+    },
+    "hostIdentity": {
+      "hostKind": "unbound",
+      "hostVersion": "unbound"
+    },
+    "completenessState": "pending"
+  },
+  "recordedClaims": [
+    {
+      "statement": "the dedicated-worker realm boundary fact and the WorkerRequest/WorkerReply boundary typing for src/worker.ts hold on the pinned host and profile",
+      "evidenceClass": "runtime-observation"
+    }
+  ]
+}
