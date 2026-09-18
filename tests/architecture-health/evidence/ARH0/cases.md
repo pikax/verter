@@ -18,6 +18,7 @@ Clean products validate: inventory totals equal row sums, all module/consumer/ca
 - `unknown-owner`: train without charters dir and without gap annotation (dirty twin invents `expansion.nope` for `crates/verter_parser`).
 - `duplicate-module`, `owner-without-responsibility`: structural discipline of the map.
 - `inventory-module-unowned`: an inventory crate/package in neither `owners` nor `debt-register.candidatePath` (silent absorption; dirty twin drops the `crates/verter_parser` owner row).
+- `workspace-package-unowned`: a literal `pnpm-workspace.yaml` package entry outside the inventoried `packages/` globs (e.g. `docs`) in neither `owners` nor `debt-register.candidatePath`; the join reads the live workspace definition (dirty twin drops the `docs` owner row).
 - `module-double-disposition`: a module with both an owner row and a debt row (dirty twin adds a debt row for the owned `crates/verter_parser`).
 
 ## ARH0-god-evidence (reject) — ARH0-AC2 discriminator

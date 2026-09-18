@@ -162,6 +162,25 @@ test("ARH0-ownership dirty twin: inventory module in neither owners nor debt-reg
   );
 });
 
+test("ARH0-ownership dirty twin: pnpm workspace package outside the inventory populations cannot be silently absorbed", () => {
+  const dirty = cloneProducts();
+  const owners = dirty["responsibility-map"].owners;
+  const idx = owners.findIndex((r) => r.module === "docs");
+  assert.ok(idx !== -1, "docs owner row missing from the clean products");
+  owners.splice(idx, 1);
+  const result = validate(dirty, authority);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH0-ownership" &&
+        e.code === "workspace-package-unowned" &&
+        e.detail.startsWith("docs"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
 test("ARH0-ownership dirty twin: module with both an owner row and a debt row is rejected", () => {
   const dirty = cloneProducts();
   dirty["debt-register"].rows.push({

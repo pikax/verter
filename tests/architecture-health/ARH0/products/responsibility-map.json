@@ -1150,6 +1150,21 @@
         "documented: web-product-expansion-v1.md §2 (tools/ under gate governance)",
         "documented: tools/tsgo-api-gate README"
       ]
+    },
+    {
+      "module": "docs",
+      "owner": {
+        "id": "DOC2",
+        "kind": "node"
+      },
+      "responsibility": [
+        "documentation site sources for user-facing and contributor docs; the docs-domain final gate builds this package (pnpm docs:build)"
+      ],
+      "evidence": [
+        "workspace: pnpm-workspace.yaml literal package entry docs (outside the inventoried packages/ globs)",
+        "charter-declared: web-product-expansion-v1.md §7 public-docs obligation (DOC2)",
+        "coupling: 103 shared commits with crates/verter_session (changeCoupling.topPairs)"
+      ]
     }
   ],
   "godModuleCandidates": [

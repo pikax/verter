@@ -324,25 +324,55 @@ function validateOwnershipCoverage(products, errors) {
   const caseId = "ARH0-ownership";
   const owned = new Set(products["responsibility-map"].owners.map((r) => r.module));
   const debt = new Set(products["debt-register"].rows.map((r) => r.candidatePath));
-  const rows = [
-    ...products["codebase-inventory"].crates,
-    ...products["codebase-inventory"].packages,
-  ];
-  for (const row of rows) {
-    if (owned.has(row.module) && debt.has(row.module)) {
+  const checkModule = (module, unownedCode) => {
+    if (owned.has(module) && debt.has(module)) {
       errors.push({
         caseId,
         code: "module-double-disposition",
-        detail: `${row.module}: both an owner row and a debt-register row`,
+        detail: `${module}: both an owner row and a debt-register row`,
       });
-    } else if (!owned.has(row.module) && !debt.has(row.module)) {
+    } else if (!owned.has(module) && !debt.has(module)) {
       errors.push({
         caseId,
-        code: "inventory-module-unowned",
-        detail: `${row.module}: in neither owners nor debt-register (silent absorption)`,
+        code: unownedCode,
+        detail: `${module}: in neither owners nor debt-register (silent absorption)`,
       });
     }
+  };
+  for (const row of [
+    ...products["codebase-inventory"].crates,
+    ...products["codebase-inventory"].packages,
+  ]) {
+    checkModule(row.module, "inventory-module-unowned");
   }
+  for (const module of uninventoriedWorkspacePackages()) {
+    checkModule(module, "workspace-package-unowned");
+  }
+}
+
+/**
+ * pnpm workspace entries (pnpm-workspace.yaml `packages:`) the inventory does
+ * not enumerate as population rows: glob entries under `packages/` expand to
+ * typescriptPackages rows, so only literal entries outside it (e.g. `docs`)
+ * need their own owner/debt routing here.
+ */
+function uninventoriedWorkspacePackages() {
+  const text = fs.readFileSync(path.join(REPO_ROOT, "pnpm-workspace.yaml"), "utf8");
+  const entries = [];
+  let inPackages = false;
+  for (const line of text.split(/\r?\n/)) {
+    if (!inPackages) {
+      if (/^packages:\s*$/.test(line)) inPackages = true;
+      continue;
+    }
+    const item = line.match(/^\s+-\s+"?([^"\s]+)"?\s*$/);
+    if (item) {
+      entries.push(item[1]);
+    } else if (line.trim() !== "") {
+      inPackages = false;
+    }
+  }
+  return entries.filter((entry) => !entry.startsWith("packages/"));
 }
 
 export function mandatoryCases() {
