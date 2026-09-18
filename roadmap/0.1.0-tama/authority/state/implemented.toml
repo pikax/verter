@@ -414,6 +414,7 @@ schema = 2
 "SST2" = { status = "pending" }
 "STP0" = { status = "implemented", commit_message = "docs(compiler): ratify SFC TypeScript projection constitution and current-feature contract", commit_date = "2026-09-18T12:00:00+01:00" }
 "STP1" = { status = "implemented", commit_message = "test(compiler): add SFC projection feature inventory, engine pins, and probe harness", commit_date = "2026-09-18T14:00:00+01:00" }
+"STP2" = { status = "implemented", commit_message = "test(compiler): prove Vue constructor InstanceType compatibility and specialization feasibility", commit_date = "2026-09-18T18:00:00+01:00" }
 "TA1A" = { status = "implemented", commit_message = "feat(session): canonical union and intersection algebra with structural constituent identity", commit_date = "2026-08-31T18:30:00+01:00" }
 "TA1B" = { status = "implemented", commit_message = "feat(session): flip the composite payload opaque and close every construction site", commit_date = "2026-08-31T23:30:00+01:00" }
 "TA2" = { status = "implemented", commit_message = "feat(session): demand-scoped truthiness domain authority consumed by flow", commit_date = "2026-09-01T04:00:00+01:00" }
