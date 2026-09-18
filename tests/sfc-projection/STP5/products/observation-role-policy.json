@@ -1,0 +1,29 @@
+{
+  "schema": "ObservationRolePolicy",
+  "version": 1,
+  "product": "ObservationRolePolicy",
+  "spanKinds": {
+    "verbatim": {
+      "edits": true,
+      "diagnostics": true,
+      "lengthPreserving": true
+    },
+    "atom": {
+      "edits": false,
+      "diagnostics": true,
+      "correspondence": "region-to-region"
+    },
+    "alias": {
+      "edits": false,
+      "diagnostics": "substitute-original-text",
+      "notRenameCodec": true,
+      "kebabPascalForbidden": true
+    }
+  },
+  "synthesized": "fail-closed-no-carrier-preimage",
+  "oneSourceMultipleObservations": true,
+  "nonOverlappingVirtualSpans": true,
+  "foreignDefinitionUsesTargetSnapshot": true,
+  "featureParticipationIsNotEditSafety": true,
+  "observationChannels": ["hover", "definition", "references", "edits"]
+}

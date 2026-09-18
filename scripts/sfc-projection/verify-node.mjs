@@ -33,6 +33,22 @@ export const MANDATORY_CASES = Object.freeze([
   "STP1-harness",
 ]);
 
+export const STP5_MANDATORY_CASES = Object.freeze([
+  "STP5-encoding",
+  "STP5-guard-duplicate",
+  "STP5-alias-edit",
+  "STP5-stale-target",
+  "STP5-raw-cli",
+  "STP5-capability",
+]);
+
+export function mandatoryCasesFor(nodeManifest) {
+  const nodeId = nodeManifest?.node;
+  if (!nodeId || nodeId === "STP1") return [...MANDATORY_CASES];
+  if (nodeId === "STP5") return [...STP5_MANDATORY_CASES];
+  return [...(nodeManifest.mandatoryCases || [])];
+}
+
 const REQUIRED_PROBE_STRINGS = Object.freeze([
   "positive",
   "negative",
@@ -132,7 +148,7 @@ export function validateProbeManifest(doc, { role }) {
       );
     } else {
       const declared = new Set(doc.mandatoryCases);
-      for (const id of MANDATORY_CASES) {
+      for (const id of mandatoryCasesFor(doc)) {
         if (!declared.has(id)) {
           errors.push(
             err(
@@ -447,7 +463,7 @@ function createJsProgram(ts, fileAbs, options, checkCounts, fileKey) {
   return ts.createProgram({ rootNames: [fileAbs], options, host });
 }
 
-function runJsFile(ts, fileAbs, options, checkCounts, fileKey) {
+function runJsFile(ts, fileAbs, options, checkCounts, fileKey, probes) {
   const program = createJsProgram(ts, fileAbs, options, checkCounts, fileKey);
   const sf = program.getSourceFile(fileAbs);
   const checker = program.getTypeChecker();
@@ -456,11 +472,11 @@ function runJsFile(ts, fileAbs, options, checkCounts, fileKey) {
     .filter((diag) => diag.file && path.resolve(diag.file.fileName) === path.resolve(fileAbs))
     .map(normalizeDiag);
   const text = fs.readFileSync(fileAbs, "utf8");
-  const observations = observeJs(ts, checker, sf, text);
+  const observations = observeJs(ts, checker, sf, text, probes);
   return { diags, observations };
 }
 
-function observeJs(ts, checker, sf, text) {
+function observeJs(ts, checker, sf, text, probes) {
   const out = { types: {}, hover: null, definition: null, references: 0, edits: [] };
   if (!sf) return out;
   const instancePos = text.indexOf("export type Instance");
@@ -474,13 +490,14 @@ function observeJs(ts, checker, sf, text) {
       };
     }
   }
-  const hoverPos = text.indexOf("stp1HoverTarget");
+  const hoverNeedle = probes?.hoverNeedle || "stp1HoverTarget";
+  const hoverPos = text.indexOf(hoverNeedle);
   if (hoverPos >= 0) {
-    const node = findIdentifier(ts, sf, "stp1HoverTarget");
+    const node = findIdentifier(ts, sf, hoverNeedle);
     if (node) {
       const type = checker.getTypeAtLocation(node);
       out.hover = {
-        name: "stp1HoverTarget",
+        name: hoverNeedle,
         printed: checker.typeToString(type),
         flags: jsTypeFlags(ts, type),
         pos: node.getStart(sf),
@@ -535,8 +552,8 @@ export function runJsEngine(resolved, probes, repoRoot) {
   const positive = repoPath(repoRoot, probes.positive);
   const negative = repoPath(repoRoot, probes.negative);
   const checkCounts = {};
-  const pos = runJsFile(ts, positive, options, checkCounts, probes.positive);
-  const neg = runJsFile(ts, negative, options, checkCounts, probes.negative);
+  const pos = runJsFile(ts, positive, options, checkCounts, probes.positive, probes);
+  const neg = runJsFile(ts, negative, options, checkCounts, probes.negative, probes);
   return {
     engine: pin.id,
     positive: pos,
@@ -839,13 +856,25 @@ export async function verifyNode(options) {
   }
 
   if (options.requireAll) {
-    for (const id of MANDATORY_CASES) {
+    for (const id of mandatoryCasesFor(nodeLoad.manifest)) {
       if (!selected.includes(id)) {
         errors.push(
           err("STP1-zero-selection", "zero-cases", `mandatory case ${id} was not selected`),
         );
       }
     }
+  }
+
+  if (nodeId === "STP5") {
+    errors.push(
+      ...(await evaluateStp5Node({
+        repoRoot,
+        resolvedEngines,
+        harnessRuns,
+        skipProbes: options.skipProbes,
+        runnable,
+      })),
+    );
   }
 
   return summarize({
@@ -857,7 +886,50 @@ export async function verifyNode(options) {
     repoRoot,
     inventory,
     methodology,
+    nodeManifest: nodeLoad.manifest,
   });
+}
+
+async function evaluateStp5Node({ repoRoot, resolvedEngines, harnessRuns, skipProbes, runnable }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STP5/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  const errors = [];
+  if (skipProbes) {
+    errors.push(...protocol.assertEncodingIdentity());
+    errors.push(...protocol.assertCleanGeometry());
+    errors.push(...protocol.evaluateRejectTwins());
+    return errors;
+  }
+  if (!runnable) {
+    errors.push(err("STP5-capability", "missing-probes", "STP5 omitted runnable probes"));
+    return errors;
+  }
+  const native = resolvedEngines.find((engine) => engine.kind === "native") || resolvedEngines[0];
+  let mapperHostPresent = false;
+  if (native?.kind === "native" && native.executable) {
+    const help = spawnSync(native.executable, ["--help"], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    mapperHostPresent = protocol.helpTextHasMapperHost(`${help.stdout || ""}${help.stderr || ""}`);
+  }
+  const observation = {
+    diagnostics: harnessRuns.some((run) => (run.negative?.diags || []).length > 0),
+    hover: harnessRuns.some((run) => Boolean(run.positive?.observations?.hover)),
+    definition: harnessRuns.some((run) => Boolean(run.positive?.observations?.definition)),
+    references: harnessRuns.some((run) => (run.positive?.observations?.references || 0) > 0),
+    edits: harnessRuns.some((run) => (run.positive?.observations?.edits || []).length > 0),
+  };
+  const stp5 = await protocol.evaluateStp5({
+    mapperHostPresent,
+    observation,
+    engineId: native?.id || "ts-native",
+    engineVersion: native?.version || "unknown",
+  });
+  errors.push(...stp5.errors);
+  return errors;
 }
 
 function summarize({
@@ -869,19 +941,21 @@ function summarize({
   repoRoot,
   inventory,
   methodology,
+  nodeManifest,
 }) {
   const ok = errors.length === 0;
+  const required = mandatoryCasesFor(nodeManifest || { node: options.node });
   const selectedCaseIds = new Set(selected);
   if (ok) {
-    for (const id of MANDATORY_CASES) selectedCaseIds.add(id);
+    for (const id of required) selectedCaseIds.add(id);
   } else {
     for (const error of errors) selectedCaseIds.add(error.caseId);
   }
   const probeSizes = {};
-  for (const rel of [
-    "tests/sfc-projection/STP1/probes/positive.ts",
-    "tests/sfc-projection/STP1/probes/negative.ts",
-  ]) {
+  const probeFiles = [nodeManifest?.probes?.positive, nodeManifest?.probes?.negative].filter(
+    Boolean,
+  );
+  for (const rel of probeFiles) {
     const abs = repoPath(repoRoot, rel);
     if (fs.existsSync(abs)) probeSizes[rel] = fs.statSync(abs).size;
   }
@@ -894,7 +968,7 @@ function summarize({
     platform: `${os.platform()}-${os.arch()}`,
     inputRevision: inputRevision(repoRoot),
     selectedCaseIds: [...selectedCaseIds],
-    mandatoryCases: [...MANDATORY_CASES],
+    mandatoryCases: required,
     engines: resolvedEngines.map((engine) => ({
       id: engine.id,
       label: engine.label,
@@ -927,15 +1001,17 @@ export function selectedCaseIds(result) {
   return [...(result.selectedCaseIds || [])];
 }
 
-const HELP = `ProjectionProbeRunner — STP1 feature inventory and engine probe harness
+const HELP = `ProjectionProbeRunner — STP1/STP5 feature inventory and mapper proof harness
 
 USAGE
-  node scripts/sfc-projection/verify-node.mjs --node STP1 [--engine all|ts-js|ts-native] [--require-all] [--json]
+  node scripts/sfc-projection/verify-node.mjs --node STP1|STP5 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
 vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted
 executable under the same engine label, omitted probes, non-exact type matches,
-missing references, and duplicate file checks.
+missing references, and duplicate file checks. STP5 additionally rejects Alias
+rename codecs, query-snapshot reuse, Verter-as-stock-CLI claims, duplicate
+guards, version-label capability, and dormant-product complete claims.
 `;
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -949,7 +1025,7 @@ if (isMain) {
   if (args.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   else if (result.ok) {
     process.stdout.write(
-      `STP1 verify: PASS cases=${result.selectedCaseIds.join(",")} engines=${result.engines
+      `${result.node} verify: PASS cases=${result.selectedCaseIds.join(",")} engines=${result.engines
         .map((engine) => `${engine.id}:${posix(engine.executable)}`)
         .join(",")}\n`,
     );

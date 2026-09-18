@@ -5,6 +5,7 @@ import test from "node:test";
 
 import {
   MANDATORY_CASES,
+  STP5_MANDATORY_CASES,
   assertCheckCounts,
   assertCleanTwin,
   assertExactType,
@@ -288,4 +289,58 @@ test("engine filter all admits both pins", () => {
     pins.map((pin) => pin.id),
     ["ts-js", "ts-native"],
   );
+});
+
+test("STP5 node manifest is runnable without STP1 mandatory cases", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP5/manifest.json");
+  assert.equal(node.errors.length, 0, JSON.stringify(node.errors));
+  for (const id of STP5_MANDATORY_CASES) {
+    assert.ok(node.manifest.mandatoryCases.includes(id), `missing ${id}`);
+  }
+  assert.ok(!node.manifest.mandatoryCases.includes("STP1-harness"));
+});
+
+test("STP5 verify: encoding, reject twins, and selected-build capability on both engines", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP5",
+    engine: "all",
+    requireAll: true,
+    json: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.deepEqual([...STP5_MANDATORY_CASES].sort(), [...result.mandatoryCases].sort());
+  for (const id of STP5_MANDATORY_CASES) {
+    assert.ok(selectedCaseIds(result).includes(id), `missing selected case ${id}`);
+  }
+  assert.equal(result.engines.length, 2, JSON.stringify(result.engines));
+  assert.equal(result.harnessRuns.length, 2);
+  for (const run of result.harnessRuns) {
+    assert.equal(run.positiveDiagnostics.length, 0, JSON.stringify(run));
+    assert.ok(
+      run.negativeDiagnostics.some((diag) => diag.code === 2322),
+      JSON.stringify(run.negativeDiagnostics),
+    );
+    assert.equal(run.hover, "number", JSON.stringify(run));
+    assert.equal(run.instanceType, "Comp", JSON.stringify(run));
+    assert.ok(run.definition);
+    assert.ok(run.references >= 1, JSON.stringify(run));
+    assert.ok(run.edits >= 1);
+  }
+  assert.equal(result.incremental, "fresh");
+});
+
+test("STP5 --require-all does not demand STP1 cases", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP5",
+    engine: "all",
+    requireAll: true,
+    skipProbes: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.ok(!selectedCaseIds(result).includes("STP1-harness"));
+  for (const id of STP5_MANDATORY_CASES) {
+    assert.ok(selectedCaseIds(result).includes(id), `missing ${id}`);
+  }
 });

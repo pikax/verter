@@ -1,0 +1,66 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP5",
+  "kind": "proof",
+  "products": [
+    "MapperCapabilityEvidence",
+    "DiagnosticOriginPolicy",
+    "ObservationRolePolicy"
+  ],
+  "mandatoryCases": [
+    "STP5-encoding",
+    "STP5-guard-duplicate",
+    "STP5-alias-edit",
+    "STP5-stale-target",
+    "STP5-raw-cli",
+    "STP5-capability"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP5/probes/positive.ts",
+    "negative": "tests/sfc-projection/STP5/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STP5/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STP5/probes/tsconfig.json",
+    "hoverNeedle": "stp5HoverTarget",
+    "definitionNeedle": "stp5DefinitionTarget",
+    "expectedNegativeCode": 2322,
+    "expectedHoverType": "number",
+    "expectedInstanceType": "Comp"
+  },
+  "cases": [
+    {
+      "id": "STP5-encoding",
+      "disposition": "accept",
+      "twins": ["utf-8", "utf-16"]
+    },
+    {
+      "id": "STP5-guard-duplicate",
+      "disposition": "reject",
+      "twins": ["one-valid-directive", "repeated-guards"]
+    },
+    {
+      "id": "STP5-alias-edit",
+      "disposition": "reject",
+      "twins": ["alias-display-only", "kebab-pascal-rename-codec"]
+    },
+    {
+      "id": "STP5-stale-target",
+      "disposition": "reject",
+      "twins": ["target-file-snapshot", "query-file-snapshot"]
+    },
+    {
+      "id": "STP5-raw-cli",
+      "disposition": "reject",
+      "twins": ["stock-tsc", "verter-postprocessor"]
+    },
+    {
+      "id": "STP5-capability",
+      "disposition": "accept",
+      "twins": ["executable-selected-build", "version-label", "dormant-tcm2"]
+    }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP5 --engine all --require-all --json",
+  "test": "node --test tests/sfc-projection/STP5/mapper.spec.ts",
+  "runtimeCorrectness": true,
+  "notes": "Proof/qualification. Does not implement a production Vue content mapper. Host-missing operations are blocking upstream defects, not silent success. Expected reject-twin failures are harness data."
+}
