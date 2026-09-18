@@ -1,0 +1,47 @@
+{
+  "id": "projection-policy.v1",
+  "product": "ProjectionPolicy",
+  "version": 1,
+  "typeAuthority": "typescript",
+  "forbiddenTypeAuthorities": ["native-typeinfo", "native-assignability", "duplicate-script-body-checker"],
+  "vueDefaultExport": {
+    "shape": "constructor",
+    "instanceSpelling": "InstanceType<typeof Comp>",
+    "genericInstanceSpelling": "InstanceType<typeof Comp<Args>>",
+    "publicCallableReplacement": false,
+    "syntheticRuntimeMetadataProperty": false,
+    "broadAnyConstructor": false,
+    "vacuousNeverSuccess": false
+  },
+  "specialization": {
+    "usesPerTransaction": 1,
+    "useIdentity": "ComponentUseId",
+    "useIdentityDistinctFromRevisionObservations": true
+  },
+  "provenancePlanes": ["mapping-geometry", "semantic-origin", "edit-spelling"],
+  "mappingOwner": "CodeTransform",
+  "secondMappingOwner": false,
+  "inheritAttrs": {
+    "omitted": "inherit",
+    "explicitTrue": "inherit",
+    "omittedEqualsExplicitTrue": true,
+    "runtimeDistinctionFromDefaultToTrue": false,
+    "explicitFalse": "no-inherit",
+    "primaryFallthroughPolicy": "vue-correct-typed-fallthrough",
+    "benchmarkScoreLane": "unmodified-separate"
+  },
+  "compilerAuthorities": [
+    "CarrierFrontend",
+    "FrameworkSemanticAuthority",
+    "ProjectionBackend",
+    "RuntimeCompilerBackend",
+    "FrameworkHostIntegrationBackend"
+  ],
+  "planIsSemanticRegistry": false,
+  "cache": {
+    "incompleteCannotWarmComplete": true,
+    "configurationMissingCannotWarmComplete": true,
+    "cancelledCannotWarmComplete": true,
+    "unchangedCheckingTextDoesNotJustifyStaleMappings": true
+  }
+}

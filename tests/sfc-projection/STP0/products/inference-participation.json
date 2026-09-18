@@ -1,0 +1,35 @@
+{
+  "schema": "InferenceParticipation",
+  "version": 1,
+  "nativeTypeInfoMayComputeVariance": false,
+  "nativeTypeInfoMayComputeInference": false,
+  "channels": [
+    {
+      "id": "authored-prop-emit-slot-model-signature",
+      "participation": "authored-signature"
+    },
+    {
+      "id": "use-site-props-jsx-slot-props",
+      "participation": "contextual-consumer"
+    },
+    {
+      "id": "excess-key-and-fallthrough-validation",
+      "participation": "validation-only"
+    },
+    {
+      "id": "hover-definition-references",
+      "participation": "observation-only"
+    },
+    {
+      "id": "generic-component-use",
+      "participation": "coupled"
+    }
+  ],
+  "allowedParticipation": [
+    "authored-signature",
+    "contextual-consumer",
+    "validation-only",
+    "observation-only",
+    "coupled"
+  ]
+}
