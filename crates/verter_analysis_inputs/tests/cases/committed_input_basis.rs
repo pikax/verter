@@ -5,25 +5,50 @@
 //! order.
 
 use verter_analysis_inputs::{
-    CommitError, InputBasis, LoadWave, NegativeFact, Observation, ObserveError, SnapshotFence,
-    TornSnapshot,
+    CommitError, DirectoryEntry, InputBasis, LoadWave, NegativeFact, Observation, ObserveError,
+    SnapshotFence, TornSnapshot,
 };
 
 fn file(canonical: &str, content: &str) -> Observation {
     Observation::file(canonical, content)
 }
 
+fn directory(canonical: &str, entries: Vec<DirectoryEntry>) -> Observation {
+    Observation::directory(canonical, entries).expect("directory")
+}
+
 #[test]
 fn commit_identity_is_stable_under_probe_order() {
     let first = InputBasis::commit(
-        LoadWave::from_keys(["/b.ts", "/a.ts"]),
-        [file("/b.ts", "b"), file("/a.ts", "a")],
+        LoadWave::from_keys(["/b.ts", "/a.ts", "/d"]),
+        [
+            file("/b.ts", "b"),
+            file("/a.ts", "a"),
+            directory(
+                "/d",
+                vec![
+                    DirectoryEntry::new("/d/b.ts", false),
+                    DirectoryEntry::new("/d/a.ts", false),
+                    DirectoryEntry::new("/d/a.ts", false),
+                ],
+            ),
+        ],
         [],
     )
     .expect("commit");
     let second = InputBasis::commit(
-        LoadWave::from_keys(["/a.ts", "/b.ts"]),
-        [file("/a.ts", "a"), file("/b.ts", "b")],
+        LoadWave::from_keys(["/d", "/a.ts", "/b.ts"]),
+        [
+            directory(
+                "/d",
+                vec![
+                    DirectoryEntry::new("/d/a.ts", false),
+                    DirectoryEntry::new("/d/b.ts", false),
+                ],
+            ),
+            file("/a.ts", "a"),
+            file("/b.ts", "b"),
+        ],
         [],
     )
     .expect("commit");
@@ -33,8 +58,9 @@ fn commit_identity_is_stable_under_probe_order() {
             .observations()
             .map(Observation::canonical)
             .collect::<Vec<_>>(),
-        vec!["/a.ts", "/b.ts"]
+        vec!["/a.ts", "/b.ts", "/d"]
     );
+    assert_eq!(first, second);
 }
 
 #[test]
@@ -126,4 +152,46 @@ fn identical_observations_commit_equal_to_a_fresh_commit() {
     let second = InputBasis::commit(wave, observations, negatives).expect("second");
     assert_eq!(first.id(), second.id());
     assert_eq!(first, second);
+}
+
+#[test]
+fn conflicting_directory_entries_for_one_path_are_refused() {
+    let error = Observation::directory(
+        "/d",
+        vec![
+            DirectoryEntry::new("/d/a", false),
+            DirectoryEntry::new("/d/a", true),
+        ],
+    )
+    .expect_err("conflict");
+    assert_eq!(
+        error,
+        CommitError::ConflictingDirectoryEntry {
+            directory: "/d".into(),
+            path: "/d/a".into()
+        }
+    );
+}
+
+#[test]
+fn commit_requires_every_wave_key_to_have_exactly_one_row() {
+    let incomplete = InputBasis::commit(LoadWave::from_keys(["/a.ts"]), [], []).expect_err("gap");
+    assert_eq!(
+        incomplete,
+        CommitError::IncompleteWave {
+            canonical: "/a.ts".into()
+        }
+    );
+    let extraneous = InputBasis::commit(
+        LoadWave::from_keys(Vec::<&str>::new()),
+        [file("/a.ts", "a")],
+        [],
+    )
+    .expect_err("extra");
+    assert_eq!(
+        extraneous,
+        CommitError::ExtraneousRow {
+            canonical: "/a.ts".into()
+        }
+    );
 }
