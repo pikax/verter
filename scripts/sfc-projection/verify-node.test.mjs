@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   MANDATORY_CASES,
   NODE_MANDATORY_CASES,
+  STP3_MANDATORY_CASES,
   STP5_MANDATORY_CASES,
   assertCheckCounts,
   assertCleanTwin,
@@ -14,6 +15,7 @@ import {
   assertInventoryComplete,
   assertNonZeroSelection,
   assertStp2Products,
+  assertStp3Products,
   cloneJson,
   loadNodeManifest,
   loadObligation,
@@ -445,6 +447,74 @@ test("STP5 --require-all does not demand STP1 cases", async () => {
   assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
   assert.ok(!selectedCaseIds(result).includes("STP1-harness"));
   for (const id of STP5_MANDATORY_CASES) {
+    assert.ok(selectedCaseIds(result).includes(id), `missing ${id}`);
+  }
+});
+
+test("STP3 node manifest is schema-valid and lists every mandatory case", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP3/manifest.json");
+  assert.equal(node.errors.length, 0, JSON.stringify(node.errors));
+  const ids = node.manifest.cases.map((row) => row.id).sort();
+  assert.deepEqual(ids, [...NODE_MANDATORY_CASES.STP3].sort());
+  assert.deepEqual([...STP3_MANDATORY_CASES].sort(), [...NODE_MANDATORY_CASES.STP3].sort());
+});
+
+test("STP3 products name every mandatory case, binder, and selected witness", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP3/manifest.json");
+  const errors = assertStp3Products(REPO_ROOT, node.manifest);
+  assert.equal(errors.length, 0, JSON.stringify(errors));
+});
+
+test("STP3-wrong-channel dirty twin is the broad any constructor", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP3/manifest.json");
+  const row = node.manifest.cases.find((entry) => entry.id === "STP3-wrong-channel");
+  assert.equal(row.disposition, "reject");
+  assert.equal(row.expectedCode, 2551);
+  assert.match(row.dirtyTwin, /reject-wrong-channel-any\.ts$/);
+});
+
+test("STP3-ordered-merge dirty twin is last-write-wins, not accumulation", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP3/manifest.json");
+  const row = node.manifest.cases.find((entry) => entry.id === "STP3-ordered-merge");
+  assert.equal(row.disposition, "reject");
+  assert.equal(row.expectedCode, 2322);
+  assert.match(row.dirtyTwin, /reject-ordered-merge-lww\.ts$/);
+});
+
+test("STP3 verify: all mandatory cases run on each admitted engine", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP3",
+    engine: "all",
+    requireAll: true,
+    json: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.deepEqual([...NODE_MANDATORY_CASES.STP3].sort(), [...result.mandatoryCases].sort());
+  for (const id of NODE_MANDATORY_CASES.STP3) {
+    assert.ok(selectedCaseIds(result).includes(id), `missing selected case ${id}`);
+  }
+  assert.equal(result.engines.length, 2, JSON.stringify(result.engines));
+  assert.equal(result.harnessRuns.length, 2);
+  assert.equal(result.incremental, "fresh");
+  for (const run of result.harnessRuns) {
+    for (const count of Object.values(run.checkCounts)) {
+      assert.equal(count, 1, JSON.stringify(run.checkCounts));
+    }
+  }
+});
+
+test("STP3 --require-all does not demand STP1 cases", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP3",
+    engine: "all",
+    requireAll: true,
+    skipProbes: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.ok(!selectedCaseIds(result).includes("STP1-harness"));
+  for (const id of STP3_MANDATORY_CASES) {
     assert.ok(selectedCaseIds(result).includes(id), `missing ${id}`);
   }
 });
