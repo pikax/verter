@@ -401,7 +401,7 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
 }
 
 /// Non-projection-op queries (ResolveDecl, NormalizeUnion,
-/// NormalizeIntersection, Relate,
+/// ReduceIntersection, Relate,
 /// ResolveMacroPayload) MUST be unaffected by the post-trip
 /// fast-path early-exit — the projection-op fuse only bounds the
 /// budget-counted subset of the dispatch surface, and a request that

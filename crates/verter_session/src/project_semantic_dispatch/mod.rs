@@ -25,7 +25,7 @@
 //!   `IndexedAccess { base, index, mode }` admission-canonicalise to the
 //!   length-1 `ProjectPath` form **before** memo hashing so sugar and
 //!   canonical share one warm entry and one in-flight wait graph.
-//! - `NormalizeUnion` / `NormalizeIntersection` — structural dedup over the
+//! - `NormalizeUnion` / `ReduceIntersection` — structural dedup over the
 //!   supplied members with stable ordering.
 //! - `KeyOf` / `MappedType` / `Conditional` — navigation operations that
 //!   walk the base node's shared-graph payload. Paths that do not reach a
@@ -2483,7 +2483,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // funnel through this helper, so the mask captures every
         // `SemanticQueryKey` variant dispatched anywhere during the request
         // — including nested reducer sub-dispatches that enter ONLY via
-        // `execute_read` (e.g. the macro-payload `NormalizeIntersection`
+        // `execute_read` (e.g. the macro-payload `ReduceIntersection`
         // reduction in `build.rs`, mapped-type `ProjectPath` member
         // projection). Idempotent per tag (sets one bit). No-op when no
         // `RequestContext` is installed on the calling thread.
@@ -2498,7 +2498,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         //     entry and one in-flight wait graph.
         //   - `IndexedAccess { base, index, mode }` rewrites the same way to
         //     `ProjectPath { base, path: [Index(index)], mode }`.
-        //   - `NormalizeUnion` / `NormalizeIntersection` get structural
+        //   - `NormalizeUnion` / `ReduceIntersection` get structural
         //     member-list canonicalisation so `{A, B}` and `{B, A}` converge.
         //   - Symmetric `Relate` operands get the same ordering as typed
         //     relation callers before the family memo or wait graph sees them.
@@ -3248,7 +3248,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         Some(AuditEvent::SemanticQueryProjectPathWarm)
                     }
                 }
-                // ResolveDecl, NormalizeUnion, NormalizeIntersection,
+                // ResolveDecl, NormalizeUnion, ReduceIntersection,
                 // Relate, ResolveMacroPayload — not in the focused
                 // counter set.
                 _ => None,

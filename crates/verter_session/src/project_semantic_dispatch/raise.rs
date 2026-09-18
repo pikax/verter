@@ -444,7 +444,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// can accumulate dep facts across nested dispatches and merge them into
     /// the session-layer `fact_versions`. This is the dispatch entry the
     /// cold-build subtree reducer and the operator sub-reductions
-    /// (`ProjectPath` / `NormalizeIntersection` / macro-payload
+    /// (`ProjectPath` / `ReduceIntersection` / macro-payload
     /// intersection normalisation) ride so their dependency facts are not
     /// dropped — the dep-signature-preserving peer of the `SemanticQueryApi`
     /// trait's `execute`.

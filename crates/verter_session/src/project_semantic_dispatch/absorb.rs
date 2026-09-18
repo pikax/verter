@@ -150,7 +150,7 @@ impl ProjectSemanticDispatch<'_> {
     // absorption arms inside `canonical_algebra::canonical_union` /
     // `canonical_intersection`; the former per-reducer `absorb_union` /
     // `absorb_intersection` entry hooks are deleted. Raw structural carriers
-    // remain intentional: the `NormalizeUnion` / `NormalizeIntersection`
+    // remain intentional: the `NormalizeUnion` / `ReduceIntersection`
     // query-key nodes, the arity-1 key-domain carrier in `mod.rs`, and the
     // structural rebuilds in `walk.rs` intern their ordered payloads directly.
 

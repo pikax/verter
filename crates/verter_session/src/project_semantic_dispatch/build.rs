@@ -342,7 +342,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// A node kind keyed by already-interned input nodes (`ProjectPath` /
     /// `ProjectMember` / `IndexedAccess` rooted at `base`; `KeyOf` /
     /// `MappedType` / `Conditional` / `NormalizeUnion` /
-    /// `NormalizeIntersection` over their input nodes) produces a result
+    /// `ReduceIntersection` over their input nodes) produces a result
     /// whose identity transitively depends on the file content each
     /// file-derived input was lowered from. The input node's origin scope
     /// — recorded in the arena sidecar at intern time — names that file
@@ -10211,7 +10211,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// contributing source member whenever the input had more than one
     /// member — lattice-extreme and proven-disjoint folds included — so
     /// provenance recovery finds the pre-canonical input set even after
-    /// absorption / dedup / sorting (`NormalizeIntersection([string,
+    /// absorption / dedup / sorting (`ReduceIntersection([string,
     /// number])` records `string` and `number` on the shared `never`).
     /// Edges landing on a shared `Global` primitive are accepted growth:
     /// the derivation store deduplicates identical edges, and each edge is
@@ -11701,7 +11701,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// Per-arm logic mirrors §3.2 body sketch:
     /// - `DefineProps` / `WithDefaults`: 0 args → `Opaque(Miss)`;
-    ///   1 arg → arg unchanged; ≥2 args → `NormalizeIntersection`.
+    ///   1 arg → arg unchanged; ≥2 args → `ReduceIntersection`.
     /// - `DefineEmits`: dispatch `type_args[0]` through `ProjectPath`
     ///   in the caller's mode. Returns the projected surface; the
     ///   consumer (`extract_component_meta` at
@@ -11910,7 +11910,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // AND from the `type_args` nodes — every arm derives its value
         // from `type_args` (returned directly for `DefineProps` /
         // `WithDefaults` 1-arg and `DefineExpose` / `DefineOptions`;
-        // `NormalizeIntersection`-normalised for the ≥2-arg props arms;
+        // `ReduceIntersection`-normalised for the ≥2-arg props arms;
         // `ProjectPath`-projected for `DefineEmits` / `DefineSlots` /
         // `DefineModel`). When a type argument is file-derived from
         // another canonical the result transitively depends on that
@@ -11950,7 +11950,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         .with_observed_self_roots(observed_self_roots);
         // Fold the nested macro-payload reads' metadata onto the build
         // output so a budget/walker partial in a nested
-        // `NormalizeIntersection` / `ProjectPath` read taints this macro
+        // `ReduceIntersection` / `ProjectPath` read taints this macro
         // payload result (and suppresses the component-meta warm gate),
         // while a benign non-cacheable nested read still refuses inner-memo
         // admission without falsely marking this result partial.

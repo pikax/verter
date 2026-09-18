@@ -3067,7 +3067,7 @@ fn type_expand_expand_object_shape_removal_preserves_shape_output() {
 }
 
 /// Normalization invariant: union / intersection normalization
-/// lives on dispatch via `NormalizeUnion` / `NormalizeIntersection`.
+/// lives on dispatch via `NormalizeUnion` / `ReduceIntersection`.
 #[test]
 fn type_expand_expand_normalized_expr_removal_preserves_normalization_output() {
     let host = host_for_relation_tests();

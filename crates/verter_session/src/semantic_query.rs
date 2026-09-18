@@ -7748,7 +7748,7 @@ pub enum SemanticQueryKey {
     /// NOT build per-kind member objects itself. The one-engine
     /// `build_resolve_macro_payload` dispatch is:
     /// - `DefineProps` / `WithDefaults`: 0 args → `Opaque(Miss)`; 1 arg
-    ///   → arg unchanged; ≥2 args → `NormalizeIntersection`.
+    ///   → arg unchanged; ≥2 args → `ReduceIntersection`.
     /// - `DefineEmits` / `DefineSlots` / `DefineModel`: dispatch
     ///   `type_args[0]` through `ProjectPath` in the caller's mode and
     ///   return the projected surface. Per-kind member construction

@@ -691,7 +691,7 @@ struct BlockContractRow {
 /// line number — line numbers drift as the docs are edited, the block heading
 /// does not:
 /// - foundational decl/value keys (`ResolveDecl`, `TypeOf`, `NormalizeUnion`,
-///   `NormalizeIntersection`) PLUS `Instantiate` at
+///   `ReduceIntersection`) PLUS `Instantiate` at
 ///   `U2.QUERY_VALUE_DOMAIN` (its `Context` adds/upgrades the U2 key surface +
 ///   value-domain arms; generic substitution is a value-domain instantiation,
 ///   not a relation inference);
