@@ -31,19 +31,52 @@ use verter_semantic::analysis::{
     ROUTER_CONFIG_CANDIDATES,
 };
 
-use crate::input_basis::{DirectoryEntry, InputBasis, LoadWave, NegativeFact, Observation};
+use crate::input_basis::{
+    DirectoryEntry, InputBasis, LoadWave, NegativeFact, Observation, RequestInputBinding,
+};
 
 /// Builds the complete `RouteAnalysisInputs` snapshot for `project_root`.
 ///
-/// The workspace is read only while committing one [`InputBasis`]. The
-/// snapshot rows are projected from that basis — never by a second live
-/// consumer read.
+/// The workspace is read only while committing one [`InputBasis`]. When a
+/// request context is installed, that basis is bound once and later calls
+/// project the bound rows. Without a request, the capture is fenced locally
+/// then projected. Snapshot rows are never a second live consumer read.
 #[must_use]
 pub fn build_route_analysis_inputs(
     workspace: &dyn verter_workspace::WorkspaceRead,
     project_root: &str,
 ) -> RouteAnalysisInputs {
-    project_route_analysis_inputs(&commit_route_analysis_basis(workspace, project_root))
+    if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(bound) = ctx.committed_input() {
+            return project_admitted_route_analysis_inputs(bound);
+        }
+        let basis = commit_route_analysis_basis(workspace, project_root);
+        return match ctx.bind_committed_input(basis) {
+            Ok(()) => project_admitted_route_analysis_inputs(
+                ctx.committed_input()
+                    .expect("request bind stored the route-analysis basis"),
+            ),
+            Err(rejected) => {
+                let bound = ctx
+                    .committed_input()
+                    .expect("failed bind implies a stored request basis");
+                bound
+                    .admit_publication(rejected.basis())
+                    .expect("route-analysis basis must match the request snapshot fence");
+                project_admitted_route_analysis_inputs(bound)
+            }
+        };
+    }
+    project_admitted_route_analysis_inputs(&RequestInputBinding::from_basis(
+        commit_route_analysis_basis(workspace, project_root),
+    ))
+}
+
+fn project_admitted_route_analysis_inputs(binding: &RequestInputBinding) -> RouteAnalysisInputs {
+    binding
+        .admit_publication(binding.basis())
+        .expect("route-analysis projection requires the bound snapshot fence");
+    project_route_analysis_inputs(binding.basis())
 }
 
 /// Commit one [`InputBasis`] covering the route-analysis load wave.
