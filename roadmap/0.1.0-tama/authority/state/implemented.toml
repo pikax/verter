@@ -194,7 +194,7 @@ schema = 2
 "D9" = { status = "implemented", commit_message = "fix(session): reduce return-position subtype arms and empty-object intersections", commit_date = "2026-09-14T22:45:00+01:00" }
 "DEM0" = { status = "pending" }
 "E1" = { status = "implemented", commit_message = "feat(typeinfo): resolve-symbol graph operation with bounded SemanticTypeGraph export", commit_date = "2026-09-05T01:30:00+01:00" }
-"E2" = { status = "pending" }
+"E2" = { status = "implemented", commit_message = "fix(session): classify Vue named members in node domain without TypeExpr transit", commit_date = "2026-09-18T12:00:00+01:00" }
 "E3" = { status = "pending" }
 "E4" = { status = "pending" }
 "EAK0" = { status = "pending" }

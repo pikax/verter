@@ -23,7 +23,6 @@ use verter_semantic::analysis::type_expand::ExpandedIndexSignature;
 use verter_semantic::analysis::types::{
     AnalyzedDefaultValue, AnalyzedExposeField, AnalyzedPropField, AnalyzedSlotField,
 };
-use verter_type_expr::TypeExpr;
 
 use crate::resolver_core::ResolvedTypeDeclaration;
 
@@ -371,27 +370,6 @@ impl NamedTypeMemberOutput {
             RaisedShallowMemberOutput::Ref { name } => Self::Ref { name },
             RaisedShallowMemberOutput::EmptyObject => Self::EmptyObject,
             RaisedShallowMemberOutput::Opaque => Self::Opaque,
-        }
-    }
-
-    /// Classify a producer-transient raised [`TypeExpr`] into the closed
-    /// shallow output vocabulary. The `TypeExpr` is read ONCE at the
-    /// publication boundary and discarded — it never enters the DTO.
-    ///
-    /// Mirrors the zero-dispatch wire encoder's shallow member-value rules
-    /// exactly (wire parity): primitive / literal leaves map to their arms, a
-    /// named `Ref` keeps ONLY its name (arguments are not expanded), an EMPTY
-    /// object literal maps to [`Self::EmptyObject`], and every other shape
-    /// degrades to [`Self::Opaque`].
-    pub(crate) fn classify_shallow(raised: &TypeExpr) -> Self {
-        match raised {
-            TypeExpr::Primitive(name) => Self::Primitive(*name),
-            TypeExpr::Literal(lit) => Self::Literal(lit.clone()),
-            TypeExpr::Ref { name, .. } => Self::Ref {
-                name: Arc::clone(name),
-            },
-            TypeExpr::Object(obj) if obj.properties.is_empty() => Self::EmptyObject,
-            _ => Self::Opaque,
         }
     }
 }

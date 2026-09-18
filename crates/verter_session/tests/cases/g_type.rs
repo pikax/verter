@@ -1,7 +1,16 @@
 //! Consolidated integration-test group `type`: each module below was
 //! a separate top-level tests/*.rs binary, merged to cut test-link count.
+// Each entry module intentionally gets its own copy of this stateless
+// fixture helper (no statics/atomics/OnceCell), so the per-entry scopes
+// stay disjoint and share no state. The "duplicate mod" the lint reports
+// is the intended layout, not an accident — keep the allow at every site.
 #[path = "g_type/flow_return_audit_contract.rs"]
 mod flow_return_audit_contract;
+#[allow(clippy::duplicate_mod)]
+#[path = "component_meta_audit/harness.rs"]
+mod harness;
+#[path = "g_type/internal_type_expr_transit_closure.rs"]
+mod internal_type_expr_transit_closure;
 #[path = "g_type/type_resolution_audit_cache_reuse_across_entrypoints.rs"]
 mod type_resolution_audit_cache_reuse_across_entrypoints;
 #[path = "g_type/type_resolution_audit_diamond_repeated_prop.rs"]
