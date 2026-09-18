@@ -51,7 +51,7 @@
     { "receiver": "COX0", "product": "per-profile editor participation and coexistence consumes the preserved-client inventory", "productionCapable": true },
     { "receiver": "ED0", "product": "non-VS-Code client preservation and acceptance contract", "productionCapable": true },
     { "receiver": "EPR0", "product": "external engine provisioning policy consumes ExternalOwner law", "productionCapable": false },
-    { "receiver": "JBT0", "product": "official JetBrains baseline consumes the exposure and receipt obligations", "productionCapable": true },
+    { "receiver": "JBT0", "product": "official JetBrains baseline consumes the exposure and receipt obligations", "productionCapable": false },
     { "receiver": "LSO0", "product": "authored-coordinate semantic operations keep semantic-rail law", "productionCapable": false },
     { "receiver": "LSPX0", "product": "LSP capability and interoperability ownership consumes the capability inventory", "productionCapable": true },
     { "receiver": "PG0", "product": "all-feature workbench consumes producer-coverage obligations", "productionCapable": true },
