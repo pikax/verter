@@ -67,6 +67,12 @@ problem = "Semantic queries can still depend on mixed ownership and ambient stat
 expected_outcome = "Each semantic query declares all required facts, uses one authoritative execution path, and returns an explicit result contract that cannot misrepresent incomplete work."
 acceptance = ["Query identity includes every fact that can change the result.", "Equivalent fact sets produce deterministic results independent of ambient session state.", "Incomplete, cancelled, or degraded computation cannot be admitted as a complete result.", "The affected compiler, session, and semantic paths use one query authority with no compatibility fallback.", "Incremental execution is equivalent to a fresh computation for the same facts."]
 [[issue]]
+node_id = "L0"
+title = "Ratify public product-surface capability and performance rows"
+problem = "The release advertises compiler, checker, metadata, lint and language-service surfaces whose families are not locked in performance-gates.toml. Without a sole-owner catalog, a surface can pass architecture close by never having been measured or classed."
+expected_outcome = "One ratified catalog assigns every advertised surface exactly one stability class and one controlling wall, allocation and process-tree RSS row set, bound to published baseline provenance and executable commands."
+acceptance = ["Every advertised surface has one class and one controlling row set, with a named removing node for each non-stable class.", "Limits are restated from recorded published measurements or the locked product budget; a locked cell is never rewritten to fit a row.", "The validator refuses a missing class, a missing command, a stable class without a limit, a non-stable class without a removing node, and a limit edited after ratification.", "RSS follows MEM0's process-tree method including allocator slack, and statistical metrics carry no implied 0.0 percent bound."]
+[[issue]]
 node_id = "L1"
 title = "Prove bounded memory under long-lived churn"
 problem = "Short benchmarks can hide retained semantic candidates, snapshots, and publication state that accumulate during long-lived editor activity. This risks invisible memory growth that makes real workspaces progressively slow or unstable."

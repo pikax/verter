@@ -278,6 +278,7 @@ schema = 2
 "K1" = { status = "pending" }
 "K2" = { status = "pending" }
 "K3" = { status = "pending" }
+"L0" = { status = "implemented", commit_message = "docs(*): ratify the public product-surface capability and performance catalog", commit_date = "2026-09-18T12:00:00+01:00" }
 "L1" = { status = "pending" }
 "L2" = { status = "pending" }
 "L3" = { status = "pending" }

@@ -364,6 +364,23 @@ jobs:
               # no pattern here covers, so this block cannot silently fall
               # behind what the contract cites or runs.
               - 'performance-gates.toml'
+              # Product-surface catalog: advertised docs and package
+              # entrypoints the L0 validator re-resolves, so a new advertised
+              # surface without a catalog row turns this job red.
+              - 'docs/index.md'
+              - 'docs/api-stability.md'
+              - 'docs/guide/getting-started.md'
+              - 'docs/guide/linting.md'
+              - 'docs/guide/performance.md'
+              - 'packages/unplugin/package.json'
+              - 'packages/component-meta/package.json'
+              - 'packages/verter-tsc/package.json'
+              - 'packages/verter-lsp/package.json'
+              - 'packages/vue-vscode/package.json'
+              - 'packages/typeinfo/package.json'
+              - 'packages/nuxt/package.json'
+              - 'packages/verter-mcp/package.json'
+              - 'packages/native/package.json'
               - 'crates/verter_audit/src/**'
               - 'crates/verter_bench/examples/attribution_baseline.rs'
               - 'crates/verter_session/src/**'
@@ -398,6 +415,8 @@ jobs:
           node --test roadmap/0.1.0-tama/tools/validate-probe-authorities.test.mjs
           node roadmap/0.1.0-tama/tools/validate-semantic-memory-budget.mjs
           node --test roadmap/0.1.0-tama/tools/semantic-memory-budget.test.mjs
+          node roadmap/0.1.0-tama/tools/validate-product-surface-catalog.mjs
+          node --test roadmap/0.1.0-tama/tools/product-surface-catalog.test.mjs
       - name: CI aggregate completeness
         run: |
           node scripts/check-ci-aggregate.mjs
