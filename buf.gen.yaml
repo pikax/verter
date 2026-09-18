@@ -3,7 +3,12 @@ plugins:
   - local:
       - node
       - node_modules/@bufbuild/protoc-gen-es/bin/protoc-gen-es
-    opt: target=ts
+    # `@verter/proto` ships `"type": "module"`: Node ESM requires explicit
+    # `.js` extensions on relative imports, so the generated sibling imports
+    # must carry them. The package tsconfig (NodeNext resolution) rejects an
+    # extensionless import at build time; `scripts/check-proto-generated.mjs`
+    # regenerates from this exact template.
+    opt: target=ts,import_extension=js
     out: packages/proto/src/gen
 inputs:
   - directory: crates/verter_protocol/proto
