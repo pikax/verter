@@ -119,6 +119,7 @@ export function validate(products, authority) {
   validateResponsibilityMap(products["responsibility-map"], gapIds, errors);
   validateCapabilityMatrix(products["capability-matrix"], errors);
   validateDebtRegister(products["debt-register"], gapIds, errors);
+  validateOwnershipCoverage(products, errors);
   authorityRef = null;
   return { ok: errors.length === 0, errors };
 }
@@ -195,9 +196,13 @@ function validateResponsibilityMap(map, gapIds, errors) {
       continue;
     }
     const hasMulti = Array.isArray(row.responsibilities) && row.responsibilities.length >= 2;
+    // Contract §5: coupling evidence is a shared-commit count or fan-in; a
+    // touch count is churn, not coupling.
+    const hasCouplingCount =
+      typeof row.couplingEvidence?.fanIn === "number" ||
+      typeof row.couplingEvidence?.sharedCommits === "number";
     const hasCoupling =
-      row.couplingEvidence &&
-      Object.keys(row.couplingEvidence).length > 0 &&
+      hasCouplingCount &&
       Array.isArray(row.evidenceKinds) &&
       row.evidenceKinds.includes("coupling") &&
       row.evidenceKinds.includes("multi-responsibility");
@@ -205,7 +210,9 @@ function validateResponsibilityMap(map, gapIds, errors) {
       errors.push({
         caseId: "ARH0-god-evidence",
         code: "god-without-responsibility-evidence",
-        detail: `${row.path}: declared god-module on ${hasMulti ? "coupling" : "size"} evidence alone`,
+        detail: `${row.path}: declared god-module on ${
+          !hasMulti ? "size" : !hasCouplingCount ? "touches-only" : "coupling"
+        } evidence alone`,
       });
     }
   }
@@ -308,6 +315,36 @@ function validateDebtRegister(register, gapIds, errors) {
   }
 }
 
+/**
+ * ARH0-AC1: every inventoried production module routes to exactly one
+ * surviving owner or an explicit debt-row disposition; joining the inventory
+ * against owners/debt-register rejects silent absorption (contract §2/§8).
+ */
+function validateOwnershipCoverage(products, errors) {
+  const caseId = "ARH0-ownership";
+  const owned = new Set(products["responsibility-map"].owners.map((r) => r.module));
+  const debt = new Set(products["debt-register"].rows.map((r) => r.candidatePath));
+  const rows = [
+    ...products["codebase-inventory"].crates,
+    ...products["codebase-inventory"].packages,
+  ];
+  for (const row of rows) {
+    if (owned.has(row.module) && debt.has(row.module)) {
+      errors.push({
+        caseId,
+        code: "module-double-disposition",
+        detail: `${row.module}: both an owner row and a debt-register row`,
+      });
+    } else if (!owned.has(row.module) && !debt.has(row.module)) {
+      errors.push({
+        caseId,
+        code: "inventory-module-unowned",
+        detail: `${row.module}: in neither owners nor debt-register (silent absorption)`,
+      });
+    }
+  }
+}
+
 export function mandatoryCases() {
   return [
     "ARH0-authority",
@@ -323,4 +360,17 @@ export function mandatoryCases() {
 /** Case ids with at least one recorded error (dirty-twin selection helper). */
 export function selectedCaseIds(result) {
   return [...new Set(result.errors.map((e) => e.caseId))];
+}
+
+// The manifest documents `node tests/architecture-health/ARH0/verify.mjs` as
+// this node's verify command; it must validate the real products, not no-op.
+const isMain =
+  process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+if (isMain) {
+  const result = validate(loadProducts(), loadAuthority());
+  if (!result.ok) {
+    console.error(result.errors.map((e) => `${e.caseId}/${e.code}: ${e.detail}`).join("\n"));
+    process.exit(1);
+  }
+  console.log(`ARH0 verify: PASS cases=${mandatoryCases().join(",")}`);
 }

@@ -17,10 +17,12 @@ Clean products validate: inventory totals equal row sums, all module/consumer/ca
 
 - `unknown-owner`: train without charters dir and without gap annotation (dirty twin invents `expansion.nope` for `crates/verter_parser`).
 - `duplicate-module`, `owner-without-responsibility`: structural discipline of the map.
+- `inventory-module-unowned`: an inventory crate/package in neither `owners` nor `debt-register.candidatePath` (silent absorption; dirty twin drops the `crates/verter_parser` owner row).
+- `module-double-disposition`: a module with both an owner row and a debt row (dirty twin adds a debt row for the owned `crates/verter_parser`).
 
 ## ARH0-god-evidence (reject) — ARH0-AC2 discriminator
 
-- `god-without-responsibility-evidence`: a god-module-candidate row reduced to one responsibility and size-only evidence. A large file alone never declares a god module.
+- `god-without-responsibility-evidence`: a god-module-candidate row reduced to one responsibility and size-only evidence, or to touches-only coupling (a touch count is churn, not coupling; the dirty twin strips `fanIn` from the live `flow_slice_content.rs` row). A large file alone never declares a god module; coupling evidence is a shared-commit count or fan-in.
 - `split-module-reclassified-without-new-evidence`: the retired Phase 11 target `meta_resolve.rs` pushed back into godModuleCandidates with only pre-split history. Previously split modules need fresh measured multi-responsibility evidence.
 
 ## ARH0-capability (reject)

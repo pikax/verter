@@ -900,6 +900,256 @@
       "evidence": [
         "documented: testing skill"
       ]
+    },
+    {
+      "module": "crates/verter_parser",
+      "owner": {
+        "id": "expansion.kernel",
+        "kind": "train"
+      },
+      "responsibility": [
+        "framework-neutral Vue SFC parser and syntax facts substrate over the pinned oxc parser substrate"
+      ],
+      "evidence": [
+        "documented: docs/guide/architecture.md module map (framework-neutral parser)",
+        "graph: fan-in 4",
+        "documented: capability matrix names it consumer of rust-parser-substrate (oxc 0.126.0)"
+      ]
+    },
+    {
+      "module": "crates/verter_debug_assert",
+      "owner": {
+        "id": "expansion.kernel",
+        "kind": "train"
+      },
+      "responsibility": [
+        "sole sanctioned debug_assert entry point for production code (leaf policy substrate)"
+      ],
+      "evidence": [
+        "documented: crate contract (sole sanctioned entry point)",
+        "documented: web-product-expansion-v1.md §3 substrate fan-in list",
+        "graph: leaf, fan-in 13"
+      ]
+    },
+    {
+      "module": "crates/verter_macro_dto",
+      "owner": {
+        "id": "expansion.kernel",
+        "kind": "train"
+      },
+      "responsibility": [
+        "dependency-neutral Vue macro handoff DTOs shared by runtime and IDE generation"
+      ],
+      "evidence": [
+        "documented: crate contract (runtime and TSC/IDE generation are separate demands)",
+        "graph: fan-in 3"
+      ]
+    },
+    {
+      "module": "crates/verter_no_typeexpr",
+      "owner": {
+        "id": "rev11.type-evaluation",
+        "kind": "train"
+      },
+      "responsibility": [
+        "NoTypeExpr marker-trait law certifying transitively TypeExpr-free types"
+      ],
+      "evidence": [
+        "documented: crate contract",
+        "graph: fan-in 5"
+      ]
+    },
+    {
+      "module": "crates/verter_no_typeexpr_derive",
+      "owner": {
+        "id": "rev11.type-evaluation",
+        "kind": "train"
+      },
+      "responsibility": [
+        "derive macro emitting field-recursive NoTypeExpr witnesses"
+      ],
+      "evidence": [
+        "documented: crate contract"
+      ]
+    },
+    {
+      "module": "crates/verter_no_storedspan",
+      "owner": {
+        "id": "expansion.kernel",
+        "kind": "train"
+      },
+      "responsibility": [
+        "NoStoredSpan marker-trait law certifying transitively span-free types"
+      ],
+      "evidence": [
+        "documented: crate contract",
+        "graph: fan-in 2"
+      ]
+    },
+    {
+      "module": "crates/verter_no_storedspan_derive",
+      "owner": {
+        "id": "expansion.kernel",
+        "kind": "train"
+      },
+      "responsibility": [
+        "derive macro emitting field-recursive NoStoredSpan witnesses"
+      ],
+      "evidence": [
+        "documented: crate contract"
+      ]
+    },
+    {
+      "module": "crates/verter_session_query",
+      "owner": {
+        "id": "rev11.host-session",
+        "kind": "train"
+      },
+      "responsibility": [
+        "query side of the host/query inversion of control (what the query layer demands of the session host)"
+      ],
+      "evidence": [
+        "documented: crate contract (query-boundary crate for the shared semantic engine)",
+        "graph: fan-in 1, fan-out 1"
+      ]
+    },
+    {
+      "module": "crates/verter_shipped_cfg_contract",
+      "owner": {
+        "id": "governance.github-control-plane",
+        "kind": "train"
+      },
+      "responsibility": [
+        "shipped-cfg Surface 3 contract lane (gate half two, wired into scripts/gate.mjs)"
+      ],
+      "evidence": [
+        "documented: crate contract (Surface 3 replacement, half two of two)",
+        "charter-declared: SG0 names the canonical gate halves"
+      ]
+    },
+    {
+      "module": "crates/verter_source_policy_gate",
+      "owner": {
+        "id": "governance.github-control-plane",
+        "kind": "train"
+      },
+      "responsibility": [
+        "repository-policy test lane hosting the policy cases relocated out of verter_session (no production surface)"
+      ],
+      "evidence": [
+        "documented: crate contract (no production surface)",
+        "documented: SIMP3-SIMP5 charters relocate policy case files here"
+      ]
+    },
+    {
+      "module": "crates/verter_test_support",
+      "owner": {
+        "id": "expansion.kernel",
+        "kind": "train"
+      },
+      "responsibility": [
+        "shared cross-crate test-only primitives preventing known flake classes"
+      ],
+      "evidence": [
+        "documented: crate contract (test-only flake prevention)"
+      ]
+    },
+    {
+      "module": "crates/verter_session_oracle_macro",
+      "owner": {
+        "id": "rev11.flow",
+        "kind": "train"
+      },
+      "responsibility": [
+        "self-keyed oracle-row proc-macro for lifted TS7 TypeExpr-projection rows (session tests only)"
+      ],
+      "evidence": [
+        "documented: crate contract (TS7 oracle contract §Q4)",
+        "graph: consumed only by verter_session"
+      ]
+    },
+    {
+      "module": "crates/verter_compile_contracts",
+      "owner": {
+        "id": "governance.github-control-plane",
+        "kind": "train"
+      },
+      "responsibility": [
+        "standalone trybuild compile-fail contract runner for workspace crates (scripts/compile-contracts.mjs lane)"
+      ],
+      "evidence": [
+        "documented: CLAUDE.md compile-contracts lane",
+        "graph: no internal dependents (publish = false lane crate)"
+      ]
+    },
+    {
+      "module": "crates/verter_compile_contracts_bench",
+      "owner": {
+        "id": "governance.github-control-plane",
+        "kind": "train"
+      },
+      "responsibility": [
+        "bench-feature compile-fail contract runner for verter_compiler"
+      ],
+      "evidence": [
+        "documented: crate contract",
+        "graph: no internal dependents (publish = false lane crate)"
+      ]
+    },
+    {
+      "module": "crates/verter_compile_contracts_session_variants",
+      "owner": {
+        "id": "governance.github-control-plane",
+        "kind": "train"
+      },
+      "responsibility": [
+        "feature-profile compile contracts for verter_session"
+      ],
+      "evidence": [
+        "documented: crate contract",
+        "graph: no internal dependents (publish = false lane crate)"
+      ]
+    },
+    {
+      "module": "packages/proto",
+      "owner": {
+        "id": "expansion.kernel",
+        "kind": "train"
+      },
+      "responsibility": [
+        "generated TS transport-schema mirror of crates/verter_protocol/proto (buf/protoc-gen-es, freshness-gated)"
+      ],
+      "evidence": [
+        "documented: web-product-expansion-v1.md §1 generated classification and §6 transport schemas",
+        "documented: capability matrix names it consumer of the transport-schemas row"
+      ]
+    },
+    {
+      "module": "packages/verter-mcp",
+      "owner": {
+        "id": "expansion.cli",
+        "kind": "train"
+      },
+      "responsibility": [
+        "published verter-mcp npm launcher for the MCP server binary surface"
+      ],
+      "evidence": [
+        "documented: web-product-expansion-v1.md §2 load-bearing table (expansion.cli MCP tool surface)"
+      ]
+    },
+    {
+      "module": "tools",
+      "owner": {
+        "id": "governance.github-control-plane",
+        "kind": "train"
+      },
+      "responsibility": [
+        "debug and capability-gate tooling (lldb attach helper, tsgo --api gate harness)"
+      ],
+      "evidence": [
+        "documented: web-product-expansion-v1.md §2 (tools/ under gate governance)",
+        "documented: tools/tsgo-api-gate README"
+      ]
     }
   ],
   "godModuleCandidates": [
@@ -914,8 +1164,7 @@
       ],
       "couplingEvidence": {
         "touchesSinceJune": 19,
-        "fanIn": 5,
-        "topCoChangePair": "crates/verter_compiler <-> crates/verter_session (105 shared commits)"
+        "fanIn": 5
       },
       "evidenceKinds": [
         "multi-responsibility",
@@ -991,7 +1240,8 @@
         "slice publication admission"
       ],
       "couplingEvidence": {
-        "touchesSinceJune": 34
+        "touchesSinceJune": 34,
+        "fanIn": 9
       },
       "evidenceKinds": [
         "multi-responsibility",
