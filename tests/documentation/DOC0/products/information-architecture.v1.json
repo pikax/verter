@@ -1,0 +1,62 @@
+{
+  "id": "information-architecture.v1",
+  "docTypes": [
+    {
+      "type": "tutorial",
+      "owner": "DOC4",
+      "assets": ["docs/index.md", "docs/guide/index.md", "docs/guide/getting-started.md"],
+      "versionPolicy": "site-release",
+      "deprecationPolicy": "journey re-authored or withdrawn with the release that invalidates it; CHANGELOG notice for Stable APIs it teaches"
+    },
+    {
+      "type": "how-to",
+      "owners": ["DOC5", "DOC6", "DOC7", "DOC8"],
+      "assets": ["docs/guide/vite.md", "docs/guide/webpack.md", "docs/guide/other-bundlers.md", "docs/guide/linting.md", "docs/migrating-from-eslint.md", "docs/migration/getDeclaredComponentMeta-removal.md", "docs/editor/vscode.md", "docs/editor/other-editors.md"],
+      "versionPolicy": "site-release plus the exact tool/package versions the journey pins",
+      "deprecationPolicy": "migration note under docs/migration/ linked from the deprecated how-to at cutover"
+    },
+    {
+      "type": "reference",
+      "owners": ["DOC2", "DOC3", "DOC7"],
+      "assets": ["docs/api/unplugin.md", "docs/api/native.md", "docs/api/wasm.md", "docs/api/types.md", "docs/api/component-meta.md", "docs/configuration.md", "docs/editor/settings.md", "docs/editor/lsp-features.md", "docs/editor/mcp-server.md", "docs/lint-rules.md", "docs/api-stability.md", "docs/generated/typeinfo-row-registry-counts.md", "docs/audit-footprint/api-reference.md", "docs/audit-footprint/structured-events.md"],
+      "versionPolicy": "exact package version per page (public packages at 0.0.1-beta.5); generated pages bind generator and source revision",
+      "deprecationPolicy": "api-stability.md beta notice rule: changelog entry plus at least one beta release of deprecation notice"
+    },
+    {
+      "type": "explanation",
+      "owners": ["DOC2", "DOC5", "DOC6", "DOC8"],
+      "assets": ["docs/guide/architecture.md", "docs/guide/features.md", "docs/guide/performance.md", "docs/guide/cross-file-optimization.md", "docs/guide/experimental.md", "docs/guide/release-state.md", "docs/guide/advanced/reactivity-classification.md", "docs/guide/advanced/template-compilation.md", "docs/arch/signature-kernel.md", "docs/audit-footprint/README.md", "docs/contributing/**", "docs/evidence/**", "docs/plans/**"],
+      "versionPolicy": "internal for contributor material; site-release for published explanations",
+      "deprecationPolicy": "internal design material is superseded in place by its owning feature node; published explanations follow the site-release cycle"
+    }
+  ],
+  "audiences": [
+    { "id": "user", "servedBy": ["guide", "api", "editor", "root standalone pages", "README", "examples/reference (DOC1)"] },
+    { "id": "contributor", "servedBy": ["contributing", "arch (excluded from build)", "evidence", "audit-footprint", "plans", "generated", "internal packages"] },
+    { "id": "agent", "servedBy": ["CLAUDE.md", "AGENTS.md", ".claude/skills/", "MCP material under docs/editor/mcp-server.md"] }
+  ],
+  "versioningPolicy": {
+    "siteReleaseBasis": { "source": "package.json", "version": "0.0.1-beta.1", "buildCommand": "pnpm docs:build", "deployConfig": "docs/netlify.toml" },
+    "apiReferenceBasis": "exact package version documented on the page; a page for an unversioned or private package is an unowned public API page",
+    "generatedBasis": "generator plus source revision; freshness-guarded pages fail validation when the source moves",
+    "stabilityLabels": { "source": "docs/api-stability.md", "classes": ["alpha", "beta", "rc/stable"], "catalogAlignment": "product-surface-catalog.toml stability_class" }
+  },
+  "deprecationPolicy": {
+    "notice": "changelog entry plus at least one beta release of deprecation notice for Stable APIs",
+    "migrationHome": "docs/migration/",
+    "example": "docs/migration/getDeclaredComponentMeta-removal.md",
+    "cutover": "superseded pages redirect or are deleted at the owning node's cutover; no second live authority"
+  },
+  "navigation": {
+    "shell": "docs/.vitepress/config.ts",
+    "qualifyingOwner": "DOC9",
+    "sections": [
+      { "route": "/guide/", "inSidebar": true },
+      { "route": "/api/", "inSidebar": true },
+      { "route": "/editor/", "inSidebar": true },
+      { "route": "/contributing/", "inSidebar": true }
+    ],
+    "unnavigatedBuiltPages": "inventory rows with nav=unnavigated remain built but unreachable from nav/sidebar; DOC9 owns their disposition",
+    "excludedFromBuild": ["arch/**"]
+  }
+}
