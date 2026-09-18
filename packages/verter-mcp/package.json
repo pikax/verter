@@ -1,6 +1,6 @@
 {
   "name": "verter-mcp",
-  "version": "0.0.1-beta.3",
+  "version": "0.0.1-beta.4",
   "description": "Model Context Protocol server exposing Verter's Vue and Svelte analysis to AI agents",
   "keywords": [
     "ai",
