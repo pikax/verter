@@ -1,0 +1,104 @@
+{
+  "id": "generated-reference-plan.v1",
+  "generationOwner": "DOC3",
+  "validationOwner": "DOC1",
+  "capabilityMatrix": {
+    "source": "TAMA controller DAG asset catalogs/product-surface-catalog.toml",
+    "catalogOwner": "L0",
+    "surfaceCount": 24,
+    "surfaceIds": [
+      "vue.direct.compile.raw",
+      "vue.direct.compile.css",
+      "vue.managed.compile.raw",
+      "vue.managed.compile.css",
+      "vue.css.semantics",
+      "svelte.direct.compile.raw",
+      "svelte.direct.compile.css",
+      "svelte.managed.compile.raw",
+      "svelte.managed.compile.css",
+      "svelte.css.semantics",
+      "vue.tsc.project_check",
+      "vue.tsc.correctness_wall",
+      "svelte.tsc.project_check",
+      "svelte.tsc.correctness_wall",
+      "vue.component_meta.scalar",
+      "vue.component_meta.batch",
+      "svelte.component_meta.scalar",
+      "svelte.component_meta.batch",
+      "vue.host_lint",
+      "svelte.host_lint",
+      "vue.language_service.typing",
+      "vue.language_service.edit",
+      "svelte.language_service.typing",
+      "svelte.language_service.edit"
+    ],
+    "rule": "sole capability truth; no second manually curated capability matrix; inventories cite surface ids and drift when the catalog drifts"
+  },
+  "apiReference": {
+    "pages": [
+      {
+        "path": "docs/api/unplugin.md",
+        "package": "@verter/unplugin",
+        "version": "0.0.1-beta.5"
+      },
+      {
+        "path": "docs/api/native.md",
+        "package": "@verter/native",
+        "version": "0.0.1-beta.5"
+      },
+      {
+        "path": "docs/api/wasm.md",
+        "package": "@verter/wasm",
+        "version": "0.0.1-beta.5"
+      },
+      {
+        "path": "docs/api/types.md",
+        "package": "@verter/types",
+        "version": "0.0.1-beta.5"
+      },
+      {
+        "path": "docs/api/component-meta.md",
+        "package": "@verter/component-meta",
+        "version": "0.0.1-beta.5"
+      }
+    ],
+    "handWrittenPagesAreMigrationInput": true,
+    "rule": "DOC3 generates API reference from package type surfaces at the exact published versions"
+  },
+  "configReference": {
+    "sources": [
+      {
+        "kind": ".verterrc.json schema",
+        "documentedBy": "docs/configuration.md"
+      },
+      {
+        "kind": "VS Code settings",
+        "documentedBy": "docs/editor/settings.md"
+      }
+    ],
+    "owner": "DOC3"
+  },
+  "lintReference": {
+    "source": "crates/verter_diagnostics/src/rules/mod.rs",
+    "ruleCount": 187,
+    "documentedBy": "docs/lint-rules.md",
+    "rule": "the documented rule population must equal the live registry count"
+  },
+  "generatedPages": [
+    {
+      "path": "docs/generated/typeinfo-row-registry-counts.md",
+      "generator": "scripts/gen-typeinfo-ignore-manifest.mjs",
+      "freshnessGuard": "crates/verter_session/tests/cases/typeinfo_manifest_freshness.rs",
+      "owner": "DOC3",
+      "validationOwner": "DOC1"
+    }
+  ],
+  "releaseSelectedChecks": {
+    "profile": "docs-domain",
+    "source": "TAMA controller DAG asset catalogs/gate-profiles.toml",
+    "commands": [
+      "pnpm docs:build"
+    ],
+    "selectionRule": "the release owner selects the documentation checks per release from the ratified gate-profile catalog; documentation promotion claims require them to have run on the release candidate; the DAG-side catalog validators run in the TAMA controller, not from this repository"
+  }
+}
