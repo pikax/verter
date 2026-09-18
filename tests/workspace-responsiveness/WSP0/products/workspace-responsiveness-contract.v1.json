@@ -1,0 +1,181 @@
+{
+  "schema": "workspace-responsiveness-contract.v1",
+  "ratifiedBy": "WSP0",
+  "contract": "contracts/workspace-responsiveness-v1.md",
+  "status": "ratified",
+  "predecessors": {
+    "ORC0": "trusted implementation-ledger cutover; implementation state resolves through authority/state/implemented.toml",
+    "MEM0": "aggregate semantic memory budget and fixed churn workload (catalogs/semantic-memory-budget.toml, catalogs/semantic-memory-workload/)"
+  },
+  "ownership": {
+    "finalOwner": "expansion.workspace-responsiveness",
+    "retirementObligation": "retired only when the ratified interactive SLO catalog is measured-and-rebaselined by an owning successor through a recorded amendment, or superseded by a successor constitution; never by unrecorded deletion",
+    "preservedOwners": [
+      "semantic algorithms",
+      "project resolution",
+      "format/lint logic",
+      "TypeScript projection",
+      "edit transactions"
+    ]
+  },
+  "conflictDomains": ["lsp_publication", "performance_evidence", "scheduler_admission"],
+  "measurementDefinitions": [
+    {
+      "id": "client_input_to_paint",
+      "measures": "client-side UI responsiveness from input event to applied paint",
+      "unit": "ms",
+      "domain": "client",
+      "independentOf": "server_request_to_response",
+      "instrumentationOwner": "WSP1",
+      "instrumentationStatus": "not-instrumented"
+    },
+    {
+      "id": "server_request_to_response",
+      "measures": "server handling time per request with internal phase spans; evidence for server work only, never an interactivity certificate",
+      "unit": "ms",
+      "domain": "server",
+      "instrumentationOwner": "WSP1",
+      "instrumentationStatus": "not-instrumented"
+    },
+    {
+      "id": "process_tree_rss",
+      "measures": "total retained RSS summed across the whole process tree (client, server, providers, workers)",
+      "unit": "MiB",
+      "domain": "host",
+      "instrumentationOwner": "WSP1",
+      "instrumentationStatus": "not-instrumented"
+    },
+    {
+      "id": "language_service_incremental_rss",
+      "measures": "incremental/retained RSS attributable to the language service, reported separately from the process-tree total",
+      "unit": "MiB",
+      "domain": "host",
+      "separateFrom": "process_tree_rss",
+      "instrumentationOwner": "WSP1",
+      "instrumentationStatus": "not-instrumented"
+    },
+    {
+      "id": "protocol_bytes_and_messages",
+      "measures": "outbound bytes and message counts per scenario window, by notification family",
+      "unit": "bytes+count",
+      "domain": "server",
+      "instrumentationOwner": "WSP1",
+      "instrumentationStatus": "not-instrumented"
+    },
+    {
+      "id": "decode_apply_time",
+      "measures": "client time decoding and applying server payloads",
+      "unit": "ms",
+      "domain": "client",
+      "instrumentationOwner": "WSP1",
+      "instrumentationStatus": "not-instrumented"
+    },
+    {
+      "id": "worker_queue_depth_and_wait",
+      "measures": "CPU/IO pool queue depth and wait under the existing scheduler admission",
+      "unit": "count+ms",
+      "domain": "server",
+      "instrumentationOwner": "WSP1",
+      "instrumentationStatus": "not-instrumented"
+    },
+    {
+      "id": "provider_work",
+      "measures": "work performed by provider engines (tsgo/tsserver modes) per scenario window, including their process cost",
+      "unit": "ms+MiB",
+      "domain": "provider",
+      "instrumentationOwner": "WSP1",
+      "instrumentationStatus": "not-instrumented"
+    },
+    {
+      "id": "cancellation_waste",
+      "measures": "work started then discarded by cancellation, count and duration",
+      "unit": "count+ms",
+      "domain": "server",
+      "instrumentationOwner": "WSP1",
+      "instrumentationStatus": "not-instrumented"
+    }
+  ],
+  "workloadMatrix": [
+    {
+      "id": "authored-1k",
+      "class": "scale-tier",
+      "characteristics": ["1000 authored sources"],
+      "realProjectBinding": { "status": "unpinned", "owner": "WSP1" }
+    },
+    {
+      "id": "authored-10k",
+      "class": "scale-tier",
+      "characteristics": ["10000 authored sources"],
+      "realProjectBinding": { "status": "unpinned", "owner": "WSP1" }
+    },
+    {
+      "id": "authored-50k",
+      "class": "scale-tier",
+      "characteristics": ["50000 authored sources"],
+      "realProjectBinding": { "status": "unpinned", "owner": "WSP1" }
+    },
+    {
+      "id": "monorepo-references",
+      "class": "structural-adversary",
+      "characteristics": ["cross-package references", "tsconfig paths across packages"],
+      "realProjectBinding": { "status": "unpinned", "owner": "WSP1" }
+    },
+    {
+      "id": "single-1mib-source",
+      "class": "structural-adversary",
+      "characteristics": ["one 1 MiB authored source file"]
+    },
+    {
+      "id": "high-diagnostic-density",
+      "class": "structural-adversary",
+      "characteristics": ["dense lint and type diagnostics across carriers"]
+    },
+    {
+      "id": "unicode-crlf",
+      "class": "structural-adversary",
+      "characteristics": ["non-ASCII identifiers and strings", "CRLF line endings"]
+    },
+    {
+      "id": "ignored-dependency-trees",
+      "class": "structural-adversary",
+      "characteristics": ["ignored dependency trees present on disk", "membership excludes them while resolution sees them"]
+    },
+    {
+      "id": "edit-storm",
+      "class": "dynamic-adversary",
+      "characteristics": ["rapid sequential authored edits", "per-edit publication"]
+    },
+    {
+      "id": "slow-reading-client",
+      "class": "dynamic-adversary",
+      "characteristics": ["delayed client reads applying backpressure"]
+    }
+  ],
+  "correctnessDenominator": {
+    "featuresEnabled": "all-required-current",
+    "diagnostics": "full-publication",
+    "membership": "full-project-membership",
+    "truncation": "forbidden"
+  },
+  "equalWorkCorpus": {
+    "memorySide": "catalogs/semantic-memory-workload/",
+    "pinnedFixtureCount": 9,
+    "realProjectPins": { "status": "unpinned", "owner": "WSP1" }
+  },
+  "basisLaw": {
+    "receiptVocabulary": "contracts/product-experience.md#4",
+    "completenessStates": ["complete", "complete-empty", "partial", "pending", "unsupported", "ambiguous", "failed", "cancelled", "stale"],
+    "rejectedOutcomes": ["old-source", "old-project", "old-engine", "old-worker", "wrong-result-handle"],
+    "incrementalVsFresh": "compared only on the same recorded basis and machine manifest"
+  },
+  "budgetLaw": {
+    "predeclared": "budgets are pinned in the interactive SLO catalog before any optimization",
+    "clientMandatory": "every interactive SLO row carries a client-domain budget; server-only certification is forbidden",
+    "forbiddenImprovements": ["reduced-feature-set", "hidden-error-truncation", "reduced-project-membership", "dropped-diagnostics"],
+    "metricLabeling": "unavailable metrics are labelled not-instrumented; guessed zeros are forbidden"
+  },
+  "exposureLaw": {
+    "introducedOperations": [],
+    "rule": "any operation a later node in this train exposes registers through DX1's descriptor contract with executable route, replay case and completeness states; promotion blocked until executable exposure exists"
+  }
+}
