@@ -5,11 +5,13 @@ import test from "node:test";
 
 import {
   MANDATORY_CASES,
+  NODE_MANDATORY_CASES,
   assertCheckCounts,
   assertCleanTwin,
   assertExactType,
   assertInventoryComplete,
   assertNonZeroSelection,
+  assertStp2Products,
   cloneJson,
   loadNodeManifest,
   loadObligation,
@@ -288,4 +290,48 @@ test("engine filter all admits both pins", () => {
     pins.map((pin) => pin.id),
     ["ts-js", "ts-native"],
   );
+});
+
+test("STP2 node manifest is schema-valid and lists every mandatory case", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP2/manifest.json");
+  assert.equal(node.errors.length, 0, JSON.stringify(node.errors));
+  const ids = node.manifest.cases.map((row) => row.id).sort();
+  assert.deepEqual(ids, [...NODE_MANDATORY_CASES.STP2].sort());
+});
+
+test("STP2 products name every mandatory case and specialization kind", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP2/manifest.json");
+  const errors = assertStp2Products(REPO_ROOT, node.manifest);
+  assert.equal(errors.length, 0, JSON.stringify(errors));
+});
+
+test("STP2-constructor-escape dirty twin is the broad overload, not the typed constructor", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP2/manifest.json");
+  const row = node.manifest.cases.find((entry) => entry.id === "STP2-constructor-escape");
+  assert.equal(row.disposition, "reject");
+  assert.equal(row.expectedCode, 2353);
+  assert.match(row.dirtyTwin, /reject-constructor-escape\.ts$/);
+});
+
+test("STP2 verify: all mandatory cases run on each admitted engine", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP2",
+    engine: "all",
+    requireAll: true,
+    json: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.deepEqual([...NODE_MANDATORY_CASES.STP2].sort(), [...result.mandatoryCases].sort());
+  for (const id of NODE_MANDATORY_CASES.STP2) {
+    assert.ok(selectedCaseIds(result).includes(id), `missing selected case ${id}`);
+  }
+  assert.equal(result.engines.length, 2, JSON.stringify(result.engines));
+  assert.equal(result.harnessRuns.length, 2);
+  assert.equal(result.incremental, "fresh");
+  for (const run of result.harnessRuns) {
+    for (const count of Object.values(run.checkCounts)) {
+      assert.equal(count, 1, JSON.stringify(run.checkCounts));
+    }
+  }
 });

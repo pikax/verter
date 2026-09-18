@@ -66,6 +66,17 @@
         "properties": {
           "id": { "type": "string", "minLength": 1 },
           "disposition": { "enum": ["accept", "reject"] },
+          "file": { "type": "string", "minLength": 1 },
+          "files": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "dirtyTwin": { "type": "string", "minLength": 1 },
+          "expectedCode": { "type": "integer" },
+          "dirtyExpectedCode": { "type": "integer" },
+          "hoverNeedle": { "type": "string", "minLength": 1 },
+          "expectedHoverType": { "type": "string", "minLength": 1 },
+          "expectedInstanceType": { "type": "string", "minLength": 1 },
           "twins": {
             "type": "array",
             "items": { "type": "string", "minLength": 1 }

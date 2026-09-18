@@ -1,0 +1,68 @@
+{
+  "schema": "InstanceTypeCompatibilityTable",
+  "version": 1,
+  "product": "InstanceTypeCompatibilityTable",
+  "node": "STP2",
+  "instanceSpelling": "InstanceType<typeof Comp>",
+  "genericInstanceSpelling": "InstanceType<typeof Comp<Args>>",
+  "rows": [
+    {
+      "id": "STP2-instance-concrete",
+      "disposition": "accept",
+      "import": "tests/sfc-projection/STP2/probes/components/Concrete.vue",
+      "kind": "unbound-extraction",
+      "observables": ["reset(): void", "$props.msg: string", "$emit", "$slots"]
+    },
+    {
+      "id": "STP2-instance-generic",
+      "disposition": "accept",
+      "import": "tests/sfc-projection/STP2/probes/components/Generic.vue",
+      "kind": "unbound-extraction",
+      "observables": ["value: unknown", "label: string", "zero-argument construction"]
+    },
+    {
+      "id": "STP2-instance-explicit",
+      "disposition": "accept",
+      "import": "tests/sfc-projection/STP2/probes/components/Generic.vue",
+      "kind": "explicit-specialization",
+      "observables": ["Comp<number>", "value: number", "Foo<number>.value: number"]
+    },
+    {
+      "id": "STP2-constructor-escape",
+      "disposition": "reject",
+      "reason": "broad-construct-overload",
+      "observables": ["wrong props accepted", "InstanceType extraction"]
+    },
+    {
+      "id": "STP2-vue-utilities",
+      "disposition": "accept",
+      "kind": "template-use",
+      "observables": ["createApp", "h", "TSX"]
+    },
+    {
+      "id": "STP2-not-callable",
+      "disposition": "reject",
+      "reason": "callable-sfc-default-export",
+      "observables": ["Comp({ msg }) is not callable"]
+    },
+    {
+      "id": "STP2-constructor-inferred",
+      "disposition": "accept",
+      "kind": "props-inferred-construction",
+      "observables": [
+        "new Comp({ test: 0 }).value: number",
+        "sibling string remains independent",
+        "Foo control"
+      ]
+    },
+    {
+      "id": "STP2-explicit-input-mismatch",
+      "disposition": "reject",
+      "reason": "explicit-number-rejects-string-prop",
+      "observables": [
+        "new Comp<number>({ test: \"wrong\" })",
+        "new NumberComp({ test: \"wrong\" })"
+      ]
+    }
+  ]
+}

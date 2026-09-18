@@ -9,6 +9,10 @@
     {
       "id": "STP1",
       "manifest": "tests/sfc-projection/STP1/manifest.json"
+    },
+    {
+      "id": "STP2",
+      "manifest": "tests/sfc-projection/STP2/manifest.json"
     }
   ]
 }
