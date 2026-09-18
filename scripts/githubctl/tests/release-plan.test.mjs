@@ -43,7 +43,16 @@ function clearanceFor(adapter, require = ["actions"]) {
 function writeWorkflows(repoRoot, checkYaml) {
   const dir = path.join(repoRoot, ".github", "workflows");
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, "release.yml"), "name: Release\n");
+  fs.writeFileSync(
+    path.join(dir, "release.yml"),
+    `name: Release
+jobs:
+  clean-room:
+    runs-on: ubuntu-latest
+    steps:
+      - run: node scripts/githubctl/clean-room.mjs
+`,
+  );
   fs.writeFileSync(path.join(dir, "release-check.yml"), checkYaml);
 }
 

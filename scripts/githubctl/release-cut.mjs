@@ -125,6 +125,7 @@ export function releaseCut(options) {
     recorded: mode === "apply",
     dispatched: false,
     terminal_result: "not-run",
+    clean_room: { kind: "CleanRoomPublishedArtifact", hosted: true, skipped: false },
   };
   const authorization = { kind: "ReleaseCutAuthorization", authorized: authorize };
   const landing = {

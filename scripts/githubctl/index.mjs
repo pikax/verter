@@ -49,6 +49,12 @@ export {
 export { schedule, schedulePreflight } from "./schedule.mjs";
 export { projectStatus, projectStatusPreflight } from "./project-status.mjs";
 export { releasePlan, RELEASE_REHEARSAL, rehearsalIdentity } from "./release-plan.mjs";
+export {
+  CLEAN_ROOM_KIND,
+  assertCleanRoomHosted,
+  declaredEntrypoints,
+  runCleanRoomCheck,
+} from "./clean-room.mjs";
 export { releaseCut, createReleasePullRequest } from "./release-cut.mjs";
 export { createPr } from "./create-pr.mjs";
 export { reviewSummary } from "./review-summary.mjs";

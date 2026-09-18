@@ -74,6 +74,12 @@ train = "governance.release-control"
 predecessors = ["REL1"]
 
 [[node]]
+id = "REL3"
+name = "Clean-room published-package installation and public entrypoint smoke"
+train = "governance.release-control"
+predecessors = ["REL2"]
+
+[[node]]
 id = "GH6"
 name = "Minimal GitHub workflow convergence and cutover"
 train = "governance.github-control-plane"

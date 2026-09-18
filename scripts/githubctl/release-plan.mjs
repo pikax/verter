@@ -8,6 +8,7 @@ import {
   assertMutationMode,
   assertRequiredText,
 } from "./adapter.mjs";
+import { assertCleanRoomHosted } from "./clean-room.mjs";
 import { AmbiguousWaiverError, GitHubAdapterError } from "./errors.mjs";
 import { loadLedgerFile } from "./ledger-write.mjs";
 import {
@@ -185,6 +186,7 @@ export function rehearsalIdentity(repoRoot = REPO_ROOT) {
     throw new GitHubAdapterError(`missing required workflow ${RELEASE_REHEARSAL.uses}`);
   }
   assertReleaseCheckDryRun(fs.readFileSync(checkPath, "utf8"));
+  assertCleanRoomHosted(fs.readFileSync(releasePath, "utf8"));
   return { workflow: RELEASE_REHEARSAL.workflow, uses: RELEASE_REHEARSAL.uses, dry_run: true };
 }
 
@@ -349,6 +351,7 @@ export function releasePlan(options) {
     recorded: mode === "apply",
     dispatched: false,
     terminal_result: "not-run",
+    clean_room: { kind: "CleanRoomPublishedArtifact", hosted: true, skipped: false },
   };
   const report = {
     kind: "release-plan",

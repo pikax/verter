@@ -369,6 +369,7 @@ schema = 2
 "REL0" = { status = "implemented", commit_message = "feat(ci): overlay READY work onto GitHub Project 3", commit_date = "2026-08-29T01:22:51+01:00" }
 "REL1" = { status = "implemented", commit_message = "feat(ci): plan milestone release readiness from the local ledger", commit_date = "2026-08-29T05:20:00+01:00" }
 "REL2" = { status = "implemented", commit_message = "feat(ci): cut release pull requests with a versioned squash subject", commit_date = "2026-08-29T18:00:00+01:00" }
+"REL3" = { status = "implemented", commit_message = "feat(ci): clean-room smoke published package entrypoints before release", commit_date = "2026-09-18T16:00:00+01:00" }
 "SCE0" = { status = "pending" }
 "SCP0" = { status = "pending" }
 "SCP1" = { status = "pending" }

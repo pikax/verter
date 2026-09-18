@@ -1285,6 +1285,53 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   # ---------------------------------------------------------------------------
+  # Clean-room published-package install + public entrypoint smoke.
+  # Observes packed artifacts; does not publish. Must run in rehearsal
+  # (dry_run true) as well as on a real tag, so an unloadable tarball
+  # blocks before publication rather than after.
+  # ---------------------------------------------------------------------------
+  clean-room:
+    name: Clean-room published-package smoke
+    needs:
+      [
+        validate,
+        test,
+        provider-tsserver,
+        provider-tsgo,
+        compiler-contracts,
+        bf2-authoritative,
+        editor-helix,
+        editor-lapce,
+        editor-zed,
+        editor-neovim,
+        build-native,
+        build-lsp,
+        build-mcp,
+        build-tsc,
+        build-wasm,
+      ]
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: "{native-*,tsc-*,lsp-*,mcp-*,wasm}"
+          path: ${{ runner.temp }}/release-artifacts
+      - name: Stage release artifacts
+        run: node scripts/release-publish.mjs stage --artifacts "${RUNNER_TEMP}/release-artifacts"
+      - name: Prepare packages
+        run: node scripts/release-publish.mjs prepare
+      - name: Clean-room install and public entrypoint smoke
+        run: node scripts/githubctl/clean-room.mjs --work-dir "${RUNNER_TEMP}/clean-room-${{ github.run_id }}-${{ github.run_attempt }}"
+
+  # ---------------------------------------------------------------------------
   # Publish npm packages
   # ---------------------------------------------------------------------------
   publish-npm:
@@ -1306,6 +1353,7 @@ jobs:
         build-mcp,
         build-tsc,
         build-wasm,
+        clean-room,
       ]
     if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
