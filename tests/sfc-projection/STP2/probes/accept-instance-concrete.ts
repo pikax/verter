@@ -16,7 +16,18 @@ export const stp2PropsMsg: string = instance.$props.msg;
 export const stp2DefinitionTarget: typeof Comp = Comp;
 
 const asComponent: Component = Comp;
+const asCpi: ComponentPublicInstance<
+  { readonly msg: string },
+  { reset(): void },
+  {},
+  {},
+  {},
+  { reset: [] }
+> = instance;
+export const constructed: Instance = new Comp({ msg: "ok" });
 void asComponent;
+void asCpi;
+void constructed;
 void instance.$emit;
 void instance.$slots;
 void instance.$props;

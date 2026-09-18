@@ -1,7 +1,7 @@
 import type { ComponentPublicInstance, Slot } from "vue";
 
 type ConcreteProps = { readonly msg: string };
-type ConcreteEmit = ((event: "reset") => void) & ((event: "reset", ...args: unknown[]) => void);
+type ConcreteEmit = (event: "reset", ...args: []) => void;
 type ConcreteSlots = Readonly<{
   default?: Slot<{ msg: string }>;
 }>;
@@ -20,7 +20,8 @@ export interface Comp extends ComponentPublicInstance<
   ConcreteExposed,
   {},
   {},
-  ConcreteExposed
+  {},
+  { reset: [] }
 > {}
 
 export default Comp;

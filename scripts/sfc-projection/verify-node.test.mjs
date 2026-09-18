@@ -9,6 +9,7 @@ import {
   assertCheckCounts,
   assertCleanTwin,
   assertExactType,
+  assertFooSyntaxControl,
   assertInventoryComplete,
   assertNonZeroSelection,
   assertStp2Products,
@@ -19,6 +20,7 @@ import {
   parseArgs,
   readJson,
   repoPath,
+  resolveDefinitionName,
   resolveEngine,
   selectCases,
   selectEngines,
@@ -303,6 +305,35 @@ test("STP2 products name every mandatory case and specialization kind", () => {
   const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP2/manifest.json");
   const errors = assertStp2Products(REPO_ROOT, node.manifest);
   assert.equal(errors.length, 0, JSON.stringify(errors));
+});
+
+test("STP2 Foo syntax control is required, not optional", () => {
+  const present = assertFooSyntaxControl({
+    syntaxControl: {
+      spelling: "declare class Foo<T = unknown> { constructor(props?: { test: T }) }",
+    },
+  });
+  assert.equal(present.length, 0, JSON.stringify(present));
+  const absent = assertFooSyntaxControl({});
+  assert.ok(
+    absent.some(
+      (error) =>
+        error.caseId === "STP2-instance-explicit" && error.message.includes("Foo syntax control"),
+    ),
+    JSON.stringify(absent),
+  );
+  const wrong = assertFooSyntaxControl({ syntaxControl: { spelling: "declare class Bar" } });
+  assert.ok(wrong.length > 0, JSON.stringify(wrong));
+});
+
+test("definition observation prefers definitionNeedle over Comp substring", () => {
+  const text = `import { type Component } from "vue";\nimport Comp from "./components/Concrete.vue";\nexport const stp2DefinitionTarget: typeof Comp = Comp;\n`;
+  assert.equal(
+    resolveDefinitionName(text, { definitionNeedle: "stp2DefinitionTarget" }),
+    "stp2DefinitionTarget",
+  );
+  assert.equal(resolveDefinitionName("import Comp from './x'", {}), "Comp");
+  assert.equal(resolveDefinitionName("import { type Component } from 'vue'", {}), null);
 });
 
 test("STP2-constructor-escape dirty twin is the broad overload, not the typed constructor", () => {

@@ -11,9 +11,12 @@ defineSlots<{
   default?: (props: { msg: string }) => unknown;
 }>();
 
+const hidden = "not-exposed";
+
 function reset(): void {
   emit("reset");
   void props.msg;
+  void hidden;
 }
 
 defineExpose({ reset });

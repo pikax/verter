@@ -33,6 +33,14 @@
       "expectedInstanceType": "Comp",
       "hoverNeedle": "stp2HoverTarget",
       "expectedHoverType": "() => void",
+      "files": [
+        "tests/sfc-projection/STP2/probes/reject-wrong-emit-payload.ts",
+        "tests/sfc-projection/STP2/probes/reject-leaked-setup.ts"
+      ],
+      "fileExpectedCodes": {
+        "tests/sfc-projection/STP2/probes/reject-wrong-emit-payload.ts": 2554,
+        "tests/sfc-projection/STP2/probes/reject-leaked-setup.ts": 2339
+      },
       "twins": ["imported .vue InstanceType", "any", "vacuous-never"]
     },
     {
@@ -69,6 +77,8 @@
       "file": "tests/sfc-projection/STP2/probes/accept-vue-utilities.tsx",
       "hoverNeedle": "stp2HoverTarget",
       "expectedHoverType": "string",
+      "files": ["tests/sfc-projection/STP2/probes/reject-foreign-utility.tsx"],
+      "expectedCode": 2322,
       "twins": ["createApp", "h", "TSX"]
     },
     {

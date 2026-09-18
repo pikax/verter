@@ -352,13 +352,33 @@ export function assertStp2Products(repoRoot, nodeManifest) {
       );
     }
   }
-  if (
-    evidence.syntaxControl?.spelling &&
-    !String(evidence.syntaxControl.spelling).includes("declare class Foo")
-  ) {
-    errors.push(err("STP2-instance-explicit", "removed-fixture", "missing Foo syntax control"));
+  errors.push(...assertFooSyntaxControl(evidence));
+  if (!String(evidence.publicOptionsStaticBehavior?.rationale || "").trim()) {
+    errors.push(
+      err(
+        "STP2-instance-concrete",
+        "removed-fixture",
+        "missing public options/static behavior rationale",
+      ),
+    );
+  }
+  if (!String(evidence.componentPublicInstanceAssignability?.rationale || "").trim()) {
+    errors.push(
+      err(
+        "STP2-instance-concrete",
+        "removed-fixture",
+        "missing ComponentPublicInstance assignability rationale",
+      ),
+    );
   }
   return errors;
+}
+
+export function assertFooSyntaxControl(evidence) {
+  if (!String(evidence?.syntaxControl?.spelling || "").includes("declare class Foo")) {
+    return [err("STP2-instance-explicit", "removed-fixture", "missing Foo syntax control")];
+  }
+  return [];
 }
 
 function pinExe(pin, pkgDir) {
@@ -514,6 +534,29 @@ function offsetOf(text, needle) {
   return pos;
 }
 
+function identifierPattern(name) {
+  const escaped = String(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![A-Za-z0-9_$])${escaped}(?![A-Za-z0-9_$])`);
+}
+
+export function hasIdentifier(text, name) {
+  if (!name) return false;
+  return identifierPattern(name).test(text);
+}
+
+export function identifierOffset(text, name) {
+  if (!name) return -1;
+  const match = identifierPattern(name).exec(text);
+  return match ? match.index : -1;
+}
+
+export function resolveDefinitionName(text, probes = {}) {
+  const needle = probes.definitionNeedle;
+  if (needle && hasIdentifier(text, needle)) return needle;
+  if (hasIdentifier(text, "Comp")) return "Comp";
+  return null;
+}
+
 function jsTypeFlags(ts, type) {
   return type?.flags ?? 0;
 }
@@ -530,7 +573,7 @@ function createJsProgram(ts, fileAbs, options, checkCounts, fileKey) {
   return ts.createProgram({ rootNames: [fileAbs], options, host });
 }
 
-function runJsFile(ts, fileAbs, options, checkCounts, fileKey) {
+function runJsFile(ts, fileAbs, options, checkCounts, fileKey, probes = {}) {
   const program = createJsProgram(ts, fileAbs, options, checkCounts, fileKey);
   const sf = program.getSourceFile(fileAbs);
   const checker = program.getTypeChecker();
@@ -539,7 +582,7 @@ function runJsFile(ts, fileAbs, options, checkCounts, fileKey) {
     .filter((diag) => diag.file && path.resolve(diag.file.fileName) === path.resolve(fileAbs))
     .map(normalizeDiag);
   const text = fs.readFileSync(fileAbs, "utf8");
-  const observations = observeJs(ts, checker, sf, text);
+  const observations = observeJs(ts, checker, sf, text, probes);
   return { diags, observations };
 }
 
@@ -576,7 +619,7 @@ function observeJs(ts, checker, sf, text, probes = {}) {
       };
     }
   }
-  const defName = text.includes("Comp") ? "Comp" : probes.definitionNeedle;
+  const defName = resolveDefinitionName(text, probes);
   const defNode = defName ? findIdentifier(ts, sf, defName) : null;
   if (defNode) {
     const sym = checker.getSymbolAtLocation(defNode);
@@ -625,8 +668,8 @@ export function runJsEngine(resolved, probes, repoRoot) {
   const positive = repoPath(repoRoot, probes.positive);
   const negative = repoPath(repoRoot, probes.negative);
   const checkCounts = {};
-  const pos = runJsFile(ts, positive, options, checkCounts, probes.positive);
-  const neg = runJsFile(ts, negative, options, checkCounts, probes.negative);
+  const pos = runJsFile(ts, positive, options, checkCounts, probes.positive, probes);
+  const neg = runJsFile(ts, negative, options, checkCounts, probes.negative, probes);
   return {
     engine: pin.id,
     positive: pos,
@@ -702,15 +745,11 @@ function observeNative(project, fileAbs, probes, checkCounts, fileKey) {
       };
     }
   }
+  const defName = resolveDefinitionName(text, probes);
   let defPos = null;
-  let defName = "Comp";
-  if (text.includes("class Comp")) {
-    defPos = offsetOf(text, "class Comp") + "class ".length;
-  } else if (text.includes("Comp")) {
-    defPos = offsetOf(text, "Comp");
-  } else if (probes.definitionNeedle && text.includes(probes.definitionNeedle)) {
-    defName = probes.definitionNeedle;
-    defPos = offsetOf(text, probes.definitionNeedle);
+  if (defName) {
+    const identPos = identifierOffset(text, defName);
+    defPos = identPos >= 0 ? identPos : offsetOf(text, defName);
   }
   if (defPos != null) {
     const sym = project.checker.getSymbolAtPosition(fileAbs, defPos);
@@ -864,6 +903,14 @@ function fileResult(run, rel) {
   return run.files?.[posix(rel)] || null;
 }
 
+function extraExpectedCode(row, extraRel) {
+  const key = posix(extraRel);
+  const keyed = row.fileExpectedCodes?.[key] ?? row.fileExpectedCodes?.[extraRel];
+  if (Number.isInteger(keyed)) return keyed;
+  if (Number.isInteger(row.expectedCode)) return row.expectedCode;
+  return null;
+}
+
 function evaluateStp2Run(run, probes, cases, engineId, { maxChecksPerFile = 1 } = {}) {
   const errors = [];
   const measured = [];
@@ -926,6 +973,17 @@ function evaluateStp2Run(run, probes, cases, engineId, { maxChecksPerFile = 1 } 
       }
       if (!primary.observations.definition) {
         errors.push(err(caseId, "missing-definition", `${engineId} missing definition target`));
+      } else if (
+        probes.definitionNeedle &&
+        primary.observations.definition.name !== probes.definitionNeedle
+      ) {
+        errors.push(
+          err(
+            caseId,
+            "missing-definition",
+            `${engineId} definition target ${primary.observations.definition.name} is not ${probes.definitionNeedle}`,
+          ),
+        );
       }
       if ((primary.observations.edits || []).length === 0) {
         errors.push(err(caseId, "missing-edit", `${engineId} missing edit participation`));
@@ -938,17 +996,28 @@ function evaluateStp2Run(run, probes, cases, engineId, { maxChecksPerFile = 1 } 
           err(caseId, "missing-references", `${engineId} missing references participation`),
         );
       }
-      if (row.expectedCode && Array.isArray(row.files)) {
+      if (Array.isArray(row.files)) {
         for (const extraRel of row.files) {
           measured.push(extraRel);
           const extra = fileResult(run, extraRel);
-          const anchored = (extra?.diags || []).filter((diag) => diag.code === row.expectedCode);
+          const expectedCode = extraExpectedCode(row, extraRel);
+          if (!Number.isInteger(expectedCode)) {
+            errors.push(
+              err(
+                caseId,
+                "missing-negative",
+                `${engineId} ${extraRel} has no expectedCode/fileExpectedCodes entry`,
+              ),
+            );
+            continue;
+          }
+          const anchored = (extra?.diags || []).filter((diag) => diag.code === expectedCode);
           if (anchored.length === 0) {
             errors.push(
               err(
                 caseId,
                 "missing-negative",
-                `${engineId} ${extraRel} lacked TS${row.expectedCode}; got ${JSON.stringify(extra?.diags || [])}`,
+                `${engineId} ${extraRel} lacked TS${expectedCode}; got ${JSON.stringify(extra?.diags || [])}`,
               ),
             );
           }
@@ -1031,6 +1100,17 @@ function evaluateHarnessRun(run, probes, engineId, { maxChecksPerFile = 1 } = {}
   }
   if (!run.positive.observations.definition) {
     errors.push(err("STP1-harness", "missing-definition", `${engineId} missing definition target`));
+  } else if (
+    probes.definitionNeedle &&
+    run.positive.observations.definition.name !== probes.definitionNeedle
+  ) {
+    errors.push(
+      err(
+        "STP1-harness",
+        "missing-definition",
+        `${engineId} definition target ${run.positive.observations.definition.name} is not ${probes.definitionNeedle}`,
+      ),
+    );
   }
   if ((run.positive.observations.edits || []).length === 0) {
     errors.push(err("STP1-harness", "missing-edit", `${engineId} missing edit participation`));

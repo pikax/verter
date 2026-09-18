@@ -1,12 +1,11 @@
 import type { ComponentPublicInstance, Slot } from "vue";
 
 type GenericProps<T> = { readonly test: T };
-type GenericEmit<T> = ((event: "change", value: T) => void) &
-  ((event: "change", ...args: unknown[]) => void);
+type GenericEmit<T> = (event: "change", ...args: [value: T]) => void;
 type GenericSlots<T> = Readonly<{
   default?: Slot<{ value: T }>;
 }>;
-type GenericExposed<T> = { readonly value: T };
+type GenericExposed<T> = { readonly value: T; readonly label: string };
 
 export declare class Comp<T = unknown> {
   constructor(props?: GenericProps<T>);
@@ -22,7 +21,8 @@ export interface Comp<T = unknown> extends ComponentPublicInstance<
   GenericExposed<T>,
   {},
   {},
-  {}
+  {},
+  { change: [value: T] }
 > {}
 
 export default Comp;

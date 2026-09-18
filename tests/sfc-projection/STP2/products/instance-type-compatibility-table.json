@@ -11,7 +11,14 @@
       "disposition": "accept",
       "import": "tests/sfc-projection/STP2/probes/components/Concrete.vue",
       "kind": "unbound-extraction",
-      "observables": ["reset(): void", "$props.msg: string", "$emit", "$slots"]
+      "observables": [
+        "reset(): void",
+        "$props.msg: string",
+        "$emit(\"reset\")",
+        "$slots",
+        "exposed-only setup members",
+        "ComponentPublicInstance assignability"
+      ]
     },
     {
       "id": "STP2-instance-generic",
@@ -25,7 +32,13 @@
       "disposition": "accept",
       "import": "tests/sfc-projection/STP2/probes/components/Generic.vue",
       "kind": "explicit-specialization",
-      "observables": ["Comp<number>", "value: number", "Foo<number>.value: number"]
+      "observables": [
+        "Comp<number>",
+        "value: number",
+        "$emit(\"change\", number)",
+        "$slots.default value: number",
+        "Foo<number>.value: number"
+      ]
     },
     {
       "id": "STP2-constructor-escape",
@@ -37,7 +50,7 @@
       "id": "STP2-vue-utilities",
       "disposition": "accept",
       "kind": "template-use",
-      "observables": ["createApp", "h", "TSX"]
+      "observables": ["createApp", "h", "TSX", "wrong h/TSX prop payload"]
     },
     {
       "id": "STP2-not-callable",

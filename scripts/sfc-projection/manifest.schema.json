@@ -73,6 +73,10 @@
           },
           "dirtyTwin": { "type": "string", "minLength": 1 },
           "expectedCode": { "type": "integer" },
+          "fileExpectedCodes": {
+            "type": "object",
+            "additionalProperties": { "type": "integer" }
+          },
           "dirtyExpectedCode": { "type": "integer" },
           "hoverNeedle": { "type": "string", "minLength": 1 },
           "expectedHoverType": { "type": "string", "minLength": 1 },
