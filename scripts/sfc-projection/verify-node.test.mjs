@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   MANDATORY_CASES,
   NODE_MANDATORY_CASES,
+  STP5_MANDATORY_CASES,
   assertCheckCounts,
   assertCleanTwin,
   assertExactType,
@@ -18,6 +19,7 @@ import {
   loadObligation,
   loadRootManifest,
   parseArgs,
+  probeMapperHost,
   readJson,
   repoPath,
   resolveDefinitionName,
@@ -364,5 +366,85 @@ test("STP2 verify: all mandatory cases run on each admitted engine", async () =>
     for (const count of Object.values(run.checkCounts)) {
       assert.equal(count, 1, JSON.stringify(run.checkCounts));
     }
+  }
+});
+
+test("STP5 node manifest is runnable without STP1 mandatory cases", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP5/manifest.json");
+  assert.equal(node.errors.length, 0, JSON.stringify(node.errors));
+  for (const id of STP5_MANDATORY_CASES) {
+    assert.ok(node.manifest.mandatoryCases.includes(id), `missing ${id}`);
+  }
+  assert.ok(!node.manifest.mandatoryCases.includes("STP1-harness"));
+});
+
+test("STP5 verify: encoding, reject twins, and selected-build capability on both engines", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP5",
+    engine: "all",
+    requireAll: true,
+    json: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.deepEqual([...STP5_MANDATORY_CASES].sort(), [...result.mandatoryCases].sort());
+  for (const id of STP5_MANDATORY_CASES) {
+    assert.ok(selectedCaseIds(result).includes(id), `missing selected case ${id}`);
+  }
+  assert.equal(result.engines.length, 2, JSON.stringify(result.engines));
+  assert.equal(result.harnessRuns.length, 2);
+  for (const run of result.harnessRuns) {
+    assert.equal(run.positiveDiagnostics.length, 0, JSON.stringify(run));
+    assert.ok(
+      run.negativeDiagnostics.some((diag) => diag.code === 2322),
+      JSON.stringify(run.negativeDiagnostics),
+    );
+    assert.equal(run.hover, "number", JSON.stringify(run));
+    assert.equal(run.instanceType, "Comp", JSON.stringify(run));
+    assert.ok(run.definition);
+    assert.ok(run.references >= 1, JSON.stringify(run));
+    assert.ok(run.edits >= 1);
+  }
+  assert.equal(result.incremental, "fresh");
+  const jsInit = result.capabilityRows.find(
+    (row) => row.operation === "initialize" && row.engineId === "ts-js",
+  );
+  const nativeInit = result.capabilityRows.find(
+    (row) => row.operation === "initialize" && row.engineId === "ts-native",
+  );
+  assert.ok(jsInit, JSON.stringify(result.capabilityRows));
+  assert.ok(nativeInit, JSON.stringify(result.capabilityRows));
+  assert.equal(jsInit.status, "blocking-upstream-defect");
+  assert.equal(nativeInit.status, "blocking-upstream-defect");
+  assert.match(jsInit.evidence, /ts-js@6\.0\.3 tsc --help/);
+  assert.match(nativeInit.evidence, /ts-native@7\.0\.2 tsc --help/);
+  assert.equal(
+    result.capabilityRows.filter((row) => row.operation === "encoding-negotiation").length,
+    2,
+  );
+});
+
+test("STP5 mapper-host probe uses tsc --help on the selected engine", () => {
+  const skipped = probeMapperHost(
+    { id: "ts-js", version: "6.0.3", kind: "javascript" },
+    { helpTextHasMapperHost: () => true },
+  );
+  assert.equal(skipped.performed, false);
+  assert.match(skipped.evidence, /ts-js@6\.0\.3 mapper-host probe skipped/);
+  assert.doesNotMatch(skipped.evidence, /help\/API/);
+});
+
+test("STP5 --require-all does not demand STP1 cases", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP5",
+    engine: "all",
+    requireAll: true,
+    skipProbes: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.ok(!selectedCaseIds(result).includes("STP1-harness"));
+  for (const id of STP5_MANDATORY_CASES) {
+    assert.ok(selectedCaseIds(result).includes(id), `missing ${id}`);
   }
 });

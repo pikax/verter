@@ -43,12 +43,30 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP2-constructor-inferred",
     "STP2-explicit-input-mismatch",
   ]),
+  STP5: Object.freeze([
+    "STP5-encoding",
+    "STP5-guard-duplicate",
+    "STP5-alias-edit",
+    "STP5-stale-target",
+    "STP5-raw-cli",
+    "STP5-capability",
+  ]),
 });
 
 export const MANDATORY_CASES = NODE_MANDATORY_CASES.STP1;
 
 export function canonicalMandatoryCases(nodeId) {
   return NODE_MANDATORY_CASES[nodeId] || [];
+}
+
+export const STP5_MANDATORY_CASES = NODE_MANDATORY_CASES.STP5;
+
+export function mandatoryCasesFor(nodeManifest) {
+  const nodeId = nodeManifest?.node;
+  const canonical = canonicalMandatoryCases(nodeId);
+  if (canonical.length) return [...canonical];
+  if (!nodeId || nodeId === "STP1") return [...MANDATORY_CASES];
+  return [...(nodeManifest?.mandatoryCases || [])];
 }
 
 const REQUIRED_PROBE_STRINGS = Object.freeze([
@@ -151,7 +169,8 @@ export function validateProbeManifest(doc, { role }) {
     } else {
       const declared = new Set(doc.mandatoryCases);
       const canonical = canonicalMandatoryCases(doc.node);
-      for (const id of canonical) {
+      const required = canonical.length ? canonical : mandatoryCasesFor(doc);
+      for (const id of required) {
         if (!declared.has(id)) {
           errors.push(
             err(
@@ -1283,7 +1302,7 @@ export async function verifyNode(options) {
   }
 
   if (options.requireAll) {
-    const required = canonicalMandatoryCases(nodeId);
+    const required = mandatoryCasesFor(nodeLoad.manifest);
     for (const id of required) {
       if (!selected.includes(id)) {
         errors.push(
@@ -1291,6 +1310,19 @@ export async function verifyNode(options) {
         );
       }
     }
+  }
+
+  let capabilityRows = [];
+  if (nodeId === "STP5") {
+    const stp5 = await evaluateStp5Node({
+      repoRoot,
+      resolvedEngines,
+      harnessRuns,
+      skipProbes: options.skipProbes,
+      runnable,
+    });
+    errors.push(...stp5.errors);
+    capabilityRows = stp5.capabilityRows;
   }
 
   return summarize({
@@ -1302,7 +1334,101 @@ export async function verifyNode(options) {
     repoRoot,
     inventory,
     methodology,
+    nodeManifest: nodeLoad.manifest,
+    capabilityRows,
   });
+}
+
+export function probeMapperHost(engine, { helpTextHasMapperHost }) {
+  const id = engine?.id || "unknown";
+  const version = engine?.version || "unknown";
+  if (!engine?.executable) {
+    return {
+      present: false,
+      performed: false,
+      method: null,
+      evidence: `${id}@${version} mapper-host probe skipped: no executable`,
+    };
+  }
+  const spawned =
+    engine.kind === "native"
+      ? spawnSync(engine.executable, ["--help"], {
+          encoding: "utf8",
+          windowsHide: true,
+          timeout: 20000,
+        })
+      : spawnSync(process.execPath, [engine.executable, "--help"], {
+          encoding: "utf8",
+          windowsHide: true,
+          timeout: 20000,
+        });
+  if (spawned.error && !spawned.stdout && !spawned.stderr) {
+    return {
+      present: false,
+      performed: false,
+      method: "tsc --help",
+      evidence: `${id}@${version} tsc --help probe failed: ${spawned.error.message}`,
+    };
+  }
+  const text = `${spawned.stdout || ""}${spawned.stderr || ""}`;
+  const present = helpTextHasMapperHost(text);
+  return {
+    present,
+    performed: true,
+    method: "tsc --help",
+    evidence: present
+      ? "executable-selected-build"
+      : `${id}@${version} tsc --help has no content mapper host (--runExternalCode / contentMappers)`,
+  };
+}
+
+function observationFromRun(run) {
+  return {
+    diagnostics: (run?.negative?.diags || []).length > 0,
+    hover: Boolean(run?.positive?.observations?.hover),
+    definition: Boolean(run?.positive?.observations?.definition),
+    references: (run?.positive?.observations?.references || 0) > 0,
+    edits: (run?.positive?.observations?.edits || []).length > 0,
+  };
+}
+
+async function evaluateStp5Node({ repoRoot, resolvedEngines, harnessRuns, skipProbes, runnable }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STP5/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  const errors = [];
+  if (skipProbes) {
+    errors.push(...protocol.assertEncodingIdentity());
+    errors.push(...protocol.assertCleanGeometry());
+    errors.push(...protocol.evaluateRejectTwins());
+    errors.push(...protocol.validateStp5Products());
+    return { errors, capabilityRows: [] };
+  }
+  if (!runnable) {
+    errors.push(err("STP5-capability", "missing-probes", "STP5 omitted runnable probes"));
+    return { errors, capabilityRows: [] };
+  }
+  if (resolvedEngines.length === 0) {
+    errors.push(
+      err("STP5-capability", "missing-probes", "STP5 selected zero engines for capability rows"),
+    );
+    return { errors, capabilityRows: [] };
+  }
+  const engines = resolvedEngines.map((engine) => {
+    const probe = probeMapperHost(engine, protocol);
+    const run = harnessRuns.find((row) => row.engine === engine.id);
+    return {
+      mapperHostPresent: probe.present,
+      mapperHostEvidence: probe.evidence,
+      observation: observationFromRun(run),
+      engineId: engine.id,
+      engineVersion: engine.version,
+    };
+  });
+  const stp5 = await protocol.evaluateStp5({ engines });
+  errors.push(...stp5.errors);
+  return { errors, capabilityRows: stp5.capabilityRows };
 }
 
 function summarize({
@@ -1314,18 +1440,21 @@ function summarize({
   repoRoot,
   inventory,
   methodology,
+  nodeManifest,
+  capabilityRows = [],
 }) {
   const ok = errors.length === 0;
+  const required = mandatoryCasesFor(nodeManifest || { node: options.node });
   const selectedCaseIds = new Set(selected);
-  const mandatory = canonicalMandatoryCases(options.node);
-  const mandatoryList = mandatory.length ? mandatory : [...MANDATORY_CASES];
   if (ok) {
-    for (const id of mandatoryList) selectedCaseIds.add(id);
+    for (const id of required) selectedCaseIds.add(id);
   } else {
     for (const error of errors) selectedCaseIds.add(error.caseId);
   }
   const probeSizes = {};
-  for (const rel of [
+  const probeFiles = [
+    nodeManifest?.probes?.positive,
+    nodeManifest?.probes?.negative,
     "tests/sfc-projection/STP1/probes/positive.ts",
     "tests/sfc-projection/STP1/probes/negative.ts",
     "tests/sfc-projection/STP2/probes/accept-instance-concrete.ts",
@@ -1336,7 +1465,8 @@ function summarize({
     "tests/sfc-projection/STP2/probes/reject-not-callable.ts",
     "tests/sfc-projection/STP2/probes/reject-constructor-escape-clean.ts",
     "tests/sfc-projection/STP2/probes/reject-explicit-input-mismatch.ts",
-  ]) {
+  ].filter(Boolean);
+  for (const rel of probeFiles) {
     const abs = repoPath(repoRoot, rel);
     if (fs.existsSync(abs)) probeSizes[rel] = fs.statSync(abs).size;
   }
@@ -1349,7 +1479,7 @@ function summarize({
     platform: `${os.platform()}-${os.arch()}`,
     inputRevision: inputRevision(repoRoot),
     selectedCaseIds: [...selectedCaseIds],
-    mandatoryCases: [...mandatoryList],
+    mandatoryCases: required,
     engines: resolvedEngines.map((engine) => ({
       id: engine.id,
       label: engine.label,
@@ -1375,6 +1505,7 @@ function summarize({
       checkCounts: run.checkCounts,
     })),
     errors,
+    capabilityRows,
   };
 }
 
@@ -1382,15 +1513,17 @@ export function selectedCaseIds(result) {
   return [...(result.selectedCaseIds || [])];
 }
 
-const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor)
+const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP5 mapper)
 
 USAGE
-  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2 [--engine all|ts-js|ts-native] [--require-all] [--json]
+  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP5 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
 vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted
 executable under the same engine label, omitted probes, non-exact type matches,
-missing references, and duplicate file checks.
+missing references, and duplicate file checks. STP5 additionally rejects Alias
+rename codecs, query-snapshot reuse, Verter-as-stock-CLI claims, duplicate
+guards, version-label capability, and dormant-product complete claims.
 `;
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
