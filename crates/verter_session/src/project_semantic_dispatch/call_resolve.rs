@@ -830,7 +830,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self_roots: root.self_roots,
                     },
                 ),
-                _ => self.resolve_call_abort_inline_flight(root.inline_flight.as_ref()),
+                _ => {
+                    // Incomplete proof stays transaction-local. The value
+                    // still flows through `Complete`, so the enclosing
+                    // build/request must take the same non-admission rails
+                    // a machinery-root `cache_suppress` would set.
+                    self.fold_into_top_build_local_taint(false, true);
+                    self.resolve_call_abort_inline_flight(root.inline_flight.as_ref());
+                }
             }
         }
         if machinery_root {

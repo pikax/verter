@@ -1365,6 +1365,79 @@ fn incomplete_nested_call_proof_refuses_component_admission() {
     );
 }
 
+/// An incomplete nested call that closes independently (does not join the
+/// parent SCC) must taint the enclosing build. Mutation: abort the inline
+/// flight only and return `Complete`; the parent consumes it and admits.
+#[test]
+fn incomplete_independent_nested_call_taints_enclosing_build() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let graph = dispatch.graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    let parent_sig = anonymous_signature(&dispatch, Vec::new(), Vec::new(), string);
+    let parent_callee = callable(&dispatch, vec![parent_sig], Vec::new());
+    let parent_key = call_key(&dispatch, parent_callee, CallKind::Call, None, Vec::new());
+    let _parent_idx = dispatch.resolve_call_frame_open(&parent_key);
+
+    let mut deep = string;
+    // bounded-loop: SELF_ROOT_WALK_CAP-bounded Global chain; extra 8 is the discriminator.
+    for _ in 0..(super::build::SELF_ROOT_WALK_CAP + 8) {
+        deep = graph.intern_node(SemanticNodeData::Array {
+            element: deep,
+            readonly: false,
+        });
+    }
+    let nested_sig = anonymous_signature(&dispatch, Vec::new(), Vec::new(), deep);
+    let nested_callee = callable(&dispatch, vec![nested_sig], Vec::new());
+    let mut nested_key = call_key(&dispatch, nested_callee, CallKind::Call, None, Vec::new());
+    nested_key.point.offset = 99;
+
+    let observation = super::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+    let step = dispatch.execute_resolve_call(nested_key.clone());
+    let observed = observation.finish();
+    assert!(
+        matches!(
+            step,
+            super::call_resolve::ResolveCallStep::Complete(ResolvedCallResult::Selected {
+                return_type,
+                ..
+            }) if return_type == deep
+        ),
+        "the nested value still serves, got {step:?}"
+    );
+    assert!(
+        observed.cache_suppress,
+        "an independently closed incomplete nested call must taint the enclosing build"
+    );
+    assert_eq!(
+        graph.slot_candidate_count_for_tests(&SemanticQueryKey::ResolveCall(Box::new(nested_key))),
+        0,
+        "the incomplete nested call is refused warm"
+    );
+
+    let shallow_sig = anonymous_signature(&dispatch, Vec::new(), Vec::new(), string);
+    let shallow_callee = callable(&dispatch, vec![shallow_sig], Vec::new());
+    let mut shallow_key = call_key(&dispatch, shallow_callee, CallKind::Call, None, Vec::new());
+    shallow_key.point.offset = 100;
+    let control_observation = super::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+    let control = dispatch.execute_resolve_call(shallow_key);
+    let control_observed = control_observation.finish();
+    assert!(
+        matches!(
+            control,
+            super::call_resolve::ResolveCallStep::Complete(ResolvedCallResult::Selected { .. })
+        ),
+        "control value serves, got {control:?}"
+    );
+    assert!(
+        !control_observed.cache_suppress,
+        "a complete independently closed nested call must not taint the enclosing build"
+    );
+
+    dispatch.dispatch_txn.borrow_mut().reentry_mut().pop();
+}
+
 /// A context-sensitive argument (a function value with an un-annotated
 /// parameter) is withheld from the FIRST inference pass: the eager argument
 /// alone fixes `T`, and the withheld argument is then checked for

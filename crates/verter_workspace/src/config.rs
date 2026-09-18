@@ -861,14 +861,36 @@ pub fn raw_paths_json(
     ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
 ) -> Option<(String, serde_json::Value)> {
-    raw_paths_json_inner(ws, tsconfig_path, 0)
+    raw_paths_json_inner(ws, tsconfig_path, 0).map(|acc| (acc.base_url, acc.paths))
+}
+
+/// Array-`extends` overlay for `raw_paths_json`: last-wins per declared key.
+/// A later base that never mentioned `paths` must not replace inherited
+/// mappings with the empty-object fallback a config-without-`paths` returns.
+struct RawPathsOverlay {
+    base_url: String,
+    paths: serde_json::Value,
+    base_url_declared: bool,
+    paths_declared: bool,
+}
+
+fn overlay_raw_paths(mut earlier: RawPathsOverlay, later: RawPathsOverlay) -> RawPathsOverlay {
+    if later.base_url_declared {
+        earlier.base_url = later.base_url;
+        earlier.base_url_declared = true;
+    }
+    if later.paths_declared {
+        earlier.paths = later.paths;
+        earlier.paths_declared = true;
+    }
+    earlier
 }
 
 fn raw_paths_json_inner(
     ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
     depth: u8,
-) -> Option<(String, serde_json::Value)> {
+) -> Option<RawPathsOverlay> {
     if depth > 5 {
         return None;
     }
@@ -888,10 +910,30 @@ fn raw_paths_json_inner(
     let own_paths = co.and_then(|c| c.get("paths")).cloned();
 
     match (own_paths, own_base_url, inherited) {
-        (Some(paths), Some(base_url), _) => Some((base_url, paths)),
-        (Some(paths), None, Some((inherited_base_url, _))) => Some((inherited_base_url, paths)),
-        (Some(paths), None, None) => Some((tsconfig_dir, paths)),
-        (None, Some(base_url), Some((_, inherited_paths))) => Some((base_url, inherited_paths)),
+        (Some(paths), Some(base_url), _) => Some(RawPathsOverlay {
+            base_url,
+            paths,
+            base_url_declared: true,
+            paths_declared: true,
+        }),
+        (Some(paths), None, Some(inherited)) => Some(RawPathsOverlay {
+            base_url: inherited.base_url,
+            paths,
+            base_url_declared: inherited.base_url_declared,
+            paths_declared: true,
+        }),
+        (Some(paths), None, None) => Some(RawPathsOverlay {
+            base_url: tsconfig_dir,
+            paths,
+            base_url_declared: false,
+            paths_declared: true,
+        }),
+        (None, Some(base_url), Some(inherited)) => Some(RawPathsOverlay {
+            base_url,
+            paths: inherited.paths,
+            base_url_declared: true,
+            paths_declared: inherited.paths_declared,
+        }),
         (None, _, Some(inherited)) => Some(inherited),
         (None, own_base_url, None) => {
             if let Some(refs) = json.get("references").and_then(|v| v.as_array()) {
@@ -908,7 +950,12 @@ fn raw_paths_json_inner(
                     }
                 }
             }
-            Some((own_base_url.unwrap_or(tsconfig_dir), serde_json::json!({})))
+            Some(RawPathsOverlay {
+                base_url_declared: own_base_url.is_some(),
+                base_url: own_base_url.unwrap_or(tsconfig_dir),
+                paths: serde_json::json!({}),
+                paths_declared: false,
+            })
         }
     }
 }
@@ -987,12 +1034,15 @@ fn load_inherited_raw_paths(
     tsconfig_dir: &str,
     json: &serde_json::Value,
     depth: u8,
-) -> Option<(String, serde_json::Value)> {
+) -> Option<RawPathsOverlay> {
     let mut acc = None;
     for spec in extends_specs(json) {
         if let Some(path) = resolve_tsconfig_extends(ws, tsconfig_dir, spec) {
             if let Some(base) = raw_paths_json_inner(ws, &path, depth + 1) {
-                acc = Some(base);
+                acc = Some(match acc {
+                    Some(earlier) => overlay_raw_paths(earlier, base),
+                    None => base,
+                });
             }
         }
     }
@@ -1023,7 +1073,7 @@ pub fn resolve_tsconfig_extends(
         loop {
             let nm = join_paths(&dir, "node_modules");
             let candidate = join_paths(&nm, extends);
-            if ws.file_exists(&candidate) {
+            if ws.file_exists(&candidate) && !ws.is_dir(&candidate) {
                 return Some(candidate);
             }
             let with_json = format!("{candidate}.json");

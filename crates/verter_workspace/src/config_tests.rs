@@ -999,6 +999,94 @@ fn raw_paths_json_child_base_url_overrides_inherited_paths() {
     );
 }
 
+/// Ordered array `extends`: a later base that does not declare `paths`
+/// must keep the earlier base's mappings. Mutation: `raw_paths_json_inner`
+/// returns an empty object for a config without `paths`, and last-wins
+/// assignment replaces the inherited map.
+#[test]
+fn raw_paths_json_array_extends_preserves_undeclared_paths() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    std::fs::write(
+        tmp.path().join("with-paths.json"),
+        r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@lib/*": ["lib/*"] } } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("no-paths.json"),
+        r#"{ "compilerOptions": { "strict": true } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("tsconfig.json"),
+        r#"{ "extends": ["./with-paths.json", "./no-paths.json"] }"#,
+    )
+    .unwrap();
+
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let (base_url, paths) = raw_paths_json(&ws, &tsconfig_path).expect("should find paths");
+    let expected_base =
+        verter_semantic::resolver_core::normalize_canonical_id(&tmp.path().to_string_lossy());
+    assert_eq!(
+        base_url, expected_base,
+        "undeclared later base must keep the earlier baseUrl"
+    );
+    let paths_obj = paths.as_object().expect("paths should be an object");
+    assert!(
+        paths_obj.contains_key("@lib/*"),
+        "undeclared later base must keep inherited paths, got {paths:?}"
+    );
+}
+
+/// Later array base that DOES declare `paths` last-wins the map (TypeScript
+/// replaces, it does not merge path entries).
+#[test]
+fn raw_paths_json_array_extends_later_declared_paths_replace() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    std::fs::write(
+        tmp.path().join("first.json"),
+        r#"{ "compilerOptions": { "paths": { "@old/*": ["old/*"] } } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("second.json"),
+        r#"{ "compilerOptions": { "paths": { "@new/*": ["new/*"] } } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("tsconfig.json"),
+        r#"{ "extends": ["./first.json", "./second.json"] }"#,
+    )
+    .unwrap();
+
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let (_, paths) = raw_paths_json(&ws, &tsconfig_path).expect("should find paths");
+    let paths_obj = paths.as_object().expect("paths should be an object");
+    assert!(
+        paths_obj.contains_key("@new/*"),
+        "later declared paths must win"
+    );
+    assert!(
+        !paths_obj.contains_key("@old/*"),
+        "later declared paths replace earlier mappings entirely"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // discover_tsconfigs — descent pruning
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1637,5 +1725,68 @@ fn semantic_options_resolve_package_tsconfig_field() {
     assert_eq!(
         options.target,
         verter_semantic::resolver_core::ScriptTarget::Es2019
+    );
+}
+
+/// `file_exists` is true for directories on some backends (recorder/frozen,
+/// NativeFs). Returning the package directory as a tsconfig file skips
+/// `package.json`'s `tsconfig` field. Mutation: `file_exists(candidate)`
+/// alone returns the directory.
+#[test]
+fn resolve_tsconfig_extends_does_not_return_package_directory() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    struct DirExistsWorkspace {
+        files: HashMap<String, String>,
+    }
+
+    impl crate::traits::WorkspaceRead for DirExistsWorkspace {
+        fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
+            self.files.get(canonical_id).map(|s| Arc::from(s.as_str()))
+        }
+        fn file_exists(&self, canonical_id: &str) -> bool {
+            self.files.contains_key(canonical_id) || self.is_dir(canonical_id)
+        }
+        fn is_dir(&self, path: &str) -> bool {
+            let prefix = format!("{path}/");
+            self.files.keys().any(|id| id.starts_with(&prefix))
+        }
+        fn realpath(&self, canonical_id: &str) -> Option<String> {
+            self.file_exists(canonical_id)
+                .then(|| canonical_id.to_string())
+        }
+        fn reverse_deps_for(&self, _id: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn forward_deps_for(&self, _id: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn dependency_snapshot(&self, _id: &str) -> Option<crate::DependencySnapshotView> {
+            None
+        }
+    }
+
+    let ws = DirExistsWorkspace {
+        files: HashMap::from([
+            (
+                "/ws/node_modules/pkg-config/package.json".into(),
+                r#"{ "name": "pkg-config", "tsconfig": "./configs/strict.json" }"#.into(),
+            ),
+            (
+                "/ws/node_modules/pkg-config/configs/strict.json".into(),
+                r#"{ "compilerOptions": { "strict": false, "target": "ES2019" } }"#.into(),
+            ),
+            (
+                "/ws/node_modules/pkg-config/tsconfig.json".into(),
+                r#"{ "compilerOptions": { "strict": true, "target": "ESNext" } }"#.into(),
+            ),
+        ]),
+    };
+    let resolved = resolve_tsconfig_extends(&ws, "/ws", "pkg-config");
+    assert_eq!(
+        resolved.as_deref(),
+        Some("/ws/node_modules/pkg-config/configs/strict.json"),
+        "package directory must not be returned as a tsconfig file, got {resolved:?}"
     );
 }
