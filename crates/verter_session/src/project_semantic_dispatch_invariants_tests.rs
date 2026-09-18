@@ -4362,6 +4362,64 @@ fn strict_family_flip_changes_verdict_without_cross_hit() {
     );
 }
 
+/// Awaited / template-literal query keys have no per-declaration
+/// canonical, so their env must come from the request project — not the
+/// workspace-default bundle. Two projects that differ only in `strict`
+/// must mint distinct contexts; a workspace-default constructor would
+/// alias them and let one project's awaited answer warm-hit the other.
+#[test]
+fn structural_reduce_context_uses_request_project_env() {
+    let host = VerterHost::new_standalone_with_tsconfig_projects(
+        HostConfig::default(),
+        &[
+            ("/strict", r#"{ "compilerOptions": { "strict": true } }"#),
+            ("/relaxed", r#"{ "compilerOptions": { "strict": false } }"#),
+        ],
+    );
+    let strict_env = host.host_view_env_hashes_for("/strict/main.ts");
+    let relaxed_env = host.host_view_env_hashes_for("/relaxed/main.ts");
+    assert_ne!(
+        strict_env.type_env_hash, relaxed_env.type_env_hash,
+        "fixture: the two projects must differ in type_env_hash"
+    );
+
+    let strict_ctx = {
+        let _request = crate::request_context::install_test_request_for("/strict/main.ts");
+        ProjectSemanticDispatch::new(&host).structural_reduce_context()
+    };
+    let relaxed_ctx = {
+        let _request = crate::request_context::install_test_request_for("/relaxed/main.ts");
+        ProjectSemanticDispatch::new(&host).structural_reduce_context()
+    };
+    assert_eq!(
+        strict_ctx.type_env_hash, strict_env.type_env_hash,
+        "awaited-key env must be the request project's type_env_hash"
+    );
+    assert_eq!(
+        relaxed_ctx.type_env_hash, relaxed_env.type_env_hash,
+        "awaited-key env must be the request project's type_env_hash"
+    );
+    assert_ne!(
+        strict_ctx, relaxed_ctx,
+        "distinct request projects must not share an awaited/template reduce context"
+    );
+
+    let strict_tpl = {
+        let _request = crate::request_context::install_test_request_for("/strict/main.ts");
+        ProjectSemanticDispatch::new(&host).template_literal_reduce_context()
+    };
+    let relaxed_tpl = {
+        let _request = crate::request_context::install_test_request_for("/relaxed/main.ts");
+        ProjectSemanticDispatch::new(&host).template_literal_reduce_context()
+    };
+    assert_eq!(strict_tpl.type_env_hash, strict_env.type_env_hash);
+    assert_eq!(relaxed_tpl.type_env_hash, relaxed_env.type_env_hash);
+    assert_ne!(
+        strict_tpl, relaxed_tpl,
+        "distinct request projects must not share a template-literal reduce context"
+    );
+}
+
 /// The env-hash tables published for a multi-project workspace scope each
 /// option to its dimension: projects differing ONLY in strictness get
 /// distinct `type_env_hash` and identical `lib_env_hash`; a project
