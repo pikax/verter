@@ -2264,7 +2264,11 @@ mod corpus_suite {
             };
 
             let host = u6_flow_expect_tests::make_audit_host();
-            let dir = "/flow-gap-preservation";
+            // The same canonical directory the expect/boundary lane measures under
+            // (`drive_expect_boundary`): authored carriers key by logical source-unit
+            // identity, so a row's exact public output pin holds for ONE canonical
+            // path, and both lanes assert that same pin.
+            let dir = "/wb";
             if !row.aux.is_empty() {
                 upsert(
                     &host,

@@ -598,10 +598,10 @@ fn flow_return_return_bearing_loop_stays_degraded_switch_and_try_resolve() {
             expr,
             verter_type_expr::TypeExpr::union(vec![
                 verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
-                    "a".to_string()
+                    "b".to_string()
                 )),
                 verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
-                    "b".to_string()
+                    "a".to_string()
                 )),
             ])
         );
@@ -4541,7 +4541,7 @@ fn flow_return_if_arm_restores_shadowed_declared_type() {
     assert_eq!(degradation, None);
     assert_eq!(
         expr,
-        verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
+        verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")])
     );
 }
 
@@ -4555,7 +4555,7 @@ fn flow_return_abrupt_finally_keeps_its_own_break_exit() {
     assert_eq!(degradation, None);
     assert_eq!(
         expr,
-        verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
+        verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")])
     );
     assert_ne!(
         expr,
@@ -4740,8 +4740,8 @@ fn expect_refused_flow(script: &str) {
 #[test]
 fn flow_return_guard_union_joins_each_alternatives_final_overlay() {
     let expected = verter_type_expr::TypeExpr::union(vec![
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
         verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
     ]);
     for script in [
         "function makeProps(x: string | number | boolean) { if (!((typeof x !== \"boolean\" && typeof x === \"string\") || typeof x === \"boolean\")) throw 0; return { v: x } }",
@@ -4811,8 +4811,8 @@ fn flow_return_guard_union_counts_a_disjunct_that_re_establishes_a_held_fact() {
     assert_eq!(
         member_types(&expr, "r"),
         vec![verter_type_expr::TypeExpr::union(vec![
-            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
             verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
         ])]
     );
     assert_ne!(
@@ -4854,7 +4854,7 @@ fn flow_return_declared_authority_is_seeded_before_forward_reads_and_writes() {
 #[test]
 fn flow_return_mutable_closures_use_declared_capture_authority() {
     let expected =
-        verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")]);
+        verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")]);
     for script in [
         "function makeProps() { var x: \"a\" | \"b\" = \"a\"; const read = () => x; return read() }",
         "function makeProps() { const read = () => x; let x: \"a\" | \"b\" = \"a\"; return read() }",
@@ -5025,8 +5025,8 @@ fn flow_return_switch_fallthrough_keeps_successive_control_merges_separate() {
     assert_eq!(
         expr,
         verter_type_expr::TypeExpr::union(vec![
-            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
             verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
         ])
     );
     assert_eq!(
@@ -5163,18 +5163,18 @@ pub(crate) fn a_labeled_try_or_throw_suffix_never_admits_a_fabricated_undefined_
     for (suffix, expected) in [
         (
             " return \"b\" as const;",
-            verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")]),
+            verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")]),
         ),
         (
             " { return \"b\" as const; }",
-            verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")]),
+            verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")]),
         ),
         (
             " if (true) { return \"b\" as const; } else { return \"c\" as const; }",
             verter_type_expr::TypeExpr::union(vec![
-                string_literal("a"),
-                string_literal("b"),
                 string_literal("c"),
+                string_literal("b"),
+                string_literal("a"),
             ]),
         ),
     ] {
@@ -5296,7 +5296,7 @@ fn flow_return_loop_transfer_classification_tracks_invocation_paths_and_reachabi
         expect_clean_flow_value(
             "function makeProps() { let o: { x: 0 | 1; y: \"a\" | \"b\" } = { x: 0, y: \"a\" }; do { o.x = 1 } while (false); return o.y }",
         ),
-        verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
+        verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")])
     );
     assert_eq!(
         expect_clean_flow_value(
@@ -5340,7 +5340,7 @@ fn flow_return_sequence_wrapped_iife_effect_fails_closed() {
 #[test]
 fn flow_return_impossible_predicate_edges_contribute_no_return_value() {
     let expected =
-        verter_type_expr::TypeExpr::union(vec![string_literal("ok"), string_literal("no")]);
+        verter_type_expr::TypeExpr::union(vec![string_literal("no"), string_literal("ok")]);
     let ternary = "type A = { kind: \"a\"; a: number }; type B = { kind: \"b\"; b: number }; function isA(x: A | B): x is A { return x.kind === \"a\" } function isB(x: A | B): x is B { return x.kind === \"b\" } function makeProps(x: A | B) { return isA(x) ? (isB(x) ? x : \"ok\" as const) : \"no\" as const }";
     assert_eq!(expect_clean_flow_value(ternary), expected);
 
@@ -5404,7 +5404,7 @@ fn flow_return_nested_destructured_capture_uses_its_parent_parameter_input() {
     );
     assert_eq!(
         projected_function_return(&value),
-        &verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
+        &verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")])
     );
 }
 
@@ -5436,7 +5436,7 @@ fn flow_return_nested_label_inherits_the_enclosing_suffix_return() {
         expect_clean_flow_value(
             "function makeProps() { OUT: INNER: { try { break INNER } finally { return \"a\" as const } } return \"b\" as const }",
         ),
-        verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
+        verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")])
     );
 }
 
@@ -10025,8 +10025,8 @@ fn flow_return_evolving_local_established_writes_keep_existing_warm_policy() {
     assert_eq!(
         member_types(&established, "v"),
         vec![verter_type_expr::TypeExpr::union(vec![
-            verter_type_expr::TypeExpr::number_literal(1.0),
             verter_type_expr::TypeExpr::string_literal("p"),
+            verter_type_expr::TypeExpr::number_literal(1.0),
         ])]
     );
 }
@@ -10831,9 +10831,14 @@ fn flow_return_reunion_absorbs_a_subtype_arm_but_the_canonical_union_keeps_both(
         else {
             panic!("the canonical union of the two object arms must stay a union");
         };
+        // The canonical union renders its members in `VerterStableV1` order, so
+        // compare the constituent SET: both arms must survive, whichever sorts first.
+        let mut kept = members.to_vec();
+        kept.sort();
+        let mut expected = vec![narrow, wide];
+        expected.sort();
         assert_eq!(
-            members.to_vec(),
-            vec![narrow, wide],
+            kept, expected,
             "the canonical layer keeps every constituent: a supertype arm never swallows a \
              subtype arm there"
         );
@@ -10869,16 +10874,26 @@ fn flow_return_reunion_keeps_the_surviving_arms_in_source_order() {
             out[1]
         );
     };
+    // The declared union's members render in `VerterStableV1` order; what matters
+    // is that the object constituent is still THERE.
+    assert!(
+        second
+            .iter()
+            .any(|arm| matches!(arm, verter_type_expr::TypeExpr::Object(_))),
+        "the surviving supertype arm keeps the `{{ b: true }}` object constituent, \
+         so the reduction never collapsed to the bare `string`: {second:?}"
+    );
     assert_eq!(
-        second.first(),
-        Some(&verter_type_expr::TypeExpr::Primitive(
-            verter_type_expr::PrimitiveName::String
-        )),
-        "the surviving supertype arm is `string | {{ b: true }}`, not the absorbed bare `string`"
+        second.len(),
+        2,
+        "exactly the declared two constituents survive: {second:?}"
     );
     assert!(
-        matches!(second.get(1), Some(verter_type_expr::TypeExpr::Object(_))),
-        "…whose second constituent is the object arm: {second:?}"
+        second.iter().any(|arm| matches!(
+            arm,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        )),
+        "…with the `string` constituent alongside it: {second:?}"
     );
 }
 

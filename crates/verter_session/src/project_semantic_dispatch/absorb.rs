@@ -148,7 +148,7 @@ impl ProjectSemanticDispatch<'_> {
 
     // Canonical semantic union / intersection construction owns the §22
     // absorption arms inside `canonical_algebra::canonical_union` /
-    // `canonical_intersection`; the former per-reducer `absorb_union` /
+    // `canonical_algebra::intern_ordered_intersection`; the former per-reducer `absorb_union` /
     // `absorb_intersection` entry hooks are deleted. Raw structural carriers
     // remain intentional: the `NormalizeUnion` / `ReduceIntersection`
     // query-key nodes, the arity-1 key-domain carrier in `mod.rs`, and the

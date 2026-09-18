@@ -2370,8 +2370,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let mut dedup: Vec<SemanticNodeId> = many.to_vec();
                 crate::semantic_query::stable_key::sort_by_stable_key(graph, &mut dedup);
                 dedup.dedup_by(|a, b| {
-                    crate::semantic_query::stable_key::stable_key_for_node(graph, *a)
-                        == crate::semantic_query::stable_key::stable_key_for_node(graph, *b)
+                    crate::semantic_query::stable_key::provably_equal(graph, *a, *b)
                 });
                 if dedup.len() == 1 {
                     return dedup[0];
@@ -7599,8 +7598,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let source_required = Self::last_required_position(source_pos);
         let target_required = Self::last_required_position(target_pos);
-        let source_has_rest = source_pos.iter().any(|p| p.rest);
-        if source_required > target_required && !source_has_rest {
+        // A rest parameter absorbs extra supplied arguments; it never
+        // supplies the source's own missing required parameters, so a
+        // source uncallable at the target's last-required-position arity
+        // rejects unconditionally.
+        if source_required > target_required {
             return RelationResult::NotAssignable;
         }
         let source_params = source_pos;

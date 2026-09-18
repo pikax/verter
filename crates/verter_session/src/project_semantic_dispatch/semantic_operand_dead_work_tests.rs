@@ -566,6 +566,7 @@ fn row_intersection_non_contributing_arm() -> MatrixRow {
             ("Instantiate", 3),
             ("LowerLocator", 3),
             ("ProjectPath", 1),
+            ("ReduceIntersection", 1),
             ("ResolveDecl", 2),
         ],
         expected_warm_classes: &[("Instantiate", 1)],

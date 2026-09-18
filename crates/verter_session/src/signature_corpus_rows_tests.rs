@@ -285,7 +285,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness(): never;\n",
-        verdict: Verdict::KnownOwed { note: "GROUPING WITNESS L: 7.0.2 reduction-state witness only — L<a> is never. Grouping trees are preserved by ReduceIntersection; this row does not claim a live ReturnType reduction of L<'a'>." },
+        verdict: Verdict::KnownOwed { note: "GROUPING WITNESS L: 7.0.2 reduction-state witness only — L<a> is never. Grouping trees are preserved by V4's ReduceIntersection; the live ReturnType reduction of L<'a'> is owned by V5 (SignaturesOfType) with V4 (ReduceIntersection)." },
     },
     Row {
         id: "SV13_grouping_witness_R",
@@ -298,7 +298,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness(): never;\n",
-        verdict: Verdict::KnownOwed { note: "GROUPING WITNESS R: 7.0.2 reduction-state witness only — R<a> is never, matching L. Pair pin is signature_corpus_records_the_7_0_2_grouping_witness_as_a_pair." },
+        verdict: Verdict::KnownOwed { note: "GROUPING WITNESS R: 7.0.2 reduction-state witness only — R<a> is never, matching L. Pair pin is signature_corpus_records_the_7_0_2_grouping_witness_as_a_pair; the live ReturnType reduction is owned by V5 (SignaturesOfType) with V4 (ReduceIntersection)." },
     },
     Row {
         id: "SV14_transparent_group",

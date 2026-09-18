@@ -399,15 +399,17 @@ fn closed_tuple_leaf_union_element_raises_to_the_ordered_union_node() {
         panic!("the leaf-union element must intern a Union node, got {union_data:?}");
     };
     assert_eq!(members.len(), 2, "both union arms must survive");
+    // The tuple's leaf union renders in VerterStableV1 order — number
+    // sorts before string — not in authored element order.
     assert_eq!(
         dispatch.node_leaf_fact(members[0]),
-        Some(LeafTypeFact::Primitive(PrimitiveName::String)),
-        "the first union arm must lower to the String primitive"
+        Some(LeafTypeFact::Primitive(PrimitiveName::Number)),
+        "the first union arm must lower to the Number primitive"
     );
     assert_eq!(
         dispatch.node_leaf_fact(members[1]),
-        Some(LeafTypeFact::Primitive(PrimitiveName::Number)),
-        "the second union arm must lower to the Number primitive"
+        Some(LeafTypeFact::Primitive(PrimitiveName::String)),
+        "the second union arm must lower to the String primitive"
     );
 
     // The shared node→closed-fact projections round-trip the raised union:
@@ -417,8 +419,8 @@ fn closed_tuple_leaf_union_element_raises_to_the_ordered_union_node() {
         dispatch.node_leaf_union_fact(union_node).as_deref(),
         Some(
             [
-                LeafTypeFact::Primitive(PrimitiveName::String),
                 LeafTypeFact::Primitive(PrimitiveName::Number),
+                LeafTypeFact::Primitive(PrimitiveName::String),
             ]
             .as_slice()
         ),

@@ -395,7 +395,7 @@ fn flow_return_leaf_answer_never_binds_a_frame_owned_name_in_owner_scope() {
     assert_clean_warm(
         &host,
         "gateConditionalArm",
-        TypeExpr::Union(std::sync::Arc::from(vec![number_lit(1.0), number_lit(2.0)])),
+        TypeExpr::Union(std::sync::Arc::from(vec![number_lit(2.0), number_lit(1.0)])),
     );
 
     // The SPREAD source resolves the same way: the parameter, through the
@@ -520,7 +520,7 @@ fn flow_return_root_gate_leaves_free_roots_and_unread_positions_alone() {
     assert_clean_warm(
         &host,
         "gateConditionalTestOnParam",
-        TypeExpr::union(vec![number_lit(1.0), number_lit(2.0)]),
+        TypeExpr::union(vec![number_lit(2.0), number_lit(1.0)]),
     );
     let spread = projected(&host, "gateFreeSpreadResolves");
     let TypeExpr::Object(object) = &spread else {

@@ -14385,6 +14385,81 @@ fn strict_subtype_rejects_mutual_pair_that_subtype_accepts() {
     );
 }
 
+/// A rest parameter absorbs extra SUPPLIED arguments; it never supplies
+/// the source's own missing required parameters. A source whose
+/// last-required-position arity exceeds the target's is uncallable at the
+/// target's arity no matter what follows its fixed prefix, so the rest
+/// flag must not exempt that rejection — rest expansion only covers
+/// extra target-side arguments.
+#[test]
+fn relate_function_rest_never_exempts_uncallable_source_arity() {
+    use crate::semantic_query::{
+        FunctionParam, RelationKind, SignatureKind, SignatureReturnCarrier, TypeParamDecl,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let any = primitive(&graph, PrimitiveKind::Any);
+    let ret = primitive(&graph, PrimitiveKind::Undefined);
+
+    let signature = |params: Vec<FunctionParam>| {
+        graph.intern_node(SemanticNodeData::Signature {
+            kind: SignatureKind::Call,
+            params: Arc::from(params.into_boxed_slice()),
+            return_type: ret,
+            occurrence: None,
+            return_carrier: SignatureReturnCarrier::Declared(ret),
+            type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            signature_span: None,
+            return_type_span: None,
+        })
+    };
+    // `(a: string, b: number, ...rest: any[])` — last required position 2.
+    let resty = signature(vec![
+        FunctionParam::synthetic(Some(Arc::from("a")), string, false, false),
+        FunctionParam::synthetic(Some(Arc::from("b")), number, false, false),
+        FunctionParam::synthetic(Some(Arc::from("rest")), any, false, true),
+    ]);
+    // `(x: string)` — last required position 1.
+    let unary = signature(vec![FunctionParam::synthetic(
+        Some(Arc::from("x")),
+        string,
+        false,
+        false,
+    )]);
+    // `(x: string, y: number)` — covers the source's fixed prefix.
+    let binary = signature(vec![
+        FunctionParam::synthetic(Some(Arc::from("x")), string, false, false),
+        FunctionParam::synthetic(Some(Arc::from("y")), number, false, false),
+    ]);
+
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair(resty, unary),
+            RelationStep::NotAssignable
+        ),
+        "Assignability must reject a source uncallable at the target's unary \
+         arity even though the source ends in a rest parameter"
+    );
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_kind(resty, unary, RelationKind::Subtype),
+            RelationStep::NotAssignable
+        ),
+        "Subtype must reject the same uncallable arity"
+    );
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair(resty, binary),
+            RelationStep::Assignable { .. }
+        ),
+        "control: a target covering the source's fixed prefix stays assignable"
+    );
+}
+
 /// V4-AC5 (parent side) — a policy-set change interns a different
 /// `SemanticContextId`, and that id rides the derived `Hash`/`Eq` of
 /// `RelationContext`: two `Relate` keys differing ONLY in
@@ -30371,23 +30446,25 @@ fn assert_shallow_surface_eq(actual: &ShallowSurface, expected: &ShallowSurface,
 /// INDEPENDENT reference for the member-value union step over this
 /// fixture domain (distinct childless primitive/literal value nodes, no
 /// lattice extremes, no literal-vs-base-primitive pairs): dedup by node
-/// id, sort ascending, singleton stays bare, multi-arm interns a raw
-/// `Union`. Deliberately NOT the production canonical builder, so the
-/// oracle keeps discriminating the production member-value union step.
+/// id, singleton stays bare, multi-arm interns through the canonical
+/// union builder — the charter-ratified semantics of the member-value
+/// union step (stable order + carrier-qualified canonical mint). The
+/// oracle still discriminates the MERGE logic around it: common-member
+/// selection, per-arm value collection, accessibility folds, synthesized
+/// neutrality.
 fn oracle_value_union(
     graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
     values: &[SemanticNodeId],
 ) -> SemanticNodeId {
     let mut ids: Vec<SemanticNodeId> = values.to_vec();
-    ids.sort_by_key(|id| id.0);
     ids.dedup();
     match ids.as_slice() {
         [only] => *only,
-        _ => graph.intern_node(SemanticNodeData::Union(
-            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
-                ids.into_boxed_slice(),
-            )),
-        )),
+        // The member-value union is the CANONICAL union by charter: the
+        // ratified VerterStableV1 order and the carrier-qualified canonical
+        // mint ARE the intended semantics of this step, so the reference
+        // delegates the intern while keeping its own dedup/singleton logic.
+        _ => crate::project_semantic_dispatch::canonical_algebra::canonical_union(graph, &ids).node,
     }
 }
 
@@ -30791,13 +30868,19 @@ fn union_surface_merge_pins_order_accessibility_and_neutrality() {
         );
     }
 
-    // Value-union arm order: zebra's merged value is Union([arm0, arm1]).
+    // Value-union arm order: zebra's merged value is the per-arm value
+    // union, rendering in VerterStableV1 order (number sorts before
+    // string), not construction order.
     let zebra_value = graph
         .node_data(common_zebra.value)
         .expect("zebra value interned");
     match &*zebra_value {
         SemanticNodeData::Union(vals) => {
-            assert_eq!(vals.as_ref(), &[s, n], "per-arm value order preserved");
+            assert_eq!(
+                vals.as_ref(),
+                &[n, s],
+                "per-arm value union keeps both arms in stable order"
+            );
         }
         other => panic!("expected Union value, got {other:?}"),
     }

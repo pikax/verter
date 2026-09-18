@@ -249,7 +249,7 @@ fn readable_composite_predicate_narrows_remain_complete_and_warm() {
         (
             "signature",
             "function isB(x: (value: number) => number): x is (value: string) => string { return true as boolean as never }\nfunction makeProps(x: (value: number) => number) { return { v: isB(x) ? x : \"no\" } }",
-            r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"union","types":[{"kind":"primitive","name":"string"},{"kind":"intersection","types":[{"kind":"function","parameters":[{"name":"value","optional":false,"rest":false,"ty":{"kind":"primitive","name":"number"}}],"returnType":{"kind":"primitive","name":"number"}},{"kind":"function","parameters":[{"name":"value","optional":false,"rest":false,"ty":{"kind":"primitive","name":"string"}}],"returnType":{"kind":"primitive","name":"string"}}]}]}}]}"#,
+            r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"union","types":[{"kind":"intersection","types":[{"kind":"function","parameters":[{"name":"value","optional":false,"rest":false,"ty":{"kind":"primitive","name":"number"}}],"returnType":{"kind":"primitive","name":"number"}},{"kind":"function","parameters":[{"name":"value","optional":false,"rest":false,"ty":{"kind":"primitive","name":"string"}}],"returnType":{"kind":"primitive","name":"string"}}]},{"kind":"primitive","name":"string"}]}}]}"#,
         ),
     ];
 
@@ -1062,7 +1062,7 @@ fn flow_gap_false_refusal_controls_remain_complete_and_warm() {
         (
             "impossible_typeof_non_subject_read",
             "function makeProps(x: string) { if (typeof x === \"number\") return \"dead\" as const; return \"live\" as const }",
-            Some(r#"{"kind":"union","types":[{"kind":"literal","literalKind":"string","value":"dead"},{"kind":"literal","literalKind":"string","value":"live"}]}"#),
+            Some(r#"{"kind":"union","types":[{"kind":"literal","literalKind":"string","value":"live"},{"kind":"literal","literalKind":"string","value":"dead"}]}"#),
         ),
         (
             "impossible_predicate_non_subject_value",
@@ -1077,7 +1077,7 @@ fn flow_gap_false_refusal_controls_remain_complete_and_warm() {
         ("n24", "type A = { kind: \"a\"; a: number }; type B = { kind: \"b\"; b: number }\nfunction isA(x: A | B): x is A { return x.kind === \"a\" }\nfunction isB(x: A | B): x is B { return x.kind === \"b\" }\nfunction makeProps(x: A | B) { return { v: isA(x) ? (isB(x) ? x : \"ok\") : \"no\" } }", None),
         ("n26", "type A = { a: number }; type B = { b: number }\nfunction isA(x: A | B): x is A { return \"a\" in x }\nfunction isB(x: A | B): x is B { return \"b\" in x }\nfunction makeProps(x: A | B) { return { v: isA(x) ? (isB(x) ? x : \"ok\") : \"no\" } }", Some(r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"union","types":[{"kind":"intersection","types":[{"kind":"ref","name":"A","typeArguments":[]},{"kind":"ref","name":"B","typeArguments":[]}]},{"kind":"primitive","name":"string"}]}}]}"#)),
         ("x85", "function makeProps() { let x: \"a\" | \"b\" = \"a\"; return () => { x = \"b\"; return x } }", Some(r#"{"kind":"function","parameters":[],"returnType":{"kind":"literal","literalKind":"string","value":"b"}}"#)),
-        ("x88", "function makeProps() { OUT: INNER: { try { break INNER } finally { return \"a\" as const } } return \"b\" as const }", Some(r#"{"kind":"union","types":[{"kind":"literal","literalKind":"string","value":"a"},{"kind":"literal","literalKind":"string","value":"b"}]}"#)),
+        ("x88", "function makeProps() { OUT: INNER: { try { break INNER } finally { return \"a\" as const } } return \"b\" as const }", Some(r#"{"kind":"union","types":[{"kind":"literal","literalKind":"string","value":"b"},{"kind":"literal","literalKind":"string","value":"a"}]}"#)),
         (
             "optional_member_any",
             "function makeProps(a: any) { return a?.b }",

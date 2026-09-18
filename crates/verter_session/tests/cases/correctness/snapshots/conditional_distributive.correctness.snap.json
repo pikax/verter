@@ -3,7 +3,7 @@
   "props": [
     {
       "name": "kind",
-      "type_signature": "\"a\" | \"b\"",
+      "type_signature": "\"b\" | \"a\"",
       "required": true,
       "has_default": false,
       "default_signature": null,

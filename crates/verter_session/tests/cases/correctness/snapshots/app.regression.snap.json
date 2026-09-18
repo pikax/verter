@@ -3,7 +3,7 @@
   "props": [
     {
       "name": "mode",
-      "type_signature": "\"light\" | \"dark\"",
+      "type_signature": "\"dark\" | \"light\"",
       "required": false,
       "has_default": false,
       "default_signature": null,

@@ -1109,10 +1109,15 @@ fn canonicalize(
     //    — never skip-eligible.
     if is_union {
         crate::semantic_query::stable_key::sort_by_stable_key(graph, &mut kept);
-        kept.dedup_by(|a, b| {
-            crate::semantic_query::stable_key::stable_key_for_node(graph, *a)
-                == crate::semantic_query::stable_key::stable_key_for_node(graph, *b)
-        });
+        // An over-deep arm cannot be proven equal to anything within the
+        // encoder's depth budget: keep every arm and refuse canonical warm
+        // admission rather than collapsing on the shared marker.
+        if kept.iter().any(|id| {
+            !crate::semantic_query::stable_key::stable_key_for_node(graph, *id).is_complete()
+        }) {
+            evidence.incomplete = true;
+        }
+        kept.dedup_by(|a, b| crate::semantic_query::stable_key::provably_equal(graph, *a, *b));
     } else {
         // Intersection preserves construction order. First-occurrence
         // construction-identical dedup only.

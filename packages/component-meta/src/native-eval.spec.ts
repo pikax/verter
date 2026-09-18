@@ -1194,15 +1194,17 @@ defineSlots<ButtonSlots>()
     // The two-hop terminal merges the theme variants with the AppConfig
     // union arm (`GetComponentAppConfig` conditional): the structured union
     // must include the app-config-contributed `neutral` literal alongside
-    // the theme literals.
+    // the theme literals, rendered in the ratified VerterStableV1
+    // (fingerprint, exact) member order — `neutral` between `primary`
+    // and `secondary`, not the authored declaration order.
     const color = nativeProps.find((prop) => prop.name === "color");
     expect(color).toBeDefined();
     expect(color!.type).toEqual({
       kind: "union",
       types: [
         { kind: "literal", value: "primary" },
-        { kind: "literal", value: "secondary" },
         { kind: "literal", value: "neutral" },
+        { kind: "literal", value: "secondary" },
       ],
     });
     expect(color!.required).toBe(false);

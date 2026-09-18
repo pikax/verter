@@ -11970,7 +11970,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// union / intersection CONSTRUCTION routes here, and this routes through
     /// the canonical algebra
     /// ([`canonical_algebra::canonical_union`] /
-    /// [`canonical_algebra::canonical_intersection`]) — recursive flattening,
+    /// [`canonical_algebra::intern_ordered_intersection`]) — recursive flattening,
     /// lattice absorption, structural `T | T = T`, proven-disjoint scalar
     /// intersection collapse. The canonicalization's freshness evidence is
     /// deposited ambiently on the active cold-build taint frame
