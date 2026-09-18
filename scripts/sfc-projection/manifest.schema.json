@@ -52,7 +52,8 @@
         "hoverNeedle": { "type": "string", "minLength": 1 },
         "definitionNeedle": { "type": "string", "minLength": 1 },
         "expectedNegativeCode": { "type": "integer" },
-        "expectedHoverType": { "type": "string", "minLength": 1 }
+        "expectedHoverType": { "type": "string", "minLength": 1 },
+        "expectedInstanceType": { "type": "string", "minLength": 1 }
       }
     },
     "cases": {

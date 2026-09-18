@@ -5,7 +5,8 @@
  * CLI: --node, --engine, --require-all, --json
  * Rejects absent/empty manifests, zero selected cases, missing inventory
  * fixtures, vacuous any/never type matches, unrelated clean-twin diagnostics,
- * and executable substitution under a stable engine label.
+ * executable substitution under a stable engine label, omitted probes,
+ * non-exact type matches, missing references, and duplicate file checks.
  */
 
 import { createHash } from "node:crypto";
@@ -31,6 +32,25 @@ export const MANDATORY_CASES = Object.freeze([
   "STP1-provenance",
   "STP1-harness",
 ]);
+
+const REQUIRED_PROBE_STRINGS = Object.freeze([
+  "positive",
+  "negative",
+  "cleanTwin",
+  "tsconfig",
+  "hoverNeedle",
+  "definitionNeedle",
+  "expectedHoverType",
+  "expectedInstanceType",
+]);
+
+export function probesAreRunnable(probes) {
+  if (!probes || typeof probes !== "object" || Array.isArray(probes)) return false;
+  for (const key of REQUIRED_PROBE_STRINGS) {
+    if (typeof probes[key] !== "string" || probes[key].length === 0) return false;
+  }
+  return Number.isInteger(probes.expectedNegativeCode);
+}
 
 export function posix(p) {
   return String(p).split(path.sep).join("/");
@@ -110,6 +130,22 @@ export function validateProbeManifest(doc, { role }) {
       errors.push(
         err("STP1-zero-selection", "empty-manifest", "node manifest mandatoryCases are empty"),
       );
+    } else {
+      const declared = new Set(doc.mandatoryCases);
+      for (const id of MANDATORY_CASES) {
+        if (!declared.has(id)) {
+          errors.push(
+            err(
+              "STP1-zero-selection",
+              "zero-cases",
+              `mandatory case ${id} missing from node mandatoryCases`,
+            ),
+          );
+        }
+      }
+    }
+    if (!probesAreRunnable(doc.probes)) {
+      errors.push(err("STP1-harness", "missing-probes", "node manifest omitted runnable probes"));
     }
   }
   return errors;
@@ -357,15 +393,8 @@ export function assertExactType({
       ),
     ];
   }
-  if (expected != null && actual !== expected && !isVacuousType(actual, flags)) {
-    // Printed constructor instance types may be the class name; allow that when
-    // expected is a non-vacuous name and actual is also non-vacuous.
-    if (expected === "number" || expected === "string" || expected === "boolean") {
-      return [err("STP1-types", "type-mismatch", `expected ${expected}, got ${actual}`)];
-    }
-  }
-  if (expected === "number" && actual !== "number") {
-    return [err("STP1-types", "type-mismatch", `expected number, got ${actual}`)];
+  if (expected != null && actual !== expected) {
+    return [err("STP1-types", "type-mismatch", `expected ${expected}, got ${actual}`)];
   }
   return [];
 }
@@ -406,9 +435,20 @@ function jsTypeFlags(ts, type) {
   return type?.flags ?? 0;
 }
 
-function runJsFile(ts, fileAbs, options) {
+export function bumpCheckCount(checkCounts, fileKey) {
+  const key = posix(fileKey);
+  checkCounts[key] = (checkCounts[key] || 0) + 1;
+  return checkCounts[key];
+}
+
+function createJsProgram(ts, fileAbs, options, checkCounts, fileKey) {
+  bumpCheckCount(checkCounts, fileKey);
   const host = ts.createCompilerHost(options, true);
-  const program = ts.createProgram({ rootNames: [fileAbs], options, host });
+  return ts.createProgram({ rootNames: [fileAbs], options, host });
+}
+
+function runJsFile(ts, fileAbs, options, checkCounts, fileKey) {
+  const program = createJsProgram(ts, fileAbs, options, checkCounts, fileKey);
   const sf = program.getSourceFile(fileAbs);
   const checker = program.getTypeChecker();
   const diags = ts
@@ -417,7 +457,7 @@ function runJsFile(ts, fileAbs, options) {
     .map(normalizeDiag);
   const text = fs.readFileSync(fileAbs, "utf8");
   const observations = observeJs(ts, checker, sf, text);
-  return { diags, observations, checkCount: 1 };
+  return { diags, observations };
 }
 
 function observeJs(ts, checker, sf, text) {
@@ -494,16 +534,14 @@ export function runJsEngine(resolved, probes, repoRoot) {
   };
   const positive = repoPath(repoRoot, probes.positive);
   const negative = repoPath(repoRoot, probes.negative);
-  const pos = runJsFile(ts, positive, options);
-  const neg = runJsFile(ts, negative, options);
+  const checkCounts = {};
+  const pos = runJsFile(ts, positive, options, checkCounts, probes.positive);
+  const neg = runJsFile(ts, negative, options, checkCounts, probes.negative);
   return {
     engine: pin.id,
     positive: pos,
     negative: neg,
-    checkCounts: {
-      [posix(probes.positive)]: pos.checkCount,
-      [posix(probes.negative)]: neg.checkCount,
-    },
+    checkCounts,
   };
 }
 
@@ -526,25 +564,28 @@ export async function runNativeEngine(resolved, probes, repoRoot) {
     if (!project) {
       throw new Error(`native engine did not open ${posix(probes.tsconfig)}`);
     }
-    const pos = observeNative(project, positive, probes);
-    const neg = observeNative(project, negative, probes);
+    const checkCounts = {};
+    const pos = observeNative(project, positive, probes, checkCounts, probes.positive);
+    const neg = observeNative(project, negative, probes, checkCounts, probes.negative);
     snap.dispose();
     return {
       engine: resolved.id,
       positive: pos,
       negative: neg,
-      checkCounts: {
-        [posix(probes.positive)]: pos.checkCount,
-        [posix(probes.negative)]: neg.checkCount,
-      },
+      checkCounts,
     };
   } finally {
     api.close();
   }
 }
 
-function observeNative(project, fileAbs, probes) {
-  const diags = project.program.getSemanticDiagnostics(fileAbs).map(normalizeDiag);
+function nativeSemanticDiagnostics(project, fileAbs, checkCounts, fileKey) {
+  bumpCheckCount(checkCounts, fileKey);
+  return project.program.getSemanticDiagnostics(fileAbs).map(normalizeDiag);
+}
+
+function observeNative(project, fileAbs, probes, checkCounts, fileKey) {
+  const diags = nativeSemanticDiagnostics(project, fileAbs, checkCounts, fileKey);
   const text = fs.readFileSync(fileAbs, "utf8");
   const observations = { types: {}, hover: null, definition: null, references: 0, edits: [] };
   const instanceNeedle = "Instance";
@@ -583,10 +624,32 @@ function observeNative(project, fileAbs, probes) {
     }
     observations.references = Array.isArray(refs) ? refs.length : text.split("Comp").length - 1;
   }
-  return { diags, observations, checkCount: 1 };
+  return { diags, observations };
 }
 
-function evaluateHarnessRun(run, probes, engineId) {
+export function assertCheckCounts(checkCounts, engineId, probeFiles, max = 1) {
+  const errors = [];
+  for (const file of probeFiles) {
+    const key = posix(file);
+    const count = checkCounts?.[key];
+    if (!Number.isInteger(count) || count < 1) {
+      errors.push(
+        err(
+          "STP1-harness",
+          "duplicate-check",
+          `${engineId} missing measured check count for ${key}`,
+        ),
+      );
+    } else if (count > max) {
+      errors.push(
+        err("STP1-harness", "duplicate-check", `${engineId} checked ${key} ${count} times`),
+      );
+    }
+  }
+  return errors;
+}
+
+function evaluateHarnessRun(run, probes, engineId, { maxChecksPerFile = 1 } = {}) {
   const errors = [];
   errors.push(...assertCleanTwin(run.positive.diags, { fileLabel: `${engineId} clean twin` }));
   const instance = run.positive.observations.types.Instance;
@@ -596,7 +659,7 @@ function evaluateHarnessRun(run, probes, engineId) {
     errors.push(
       ...assertExactType({
         actual: instance.printed,
-        expected: instance.printed,
+        expected: probes.expectedInstanceType,
         flags: instance.flags,
       }),
     );
@@ -618,6 +681,14 @@ function evaluateHarnessRun(run, probes, engineId) {
   }
   if ((run.positive.observations.edits || []).length === 0) {
     errors.push(err("STP1-harness", "missing-edit", `${engineId} missing edit participation`));
+  }
+  if (
+    !Number.isInteger(run.positive.observations.references) ||
+    run.positive.observations.references < 1
+  ) {
+    errors.push(
+      err("STP1-harness", "missing-references", `${engineId} missing references participation`),
+    );
   }
   const expectedCode = probes.expectedNegativeCode;
   const anchored = (run.negative.diags || []).filter((diag) => diag.code === expectedCode);
@@ -642,13 +713,14 @@ function evaluateHarnessRun(run, probes, engineId) {
       ),
     );
   }
-  for (const [file, count] of Object.entries(run.checkCounts || {})) {
-    if (count > 1) {
-      errors.push(
-        err("STP1-harness", "duplicate-check", `${engineId} checked ${file} ${count} times`),
-      );
-    }
-  }
+  errors.push(
+    ...assertCheckCounts(
+      run.checkCounts,
+      engineId,
+      [probes.positive, probes.negative],
+      maxChecksPerFile,
+    ),
+  );
   return errors;
 }
 
@@ -737,20 +809,37 @@ export async function verifyNode(options) {
   }
 
   const probes = nodeLoad.manifest?.probes;
-  const shouldRun = resolvedEngines.length > 0 && probes && !options.skipProbes;
-  if (shouldRun) {
+  const runnable = probesAreRunnable(probes);
+  const shouldRun = resolvedEngines.length > 0 && runnable && !options.skipProbes;
+  if (resolvedEngines.length > 0 && !options.skipProbes && !runnable) {
+    if (
+      !errors.some((error) => error.caseId === "STP1-harness" && error.code === "missing-probes")
+    ) {
+      errors.push(
+        err(
+          "STP1-harness",
+          "missing-probes",
+          "node manifest omitted probes; refusing zero-test pass",
+        ),
+      );
+    }
+  } else if (shouldRun) {
+    const maxChecksPerFile = methodology?.boundedWork?.maxChecksPerFilePerEngine ?? 1;
     for (const engine of resolvedEngines) {
       const run =
         engine.kind === "javascript"
           ? runJsEngine(engine, probes, repoRoot)
           : await runNativeEngine(engine, probes, repoRoot);
       harnessRuns.push(run);
-      errors.push(...evaluateHarnessRun(run, probes, engine.id));
+      errors.push(...evaluateHarnessRun(run, probes, engine.id, { maxChecksPerFile }));
+    }
+    if (harnessRuns.length === 0) {
+      errors.push(err("STP1-harness", "missing-probes", "zero probe executions"));
     }
   }
 
   if (options.requireAll) {
-    for (const id of nodeLoad.manifest?.mandatoryCases || MANDATORY_CASES) {
+    for (const id of MANDATORY_CASES) {
       if (!selected.includes(id)) {
         errors.push(
           err("STP1-zero-selection", "zero-cases", `mandatory case ${id} was not selected`),
@@ -844,8 +933,9 @@ USAGE
   node scripts/sfc-projection/verify-node.mjs --node STP1 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
-vacuous any/never type matches, unrelated clean-twin diagnostics, and a
-substituted executable under the same engine label.
+vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted
+executable under the same engine label, omitted probes, non-exact type matches,
+missing references, and duplicate file checks.
 `;
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

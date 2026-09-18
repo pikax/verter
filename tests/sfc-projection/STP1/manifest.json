@@ -26,7 +26,8 @@
     "hoverNeedle": "stp1HoverTarget",
     "definitionNeedle": "stp1DefinitionTarget",
     "expectedNegativeCode": 2322,
-    "expectedHoverType": "number"
+    "expectedHoverType": "number",
+    "expectedInstanceType": "Comp"
   },
   "cases": [
     {

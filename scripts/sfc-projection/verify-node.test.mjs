@@ -5,6 +5,7 @@ import test from "node:test";
 
 import {
   MANDATORY_CASES,
+  assertCheckCounts,
   assertCleanTwin,
   assertExactType,
   assertInventoryComplete,
@@ -20,6 +21,7 @@ import {
   selectCases,
   selectEngines,
   selectedCaseIds,
+  validateProbeManifest,
   verifyNode,
 } from "./verify-node.mjs";
 
@@ -127,6 +129,21 @@ test("STP1-types dirty twin: vacuous never cannot satisfy a type equality", () =
   assert.ok(errors.some((error) => error.caseId === "STP1-types" && error.code === "vacuous-type"));
 });
 
+test("STP1-types dirty twin: non-primitive expected types must match exactly", () => {
+  const mismatch = assertExactType({ actual: "number", expected: "Comp" });
+  assert.ok(
+    mismatch.some((error) => error.caseId === "STP1-types" && error.code === "type-mismatch"),
+    JSON.stringify(mismatch),
+  );
+  const unknown = assertExactType({ actual: "unknown", expected: "Comp" });
+  assert.ok(
+    unknown.some((error) => error.caseId === "STP1-types" && error.code === "type-mismatch"),
+    JSON.stringify(unknown),
+  );
+  const exact = assertExactType({ actual: "Comp", expected: "Comp" });
+  assert.equal(exact.length, 0, JSON.stringify(exact));
+});
+
 test("STP1-clean-twin dirty twin: unrelated generated error is rejected", () => {
   const errors = assertCleanTwin([{ code: 2304, message: "Cannot find name 'injected'." }]);
   assert.ok(
@@ -177,11 +194,91 @@ test("STP1-harness: one positive and one anchored negative execute on each admit
       JSON.stringify(run.negativeDiagnostics),
     );
     assert.equal(run.hover, "number", JSON.stringify(run));
-    assert.ok(run.instanceType && run.instanceType !== "any" && run.instanceType !== "never");
+    assert.equal(run.instanceType, "Comp", JSON.stringify(run));
     assert.ok(run.definition);
+    assert.ok(run.references >= 1, JSON.stringify(run));
     assert.ok(run.edits >= 1);
+    for (const count of Object.values(run.checkCounts)) {
+      assert.equal(count, 1, JSON.stringify(run.checkCounts));
+    }
   }
   assert.equal(result.incremental, "fresh");
+});
+
+test("STP1-harness: omitted probes is a zero-test pass rejection", async () => {
+  const products = loadProducts();
+  const node = cloneJson(products.node);
+  delete node.probes;
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP1",
+    engine: "all",
+    requireAll: true,
+    nodeManifest: node,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.harnessRuns.length, 0);
+  assert.ok(
+    result.errors.some(
+      (error) => error.caseId === "STP1-harness" && error.code === "missing-probes",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("--require-all enforces canonical MANDATORY_CASES, not the manifest list", async () => {
+  const products = loadProducts();
+  const node = cloneJson(products.node);
+  node.mandatoryCases = node.mandatoryCases.filter((id) => id !== "STP1-harness");
+  node.cases = node.cases.filter((row) => row.id !== "STP1-harness");
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP1",
+    engine: "all",
+    requireAll: true,
+    skipProbes: true,
+    nodeManifest: node,
+  });
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (error) =>
+        error.caseId === "STP1-zero-selection" && String(error.message).includes("STP1-harness"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("node manifest dropping a canonical mandatory case is rejected", () => {
+  const products = loadProducts();
+  const node = cloneJson(products.node);
+  node.mandatoryCases = node.mandatoryCases.filter((id) => id !== "STP1-harness");
+  const errors = validateProbeManifest(node, { role: "node" });
+  assert.ok(
+    errors.some(
+      (error) =>
+        error.caseId === "STP1-zero-selection" && String(error.message).includes("STP1-harness"),
+    ),
+    JSON.stringify(errors),
+  );
+});
+
+test("duplicate-check guard fires on measured counts above the bound", () => {
+  const files = [
+    "tests/sfc-projection/STP1/probes/positive.ts",
+    "tests/sfc-projection/STP1/probes/negative.ts",
+  ];
+  assert.equal(assertCheckCounts({ [files[0]]: 1, [files[1]]: 1 }, "ts-js", files).length, 0);
+  const duplicate = assertCheckCounts({ [files[0]]: 2, [files[1]]: 1 }, "ts-js", files);
+  assert.ok(
+    duplicate.some((error) => error.caseId === "STP1-harness" && error.code === "duplicate-check"),
+    JSON.stringify(duplicate),
+  );
+  const missing = assertCheckCounts({}, "ts-js", files);
+  assert.ok(
+    missing.some((error) => error.caseId === "STP1-harness" && error.code === "duplicate-check"),
+    JSON.stringify(missing),
+  );
 });
 
 test("engine filter all admits both pins", () => {
