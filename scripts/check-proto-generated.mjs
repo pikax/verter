@@ -7,6 +7,22 @@ import { join, relative, resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const COMMITTED_ROOT = join(REPO_ROOT, "packages", "proto", "src", "gen");
+const COMMITTED_TEMPLATE = join(REPO_ROOT, "buf.gen.yaml");
+const COMMITTED_OUT_LINE = /^(\s*)out: packages\/proto\/src\/gen$/gm;
+
+// The scratch regeneration runs the committed template's exact plugin options
+// (target, import extension, ...) and redirects only the output directory. A
+// hand-copied template would let the two drift and pass a freshness check
+// against options the real `pnpm proto:gen` never used.
+function scratchTemplate(committed, outputDirectory) {
+  const matches = [...committed.matchAll(COMMITTED_OUT_LINE)];
+  if (matches.length !== 1) {
+    throw new Error(
+      `buf.gen.yaml must declare exactly one "out: packages/proto/src/gen" line (found ${matches.length})`,
+    );
+  }
+  return committed.replace(COMMITTED_OUT_LINE, `$1out: ${JSON.stringify(outputDirectory)}`);
+}
 
 function runWorkspaceTool(packagePath, args) {
   const result = spawnSync(process.execPath, [join(REPO_ROOT, packagePath), ...args], {
@@ -36,10 +52,7 @@ try {
   mkdirSync(generatedRoot);
   const output = generatedRoot.replaceAll("\\", "/");
   const template = join(scratch, "buf.gen.yaml");
-  writeFileSync(
-    template,
-    `version: v2\nplugins:\n  - local:\n      - node\n      - node_modules/@bufbuild/protoc-gen-es/bin/protoc-gen-es\n    opt: target=ts\n    out: ${JSON.stringify(output)}\ninputs:\n  - directory: crates/verter_protocol/proto\n`,
-  );
+  writeFileSync(template, scratchTemplate(readFileSync(COMMITTED_TEMPLATE, "utf8"), output));
   runWorkspaceTool("node_modules/@bufbuild/buf/bin/buf", ["generate", "--template", template]);
   runWorkspaceTool("node_modules/oxfmt/bin/oxfmt", [generatedRoot]);
 

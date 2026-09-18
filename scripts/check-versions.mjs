@@ -15,7 +15,7 @@
 import { execSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { computePublishSet, scanWorkspacePackages } from "./lib/publish-set.mjs";
+import { computePublishSet, PUBLISHED_CRATES, scanWorkspacePackages } from "./lib/publish-set.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const PACKAGES_DIR = join(ROOT, "packages");
@@ -135,9 +135,6 @@ const order = publishSet.order
 const cargoToml = readFileSync(join(ROOT, "Cargo.toml"), "utf8");
 const cargoVersionMatch = cargoToml.match(/version\s*=\s*"([^"]+)"/);
 const cargoVersion = cargoVersionMatch ? cargoVersionMatch[1] : null;
-
-/** Crates published to crates.io, in dependency order (see .github/workflows/release.yml) */
-const PUBLISHED_CRATES = ["verter_span", "verter_compiler"];
 
 const rustCrates = [];
 for (const crate of PUBLISHED_CRATES) {

@@ -63,7 +63,10 @@ Triggered on push of tags matching `v*` (e.g., `v0.0.1-beta.1`, `v1.0.0`).
 
 ```
 validate
-  +-- test                                  <- blocking; gates publishing AND the release
+  +-- build-wasm
+        +-- test                            <- blocking; gates publishing AND the release
+                                               (runs `pnpm test`, whose @verter/wasm suite
+                                               loads the wasm artifact build-wasm produced)
   +-- build-native      (matrix: 7 targets) <- parallel
   +-- build-lsp         (matrix: 7 targets) <- parallel
   +-- build-tsc         (matrix: 7 targets) <- parallel
@@ -117,12 +120,32 @@ so `publish-npm` stages them by directory name;
 `build-vsix` maps its five VSIX targets onto those same artifacts (the two
 musl legs serve the npm channel only -- the VSIX has no musl target).
 
-**Publishing process:**
+**Publishing process.** The crates and npm publishes run through
+`scripts/release-publish.mjs`, the one publish path CI and a local release
+share (see [Publishing locally](#publishing-locally)):
 
-1. **Rust crates** -- only `verter_compiler` is published to crates.io (binding crates are consumed via npm)
-2. **npm platform packages** -- published first (e.g., `@verter/native-darwin-arm64`, `@verter/lsp-linux-x64-gnu`, `@verter/mcp-linux-x64-gnu`). The directory list is derived, not hand-listed per family: `scripts/publish-platform-dirs.mjs` prints every `packages/<pkg>/npm/<platform>` dir in the publish set, and the workflow loops over that output
-3. **npm packages** -- published in topological order via `scripts/check-versions.mjs`; the publish set is derived from the product dependency closure by `scripts/lib/publish-set.mjs` (marketplace-only packages such as `verter-vscode` are excluded)
-4. **GitHub Release** -- created with the changelog (via git-cliff) and the staged binary assets
+1. **Rust crates** -- `publish-crates`: the crates in `PUBLISHED_CRATES`
+   (`scripts/lib/publish-set.mjs`: `verter_span`, then `verter_compiler`; the
+   binding crates are consumed via npm), pausing for the crates.io index
+   between them. An already-uploaded version is skipped.
+2. **Stage** -- `stage --artifacts <dir>`: every platform package's binary
+   (named by the package's own `files` list), the wasm build and the
+   napi-generated loader are copied from the downloaded build artifacts into
+   the tree. Fails closed when any platform package cannot be fed.
+3. **Prepare** -- `prepare`: `pnpm run build:ts`, `@verter/native`'s
+   `build:types`, and its hermetic packaging guards.
+4. **npm packages** -- `publish-npm --dist-tag <tag> --provenance`: platform
+   packages first (e.g., `@verter/native-darwin-arm64`,
+   `@verter/lsp-linux-x64-gnu`), then the main packages in the topological
+   order `scripts/lib/publish-set.mjs` derives from the product dependency
+   closure (marketplace-only packages such as `verter-vscode` are excluded).
+   Each package is packed once with `pnpm pack` (which resolves `workspace:`
+   ranges), shipped binaries get the executable bit inside the tarball, and
+   the tarball is published. Only "already published" is tolerated; every
+   package is attempted before a failure fails the job.
+5. **Verify** -- `verify-npm`: every package in the publish set is visible on
+   the registry at the released version.
+6. **GitHub Release** -- created with the changelog (via git-cliff) and the staged binary assets
 
 **Release assets (28).** Each one is staged under an explicit, platform-qualified
 name before `gh release create` runs, and the step writes the full list -- name
@@ -218,6 +241,55 @@ Releases start from a local version bump and end with an automatic tag:
    including the CHANGELOG commit the release workflow pushes — it is a no-op.
 6. The tag push triggers the `release.yml` workflow, which publishes
    everything.
+
+### Publishing locally
+
+When `release.yml` cannot finish a release the build matrix already completed
+(a red test lane, a publish credential problem), the npm and crates.io publish
+runs locally through the SAME code the workflow runs —
+`scripts/release-publish.mjs` — against the SAME build artifacts (the run's
+`native-*`, `tsc-*`, `lsp-*`, `mcp-*`, `wasm` and `native-loader` artifacts are
+retained for 90 days). Nothing is rebuilt from a developer machine: the
+binaries are the tag's CI builds, and the TypeScript packages are built from
+the tagged commit, which the script requires to be checked out.
+
+```bash
+git fetch --tags && git checkout v0.0.1-beta.5   # the tagged commit, clean tree
+npm login                                        # a user with publish rights + 2FA
+cargo login                                      # a crates.io token (no 2FA involved)
+
+node scripts/release-publish.mjs local           # the whole thing, interactive
+node scripts/release-publish.mjs local --run 35334967938   # pick the run explicitly
+node scripts/release-publish.mjs local --dry-run --skip-crates   # rehearse: pack + `npm publish --dry-run`
+```
+
+`local` runs the preflight (tag = HEAD = workspace version, clean tree,
+`set-version.mjs --check`, `npm whoami`), downloads the tag's completed
+`release.yml` run with `gh run download` into `.release/<tag>/artifacts/`
+(gitignored, reused on the next invocation; `--redownload` refreshes), then
+`stage → prepare → publish-npm → verify-npm → publish-crates`. Each step is
+also its own subcommand (`node scripts/release-publish.mjs <step>`), so a run
+that stopped half way is resumed from the step that failed; a package already
+on the registry is skipped, never re-published.
+
+**Two-factor authentication.** npm accepts a one-time password for a short
+window, so 44 packages cannot ride one code. `publish-npm --interactive-otp`
+(what `local` uses) asks for a code the first time the registry demands one
+and again exactly when a code is rejected as expired, retrying the same
+package — a batch of publishes shares one code and you type a fresh one only
+when npm asks. Pass `--otp <code>` to seed the first batch.
+
+**Executable bits.** A tarball packed on Windows records mode `0644` for every
+file, so a `verter-lsp` / `verter-mcp` / `verter-tsc` platform package
+published straight from `pnpm publish` installs and then cannot be spawned.
+`publish-npm` therefore packs each package to a tarball and sets `0755` on the
+shipped binaries inside the archive (the files the platform package's own
+`files` list names) before `npm publish <tarball>` — on every host, so CI and a
+local release produce the same tarballs.
+
+Not covered by the local path: the GitHub Release with its staged assets, the
+`CHANGELOG.md` commit, the platform VSIXes and the Marketplace publish —
+`release.yml` owns those.
 
 ### Version Checking
 

@@ -20,6 +20,7 @@ import { dirname, join, resolve as resolvePath, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { computePublishSet } from "../../scripts/lib/publish-set.mjs";
+import { BINARY_FAMILIES, planPlatformStaging } from "../../scripts/lib/release-publish.mjs";
 import type { PlatformEntry } from "./index.js";
 import { readJobBody, readMatrixRows } from "./test-support/release-workflow.ts";
 
@@ -117,27 +118,82 @@ describe.each(FAMILIES.map((family) => [family.name, family] as const))(
       expect(jobBody).toContain(`name: ${family.artifactPrefix}\${{ matrix.npm-pkg }}`);
     });
 
-    it("is staged into its platform packages before publishing", () => {
+    it("is downloaded and staged into its platform packages before publishing", () => {
       expect(needsOf(publishNpmBody)).toContain(family.job);
-      expect(publishNpmBody).toContain(`pattern: ${family.artifactPrefix}*`);
-      expect(publishNpmBody).toContain(`packages/${family.dir}/npm/`);
+      // The single artifact download names every family's upload prefix …
+      const pattern = /pattern:\s*"?\{([^}]*)\}"?/.exec(publishNpmBody);
+      expect(pattern, "publish-npm downloads no artifact set").not.toBeNull();
+      expect(pattern![1].split(",").map((glob) => glob.trim())).toContain(
+        `${family.artifactPrefix}*`,
+      );
+      // … and the staging step runs the shared script over that download.
+      expect(publishNpmBody).toContain("release-publish.mjs stage");
+    });
+
+    it("has a staging plan that feeds every platform package from the artifact its build uploads", () => {
+      // Executed for real over the family's own platform matrix: the script's
+      // family table must name the prefix the build job uploads under, and
+      // one artifact per matrix row — holding the binary the launcher
+      // resolves — must feed exactly its platform package with no problem.
+      const staging = BINARY_FAMILIES[family.dir as keyof typeof BINARY_FAMILIES];
+      expect(staging, `release-publish knows no family for packages/${family.dir}`).toBeDefined();
+      expect(staging.artifactPrefix).toBe(family.artifactPrefix);
+      expect(staging.executable).toBe(true);
+
+      const artifacts = Object.fromEntries(
+        family.matrix.map((row) => [`${family.artifactPrefix}${row.npmSuffix}`, [row.binaryName]]),
+      );
+      const platformPackages = family.matrix.map((row) => ({
+        dir: `packages/${family.dir}/npm/${row.npmSuffix}`,
+        files: [row.binaryName],
+      }));
+      const plan = planPlatformStaging(platformPackages, artifacts);
+      expect(plan.problems).toEqual([]);
+      expect(plan.copies.map((copy) => copy.destination).sort()).toEqual(
+        family.matrix
+          .map((row) => `packages/${family.dir}/npm/${row.npmSuffix}/${row.binaryName}`)
+          .sort(),
+      );
+      expect(plan.copies.every((copy) => copy.executable)).toBe(true);
+
+      // Negative control: a build leg that uploaded no binary is a problem, not
+      // a silent empty package.
+      const [firstRow] = family.matrix;
+      const short = planPlatformStaging(platformPackages, {
+        ...artifacts,
+        [`${family.artifactPrefix}${firstRow.npmSuffix}`]: [],
+      });
+      expect(short.problems).toHaveLength(1);
+      expect(short.copies).toHaveLength(family.matrix.length - 1);
     });
 
     it("is verified on the registry after publishing", () => {
-      const critical = /CRITICAL_PACKAGES=\(([^)]*)\)/s.exec(publishNpmBody);
-      expect(critical, "publish-npm has no CRITICAL_PACKAGES list").not.toBeNull();
-      expect(critical![1]).toContain(`"${family.name}"`);
+      expect(publishNpmBody).toContain("release-publish.mjs verify-npm");
+      // verify-npm iterates the same derived target list the publish uses.
+      expect(releaseTargets().map((target) => target.name)).toContain(family.name);
     });
   },
 );
 
+/** `release-publish.mjs list --json`, executed for real: the publish targets in publish order. */
+function releaseTargets(): Array<{ name: string; dir: string; kind: "platform" | "package" }> {
+  const stdout = execFileSync(
+    process.execPath,
+    [join("scripts", "release-publish.mjs"), "list", "--json"],
+    { cwd: REPO_ROOT, encoding: "utf8" },
+  );
+  return JSON.parse(stdout).targets;
+}
+
 describe("release.yml publish-npm job", () => {
-  it("publishes platform packages from the derived publish set, not a hand-listed family", () => {
+  it("publishes through the shared release script, not a hand-listed family loop", () => {
     // The derived list is the single authority; a per-family hardcoded loop is
     // exactly the drift that leaves a new platform family unpublished.
-    expect(publishNpmBody).toContain("scripts/publish-platform-dirs.mjs");
+    expect(publishNpmBody).toContain("release-publish.mjs publish-npm");
+    expect(publishNpmBody).toContain("--provenance");
+    expect(publishNpmBody).not.toContain("pnpm publish");
     for (const family of ["native", "verter-lsp", "verter-mcp", "verter-tsc"]) {
-      expect(publishNpmBody).not.toContain(`for platform_dir in packages/${family}/npm/*/`);
+      expect(publishNpmBody).not.toContain(`packages/${family}/npm/`);
     }
   });
 });
@@ -272,19 +328,22 @@ describe("derived publish set", () => {
     }
   });
 
-  it("the script CI publishes from emits exactly the derived platform dirs", () => {
-    // Executed for real, so the list CI loops over is proven — not inferred
+  it("the script CI publishes from targets exactly the derived set: every platform dir first, then the dependency order", () => {
+    // Executed for real, so the list CI publishes is proven — not inferred
     // from the script's source text.
-    const stdout = execFileSync(process.execPath, [join("scripts", "publish-platform-dirs.mjs")], {
-      cwd: REPO_ROOT,
-      encoding: "utf8",
-    });
-    const emitted = stdout.trim().split(/\r?\n/).filter(Boolean).map(posix);
+    const targets = releaseTargets();
+    const platformDirs = targets.filter((t) => t.kind === "platform").map((t) => t.dir);
+    const packageNames = targets.filter((t) => t.kind === "package").map((t) => t.name);
 
-    expect(emitted.sort()).toEqual(publishSet.platform.map(posix).sort());
+    expect([...platformDirs].sort()).toEqual(publishSet.platform.map(posix).sort());
+    expect(packageNames).toEqual(publishSet.order);
+    // A launcher's optionalDependencies must resolve the moment the launcher
+    // lands, so no main package may precede a platform package.
+    const firstPackage = targets.findIndex((t) => t.kind === "package");
+    expect(targets.slice(0, firstPackage).every((t) => t.kind === "platform")).toBe(true);
     for (const family of FAMILIES) {
       for (const row of family.matrix) {
-        expect(emitted).toContain(`packages/${family.dir}/npm/${row.npmSuffix}`);
+        expect(platformDirs).toContain(`packages/${family.dir}/npm/${row.npmSuffix}`);
       }
     }
   });

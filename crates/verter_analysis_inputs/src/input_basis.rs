@@ -12,6 +12,9 @@ use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{ContentId, InputBasisId};
 
 /// Deterministic, sorted, deduplicated set of load keys for one wave.
+///
+/// F1 owns the wave identity and ordering. Retry that extends a basis is a
+/// successor (F2).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LoadWave {
     keys: Vec<Arc<str>>,

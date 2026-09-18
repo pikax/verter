@@ -345,10 +345,16 @@ Before each build, `pnpm run clean:dist` removes old `.node` files from `dist/` 
 
 ### Publishing
 
-```bash
-# Generate platform-specific npm packages
-pnpm run prepublishOnly   # runs: pnpm run build && napi prepublish -t npm
+The package has no publish lifecycle script. The release (`release.yml`, or a
+local release through `node scripts/release-publish.mjs`) stages the
+per-target `.node` binaries built by the release build matrix into
+`npm/<platform>/`, drops the napi-generated loader into `dist/index.js`,
+generates `dist/*.d.ts` with `pnpm run build:types`, and publishes the platform
+packages before this main package. The main package ships the loader and the
+types only — never a `.node`; the binaries ship in the per-platform
+optional-dependency packages. See `docs/contributing/ci-cd.md`.
 
+```bash
 # Collect built artifacts for all platforms
 pnpm run artifacts        # runs: napi artifacts
 ```
