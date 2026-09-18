@@ -3,3 +3,4 @@ mod cancellation_token;
 mod cpu_concurrency_semaphore;
 mod dedupe_hook;
 mod no_parking_lot_semaphore;
+mod owner_affine_commands;

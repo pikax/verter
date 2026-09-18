@@ -5,10 +5,13 @@
 //! [`Scheduler`](crate::scheduler::Scheduler) constructor:
 //!
 //! - [`SchedulerCpuPool`] — scheduler stage CPU work (Parse / Analysis /
-//!   Artifact). Wraps a `rayon::ThreadPool`. Workers register as
+//!   Artifact). Wraps a `rayon::ThreadPool` whose fire-and-forget
+//!   [`try_submit`](SchedulerCpuPool::try_submit) is bounded by a
+//!   [`CpuConcurrencySemaphore`](crate::cpu_concurrency::CpuConcurrencySemaphore)
+//!   sized to dominate the DAG CPU budget. Workers register as
 //!   [`CallerKind::CpuWorker`](crate::caller_kind::CallerKind) so the
 //!   cooperative pump may inline-execute ready CPU dependencies on the
-//!   same worker.
+//!   same worker. Submit takes [`OwnerCommand<Cpu>`](crate::owner_command::OwnerCommand).
 //! - [`SchedulerIoPool`] — scheduler source/load work. Owns a fixed-size
 //!   crossbeam-channel worker topology, separate from the CPU pool so
 //!   blocking disk reads cannot starve parse/analyze work. Workers
@@ -27,7 +30,7 @@
 //! Both pools expose a single nonblocking submit primitive:
 //!
 //! ```ignore
-//! pub fn try_submit(&self, task: SchedulerPoolTask)
+//! pub fn try_submit(&self, command: OwnerCommand<Cpu /* or Io */>)
 //!     -> Result<SchedulerPoolSubmitResult, SchedulerPoolSubmitError>;
 //! ```
 //!
@@ -91,7 +94,13 @@ static NEXT_POOL_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 
 /// Scheduler-owned CPU pool for stage work (Parse / Analysis / Artifact).
 ///
-/// Wraps a `rayon::ThreadPool`. Workers register as
+/// Named charter boundary [`CpuPool`]. Wraps a `rayon::ThreadPool` for
+/// scoped [`Self::install`] (non-`'static` waiter-side producers) and a
+/// bounded [`CpuConcurrencySemaphore`](crate::cpu_concurrency::CpuConcurrencySemaphore)
+/// for fire-and-forget [`Self::try_submit`]. The semaphore is the CPU
+/// transport — it is sized to dominate `dag_budget.cpu` so the DAG
+/// ledger remains the sole admission gate, matching
+/// [`SchedulerIoPool`]. Workers register as
 /// [`CallerKind::CpuWorker`](crate::caller_kind::CallerKind) so the
 /// cooperative pump may inline-execute ready CPU-bound dependencies on
 /// the same worker. Distinct from
@@ -100,6 +109,13 @@ static NEXT_POOL_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 #[cfg(not(target_arch = "wasm32"))]
 pub struct SchedulerCpuPool {
     pool: rayon::ThreadPool,
+    /// Bounded CPU transport. Each successful `try_submit` holds one
+    /// owned permit until the spawned task drops it.
+    slots: std::sync::Arc<crate::cpu_concurrency::CpuConcurrencySemaphore>,
+    /// Resolved transport capacity after the same
+    /// `max(threads*4, requested, 1)` floor as [`SchedulerIoPool`].
+    #[cfg(any(test, feature = "test-support"))]
+    transport_capacity: usize,
     /// Process-unique id for this pool. Workers stash this into
     /// `SCHEDULER_CPU_POOL_TOKEN` on `start_handler` so tests can assert
     /// a worker is running on THIS injected pool.
@@ -109,6 +125,10 @@ pub struct SchedulerCpuPool {
     #[cfg(any(test, feature = "test-support"))]
     pool_id: usize,
 }
+
+/// Named charter boundary for the bounded scheduler CPU pool.
+#[cfg(not(target_arch = "wasm32"))]
+pub type CpuPool = SchedulerCpuPool;
 
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
 thread_local! {
@@ -130,10 +150,20 @@ pub fn scheduler_cpu_pool_token() -> Option<usize> {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl SchedulerCpuPool {
-    /// Build a new scheduler CPU pool with `threads` workers. Each
-    /// worker registers as [`CallerKind::CpuWorker`].
-    pub fn new(threads: usize) -> std::sync::Arc<Self> {
+    /// Build a new scheduler CPU pool with `threads` workers and a
+    /// transport bound of `transport_capacity` in-flight+queued tasks.
+    ///
+    /// `transport_capacity` MUST dominate the resolved `dag_budget.cpu`
+    /// so the DAG capacity ledger remains the sole admission gate — if
+    /// the bound could fill before the ledger's `cpu` permits are
+    /// exhausted, the pool would become a second admission authority
+    /// and `try_submit` could observe `Full` at the dispatch site (an
+    /// invariant violation). The host derives the capacity via
+    /// [`SchedulerConfig::resolved_dag_budget`](crate::scheduler::SchedulerConfig::resolved_dag_budget).
+    /// Each worker registers as [`CallerKind::CpuWorker`].
+    pub fn new(threads: usize, transport_capacity: usize) -> std::sync::Arc<Self> {
         let threads = threads.max(1);
+        let capacity = transport_capacity.max(threads * 4).max(1);
         #[cfg(any(test, feature = "test-support"))]
         let pool_id = NEXT_POOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let pool = rayon::ThreadPoolBuilder::new()
@@ -157,22 +187,44 @@ impl SchedulerCpuPool {
             .expect("failed to build scheduler CPU pool");
         std::sync::Arc::new(Self {
             pool,
+            slots: std::sync::Arc::new(crate::cpu_concurrency::CpuConcurrencySemaphore::new(
+                capacity,
+            )),
+            #[cfg(any(test, feature = "test-support"))]
+            transport_capacity: capacity,
             #[cfg(any(test, feature = "test-support"))]
             pool_id,
         })
     }
 
-    /// Nonblocking submit. `rayon::spawn` enqueues onto an unbounded
-    /// work-stealing deque and never blocks, so this always returns
-    /// [`SchedulerPoolSubmitResult::Submitted`]. The uniform
-    /// `try_submit` signature lets the dispatch loop treat both pools
-    /// identically.
+    /// Nonblocking owner-affine submit. Takes a CPU-owned command and
+    /// reserves one transport slot before `rayon::spawn`. Returns
+    /// [`SchedulerPoolSubmitError::Full`] when the bound is saturated
+    /// rather than enqueueing unbounded work. Under the DAG ledger
+    /// invariant `Full` is unreachable at the dispatch site.
     pub fn try_submit(
         &self,
-        task: SchedulerPoolTask,
+        command: crate::owner_command::OwnerCommand<crate::owner_command::Cpu>,
     ) -> Result<SchedulerPoolSubmitResult, SchedulerPoolSubmitError> {
-        self.pool.spawn(task);
+        let Some(permit) = self.slots.try_acquire_owned() else {
+            return Err(SchedulerPoolSubmitError::Full);
+        };
+        let task = command.into_task();
+        self.pool.spawn(move || {
+            let _permit = permit;
+            task();
+        });
         Ok(SchedulerPoolSubmitResult::Submitted)
+    }
+
+    /// Transport bound (resolved after the
+    /// `max(threads*4, transport_capacity, 1)` floor). Exposed so tests
+    /// can assert the bound dominates `dag_budget.cpu`.
+    ///
+    /// Test-only — gated behind `cfg(any(test, feature = "test-support"))`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn transport_capacity(&self) -> usize {
+        self.transport_capacity
     }
 
     /// Execute a non-`'static` scoped operation on this scheduler CPU pool.
@@ -308,9 +360,9 @@ impl SchedulerIoPool {
     /// the dispatch site.
     pub fn try_submit(
         &self,
-        task: SchedulerPoolTask,
+        command: crate::owner_command::OwnerCommand<crate::owner_command::Io>,
     ) -> Result<SchedulerPoolSubmitResult, SchedulerPoolSubmitError> {
-        match self.sender.try_send(task) {
+        match self.sender.try_send(command.into_task()) {
             Ok(()) => Ok(SchedulerPoolSubmitResult::Submitted),
             Err(TrySendError::Full(_)) => Err(SchedulerPoolSubmitError::Full),
             Err(TrySendError::Disconnected(_)) => Err(SchedulerPoolSubmitError::Closed),
@@ -350,8 +402,16 @@ impl SchedulerIoPool {
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
+    use crate::owner_command::OwnerCommand;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    fn cpu(task: SchedulerPoolTask) -> OwnerCommand<crate::owner_command::Cpu> {
+        OwnerCommand::cpu(task)
+    }
+    fn io(task: SchedulerPoolTask) -> OwnerCommand<crate::owner_command::Io> {
+        OwnerCommand::io(task)
+    }
 
     #[test]
     fn scheduler_io_pool_runs_submitted_tasks() {
@@ -364,10 +424,10 @@ mod tests {
         for _ in 0..10 {
             let c = Arc::clone(&counter);
             let tx = tx.clone();
-            pool.try_submit(Box::new(move || {
+            pool.try_submit(io(Box::new(move || {
                 c.fetch_add(1, Ordering::SeqCst);
                 let _ = tx.send(());
-            }))
+            })))
             .expect("submit must succeed under capacity");
         }
         for _ in 0..10 {
@@ -378,17 +438,17 @@ mod tests {
 
     #[test]
     fn scheduler_cpu_pool_runs_submitted_tasks() {
-        let pool = SchedulerCpuPool::new(2);
+        let pool = SchedulerCpuPool::new(2, 32);
         let counter = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = crossbeam_channel::bounded::<()>(10);
 
         for _ in 0..10 {
             let c = Arc::clone(&counter);
             let tx = tx.clone();
-            let r = pool.try_submit(Box::new(move || {
+            let r = pool.try_submit(cpu(Box::new(move || {
                 c.fetch_add(1, Ordering::SeqCst);
                 let _ = tx.send(());
-            }));
+            })));
             assert_eq!(r, Ok(SchedulerPoolSubmitResult::Submitted));
         }
         for _ in 0..10 {
@@ -397,29 +457,51 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 10);
     }
 
-    /// `SchedulerCpuPool::try_submit` is always-Ok: rayon's deque never
-    /// blocks, so even a 1-thread pool with many queued tasks accepts
-    /// every submit (the discriminator vs. a bounded-channel CPU pool
-    /// that could report `Full`).
+    /// G3-AC1: `SchedulerCpuPool::try_submit` reports `Full` once the
+    /// bounded transport is saturated — the displaced unbounded rayon
+    /// spawn queue is gone.
     #[test]
-    fn scheduler_cpu_pool_try_submit_never_full() {
-        let pool = SchedulerCpuPool::new(1);
+    fn scheduler_cpu_pool_try_submit_reports_full_without_blocking() {
+        let pool = SchedulerCpuPool::new(1, 1);
+        let cap = pool.transport_capacity();
         let (release_tx, release_rx) = crossbeam_channel::bounded::<()>(0);
-        // First task parks the single worker.
-        pool.try_submit(Box::new(move || {
+        pool.try_submit(cpu(Box::new(move || {
             let _ = release_rx.recv();
-        }))
+        })))
         .expect("first submit ok");
-        // Many further submits while the worker is parked: rayon queues
-        // them unbounded, so each is accepted.
-        for _ in 0..1000 {
-            assert_eq!(
-                pool.try_submit(Box::new(|| {})),
-                Ok(SchedulerPoolSubmitResult::Submitted),
-                "rayon CPU pool must never report Full"
-            );
+        let mut saw_full = false;
+        for _ in 0..(cap + 8) {
+            match pool.try_submit(cpu(Box::new(|| {}))) {
+                Ok(_) => {}
+                Err(SchedulerPoolSubmitError::Full) => {
+                    saw_full = true;
+                    break;
+                }
+                Err(SchedulerPoolSubmitError::Closed) => panic!("pool not closed"),
+            }
         }
+        assert!(
+            saw_full,
+            "try_submit must report Full on a saturated CPU transport \
+             (capacity {cap}) instead of enqueueing unbounded rayon work"
+        );
         let _ = release_tx.send(());
+    }
+
+    #[test]
+    fn scheduler_cpu_transport_capacity_dominates_request_and_floor() {
+        let big = SchedulerCpuPool::new(1, 64);
+        assert!(
+            big.transport_capacity() >= 64,
+            "CPU transport capacity must dominate the requested capacity (saw {})",
+            big.transport_capacity()
+        );
+        let small = SchedulerCpuPool::new(4, 1);
+        assert!(
+            small.transport_capacity() >= 4 * 4,
+            "CPU transport capacity must not drop below the threads*4 floor (saw {})",
+            small.transport_capacity()
+        );
     }
 
     /// Transport capacity must dominate the requested capacity AND the
@@ -457,9 +539,9 @@ mod tests {
         let cap = pool.transport_capacity();
         let (release_tx, release_rx) = crossbeam_channel::bounded::<()>(0);
         // Park the single worker on the first task.
-        pool.try_submit(Box::new(move || {
+        pool.try_submit(io(Box::new(move || {
             let _ = release_rx.recv();
-        }))
+        })))
         .expect("first submit ok");
         // Fill the transport. The worker is parked, so queued tasks pile
         // up to `cap`. The exact count that fits before Full depends on
@@ -469,7 +551,7 @@ mod tests {
         // hang here and the test would time out).
         let mut saw_full = false;
         for _ in 0..(cap + 8) {
-            match pool.try_submit(Box::new(|| {})) {
+            match pool.try_submit(io(Box::new(|| {}))) {
                 Ok(_) => {}
                 Err(SchedulerPoolSubmitError::Full) => {
                     saw_full = true;
@@ -489,11 +571,11 @@ mod tests {
     /// Workers report the correct `CallerKind` tag (isolation basis).
     #[test]
     fn scheduler_cpu_pool_workers_tag_cpu_worker() {
-        let pool = SchedulerCpuPool::new(1);
+        let pool = SchedulerCpuPool::new(1, 8);
         let (tx, rx) = crossbeam_channel::bounded::<crate::caller_kind::CallerKind>(1);
-        pool.try_submit(Box::new(move || {
+        pool.try_submit(cpu(Box::new(move || {
             let _ = tx.send(crate::caller_kind::CallerKind::current());
-        }))
+        })))
         .expect("submit ok");
         assert_eq!(
             rx.recv().unwrap(),
@@ -506,9 +588,9 @@ mod tests {
     fn scheduler_io_pool_workers_tag_io_worker() {
         let pool = SchedulerIoPool::new(1, 8);
         let (tx, rx) = crossbeam_channel::bounded::<crate::caller_kind::CallerKind>(1);
-        pool.try_submit(Box::new(move || {
+        pool.try_submit(io(Box::new(move || {
             let _ = tx.send(crate::caller_kind::CallerKind::current());
-        }))
+        })))
         .expect("submit ok");
         assert_eq!(
             rx.recv().unwrap(),
@@ -522,8 +604,8 @@ mod tests {
     /// CpuWorker/IoWorker-tagged thread).
     #[test]
     fn scheduler_pool_ids_are_distinct() {
-        let a = SchedulerCpuPool::new(1);
-        let b = SchedulerCpuPool::new(1);
+        let a = SchedulerCpuPool::new(1, 8);
+        let b = SchedulerCpuPool::new(1, 8);
         assert_ne!(a.pool_id(), b.pool_id());
         let c = SchedulerIoPool::new(1, 8);
         let d = SchedulerIoPool::new(1, 8);
@@ -535,12 +617,12 @@ mod tests {
     #[test]
     fn scheduler_cpu_pool_worker_carries_pool_id_token() {
         assert_eq!(scheduler_cpu_pool_token(), None);
-        let pool = SchedulerCpuPool::new(1);
+        let pool = SchedulerCpuPool::new(1, 8);
         let id = pool.pool_id();
         let (tx, rx) = crossbeam_channel::bounded::<Option<usize>>(1);
-        pool.try_submit(Box::new(move || {
+        pool.try_submit(cpu(Box::new(move || {
             let _ = tx.send(scheduler_cpu_pool_token());
-        }))
+        })))
         .expect("submit ok");
         assert_eq!(rx.recv().unwrap(), Some(id));
     }

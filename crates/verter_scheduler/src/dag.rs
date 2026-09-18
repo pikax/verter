@@ -384,6 +384,10 @@ pub(in crate::dag) struct DagNode {
 
 /// Lightweight dependency key — the subset of [`WorkNodeIdentity`]
 /// the DAG uses for edge gating. Cheap to clone, hashable.
+///
+/// Resource capacity is not a DAG predecessor. Admission lives on
+/// [`DagCapacityBudget`] and the owner-affine pool transports; a
+/// capacity edge cannot be represented in this enum (G3-AC1).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DepKey {
     /// A specific file-stage completion.
@@ -411,6 +415,16 @@ pub enum DepKey {
 }
 
 impl DepKey {
+    /// Closed classification of a gating edge. Exhaustiveness is the
+    /// structural rejection of a resource-capacity predecessor.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            DepKey::FileStage { .. } => "file_stage",
+            DepKey::Artifact { .. } => "artifact",
+            DepKey::CacheNode { .. } => "cache_node",
+        }
+    }
+
     /// Build a dep key from a work-node identity. The reverse
     /// conversion is intentionally lossy — identities carry the same
     /// data as dep keys today, but having a separate type makes the

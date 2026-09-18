@@ -415,18 +415,24 @@ impl VerterHost {
                 // tagged External) under the dual-pool isolation
                 // invariant: host-coordinator work never runs scheduler
                 // stage work, and scheduler stage workers never run the
-                // outer batch fan-out. The IO transport capacity is sized from the
-                // SAME resolved DAG budget the scheduler admits against
-                // (`resolved_dag_budget().io`) so the IO channel never
-                // becomes a second admission authority.
+                // outer batch fan-out. CPU and IO transport bounds are
+                // sized from the SAME resolved DAG budget the scheduler
+                // admits against so neither pool becomes a second
+                // admission authority.
                 let (scheduler_cpu_pool, scheduler_io_pool) = match &worker_pool_source {
-                    HostWorkerPoolSource::Fresh => (
-                        verter_scheduler::SchedulerCpuPool::new(scheduler_config.cpu_threads),
-                        verter_scheduler::SchedulerIoPool::new(
-                            scheduler_config.io_threads,
-                            scheduler_config.resolved_dag_budget().io as usize,
-                        ),
-                    ),
+                    HostWorkerPoolSource::Fresh => {
+                        let budget = scheduler_config.resolved_dag_budget();
+                        (
+                            verter_scheduler::SchedulerCpuPool::new(
+                                scheduler_config.cpu_threads,
+                                budget.cpu as usize,
+                            ),
+                            verter_scheduler::SchedulerIoPool::new(
+                                scheduler_config.io_threads,
+                                budget.io as usize,
+                            ),
+                        )
+                    }
                     #[cfg(any(test, feature = "test-support"))]
                     HostWorkerPoolSource::Shared(worker_pools) => (
                         Arc::clone(&worker_pools.scheduler_cpu_pool),
