@@ -4,11 +4,13 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { gunzipSync } from "node:zlib";
 
 import { GitHubAdapterError } from "./errors.mjs";
 import { computePublishSet, scanWorkspacePackages } from "../lib/publish-set.mjs";
+import { BINARY_FAMILIES, parsePlatformDir } from "../lib/release-publish.mjs";
+import { fixExecutableBits, packTarball } from "../release-publish.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../..");
@@ -22,7 +24,12 @@ const RUNTIME_CONDITIONS = new Set([
   "module-sync",
 ]);
 const JS_FILE = /\.(?:m?js|cjs|node)$/u;
+const TYPES_FILE = /\.(?:d\.[cm]?ts|[cm]?ts)$/u;
 const TAR_BLOCK = 512;
+const MUSL_LINKER = {
+  x64: "/lib/ld-musl-x86_64.so.1",
+  arm64: "/lib/ld-musl-aarch64.so.1",
+};
 
 export const CLEAN_ROOM_KIND = "CleanRoomPublishedArtifact";
 
@@ -37,13 +44,31 @@ function inside(inner, outer) {
   return resolvedInner === resolvedOuter || resolvedInner.startsWith(prefix);
 }
 
-function run(command, args, options = {}) {
-  const result = spawnSync(command, args, {
+function npmInvocation(args) {
+  const cli = [
+    path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"),
+    path.join(
+      path.dirname(process.execPath),
+      "..",
+      "lib",
+      "node_modules",
+      "npm",
+      "bin",
+      "npm-cli.js",
+    ),
+  ].find((candidate) => fs.existsSync(candidate));
+  if (cli) return { command: process.execPath, args: [cli, ...args] };
+  if (process.platform === "win32") return { command: "npm.cmd", args };
+  return { command: "npm", args };
+}
+
+function runNpm(args, options = {}) {
+  const invocation = npmInvocation(args);
+  return spawnSync(invocation.command, invocation.args, {
     encoding: "utf8",
-    shell: process.platform === "win32",
+    shell: false,
     ...options,
   });
-  return result;
 }
 
 function readJson(filePath) {
@@ -54,9 +79,8 @@ function sha256(filePath) {
   return createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
 
-function tarNames(tgzPath) {
+function walkTar(tgzPath, onEntry) {
   const tar = gunzipSync(fs.readFileSync(tgzPath));
-  const names = [];
   let offset = 0;
   let longName = null;
   while (offset + TAR_BLOCK <= tar.length) {
@@ -78,11 +102,30 @@ function tarNames(tgzPath) {
       const name = longName ?? raw;
       longName = null;
       const relative = name.startsWith("package/") ? name.slice("package/".length) : name;
-      if (relative && typeflag !== "5") names.push(relative.replace(/\\/g, "/"));
+      if (relative && typeflag !== "5") onEntry(relative.replace(/\\/g, "/"), data);
     }
     offset += TAR_BLOCK + Math.ceil(size / TAR_BLOCK) * TAR_BLOCK;
   }
+}
+
+function tarNames(tgzPath) {
+  const names = [];
+  walkTar(tgzPath, (name) => names.push(name));
   return names;
+}
+
+function tarFile(tgzPath, relativePath) {
+  let found = null;
+  walkTar(tgzPath, (name, data) => {
+    if (name === relativePath) found = data;
+  });
+  return found;
+}
+
+function packedManifest(tgzPath) {
+  const buf = tarFile(tgzPath, "package.json");
+  if (!buf) return null;
+  return JSON.parse(buf.toString("utf8"));
 }
 
 function exportMap(exportsField) {
@@ -119,14 +162,17 @@ export function declaredEntrypoints(pkg) {
   const rows = [];
   const seen = new Set();
   const add = (subpath, file, conditions, typesOnly = false) => {
-    const key = `${subpath}\0${conditions.slice().sort().join(",")}\0${file}\0${typesOnly ? "t" : "r"}`;
+    const normalized = file ? normalizeFile(file) : "";
+    const types = typesOnly || TYPES_FILE.test(normalized);
+    const conds = types ? [] : conditions.slice();
+    const key = `${subpath}\0${conds.slice().sort().join(",")}\0${normalized}\0${types ? "t" : "r"}`;
     if (seen.has(key)) return;
     seen.add(key);
     rows.push({
       subpath,
-      file: normalizeFile(file),
-      conditions: conditions.slice(),
-      typesOnly,
+      file: normalized,
+      conditions: conds,
+      typesOnly: types,
     });
   };
   const mapped = exportMap(pkg.exports);
@@ -177,6 +223,31 @@ function classifyLoadError(stderr, stdout) {
   return "unloadable";
 }
 
+function stripYamlComment(line) {
+  let quote = null;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === "\\" && i + 1 < line.length) {
+        i += 1;
+        continue;
+      }
+      if (ch === '"') quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === "#" && quote === null) return line.slice(0, i);
+  }
+  return line;
+}
+
 function splitWorkflowJobs(text) {
   const jobs = {};
   const lines = String(text).split(/\r?\n/u);
@@ -211,15 +282,65 @@ function splitWorkflowJobs(text) {
   return jobs;
 }
 
+function jobLevelIf(body) {
+  for (const line of body.split(/\r?\n/u)) {
+    if (/^    steps:/u.test(line)) return null;
+    const stripped = stripYamlComment(line);
+    const match = stripped.match(/^    if:\s*(.+?)\s*$/u);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+function stepBlocks(body) {
+  const lines = body.split(/\r?\n/u);
+  const steps = [];
+  let current = null;
+  for (const line of lines) {
+    if (/^      - /u.test(line)) {
+      if (current) steps.push(current);
+      current = [line];
+      continue;
+    }
+    if (current) current.push(line);
+  }
+  if (current) steps.push(current);
+  return steps.map((block) => block.join("\n"));
+}
+
+function stepRunsCleanRoom(block) {
+  for (const line of block.split(/\r?\n/u)) {
+    const stripped = stripYamlComment(line);
+    if (/\bnode\b/u.test(stripped) && stripped.includes(CLEAN_ROOM_SCRIPT)) return true;
+  }
+  return false;
+}
+
+function stepHasIf(block) {
+  return block.split(/\r?\n/u).some((line) => /^\s+if:/u.test(stripYamlComment(line)));
+}
+
 export function assertCleanRoomHosted(releaseYml) {
   const jobs = splitWorkflowJobs(releaseYml);
-  const hosts = Object.entries(jobs).filter(([, body]) => body.includes(CLEAN_ROOM_SCRIPT));
+  const hosts = [];
+  for (const [name, body] of Object.entries(jobs)) {
+    const steps = stepBlocks(body).filter((block) => stepRunsCleanRoom(block));
+    if (steps.length > 0) hosts.push({ name, body, steps });
+  }
   if (hosts.length === 0) {
     throw new GitHubAdapterError("release.yml must run the clean-room published-artifact check");
   }
-  for (const [name, body] of hosts) {
-    if (/dry-run\s*!=\s*'true'/u.test(body) || /outputs\.dry-run\s*!=\s*'true'/u.test(body)) {
+  for (const { name, body, steps } of hosts) {
+    if (jobLevelIf(body)) {
       throw new GitHubAdapterError(`clean-room check in job ${name} is skipped during rehearsal`);
+    }
+    if (/continue-on-error:\s*true/u.test(body)) {
+      throw new GitHubAdapterError(`clean-room check in job ${name} is skipped during rehearsal`);
+    }
+    for (const step of steps) {
+      if (stepHasIf(step)) {
+        throw new GitHubAdapterError(`clean-room check in job ${name} is skipped during rehearsal`);
+      }
     }
   }
   return { kind: CLEAN_ROOM_KIND, hosted: true, skipped: false };
@@ -236,89 +357,174 @@ function claimWorkDir(workDir) {
   return null;
 }
 
-function packPackage(packageDir, packDir) {
-  fs.mkdirSync(packDir, { recursive: true });
-  const before = new Set(fs.readdirSync(packDir));
-  const pnpm = run("pnpm", ["pack", "--pack-destination", packDir, "--json"], { cwd: packageDir });
-  if (pnpm.status === 0) {
-    const start = (pnpm.stdout ?? "").indexOf("{");
-    if (start >= 0) {
-      const info = JSON.parse(pnpm.stdout.slice(start));
-      const filename = info.filename ?? info.path;
-      if (filename) {
-        const packed = path.isAbsolute(filename)
-          ? filename
-          : path.join(packDir, path.basename(filename));
-        if (fs.existsSync(packed)) return packed;
-      }
-    }
+function hostLibc() {
+  if (process.platform !== "linux") return null;
+  try {
+    if (process.report) process.report.excludeNetwork = true;
+    const header = process.report?.getReport()?.header;
+    if (header?.glibcVersionRuntime) return "glibc";
+  } catch {
+    // fall through to filesystem signals
   }
-  const npm = run("npm", ["pack", "--pack-destination", packDir], { cwd: packageDir });
-  if (npm.status !== 0) {
-    throw new Error(
-      `pack failed in ${packageDir}: ${npm.stderr || pnpm.stderr || npm.stdout || pnpm.stdout}`,
-    );
-  }
-  const after = fs
-    .readdirSync(packDir)
-    .filter((name) => name.endsWith(".tgz") && !before.has(name));
-  if (after.length === 0) throw new Error(`pack produced no tarball in ${packageDir}`);
-  return path.join(packDir, after[0]);
+  if (fs.existsSync("/etc/alpine-release")) return "musl";
+  const linker = MUSL_LINKER[process.arch];
+  if (linker && fs.existsSync(linker)) return "musl";
+  return "glibc";
 }
 
-function platformMatches(pkg) {
+export function platformMatches(pkg) {
   if (Array.isArray(pkg.os) && pkg.os.length > 0 && !pkg.os.includes(process.platform))
     return false;
   if (Array.isArray(pkg.cpu) && pkg.cpu.length > 0 && !pkg.cpu.includes(process.arch)) return false;
+  if (Array.isArray(pkg.libc) && pkg.libc.length > 0) {
+    const libc = hostLibc();
+    if (libc == null || !pkg.libc.includes(libc)) return false;
+  }
   return true;
+}
+
+function executableFilesFor(unit, repoRoot, pkg) {
+  const rel = path.relative(repoRoot, unit.dir).split(path.sep).join("/");
+  const parsed = parsePlatformDir(rel);
+  if (!parsed) return [];
+  const family = BINARY_FAMILIES[parsed.family];
+  if (!family?.executable) return [];
+  return Array.isArray(pkg.files) ? pkg.files.map(normalizeFile) : [];
+}
+
+function packUnit(unit, packDir, repoRoot) {
+  const tarball = packTarball({ dir: unit.dir, label: unit.name }, packDir);
+  const dest = path.join(packDir, path.basename(tarball));
+  if (path.resolve(tarball) !== path.resolve(dest)) fs.copyFileSync(tarball, dest);
+  const sourcePkg = fs.existsSync(path.join(unit.dir, "package.json"))
+    ? readJson(path.join(unit.dir, "package.json"))
+    : { files: [] };
+  fixExecutableBits(
+    { label: unit.name, executableFiles: executableFilesFor(unit, repoRoot, sourcePkg) },
+    dest,
+  );
+  return dest;
 }
 
 function writeSmokeScripts(consumerDir) {
   fs.writeFileSync(
+    path.join(consumerDir, "smoke-loader.mjs"),
+    `import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+const logPath = process.env.CLEAN_ROOM_LOAD_LOG;
+export async function resolve(specifier, context, nextResolve) {
+  const result = await nextResolve(specifier, context);
+  if (logPath && typeof result.url === "string" && result.url.startsWith("file:")) {
+    try { fs.appendFileSync(logPath, fileURLToPath(result.url) + "\\n"); } catch {}
+  }
+  return result;
+}
+`,
+  );
+  fs.writeFileSync(
+    path.join(consumerDir, "smoke-register.mjs"),
+    `import { register } from "node:module";
+import { pathToFileURL } from "node:url";
+register(new URL("./smoke-loader.mjs", import.meta.url));
+`,
+  );
+  fs.writeFileSync(
     path.join(consumerDir, "smoke-import.mjs"),
-    `const spec = process.argv[2];
+    `import fs from "node:fs";
+const spec = process.argv[2];
 const ns = await import(spec);
 if (typeof ns.cleanRoomPing === "function") ns.cleanRoomPing();
 else if (ns.default == null && Object.keys(ns).length === 0) throw new Error("empty module namespace");
 const resolved = import.meta.resolve(spec);
-console.log(JSON.stringify({ ok: true, resolved }));
+const logPath = process.env.CLEAN_ROOM_LOAD_LOG;
+const loaded = logPath && fs.existsSync(logPath)
+  ? fs.readFileSync(logPath, "utf8").split(/\\r?\\n/u).filter(Boolean)
+  : [];
+console.log(JSON.stringify({ ok: true, resolved, loaded }));
 `,
   );
   fs.writeFileSync(
     path.join(consumerDir, "smoke-require.cjs"),
     `"use strict";
+const fs = require("node:fs");
 const spec = process.argv[2];
 const mod = require(spec);
 if (mod && typeof mod.cleanRoomPing === "function") mod.cleanRoomPing();
 else if (mod == null) throw new Error("empty module namespace");
-console.log(JSON.stringify({ ok: true, resolved: require.resolve(spec) }));
+const loaded = Object.keys(require.cache);
+console.log(JSON.stringify({ ok: true, resolved: require.resolve(spec), loaded }));
 `,
   );
 }
 
-function smoke(consumerDir, spec, condition) {
-  const script = condition === "require" ? "smoke-require.cjs" : "smoke-import.mjs";
-  const env = { ...process.env, NODE_PATH: "" };
+function smokeEnv(consumerDir, extra = {}) {
+  const env = { ...process.env, NODE_PATH: "", ...extra };
   delete env.NODE_OPTIONS;
-  const result = spawnSync(process.execPath, [path.join(consumerDir, script), spec], {
-    cwd: consumerDir,
-    encoding: "utf8",
-    env,
-    timeout: 30_000,
-  });
-  return result;
+  return env;
 }
 
-function inspectConsumer(consumerDir, repoRoot) {
-  const manifestPath = path.join(consumerDir, "package.json");
-  const manifest = readJson(manifestPath);
-  if (manifest.patchedDependencies || manifest.pnpm?.patchedDependencies) {
-    return fail("consumer-patch", "consumer-side patch cannot satisfy clean-room evidence");
+function smoke(consumerDir, spec, condition, logPath) {
+  const script = condition === "require" ? "smoke-require.cjs" : "smoke-import.mjs";
+  const args =
+    condition === "require"
+      ? [path.join(consumerDir, script), spec]
+      : [
+          "--import",
+          pathToFileURL(path.join(consumerDir, "smoke-register.mjs")).href,
+          path.join(consumerDir, script),
+          spec,
+        ];
+  if (logPath && fs.existsSync(logPath)) fs.rmSync(logPath);
+  return spawnSync(process.execPath, args, {
+    cwd: consumerDir,
+    encoding: "utf8",
+    env: smokeEnv(consumerDir, logPath ? { CLEAN_ROOM_LOAD_LOG: logPath } : {}),
+    timeout: 30_000,
+  });
+}
+
+function smokeBin(binPath, consumerDir) {
+  const js = /\.(?:[cm]?js)$/u.test(binPath);
+  const attempts = js
+    ? [
+        [process.execPath, [binPath, "--help"]],
+        [process.execPath, [binPath, "--version"]],
+      ]
+    : [
+        [binPath, ["--help"]],
+        [binPath, ["--version"]],
+      ];
+  let last = null;
+  for (const [command, args] of attempts) {
+    last = spawnSync(command, args, {
+      cwd: consumerDir,
+      encoding: "utf8",
+      env: smokeEnv(consumerDir),
+      timeout: 15_000,
+    });
+    if (last.status === 0) return last;
+    const text = `${last.stderr ?? ""}\n${last.stdout ?? ""}`;
+    if (/ERR_MODULE_NOT_FOUND|Cannot find module|missing-js-extension|Did you mean/u.test(text)) {
+      return last;
+    }
+    if (last.error?.code === "ENOENT") return last;
+    if (last.status !== null && last.status !== 0 && !/ERR_|Cannot find module/u.test(text)) {
+      return { ...last, status: 0 };
+    }
   }
-  if (manifest.pnpm?.overrides || manifest.overrides) {
-    return fail("workspace-resolved", "lockfile override cannot satisfy clean-room evidence");
+  return last;
+}
+
+function inspectDeps(pkg, consumerDir, repoRoot, { consumer } = { consumer: false }) {
+  if (consumer) {
+    if (pkg.patchedDependencies || pkg.pnpm?.patchedDependencies) {
+      return fail("consumer-patch", "consumer-side patch cannot satisfy clean-room evidence");
+    }
+    if (pkg.pnpm?.overrides || pkg.overrides) {
+      return fail("workspace-resolved", "lockfile override cannot satisfy clean-room evidence");
+    }
   }
-  const deps = { ...manifest.dependencies, ...manifest.optionalDependencies };
+  const deps = { ...pkg.dependencies, ...pkg.optionalDependencies };
   for (const [name, spec] of Object.entries(deps)) {
     if (typeof spec === "string" && spec.startsWith("file:")) {
       const target = spec.slice("file:".length);
@@ -331,8 +537,45 @@ function inspectConsumer(consumerDir, repoRoot) {
       return fail("workspace-resolved", `dependency ${name} uses workspace protocol`);
     }
   }
+  return null;
+}
+
+export function inspectConsumer(consumerDir, repoRoot) {
+  const manifestPath = path.join(consumerDir, "package.json");
+  if (!fs.existsSync(manifestPath)) return null;
+  const isolated = inspectDeps(readJson(manifestPath), consumerDir, repoRoot, { consumer: true });
+  if (isolated) return isolated;
   if (fs.existsSync(path.join(consumerDir, "pnpm-workspace.yaml"))) {
     return fail("workspace-resolved", "consumer is a pnpm workspace");
+  }
+  return null;
+}
+
+function inspectInstalled(consumerDir, repoRoot) {
+  const root = path.join(consumerDir, "node_modules");
+  if (!fs.existsSync(root)) return null;
+  const stack = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === ".bin") continue;
+      const full = path.join(dir, entry.name);
+      if (entry.name.startsWith("@")) {
+        stack.push(full);
+        continue;
+      }
+      const pkgPath = path.join(full, "package.json");
+      if (fs.existsSync(pkgPath)) {
+        const isolated = inspectDeps(readJson(pkgPath), consumerDir, repoRoot, { consumer: false });
+        if (isolated) return isolated;
+      }
+    }
   }
   return null;
 }
@@ -356,7 +599,48 @@ function publishedUnits(options) {
   return units;
 }
 
-export function runCleanRoomCheck(options = {}) {
+function payloadFiles(pkg, tarFiles) {
+  if (Array.isArray(pkg.files) && pkg.files.length > 0) {
+    return pkg.files.map(normalizeFile).filter((name) => name && !name.endsWith("/"));
+  }
+  return tarFiles.filter(
+    (name) =>
+      name !== "package.json" &&
+      !/^readme(?:\.(?:md|txt))?$/iu.test(name) &&
+      !/^license(?:\.(?:md|txt))?$/iu.test(name),
+  );
+}
+
+function isolationFromLoaded(loaded, resolved, consumerDir, repoRoot) {
+  const paths = [];
+  if (typeof resolved === "string") paths.push(resolved);
+  if (Array.isArray(loaded)) {
+    for (const item of loaded) {
+      if (typeof item !== "string") continue;
+      const filePath = item.startsWith("file:") ? fileURLToPath(item) : item;
+      paths.push(filePath);
+    }
+  }
+  for (const filePath of paths) {
+    if (!filePath) continue;
+    if (inside(filePath, consumerDir)) continue;
+    if (inside(filePath, repoRoot)) {
+      return {
+        reason: "source-tree-fallback",
+        message: `loaded module resolved into the repository: ${filePath}`,
+      };
+    }
+  }
+  if (resolved && !inside(resolved, consumerDir)) {
+    return {
+      reason: "source-tree-fallback",
+      message: `resolved outside the scratch consumer: ${resolved}`,
+    };
+  }
+  return null;
+}
+
+function runCleanRoomCheckInner(options = {}) {
   if (options.skip === true) {
     return fail("skipped", "a rehearsal cannot report PASS with the clean-room check skipped");
   }
@@ -389,7 +673,7 @@ export function runCleanRoomCheck(options = {}) {
       }
     } else {
       for (const unit of units) {
-        const tarball = packPackage(unit.dir, packDir);
+        const tarball = packUnit(unit, packDir, repoRoot);
         const names = tarNames(tarball);
         tarballByName.set(unit.name, { tarball, files: names, hash: sha256(tarball) });
         packed.push({
@@ -417,28 +701,12 @@ export function runCleanRoomCheck(options = {}) {
 
   const installable = [];
   for (const [name, info] of tarballByName) {
-    const unit = units.find((row) => row.name === name);
-    let pkg = { name };
-    if (unit?.dir && fs.existsSync(path.join(unit.dir, "package.json"))) {
-      pkg = readJson(path.join(unit.dir, "package.json"));
-    } else {
-      const extractDir = path.join(workDir, "manifests", name.replaceAll("/", "-"));
-      fs.mkdirSync(extractDir, { recursive: true });
-      const extract = run("tar", [
-        "-xzf",
-        info.tarball,
-        "-C",
-        extractDir,
-        "--strip-components",
-        "1",
-        "package/package.json",
-      ]);
-      const manifestPath = path.join(extractDir, "package.json");
-      if (extract.status === 0 && fs.existsSync(manifestPath)) pkg = readJson(manifestPath);
-    }
+    const pkg = packedManifest(info.tarball) ?? { name };
     info.pkg = pkg;
     const match = platformMatches(pkg);
     info.platformMatch = match;
+    const packedIso = inspectDeps(pkg, consumerDir, repoRoot, { consumer: false });
+    if (packedIso) return { ...packedIso, packed };
     if (match) installable.push(info.tarball);
   }
 
@@ -450,43 +718,124 @@ export function runCleanRoomCheck(options = {}) {
   const isolated = inspectConsumer(consumerDir, repoRoot);
   if (isolated) return { ...isolated, packed };
 
-  const install = run(
-    "npm",
-    ["install", "--ignore-scripts", "--no-package-lock", "--install-links=false", ...installable],
-    { cwd: consumerDir },
-  );
-  if (install.status !== 0) {
-    return fail(
-      "unloadable",
-      `npm install of packed tarballs failed:\n${install.stderr || install.stdout}`,
-      {
-        packed,
-      },
+  if (installable.length > 0) {
+    const install = runNpm(
+      ["install", "--ignore-scripts", "--no-package-lock", "--install-links=false", ...installable],
+      { cwd: consumerDir },
     );
+    if (install.status !== 0) {
+      return fail(
+        "unloadable",
+        `npm install of packed tarballs failed:\n${install.stderr || install.stdout}`,
+        { packed },
+      );
+    }
   }
   const afterInstall = inspectConsumer(consumerDir, repoRoot);
   if (afterInstall) return { ...afterInstall, packed };
+  const installedIso = inspectInstalled(consumerDir, repoRoot);
+  if (installedIso) return { ...installedIso, packed };
 
   const entrypoints = [];
   const failures = [];
+  const loadLog = path.join(workDir, "loaded-modules.log");
+
+  const coverBinaryPayload = (unit, info, pkg) => {
+    const files = payloadFiles(pkg, info.files);
+    if (files.length === 0) return false;
+    if (files.some((name) => JS_FILE.test(name))) return false;
+    for (const file of files) {
+      if (!info.files.includes(file)) {
+        failures.push({
+          package: unit.name,
+          entrypoint: file,
+          reason: "missing-entrypoint-file",
+          message: `${unit.name} payload ${file} is absent from the tarball`,
+        });
+        continue;
+      }
+      if (!info.platformMatch) {
+        entrypoints.push({
+          package: unit.name,
+          entrypoint: file,
+          condition: "packed",
+          ok: true,
+        });
+        continue;
+      }
+      const installed = path.join(consumerDir, "node_modules", ...unit.name.split("/"), file);
+      if (!fs.existsSync(installed)) {
+        failures.push({
+          package: unit.name,
+          entrypoint: file,
+          reason: "missing-entrypoint-file",
+          message: `${unit.name} payload ${file} did not install`,
+        });
+        continue;
+      }
+      const loaded = smokeBin(installed, consumerDir);
+      if (loaded?.error?.code === "ENOENT" || (loaded && loaded.status !== 0)) {
+        const text = `${loaded?.stderr ?? ""}\n${loaded?.stdout ?? ""}`;
+        if (/ERR_MODULE_NOT_FOUND|Cannot find module/u.test(text)) {
+          failures.push({
+            package: unit.name,
+            entrypoint: file,
+            reason: classifyLoadError(loaded.stderr, loaded.stdout),
+            message: (loaded.stderr || loaded.stdout || "bin load failed").trim(),
+          });
+          continue;
+        }
+        if (loaded?.error?.code === "ENOENT") {
+          failures.push({
+            package: unit.name,
+            entrypoint: file,
+            reason: "unloadable",
+            message: `${unit.name} payload ${file} could not be spawned`,
+          });
+          continue;
+        }
+      }
+      entrypoints.push({
+        package: unit.name,
+        entrypoint: file,
+        condition: "bin",
+        ok: true,
+      });
+    }
+    return true;
+  };
+
   for (const unit of units) {
     const info = tarballByName.get(unit.name);
     const pkg = info.pkg ?? { name: unit.name };
-    const declared = declaredEntrypoints(pkg);
+    let declared;
+    try {
+      declared = declaredEntrypoints(pkg);
+    } catch (error) {
+      failures.push({
+        package: unit.name,
+        reason: "unloadable",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
     const jsFiles = info.files.filter((name) => JS_FILE.test(name));
+    if (declared.length === 0) {
+      if (coverBinaryPayload(unit, info, pkg)) continue;
+      if (jsFiles.length > 0) {
+        failures.push({
+          package: unit.name,
+          reason: "missing-exports-condition",
+          message: `${unit.name} has runtime files but no declared entrypoint`,
+        });
+      }
+      continue;
+    }
     if (declared.every((row) => row.typesOnly) && jsFiles.length > 0 && pkg.exports) {
       failures.push({
         package: unit.name,
         reason: "missing-exports-condition",
         message: `${unit.name} ships runtime files but exports declare no import/require/default condition`,
-      });
-      continue;
-    }
-    if (declared.length === 0 && jsFiles.length > 0) {
-      failures.push({
-        package: unit.name,
-        reason: "missing-exports-condition",
-        message: `${unit.name} has runtime files but no declared entrypoint`,
       });
       continue;
     }
@@ -548,25 +897,20 @@ export function runCleanRoomCheck(options = {}) {
             });
             continue;
           }
-          const loaded = spawnSync(process.execPath, ["--check", binPath], {
-            cwd: consumerDir,
-            encoding: "utf8",
-            env: { ...process.env, NODE_PATH: "" },
-            timeout: 15_000,
-          });
+          const loaded = smokeBin(binPath, consumerDir);
           if (loaded.status !== 0) {
             failures.push({
               package: unit.name,
               entrypoint: row.subpath,
               reason: classifyLoadError(loaded.stderr, loaded.stdout),
-              message: loaded.stderr || loaded.stdout || "bin parse failed",
+              message: loaded.stderr || loaded.stdout || "bin load failed",
             });
             continue;
           }
           entrypoints.push({ package: unit.name, entrypoint: row.subpath, condition, ok: true });
           continue;
         }
-        const result = smoke(consumerDir, spec, condition);
+        const result = smoke(consumerDir, spec, condition, loadLog);
         if (result.status !== 0) {
           failures.push({
             package: unit.name,
@@ -590,23 +934,14 @@ export function runCleanRoomCheck(options = {}) {
             : typeof resolvedRaw === "string"
               ? resolvedRaw
               : null;
-        if (resolved && !inside(resolved, consumerDir)) {
+        const leaked = isolationFromLoaded(payload.loaded, resolved, consumerDir, repoRoot);
+        if (leaked) {
           failures.push({
             package: unit.name,
             entrypoint: row.subpath,
             condition,
-            reason: "source-tree-fallback",
-            message: `${spec} resolved outside the scratch consumer: ${resolved}`,
-          });
-          continue;
-        }
-        if (resolved && inside(resolved, repoRoot) && !inside(resolved, consumerDir)) {
-          failures.push({
-            package: unit.name,
-            entrypoint: row.subpath,
-            condition,
-            reason: "source-tree-fallback",
-            message: `${spec} resolved into the repository`,
+            reason: leaked.reason,
+            message: leaked.message,
           });
           continue;
         }
@@ -660,6 +995,14 @@ export function runCleanRoomCheck(options = {}) {
   };
 }
 
+export function runCleanRoomCheck(options = {}) {
+  try {
+    return runCleanRoomCheckInner(options);
+  } catch (error) {
+    return fail("unloadable", error instanceof Error ? error.message : String(error));
+  }
+}
+
 function parseCli(argv) {
   const options = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -669,6 +1012,9 @@ function parseCli(argv) {
       i += 1;
     } else if (arg === "--work-dir") {
       options.workDir = argv[i + 1];
+      i += 1;
+    } else if (arg === "--report") {
+      options.report = argv[i + 1];
       i += 1;
     } else if (arg === "--skip") {
       options.skip = true;
@@ -680,8 +1026,21 @@ function parseCli(argv) {
 }
 
 export function main(argv = process.argv.slice(2)) {
-  const report = runCleanRoomCheck(parseCli(argv));
-  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  let parsed;
+  try {
+    parsed = parseCli(argv);
+  } catch (error) {
+    const report = fail("unloadable", error instanceof Error ? error.message : String(error));
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    return 1;
+  }
+  const report = runCleanRoomCheck(parsed);
+  const text = `${JSON.stringify(report, null, 2)}\n`;
+  process.stdout.write(text);
+  if (typeof parsed.report === "string" && parsed.report.length > 0) {
+    fs.mkdirSync(path.dirname(parsed.report), { recursive: true });
+    fs.writeFileSync(parsed.report, text);
+  }
   return report.ok ? 0 : 1;
 }
 

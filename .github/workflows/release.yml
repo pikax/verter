@@ -1329,7 +1329,14 @@ jobs:
       - name: Prepare packages
         run: node scripts/release-publish.mjs prepare
       - name: Clean-room install and public entrypoint smoke
-        run: node scripts/githubctl/clean-room.mjs --work-dir "${RUNNER_TEMP}/clean-room-${{ github.run_id }}-${{ github.run_attempt }}"
+        run: node scripts/githubctl/clean-room.mjs --work-dir "${RUNNER_TEMP}/clean-room-${{ github.run_id }}-${{ github.run_attempt }}" --report "${RUNNER_TEMP}/clean-room-${{ github.run_id }}-${{ github.run_attempt }}/report.json"
+      - name: Upload clean-room report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clean-room-published-artifact
+          path: ${{ runner.temp }}/clean-room-${{ github.run_id }}-${{ github.run_attempt }}/report.json
+          if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
   # Publish npm packages

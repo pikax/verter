@@ -608,6 +608,7 @@ jobs:
     workflow: "release-check.yml",
     uses: "release.yml",
     dry_run: true,
+    clean_room: { kind: "CleanRoomPublishedArtifact", hosted: true, skipped: false },
   });
 });
 
