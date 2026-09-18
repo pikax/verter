@@ -228,6 +228,115 @@ describe("decodeFrameworkSurfaceResponse", () => {
     });
   });
 
+  it("decodes an absent signature return as unknown, not fabricated void", () => {
+    // REGRESSION — returnTypeNodeId 0 is the producer's honest-absence
+    // sentinel (NamedTypeMemberOutput::Function.return_type None), not a
+    // resolved primitive void. Fabricating void is a wrong-complete claim.
+    const strings = ["", "onTick", "n"];
+    const response = create(TypeInfoGraphResponseSchema, {
+      kind: {
+        case: "frameworkSurface",
+        value: {
+          schemaVersion: 3,
+          framework: FrameworkTag.SVELTE,
+          graph: {
+            strings: { entries: strings },
+            nodes: [
+              {},
+              { kind: { case: "primitive", value: { kind: GraphPrimitiveKind.NUMBER } } },
+              {
+                kind: {
+                  case: "object",
+                  value: { callSignatureRefs: [0], constructSignatureRefs: [], members: [] },
+                },
+              },
+            ],
+            signatures: [
+              {
+                parameters: [{ nameId: 2, typeNodeId: 1, optional: false, rest: false }],
+                returnTypeNodeId: 0,
+              },
+            ],
+          },
+          surfaces: [
+            {
+              kind: FrameworkSurfaceKind.PROPS,
+              members: [{ nameId: 1, typeNodeId: 2, required: true, readonly: false }],
+              status: { support: FrameworkSurfaceKindSupport.SUPPORTED, exactness: 0 },
+            },
+          ],
+        },
+      },
+    });
+    const surface = decodeFrameworkSurfaceResponse(
+      toBinary(TypeInfoGraphResponseSchema, response),
+    ) as FrameworkSurface;
+    const onTick = surface.kinds.get(FrameworkSurfaceKind.PROPS)!.members[0]!;
+    expect(onTick.name).toBe("onTick");
+    expect(onTick.type).toEqual({
+      kind: "function",
+      parameters: [{ name: "n", type: { kind: "primitive", name: "number" }, optional: false }],
+      returnType: { kind: "unknown", rawType: "absent" },
+    });
+    expect(onTick.type).not.toMatchObject({
+      returnType: { kind: "primitive", name: "void" },
+    });
+  });
+
+  it("decodes a rest parameter as a ...-prefixed name", () => {
+    // REGRESSION — GraphSignatureParameter.rest is producer-populated; dropping
+    // it made a variadic leaf-typed callback decode as fixed arity. type-ir
+    // FunctionParameter has no rest field, so rest-ness is the name prefix.
+    const strings = ["", "logAll", "args"];
+    const response = create(TypeInfoGraphResponseSchema, {
+      kind: {
+        case: "frameworkSurface",
+        value: {
+          schemaVersion: 3,
+          framework: FrameworkTag.SVELTE,
+          graph: {
+            strings: { entries: strings },
+            nodes: [
+              {},
+              { kind: { case: "primitive", value: { kind: GraphPrimitiveKind.STRING } } },
+              { kind: { case: "primitive", value: { kind: GraphPrimitiveKind.VOID } } },
+              {
+                kind: {
+                  case: "object",
+                  value: { callSignatureRefs: [0], constructSignatureRefs: [], members: [] },
+                },
+              },
+            ],
+            signatures: [
+              {
+                parameters: [{ nameId: 2, typeNodeId: 1, optional: false, rest: true }],
+                returnTypeNodeId: 2,
+              },
+            ],
+          },
+          surfaces: [
+            {
+              kind: FrameworkSurfaceKind.PROPS,
+              members: [{ nameId: 1, typeNodeId: 3, required: true, readonly: false }],
+              status: { support: FrameworkSurfaceKindSupport.SUPPORTED, exactness: 0 },
+            },
+          ],
+        },
+      },
+    });
+    const surface = decodeFrameworkSurfaceResponse(
+      toBinary(TypeInfoGraphResponseSchema, response),
+    ) as FrameworkSurface;
+    const logAll = surface.kinds.get(FrameworkSurfaceKind.PROPS)!.members[0]!;
+    expect(logAll.type).toEqual({
+      kind: "function",
+      parameters: [
+        { name: "...args", type: { kind: "primitive", name: "string" }, optional: false },
+      ],
+      returnType: { kind: "primitive", name: "void" },
+    });
+  });
+
   it("keeps SUPPORTED-empty distinct from UNSUPPORTED", () => {
     // A pure DECODE test: the decoder must surface the per-kind status verbatim
     // and keep SUPPORTED-empty (a real-but-empty surface) distinct from

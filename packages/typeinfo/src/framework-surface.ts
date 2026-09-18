@@ -146,7 +146,10 @@ export interface FrameworkSurfaceMember {
    * `type_node_id` is the 0 sentinel. An `unknown` / opaque descriptor
    * is an explicit unsupported outcome — it cannot claim a complete
    * callback signature. A `function` descriptor carries parameter and
-   * return structure; a `ref` is the shallow-by-default alias.
+   * return structure: an honestly-absent return (`return_type_node_id`
+   * 0) is `unknown("absent")`, never fabricated `void`; rest-ness is
+   * spelled as a `...` name prefix (`FunctionParameter` has no rest
+   * field). A `ref` is the shallow-by-default alias.
    */
   readonly type?: TypeDescriptor;
 }
@@ -377,15 +380,15 @@ function signatureDescriptor(
   }
   const parameters: FunctionParameter[] = signature.parameters.map((param, idx) => {
     const name = strings[param.nameId] ?? "";
+    const baseName = name !== "" ? name : `arg${idx}`;
     return {
-      name: name !== "" ? name : `arg${idx}`,
+      name: param.rest ? `...${baseName}` : baseName,
       type: walk(param.typeNodeId),
       optional: param.optional,
     };
   });
-  const returnType =
-    signature.returnTypeNodeId !== 0 ? walk(signature.returnTypeNodeId) : primitive("void");
-  return func(parameters, returnType);
+  // Node id 0 is honest absence (the producer does not fabricate void).
+  return func(parameters, walk(signature.returnTypeNodeId));
 }
 
 function opaqueMessage(
