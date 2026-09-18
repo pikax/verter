@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use verter_session::request_context::RequestContext;
 use verter_session::route_analysis_inputs::{
-    build_route_analysis_inputs, commit_route_analysis_basis,
+    commit_route_analysis_basis, project_route_analysis_inputs,
 };
 use verter_session::{
     commit_workspace_canonical, InputBasis, LoadWave, Observation, ObserveError, SnapshotFence,
@@ -105,9 +105,15 @@ fn route_analysis_snapshot_is_projected_from_the_committed_basis() {
     );
     let fence = SnapshotFence::bind(&basis);
     assert_eq!(fence.admit(&later), Err(TornSnapshot::BasisMismatch));
-    let inputs = build_route_analysis_inputs(&ws, root);
+    match basis.observe(&format!("{root}/layouts")) {
+        Err(ObserveError::Negative(fact)) => {
+            assert_eq!(fact.canonical(), format!("{root}/layouts"));
+        }
+        other => panic!("expected recorded layouts absence, got {other:?}"),
+    }
+    let inputs = project_route_analysis_inputs(&basis);
     assert_eq!(
         inputs.read_file(&format!("{root}/package.json")).as_deref(),
-        Some(r#"{ "dependencies": {} }"#)
+        Some(r#"{ "dependencies": { "vue-router": "^4.2.0" } }"#)
     );
 }

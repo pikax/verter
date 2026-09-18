@@ -79,6 +79,9 @@ impl NegativeFact {
 }
 
 /// One directory child captured in a committed directory observation.
+///
+/// Derived `Ord` includes `is_dir`, so identical path + opposite classification
+/// are distinct rows. [`Observation::directory`] refuses that pair.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DirectoryEntry {
     path: Arc<str>,
@@ -139,16 +142,31 @@ impl Observation {
     }
 
     /// Directory observation. Revision is the digest of the sorted listing.
-    #[must_use]
-    pub fn directory(canonical: impl Into<Arc<str>>, mut entries: Vec<DirectoryEntry>) -> Self {
+    ///
+    /// Identical duplicates collapse. The same child path with opposite
+    /// `is_dir` values is refused: `DirectoryEntry` ordering includes the
+    /// flag, so sort+dedup would otherwise keep both rows.
+    pub fn directory(
+        canonical: impl Into<Arc<str>>,
+        mut entries: Vec<DirectoryEntry>,
+    ) -> Result<Self, CommitError> {
+        let canonical = canonical.into();
         entries.sort();
+        for pair in entries.windows(2) {
+            if pair[0].path == pair[1].path && pair[0].is_dir != pair[1].is_dir {
+                return Err(CommitError::ConflictingDirectoryEntry {
+                    directory: Arc::clone(&canonical),
+                    path: Arc::clone(&pair[0].path),
+                });
+            }
+        }
         entries.dedup();
         let revision = directory_revision(&entries);
-        Self {
-            canonical: canonical.into(),
+        Ok(Self {
+            canonical,
             revision,
             kind: ObservationKind::Directory { entries },
-        }
+        })
     }
 
     /// Canonical identity.
@@ -195,6 +213,12 @@ pub enum CommitError {
     MixedRevision { canonical: Arc<str> },
     /// A canonical is both a positive observation and a negative fact.
     OverlappingPositiveAndNegative { canonical: Arc<str> },
+    /// One directory listing classified the same child as both file and directory.
+    ConflictingDirectoryEntry { directory: Arc<str>, path: Arc<str> },
+    /// A load-wave key has no positive observation and no negative fact.
+    IncompleteWave { canonical: Arc<str> },
+    /// An observation or negative fact is not in the load wave.
+    ExtraneousRow { canonical: Arc<str> },
 }
 
 /// Why [`InputBasis::observe`] cannot return a positive row.
@@ -244,6 +268,21 @@ impl InputBasis {
                 return Err(CommitError::OverlappingPositiveAndNegative { canonical });
             }
             negative_map.insert(canonical, fact);
+        }
+
+        for key in wave.keys() {
+            if !observation_map.contains_key(key) && !negative_map.contains_key(key) {
+                return Err(CommitError::IncompleteWave {
+                    canonical: Arc::clone(key),
+                });
+            }
+        }
+        for canonical in observation_map.keys().chain(negative_map.keys()) {
+            if wave.keys.binary_search(canonical).is_err() {
+                return Err(CommitError::ExtraneousRow {
+                    canonical: Arc::clone(canonical),
+                });
+            }
         }
 
         let id = InputBasisId::from_canonical(&InputBasisDescriptor {

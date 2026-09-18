@@ -66,9 +66,7 @@ pub fn commit_route_analysis_basis(
         }
         RoutingFramework::UnpluginVueRouter => {
             let src_pages = format!("{trimmed_root}/src/pages");
-            if workspace.is_dir(&src_pages) {
-                capture.walk_dir(workspace, &src_pages);
-            } else {
+            if !capture.walk_dir(workspace, &src_pages) {
                 capture.walk_dir(workspace, &format!("{trimmed_root}/pages"));
             }
         }
@@ -84,7 +82,11 @@ pub fn commit_route_analysis_basis(
     capture.commit()
 }
 
-fn project_route_analysis_inputs(basis: &InputBasis) -> RouteAnalysisInputs {
+/// Project committed observations into `RouteAnalysisInputs`.
+///
+/// Does not re-read the workspace. Callers that need a frozen snapshot after
+/// a later mutation must pass the original basis.
+pub fn project_route_analysis_inputs(basis: &InputBasis) -> RouteAnalysisInputs {
     let mut inputs = RouteAnalysisInputs::new();
     project_route_analysis_inputs_into(basis, &mut inputs);
     inputs
@@ -112,6 +114,7 @@ struct RouteCapture {
     keys: Vec<String>,
     observations: Vec<Observation>,
     negatives: Vec<NegativeFact>,
+    directory_read_failed: bool,
 }
 
 impl RouteCapture {
@@ -133,20 +136,38 @@ impl RouteCapture {
         }
     }
 
-    fn walk_dir(&mut self, workspace: &dyn verter_workspace::WorkspaceRead, dir: &str) {
-        if !workspace.is_dir(dir) {
-            return;
+    /// Walk `dir`. Returns whether a directory listing was recorded.
+    /// Confirmed non-directories become [`NegativeFact::absent`]. A `read_dir`
+    /// error aborts capture rather than being classified as absence.
+    fn walk_dir(&mut self, workspace: &dyn verter_workspace::WorkspaceRead, dir: &str) -> bool {
+        if self.directory_read_failed {
+            return false;
         }
-        let Ok(entries) = workspace.read_dir(dir) else {
-            return;
+        if !workspace.is_dir(dir) {
+            self.keys.push(dir.to_string());
+            self.negatives.push(NegativeFact::absent(dir));
+            return false;
+        }
+        let entries = match workspace.read_dir(dir) {
+            Ok(entries) => entries,
+            Err(_) => {
+                self.directory_read_failed = true;
+                return false;
+            }
         };
         let projected: Vec<DirectoryEntry> = entries
             .iter()
             .map(|entry| DirectoryEntry::new(entry.path.clone(), entry.is_dir))
             .collect();
+        let observation = match Observation::directory(dir, projected) {
+            Ok(observation) => observation,
+            Err(_) => {
+                self.directory_read_failed = true;
+                return false;
+            }
+        };
         self.keys.push(dir.to_string());
-        self.observations
-            .push(Observation::directory(dir, projected));
+        self.observations.push(observation);
         for entry in &entries {
             if entry.is_dir {
                 self.walk_dir(workspace, &entry.path);
@@ -154,9 +175,13 @@ impl RouteCapture {
                 self.probe_file(workspace, entry.path.clone());
             }
         }
+        true
     }
 
     fn commit(self) -> InputBasis {
+        if self.directory_read_failed {
+            panic!("route-analysis directory read failed; not classified as absent");
+        }
         InputBasis::commit(
             LoadWave::from_keys(self.keys),
             self.observations,
