@@ -4,7 +4,7 @@
   "semanticRail": {
     "authority": "typescript",
     "law": "TypeScript is the authority for strict Vue/Svelte projection typing: hover types, diagnostics, project checks, completion types. Provider modes select which TypeScript engine answers; nothing else does. This restates the STP0 type-authority law at the consumer boundary.",
-    "operations": ["lsp.hover", "lsp.diagnostics", "tsc.project-check.vue", "tsc.project-check.svelte", "tsc.engine-tsgo", "playground.hover", "playground.diagnostics"],
+    "operations": ["lsp.hover", "lsp.diagnostics", "tsc.project-check.vue", "tsc.project-check.svelte", "tsc.engine-tsgo", "playground.hover", "playground.completion", "playground.diagnostics"],
     "providerModes": ["auto", "tsgo", "shared-tsgo", "tsserver", "editor-tsserver", "extension", "off"],
     "evidence": ["crates/verter_lsp/src/capabilities.rs", "crates/verter_tsc/src/main.rs"]
   },

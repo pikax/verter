@@ -85,6 +85,43 @@
       "browserExecutable": true
     },
     {
+      "id": "playground.completion",
+      "operation": "playground in-browser completions over the pinned browser TS worker",
+      "profile": "browser",
+      "version": "1",
+      "producerOwner": "Monaco completion provider over the browser typescript@6.0.3 worker (packages/playground/src/editor/lspProviders.ts); a distinct producer from crates/verter_lsp, not a port of it",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "Portable",
+      "answerRail": "semantic",
+      "semanticAuthority": "typescript",
+      "catalogSurfaces": [],
+      "exposure": {
+        "state": "executable",
+        "route": "Monaco completion provider (packages/playground/src/editor/lspProviders.ts provideCompletionItems)",
+        "replayCase": "playground completion provider suites",
+        "test": "packages/playground vitest provider suites"
+      },
+      "playground": {
+        "status": "partial",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "labelled split of provideCompletionItems: the TypeScript answer as the default, compiler-analysis and template completions as explicitly labelled inspection supplements or a per-request comparison selection (rails-policy comparisonRail)",
+          "replayCase": "DX1 exposure registration plus a playground provider suite that fails on unlabelled concatenation"
+        },
+        "route": "Monaco completion provider (packages/playground/src/editor/lspProviders.ts provideCompletionItems)",
+        "test": "packages/playground vitest provider suites",
+        "scope": "TypeScript completions via the browser worker are executable; the provider additionally concatenates compiler-analysis and template completions into the same suggestions array as the default answer",
+        "unlabelledAnalysisMerge": {
+          "defect": "provideCompletionItems concatenates collectCompletions(file.compiled.analysis), template completions and tsBridge.getCompletions into one Monaco suggestions array with no labelling and no explicit comparison selection, so an implicit comparison is the default completion answer",
+          "comparisonRailSelection": "absent",
+          "evidence": ["packages/playground/src/editor/lspProviders.ts"]
+        },
+        "evidence": ["packages/playground/src/editor/lspProviders.ts", "packages/playground/src/editor/tsWorker.ts"]
+      },
+      "browserExecutable": true
+    },
+    {
       "id": "lsp.diagnostics",
       "operation": "textDocument/publishDiagnostics (TypeScript projection diagnostics)",
       "profile": "editor",
@@ -128,16 +165,34 @@
       "catalogSurfaces": [],
       "exposure": {
         "state": "executable",
-        "route": "Diagnostics tab badge over per-file browser TS worker queries (packages/playground/src/editor/tsService.ts)",
+        "route": "Diagnostics tab over per-file browser TS worker queries (packages/playground/src/editor/tsService.ts)",
         "replayCase": "playground diagnostics suites",
         "test": "packages/playground vitest diagnostics suites"
       },
       "playground": {
-        "status": "exposed",
-        "route": "Diagnostics tab badge over per-file browser TS worker queries (packages/playground/src/editor/tsService.ts)",
+        "status": "partial",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "labelled split of the Diagnostics tab: TypeScript diagnostics as their own labelled semantic channel or an explicitly selected comparison view, with compiler and lint items staying on their labelled inspection surfaces (playground.compile-carrier, playground.lint-file) and out of the default semantic badge",
+          "replayCase": "DX1 exposure registration plus a playground suite that fails when the Diagnostics tab or its badge merges compiler, lint and TypeScript diagnostics"
+        },
+        "route": "Diagnostics tab over per-file browser TS worker queries (packages/playground/src/editor/tsService.ts); the tab and its badge concatenate compiler, lint and TypeScript items (packages/playground/src/output/DiagnosticsPanel.vue, packages/playground/src/output/Output.vue)",
         "test": "packages/playground vitest diagnostics suites",
-        "scope": "per-file TypeScript diagnostics via the pinned browser worker; lint lives on the separately labelled playground.lint-file operation, not this channel",
-        "evidence": ["packages/playground/src/editor/tsService.ts", "packages/playground/src/editor/tsWorker.ts"]
+        "scope": "per-file TypeScript diagnostics via the pinned browser worker are executable; the Diagnostics tab additionally concatenates compiler diagnostics and lint into the same default view and the same badge count, so lint does reach this channel despite the separately labelled playground.lint-file operation",
+        "unlabelledAnalysisMerge": {
+          "defect": "DiagnosticsPanel.vue concatenates file.compiled.compilerDiagnostics, file.compiled.lintDiagnostics and store.tsDiagnostics into one allDiagnostics list, and Output.vue sums the same three into one diagnosticCount badge, with no explicit comparison selection; per-source section headers label items inside the merged list but the channel and its badge remain one default mixed inspection+semantic diagnostics answer",
+          "comparisonRailSelection": "absent",
+          "evidence": [
+            "packages/playground/src/output/DiagnosticsPanel.vue",
+            "packages/playground/src/output/Output.vue"
+          ]
+        },
+        "evidence": [
+          "packages/playground/src/editor/tsService.ts",
+          "packages/playground/src/editor/tsWorker.ts",
+          "packages/playground/src/output/DiagnosticsPanel.vue",
+          "packages/playground/src/output/Output.vue"
+        ]
       },
       "browserExecutable": true
     },

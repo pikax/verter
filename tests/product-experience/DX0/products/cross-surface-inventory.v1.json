@@ -130,7 +130,7 @@
       "per-file lint with per-rule disable",
       "analysis snapshot (imports, bindings, template usage, CSS)",
       "public API / declaration projection outputs",
-      "TS hover/completions/definition/references/highlights/rename via the browser worker",
+      "TS hover/completions/definition/references/highlights/rename via the browser worker (hover and completions merge native analysis into the default answer, and the Diagnostics tab merges compiler+lint with TypeScript; all three are catalogued partial/promotionBlocked in the feature exposure contract)",
       "outline, code actions, CSS selector match matrix, template AST, CSS var flow, dependency graph, source map view",
       "sandboxed preview with import map"
     ],

@@ -41,6 +41,15 @@ const REQUIRED_PLAYGROUND_GAPS = ["tsc.project-check.vue", "tsc.project-check.sv
 const REQUIRED_SEMANTIC_ROWS = ["lsp.hover", "lsp.diagnostics"];
 const REQUIRED_INSPECTION_FLOW_ROW = "inspection.flow-return";
 
+/** Pinned DX0-AC3 implicit-comparison population: rows whose live playground
+ * route merges native analysis into the TypeScript default answer, mapped to
+ * the repository fact that keeps each catalogued gap fresh. */
+const IMPLICIT_COMPARISON_FACTS = {
+  "playground.hover": "playgroundHoverMergesAnalysis",
+  "playground.completion": "playgroundCompletionMergesAnalysis",
+  "playground.diagnostics": "playgroundDiagnosticsTabMixesRails",
+};
+
 /** Pinned DX0.1 populations: TypeInfo queries and mappings must have rows, not just prose. */
 const REQUIRED_TYPEINFO_ROWS = [
   "typeinfo.graph-operations",
@@ -130,18 +139,42 @@ export function loadRepositoryFacts() {
     "utf8",
   );
   const lintRuleCount = (rulesSource.match(/registry\.register/g) || []).length;
-  // DX0-AC3 grounding: does the live playground hover provider still concatenate
-  // compiler-analysis hover into the TypeScript hover contents array? Both
-  // pushes live in provideHover in lspProviders.ts; the product must catalogue
-  // the merge as long as the live route has it, and drop the gap once it is
-  // split or labelled.
-  const hoverSource = fs.readFileSync(
+  // DX0-AC3 grounding: do the live playground routes still merge native
+  // analysis into the TypeScript default answer? The hover and completion
+  // merges live in lspProviders.ts; the Diagnostics tab merge lives in
+  // DiagnosticsPanel.vue/Output.vue. The product must catalogue each merge
+  // as long as its live route has it, and drop the gap once it is split or
+  // labelled.
+  const providersSource = fs.readFileSync(
     path.join(REPO_ROOT, "packages/playground/src/editor/lspProviders.ts"),
     "utf8",
   );
   const playgroundHoverMergesAnalysis =
-    hoverSource.includes("tsBridge.getHover") && hoverSource.includes("hoverForWord");
-  return { surfaceIds, domainIds, lintRuleCount, playgroundHoverMergesAnalysis };
+    providersSource.includes("tsBridge.getHover") && providersSource.includes("hoverForWord");
+  const playgroundCompletionMergesAnalysis =
+    providersSource.includes("tsBridge.getCompletions") &&
+    providersSource.includes("collectCompletions");
+  const diagnosticsPanelSource = fs.readFileSync(
+    path.join(REPO_ROOT, "packages/playground/src/output/DiagnosticsPanel.vue"),
+    "utf8",
+  );
+  const outputSource = fs.readFileSync(
+    path.join(REPO_ROOT, "packages/playground/src/output/Output.vue"),
+    "utf8",
+  );
+  const playgroundDiagnosticsTabMixesRails =
+    diagnosticsPanelSource.includes("compilerDiagnostics") &&
+    diagnosticsPanelSource.includes("lintDiagnostics") &&
+    diagnosticsPanelSource.includes("tsDiagnostics") &&
+    outputSource.includes("diagnosticCount");
+  return {
+    surfaceIds,
+    domainIds,
+    lintRuleCount,
+    playgroundHoverMergesAnalysis,
+    playgroundCompletionMergesAnalysis,
+    playgroundDiagnosticsTabMixesRails,
+  };
 }
 
 function missingEvidence(caseId, paths) {
@@ -368,12 +401,24 @@ function validateExposure(exposure, hostClass, facts) {
         ),
       );
     }
-    // DX0-AC3: while the live playground hover route concatenates TypeScript
-    // and compiler-analysis content into one default answer, that implicit
-    // comparison must be catalogued as a blocked gap, never claimed as a clean
-    // exposure; once the live route is split or labelled, the gap goes stale.
+    // DX0-AC3: while a live playground route merges TypeScript semantic
+    // answers with native analysis into one default answer (hover contents,
+    // completion suggestions, the Diagnostics tab and its badge), that
+    // implicit comparison must be catalogued as a blocked gap, never claimed
+    // as a clean exposure; once the live route is split or labelled, the
+    // catalogued gap goes stale.
     const merge = playground.unlabelledAnalysisMerge;
+    const liveMergeFact = IMPLICIT_COMPARISON_FACTS[row.id];
     if (merge) {
+      if (!liveMergeFact) {
+        errors.push(
+          err(
+            "DX0-AC3",
+            "implicit-comparison-default",
+            `unlabelledAnalysisMerge on ${row.id} is outside the pinned implicit-comparison population`,
+          ),
+        );
+      }
       if (
         playground.status !== "partial" ||
         playground.promotionBlocked !== true ||
@@ -388,12 +433,12 @@ function validateExposure(exposure, hostClass, facts) {
           ),
         );
       }
-      if (!facts.playgroundHoverMergesAnalysis) {
+      if (liveMergeFact && facts[liveMergeFact] !== true) {
         errors.push(
           err(
             "DX0-AC3",
             "stale-implicit-comparison-gap",
-            `${row.id} still catalogues a hover merge the live route no longer has`,
+            `${row.id} still catalogues a merge the live route no longer has`,
           ),
         );
       }
@@ -401,16 +446,15 @@ function validateExposure(exposure, hostClass, facts) {
         errors.push(...missingEvidence("DX0-AC3", merge.evidence));
       }
     } else if (
-      facts.playgroundHoverMergesAnalysis &&
-      row.answerRail === "semantic" &&
-      typeof playground.route === "string" &&
-      playground.route.includes("lspProviders.ts")
+      liveMergeFact &&
+      facts[liveMergeFact] === true &&
+      (playground.status === "exposed" || playground.status === "partial")
     ) {
       errors.push(
         err(
           "DX0-AC3",
           "implicit-comparison-default",
-          `semantic-rail playground route on ${row.id} cites lspProviders.ts, whose provideHover concatenates TypeScript and analysis hover as the default answer`,
+          `${row.id} claims a ${playground.status} playground route whose live source merges TypeScript and analysis answers as the default; the merge must be catalogued as a blocked implicit-comparison gap`,
         ),
       );
     }

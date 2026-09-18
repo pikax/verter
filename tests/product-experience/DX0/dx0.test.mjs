@@ -172,6 +172,101 @@ test("DX0-AC3: a stale implicit-comparison gap after the live split is rejected"
   );
 });
 
+test("DX0-AC3: an unlabelled TS+analysis completion merge claimed as a clean exposure is rejected", () => {
+  const dirty = cloneProducts(clean);
+  const row = operation(dirty, "playground.completion");
+  delete row.playground.unlabelledAnalysisMerge;
+  row.playground.status = "exposed";
+  delete row.playground.promotionBlocked;
+  delete row.playground.blockedUntil;
+  const result = validate(dirty, contracts, authority, facts);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (error) => error.caseId === "DX0-AC3" && error.code === "implicit-comparison-default",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("DX0-AC3: a mixed Diagnostics tab claimed as a clean TypeScript-only exposure is rejected", () => {
+  const dirty = cloneProducts(clean);
+  const row = operation(dirty, "playground.diagnostics");
+  delete row.playground.unlabelledAnalysisMerge;
+  row.playground.status = "exposed";
+  delete row.playground.promotionBlocked;
+  delete row.playground.blockedUntil;
+  row.playground.scope =
+    "per-file TypeScript diagnostics via the pinned browser worker; lint lives on the separately labelled playground.lint-file operation, not this channel";
+  const result = validate(dirty, contracts, authority, facts);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (error) => error.caseId === "DX0-AC3" && error.code === "implicit-comparison-default",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("DX0-AC3: a stale completion gap after the live provider split is rejected", () => {
+  const split = { ...facts, playgroundCompletionMergesAnalysis: false };
+  const result = validate(clean, contracts, authority, split);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (error) => error.caseId === "DX0-AC3" && error.code === "stale-implicit-comparison-gap",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("DX0-AC3: a stale Diagnostics tab gap after the live rail split is rejected", () => {
+  const split = { ...facts, playgroundDiagnosticsTabMixesRails: false };
+  const result = validate(clean, contracts, authority, split);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (error) => error.caseId === "DX0-AC3" && error.code === "stale-implicit-comparison-gap",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("DX0-AC3: dropping the playground completion exposure row is rejected", () => {
+  const dirty = cloneProducts(clean);
+  dirty.exposure.operations = dirty.exposure.operations.filter(
+    (row) => row.id !== "playground.completion",
+  );
+  const result = validate(dirty, contracts, authority, facts);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (error) => error.caseId === "DX0-AC3" && error.code === "rail-population-drift",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("DX0-AC3: an implicit-comparison row outside the pinned population is rejected", () => {
+  const dirty = cloneProducts(clean);
+  operation(dirty, "playground.rename").playground.unlabelledAnalysisMerge = {
+    defect: "invented merge",
+    comparisonRailSelection: "absent",
+    evidence: ["packages/playground/src/editor/lspProviders.ts"],
+  };
+  const result = validate(dirty, contracts, authority, facts);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (error) =>
+        error.caseId === "DX0-AC3" &&
+        error.code === "implicit-comparison-default" &&
+        error.message.includes("outside the pinned implicit-comparison population"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
 test("DX0-AC3: relabelling a rail-listed operation is rejected", () => {
   const dirty = cloneProducts(clean);
   const row = operation(dirty, "lsp.component-meta");
