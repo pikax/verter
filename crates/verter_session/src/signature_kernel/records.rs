@@ -327,18 +327,23 @@ pub struct AppliedResult {
 }
 
 impl AppliedResult {
+    /// Shape-only / context-free *evaluation* (reserved evaluation and
+    /// evidence ids). `semantic_context` must be an interned identity —
+    /// there is no reserved context sentinel, and id 0 is the first
+    /// interned context.
     #[must_use]
     pub fn context_free(
         descriptor: SignatureDescriptorId,
         substitution: CallSubstitutionId,
         recipe: SignatureResultRecipeId,
+        semantic_context: SemanticContextId,
     ) -> Self {
         Self {
             descriptor,
             substitution,
             recipe,
             evaluation: CONTEXT_FREE_EVALUATION,
-            semantic_context: SemanticContextId::from_raw(0),
+            semantic_context,
             evidence: CONTEXT_FREE_EVIDENCE,
         }
     }

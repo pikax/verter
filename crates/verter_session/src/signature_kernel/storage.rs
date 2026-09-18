@@ -52,6 +52,9 @@ pub struct AppendInterner<T> {
     shard_lock_acquires: AtomicU64,
     /// Inclusive maximum published index. Production uses `u32::MAX`.
     max_index: u32,
+    /// Reservations that passed the overflow check. Incremented before
+    /// `push` so a racy loser never plants an unpublished boxcar slot.
+    claimed_slots: AtomicU64,
 }
 
 impl<T> AppendInterner<T> {
@@ -68,6 +71,7 @@ impl<T> AppendInterner<T> {
             slots: boxcar::Vec::new(),
             shard_lock_acquires: AtomicU64::new(0),
             max_index,
+            claimed_slots: AtomicU64::new(0),
         }
     }
 
@@ -123,8 +127,15 @@ impl<T> AppendInterner<T> {
         if cancelled.is_some_and(|c| c.load(Ordering::Acquire)) {
             return Err(InternError::Cancelled);
         }
-        // Refuse before push so overflow never plants an unpublished hole.
-        if self.slots.count() > self.max_index as usize {
+        // Reserve before push so overflow never plants an unpublished hole,
+        // including when two publishers both observe `count() <= max_index`.
+        // Do not decrement on overflow: a fetch_sub would reopen capacity
+        // while a winner's push is still in flight.
+        let claimed = self.claimed_slots.fetch_add(1, Ordering::Relaxed);
+        if claimed > u64::from(self.max_index) {
+            if let Some(existing) = self.lookup_equal(shard_idx, hash, &value) {
+                return Ok(pack_handle(self.epoch, existing));
+            }
             return Err(InternError::Overflow);
         }
         let index = self.slots.push(value);

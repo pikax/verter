@@ -78,12 +78,15 @@ pub(super) struct EpochInner {
     pub environments: AppendInterner<CanonicalTypeSubstitution>,
     pub locators: AppendInterner<u64>,
     pub live_readers: AtomicU64,
+    /// Shared across replacement epochs so `live_reader_count` includes
+    /// still-pinned retired views.
+    pub store_live_readers: Arc<AtomicU64>,
     pub descriptor_chain_walks: AtomicU64,
     pub apply_count: AtomicU64,
 }
 
 impl EpochInner {
-    fn new(epoch: GraphEpoch) -> Self {
+    fn new(epoch: GraphEpoch, store_live_readers: Arc<AtomicU64>) -> Self {
         Self {
             epoch,
             shapes: AppendInterner::new(epoch),
@@ -102,6 +105,7 @@ impl EpochInner {
             environments: AppendInterner::new(epoch),
             locators: AppendInterner::new(epoch),
             live_readers: AtomicU64::new(0),
+            store_live_readers,
             descriptor_chain_walks: AtomicU64::new(0),
             apply_count: AtomicU64::new(0),
         }
@@ -149,7 +153,10 @@ pub struct SignatureStore {
 impl SignatureStore {
     #[must_use]
     pub fn new() -> Self {
-        let inner = Arc::new(EpochInner::new(GraphEpoch::FIRST));
+        let inner = Arc::new(EpochInner::new(
+            GraphEpoch::FIRST,
+            Arc::new(AtomicU64::new(0)),
+        ));
         Self {
             current: ArcSwap::from(inner),
             retained_results: Mutex::new(Vec::new()),
@@ -167,18 +174,22 @@ impl SignatureStore {
     pub(super) fn pin(&self) -> Arc<EpochInner> {
         let inner = self.current.load_full();
         inner.live_readers.fetch_add(1, Ordering::Relaxed);
+        inner.store_live_readers.fetch_add(1, Ordering::Relaxed);
         inner
     }
 
     pub(super) fn unpin(inner: &EpochInner) {
         inner.live_readers.fetch_sub(1, Ordering::Relaxed);
+        inner.store_live_readers.fetch_sub(1, Ordering::Relaxed);
     }
 
-    /// Live readers of the current epoch (plus any still-pinned retired epochs
-    /// held by outstanding `Arc`s).
+    /// Live readers of the current epoch plus still-pinned retired epochs.
     #[must_use]
     pub fn live_reader_count(&self) -> u64 {
-        self.current.load().live_readers.load(Ordering::Relaxed)
+        self.current
+            .load()
+            .store_live_readers
+            .load(Ordering::Relaxed)
     }
 
     /// Replace the current epoch. Old pinned readers keep their `Arc`.
@@ -192,7 +203,9 @@ impl SignatureStore {
             return Err(StoreError::Overflow);
         }
         let epoch = GraphEpoch::from_raw(next);
-        self.current.store(Arc::new(EpochInner::new(epoch)));
+        let store_live_readers = Arc::clone(&self.current.load().store_live_readers);
+        self.current
+            .store(Arc::new(EpochInner::new(epoch, store_live_readers)));
         Ok(epoch)
     }
 
@@ -366,9 +379,17 @@ impl SignatureStore {
         subst: &CallSubstitution,
     ) -> Result<(), StoreError> {
         match subst {
-            CallSubstitution::Compose { first, second, .. } => {
+            CallSubstitution::Compose {
+                domain,
+                codomain,
+                first,
+                second,
+                ..
+            } => {
                 Self::require_id(inner, first.epoch(), first.index(), &inner.substitutions)?;
-                Self::require_id(inner, second.epoch(), second.index(), &inner.substitutions)
+                Self::require_id(inner, second.epoch(), second.index(), &inner.substitutions)?;
+                Self::require_id(inner, domain.epoch(), domain.index(), &inner.spaces)?;
+                Self::require_id(inner, codomain.epoch(), codomain.index(), &inner.spaces)
             }
             CallSubstitution::Identity { domain, codomain }
             | CallSubstitution::Map {
@@ -426,6 +447,14 @@ impl SignatureStore {
         cancelled: Option<&AtomicBool>,
     ) -> Result<BinderSpaceId, StoreError> {
         let inner = self.inner();
+        for binder in space.binders.iter() {
+            Self::require_id(
+                &inner,
+                binder.spelling.epoch(),
+                binder.spelling.index(),
+                &inner.strings,
+            )?;
+        }
         let raw = inner.spaces.intern(space, cancelled)?;
         Ok(BinderSpaceId::from_raw(raw))
     }
@@ -575,9 +604,50 @@ impl SignatureStore {
         cancelled: Option<&AtomicBool>,
     ) -> Result<CallSubstitutionId, StoreError> {
         let inner = self.inner();
+        let subst = self.canonicalize_subst(&inner, subst)?;
         self.check_subst_node(&inner, &subst)?;
         let raw = inner.substitutions.intern(subst, cancelled)?;
         Ok(CallSubstitutionId::from_raw(raw))
+    }
+
+    /// Recompute Compose depth/domain/codomain from operands so a
+    /// hand-built node cannot bypass chain-depth control or embed a
+    /// stale space. Identity children are elided; chains past the bound
+    /// flatten. Same-space identity elision matches `compose_after`.
+    fn canonicalize_subst(
+        &self,
+        inner: &EpochInner,
+        subst: CallSubstitution,
+    ) -> Result<CallSubstitution, StoreError> {
+        match subst {
+            CallSubstitution::Compose { first, second, .. } => {
+                Self::require_id(inner, first.epoch(), first.index(), &inner.substitutions)?;
+                Self::require_id(inner, second.epoch(), second.index(), &inner.substitutions)?;
+                let a = self.subst(inner, first)?;
+                let b = self.subst(inner, second)?;
+                if a.codomain() != b.domain() {
+                    return Err(StoreError::WrongBinderSpace);
+                }
+                if a.is_same_space_identity() {
+                    return Ok(b.clone());
+                }
+                if b.is_same_space_identity() {
+                    return Ok(a.clone());
+                }
+                let depth = compose_depth(a).max(compose_depth(b)).saturating_add(1);
+                if depth >= MAX_SUBSTITUTION_CHAIN_DEPTH {
+                    return self.flatten_subst(inner, first, second);
+                }
+                Ok(CallSubstitution::Compose {
+                    domain: a.domain(),
+                    codomain: b.codomain(),
+                    first,
+                    second,
+                    depth,
+                })
+            }
+            other => Ok(other),
+        }
     }
 
     pub fn intern_with_shape<F>(
@@ -696,21 +766,24 @@ impl SignatureStore {
     ) -> Result<SubstTerm, StoreError> {
         let inner = self.inner();
         inner.apply_count.fetch_add(1, Ordering::Relaxed);
-        self.apply_inner(&inner, subst, term)
+        Self::apply_inner(&inner, subst, term)
     }
 
-    fn apply_inner(
-        &self,
+    pub(super) fn apply_inner(
         inner: &EpochInner,
         subst: CallSubstitutionId,
         term: &SubstTerm,
     ) -> Result<SubstTerm, StoreError> {
-        let node = self.subst(inner, subst)?;
+        check_epoch(inner.epoch, subst.epoch())?;
+        let node = inner
+            .substitutions
+            .get(subst.index())
+            .ok_or(StoreError::Missing)?;
         match node {
             CallSubstitution::Compose { first, second, .. } => {
                 inner.descriptor_chain_walks.fetch_add(1, Ordering::Relaxed);
-                let mid = self.apply_inner(inner, *first, term)?;
-                self.apply_inner(inner, *second, &mid)
+                let mid = Self::apply_inner(inner, *first, term)?;
+                Self::apply_inner(inner, *second, &mid)
             }
             other => Ok(other.apply_term(term)?),
         }

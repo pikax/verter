@@ -1,9 +1,9 @@
 use super::lifetime::{SignatureStore, StoreError};
 use super::read_view::SemanticReadView;
-use super::records::{BinderSpace, SignatureSetRef};
-use super::substitution::CallSubstitution;
+use super::records::{BinderDeclaration, BinderSpace, SignatureSetRef, SpellingId};
+use super::substitution::{CallSubstitution, SubstTerm, MAX_SUBSTITUTION_CHAIN_DEPTH};
 use super::test_support::intern_one_call;
-use crate::semantic_query::CanonicalTypeSubstitution;
+use crate::semantic_query::{CanonicalTypeSubstitution, SemanticNodeId};
 
 #[test]
 fn stale_epoch_handle_is_rejected() {
@@ -77,7 +77,12 @@ fn retained_results_outlive_epoch_replacement_until_drained() {
         .intern_substitution(CallSubstitution::identity(space), None)
         .unwrap();
     let recipe = intern_recipe_of(&store, c.signature);
-    let result = super::records::AppliedResult::context_free(c.signature, subst, recipe);
+    let result = super::records::AppliedResult::context_free(
+        c.signature,
+        subst,
+        recipe,
+        super::test_support::intern_test_context([1; 16]),
+    );
     store.retain_result(result).unwrap();
     assert_eq!(store.retained_len(), 1);
     store.replace_epoch().unwrap();
@@ -223,7 +228,12 @@ fn lookup_result_does_not_publish_on_miss() {
         .intern_substitution(CallSubstitution::identity(space), None)
         .unwrap();
     let recipe = intern_recipe_of(&store, c.signature);
-    let result = super::records::AppliedResult::context_free(c.signature, subst, recipe);
+    let result = super::records::AppliedResult::context_free(
+        c.signature,
+        subst,
+        recipe,
+        super::test_support::intern_test_context([1; 16]),
+    );
     assert_eq!(store.lookup_result(&result).unwrap(), None);
     let id = store.publish_result(result.clone(), None).unwrap();
     assert_eq!(store.lookup_result(&result).unwrap(), Some(id));
@@ -291,4 +301,244 @@ fn compose_rejects_unrelated_codomain() {
         store.compose_after(first, second, None).unwrap_err(),
         StoreError::WrongBinderSpace
     );
+}
+
+#[test]
+fn intern_binder_space_rejects_stale_or_unissued_spelling() {
+    let store = SignatureStore::new();
+    let spelling = store.intern_spelling("T", None).unwrap();
+    store.replace_epoch().unwrap();
+    let stale = store
+        .intern_binder_space(
+            BinderSpace {
+                key: 1,
+                binders: Box::from([BinderDeclaration {
+                    spelling,
+                    constraint: None,
+                    default: None,
+                }]),
+            },
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(stale, StoreError::StaleHandle);
+    let unissued = store
+        .intern_binder_space(
+            BinderSpace {
+                key: 2,
+                binders: Box::from([BinderDeclaration {
+                    spelling: SpellingId::from_raw(0),
+                    constraint: None,
+                    default: None,
+                }]),
+            },
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(unissued, StoreError::StaleHandle);
+}
+
+#[test]
+fn intern_substitution_recomputes_compose_depth_and_spaces() {
+    let store = SignatureStore::new();
+    let space = store
+        .intern_binder_space(
+            BinderSpace {
+                key: 0,
+                binders: Box::from([]),
+            },
+            None,
+        )
+        .unwrap();
+    let stale_space = space;
+    store.replace_epoch().unwrap();
+    let space = store
+        .intern_binder_space(
+            BinderSpace {
+                key: 0,
+                binders: Box::from([]),
+            },
+            None,
+        )
+        .unwrap();
+    let first = store
+        .intern_substitution(
+            CallSubstitution::map(
+                space,
+                CanonicalTypeSubstitution::new(vec![(SemanticNodeId(1), SemanticNodeId(2))]),
+            ),
+            None,
+        )
+        .unwrap();
+    let second = store
+        .intern_substitution(
+            CallSubstitution::map(
+                space,
+                CanonicalTypeSubstitution::new(vec![(SemanticNodeId(2), SemanticNodeId(3))]),
+            ),
+            None,
+        )
+        .unwrap();
+    let composed = store
+        .intern_substitution(
+            CallSubstitution::Compose {
+                domain: stale_space,
+                codomain: stale_space,
+                first,
+                second,
+                depth: 0,
+            },
+            None,
+        )
+        .unwrap();
+    match store.substitution(composed).unwrap() {
+        CallSubstitution::Compose {
+            domain,
+            codomain,
+            depth,
+            ..
+        } => {
+            assert_eq!(domain, space);
+            assert_eq!(codomain, space);
+            assert_eq!(depth, 1);
+        }
+        other => panic!("expected Compose, got {other:?}"),
+    }
+}
+
+#[test]
+fn intern_hand_built_compose_chain_flattens_past_the_bound() {
+    let store = SignatureStore::new();
+    let space = store
+        .intern_binder_space(
+            BinderSpace {
+                key: 0,
+                binders: Box::from([]),
+            },
+            None,
+        )
+        .unwrap();
+    let mut current = store
+        .intern_substitution(
+            CallSubstitution::map(
+                space,
+                CanonicalTypeSubstitution::new(vec![(SemanticNodeId(1), SemanticNodeId(2))]),
+            ),
+            None,
+        )
+        .unwrap();
+    // bounded-loop: hand-built Compose claiming depth 0, one step past the bound.
+    for i in 1..=MAX_SUBSTITUTION_CHAIN_DEPTH {
+        let step = store
+            .intern_substitution(
+                CallSubstitution::map(
+                    space,
+                    CanonicalTypeSubstitution::new(vec![(
+                        SemanticNodeId(u64::from(i) + 1),
+                        SemanticNodeId(u64::from(i) + 2),
+                    )]),
+                ),
+                None,
+            )
+            .unwrap();
+        current = store
+            .intern_substitution(
+                CallSubstitution::Compose {
+                    domain: space,
+                    codomain: space,
+                    first: current,
+                    second: step,
+                    depth: 0,
+                },
+                None,
+            )
+            .unwrap();
+    }
+    match store.substitution(current).unwrap() {
+        CallSubstitution::Map { .. } => {}
+        other => panic!("expected flattened Map, got {other:?}"),
+    }
+}
+
+#[test]
+fn context_distinct_results_do_not_alias() {
+    let store = SignatureStore::new();
+    let set = intern_one_call(&store);
+    let SignatureSetRef::One(c) = set else {
+        panic!("one");
+    };
+    let space = store
+        .intern_binder_space(
+            BinderSpace {
+                key: 0,
+                binders: Box::from([]),
+            },
+            None,
+        )
+        .unwrap();
+    let subst = store
+        .intern_substitution(CallSubstitution::identity(space), None)
+        .unwrap();
+    let recipe = intern_recipe_of(&store, c.signature);
+    let first_ctx = super::test_support::intern_test_context([0; 16]);
+    let other_ctx = super::test_support::intern_test_context([1; 16]);
+    assert_ne!(first_ctx, other_ctx);
+    let a = super::records::AppliedResult::context_free(c.signature, subst, recipe, first_ctx);
+    let b = super::records::AppliedResult::context_free(c.signature, subst, recipe, other_ctx);
+    let id_a = store.publish_result(a.clone(), None).unwrap();
+    let id_b = store.publish_result(b.clone(), None).unwrap();
+    assert_ne!(id_a, id_b);
+    assert_eq!(store.lookup_result(&a).unwrap(), Some(id_a));
+    assert_eq!(store.lookup_result(&b).unwrap(), Some(id_b));
+}
+
+#[test]
+fn live_reader_count_includes_pinned_retired_epoch() {
+    let store = SignatureStore::new();
+    let view = SemanticReadView::pin(&store);
+    assert!(store.live_reader_count() >= 1);
+    store.replace_epoch().unwrap();
+    assert!(
+        store.live_reader_count() >= 1,
+        "retired pinned reader vanished from live_reader_count"
+    );
+    drop(view);
+    assert_eq!(store.live_reader_count(), 0);
+}
+
+#[test]
+fn pinned_view_reads_substitution_after_epoch_replacement() {
+    let store = SignatureStore::new();
+    let space = store
+        .intern_binder_space(
+            BinderSpace {
+                key: 0,
+                binders: Box::from([]),
+            },
+            None,
+        )
+        .unwrap();
+    let subst = store
+        .intern_substitution(CallSubstitution::identity(space), None)
+        .unwrap();
+    let set = intern_one_call(&store);
+    let SignatureSetRef::One(c) = set else {
+        panic!("one");
+    };
+    let view = SemanticReadView::pin(&store);
+    let descriptor = view.descriptor(c.signature).unwrap();
+    let template = view.template(descriptor.template).unwrap();
+    let _ = view.shape(template.input_shape).unwrap();
+    let _ = view.recipe(template.result_recipe).unwrap();
+    store.replace_epoch().unwrap();
+    assert!(view.substitution(subst).is_ok());
+    assert!(view.template(descriptor.template).is_ok());
+    assert_eq!(
+        store.substitution(subst).unwrap_err(),
+        StoreError::StaleHandle
+    );
+    let applied = view
+        .apply(subst, &SubstTerm::Binder(SemanticNodeId(1)))
+        .unwrap();
+    assert_eq!(applied, SubstTerm::Binder(SemanticNodeId(1)));
 }

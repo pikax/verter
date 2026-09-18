@@ -41,7 +41,8 @@ pub use crate::semantic_query_memo::family_variant_label_for_tests;
 pub use crate::semantic_query_memo::family_key_size_for_tests;
 pub use crate::semantic_query_memo::memo_entry_size_for_tests;
 pub use crate::signature_kernel::test_support::{
-    warm_positional_read, warm_positional_read_many, WarmPositionalLockProbe, WarmPositionalStore,
+    duplicate_publisher_one_sets, opposite_order_one_call_binder_tokens, warm_positional_read,
+    warm_positional_read_many, WarmPositionalLockProbe, WarmPositionalStore,
 };
 
 /// Re-export the canonical display projection so the `g_block` integration

@@ -191,26 +191,21 @@ impl CallSubstitution {
     /// the output of a published map.
     pub fn apply_term(&self, term: &SubstTerm) -> Result<SubstTerm, SubstError> {
         match self {
-            Self::Identity { .. } => reject_escaping(term.cloned_if_var()?),
+            // Empty maps collapse to Identity (`map_across`); walk Constructed
+            // args with the same recursive rejection as Map so a nested
+            // inference variable cannot escape.
+            Self::Identity { domain, .. } => {
+                static EMPTY: std::sync::OnceLock<CanonicalTypeSubstitution> =
+                    std::sync::OnceLock::new();
+                apply_map_term(
+                    EMPTY.get_or_init(CanonicalTypeSubstitution::empty),
+                    *domain,
+                    term,
+                )
+            }
             Self::Map { map, domain, .. } => apply_map_term(map, *domain, term),
             Self::Compose { .. } => Err(SubstError::UnresolvedCompose),
         }
-    }
-}
-
-impl SubstTerm {
-    fn cloned_if_var(&self) -> Result<SubstTerm, SubstError> {
-        match self {
-            Self::InferenceVar { .. } => Err(SubstError::EscapingInferenceVar),
-            other => Ok(other.clone()),
-        }
-    }
-}
-
-fn reject_escaping(term: SubstTerm) -> Result<SubstTerm, SubstError> {
-    match term {
-        SubstTerm::InferenceVar { .. } => Err(SubstError::EscapingInferenceVar),
-        other => Ok(other),
     }
 }
 

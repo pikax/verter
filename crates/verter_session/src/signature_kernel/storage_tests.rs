@@ -191,3 +191,49 @@ fn intern_overflow_publishes_no_handle() {
     assert_eq!(err, InternError::Overflow);
     assert!(table.lookup(&2).is_none());
 }
+
+#[test]
+fn overflow_race_does_not_plant_unmapped_slots() {
+    use super::records::GraphEpoch;
+    use super::storage::AppendInterner;
+    let table = Arc::new(AppendInterner::<u64>::with_max_index(GraphEpoch::FIRST, 3));
+    let results: Vec<_> = thread::scope(|scope| {
+        let mut joins = Vec::new();
+        // bounded-loop: distinct publishers racing the overflow bound.
+        for v in 0..32u64 {
+            let table = Arc::clone(&table);
+            joins.push(scope.spawn(move || table.intern(v, None)));
+        }
+        joins.into_iter().map(|j| j.join().unwrap()).collect()
+    });
+    let oks: Vec<u64> = results
+        .iter()
+        .filter_map(|r| r.as_ref().ok().copied())
+        .collect();
+    assert!(
+        oks.len() <= 4,
+        "published more than max_index+1 handles: {}",
+        oks.len()
+    );
+    assert_eq!(oks.len(), {
+        let mut uniq = oks.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        uniq.len()
+    });
+    for v in 0..32u64 {
+        match table.lookup(&v) {
+            Some(handle) => assert!(oks.contains(&handle), "lookup published unmapped {v}"),
+            None => assert!(
+                results
+                    .iter()
+                    .any(|r| r.as_ref().err() == Some(&InternError::Overflow)),
+                "missing value {v} was not overflow"
+            ),
+        }
+    }
+    assert!(
+        table.get(4).is_none(),
+        "overflow race planted a slot past max_index"
+    );
+}

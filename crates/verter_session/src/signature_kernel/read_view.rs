@@ -10,9 +10,12 @@ use super::lifetime::{check_epoch, EpochInner, SignatureStore, StoreError};
 use super::provenance::SignatureProvenance;
 use super::records::GraphEpoch;
 use super::records::{
-    SignatureCandidate, SignatureDescriptor, SignatureDescriptorId, SignatureProvenanceId,
-    SignatureSet, SignatureSetId, SignatureSetRef,
+    CallSubstitutionId, SignatureCandidate, SignatureDescriptor, SignatureDescriptorId,
+    SignatureInputShape, SignatureInputShapeId, SignatureProvenanceId, SignatureResultRecipe,
+    SignatureResultRecipeId, SignatureSet, SignatureSetId, SignatureSetRef, SignatureTemplate,
+    SignatureTemplateId,
 };
+use super::substitution::{CallSubstitution, SubstTerm};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadError {
@@ -87,6 +90,44 @@ impl SemanticReadView {
     pub fn set(&self, id: SignatureSetId) -> Result<&SignatureSet, ReadError> {
         check_epoch(self.inner.epoch, id.epoch()).map_err(ReadError::from)?;
         self.inner.sets.get(id.index()).ok_or(ReadError::Missing)
+    }
+
+    pub fn shape(&self, id: SignatureInputShapeId) -> Result<&SignatureInputShape, ReadError> {
+        check_epoch(self.inner.epoch, id.epoch()).map_err(ReadError::from)?;
+        self.inner.shapes.get(id.index()).ok_or(ReadError::Missing)
+    }
+
+    pub fn template(&self, id: SignatureTemplateId) -> Result<&SignatureTemplate, ReadError> {
+        check_epoch(self.inner.epoch, id.epoch()).map_err(ReadError::from)?;
+        self.inner
+            .templates
+            .get(id.index())
+            .ok_or(ReadError::Missing)
+    }
+
+    pub fn recipe(&self, id: SignatureResultRecipeId) -> Result<&SignatureResultRecipe, ReadError> {
+        check_epoch(self.inner.epoch, id.epoch()).map_err(ReadError::from)?;
+        self.inner.recipes.get(id.index()).ok_or(ReadError::Missing)
+    }
+
+    pub fn substitution(&self, id: CallSubstitutionId) -> Result<&CallSubstitution, ReadError> {
+        check_epoch(self.inner.epoch, id.epoch()).map_err(ReadError::from)?;
+        self.inner
+            .substitutions
+            .get(id.index())
+            .ok_or(ReadError::Missing)
+    }
+
+    /// Apply against this pinned epoch, not the store's current epoch.
+    pub fn apply(
+        &self,
+        subst: CallSubstitutionId,
+        term: &SubstTerm,
+    ) -> Result<SubstTerm, StoreError> {
+        self.inner
+            .apply_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        SignatureStore::apply_inner(&self.inner, subst, term)
     }
 
     /// Warm positional read. Empty and One do not touch intern shards or

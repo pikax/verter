@@ -1239,22 +1239,21 @@ fn det_09_policy_change_with_resident_parents() {
 /// orders yield one logical candidate set on a shared store.
 #[test]
 fn signature_kernel_interned_identities_are_schedule_independent() {
-    use std::sync::Arc;
-    use verter_session::for_tests::WarmPositionalStore;
-
-    let fixture = Arc::new(WarmPositionalStore::fixture());
-    let first = verter_session::for_tests::warm_positional_read(&fixture);
-    std::thread::scope(|scope| {
-        let mut joins = Vec::new();
-        // bounded-loop: concurrent warm readers of one interned set.
-        for _ in 0..8 {
-            let fixture = Arc::clone(&fixture);
-            joins.push(
-                scope.spawn(move || verter_session::for_tests::warm_positional_read(&fixture)),
+    // bounded-loop: one race per worker-count in the AC3 matrix.
+    for workers in [1usize, 2, 4, 8] {
+        let ids = verter_session::for_tests::duplicate_publisher_one_sets(workers);
+        assert_eq!(ids.len(), workers, "publisher count {workers}");
+        let first = &ids[0];
+        for id in &ids {
+            assert_eq!(
+                id, first,
+                "duplicate publishers diverged at {workers} workers"
             );
         }
-        for join in joins {
-            assert_eq!(join.join().expect("reader"), first);
-        }
-    });
+    }
+    let (fwd, rev) = verter_session::for_tests::opposite_order_one_call_binder_tokens();
+    assert_eq!(
+        fwd, rev,
+        "opposite intern order changed logical binder identity"
+    );
 }

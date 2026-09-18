@@ -114,7 +114,12 @@ fn no_double_substitution_on_warm_result_read() {
             None,
         )
         .unwrap();
-    let result = super::records::AppliedResult::context_free(c.signature, subst, recipe);
+    let result = super::records::AppliedResult::context_free(
+        c.signature,
+        subst,
+        recipe,
+        super::test_support::intern_test_context([1; 16]),
+    );
     let id = store.publish_result(result.clone(), None).unwrap();
     let applies_after_publish = store.apply_count();
     let walks_after_publish = store.descriptor_chain_walks();
@@ -188,6 +193,20 @@ fn temporary_inference_variable_does_not_escape() {
         .apply(subst, &SubstTerm::InferenceVar { id: 1, space })
         .unwrap_err();
     assert_eq!(err, super::lifetime::StoreError::EscapingInferenceVar);
+    let nested = SubstTerm::Constructed {
+        ctor: 1,
+        args: Box::from([SubstTerm::InferenceVar { id: 1, space }]),
+    };
+    let nested_err = store.apply(subst, &nested).unwrap_err();
+    assert_eq!(
+        nested_err,
+        super::lifetime::StoreError::EscapingInferenceVar
+    );
+    let identity = CallSubstitution::identity(space);
+    assert_eq!(
+        identity.apply_term(&nested).unwrap_err(),
+        SubstError::EscapingInferenceVar
+    );
     let _ = SubstError::EscapingInferenceVar;
 }
 
