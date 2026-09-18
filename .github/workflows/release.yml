@@ -232,6 +232,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          # Same reason ci.yml's compile-contracts job installs it: a trybuild
+          # `.stderr` is EXACT rustc output, and rustc renders the snippet
+          # behind a `help:` pointing into the standard library only when the
+          # library source is present. The action installs `--profile minimal`,
+          # which has no `rust-src`, so those lines vanish here while they are
+          # there on the developer machine the fixture was blessed on —
+          # register_frontend_does_not_take_runtime_identity failed exactly that
+          # way on v0.0.1-beta.4, 1 of 28, for a reason unrelated to the seal it
+          # protects. ci.yml was fixed and this lane was not.
+          components: rust-src
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-compiler-contracts
