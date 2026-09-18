@@ -2,14 +2,6 @@ import { mintDoctorClearance } from "./adapter.mjs";
 import { GitHubAdapterError } from "./errors.mjs";
 
 export const DOCTOR_ALL_CAPABILITIES = Object.freeze(["issues", "pullRequests", "projects"]);
-export const SYNC_ISSUES_CAPABILITIES = Object.freeze(["issues", "projects"]);
-export const PROJECT_STATUS_CAPABILITIES = Object.freeze(["projects"]);
-export const CREATE_PR_CAPABILITIES = Object.freeze(["issues", "pullRequests"]);
-export const REVIEW_SUMMARY_CAPABILITIES = Object.freeze(["issues", "pullRequests"]);
-export const SCHEDULE_CAPABILITIES = Object.freeze(["issues", "projects"]);
-export const INSPECT_CAPABILITIES = Object.freeze(["issues"]);
-export const RELEASE_PLAN_DISPATCH_CAPABILITIES = Object.freeze(["actions"]);
-export const RELEASE_CUT_CAPABILITIES = Object.freeze(["pullRequests"]);
 export const PROTECTION_CAPABILITIES = Object.freeze(["admin"]);
 
 const CAPABILITY_ERRORS = Object.freeze({

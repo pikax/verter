@@ -77,7 +77,7 @@ jobs:
       - name: Validate release workflow and package contracts
         run: pnpm --filter verter-vscode exec vitest run src/releasePackaging.spec.ts
       - name: Validate release rehearsal control plane
-        run: node --test scripts/githubctl/tests/release-plan.test.mjs scripts/githubctl/tests/clean-room.test.mjs
+        run: node --test scripts/githubctl/tests/clean-room.test.mjs
 
   dry-run:
     name: Release dry run

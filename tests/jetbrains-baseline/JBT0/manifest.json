@@ -1,0 +1,71 @@
+{
+  "node": "JBT0",
+  "kind": "constitution",
+  "products": [
+    "JetBrainsBaselineManifest v1",
+    "RequiredWorkflowMatrix v1",
+    "SuperiorityPredicate v1",
+    "Baseline ownership map",
+    "contracts/jetbrains-baseline.md",
+    "plans/expansion-jetbrains-product.md"
+  ],
+  "cases": [
+    {
+      "id": "JBT0-AC1",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "comparator-diagnostics-disabled",
+        "comparator-attestation-optional",
+        "captured-pin-without-value",
+        "pending-pin-with-value",
+        "missing-alternate-mode-row",
+        "second-semantic-engine",
+        "pending-pin-superiority"
+      ]
+    },
+    {
+      "id": "JBT0-AC2",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "single-benchmark-superiority",
+        "metric-population-drift",
+        "post-hoc-metric-subset",
+        "guessed-missing-metrics",
+        "thin-plugin-superiority",
+        "predicate-conjunction-drift"
+      ]
+    },
+    {
+      "id": "JBT0-AC3",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "missing-required-workflow",
+        "extra-invented-workflow",
+        "speed-buys-out-parity",
+        "collapsed-candidate-states",
+        "wrong-parity-owner"
+      ]
+    },
+    {
+      "id": "JBT0-ratification",
+      "disposition": "accept",
+      "twins": [
+        "clean products",
+        "missing-amendment",
+        "unknown-owner",
+        "premature-retirement",
+        "missing-evidence-file",
+        "stale-adapter-state",
+        "unregistered-conflict-domain",
+        "missing-contract-marker",
+        "missing-plan",
+        "predecessor-not-implemented"
+      ]
+    }
+  ],
+  "runtimeCorrectness": false,
+  "notes": "Contract/inventory node: 0 production LOC. JBT0-AC-BASIS binds incremental-vs-fresh and same-basis runtime evidence to JBT1H (real-IDE comparison harness) and JBT10 (comparative qualification) instead of fabricating a runtime test here. JBT0-AC-RESOURCE: no hot paths or UI touched; the WSP equal-work corpus and client-paint obligations bind every later claim in this train. JBT0-AC-EXPOSURE: DX1 owns the registration schema; product promotion stays blocked on executable exposure. Comparator pin values are pending-capture by design: JBT1H captures them with the real harness, and guessed pins are never admissible. The harness grounds itself in the live repository (authority DAG, conflict-domain catalog, implementation ledger, adapter-presence facts, evidence files), so drift in any of them is a failing case, not a stale pass."
+}

@@ -7594,8 +7594,8 @@ const COLD_CHAIN_HERITAGE_READS: usize = 4;
 /// The gap here is OVER-DETERMINED and this case is not the
 /// discriminating control for the walk's decidability gate: a class with
 /// heritage unwraps to a composed heritage carrier the relation
-/// authority also answers undecided (see the D10 deferral under
-/// `roadmap/0.1.0-tama/decisions`), so the structural route degrades
+/// authority also answers undecided (see the recorded relation-authority
+/// deferral in the program's decision records), so the structural route degrades
 /// too. The discriminating control for the decidability gate is
 /// [`instanceof_undecidable_heritage_stays_gapped_and_never_warms`],
 /// whose arms ARE structurally decidable: without the gate those publish

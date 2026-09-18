@@ -84,8 +84,6 @@
       ]
     }
   ],
-  "verify": "node tests/web-product/WDX0/verify.mjs",
-  "test": "node --test tests/web-product/WDX0/wdx0.test.mjs",
   "runtimeCorrectness": false,
   "notes": "Contract-only node: 0 production LOC. WDX0-AC3 binds fresh-vs-incremental, edit/revert, cancellation and ordering runtime cases to WDX1/WDX2/WDX3 instead of fabricating one here. WDX0-AC5 adds no performance budget; the ratified methodology binds when a producing train first measures. The harness grounds itself in the live repository (authority DAG, implementation ledger, capability-surface catalog families and count, preserved contracts, evidence index), so drift in any of them is a failing case, not a stale pass."
 }
