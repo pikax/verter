@@ -184,10 +184,10 @@ impl SemanticGraphStore {
     ///
     /// Returns the PUBLIC [`crate::semantic_query::RelationPayload`] **only
     /// when** the stored entry's self-version-rooted carrier validates
-    /// against the live store view AND the entry's
-    /// `validated_at_generation` still equals the live project generation
-    /// — the same gate the retired `get_relation` enforced. A stale entry
-    /// (same-canonical content edit, untracked self-root, or
+    /// against the live store view — the carrier's
+    /// `FactVersionRef::ProjectGeneration` fact is the validity oracle
+    /// (`validated_at_generation` is recency metadata, not a gate). A stale
+    /// entry (same-canonical content edit, untracked self-root, or
     /// `ProjectGeneration` bump) returns `None`. Only decided binary
     /// payloads are ever stored, so a hit is always a determinate
     /// judgement.

@@ -274,10 +274,12 @@ pub struct SemanticGraphStore {
     /// `Assignable`/`NotAssignable` outcomes ONLY (an undecided judgement
     /// has no value-domain form and is never admitted; a `BudgetExceeded`
     /// payload is public but ReturnOnly). Warm reads validate the carrier
-    /// strictly AND hard-miss on a `validated_at_generation` mismatch, so a
-    /// same-canonical content edit to either the source's or the target's
-    /// originating file — or a `ProjectGeneration` bump — misses the warm
-    /// relation judgement and forces a recompute. Retention rides the
+    /// strictly, so a same-canonical content edit to either the source's
+    /// or the target's originating file — or a `ProjectGeneration` bump —
+    /// misses the warm relation judgement via the carrier's
+    /// `FactVersionRef::ProjectGeneration` fact and forces a recompute
+    /// (`validated_at_generation` is recency metadata, not a validity
+    /// gate). Retention rides the
     /// family rails (per-family cap, invalid-first / LRU eviction, the
     /// family `memo_budget` global bound, reverse-index drains).
     entries: Mutex<FxHashMap<FamilyKey, FamilySlots>>,
