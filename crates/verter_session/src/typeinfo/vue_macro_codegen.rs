@@ -564,13 +564,18 @@ fn cancelled_vue_macro_codegen_output(
 /// One semantic-transaction entry for this owner's Vue-macro plan.
 /// Compute and terminal-partial share it so a project-owned file cannot
 /// mint two input bases for the same owner.
+///
+/// Identity is the request-pinned store view's captured published root,
+/// not live `host_view_project_identity_for`: a republish between pin and
+/// callback must not bind a new `InputBasisId` onto the old snapshot.
 fn enter_vue_macro_semantic_attempt<'a>(
-    host: &VerterHost,
+    ctx: &(dyn ResolverContext + Sync),
     owner_canonical: &'a str,
 ) -> CompileAttempt<'a> {
     CompileAttempt::enter_semantic_for_project(
         owner_canonical,
-        host.host_view_project_identity_for(owner_canonical),
+        ctx.resolver_store_view()
+            .project_identity_for(owner_canonical),
     )
 }
 
@@ -619,8 +624,7 @@ fn terminal_partial_vue_macro_codegen_output(
     // row identity. Only each projected outcome is replaced with the
     // terminal failure.
     if let Some(script_analysis) = script_analysis.as_ref() {
-        let mut attempt =
-            enter_vue_macro_semantic_attempt(ctx.host_for_fact_tracer_install(), owner_canonical);
+        let mut attempt = enter_vue_macro_semantic_attempt(ctx, owner_canonical);
         attempt.stage_script_analysis(Arc::from(owner_canonical), Arc::clone(script_analysis));
         if let Ok(plan) = attempt
             .type_info()
@@ -915,7 +919,7 @@ impl VerterHost {
         // and surface dependency failures all come from
         // `TypeInfoCore::attempt` through the compile transaction — this
         // driver only executes the live I/O each plan row demands.
-        let mut attempt = enter_vue_macro_semantic_attempt(self, owner_canonical);
+        let mut attempt = enter_vue_macro_semantic_attempt(ctx, owner_canonical);
         attempt.stage_script_analysis(Arc::from(owner_canonical), Arc::clone(script_analysis));
         let semantic_input = match attempt
             .type_info()
