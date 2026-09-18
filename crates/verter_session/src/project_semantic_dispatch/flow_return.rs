@@ -1311,7 +1311,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    coinductive hold — neither a contributor nor a failure) and
     ///    return the `Hold` sentinel.
     /// 2. **Warm read** — a validated published `Complete` result
-    ///    (carrier-validated, live-generation gated).
+    ///    (carrier-validated).
     /// 3. **Cold compute** — the machinery ROOT goes through the family
     ///    singleflight (`execute(FlowReturn)` → `build_flow_return`); a
     ///    nested flow evaluation computes INLINE on the transaction (its
@@ -1342,7 +1342,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return FlowReturnStep::Hold(Box::new(key));
             }
         }
-        // (2) Warm read (carrier-validated, live-generation gated).
+        // (2) Warm read (carrier-validated).
         if let Some(result) = self.graph().get_flow_return_result(self.ctx, &key) {
             return FlowReturnStep::Complete(result);
         }

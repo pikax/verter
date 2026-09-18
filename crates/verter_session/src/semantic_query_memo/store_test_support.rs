@@ -337,7 +337,7 @@ impl SemanticGraphStore {
         // entry's `state` with the table lock RELEASED (the store's
         // lock-order rule: `state` is never taken while `inflight` is
         // held).
-        let handles: Vec<(PreparedKeyHandle, Arc<InflightEntry>)> = {
+        let handles: Vec<(PreparedKeyHandle, Arc<FlightCell>)> = {
             let table = self.inflight.lock();
             table
                 .iter()
