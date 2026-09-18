@@ -8,9 +8,13 @@ Setup and features for the Verter VS Code extension.
 
 ## Installation
 
-::: warning Marketplace listing coming soon
-The Marketplace listing is not published yet. Until it is, build and run the extension from source using [Building from Source](#building-from-source) below.
-:::
+Search **"Verter"** in the VS Code marketplace, or install from the command line:
+
+```bash
+code --install-extension verter.verter-vscode
+```
+
+Alternatively, you can build from source (see [Building from Source](#building-from-source) below).
 
 ## Features
 

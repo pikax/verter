@@ -1,0 +1,73 @@
+{
+  "id": "browser-compatibility-matrix.v1",
+  "schema": 1,
+  "isolationModes": ["none", "coop-coep"],
+  "baselineMode": "none",
+  "engines": [
+    {
+      "id": "chromium",
+      "wasm32": "required",
+      "webWorkers": "required",
+      "sharedArrayBuffer": "not-required",
+      "crossOriginIsolation": "not-required",
+      "minimumVersion": "not invented by BWH0; BWH11/VSW5 own real matrix qualification"
+    },
+    {
+      "id": "firefox",
+      "wasm32": "required",
+      "webWorkers": "required",
+      "sharedArrayBuffer": "not-required",
+      "crossOriginIsolation": "not-required",
+      "minimumVersion": "not invented by BWH0; BWH11/VSW5 own real matrix qualification"
+    },
+    {
+      "id": "webkit",
+      "wasm32": "required",
+      "webWorkers": "required",
+      "sharedArrayBuffer": "not-required",
+      "crossOriginIsolation": "not-required",
+      "minimumVersion": "not invented by BWH0; BWH11/VSW5 own real matrix qualification"
+    }
+  ],
+  "baseline": {
+    "id": "baseline-no-isolation",
+    "crossOriginIsolationRequired": false,
+    "sharedArrayBufferRequired": false,
+    "admittedFor": "every browserAdmitted operation in browser-execution-manifest.v1.json",
+    "law": "A browser lacking cross-origin isolation still runs admitted portable operations (BWH0-AC2)."
+  },
+  "productionIsolation": {
+    "id": "netlify-coop-coep",
+    "headers": [
+      {
+        "name": "Cross-Origin-Opener-Policy",
+        "value": "same-origin",
+        "source": "netlify.toml"
+      },
+      {
+        "name": "Cross-Origin-Embedder-Policy",
+        "value": "require-corp",
+        "source": "netlify.toml"
+      }
+    ],
+    "effect": "the deployed playground (Netlify) is cross-origin isolated in engines that honor COOP/COEP; no shipped playground source uses SharedArrayBuffer or crossOriginIsolation today",
+    "baselinePrerequisite": false,
+    "law": "Production-deployed isolation headers are recorded here, never a baseline prerequisite (BWH0-AC2): every admitted operation runs without crossOriginIsolation, and the threaded-wasm strategy stays optional (BWH5)."
+  },
+  "optionalStrategies": [
+    {
+      "id": "threaded-wasm",
+      "requires": ["SharedArrayBuffer", "COOP+COEP (crossOriginIsolation)"],
+      "prerequisite": false,
+      "status": "optional-verified-strategy",
+      "owner": "BWH5",
+      "law": "Threaded WASM is an optional verified execution strategy, never an implicit prerequisite and never a silent default (BWH0.3)."
+    }
+  ],
+  "rules": [
+    "No admitted operation, engine requirement or strategy may make SharedArrayBuffer or cross-origin isolation a prerequisite for baseline execution; such a row is rejected (BWH0-AC2).",
+    "An operation that needs the threaded strategy either carries its own verified evidence under BWH5 or loses admission; it never degrades the baseline.",
+    "Minimum engine versions are pinned only by real qualification evidence (BWH11 parity terminal, VSW5 web matrix); guessing versions here is forbidden.",
+    "The live playground must not acquire SharedArrayBuffer or crossOriginIsolation usage — in shipped sources or in deployed isolation headers (netlify.toml) — without this matrix recording it; the harness grounds both in the live repository."
+  ]
+}
