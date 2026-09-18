@@ -34,16 +34,17 @@
 use std::collections::HashMap;
 
 use verter_protocol::typeinfo::graph::{
-    self as wire, Exactness, FrameworkSurfaceDeclarationKind, FrameworkSurfaceKind,
+    self as wire, Accessibility, Exactness, FrameworkSurfaceDeclarationKind, FrameworkSurfaceKind,
     FrameworkSurfaceKindEntry, FrameworkSurfaceKindStatus, FrameworkSurfaceKindSupport,
-    FrameworkSurfaceOriginHopKind, PrimitiveKind, SemanticTypeGraph, SymbolNamespace,
+    FrameworkSurfaceOriginHopKind, ObjectMemberKind, PrimitiveKind, SemanticTypeGraph,
+    SignatureKind, SignatureOrigin, SymbolNamespace,
 };
 use verter_protocol::verter::v1::{
-    graph_query_error, graph_type_node, FrameworkSurfaceMemberDeclaration,
+    graph_property_key, graph_query_error, graph_type_node, FrameworkSurfaceMemberDeclaration,
     FrameworkSurfaceMemberOrigin, FrameworkSurfaceOriginHop, GraphLiteral, GraphLiteralValue,
-    GraphObject, GraphOpaque, GraphPrimitive, GraphQueryError, GraphQueryErrorOther,
-    GraphReference, GraphStringTable, GraphSymbolNode, GraphTypeNode,
-    SemanticTypeGraph as WireGraph,
+    GraphObject, GraphObjectMember, GraphOpaque, GraphPrimitive, GraphPropertyKey, GraphQueryError,
+    GraphQueryErrorOther, GraphReference, GraphSignature, GraphSignatureParameter,
+    GraphStringTable, GraphSymbolNode, GraphTypeNode, SemanticTypeGraph as WireGraph,
 };
 use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
@@ -105,6 +106,9 @@ pub(super) struct GraphArena {
     pub(super) nodes: Vec<GraphTypeNode>,
     pub(super) symbols: Vec<GraphSymbolNode>,
     pub(super) strings: StringTableBuilder,
+    /// Call signatures for encoded function members (bounded by the
+    /// member walk; one signature per callable node).
+    pub(super) signatures: Vec<GraphSignature>,
     /// Counts `ProjectSemanticDispatch`-class operations the encoder performs.
     /// Encoding is zero-dispatch by construction; the counter exists only so a
     /// test can assert it stays zero (no path increments it).
@@ -117,9 +121,13 @@ pub(super) struct GraphArena {
 impl GraphArena {
     pub(super) fn new() -> Self {
         Self {
-            nodes: Vec::new(),
+            // Node id 0 is the absent sentinel (mirroring the protocol
+            // encoder): a 0 in a type_node_id field never means the first
+            // real node.
+            nodes: vec![GraphTypeNode { kind: None }],
             symbols: Vec::new(),
             strings: StringTableBuilder::default(),
+            signatures: Vec::new(),
             dispatch_calls: 0,
             symbol_index: HashMap::new(),
         }
@@ -254,10 +262,125 @@ impl GraphArena {
             NamedTypeMemberOutput::EmptyObject => {
                 self.push_node(graph_type_node::Kind::Object(GraphObject::default()))
             }
+            NamedTypeMemberOutput::Function {
+                parameters,
+                return_type,
+            } => self.encode_function(parameters, return_type.as_ref()),
             NamedTypeMemberOutput::Opaque => {
                 self.push_opaque("member value is structurally unencodable shallowly")
             }
         }
+    }
+
+    fn encode_leaf(&mut self, leaf: &results::NamedTypeLeaf) -> u32 {
+        match leaf {
+            results::NamedTypeLeaf::Primitive(name) => {
+                let kind = primitive_kind_for(*name);
+                self.push_node(graph_type_node::Kind::Primitive(GraphPrimitive {
+                    kind: kind as i32,
+                }))
+            }
+            results::NamedTypeLeaf::Literal(lit) => {
+                let value = self.encode_literal(lit);
+                self.push_node(graph_type_node::Kind::Literal(GraphLiteral {
+                    value: Some(value),
+                }))
+            }
+            results::NamedTypeLeaf::Ref { name } => {
+                let symbol_id = self.intern_symbol(name.as_ref());
+                self.push_node(graph_type_node::Kind::Reference(GraphReference {
+                    symbol_id,
+                }))
+            }
+            results::NamedTypeLeaf::EmptyObject => {
+                self.push_node(graph_type_node::Kind::Object(GraphObject::default()))
+            }
+            results::NamedTypeLeaf::Opaque => {
+                self.push_opaque("member value is structurally unencodable shallowly")
+            }
+        }
+    }
+
+    fn encode_param_type(&mut self, ty: &results::NamedParamType) -> u32 {
+        match ty {
+            results::NamedParamType::Leaf(leaf) => self.encode_leaf(leaf),
+            results::NamedParamType::Object { properties } => {
+                self.encode_object_properties(properties)
+            }
+        }
+    }
+
+    fn encode_object_properties(&mut self, properties: &[results::NamedObjectProperty]) -> u32 {
+        let members = properties
+            .iter()
+            .map(|property| {
+                let name_id = self.strings.intern(property.name.as_ref());
+                GraphObjectMember {
+                    value_node_id: self.encode_leaf(&property.ty),
+                    optional: property.optional,
+                    readonly: false,
+                    accessibility: Accessibility::None as i32,
+                    static_side: false,
+                    declaration_symbol_id: 0,
+                    property_key: Some(GraphPropertyKey {
+                        key: Some(graph_property_key::Key::StringId(name_id)),
+                    }),
+                    member_kind: ObjectMemberKind::Property as i32,
+                    has_implementation_body: false,
+                }
+            })
+            .collect();
+        self.push_node(graph_type_node::Kind::Object(GraphObject {
+            members,
+            index_signatures: Vec::new(),
+            call_signature_refs: Vec::new(),
+            construct_signature_refs: Vec::new(),
+            flags: 0,
+        }))
+    }
+
+    fn encode_function(
+        &mut self,
+        parameters: &[results::NamedCallableParam],
+        return_type: Option<&results::NamedTypeLeaf>,
+    ) -> u32 {
+        let encoded_params = parameters
+            .iter()
+            .map(|param| GraphSignatureParameter {
+                name_id: match param.name.as_deref() {
+                    Some(name) if !name.is_empty() => self.strings.intern(name),
+                    _ => self.strings.intern(""),
+                },
+                type_node_id: self.encode_param_type(&param.ty),
+                optional: param.optional,
+                rest: param.rest,
+                inference_policy: 0,
+            })
+            .collect();
+        let return_type_node_id = return_type.map(|ty| self.encode_leaf(ty)).unwrap_or(0);
+        let signature_ref = u32::try_from(self.signatures.len()).unwrap_or(u32::MAX);
+        self.signatures.push(GraphSignature {
+            type_parameter_node_ids: Vec::new(),
+            this_param: None,
+            parameters: encoded_params,
+            return_type_node_id,
+            return_predicate: None,
+            asserts: None,
+            overload_index: 0,
+            is_construct: false,
+            is_implementation: false,
+            is_abstract: false,
+            flags: 0,
+            signature_kind: SignatureKind::Call as i32,
+            signature_origin: SignatureOrigin::CallSignature as i32,
+        });
+        self.push_node(graph_type_node::Kind::Object(GraphObject {
+            members: Vec::new(),
+            index_signatures: Vec::new(),
+            call_signature_refs: vec![signature_ref],
+            construct_signature_refs: Vec::new(),
+            flags: 0,
+        }))
     }
 
     /// Push a `GraphOpaque` carrying an `Other` query error whose message is
@@ -475,7 +598,7 @@ pub(crate) fn encode_framework_surfaces_with_unsupported_message(
         query: None,
         nodes: arena.nodes,
         symbols: arena.symbols,
-        signatures: Vec::new(),
+        signatures: arena.signatures,
         edges: Vec::new(),
         root_ids: Vec::new(),
         exactness: Vec::new(),
@@ -630,13 +753,9 @@ fn encode_kind_members(
                 .map(|row| {
                     let f = &row.analysis;
                     let name_id = arena.strings.intern(&f.name);
-                    // A prop's typed body is an on-demand payload LOCATOR
-                    // (`AnalyzedPropField.payload`), resolved only through the
-                    // shared dispatch — this encoder is ZERO-DISPATCH, so the
-                    // member value is structurally unencodable here and takes
-                    // the same absent arm a slot value does (opaque, never a
-                    // fabricated ref, never a resolve).
-                    let type_node_id = arena.encode_member_value(None, 0);
+                    // Sealed shallow member type classified at normalize
+                    // time — this encoder is ZERO-DISPATCH.
+                    let type_node_id = arena.encode_named_member_output(row.member_type.as_ref());
                     let default_value_id = defaults
                         .get(f.name.as_str())
                         .map(|value| arena.strings.intern(value));
@@ -675,25 +794,34 @@ fn encode_kind_members(
                 }
             })
             .collect(),
-        FrameworkSurfaceKind::Slots => dtos
-            .slot_fields()
-            .iter()
-            .map(|f| {
-                let name_id = arena.strings.intern(&f.name);
-                // A slot's value type is its bindings object — left structural
-                // here (the shallow encoder degrades it to opaque). The slot
-                // NAME + required flag are the load-bearing identity.
-                let type_node_id = arena.encode_member_value(None, 0);
-                wire::FrameworkSurfaceMember {
-                    name_id,
-                    type_node_id,
-                    required: f.is_required,
-                    readonly: false,
-                    default_value_id: None,
-                    origin: None,
-                }
-            })
-            .collect(),
+        FrameworkSurfaceKind::Slots => {
+            let types: HashMap<&str, &NamedTypeMemberOutput> = dtos
+                .slot_member_types
+                .iter()
+                .filter_map(|member| {
+                    member
+                        .value
+                        .as_ref()
+                        .map(|value| (member.name.as_str(), value))
+                })
+                .collect();
+            dtos.slot_fields()
+                .iter()
+                .map(|f| {
+                    let name_id = arena.strings.intern(&f.name);
+                    let type_node_id =
+                        arena.encode_named_member_output(types.get(f.name.as_str()).copied());
+                    wire::FrameworkSurfaceMember {
+                        name_id,
+                        type_node_id,
+                        required: f.is_required,
+                        readonly: false,
+                        default_value_id: None,
+                        origin: None,
+                    }
+                })
+                .collect()
+        }
         FrameworkSurfaceKind::Options => dtos
             .options
             .as_ref()

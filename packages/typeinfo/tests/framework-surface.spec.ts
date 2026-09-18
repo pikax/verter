@@ -21,6 +21,7 @@ import {
   FrameworkSurfaceKindSupport,
   FrameworkSurfaceOriginHopKind,
   FrameworkTag,
+  GraphPrimitiveKind,
   TypeInfoGraphResponseSchema,
 } from "@verter/proto";
 import { describe, expect, it } from "vitest";
@@ -107,6 +108,124 @@ describe("decodeFrameworkSurfaceResponse", () => {
       { name: "count", required: true, readonly: false },
       { name: "label", required: false, readonly: true },
     ]);
+  });
+
+  it("decodes a callable member's parameter/return structure from the payload graph", () => {
+    // REGRESSION — the public operation DTO is type-bearing: a callback
+    // member's graph node (callable object + signature) decodes to a
+    // function descriptor. An opaque node cannot claim that complete
+    // signature; a missing type_node_id (0) stays absent.
+    const strings = ["", "onMove", "x", "y", "item", "default", "structurally unencodable"];
+    const response = create(TypeInfoGraphResponseSchema, {
+      kind: {
+        case: "frameworkSurface",
+        value: {
+          schemaVersion: 3,
+          framework: FrameworkTag.SVELTE,
+          graph: {
+            strings: { entries: strings },
+            nodes: [
+              {},
+              { kind: { case: "primitive", value: { kind: GraphPrimitiveKind.NUMBER } } },
+              { kind: { case: "primitive", value: { kind: GraphPrimitiveKind.VOID } } },
+              {
+                kind: {
+                  case: "object",
+                  value: { callSignatureRefs: [0], constructSignatureRefs: [], members: [] },
+                },
+              },
+              { kind: { case: "primitive", value: { kind: GraphPrimitiveKind.STRING } } },
+              {
+                kind: {
+                  case: "object",
+                  value: {
+                    members: [
+                      {
+                        valueNodeId: 4,
+                        optional: false,
+                        readonly: false,
+                        propertyKey: { key: { case: "stringId", value: 4 } },
+                      },
+                    ],
+                    callSignatureRefs: [],
+                    constructSignatureRefs: [],
+                  },
+                },
+              },
+              { kind: { case: "primitive", value: { kind: GraphPrimitiveKind.UNKNOWN } } },
+              {
+                kind: {
+                  case: "object",
+                  value: { callSignatureRefs: [1], constructSignatureRefs: [], members: [] },
+                },
+              },
+              {
+                kind: {
+                  case: "opaque",
+                  value: {
+                    error: { kind: { case: "other", value: { messageNameId: 6 } } },
+                  },
+                },
+              },
+            ],
+            signatures: [
+              {
+                parameters: [
+                  { nameId: 2, typeNodeId: 1, optional: false, rest: false },
+                  { nameId: 3, typeNodeId: 1, optional: false, rest: false },
+                ],
+                returnTypeNodeId: 2,
+              },
+              {
+                parameters: [{ nameId: 0, typeNodeId: 5, optional: false, rest: false }],
+                returnTypeNodeId: 6,
+              },
+            ],
+          },
+          surfaces: [
+            {
+              kind: FrameworkSurfaceKind.PROPS,
+              members: [
+                { nameId: 1, typeNodeId: 3, required: true, readonly: false },
+                { nameId: 0, typeNodeId: 8, required: true, readonly: false },
+              ],
+              status: { support: FrameworkSurfaceKindSupport.SUPPORTED, exactness: 0 },
+            },
+            {
+              kind: FrameworkSurfaceKind.SLOTS,
+              members: [{ nameId: 5, typeNodeId: 7, required: true, readonly: false }],
+              status: { support: FrameworkSurfaceKindSupport.SUPPORTED, exactness: 0 },
+            },
+          ],
+        },
+      },
+    });
+    const bytes = toBinary(TypeInfoGraphResponseSchema, response);
+    const surface = decodeFrameworkSurfaceResponse(bytes) as FrameworkSurface;
+
+    const onMove = surface.kinds.get(FrameworkSurfaceKind.PROPS)!.members[0]!;
+    expect(onMove.name).toBe("onMove");
+    expect(onMove.type).toEqual({
+      kind: "function",
+      parameters: [
+        { name: "x", type: { kind: "primitive", name: "number" }, optional: false },
+        { name: "y", type: { kind: "primitive", name: "number" }, optional: false },
+      ],
+      returnType: { kind: "primitive", name: "void" },
+    });
+
+    const opaque = surface.kinds.get(FrameworkSurfaceKind.PROPS)!.members[1]!;
+    expect(opaque.type?.kind).toBe("unknown");
+    expect(opaque.type).not.toMatchObject({ kind: "function" });
+
+    const slot = surface.kinds.get(FrameworkSurfaceKind.SLOTS)!.members[0]!;
+    expect(slot.name).toBe("default");
+    expect(slot.type?.kind).toBe("function");
+    if (slot.type?.kind !== "function") throw new Error("function slot expected");
+    expect(slot.type.parameters[0]!.type).toEqual({
+      kind: "object",
+      properties: [{ name: "item", type: { kind: "primitive", name: "string" }, optional: false }],
+    });
   });
 
   it("keeps SUPPORTED-empty distinct from UNSUPPORTED", () => {

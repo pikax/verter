@@ -854,7 +854,9 @@ fn resolved_named_member_type(
             }),
             Some(NamedTypeMemberOutput::EmptyObject) => Some("{}".to_string()),
             Some(NamedTypeMemberOutput::Ref { name }) => Some(name.to_string()),
-            Some(NamedTypeMemberOutput::Opaque) | None => None,
+            Some(NamedTypeMemberOutput::Function { .. })
+            | Some(NamedTypeMemberOutput::Opaque)
+            | None => None,
         })
         .unwrap_or_else(|| "unknown".to_string())
 }

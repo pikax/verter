@@ -173,6 +173,50 @@ pub(crate) fn slots_from_typeinfo_surface(
         .collect()
 }
 
+/// Classify each published slot member's callable into the sealed shallow
+/// vocabulary for the zero-dispatch graph encoder.
+#[must_use]
+pub(crate) fn slot_member_types_from_typeinfo_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    resolved: &impl ResolvedSurfaceAccess,
+    slots: &[AnalyzedSlotField],
+) -> Vec<crate::typeinfo::framework_surface::results::NamedTypeMember> {
+    let dispatch = ctx.dispatch();
+    let macro_surface = resolved.macro_surface();
+    let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
+    slots
+        .iter()
+        .filter_map(|slot| {
+            let member = macro_surface.surface.members.iter().find(|member| {
+                member.visibility.is_public()
+                    && member.published_name().as_deref() == Some(slot.name.as_str())
+            })?;
+            let view = CallableNodeView::new(&dispatch, member.value);
+            let node = match view.realized_callable_root(context) {
+                crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(id)
+                | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => {
+                    id.into_inner()
+                }
+                _ => member.value,
+            };
+            Some(
+                crate::typeinfo::framework_surface::results::NamedTypeMember {
+                    name: slot.name.clone(),
+                    is_optional: member.optional,
+                    value: crate::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
+                        &dispatch,
+                        node,
+                    )
+                    .map(crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::from_raised_shallow),
+                    type_annotation: None,
+                    type_references: Vec::new(),
+                    source_span: None,
+                },
+            )
+        })
+        .collect()
+}
+
 /// Build the producer-owned return publication aligned with every normalized
 /// slot row. The replay address is the stamped macro type argument plus the
 /// slot member name; a missing base is a typed required-source failure.

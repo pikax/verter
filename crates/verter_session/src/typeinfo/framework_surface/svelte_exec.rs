@@ -647,12 +647,14 @@ fn resolve_runes_props(
                     },
                 ),
             );
+            let member_type = row.member_type.clone();
             *row =
                 crate::typeinfo::framework_surface::results::ResolvedPropField::from_source_position(
                     row.analysis.clone(),
                     source,
                     row.callable_role.clone(),
                 );
+            row.member_type = member_type;
         }
     }
     // Apply runtime DEFAULTS DIRECTLY (the Svelte path does NOT use Vue's

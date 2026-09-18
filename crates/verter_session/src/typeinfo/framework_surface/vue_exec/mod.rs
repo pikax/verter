@@ -114,7 +114,8 @@ pub(crate) use normalize::{
     object_members_from_typeinfo_surface, props_from_typeinfo_surface,
 };
 pub(crate) use normalize_slots::{
-    slot_return_publications_from_typeinfo_surface, slots_from_typeinfo_surface,
+    slot_member_types_from_typeinfo_surface, slot_return_publications_from_typeinfo_surface,
+    slots_from_typeinfo_surface,
 };
 
 crate::project_semantic_dispatch::output_materialization::define_output_capability! {
@@ -1329,9 +1330,12 @@ pub(crate) fn vue_macro_dtos_with_ctx(
                                 slot_return_publications_from_typeinfo_surface(
                                     ctx, &resolved, &slots,
                                 );
+                            let slot_member_types =
+                                slot_member_types_from_typeinfo_surface(ctx, &resolved, &slots);
                             MacroSurfaceDtos {
                                 slots: Some(slots),
                                 slot_return_publications,
+                                slot_member_types,
                                 ..MacroSurfaceDtos::default()
                             }
                         }

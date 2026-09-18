@@ -33,8 +33,8 @@ pub use plan::{
 };
 pub use results::{
     EmitsSurface, ExposeSurface, MacroDtosRead, MacroSurfaceDtos, ModelBinding, ModelSurface,
-    NamedTypeMember, NamedTypeMemberOutput, NormalizedSurface, NormalizedSurfaces, OptionsSurface,
-    PropsSurface, ResolvedEmitOccurrence, ResolvedMacroPayload, ResolvedOutcome,
+    NamedTypeLeaf, NamedTypeMember, NamedTypeMemberOutput, NormalizedSurface, NormalizedSurfaces,
+    OptionsSurface, PropsSurface, ResolvedEmitOccurrence, ResolvedMacroPayload, ResolvedOutcome,
 };
 
 /// One framework's plan/normalize adapter.

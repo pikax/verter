@@ -63,7 +63,11 @@ impl VueFrameworkAdapter {
         match kind {
             FrameworkSurfaceKind::Props => out.props = dtos.props.clone(),
             FrameworkSurfaceKind::Emits => out.emits = dtos.emits.clone(),
-            FrameworkSurfaceKind::Slots => out.slots = dtos.slots.clone(),
+            FrameworkSurfaceKind::Slots => {
+                out.slots = dtos.slots.clone();
+                out.slot_return_publications = dtos.slot_return_publications.clone();
+                out.slot_member_types = dtos.slot_member_types.clone();
+            }
             FrameworkSurfaceKind::Options => out.options = dtos.options.clone(),
             FrameworkSurfaceKind::Expose => out.expose = dtos.expose.clone(),
             FrameworkSurfaceKind::Model => out.model = dtos.model.clone(),
