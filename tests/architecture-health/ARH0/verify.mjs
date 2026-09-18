@@ -5,9 +5,11 @@
  *
  * Validates the four products against each other and against the working
  * tree: internal consistency (schema, totals, duplicate ids), on-disk path
- * existence (rows whose paths bind TAMA-database DAG records instead of
- * repo tree paths must say so via provenance "tama-dag"), verbatim version
- * pins in their pinned source file, and the inventory-to-ownership coverage
+ * existence inside the repository tree (rows whose paths bind TAMA-database
+ * DAG records instead of repo tree paths must say so via provenance
+ * "tama-dag"), exact version pins bound to their named source property
+ * (parsed, never text-searched, so another dependency's version in the same
+ * file cannot satisfy the binding), and the inventory-to-ownership coverage
  * join. The program DAG is database-owned by the TAMA controller, so owner
  * ids are checked structurally only and no DAG file is read. ARH0-AC2's
  * counterexample is enforced here: a god-module row whose only evidence is
@@ -49,8 +51,21 @@ export function loadManifest() {
   return JSON.parse(fs.readFileSync(path.join(HERE, "manifest.json"), "utf8"));
 }
 
+/**
+ * A repo-relative path binds the repository tree only when it resolves back
+ * inside REPO_ROOT. `path.join` normalizes `..` segments, so a traversal value
+ * such as `..` would otherwise resolve to an existing directory outside the
+ * tree and pass a bare existence check; an absolute value is rejected by
+ * `path.resolve` the same way. Callers that validate path-typed product fields
+ * (modules, consumers, version sources, command targets) all route through
+ * this gate.
+ */
 function existsRel(rel) {
-  return fs.existsSync(path.join(REPO_ROOT, rel));
+  if (typeof rel !== "string" || rel.length === 0) return false;
+  const resolved = path.resolve(REPO_ROOT, rel);
+  const rootPrefix = REPO_ROOT.endsWith(path.sep) ? REPO_ROOT : REPO_ROOT + path.sep;
+  if (resolved !== REPO_ROOT && !resolved.startsWith(rootPrefix)) return false;
+  return fs.existsSync(resolved);
 }
 
 /**
@@ -176,18 +191,22 @@ function validateRatification(products, manifest, errors) {
     }
   }
 
-  const commands = [
-    ["verify", manifest.verify, /^node (.+)$/],
-    ["test", manifest.test, /^node --test (.+)$/],
+  // The manifest must record this verifier's canonical commands verbatim.
+  // A shape-plus-existence check would accept any existing script (e.g.
+  // `node scripts/affected-tests.mjs`), claiming a check that never runs.
+  // The strings are derived from this module's own location so they cannot
+  // drift when the tree moves.
+  const toRepoPosix = (abs) => path.relative(REPO_ROOT, abs).split(path.sep).join("/");
+  const canonical = [
+    ["verify", manifest.verify, `node ${toRepoPosix(fileURLToPath(import.meta.url))}`],
+    ["test", manifest.test, `node --test ${toRepoPosix(path.join(HERE, "arh0.test.mjs"))}`],
   ];
-  for (const [key, command, shape] of commands) {
-    const m = typeof command === "string" ? command.match(shape) : null;
-    const target = m && m[1];
-    if (!target || !existsRel(target)) {
+  for (const [key, command, expected] of canonical) {
+    if (command !== expected) {
       errors.push({
         caseId,
         code: "manifest-command-drift",
-        detail: `manifest ${key} command ${JSON.stringify(command)} does not name an on-disk script`,
+        detail: `manifest ${key} command ${JSON.stringify(command)} is not the canonical ${JSON.stringify(expected)}`,
       });
     }
   }
@@ -266,10 +285,13 @@ function validateResponsibilityMap(map, errors) {
     }
     const hasMulti = Array.isArray(row.responsibilities) && row.responsibilities.length >= 2;
     // Coupling evidence is a shared-commit count or fan-in; a touch count
-    // is churn, not coupling.
+    // is churn, not coupling, and a zero/negative/non-integer count is
+    // measured evidence of no coupling, not of a god module.
+    const isPositiveCount = (value) =>
+      typeof value === "number" && Number.isInteger(value) && value > 0;
     const hasCouplingCount =
-      typeof row.couplingEvidence?.fanIn === "number" ||
-      typeof row.couplingEvidence?.sharedCommits === "number";
+      isPositiveCount(row.couplingEvidence?.fanIn) ||
+      isPositiveCount(row.couplingEvidence?.sharedCommits);
     const hasCoupling =
       hasCouplingCount &&
       Array.isArray(row.evidenceKinds) &&
@@ -315,6 +337,117 @@ function validateResponsibilityMap(map, errors) {
   }
 }
 
+/**
+ * Reads the exact pinned value a capability row claims, from the named
+ * property of its source — never by searching the whole file, so another
+ * dependency's version in the same file cannot satisfy the binding.
+ *
+ * Binding modes by source shape:
+ * - `*.json` — `versionProperty` is a dotted path into the parsed JSON
+ *   (e.g. `devDependencies.typescript`).
+ * - `pnpm-lock.yaml` — `versionProperty` is
+ *   `importers.<importer>.<section>.<dependency>`; the importer's resolved
+ *   `version:` is returned with any peer-resolution suffix `(...)` stripped.
+ *   Importer paths and dependency names here contain no dots.
+ * - other text (Cargo.toml) — either a bare `property = "value"` declaration
+ *   line (e.g. `oxc_parser`), or a `section.property` lookup resolved inside
+ *   the named `[section]` table (e.g. `workspace.package.version`).
+ */
+function readPinnedVersion(versionSource, versionProperty, errors, caseId, capability) {
+  if (typeof versionProperty !== "string" || versionProperty.length === 0) {
+    errors.push({
+      caseId,
+      code: "version-without-property",
+      detail: `${capability}: implemented rows must bind version to a named source property`,
+    });
+    return { ok: false };
+  }
+  const text = fs.readFileSync(path.join(REPO_ROOT, versionSource), "utf8");
+  let actual;
+  if (versionSource.endsWith(".json")) {
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+    actual =
+      data == null
+        ? undefined
+        : versionProperty
+            .split(".")
+            .reduce((obj, key) => (obj == null ? undefined : obj[key]), data);
+  } else if (versionSource === "pnpm-lock.yaml") {
+    actual = lockfileResolvedVersion(text, versionProperty);
+  } else {
+    actual = textDeclarationValue(text, versionProperty);
+  }
+  return { ok: true, actual };
+}
+
+/** pnpm-lock resolved version for `importers.<importer>.<section>.<dep>`. */
+function lockfileResolvedVersion(text, versionProperty) {
+  const parts = versionProperty.split(".");
+  if (parts.length !== 4 || parts[0] !== "importers") return undefined;
+  const [, importer, section, dep] = parts;
+  const lines = text.split(/\r?\n/);
+  let i = 0;
+  // Importer block header: exactly two-space indented `path:`.
+  while (i < lines.length && !/^ {2}(?:"[^"]+"|'[^']+'|\S+):\s*$/.test(lines[i])) i++;
+  for (; i < lines.length; i++) {
+    const header = lines[i].match(/^ {2}(?:"([^"]+)"|'([^']+)'|(\S+)):\s*$/);
+    if (!header) continue;
+    const name = header[1] ?? header[2] ?? header[3];
+    if (name !== importer) continue;
+    // Inside the importer: find the section then the dependency key.
+    const sectionRe = new RegExp(`^ {4}${escapeRegExp(section)}:\\s*$`);
+    const depRe = new RegExp(`^ {6}(?:"([^"]+)"|'([^']+)'|(\\S+)):\\s*$`);
+    let j = i + 1;
+    let inSection = false;
+    for (; j < lines.length; j++) {
+      const line = lines[j];
+      if (/^ {0,2}\S/.test(line)) return undefined; // left importers block
+      if (sectionRe.test(line)) {
+        inSection = true;
+        continue;
+      }
+      if (/^ {4}\S/.test(line)) inSection = false; // a different section
+      if (!inSection) continue;
+      const depMatch = line.match(depRe);
+      const depName = depMatch ? (depMatch[1] ?? depMatch[2] ?? depMatch[3]) : null;
+      if (depName !== dep) continue;
+      const versionLine = lines.slice(j + 1, j + 4).find((l) => /^ {8}version: /.test(l));
+      const value = versionLine?.match(/^ {8}version: (\S+)(?:\s|$)/)?.[1];
+      // Peer-resolution suffixes (`8.0.14(@types/node@...)`) are install
+      // graph annotations, not part of the resolved version.
+      return value?.replace(/\(.*\)$/, "");
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/** `<property> = "value"` declaration, or `section.property` inside [section]. */
+function textDeclarationValue(text, versionProperty) {
+  const parts = versionProperty.split(".");
+  const property = parts[parts.length - 1];
+  const section = parts.length > 1 ? parts.slice(0, -1).join(".") : null;
+  const declRe = new RegExp(`^\\s*${escapeRegExp(property)}\\s*=\\s*"([^"]+)"`, "m");
+  if (section === null) {
+    return text.match(declRe)?.[1];
+  }
+  const sectionStart = text.indexOf(`[${section}]`);
+  if (sectionStart === -1) return undefined;
+  const after = text.slice(sectionStart);
+  const nextTable = after.slice(1).search(/^\[/m);
+  const body = nextTable === -1 ? after : after.slice(0, nextTable + 1);
+  return body.match(declRe)?.[1];
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function validateCapabilityMatrix(matrix, errors) {
   const caseId = "ARH0-capability";
   if (matrix.schema !== "ARH0CapabilityMatrix") {
@@ -340,13 +473,45 @@ function validateCapabilityMatrix(matrix, errors) {
         });
         continue;
       }
-      const src = fs.readFileSync(path.join(REPO_ROOT, row.versionSource), "utf8");
-      if (!src.includes(row.version)) {
+      const pin = readPinnedVersion(
+        row.versionSource,
+        row.versionProperty,
+        errors,
+        caseId,
+        row.capability,
+      );
+      if (pin.ok && (typeof pin.actual !== "string" || pin.actual !== row.version)) {
         errors.push({
           caseId,
           code: "version-not-pinned-in-source",
-          detail: `${row.capability}: version "${row.version}" does not appear in ${row.versionSource}`,
+          detail: `${row.capability}: ${row.versionSource} property ${row.versionProperty} pins ${JSON.stringify(pin.actual)}, not ${JSON.stringify(row.version)}`,
         });
+      }
+      // Executable names and compilation targets are build identity, not
+      // tool revisions; they are validated as text anchors in their own
+      // source file and must never occupy the version field.
+      const identity = row.buildIdentity;
+      if (identity != null) {
+        const malformed =
+          typeof identity !== "object" ||
+          typeof identity.kind !== "string" ||
+          typeof identity.value !== "string" ||
+          typeof identity.source !== "string";
+        if (malformed || !existsRel(identity?.source)) {
+          errors.push({
+            caseId,
+            code: "build-identity-not-in-source",
+            detail: `${row.capability}: buildIdentity needs kind, value and an in-repo source`,
+          });
+        } else if (
+          !fs.readFileSync(path.join(REPO_ROOT, identity.source), "utf8").includes(identity.value)
+        ) {
+          errors.push({
+            caseId,
+            code: "build-identity-not-in-source",
+            detail: `${row.capability}: build identity "${identity.value}" does not appear in ${identity.source}`,
+          });
+        }
       }
       if (!Array.isArray(row.consumers) || row.consumers.length === 0) {
         errors.push({ caseId, code: "implemented-without-consumers", detail: row.capability });
@@ -435,17 +600,31 @@ function validateOwnershipCoverage(products, errors) {
  * need their own owner/debt routing here.
  */
 function uninventoriedWorkspacePackages() {
-  const text = fs.readFileSync(path.join(REPO_ROOT, "pnpm-workspace.yaml"), "utf8");
+  return parseWorkspacePackageEntries(
+    fs.readFileSync(path.join(REPO_ROOT, "pnpm-workspace.yaml"), "utf8"),
+  );
+}
+
+/**
+ * Literal (non-`packages/` glob) entries of the `packages:` list. Comments
+ * (full-line and inline) and single- or double-quoted entries are part of the
+ * supported syntax: a comment line inside the list must not end it, and every
+ * entry after one must still be checked by the coverage join. `#` never
+ * occurs inside pnpm package patterns, so comment stripping is textual.
+ */
+export function parseWorkspacePackageEntries(text) {
   const entries = [];
   let inPackages = false;
-  for (const line of text.split(/\r?\n/)) {
+  for (const raw of text.split(/\r?\n/)) {
+    const comment = raw.indexOf("#");
+    const line = comment === -1 ? raw : raw.slice(0, comment);
     if (!inPackages) {
       if (/^packages:\s*$/.test(line)) inPackages = true;
       continue;
     }
-    const item = line.match(/^\s+-\s+"?([^"\s]+)"?\s*$/);
+    const item = line.match(/^\s+-\s+(?:"([^"\s]+)"|'([^'\s]+)'|([^\s'"]+))\s*$/);
     if (item) {
-      entries.push(item[1]);
+      entries.push(item[1] ?? item[2] ?? item[3]);
     } else if (line.trim() !== "") {
       inPackages = false;
     }

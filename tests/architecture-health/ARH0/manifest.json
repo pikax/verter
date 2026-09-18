@@ -47,7 +47,9 @@
         "version-not-pinned-in-source",
         "implemented-without-consumers",
         "planned-without-uncertainty",
-        "missing-version-source (null without tama-dag provenance)"
+        "missing-version-source (null without tama-dag provenance)",
+        "version-without-property",
+        "build-identity-not-in-source"
       ]
     },
     {

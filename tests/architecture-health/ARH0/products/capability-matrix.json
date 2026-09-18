@@ -1,9 +1,9 @@
 {
   "schema": "ARH0CapabilityMatrix",
-  "version": 1,
+  "version": 2,
   "contractNode": "ARH0",
   "candidate": "f69c7eee7aba2b1a260cc4d85a282bbedbbde349",
-  "rule": "implemented rows carry an exact or resolved version string that must appear verbatim in the pinned source file; required-planned rows name the repo authority that requires them",
+  "rule": "implemented rows record an exact manifest pin or a pnpm-lock resolved version, bound to the named source property (versionProperty) and compared exactly by the verifier; executable names and compilation targets are build identity (buildIdentity), never tool revisions; required-planned rows name the repo authority that requires them",
   "rows": [
     {
       "capability": "vue-sfc-compilation-conformance",
@@ -18,7 +18,8 @@
         "packages/playground",
         "examples"
       ],
-      "uncertainty": "rc pin: workspace-collapsed preview pin; upgrade is a conscious re-pin, not a floating range"
+      "uncertainty": "rc pin: workspace-collapsed preview pin; upgrade is a conscious re-pin, not a floating range",
+      "versionProperty": "dependencies.@vue/compiler-sfc"
     },
     {
       "capability": "svelte-compilation-conformance",
@@ -31,19 +32,21 @@
         "packages/svelte-runtime-tests",
         "packages/unplugin"
       ],
-      "uncertainty": ""
+      "uncertainty": "",
+      "versionProperty": "devDependencies.svelte"
     },
     {
       "capability": "typescript-tsserver-plane",
       "status": "implemented",
       "engine": "typescript (tsserver IPC)",
-      "version": "^6.0.3",
-      "versionSource": "packages/typescript-plugin/package.json",
+      "version": "6.0.3",
+      "versionSource": "pnpm-lock.yaml",
       "consumers": [
         "crates/verter_type_runtime",
         "packages/typescript-plugin"
       ],
-      "uncertainty": "range pin resolved by pnpm-lock at install time"
+      "uncertainty": "manifest specifier ^6.0.3 (packages/typescript-plugin) resolved by pnpm-lock at install time; the row records the resolved version",
+      "versionProperty": "importers.packages/typescript-plugin.devDependencies.typescript"
     },
     {
       "capability": "typescript-tsgo-plane",
@@ -55,7 +58,8 @@
         "crates/verter_tsgo_api",
         "crates/verter_relay_shim"
       ],
-      "uncertainty": "tsgo plane is dual-plane law (TCM0R); relay shim pins editor tsdk routing"
+      "uncertainty": "tsgo plane is dual-plane law (TCM0R); relay shim pins editor tsdk routing",
+      "versionProperty": "devDependencies.typescript"
     },
     {
       "capability": "rust-parser-substrate",
@@ -67,81 +71,108 @@
         "crates/verter_parser",
         "crates/verter_type_expr_oxc"
       ],
-      "uncertainty": ""
+      "uncertainty": "",
+      "versionProperty": "oxc_parser"
     },
     {
       "capability": "transport-schemas",
       "status": "implemented",
       "engine": "buf + @bufbuild/protoc-gen-es",
-      "version": "protoc-gen-es",
-      "versionSource": "buf.gen.yaml",
+      "version": "2.12.0",
+      "versionSource": "package.json",
       "consumers": [
         "packages/proto",
         "packages/native",
         "crates/verter_protocol"
       ],
-      "uncertainty": "generated output freshness-gated by scripts/check-proto-generated.mjs"
+      "uncertainty": "buf CLI is pinned in the same manifest (@bufbuild/buf 1.70.0); generated output freshness-gated by scripts/check-proto-generated.mjs",
+      "versionProperty": "devDependencies.@bufbuild/protoc-gen-es",
+      "buildIdentity": {
+        "kind": "executable",
+        "value": "protoc-gen-es",
+        "source": "buf.gen.yaml"
+      }
     },
     {
       "capability": "bundler-host-plugin",
       "status": "implemented",
       "engine": "vite (dev/test surface for unplugin)",
-      "version": "^8.0.14",
-      "versionSource": "packages/unplugin/package.json",
+      "version": "8.0.14",
+      "versionSource": "pnpm-lock.yaml",
       "consumers": [
         "packages/unplugin"
       ],
-      "uncertainty": "unplugin targets Vite/Rollup/webpack/esbuild/rspack/Rolldown/Farm; only the Vite dev pin is asserted here"
+      "uncertainty": "manifest specifier ^8.0.14 (packages/unplugin devDependencies) resolved by pnpm-lock; unplugin targets Vite/Rollup/webpack/esbuild/rspack/Rolldown/Farm, only the Vite dev pin is asserted here",
+      "versionProperty": "importers.packages/unplugin.devDependencies.vite"
     },
     {
       "capability": "nuxt-project-profile",
       "status": "implemented",
       "engine": "@nuxt/kit",
-      "version": "^4.4.6",
-      "versionSource": "packages/nuxt/package.json",
+      "version": "4.4.6",
+      "versionSource": "pnpm-lock.yaml",
       "consumers": [
         "packages/nuxt"
       ],
-      "uncertainty": ""
+      "uncertainty": "manifest specifier ^4.4.6 (packages/nuxt dependencies) resolved by pnpm-lock",
+      "versionProperty": "importers.packages/nuxt.dependencies.@nuxt/kit"
     },
     {
       "capability": "vscode-host",
       "status": "implemented",
       "engine": "VS Code extension host",
-      "version": "verter-lsp",
+      "version": "1.110.0",
       "versionSource": "packages/vue-vscode/package.json",
       "consumers": [
         "packages/vue-vscode",
         "packages/verter-lsp"
       ],
-      "uncertainty": "pin string is the launched binary name in the extension manifest"
+      "uncertainty": "extension-host API revision pinned by @types/vscode; engines.vscode is the ^1.110.0 range; verter-lsp is the launched binary name recorded in the extension manifest configuration",
+      "versionProperty": "devDependencies.@types/vscode",
+      "buildIdentity": {
+        "kind": "launched-binary",
+        "value": "verter-lsp",
+        "source": "packages/vue-vscode/package.json"
+      }
     },
     {
       "capability": "zed-lapce-helix-nvim-hosts",
       "status": "implemented",
       "engine": "editor host adapters",
-      "version": "wasm32-wasip1",
-      "versionSource": "crates/verter-editor-client/src/lib.rs",
+      "version": "0.0.1-beta.5",
+      "versionSource": "Cargo.toml",
       "consumers": [
         "extensions/zed",
         "extensions/lapce",
         "editors/helix",
         "editors/nvim"
       ],
-      "uncertainty": "pin string is the documented Lapce target; Zed is wasm32-wasip2 in the same header"
+      "uncertainty": "the launch-contract crate (verter-editor-client, verter-lsp) ships at the workspace crate version; Lapce compiles to wasm32-wasip1 and Zed to wasm32-wasip2, documented in the same crate header",
+      "versionProperty": "workspace.package.version",
+      "buildIdentity": {
+        "kind": "compilation-target",
+        "value": "wasm32-wasip1",
+        "source": "crates/verter-editor-client/src/lib.rs"
+      }
     },
     {
       "capability": "analysis-mcp",
       "status": "implemented",
       "engine": "MCP (stdio + HTTP)",
-      "version": "verter-mcp",
-      "versionSource": "mcp/verter.mcp.json",
+      "version": "0.0.1-beta.5",
+      "versionSource": "Cargo.toml",
       "consumers": [
         "crates/verter_mcp",
         "crates/verter_mcp_server",
         "packages/vue-vscode"
       ],
-      "uncertainty": ""
+      "uncertainty": "the MCP server crates (verter_mcp, verter_mcp_server) ship at the workspace crate version; verter-mcp is the launched command name in the MCP client config",
+      "versionProperty": "workspace.package.version",
+      "buildIdentity": {
+        "kind": "executable",
+        "value": "verter-mcp",
+        "source": "mcp/verter.mcp.json"
+      }
     },
     {
       "capability": "solid-2-target",

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -7,6 +8,7 @@ import {
   loadManifest,
   loadProducts,
   mandatoryCases,
+  parseWorkspacePackageEntries,
   selectedCaseIds,
   validate,
 } from "./verify.mjs";
@@ -84,6 +86,23 @@ test("ARH0-ratification dirty twin: manifest verify command naming an absent scr
   );
 });
 
+test("ARH0-ratification dirty twin: a different existing script is not the canonical verify command", () => {
+  const dirtyManifest = structuredClone(loadManifest());
+  // Shape-valid and on disk, but it does not run the ARH0 verifier.
+  dirtyManifest.verify = "node scripts/affected-tests.mjs";
+  const result = validate(cloneProducts(), dirtyManifest);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH0-ratification" &&
+        e.code === "manifest-command-drift" &&
+        e.detail.includes("canonical"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
 test("ARH0-god-evidence dirty twin: size-only god module is rejected (AC2)", () => {
   const dirty = cloneProducts();
   const row = dirty["responsibility-map"].godModuleCandidates[0];
@@ -116,6 +135,37 @@ test("ARH0-god-evidence dirty twin: touches-only coupling evidence is rejected (
         e.caseId === "ARH0-god-evidence" &&
         e.code === "god-without-responsibility-evidence" &&
         e.detail.includes("touches-only"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH0-god-evidence dirty twin: zero coupling count is not coupling evidence (AC2)", () => {
+  const dirty = cloneProducts();
+  const row = dirty["responsibility-map"].godModuleCandidates.find(
+    (r) => r.path === "crates/verter_session/src/semantic_query.rs",
+  );
+  // Measured evidence of NO coupling must not qualify as a god module.
+  row.couplingEvidence = { fanIn: 0, touchesSinceJune: row.couplingEvidence.touchesSinceJune };
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH0-god-evidence" && e.code === "god-without-responsibility-evidence",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH0-god-evidence dirty twin: negative shared-commit count is not coupling evidence (AC2)", () => {
+  const dirty = cloneProducts();
+  const row = dirty["responsibility-map"].godModuleCandidates[0];
+  row.couplingEvidence = { sharedCommits: -3 };
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH0-god-evidence" && e.code === "god-without-responsibility-evidence",
     ),
     JSON.stringify(result.errors),
   );
@@ -155,6 +205,74 @@ test("ARH0-capability dirty twin: fabricated version pin is rejected", () => {
   assert.ok(
     result.errors.some(
       (e) => e.caseId === "ARH0-capability" && e.code === "version-not-pinned-in-source",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH0-capability dirty twin: another dependency's version in the same file is rejected", () => {
+  const dirty = cloneProducts();
+  const row = dirty["capability-matrix"].rows.find(
+    (r) => r.capability === "svelte-compilation-conformance",
+  );
+  // 3.6.0-rc.5 IS in package.json — but as the Vue pin, not Svelte's. The
+  // binding is the named property, so the same-file occurrence must fail.
+  row.version = "3.6.0-rc.5";
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH0-capability" &&
+        e.code === "version-not-pinned-in-source" &&
+        e.detail.includes("devDependencies.svelte"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH0-capability dirty twin: implemented row without a versionProperty binding is rejected", () => {
+  const dirty = cloneProducts();
+  const row = dirty["capability-matrix"].rows.find((r) => r.capability === "typescript-tsgo-plane");
+  delete row.versionProperty;
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH0-capability" && e.code === "version-without-property",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH0-capability dirty twin: build identity missing from its source is rejected", () => {
+  const dirty = cloneProducts();
+  const row = dirty["capability-matrix"].rows.find((r) => r.capability === "transport-schemas");
+  row.buildIdentity.value = "protoc-gen-go";
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH0-capability" && e.code === "build-identity-not-in-source",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH0-capability dirty twin: traversal versionSource escaping the repo tree is rejected", () => {
+  const dirty = cloneProducts();
+  const row = dirty["capability-matrix"].rows.find((r) => r.capability === "rust-parser-substrate");
+  // `..` normalizes to the worktree parent, which exists — a bare existence
+  // check accepts it, but the row must bind the repository tree.
+  row.versionSource = "..";
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH0-capability" &&
+        e.code === "missing-version-source" &&
+        e.detail.includes("rust-parser-substrate"),
     ),
     JSON.stringify(result.errors),
   );
@@ -252,6 +370,30 @@ test("ARH0-ownership dirty twin: pnpm workspace package outside the inventory po
     ),
     JSON.stringify(result.errors),
   );
+});
+
+test("ARH0-ownership: workspace package parsing survives comments, quotes and inline comments", () => {
+  const yaml = [
+    "packages:",
+    "  # pnpm globs expand to inventory population rows",
+    '  - "packages/*"',
+    "  - 'docs' # single-quoted literal with an inline comment",
+    "  - examples # unquoted literal with an inline comment",
+    "  - 'packages/native/npm/*'",
+    "",
+    "onlyBuiltDependencies:",
+    '  - "@swc/core"',
+    "  - esbuild",
+  ].join("\n");
+  // Entries after a comment line and in non-double-quote styles must still
+  // reach the coverage join; entries of other lists must not leak into it.
+  assert.deepEqual(parseWorkspacePackageEntries(yaml), ["docs", "examples"]);
+  // A list terminated by the next key still ends: onlyBuiltDependencies
+  // members are not workspace packages.
+  const real = parseWorkspacePackageEntries(
+    fs.readFileSync(new URL("../../../pnpm-workspace.yaml", import.meta.url), "utf8"),
+  );
+  assert.deepEqual(real, ["docs"]);
 });
 
 test("ARH0-ownership dirty twin: module with both an owner row and a debt row is rejected", () => {
