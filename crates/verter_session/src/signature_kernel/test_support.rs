@@ -11,10 +11,10 @@ use super::records::{
     SignatureDescriptor, SignatureInputShape, SignatureKind, SignatureResultRecipe,
     SignatureSemanticFlags, SignatureSetRef, SignatureTemplate,
 };
-use crate::semantic_query::{
-    CanonicalTypeSubstitution, ResultEvaluationContextId, SemanticContext, SemanticContextId,
-    SemanticNodeId, SemanticPolicySet,
-};
+use crate::semantic_query::{CanonicalTypeSubstitution, ResultEvaluationContextId, SemanticNodeId};
+#[cfg(test)]
+use crate::semantic_query::{SemanticContext, SemanticContextId, SemanticPolicySet};
+#[cfg(test)]
 use verter_semantic::resolver_core::{EnvHashes, SemanticCompilerOptions};
 
 /// Store plus one inline candidate used by the warm positional canary.
@@ -175,6 +175,7 @@ pub(crate) fn intern_one_call(store: &SignatureStore) -> SignatureSetRef {
 
 /// Intern a real semantic context. Id 0 is whichever context interned first;
 /// tests must not forge it.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn intern_test_context(project_identity: [u8; 16]) -> SemanticContextId {
     SemanticContext {
