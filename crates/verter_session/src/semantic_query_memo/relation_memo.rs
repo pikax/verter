@@ -13,8 +13,8 @@
 //! value-domain form and is never admitted anywhere (memo / fact /
 //! reverse index), and a `BudgetExceeded` payload is public but
 //! ReturnOnly (never written here). Warm reads validate the
-//! self-version-rooted carrier strictly AND hard-miss on a
-//! `validated_at_generation` mismatch. Retention rides the family rails
+//! self-version-rooted carrier strictly. Project-shape invalidation
+//! rides `FactVersionRef::ProjectGeneration` on that carrier. Retention rides the family rails
 //! (per-family cap, invalid-first / LRU eviction, the family
 //! `memo_budget` global bound, reverse-index drains).
 //!
@@ -39,7 +39,7 @@ pub(crate) type RelationPublishedCarrier = PublishedMemoCandidate;
 #[derive(Clone)]
 pub(crate) struct InlineRelationFlight {
     pub(super) prepared: PreparedKeyHandle,
-    pub(super) inflight: Arc<InflightEntry>,
+    pub(super) inflight: Arc<FlightCell>,
     /// Present only when an inline flight starts outside an existing
     /// semantic execution stack. Production nested relations reuse the
     /// active owner; direct callers hold this detached RAII lease.
@@ -74,7 +74,7 @@ impl SemanticGraphStore {
             "binding relation roots use independently-owned cooperative flights"
         );
         let prepared = PreparedKeyHandle::prepare(key.to_query_key());
-        let inflight = Arc::new(InflightEntry::new());
+        let inflight = Arc::new(FlightCell::new());
         let (owner, owner_registration) =
             if let Some(owner) = wait_cycle::ExecutionOwnerScope::current(&self.wait_for_graph) {
                 (owner, None)
@@ -209,10 +209,7 @@ impl SemanticGraphStore {
                 .get(&family)
                 .map(|slots| slots.snapshot_slot(ModeSlot::Single))?
         };
-        let live_generation = ctx.project_type_store().current_project_generation();
-        let hit = snapshot.into_iter().find(|entry| {
-            entry.validated_at_generation == live_generation && entry.validate(ctx)
-        })?;
+        let hit = snapshot.into_iter().find(|entry| entry.validate(ctx))?;
         // Brief LRU bookkeeping — promote the hit candidate in the slot's
         // recency order (a concurrent invalidation makes this a no-op).
         {

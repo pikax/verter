@@ -18,7 +18,7 @@
 //! - **Same-path recursion** returns `QueryResult::Recursive(self_id)`
 //!   so cycles dedup rather than re-entering.
 //! - **Distinct top-level waiters** block cooperatively on a per-entry
-//!   [`Condvar`] pairing (see [`InflightEntry`]).
+//!   [`Condvar`] pairing (see [`FlightCell`]).
 //! - Cancelled, budget-exceeded, or partial results **never** promote to a
 //!   warm memo entry; they surface as [`QueryError`] variants and the
 //!   in-flight admission is removed so the next caller starts fresh.
@@ -122,7 +122,7 @@ use family::{
 #[cfg(any(test, feature = "test-support"))]
 use family::requested_point_for_key;
 use inflight::{
-    InflightEntry, InflightPanicGuard, RecursionStackGuard, IN_FLIGHT_ON_THIS_THREAD,
+    FlightCell, InflightPanicGuard, RecursionStackGuard, IN_FLIGHT_ON_THIS_THREAD,
     MAX_INFLIGHT_RETRIES,
 };
 use prepared::PreparedKeyHandle;
@@ -147,24 +147,6 @@ pub fn family_variant_label_for_tests(
 ) -> &'static str {
     let (family, _slot) = family_and_slot(key);
     family.variant_label()
-}
-
-/// Whether the family's warm reads additionally hard-gate on
-/// `validated_at_generation` equality with the LIVE project generation.
-/// A `ProjectGeneration` reset bumps no file content, so the carrier
-/// alone would miss it — a stale judgement must not warm-serve across a
-/// project-shape boundary. The gated families all read cross-file state
-/// that can shift with a project-shape change touching no tracked file
-/// content: `Relate` (cross-file judgements),
-/// `ClassifyMaterializationCycleGate` (cross-file declaration bodies),
-/// and `FlowReturn` (cross-file callees and object-spread programs).
-fn family_requires_live_generation_gate(family: &FamilyKey) -> bool {
-    matches!(
-        family,
-        FamilyKey::Relate { .. }
-            | FamilyKey::ClassifyMaterializationCycleGate { .. }
-            | FamilyKey::FlowReturn { .. }
-    )
 }
 
 fn narrow_value_result(result: QueryResult<SemanticQueryValue>) -> QueryResult<SemanticNodeId> {
@@ -327,7 +309,7 @@ pub struct SemanticGraphStore {
     /// independent in-flight entries. The handle additionally carries
     /// the prepared `(family, slot)` projection, so invalidation sweeps
     /// read it instead of re-running `family_and_slot` per entry.
-    inflight: Mutex<FxHashMap<PreparedKeyHandle, Arc<InflightEntry>>>,
+    inflight: Mutex<FxHashMap<PreparedKeyHandle, Arc<FlightCell>>>,
     /// Generation-qualified execution owners plus the cooperative wait-for
     /// graph. Nested semantic queries on one synchronous dispatch stack share
     /// an owner; cross-thread joiners add a temporary edge before parking.
@@ -339,7 +321,7 @@ pub struct SemanticGraphStore {
     /// right under the same store-owned admission fence as ordinary flights.
     /// The value is a list because multiple independent owners may compute
     /// the same full key concurrently.
-    independent_inflight: Mutex<FxHashMap<PreparedKeyHandle, Vec<Arc<InflightEntry>>>>,
+    independent_inflight: Mutex<FxHashMap<PreparedKeyHandle, Vec<Arc<FlightCell>>>>,
     /// Sibling derivation/origin layer. Edges are keyed by
     /// `(result_node, kind)`; multiple derivations of the same structural
     /// result store multiple edges per key. Edge dep-signatures are
@@ -1424,9 +1406,9 @@ impl SemanticGraphStore {
             // held. Keeping the `entries` lock through the state update closes
             // the publish-after-invalidation window because both store-owned
             // publish paths re-check `aborted` under this same lock.
-            let aborted_entries: Vec<Arc<InflightEntry>> = {
+            let aborted_entries: Vec<Arc<FlightCell>> = {
                 let mut table = self.inflight.lock();
-                let mut collected: Vec<Arc<InflightEntry>> = Vec::new();
+                let mut collected: Vec<Arc<FlightCell>> = Vec::new();
                 table.retain(|handle, inflight| {
                     // The prepared handle carries its `(family, slot)`
                     // projection — no per-entry `family_and_slot`
@@ -1446,7 +1428,7 @@ impl SemanticGraphStore {
                 });
                 collected
             };
-            let independent_aborted_entries: Vec<Arc<InflightEntry>> = {
+            let independent_aborted_entries: Vec<Arc<FlightCell>> = {
                 let mut table = self.independent_inflight.lock();
                 let collected = table
                     .values()
@@ -1621,17 +1603,17 @@ impl SemanticGraphStore {
             // sequential, non-nested acquisitions — so it cannot AB-BA
             // against either order. Collect-then-release keeps the rule
             // uniform regardless.) Instead: snapshot the
-            // `Arc<InflightEntry>` handles AND drain the table under the
+            // `Arc<FlightCell>` handles AND drain the table under the
             // table lock, RELEASE the table lock, THEN lock each entry's
             // `state`. Global rule: `state` is never taken while the
             // `inflight` table lock is held.
-            let aborted_entries: Vec<Arc<InflightEntry>> = {
+            let aborted_entries: Vec<Arc<FlightCell>> = {
                 let mut table = self.inflight.lock();
-                let collected: Vec<Arc<InflightEntry>> = table.values().map(Arc::clone).collect();
+                let collected: Vec<Arc<FlightCell>> = table.values().map(Arc::clone).collect();
                 table.clear();
                 collected
             };
-            let independent_aborted_entries: Vec<Arc<InflightEntry>> = {
+            let independent_aborted_entries: Vec<Arc<FlightCell>> = {
                 let mut table = self.independent_inflight.lock();
                 let collected = table
                     .values()
@@ -1998,15 +1980,6 @@ impl SemanticGraphStore {
             &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
         >,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
-        // Relation warm-read generation gate (the retired dedicated
-        // relation memo's contract, carried onto the family path): a
-        // `ProjectGeneration` bump misses the warm read even when the
-        // carrier still validates on file-content terms.
-        let live_generation = if family_requires_live_generation_gate(family) {
-            Some(ctx.project_type_store().current_project_generation())
-        } else {
-            None
-        };
         // Snapshot the candidate list under the lock, then validate
         // OUTSIDE the lock. Holding `entries` across `MemoEntry::validate`
         // — which walks the path-precise fact rail against the resolver
@@ -2019,11 +1992,12 @@ impl SemanticGraphStore {
         // §3.4 TWO-GATE warm hit — `cached_satisfies` (recorded-point
         // dominance, pure) AND `validate_with_self_roots` (fact rail).
         // Both must pass; see `try_warm_hit_fast_path` for the rationale.
+        // `validated_at_generation` is recency metadata only, never a
+        // validity oracle: project-shape invalidation rides
+        // `FactVersionRef::ProjectGeneration` on the carrier.
         let validated = snapshot.and_then(|list| {
             list.into_iter().find(|entry| {
-                live_generation.is_none_or(|generation| entry.validated_at_generation == generation)
-                    && cached_satisfies(&entry.satisfied_projection, requested)
-                    && entry.validate(ctx)
+                cached_satisfies(&entry.satisfied_projection, requested) && entry.validate(ctx)
             })
         });
         if let Some(entry) = &validated {
@@ -2380,16 +2354,6 @@ impl SemanticGraphStore {
         let family = prepared.family();
         let slot = prepared.slot();
 
-        // Relation warm-read generation gate (the retired dedicated
-        // relation memo's contract, carried onto the fast path): a
-        // `ProjectGeneration` bump misses the warm read even when the
-        // carrier still validates on file-content terms.
-        let live_generation = if family_requires_live_generation_gate(family) {
-            Some(ctx.project_type_store().current_project_generation())
-        } else {
-            None
-        };
-
         // Snapshot the candidate list under the lock; validate OUTSIDE
         // the lock. With the multi-candidate substrate the
         // validation walk over the path-precise fact rail is bounded
@@ -2406,13 +2370,12 @@ impl SemanticGraphStore {
         // requested point (pure, no store view; cheap, so first). Gate 2:
         // `validate_with_self_roots` — the fact rail must validate against
         // the live view. BOTH must pass; a candidate failing either is
-        // skipped without bubbling.
+        // skipped without bubbling. `validated_at_generation` is recency
+        // metadata only.
         let requested = prepared.requested_point();
-        let entry: MemoEntry = snapshot?.into_iter().find(|e| {
-            live_generation.is_none_or(|generation| e.validated_at_generation == generation)
-                && cached_satisfies(&e.satisfied_projection, requested)
-                && e.validate(ctx)
-        })?;
+        let entry: MemoEntry = snapshot?
+            .into_iter()
+            .find(|e| cached_satisfies(&e.satisfied_projection, requested) && e.validate(ctx))?;
         // Brief LRU bookkeeping — reacquire ONLY to move the matching
         // candidate to the back of the slot's LRU order so subsequent
         // lookups treat it as freshest. The match is by discriminant
@@ -2622,7 +2585,7 @@ impl SemanticGraphStore {
             //    the prepared token — an `Arc` refcount bump, not a
             //    full `SemanticQueryKey` clone.
             if independent_owner {
-                let inflight = Arc::new(InflightEntry::new());
+                let inflight = Arc::new(FlightCell::new());
                 {
                     let mut state = inflight.state.lock();
                     state.claimed = true;
@@ -2639,7 +2602,7 @@ impl SemanticGraphStore {
                 let mut table = self.inflight.lock();
                 table
                     .entry(prepared.clone())
-                    .or_insert_with(|| Arc::new(InflightEntry::new()))
+                    .or_insert_with(|| Arc::new(FlightCell::new()))
                     .clone()
             };
 
@@ -3310,7 +3273,7 @@ impl SemanticGraphStore {
         //    The remove is `ptr_eq`-guarded: a cross-view joiner that
         //    failed this winner's carrier validation forks (see the
         //    view-validation gate above), removes THIS winner's entry,
-        //    and may already have installed a FRESH `InflightEntry` for
+        //    and may already have installed a FRESH `FlightCell` for
         //    the same key as a new cold winner. An unconditional
         //    `remove` here would evict that fresh entry mid-build,
         //    spawning a redundant concurrent cold build. The guard
@@ -3339,7 +3302,7 @@ impl SemanticGraphStore {
     fn abort_inflight_for_cancellation(
         &self,
         prepared: &PreparedKeyHandle,
-        inflight: &Arc<InflightEntry>,
+        inflight: &Arc<FlightCell>,
         independent_owner: bool,
     ) {
         {
@@ -3369,7 +3332,7 @@ impl SemanticGraphStore {
     fn retire_inflight(
         &self,
         prepared: &PreparedKeyHandle,
-        inflight: &Arc<InflightEntry>,
+        inflight: &Arc<FlightCell>,
         independent_owner: bool,
     ) {
         if independent_owner {
@@ -3427,7 +3390,7 @@ impl SemanticGraphStore {
         dispatch_dep_signature: &DepSignature,
         self_root_canonicals: &Arc<[Arc<str>]>,
         satisfied_projection: &MaterializedSet,
-        inflight: &Arc<InflightEntry>,
+        inflight: &Arc<FlightCell>,
     ) -> WarmPublishOutcome {
         let publishable = matches!(result, QueryResult::Value(_));
         if !publishable {
@@ -3632,7 +3595,7 @@ impl SemanticGraphStore {
         dispatch_dep_signature: DepSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         satisfied_projection: MaterializedSet,
-        parent_inflight: &Arc<InflightEntry>,
+        parent_inflight: &Arc<FlightCell>,
         admission_already_linearized: bool,
     ) -> bool {
         if !matches!(result, QueryResult::Value(_)) {

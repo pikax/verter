@@ -12,7 +12,7 @@ pub(super) fn resolve_call_satisfied_projection() -> MaterializedSet {
 #[derive(Clone)]
 pub(crate) struct InlineResolveCallFlight {
     pub(super) prepared: PreparedKeyHandle,
-    pub(super) inflight: Arc<InflightEntry>,
+    pub(super) inflight: Arc<FlightCell>,
     _owner_registration: Option<wait_cycle::ExecutionOwnerRegistration>,
 }
 
@@ -33,7 +33,7 @@ impl SemanticGraphStore {
     ) -> Option<InlineResolveCallFlight> {
         let prepared =
             PreparedKeyHandle::prepare(SemanticQueryKey::ResolveCall(Box::new(key.clone())));
-        let inflight = Arc::new(InflightEntry::new());
+        let inflight = Arc::new(FlightCell::new());
         let (owner, owner_registration) =
             if let Some(owner) = wait_cycle::ExecutionOwnerScope::current(&self.wait_for_graph) {
                 (owner, None)
@@ -91,10 +91,7 @@ impl SemanticGraphStore {
                 .get(&family)
                 .map(|slots| slots.snapshot_slot(ModeSlot::Single))?
         };
-        let live_generation = ctx.project_type_store().current_project_generation();
-        let hit = snapshot.into_iter().find(|entry| {
-            entry.validated_at_generation == live_generation && entry.validate(ctx)
-        })?;
+        let hit = snapshot.into_iter().find(|entry| entry.validate(ctx))?;
         {
             let mut entries = self.entries_lock_diagnosed();
             if let Some(slots) = entries.get_mut(&family) {

@@ -897,7 +897,7 @@ fn family_map_publish_registers_canonical_to_entries_reverse_index() {
 ///
 /// This is a TARGETED unit test (per §1.B.4 brief invariant) that
 /// invokes `warm_publish_one` directly with a synthetic
-/// `InflightEntry` so the assertion is on the helper's surface,
+/// `FlightCell` so the assertion is on the helper's surface,
 /// not the full cooperative-admission flow.
 ///
 /// Discriminating: with the refactor, the helper does the publish
@@ -915,7 +915,7 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
     });
     let value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let dep_sig = dep_sig_for("/w/helper_test.ts", 7);
-    let inflight = Arc::new(InflightEntry::new());
+    let inflight = Arc::new(FlightCell::new());
 
     // Pre-condition: warm map empty for this key, reverse index
     // empty for the canonical.
@@ -1637,7 +1637,7 @@ fn warm_publish_one_debug_asserts_against_sub_slot_mode_terminal() {
     let carrier = crate::fact_signature_helpers::ReadSetSignature::new(
         crate::fact_signature_helpers::empty_fact_signature(),
     );
-    let inflight = Arc::new(InflightEntry::new());
+    let inflight = Arc::new(FlightCell::new());
     // A `Navigate` terminal recorded into the `Expanded` slot — the
     // forbidden sub-slot-mode terminal the production assert rejects.
     let bad = MaterializedSet::single(MaterializedPoint::new(Demand::navigate(proj_path)));
@@ -3096,7 +3096,7 @@ fn invalidate_all_aborts_pending_inflight_and_skips_aborted_publish() {
 /// the only other path touching both locks, acquires `state`, *releases*
 /// it, and only then acquires the `inflight` table lock — two sequential,
 /// non-nested acquisitions — so it cannot AB-BA against either order.)
-/// The fix is collect-then-release: snapshot the `Arc<InflightEntry>`
+/// The fix is collect-then-release: snapshot the `Arc<FlightCell>`
 /// handles AND drain the table under the table lock, RELEASE the table
 /// lock, THEN lock each `state` — keeping the rule uniform.
 ///
@@ -3532,7 +3532,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
 
     // An ABORTED parent in-flight entry — models a project-generation
     // reset that aborted the parent cold build mid-flight.
-    let aborted_parent = Arc::new(InflightEntry::new());
+    let aborted_parent = Arc::new(FlightCell::new());
     aborted_parent.state.lock().aborted = true;
     store.warm_publish_one_if_absent(
         &host,
@@ -3563,7 +3563,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
     // A fresh (non-aborted) parent — the negative control. The same
     // call MUST publish; the abort fence is precise, not a blanket
     // refusal.
-    let healthy_parent = Arc::new(InflightEntry::new());
+    let healthy_parent = Arc::new(FlightCell::new());
     store.warm_publish_one_if_absent(
         &host,
         healthy_key.clone(),
@@ -5653,7 +5653,7 @@ fn node_scope_returns_origin_not_reader_scope() {
 // SemanticGraphStats counter extension
 // ──────────────────────────────────────────────────────────────────
 
-/// Number of `Arc<InflightEntry>` strong references held while a cold
+/// Number of `Arc<FlightCell>` strong references held while a cold
 /// winner is inside its build closure and **no** joiner has joined
 /// yet. The winner accounts for three: the in-flight table entry, the
 /// winner's own `inflight` local in `execute_cooperative`, and the

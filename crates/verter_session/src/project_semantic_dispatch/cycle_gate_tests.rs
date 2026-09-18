@@ -493,14 +493,12 @@ fn classify_materialization_cycle_gate_keys_do_not_warm_hit_across_env_axes() {
     );
 }
 
-/// Live-generation gate: a bare project-generation bump (no content
-/// edit, NO eager eviction) rejects the warm candidate — the producer
-/// re-runs. The rejection rides two rails: the carrier's
-/// `FactVersionRef::ProjectGeneration` (from the walk's dep signature)
-/// AND the family's membership in `family_requires_live_generation_gate`
-/// (the `validated_at_generation` parity rail). Mutation recipe: an
-/// entry admitted with neither rail warm-serves stale and fails the
-/// recompute assertion.
+/// Fact-validated project-shape miss: a bare project-generation bump
+/// (no content edit, NO eager eviction) rejects the warm candidate —
+/// the producer re-runs. The rejection rides
+/// `FactVersionRef::ProjectGeneration` on the published carrier.
+/// Mutation recipe: an entry admitted without that fact warm-serves
+/// stale and fails the recompute assertion.
 #[test]
 fn cycle_gate_warm_candidate_rejected_on_bare_generation_bump() {
     let project = make_project();
@@ -515,8 +513,8 @@ fn cycle_gate_warm_candidate_rejected_on_bare_generation_bump() {
         "gen prime",
     );
 
-    // Bare generation bump WITHOUT the eager evict: only the family's
-    // live-generation gate can reject the warm candidate.
+    // Bare generation bump WITHOUT the eager evict: the carrier's
+    // ProjectGeneration fact must reject the warm candidate.
     host.project_type_store().bump_project_generation();
 
     reset_cycle_gate_compute_counter_for_test();

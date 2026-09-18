@@ -247,7 +247,7 @@ schema = 2
 "FMTS0" = { status = "pending" }
 "FMTV0" = { status = "pending" }
 "G1" = { status = "implemented", commit_message = "fix(session): pin awaited query keys to the request project's env", commit_date = "2026-09-18T16:45:00+01:00" }
-"G2" = { status = "pending" }
+"G2" = { status = "implemented", commit_message = "feat(session): own same-key production in FlightCell with fact-validated family retention", commit_date = "2026-09-18T19:30:00+01:00" }
 "G3" = { status = "pending" }
 "G4" = { status = "pending" }
 "G5" = { status = "pending" }

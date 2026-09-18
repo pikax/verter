@@ -8,9 +8,9 @@
 //! `Budget` / `EmptyCycle` / `Unresolved` / `CallResolution`) has no
 //! value-domain form and is never admitted anywhere (memo / fact /
 //! reverse index). Warm reads
-//! validate the self-version-rooted carrier strictly AND hard-miss on a
-//! `validated_at_generation` mismatch (the family carries the
-//! live-generation gate). Retention rides the family rails (cap 8,
+//! validate the self-version-rooted carrier strictly. Project-shape
+//! invalidation rides `FactVersionRef::ProjectGeneration` on that
+//! carrier. Retention rides the family rails (cap 8,
 //! invalid-first / LRU eviction, reverse-index drains).
 //!
 //! Writes land through the batched SCC member publish in
@@ -27,7 +27,7 @@ use super::*;
 #[derive(Clone)]
 pub(crate) struct InlineFlowReturnFlight {
     pub(super) prepared: PreparedKeyHandle,
-    pub(super) inflight: Arc<InflightEntry>,
+    pub(super) inflight: Arc<FlightCell>,
     /// Present only when an inline flight starts outside an existing
     /// semantic execution stack. Production nested evaluations reuse the
     /// active owner; direct callers hold this detached RAII lease.
@@ -52,7 +52,7 @@ impl SemanticGraphStore {
     ) -> Option<InlineFlowReturnFlight> {
         let prepared =
             PreparedKeyHandle::prepare(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
-        let inflight = Arc::new(InflightEntry::new());
+        let inflight = Arc::new(FlightCell::new());
         let (owner, owner_registration) =
             if let Some(owner) = wait_cycle::ExecutionOwnerScope::current(&self.wait_for_graph) {
                 (owner, None)
@@ -102,8 +102,7 @@ impl SemanticGraphStore {
     /// The strict warm read of the `FlowReturn` family (design §3.4):
     /// the TWO-GATE hit — `cached_satisfies` over the entry's RECORDED
     /// materialised point against the key's OWN demand point (never the
-    /// nominal `Single` preset), AND carrier validation with the
-    /// live-generation gate. An entry carries the `FlowBody` fact rail
+    /// nominal `Single` preset), AND carrier validation. An entry carries the `FlowBody` fact rail
     /// plus its consumed subquery facts and self roots; `validate(ctx)`
     /// revalidates that whole signature against the caller's live view,
     /// so a body edit or a torn fact set hard-misses. Warm validity
@@ -129,11 +128,8 @@ impl SemanticGraphStore {
                 .get(&family)
                 .map(|slots| slots.snapshot_slot(ModeSlot::Single))?
         };
-        let live_generation = ctx.project_type_store().current_project_generation();
         let hit = snapshot.into_iter().find(|entry| {
-            cached_satisfies(&entry.satisfied_projection, &requested)
-                && entry.validated_at_generation == live_generation
-                && entry.validate(ctx)
+            cached_satisfies(&entry.satisfied_projection, &requested) && entry.validate(ctx)
         })?;
         // Brief LRU bookkeeping — promote the hit candidate in the slot's
         // recency order (a concurrent invalidation makes this a no-op).
