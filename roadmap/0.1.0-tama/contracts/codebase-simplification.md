@@ -47,7 +47,7 @@ Each delivery has named retained proof and the applicable final gate. Real behav
 
 No full Rust gate or runtime benchmarks are required for this roadmap-only amendment. Later implementation runs the owning gates. SIMP11 consolidates the existing metadata check without replacing the gate runner or weakening SG0.
 
-Report separate production/test/comment/generated-data counts, removed operations/representations/state owners and retained proof. Compare build/archive and relevant suite costs on comparable runner/prerequisite states before claiming CI speedups; the source-policy aggregate already shares scans within its process. The manual scanners-replacement campaign tool is not itself a default CI job.
+Report separate production/test/comment/generated-data counts, removed operations/representations/state owners and retained proof. Compare build/archive and relevant suite costs on comparable runner/prerequisite states before claiming CI speedups. The manual scanners-replacement campaign tool is not itself a default CI job.
 
 Production performance claims require equivalent-work, allocation and retention evidence under contracts/resource-and-finalization.md and the applicable ratified metric rows. No speculative percentage or blanket zero-regression threshold is introduced. Test deletion does not itself accelerate shipped Verter.
 

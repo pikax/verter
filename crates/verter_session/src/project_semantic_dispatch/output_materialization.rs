@@ -54,9 +54,7 @@
 //!   a Kind-B bridge sibling (`dispatch_helpers`, `eval_env`) — or a non-sink
 //!   helper that shares the subtree — is NOT reachable from any sink's mint
 //!   scope, so it cannot name any cap's constructor (a planted mint is
-//!   `E0624`). The `output_cap_mint_scope_is_per_leaf_not_subtree` guard models
-//!   this with a Rust-visibility reachable-module-tree check (default-deny on
-//!   any non-sink module reachable from a mint scope).
+//!   `E0624`).
 //!
 //! Net effect: in safe production Rust OUTSIDE the audited payload vault,
 //! [`OutputTypeExpr`] and [`MaterializedOutputTypeExpr`] do not expose a
@@ -70,16 +68,11 @@
 //! `mint: pub(in <sink>)` scope makes a non-sink mint `E0624`. The residual
 //! TRUSTED surface — the inline payload vault + the projector registration
 //! source — is the part the COMPILER cannot itself pin (the identity of which
-//! owner-named types are sinks, and edits inside the trusted file). Over that
-//! BOUNDED surface, the `output_projector_residual_guards` `syn` checks are
-//! DEFENSE-IN-DEPTH, shaped as a CLOSED structural allowlist (exact module
-//! topology; the exact `impl OutputProjector` / `impl sealed::Sealed` multiset
-//! by full self-type path; a cap-gated-or-test signature allowlist for every
-//! `TypeExpr`-returning fn; bans on item/impl/trait-position macro invocations,
-//! `include!`, unknown attributes, a `sealed::Sealed` alias, and any owner
-//! `TypeExpr` alias), backed by the `output_materialization_guards`
-//! accidental-regression canary. The defense-in-depth claim does NOT cover
-//! guard deletion or unsafe code (unless the crate forbids unsafe globally).
+//! owner-named types are sinks, and edits inside the trusted file). Completeness
+//! for common accidental trait escapes is the
+//! `output_materialization_guards` canary plus the out-of-crate trybuild
+//! fixture `output_projector_not_impl_outside_crate`. The claim does NOT cover
+//! unsafe code (unless the crate forbids unsafe globally).
 //! Hot / session / Kind-B code can neither construct an [`OutputProjector`]
 //! capability (no constructible capability type is reachable from a non-sink
 //! module — a planted hot mint is `E0624`/`E0451`) nor unwrap a sealed
@@ -132,9 +125,7 @@ use crate::semantic_query::{DepSignature, ProjectionReductionContext, SemanticNo
 // `projector::sealed::Sealed` marker (private `mod sealed`, not `pub(super)`),
 // so a carrier-side `impl projector::sealed::Sealed for HotCap` is `E0603`
 // (module `sealed` is private) — the carrier modules can never become a
-// replacement owner-descendant scope that launders a sealed impl. The
-// `output_projector_owner_registration_inventory` topology guard is the
-// defense-in-depth backstop.
+// replacement owner-descendant scope that launders a sealed impl.
 // =====================================================================
 pub(crate) use carrier::{MaterializedOutputTypeExpr, OutputTypeExpr};
 pub(crate) use projector::OutputProjector;
@@ -150,7 +141,7 @@ pub(crate) use projector::OutputProjector;
 /// `carrier` module (and its `payload` vault) cannot name `projector::sealed`
 /// at all: a carrier-side `impl projector::sealed::Sealed for HotCap` is a
 /// COMPILE error (`E0603`, module `sealed` is private), so the seal is
-/// compiler-enforced — the topology guard is a defense-in-depth backstop.
+/// compiler-enforced.
 mod projector {
     use super::{
         MaterializedOutputTypeExpr, OutputTypeExpr, ProjectSemanticDispatch,
@@ -237,11 +228,8 @@ mod projector {
     // `meta_resolve::projectors::output_sink` — so those helpers cannot mint.)
     // Here, in the owner `projector` module, each cap is sealed
     // (`impl sealed::Sealed`) and implements [`OutputProjector`] EXPLICITLY (NOT
-    // through a macro): explicit source items are scannable, so the
-    // `output_projector_owner_registration_inventory` module-topology guard can
-    // pin the sanctioned sink set by reading the actual `impl OutputProjector
-    // for <Cap>` items (by FULL self-type path, as a multiset) rather than
-    // trusting an opaque macro body.
+    // through a macro): the sanctioned sink set is the actual
+    // `impl OutputProjector for <Cap>` items, not an opaque macro body.
     //
     // A hot/session/Kind-B module can NAME a capability type (it is
     // `pub(crate)`) but can neither call its private `new()` (E0624) nor
@@ -261,10 +249,8 @@ mod projector {
     // the projectors `output_sink` submodule): the parent module re-exports
     // ONLY the `pub(crate)` cap type, NOT the private sink module or its `new()`
     // constructor. So the owner names the type while the constructor stays
-    // sink-private. The `output_cap_mint_scope_is_per_leaf_not_subtree` guard
-    // pins each cap's `mint:` scope to a TERMINAL sink whose entire reachable
-    // production module tree is output-only (a Rust-visibility reachable-tree
-    // model, default-deny on any reachable non-sink module).
+    // sink-private. Each cap's `mint:` visibility is a TERMINAL sink whose
+    // entire reachable production module tree is output-only.
     // =====================================================================
 
     impl sealed::Sealed for crate::meta_resolve::projectors::MetaResolveProjectorsOutputCap<'_, '_> {}
@@ -783,11 +769,8 @@ pub(crate) fn wrap_degraded_output<P: OutputProjector + ?Sized>(
 /// wider visibility, or in an unrelated module, would still not grant a
 /// cross-sink capability because the [`OutputProjector`] + sealed-marker impls
 /// (in the owner `projector` module) are keyed by the EXACT capability type
-/// registered through the explicit `impl` pairs. The
-/// `output_projector_owner_registration_inventory` module-topology guard pins
-/// the registered capability set + the carrier/vault shape, and the
-/// `output_cap_mint_scope_is_per_leaf_not_subtree` guard pins each cap's mint
-/// scope to a terminal-sink reachable-module tree.
+/// registered through the explicit `impl` pairs. Each cap's mint visibility
+/// is a terminal sink whose reachable production module tree is output-only.
 macro_rules! define_output_capability {
     ($(#[$meta:meta])* $vis:vis struct $name:ident; mint: $mint_vis:vis) => {
         $(#[$meta])*

@@ -751,8 +751,7 @@ impl VerterHost {
     ///
     /// Its equivalence with the materializer is proved on full
     /// `(source_canonical, source_owner, source_name)` identities by the C3 dep-equivalence
-    /// tests; its presence is pinned by
-    /// `whole_env_consumer_graph_native_inventory.rs`.
+    /// tests.
     #[allow(dead_code)]
     pub(super) fn fallthrough_runtime_value_deps_graph_native(
         &self,

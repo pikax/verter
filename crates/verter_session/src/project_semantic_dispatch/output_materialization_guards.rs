@@ -24,20 +24,7 @@
 //! canary does not cover guard deletion, deliberate edits inside the trusted
 //! vault, or unsafe code unless the crate forbids unsafe globally.
 //!
-//! Companion structural guards (the bounded residuals the compiler cannot
-//! express) live in the integration suite at
-//! `crates/verter_source_policy_gate/tests/cases/output_projector_residual_guards.rs`:
-//! `output_projector_owner_registration_inventory` (the sanctioned sink set +
-//! the EXACT module-topology confinement of the owner file — banning
-//! item/include/attribute macro injection and any module other than the
-//! intended inline `projector` / `carrier` / `carrier::payload` /
-//! `projector::sealed` shape),
-//! `output_carriers_have_no_inherent_typeexpr_escape_method` (a closed
-//! item/signature allowlist over the carrier/vault modules — no production
-//! method returning `TypeExpr` / `&TypeExpr` without a capability param), and
-//! `output_carrier_payload_fields_are_private` (every `TypeExpr`-bearing
-//! payload field private regardless of type-name spelling). The out-of-crate
-//! visibility boundary is pinned by the trybuild fixture
+//! The out-of-crate visibility boundary is pinned by the trybuild fixture
 //! `output_projector_not_impl_outside_crate.rs`.
 use static_assertions::assert_not_impl_any;
 use verter_type_expr::TypeExpr;

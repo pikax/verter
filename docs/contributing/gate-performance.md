@@ -386,43 +386,29 @@ Verified per file (not by filename) rather than assumed:
 | file | verdict | why |
 |---|---|---|
 | `architecture_guards.rs` | **kept in `verter_session`** | one `#[test]` (`foundations_guards::external_corpus_paths_not_present_outside_gated_tests`) is bound by name into `typeinfo_ignored_test_manifest.rs`'s `live_guard!` registry, which requires the bound test to run in the SAME binary the canonical gates execute; the file's `foundations_guards` submodule also shares internal helper functions across that boundary. Relocating it needs a scoped design decision (repoint the one binding, or prove the "same binary" invariant can relax), not a same-session mechanical move. |
-| `output_projector_residual_guards.rs` | moved | pure scan plus a check against `verter_session`'s public API (sealed `TypeExpr`/`NoTypeExpr` capability fence) — never runs it |
-| `whole_env_consumer_graph_native_inventory.rs` | moved | pure `syn`/`walkdir` scan of `verter_session`'s `src/` |
-| `residual_type_expr_body_reader_inventory.rs` | moved | pure `syn`/`walkdir` scan |
-| `handle_capable_consumer_guards.rs` | moved | pure `syn`/`walkdir` scan (reads sibling `verter_session` test files that stayed behind, e.g. `architecture_guards.rs`) |
+| `output_projector_residual_guards.rs` | moved, later retired | residual HOT_*/taint analyzer and closed OutputProjector inventories — capability fence now lives in compile-time witnesses + trybuild fixtures |
+| `whole_env_consumer_graph_native_inventory.rs` | moved, later retired | closed whole-env consumer inventory |
+| `residual_type_expr_body_reader_inventory.rs` | moved, later retired | closed TypeExpr body-reader inventory |
+| `handle_capable_consumer_guards.rs` | moved, later retired | closed handle-capable consumer inventory |
 | `tracked_paths_are_portable.rs` | moved | scan plus a check against `verter_session`'s public API (`framework::descriptor` registry) — never runs it |
 | `scanners_replacement.rs` | moved | pure JSON/schema scan |
-| `framework_known_bug_manifest.rs` | moved | pure `syn` scan |
+| `framework_known_bug_manifest.rs` | moved | known-bug ledger bijection |
 | `svelte_typecheck_gate.rs` | kept | drives a real `tsc.js` subprocess — not a scan |
 | `vue_macro_tsc_typecheck_gate.rs` | kept | drives a real `tsc.js` subprocess — not a scan |
 | `defect_b_corpus_prevention_gate.rs` | kept, N/A | `#![cfg(feature = "external-corpus")]` — already excluded from the default gate entirely; not compiled into any of the three surfaces to begin with |
 
-The eight movable files relocated to a new crate, `verter_source_policy_gate`
+The movable files relocated to a new crate, `verter_source_policy_gate`
 (`crates/verter_source_policy_gate/tests/cases/`), with its own single
 `tests/main.rs` (Anti-Binary-Growth-compliant — no allowlist entry needed).
-`cargo nextest run --workspace` (Surface 1) still runs its 180 tests once, as
-before; Surface 2 (`verter_session`-only shared-process) and Surface 3 (the
-five-package filterset above) select by PACKAGE, so this crate's tests are
-structurally invisible to both regardless of what it depends on — no filter
-change was needed on either surface to achieve the exclusion. Two of the
-eight (`tracked_paths_are_portable.rs`, `output_projector_residual_guards.rs`)
-turned out to depend on `verter_session`'s public API partway through the
-file (not visible from the file's own header `use` block) rather than being
-pure disk scans; that dependency does not affect the exclusion, since it is
-a library dependency, not a package-selection criterion.
+Surface 1 still runs this crate once; Surface 2 (`verter_session`-only
+shared-process) and Surface 3 (the five-package filterset above) select by
+PACKAGE, so this crate's tests are structurally invisible to both regardless
+of what it depends on. Remaining consumers are schema, portability,
+known-bug bijection, and compile-time capability witnesses against
+`verter_session`'s public API (`tracked_paths_are_portable.rs` plus the
+extracted `semantic_capability_witnesses.rs`).
 
-Four of the eight scan `verter_session`'s own `src/` tree, so their
-`crate_root()` helper — previously `CARGO_MANIFEST_DIR`, correct only because
-`CARGO_MANIFEST_DIR` used to BE `verter_session`'s own directory — was
-re-anchored to `workspace_root().join("crates/verter_session")` explicitly.
-`output_projector_residual_guards.rs` additionally has one genuine
-self-reference (reading its own source for a doc/list-parity check), which
-resolves against the new crate's own `CARGO_MANIFEST_DIR` via a second,
-distinct `own_crate_root()` helper — the two must not be conflated.
-
-Verified: `cargo test -p verter_source_policy_gate` (180/180 passing,
-non-vacuous — several tests assert the production scan found real production
-matches, not an empty/mocked tree), plus
+Verified: `cargo test -p verter_source_policy_gate` plus
 `cargo test -p verter_session --test main -- cases::typeinfo_ignored_test_manifest cases::g_misc0::critical_rules_have_guards cases::architecture_guards`
 (318/319, 1 pre-existing `#[ignore]`, 0 failed) — covering the R6 registry
 scanner (finds the moved guard names at their new path) and the `live_guard!`
