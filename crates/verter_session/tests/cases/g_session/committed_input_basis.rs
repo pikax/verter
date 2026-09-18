@@ -3,9 +3,9 @@
 
 use std::sync::Arc;
 
-use verter_session::request_context::RequestContext;
+use verter_session::request_context::{RequestContext, RequestContextGuard};
 use verter_session::route_analysis_inputs::{
-    commit_route_analysis_basis, project_route_analysis_inputs,
+    build_route_analysis_inputs, commit_route_analysis_basis, project_route_analysis_inputs,
 };
 use verter_session::{
     commit_workspace_canonical, InputBasis, LoadWave, Observation, ObserveError, SnapshotFence,
@@ -115,5 +115,47 @@ fn route_analysis_snapshot_is_projected_from_the_committed_basis() {
     assert_eq!(
         inputs.read_file(&format!("{root}/package.json")).as_deref(),
         Some(r#"{ "dependencies": { "vue-router": "^4.2.0" } }"#)
+    );
+}
+
+#[test]
+fn request_route_analysis_projects_the_bound_basis_after_workspace_mutation() {
+    let ws = memory();
+    let root = "/proj";
+    ws.inject_file(
+        format!("{root}/package.json"),
+        Arc::from(r#"{ "dependencies": { "vue-router": "^4.2.0" } }"#),
+    );
+    ws.inject_file(
+        format!("{root}/src/router/index.ts"),
+        Arc::from("export default { routes: [] }"),
+    );
+    let ctx = RequestContext::new(2, Arc::from("/proj/package.json"), false, None);
+    let _guard = RequestContextGuard::install(Arc::clone(&ctx));
+    let first = build_route_analysis_inputs(&ws, root);
+    let bound = ctx
+        .committed_input()
+        .expect("route capture binds the request");
+    bound
+        .admit_publication(bound.basis())
+        .expect("bound basis admits");
+    let original = r#"{ "dependencies": { "vue-router": "^4.2.0" } }"#;
+    assert_eq!(
+        first.read_file(&format!("{root}/package.json")).as_deref(),
+        Some(original)
+    );
+    ws.inject_file(
+        format!("{root}/package.json"),
+        Arc::from(r#"{ "dependencies": {} }"#),
+    );
+    let second = build_route_analysis_inputs(&ws, root);
+    assert_eq!(
+        second.read_file(&format!("{root}/package.json")).as_deref(),
+        Some(original),
+        "second capture in the same request must project the bound basis"
+    );
+    assert_eq!(
+        ctx.committed_input().expect("still bound").basis().id(),
+        bound.basis().id()
     );
 }
