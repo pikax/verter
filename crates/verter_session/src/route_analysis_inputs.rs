@@ -24,100 +24,145 @@
 //! distinction to preserve (unlike module resolution's witnessed
 //! `PathProbe`).
 
+use std::sync::Arc;
+
 use verter_semantic::analysis::{
     detect_routing_framework, RouteAnalysisInputs, RouteDirEntry, RoutingFramework,
     ROUTER_CONFIG_CANDIDATES,
 };
 
+use crate::input_basis::{DirectoryEntry, InputBasis, LoadWave, NegativeFact, Observation};
+
 /// Builds the complete `RouteAnalysisInputs` snapshot for `project_root`.
+///
+/// The workspace is read only while committing one [`InputBasis`]. The
+/// snapshot rows are projected from that basis — never by a second live
+/// consumer read.
 #[must_use]
 pub fn build_route_analysis_inputs(
     workspace: &dyn verter_workspace::WorkspaceRead,
     project_root: &str,
 ) -> RouteAnalysisInputs {
-    let mut inputs = RouteAnalysisInputs::new();
+    project_route_analysis_inputs(&commit_route_analysis_basis(workspace, project_root))
+}
+
+/// Commit one [`InputBasis`] covering the route-analysis load wave.
+#[must_use]
+pub fn commit_route_analysis_basis(
+    workspace: &dyn verter_workspace::WorkspaceRead,
+    project_root: &str,
+) -> InputBasis {
+    let mut capture = RouteCapture::default();
     let trimmed_root = project_root.trim_end_matches('/');
 
-    // package.json — framework detection's own input.
     let pkg_path = format!("{trimmed_root}/package.json");
-    if let Some(content) = workspace.read_file(&pkg_path) {
-        inputs.insert_file(pkg_path, content);
-    }
+    capture.probe_file(workspace, pkg_path);
 
-    // Framework detection itself is pure — run it against the snapshot
-    // we've captured so far, exactly mirroring what `build_route_analysis`
-    // will do with the SAME inputs later.
-    let framework = detect_routing_framework(&inputs, project_root);
+    let framework = detect_routing_framework(&capture.detection_inputs(), project_root);
 
-    // Pages directory — mirrors `build_route_analysis`'s own branching
-    // (`crates/verter_semantic/src/analysis/routes.rs`).
     match framework {
         RoutingFramework::NuxtPages => {
-            walk_dir_recursive(workspace, &format!("{trimmed_root}/pages"), &mut inputs);
+            capture.walk_dir(workspace, &format!("{trimmed_root}/pages"));
         }
         RoutingFramework::UnpluginVueRouter => {
             let src_pages = format!("{trimmed_root}/src/pages");
             if workspace.is_dir(&src_pages) {
-                walk_dir_recursive(workspace, &src_pages, &mut inputs);
+                capture.walk_dir(workspace, &src_pages);
             } else {
-                walk_dir_recursive(workspace, &format!("{trimmed_root}/pages"), &mut inputs);
+                capture.walk_dir(workspace, &format!("{trimmed_root}/pages"));
             }
         }
-        RoutingFramework::VueRouter | RoutingFramework::Unknown => {
-            // Programmatic route extraction reads only the router-config
-            // candidates below, not a pages directory.
-        }
+        RoutingFramework::VueRouter | RoutingFramework::Unknown => {}
     }
 
-    // layouts/ — `discover_layouts` runs unconditionally, independent of
-    // the detected framework.
-    walk_dir_recursive(workspace, &format!("{trimmed_root}/layouts"), &mut inputs);
+    capture.walk_dir(workspace, &format!("{trimmed_root}/layouts"));
 
-    // Router config candidates — fixed, known paths; probe existence and
-    // capture content for any that are present.
     for candidate in ROUTER_CONFIG_CANDIDATES {
-        let path = format!("{trimmed_root}/{candidate}");
-        if let Some(content) = workspace.read_file(&path) {
-            inputs.insert_file(path, content);
-        }
+        capture.probe_file(workspace, format!("{trimmed_root}/{candidate}"));
     }
 
+    capture.commit()
+}
+
+fn project_route_analysis_inputs(basis: &InputBasis) -> RouteAnalysisInputs {
+    let mut inputs = RouteAnalysisInputs::new();
+    project_route_analysis_inputs_into(basis, &mut inputs);
     inputs
 }
 
-/// Recursively walks `dir` via `workspace`, capturing every directory's
-/// listing and every file's content into `inputs`. A `dir` that is not a
-/// directory (absent, or a file) captures nothing — matching
-/// `RouteAnalysisInputs::is_dir`'s "never inserted = does not exist" fold.
-fn walk_dir_recursive(
-    workspace: &dyn verter_workspace::WorkspaceRead,
-    dir: &str,
-    inputs: &mut RouteAnalysisInputs,
-) {
-    if !workspace.is_dir(dir) {
-        return;
-    }
-    let Ok(entries) = workspace.read_dir(dir) else {
-        return;
-    };
-    // One-way projection from the live VFS row onto the dependency-neutral
-    // route-analysis input IR — `verter_semantic` never names the workspace
-    // `DirEntry` type; this is the caller-side boundary that performs the
-    // mapping.
-    let projected: Vec<RouteDirEntry> = entries
-        .iter()
-        .map(|entry| RouteDirEntry {
-            path: entry.path.clone(),
-            is_dir: entry.is_dir,
-        })
-        .collect();
-    inputs.insert_directory(dir.to_string(), projected);
-    for entry in &entries {
-        if entry.is_dir {
-            walk_dir_recursive(workspace, &entry.path, inputs);
-        } else if let Some(content) = workspace.read_file(&entry.path) {
-            inputs.insert_file(entry.path.clone(), content);
+fn project_route_analysis_inputs_into(basis: &InputBasis, inputs: &mut RouteAnalysisInputs) {
+    for observation in basis.observations() {
+        if let Some(content) = observation.file_content() {
+            inputs.insert_file(observation.canonical(), Arc::from(content));
+        } else if let Some(entries) = observation.directory_entries() {
+            let projected: Vec<RouteDirEntry> = entries
+                .iter()
+                .map(|entry| RouteDirEntry {
+                    path: entry.path().to_string(),
+                    is_dir: entry.is_dir(),
+                })
+                .collect();
+            inputs.insert_directory(observation.canonical(), projected);
         }
+    }
+}
+
+#[derive(Default)]
+struct RouteCapture {
+    keys: Vec<String>,
+    observations: Vec<Observation>,
+    negatives: Vec<NegativeFact>,
+}
+
+impl RouteCapture {
+    fn detection_inputs(&self) -> RouteAnalysisInputs {
+        let mut inputs = RouteAnalysisInputs::new();
+        for observation in &self.observations {
+            if let Some(content) = observation.file_content() {
+                inputs.insert_file(observation.canonical(), Arc::from(content));
+            }
+        }
+        inputs
+    }
+
+    fn probe_file(&mut self, workspace: &dyn verter_workspace::WorkspaceRead, path: String) {
+        self.keys.push(path.clone());
+        match workspace.read_file(&path) {
+            Some(content) => self.observations.push(Observation::file(path, content)),
+            None => self.negatives.push(NegativeFact::absent(path)),
+        }
+    }
+
+    fn walk_dir(&mut self, workspace: &dyn verter_workspace::WorkspaceRead, dir: &str) {
+        if !workspace.is_dir(dir) {
+            return;
+        }
+        let Ok(entries) = workspace.read_dir(dir) else {
+            return;
+        };
+        let projected: Vec<DirectoryEntry> = entries
+            .iter()
+            .map(|entry| DirectoryEntry::new(entry.path.clone(), entry.is_dir))
+            .collect();
+        self.keys.push(dir.to_string());
+        self.observations
+            .push(Observation::directory(dir, projected));
+        for entry in &entries {
+            if entry.is_dir {
+                self.walk_dir(workspace, &entry.path);
+            } else {
+                self.probe_file(workspace, entry.path.clone());
+            }
+        }
+    }
+
+    fn commit(self) -> InputBasis {
+        InputBasis::commit(
+            LoadWave::from_keys(self.keys),
+            self.observations,
+            self.negatives,
+        )
+        .expect("route-analysis capture mixed a canonical during one producer walk")
     }
 }
 

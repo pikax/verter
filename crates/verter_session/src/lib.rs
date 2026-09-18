@@ -338,6 +338,7 @@ mod test_worker_pools;
 
 #[cfg(test)]
 mod artifact_root_retention_tests;
+pub mod input_basis;
 pub mod meta_resolve;
 #[cfg(test)]
 mod negative_import_route_tests;
@@ -455,6 +456,11 @@ pub use verter_protocol::types::PublicApiProjectionSubject;
 use std::sync::Arc;
 
 pub use id::resolve_external;
+pub use input_basis::{
+    commit_workspace_canonical, CommitError, DirectoryEntry, InputBasis, LoadWave, NegativeFact,
+    NegativeKind, Observation, ObservationKind, ObserveError, RequestInputBinding, SnapshotFence,
+    TornSnapshot,
+};
 pub(crate) use parsed_eval_program::ParsedEvalProgram;
 use rustc_hash::FxHashMap;
 #[cfg(test)]

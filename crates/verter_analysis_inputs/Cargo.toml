@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Neutral foundation for local-analysis-input config: opaque project ids, path-privacy types, and the producer-side redactor shared by analysis runners"
+description = "Committed InputBasis and local-analysis-input config: opaque project ids, path-privacy types, and the producer-side redactor"
 keywords = ["analysis", "redaction", "hermetic", "privacy"]
 categories = ["development-tools"]
 
@@ -18,3 +18,4 @@ categories = ["development-tools"]
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+verter_identity = { path = "../verter_identity" }

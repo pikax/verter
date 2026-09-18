@@ -3191,6 +3191,7 @@ version = "0.0.1-beta.5"
 dependencies = [
  "serde",
  "serde_json",
+ "verter_identity",
 ]
 
 [[package]]
@@ -3754,6 +3755,7 @@ dependencies = [
  "tracing-test",
  "ts-rs",
  "uuid",
+ "verter_analysis_inputs",
  "verter_audit",
  "verter_compiler",
  "verter_css_syntax",
