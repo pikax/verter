@@ -1301,6 +1301,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
+    /// Env hashes of the currently installed request's owning project, or
+    /// the workspace default when no request is installed.
+    ///
+    /// Query-key constructors that have no per-declaration canonical of
+    /// their own (awaited / template-literal reduce) must use this rather
+    /// than the host's workspace-default env bundle: that default is
+    /// ambient session state, not a fact of the demand. The augmentation
+    /// index key is not request-scoped — it is the store-view basis.
+    #[must_use]
+    pub(crate) fn request_view_env_hashes(&self) -> crate::session_view::EnvHashes {
+        let host = self.ctx.host_for_fact_tracer_install();
+        match crate::request_context::current_request_canonical() {
+            Some(canonical) => host.host_view_env_hashes_for(&canonical),
+            None => host.host_view_env_hashes(),
+        }
+    }
+
+    /// Project identity of the currently installed request's owning
+    /// project, or the workspace default when no request is installed.
+    /// Pair with [`Self::request_view_env_hashes`].
+    #[must_use]
+    pub(crate) fn request_view_project_identity(
+        &self,
+    ) -> crate::file_artifact_store::ProjectIdentity {
+        let host = self.ctx.host_for_fact_tracer_install();
+        match crate::request_context::current_request_canonical() {
+            Some(canonical) => host.host_view_project_identity_for(&canonical),
+            None => host.host_view_project_identity(),
+        }
+    }
+
     /// The `resolve_env_hash` (`R`) dimension for a declaration defined in
     /// `canonical` — the extra env dim carried by
     /// [`InstantiateContext`](crate::semantic_query::InstantiateContext) /
