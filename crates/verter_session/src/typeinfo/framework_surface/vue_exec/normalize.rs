@@ -4,8 +4,10 @@
 //! `NamedTypeMember` / index signatures / model props; the slot normalizer
 //! lives in the sibling [`super::normalize_slots`]).
 //!
-//! These are NOT resolvers — they slice JSDoc spans and raise each member's
-//! already-resolved value node to a `TypeExpr` through the active `ctx`. The
+//! These are NOT resolvers — they slice JSDoc spans and, where display text is
+//! required, raise each member's already-resolved value node to a `TypeExpr`
+//! through the active `ctx`. Named-member wire values classify in the
+//! node-domain raised-shape fold and do not transit a `TypeExpr`. The
 //! resolution itself happens once in [`super::vue_macro_dtos_with_ctx`]; this
 //! module is the kind-specific projection of that single surface.
 
@@ -328,18 +330,17 @@ fn member_value_source(
 /// argument through the SHARED resolver (no special-case there — only
 /// `defineModel` is). This is the thin per-member normalize: one
 /// [`NamedTypeMember`] per public named member carrying its name, optionality,
-/// and the member value raised through the active `ctx` and classified INTO
-/// the sealed shallow
+/// and the member value classified INTO the sealed shallow
 /// [`NamedTypeMemberOutput`](crate::typeinfo::framework_surface::results::NamedTypeMemberOutput)
-/// vocabulary at this publication boundary — the raised form is transient and
-/// discarded here; no raw `TypeExpr` enters the DTO. The shallow-by-default
-/// rule holds — `raise_member_value` raises the member's one-level value node,
-/// it does not eagerly expand it.
+/// vocabulary from the node-domain raised-shape fold — no `TypeExpr` is raised
+/// to classify the member. The shallow-by-default rule holds: the fold reads
+/// the member's one-level value node and does not eagerly expand it.
 #[must_use]
 pub(crate) fn object_members_from_typeinfo_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
     resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<crate::typeinfo::framework_surface::results::NamedTypeMember> {
+    let dispatch = ctx.dispatch();
     let macro_surface = resolved.macro_surface();
     macro_surface
         .surface
@@ -349,18 +350,22 @@ pub(crate) fn object_members_from_typeinfo_surface(
         // shared surface RECORDS non-public class members, but the published
         // object surface exposes only public members.
         .filter(|member| member.visibility.is_public())
-        .filter_map(
-            |member| Some(crate::typeinfo::framework_surface::results::NamedTypeMember {
-                name: member.published_name()?.to_string(),
-                is_optional: member.optional,
-                value: raise_member_value(ctx, member).map(|raised| {
-                    crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::classify_shallow(&raised)
-                }),
-                type_annotation: None,
-                type_references: Vec::new(),
-                source_span: None,
-            }),
-        )
+        .filter_map(|member| {
+            Some(
+                crate::typeinfo::framework_surface::results::NamedTypeMember {
+                    name: member.published_name()?.to_string(),
+                    is_optional: member.optional,
+                    value: crate::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
+                        &dispatch,
+                        member.value,
+                    )
+                    .map(crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::from_raised_shallow),
+                    type_annotation: None,
+                    type_references: Vec::new(),
+                    source_span: None,
+                },
+            )
+        })
         .collect()
 }
 

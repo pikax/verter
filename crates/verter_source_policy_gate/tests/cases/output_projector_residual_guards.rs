@@ -12405,12 +12405,6 @@ const HOT_TERMINAL_PASSTHROUGH_IDENTS: &[&str] = &[
     // sanctioned sinks already render through the by-name `.and_then` form;
     // the direct-call form is the same publication.
     "render_type_expr_display",
-    // The sealed shallow output-vocabulary classifier
-    // (`NamedTypeMemberOutput::classify_shallow`): classifies a sink-minted
-    // member value INTO the sealed publication vocabulary at the boundary —
-    // the raised form is transient and discarded, no raw `TypeExpr` enters
-    // the DTO (see `object_members_from_typeinfo_surface`'s doc contract).
-    "classify_shallow",
     // (The former `named_signature_row` published emit-signature DTO row
     // constructor was swept with the deleted `ResolvedElements` /
     // `imported_elements` rail — no spelling remains.)
@@ -12575,16 +12569,13 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
         "project_semantic_dispatch/output_materialization.rs",
         "into_type_expr",
     ),
-    // Per-member publication DTO builders (props / expose / object-member / slot
-    // binding leaf surfaces): mint each member's value once through the
-    // registered `raise_member_value` mint, store it in
-    // the published DTO, and render it for display — no decision on its variants.
+    // Per-member publication DTO builders (props / expose / slot binding leaf
+    // surfaces): mint each member's value once through the registered
+    // `raise_member_value` mint, store it in the published DTO, and render it
+    // for display — no decision on its variants. Vue named-member wire values
+    // classify in the node-domain raised-shape fold and do not mint here.
     ("vue_exec/normalize.rs", "props_from_typeinfo_surface"),
     ("vue_exec/normalize.rs", "exposed_from_typeinfo_surface"),
-    (
-        "vue_exec/normalize.rs",
-        "object_members_from_typeinfo_surface",
-    ),
     // The Vue emit payload-tuple terminal: mints each node-domain payload param
     // (`FunctionParam.ty` node) ONCE through the sealed output cap into a
     // labelled `TupleElement` and returns the payload `TypeExpr::Tuple`. ZERO
