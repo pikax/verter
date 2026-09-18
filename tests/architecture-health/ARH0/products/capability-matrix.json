@@ -148,18 +148,20 @@
       "status": "required-planned",
       "engine": "Solid 2",
       "version": "target",
-      "versionSource": "roadmap/0.1.0-tama/decisions/2026-09-08-solid2-htmx4-targets.md",
+      "versionSource": null,
       "consumers": [],
-      "uncertainty": "no Verter support claim until the owning expansion trains deliver the authored integration"
+      "uncertainty": "no Verter support claim until the owning expansion trains deliver the authored integration",
+      "provenance": "tama-dag"
     },
     {
       "capability": "htmx-4-target",
       "status": "required-planned",
       "engine": "htmx 4",
       "version": "target",
-      "versionSource": "roadmap/0.1.0-tama/decisions/2026-09-08-solid2-htmx4-targets.md",
+      "versionSource": null,
       "consumers": [],
-      "uncertainty": "no Verter support claim until the owning expansion trains deliver the authored integration"
+      "uncertainty": "no Verter support claim until the owning expansion trains deliver the authored integration",
+      "provenance": "tama-dag"
     }
   ]
 }

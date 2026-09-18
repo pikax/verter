@@ -1,12 +1,16 @@
 # ARH0 evidence cases
 
+The sole owning interface is `node tests/architecture-health/ARH0/verify.mjs` (verify) plus `node --test tests/architecture-health/ARH0/arh0.test.mjs` (dirty twins), wired into `test:scripts`. The program DAG is database-owned by the TAMA controller, so nothing here reads a DAG copy from this tree: owner ids are checked structurally (dotted lowercase train ids, uppercase node ids) and rows whose path fields bind TAMA-database DAG records instead of repo tree paths declare `provenance: "tama-dag"` with a null path.
+
 ## ARH0-ratification (accept)
 
-Clean products validate: inventory totals equal row sums, all module/consumer/candidate paths exist on the candidate tree, every owner resolves to a repo-authority train (charters dir) or DAG node id or an explicitly annotated planAuthorityGap id, and each implemented capability pin appears verbatim in its pinned source file.
+Clean products validate: inventory totals equal row sums, all module/consumer/candidate paths that name repo tree paths exist on the candidate tree (tama-dag rows bind database records instead), and each implemented capability pin appears verbatim in its pinned source file.
 
-## ARH0-authority (reject)
+## ARH0-ratification (reject)
 
-- `stale-gap-annotation`: a planAuthorityGap id that has appeared in repo authority since recording.
+- `manifest-case-drift`: the manifest records a case the verifier does not implement, drops one it does, or lists a case without disposition reject and the `clean products` accept twin (dirty twins add `ARH0-phantom` and drop `ARH0-god-evidence`). The manifest cannot claim checks that do not run.
+- `manifest-product-drift`: a carried product schema missing from the manifest's products list, or a recorded product no file carries.
+- `manifest-command-drift`: the manifest verify/test command does not name an on-disk script (dirty twin points verify at an absent file).
 
 ## ARH0-inventory (reject)
 
@@ -15,7 +19,7 @@ Clean products validate: inventory totals equal row sums, all module/consumer/ca
 
 ## ARH0-ownership (reject)
 
-- `unknown-owner`: train without charters dir and without gap annotation (dirty twin invents `expansion.nope` for `crates/verter_parser`).
+- `malformed-owner`: owner id outside the structural discipline — a train id without a dot, or a lowercase node id (dirty twins invent `expansion` and `simp99` for `crates/verter_parser`). Resolving ids against the real DAG is the TAMA controller's job; this tree holds no copy.
 - `duplicate-module`, `owner-without-responsibility`: structural discipline of the map.
 - `inventory-module-unowned`: an inventory crate/package in neither `owners` nor `debt-register.candidatePath` (silent absorption; dirty twin drops the `crates/verter_parser` owner row).
 - `workspace-package-unowned`: a literal `pnpm-workspace.yaml` package entry outside the inventoried `packages/` globs (e.g. `docs`) in neither `owners` nor `debt-register.candidatePath`; the join reads the live workspace definition (dirty twin drops the `docs` owner row).
@@ -29,9 +33,11 @@ Clean products validate: inventory totals equal row sums, all module/consumer/ca
 ## ARH0-capability (reject)
 
 - `version-not-pinned-in-source`: fabricated `5.99.0` Svelte pin that does not appear in `package.json`.
-- `implemented-without-consumers`, `planned-without-uncertainty`, `missing-consumer`, `missing-version-source`: no support claim without named consumers; required-planned rows must state uncertainty and have no live consumers.
+- `implemented-without-consumers`, `planned-without-uncertainty`, `missing-consumer`: no support claim without named consumers; required-planned rows must state uncertainty and have no live consumers.
+- `missing-version-source`: a versionSource that is not a repo tree path and not marked `provenance: "tama-dag"` (the solid-2/htmx-4 target rows bind the TAMA-database target decision; an implemented pin may never use the tama-dag binding).
 
 ## ARH0-debt (reject)
 
-- `unknown-disposition-owner`: disposition owner `SIMP99` outside authority and gap list.
-- `debt-without-disposition`, `missing-candidate-path`: every debt row carries a concrete path and a disposition.
+- `malformed-disposition-owner`: disposition owner outside the structural id discipline (dirty twin uses `simp99`).
+- `debt-without-disposition`: every debt row carries a disposition.
+- `missing-candidate-path`: a candidatePath that is not a repo tree path and not marked `provenance: "tama-dag"` (the rev11 retirement-block row binds the TAMA-database simplification contract).

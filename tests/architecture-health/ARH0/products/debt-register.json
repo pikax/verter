@@ -3,7 +3,7 @@
   "version": 1,
   "contractNode": "ARH0",
   "candidate": "f69c7eee7aba2b1a260cc4d85a282bbedbbde349",
-  "emptyDeletionSetRationale": "ARH0 is a genuinely additive inventory boundary: it introduces no new API and supersedes no current route, so its own deletion set is empty; every other row binds an existing candidate to its already-named disposition owner.",
+  "emptyDeletionSetRationale": "ARH0 is a genuinely additive inventory boundary: it introduces no new API and supersedes no current route, so its own deletion set is empty; every other row binds an existing candidate (a repo tree path, or a TAMA-database DAG record via provenance \"tama-dag\") to its already-named disposition owner.",
   "rows": [
     {
       "id": "ARH0-DEBT-1",
@@ -17,8 +17,9 @@
     {
       "id": "ARH0-DEBT-2",
       "candidate": "rev11.simplification retirement blocks SIMP3-SIMP6, SIMP8-SIMP15",
-      "candidatePath": "roadmap/0.1.0-tama/contracts/codebase-simplification.md",
-      "evidence": "codebase-simplification contract; SIMP1/SIMP2/SIMP7 already delivered per the trusted ledger",
+      "provenance": "tama-dag",
+      "candidatePath": null,
+      "evidence": "the codebase-simplification contract is a TAMA-database DAG record; SIMP1/SIMP2/SIMP7 already delivered per the trusted ledger",
       "disposition": "execute under their own nodes; ARH0 does not pre-delete any population",
       "owner": { "id": "SIMP3", "kind": "node" },
       "coOwners": ["SIMP4", "SIMP5", "SIMP6", "SIMP8", "SIMP9", "SIMP10", "SIMP11", "SIMP12", "SIMP13", "SIMP14", "SIMP15"],
