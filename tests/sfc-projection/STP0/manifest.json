@@ -1,0 +1,48 @@
+{
+  "node": "STP0",
+  "kind": "lock",
+  "products": [
+    "ProjectionPolicy v1",
+    "CurrentFeatureObligation schema",
+    "InferenceParticipation policy",
+    "ProjectionOwnershipMap"
+  ],
+  "cases": [
+    {
+      "id": "STP0-authority",
+      "disposition": "reject",
+      "twins": ["clean products", "native-assignability", "second-mapping-owner"]
+    },
+    {
+      "id": "STP0-required-current",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "removed-instancetype",
+        "removed-define-props",
+        "optionalized",
+        "external",
+        "unshipped-external"
+      ]
+    },
+    {
+      "id": "STP0-policy",
+      "disposition": "reject",
+      "twins": ["clean products", "inheritattrs-default-true-split"]
+    },
+    {
+      "id": "STP0-ratification",
+      "disposition": "accept",
+      "twins": [
+        "clean products",
+        "missing-amendment",
+        "docs-only-deletion-owner",
+        "empty-displaced-routes"
+      ]
+    }
+  ],
+  "verify": "node tests/sfc-projection/STP0/verify.mjs",
+  "test": "node --test tests/sfc-projection/STP0/stp0.test.mjs",
+  "runtimeCorrectness": false,
+  "notes": "Seeds only. STP1 expands to executable Vue fixtures. This lock does not assert runtime checking."
+}

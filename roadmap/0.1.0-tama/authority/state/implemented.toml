@@ -194,7 +194,7 @@ schema = 2
 "D9" = { status = "implemented", commit_message = "fix(session): reduce return-position subtype arms and empty-object intersections", commit_date = "2026-09-14T22:45:00+01:00" }
 "DEM0" = { status = "pending" }
 "E1" = { status = "implemented", commit_message = "feat(typeinfo): resolve-symbol graph operation with bounded SemanticTypeGraph export", commit_date = "2026-09-05T01:30:00+01:00" }
-"E2" = { status = "pending" }
+"E2" = { status = "implemented", commit_message = "fix(session): classify Vue named members in node domain without TypeExpr transit", commit_date = "2026-09-18T12:00:00+01:00" }
 "E3" = { status = "pending" }
 "E4" = { status = "pending" }
 "EAK0" = { status = "pending" }
@@ -212,7 +212,7 @@ schema = 2
 "EPR4" = { status = "pending" }
 "EPR5" = { status = "pending" }
 "EPR6" = { status = "pending" }
-"F1" = { status = "pending" }
+"F1" = { status = "implemented", commit_message = "feat(inputs): commit one InputBasis and snapshot fence as input authority", commit_date = "2026-09-18T12:00:00+01:00" }
 "F2" = { status = "pending" }
 "FB0" = { status = "implemented", commit_message = "docs(ci): define non-DAG feedback labels and finding follow-up", commit_date = "2026-08-29T03:45:51+01:00" }
 "FB1" = { status = "implemented", commit_message = "feat(ci): inspect GitHub issues and write local feedback reports", commit_date = "2026-08-29T04:14:40+01:00" }
@@ -410,6 +410,7 @@ schema = 2
 "SST0" = { status = "pending" }
 "SST1" = { status = "pending" }
 "SST2" = { status = "pending" }
+"STP0" = { status = "implemented", commit_message = "docs(compiler): ratify SFC TypeScript projection constitution and current-feature contract", commit_date = "2026-09-18T12:00:00+01:00" }
 "TA1A" = { status = "implemented", commit_message = "feat(session): canonical union and intersection algebra with structural constituent identity", commit_date = "2026-08-31T18:30:00+01:00" }
 "TA1B" = { status = "implemented", commit_message = "feat(session): flip the composite payload opaque and close every construction site", commit_date = "2026-08-31T23:30:00+01:00" }
 "TA2" = { status = "implemented", commit_message = "feat(session): demand-scoped truthiness domain authority consumed by flow", commit_date = "2026-09-01T04:00:00+01:00" }

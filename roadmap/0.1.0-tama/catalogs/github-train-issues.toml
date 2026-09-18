@@ -358,3 +358,12 @@ expected_outcome = "Provider, compiler and semantic code use fewer independently
 acceptance = ["Obsolete source-name, historical-layout and recursive governance checks are retired with their unused infrastructure.","Provider, SSR and semantic duplication is removed through the existing domain owners.","Observable behavior, concurrency, identity, mapping and useful compiler constraints remain covered.","Code, test and comment changes and any measured build/runtime benefits are reported separately."]
 problem_label = "problem:architecture"
 gh_milestone = "0.0.2"
+
+[[train_issue]]
+train = "compiler.sfc-ts-projection"
+title = "Ratify Vue SFC TypeScript projection constitution"
+problem = "Vue TypeScript projection still lacks one constitution for type authority, constructor shape, current-feature obligation, and ownership, which lets later work drop shipped features or invent a second mapping or native type owner."
+expected_outcome = "ProjectionPolicy v1, CurrentFeatureObligation, InferenceParticipation, and ProjectionOwnershipMap lock TypeScript type answers, constructor-shaped exports, RequiredCurrent shipped features, and successor amendments."
+acceptance = ["TypeScript remains the sole published type-answer authority and CodeTransform remains the sole mapping owner.", "Every shipped valid Vue feature including InstanceType stays RequiredCurrent.", "Default inheritAttrs equals explicit true; only false is a runtime distinction.", "Receiving amendments name STP1 through STP59 and STS retirement without reverse edges to TCM4 or BR0."]
+problem_label = "problem:architecture"
+gh_milestone = "0.0.4"

@@ -1,0 +1,168 @@
+{
+  "schema": "ProjectionOwnershipMap",
+  "version": 1,
+  "contractNode": "STP0",
+  "noSixthCompilerAuthority": true,
+  "deletionPopulationThisNode": [],
+  "ac3UntouchedOwners": ["B4R0", "LSO0", "CCA1J", "TCM0R"],
+  "ac3Rationale": "STP0 is a zero-production lock; incremental=fresh and stale/cancelled publication remain with B4R0 lineage, LSO snapshot publication, CCA1J projection route, and TCM0R observation identity.",
+  "ac4UntouchedOwners": ["CCA1J", "CCA1H"],
+  "ac4Rationale": "STP0 does not touch projection hot paths; bounded parse/check/emit stays with the existing ProjectionBackend route (CCA1H/CCA1J).",
+  "ac2Observability": {
+    "diagnostics": "TypeScript diagnostics mapped through existing ProjectionBackend/CodeTransform",
+    "types": "TypeScript type answers; InstanceType<typeof Comp> preserved",
+    "sourceTargets": "B4R0 lineage; no invented locations",
+    "hoverDefinitionReferencesEdits": "LSO participation for touched semantics; STP0 adds no production editor surface"
+  },
+  "outcomes": [
+    {
+      "id": "projection-policy-v1",
+      "kind": "outcome",
+      "currentOwner": "STP0",
+      "finalOwner": "STP0",
+      "receivingAcceptance": "STP0-ratification"
+    },
+    {
+      "id": "current-feature-obligation-schema",
+      "kind": "outcome",
+      "currentOwner": "STP0",
+      "finalOwner": "STP0",
+      "receivingAcceptance": "STP0-required-current"
+    },
+    {
+      "id": "inference-participation-policy",
+      "kind": "outcome",
+      "currentOwner": "STP0",
+      "finalOwner": "STP0",
+      "receivingAcceptance": "STP0-policy"
+    },
+    {
+      "id": "projection-ownership-map",
+      "kind": "outcome",
+      "currentOwner": "STP0",
+      "finalOwner": "STP0",
+      "receivingAcceptance": "STP0-ratification"
+    }
+  ],
+  "consumers": [
+    {
+      "id": "stp1-harness",
+      "kind": "consumer",
+      "currentOwner": "STP0",
+      "finalOwner": "STP1",
+      "receivingAcceptance": "STP1-inventory",
+      "successorPath": ["STP0", "STP1"]
+    },
+    {
+      "id": "vue-ide-projection-route",
+      "kind": "consumer",
+      "currentOwner": "CCA1J",
+      "finalOwner": "CCA1J",
+      "receivingAcceptance": "CCA1J"
+    },
+    {
+      "id": "typescript-type-answers",
+      "kind": "consumer",
+      "currentOwner": "TCM0R",
+      "finalOwner": "TCM0R",
+      "receivingAcceptance": "TCM0R-AC2"
+    },
+    {
+      "id": "lso-publication-edits",
+      "kind": "consumer",
+      "currentOwner": "LSO0",
+      "finalOwner": "LSO0",
+      "receivingAcceptance": "LSO0"
+    }
+  ],
+  "displacedRoutes": [
+    {
+      "id": "vue-legacy-projection-route",
+      "kind": "displaced-route",
+      "currentOwner": "CCA1H",
+      "finalOwner": "STP58",
+      "deletionOwner": "STP58",
+      "receivingAcceptance": "STP58-retired-authority",
+      "successorPath": ["STP0", "STP1", "STP8", "STP16", "STP52", "STP58"],
+      "retiredByThisNode": false
+    },
+    {
+      "id": "svelte-legacy-projection-route",
+      "kind": "displaced-route",
+      "currentOwner": "CCA1I",
+      "finalOwner": "STS15",
+      "deletionOwner": "STS15",
+      "receivingAcceptance": "STS15",
+      "successorPath": ["STP0", "STP8", "STS0", "STS15"],
+      "retiredByThisNode": false
+    }
+  ],
+  "receivingAmendments": [
+    {
+      "id": "STP0-A-inventory",
+      "receiver": "STP1",
+      "receivingAcceptance": "STP1-inventory",
+      "productionCapable": true
+    },
+    {
+      "id": "STP0-A-abi",
+      "receiver": "STP8",
+      "receivingAcceptance": "STP8-complete-evidence",
+      "productionCapable": false
+    },
+    {
+      "id": "STP0-A-plan",
+      "receiver": "STP9",
+      "receivingAcceptance": "STP9",
+      "productionCapable": true
+    },
+    {
+      "id": "STP0-A-constructor",
+      "receiver": "STP16",
+      "receivingAcceptance": "STP16-required-api",
+      "productionCapable": true
+    },
+    {
+      "id": "STP0-A-specialization",
+      "receiver": "STP18",
+      "receivingAcceptance": "STP18",
+      "productionCapable": true
+    },
+    {
+      "id": "STP0-A-fallthrough",
+      "receiver": "STP34",
+      "receivingAcceptance": "STP34-inherit-equivalence",
+      "productionCapable": true
+    },
+    {
+      "id": "STP0-A-conformance",
+      "receiver": "STP52",
+      "receivingAcceptance": "STP52",
+      "productionCapable": true
+    },
+    {
+      "id": "STP0-A-vue-retire",
+      "receiver": "STP58",
+      "receivingAcceptance": "STP58-retired-authority",
+      "productionCapable": true
+    },
+    {
+      "id": "STP0-A-vue-terminal",
+      "receiver": "STP59",
+      "receivingAcceptance": "STP59",
+      "productionCapable": true
+    },
+    {
+      "id": "STP0-A-svelte-contract",
+      "receiver": "STS0",
+      "receivingAcceptance": "STS0-policy-lock",
+      "productionCapable": false
+    },
+    {
+      "id": "STP0-A-svelte-retire",
+      "receiver": "STS15",
+      "receivingAcceptance": "STS15",
+      "productionCapable": true
+    }
+  ]
+}
