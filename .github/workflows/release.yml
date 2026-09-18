@@ -161,6 +161,15 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Format
         run: cargo fmt --all -- --check
+      # `packages/native`'s own `pretest` refuses to run without the napi
+      # loader (`dist/index.js`), which only the napi build produces. ci.yml
+      # builds it once in `build-native-node` and hands it to the test jobs as
+      # an artifact; this job is standalone and had no equivalent, so
+      # `pnpm test` died in pretest on v0.0.1-beta.4 before a single JS test
+      # ran. Debug, not release: nothing here ships this binding — the release
+      # artifacts come from the `Build Native` matrix.
+      - name: Build the napi binding the JS tests load
+        run: pnpm --filter @verter/native build:debug
       - name: JS tests
         run: pnpm test
 
