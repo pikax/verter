@@ -305,6 +305,6 @@ description = "Exclusive mutation lease for the JetBrains adapter product surfac
 
 [[domain]]
 id = "semantic_presentation"
-path_roots = ["crates/verter-editor-client/src","packages/playground/src/editor","packages/typescript-plugin/src","packages/vue-vscode/src"]
+path_roots = ["extensions/jetbrains"]
 symbols = ["SemanticPresentation","InlaySurface","CompletionPresentation"]
-description = "Shared lease for how semantic answers are presented in editor clients (labelling, hover, inlay and completion presentation); semantic algorithms stay with their producing owners."
+description = "Exclusive mutation lease for how semantic answers are presented in the JetBrains adapter surface (labelling, hover, inlay and completion presentation); semantic algorithms and the other editor clients stay with their producing owners."
