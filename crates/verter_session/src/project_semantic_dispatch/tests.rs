@@ -25858,6 +25858,7 @@ fn overload_set_key_for(
         type_args: Arc::from(type_args.into_boxed_slice()),
         context: crate::semantic_query::OverloadSetContext {
             resolve_env_hash: env.resolve_env_hash,
+            ..Default::default()
         },
     }
 }

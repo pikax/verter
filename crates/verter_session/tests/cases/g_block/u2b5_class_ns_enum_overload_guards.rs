@@ -223,6 +223,7 @@ fn overload_set_key(callee: SemanticNodeId, resolve_env: u8) -> SemanticQueryKey
         type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: OverloadSetContext {
             resolve_env_hash: hash16(resolve_env),
+            ..Default::default()
         },
     }
 }

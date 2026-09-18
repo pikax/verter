@@ -1011,19 +1011,20 @@ fn relate_maps_to_dedicated_relate_family_not_indexed_access() {
 }
 
 // ---------------------------------------------------------------------------
-// (7) KEYSPACE SIZE DISCIPLINE: the `Relate` payload is BOXED, never embedded
-//     by value. A Rust enum is sized to its largest variant, so embedding the
-//     ~144B `RelateMemoKey` BY VALUE would inflate EVERY entry key of the hot
-//     single-node `FamilyKey → FamilySlots` keyspace — for a variant that is
-//     NEVER admitted in production. `Box<RelateMemoKey>` is 8 bytes, keeping the
-//     enum driven by the legitimately-present env-heavy variants (`FamilyKey` is
-//     136B with the boxed payload — the `Instantiate` variant's env-bearing
-//     `ResolvedDeclSlotIdentity` base carries the exact-owner field, so the
-//     legitimate envelope is 8B wider than the pre-owner-aware 112B). The
-//     boxed `ClassifyBroadRuntime` subject payload obeys the same discipline.
+// (7) KEYSPACE SIZE DISCIPLINE: the `Relate` payload is INTERNED, never
+//     embedded by value. A Rust enum is sized to its largest variant, so
+//     embedding the ~144B `RelateMemoKey` BY VALUE would inflate EVERY entry
+//     key of the hot single-node `FamilyKey → FamilySlots` keyspace — for a
+//     variant that is NEVER admitted in production. `InternedRelateKey` is 16
+//     bytes (id + `Arc`), keeping the enum driven by the legitimately-present
+//     env-heavy variants (`FamilyKey` is 136B with the interned payload — the
+//     `Instantiate` variant's env-bearing `ResolvedDeclSlotIdentity` base
+//     carries the exact-owner field, so the legitimate envelope is 8B wider
+//     than the pre-owner-aware 112B). The boxed `ClassifyBroadRuntime` subject
+//     payload obeys the same compact-handle discipline.
 //     DISCRIMINATES against the inline shape: with `RelateMemoKey` embedded by
 //     value the enum is >= 144B + discriminant (>= 152B) and this bound FAILS;
-//     boxed it is 136B and the bound PASSES.
+//     interned it is 136B and the bound PASSES.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1039,14 +1040,14 @@ fn family_key_does_not_embed_relate_memo_key_by_value() {
     // vue-heritage axes measures exactly 136B. ZERO growth margin is
     // intentional — any new key axis must justify itself here — and the bound
     // stays well BELOW the inline `RelateMemoKey` size (144B) + discriminant.
-    // An inline `Relate` payload pushes the enum past this bound; the boxed
-    // payload stays at it.
+    // An inline `Relate` payload pushes the enum past this bound; the interned
+    // handle stays at it.
     const FAMILY_KEY_KEYSPACE_BOUND: usize = 136;
 
     assert!(
         family_key <= FAMILY_KEY_KEYSPACE_BOUND,
         "FamilyKey is {family_key}B (> {FAMILY_KEY_KEYSPACE_BOUND}B bound): the \
-         Relate payload (RelateMemoKey is {relate_memo}B) must be BOXED, not \
+         Relate payload (RelateMemoKey is {relate_memo}B) must be INTERNED, not \
          embedded by value — an inline payload re-imports the node-memo keyspace \
          inflation the relation memo was separated out to AVOID"
     );

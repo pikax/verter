@@ -46,6 +46,7 @@ use crate::semantic_query::{PathSegment, ProjectionMode, SemanticGraphStats};
 mod arena;
 mod derivation;
 mod family;
+mod family_intern;
 mod family_retention;
 mod flow_return_memo;
 mod hash_cons_memos;
@@ -207,7 +208,7 @@ fn cancelled_cache_read() -> CacheRead<QueryResult<SemanticQueryValue>> {
 /// guard pin that the hot single-node `FamilyKey → FamilySlots` keyspace is NOT
 /// inflated by embedding the ~144B `RelateMemoKey` by value — without exposing
 /// the `pub(super)` `FamilyKey` taxonomy outside the crate. The `Relate` payload
-/// must stay BOXED (see [`family::FamilyKey::Relate`]).
+/// must stay interned (see [`family::FamilyKey::Relate`]).
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 #[must_use]

@@ -39,9 +39,13 @@ pub(crate) enum ResolveCallStep {
 }
 
 enum ResolveCallRootClose {
+    /// A complete selected value plus its SCC-unioned self-roots and
+    /// whether the component's dependency proof is complete (root AND
+    /// every drained call member).
     Complete(
         ResolvedCallResult,
         Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+        bool,
     ),
     /// A complete result whose mixed component consumed UNPROVEN
     /// flow-member values: the value flows to the caller, the build is
@@ -163,6 +167,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
         idx
     }
 
+    /// Close a two-call SCC whose member assumes the root. Discriminates
+    /// component-level proof: a truncated member walk must refuse the root
+    /// even when the root's own walk finished.
+    #[cfg(test)]
+    pub(super) fn close_mutual_call_component_for_tests(
+        &self,
+        root_key: ResolveCallKey,
+        member_key: ResolveCallKey,
+    ) -> (ResolvedCallResult, bool) {
+        let root_idx = self.resolve_call_frame_open(&root_key);
+        let member_idx = self.resolve_call_frame_open(&member_key);
+        self.dispatch_txn
+            .borrow_mut()
+            .obligations
+            .record_assumption(root_idx);
+        let member_outcome = self.run_resolve_call(&member_key);
+        let _ = self.resolve_call_frame_pop(member_idx, member_outcome, false);
+        let root_outcome = self.run_resolve_call(&root_key);
+        match self.resolve_call_frame_pop(root_idx, root_outcome, true) {
+            ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(
+                result,
+                _,
+                proof_complete,
+            )) => (result, proof_complete),
+            ResolveCallFramePop::RootClose(ResolveCallRootClose::CompleteReturnOnly(result)) => {
+                (result, false)
+            }
+            ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(_))
+            | ResolveCallFramePop::Provisional(_) => {
+                panic!("mutual call component must close with a selected value")
+            }
+        }
+    }
+
     fn execute_resolve_call_inline(&self, key: ResolveCallKey) -> ResolveCallStep {
         let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
         if initial_trip.is_some() {
@@ -172,7 +210,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let outcome = self.run_resolve_call(&key);
         match self.resolve_call_frame_pop(idx, outcome, false) {
             ResolveCallFramePop::Provisional(step) => step,
-            ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, _))
+            ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, _, _))
             | ResolveCallFramePop::RootClose(ResolveCallRootClose::CompleteReturnOnly(result)) => {
                 ResolveCallStep::Complete(result)
             }
@@ -228,11 +266,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         #[cfg(any(test, feature = "test-support"))]
         self.inject_unproven_flow_member_for_tests(idx);
         match self.resolve_call_frame_pop(idx, outcome, true) {
-            ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, self_roots)) => {
-                // A rootless winner has no stable occurrence to key a
-                // shared entry on: the caller still receives the result,
-                // but the family memo refuses it.
-                let admits = crate::semantic_query::AdmissibleCallResult::admits(&result);
+            ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(
+                result,
+                self_roots,
+                proof_complete,
+            )) => {
+                // Origin is provenance. An empty/incomplete self-root proof
+                // stays transaction-local; a complete proof admits.
+                let admits =
+                    crate::semantic_query::AdmissibleCallResult::admits(&result, proof_complete);
                 let mut output = QueryBuildOutput::from((
                     QueryResult::Value(SemanticQueryValue::ResolveCall(Arc::new(result))),
                     fence,
@@ -294,8 +336,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             CallArgKey::Eager { ty, .. } => Some(*ty),
             CallArgKey::ProgramExpression { .. } => None,
         }));
-        let mut self_roots = self.observed_self_roots_from_nodes(observed_nodes);
-        if let Some(serve) = self
+        let mut self_roots = self.observed_self_roots_from_nodes(observed_nodes.iter().copied());
+        let walk_complete = match self.transitive_self_roots_from_nodes(observed_nodes) {
+            Ok(transitive) => {
+                for root in transitive {
+                    if !self_roots.iter().any(|(c, h)| *c == root.0 && *h == root.1) {
+                        self_roots.push(root);
+                    }
+                }
+                true
+            }
+            Err(_) => false,
+        };
+        let site_rooted = if let Some(serve) = self
             .ctx
             .ensure_indexed_ready_serve(key.point.canonical_id.as_ref())
         {
@@ -308,7 +361,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     serve.indexed.whole_hash,
                 ));
             }
-        }
+            true
+        } else {
+            false
+        };
         ResolveCallPendingState {
             selection,
             concrete_seeds,
@@ -317,6 +373,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             replay_applicability,
             inline_flight: None,
             self_roots,
+            proof_complete: walk_complete && site_rooted,
         }
     }
 
@@ -663,6 +720,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let root_result =
             root_result.expect("the call-root close always solves its own root equation");
+        // A truncated member walk can leave `root.proof_complete` true
+        // while a drained nested call omitted dependency roots. The
+        // component is complete only when every member finished its walk.
+        let component_proof_complete = root.proof_complete
+            && call_results
+                .iter()
+                .all(|(_, state, _)| state.proof_complete);
 
         let cyclic = self_cycle
             || !relation_members.is_empty()
@@ -752,10 +816,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         if !machinery_root {
-            // A rootless winner has no stable occurrence to key a shared
-            // entry on: it stays transaction-local, so its inline flight
-            // is released instead of queued for publication.
-            match crate::semantic_query::AdmissibleCallResult::new(root_result.clone()) {
+            // Incomplete proof stays transaction-local (no shared entry).
+            // Origin is provenance and is not consulted here.
+            match crate::semantic_query::AdmissibleCallResult::new(
+                root_result.clone(),
+                component_proof_complete,
+            ) {
                 Some(result) => self.dispatch_txn.borrow_mut().call.completed_members.push(
                     CompletedResolveCallMember {
                         key: root_key,
@@ -764,13 +830,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self_roots: root.self_roots,
                     },
                 ),
-                None => self.resolve_call_abort_inline_flight(root.inline_flight.as_ref()),
+                _ => {
+                    // Incomplete proof stays transaction-local. The value
+                    // still flows through `Complete`, so the enclosing
+                    // build/request must take the same non-admission rails
+                    // a machinery-root `cache_suppress` would set.
+                    self.fold_into_top_build_local_taint(false, true);
+                    self.resolve_call_abort_inline_flight(root.inline_flight.as_ref());
+                }
             }
         }
         if machinery_root {
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(
                 root_result,
                 scc_self_roots,
+                component_proof_complete,
             ))
         } else {
             ResolveCallFramePop::Provisional(ResolveCallStep::Complete(root_result))
@@ -917,6 +991,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         state.self_roots.push(root.clone());
                     }
                 }
+                state.proof_complete &= previous.proof_complete;
                 verter_debug_assert_eq!(idx, self.dispatch_txn.borrow().reentry().depth());
                 Ok(state)
             }
@@ -1268,6 +1343,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut merged_replay = false;
         let mut merged_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
             Vec::new();
+        let mut arm_proofs_complete = true;
         for state in arm_states.into_iter().flatten() {
             let ResolveCallPendingState {
                 selection,
@@ -1277,6 +1353,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 replay_applicability,
                 inline_flight: _,
                 self_roots,
+                proof_complete,
             } = state;
             // Per-arm candidate sessions are per-winner scratch: the arm's
             // substitution is already extracted onto its selection, and the
@@ -1286,6 +1363,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.abandon_session(session);
             }
             merged_replay |= replay_applicability;
+            arm_proofs_complete &= proof_complete;
             merged_seeds.extend(concrete_seeds);
             merged_holds.extend(holds);
             union_self_roots(&mut merged_self_roots, &self_roots);
@@ -1327,6 +1405,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             merged_replay,
         );
         union_self_roots(&mut merged.self_roots, &merged_self_roots);
+        merged.proof_complete &= arm_proofs_complete;
         CandidateVerdict::Selected(merged)
     }
 
@@ -1340,7 +1419,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .execute_via_cold_build_helper(SemanticQueryKey::ResolveOverloadSet {
                 callee,
                 type_args: Arc::clone(type_args),
-                context: crate::semantic_query::OverloadSetContext { resolve_env_hash },
+                context: crate::semantic_query::OverloadSetContext {
+                    resolve_env_hash,
+                    ..Default::default()
+                },
             })
             .value
         {

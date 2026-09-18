@@ -149,6 +149,7 @@ fn call_candidates(
             type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: crate::semantic_query::OverloadSetContext {
                 resolve_env_hash: env.resolve_env_hash,
+                ..Default::default()
             },
         },
     ) {

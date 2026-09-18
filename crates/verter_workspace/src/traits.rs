@@ -1058,6 +1058,26 @@ pub trait WorkspaceAccess: WorkspaceRead {
         None
     }
 
+    /// The EFFECTIVE type-semantic compiler options of a published project
+    /// (`strict` family, exact optionality, lib selection, target) — the
+    /// values `type_env_hash` / `lib_env_hash` were composed from, so the
+    /// checker branches on exactly the configuration its cache keys carry.
+    ///
+    /// Returns `None` when `project_id` is not present in the currently
+    /// published snapshot. A fallback (tsconfig-less) project reports the
+    /// TypeScript defaults. Callers fall back to
+    /// [`SemanticCompilerOptions::default`] for canonicals with no owning
+    /// project.
+    ///
+    /// Default body returns `None` — concrete workspaces override to read
+    /// from their published snapshot.
+    fn semantic_compiler_options_for_project(
+        &self,
+        _project_id: ProjectId,
+    ) -> Option<verter_semantic::resolver_core::SemanticCompilerOptions> {
+        None
+    }
+
     /// Workspace-wide default env-hash array for canonicals with no
     /// owning project (e.g., cross-project sweeps over scratch / ambient
     /// canonicals).

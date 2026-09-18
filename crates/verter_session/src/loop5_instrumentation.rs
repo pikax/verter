@@ -949,6 +949,7 @@ mod tests {
             type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: crate::semantic_query::OverloadSetContext {
                 resolve_env_hash: Default::default(),
+                ..Default::default()
             },
         };
         let broad_runtime = SemanticQueryKey::ClassifyBroadRuntime {

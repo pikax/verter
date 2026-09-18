@@ -93,11 +93,16 @@ impl InferenceOccurrence {
     };
 }
 
-/// Normalized typed strict-family configuration threaded into the
-/// transaction (RI-10): the reducer BRANCHES on it, and it folds into the
-/// relation key's `type_env_hash` so a strict-on judgement can never
-/// warm-hit a strict-off request (design obligation 3 — behavioral branch
-/// AND key isolation, never hash-only).
+/// The typed strict-family configuration the relation reducer BRANCHES on,
+/// derived from the effective tsconfig options of the project the request
+/// is checking for ([`StrictFamilyConfig::from_options`]).
+///
+/// Key isolation is NOT this struct's job: the same effective options are
+/// what the owning project's `type_env_hash` folds, so the relation key
+/// already separates a strict-on judgement from a strict-off request by
+/// carrying that project's `T` dimension. The reducer snapshots this value
+/// at every relation root so the behavioral branch and the key it ran under
+/// can never diverge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct StrictFamilyConfig {
     /// `strictNullChecks`: when OFF, `null` / `undefined` are assignable to
@@ -109,19 +114,33 @@ pub(crate) struct StrictFamilyConfig {
     pub(crate) strict_function_types: bool,
     /// `exactOptionalPropertyTypes`: when ON, an authored optional write
     /// keeps its explicit `undefined` in the present value (Disabled drops
-    /// it). Not part of the `strict` family — threaded along the same host
-    /// knob so every consumer reads one configuration.
+    /// it). Not part of the `strict` family — read from the same effective
+    /// option set so every consumer reads one configuration.
     pub(crate) exact_optional_property_types: bool,
 }
 
 impl StrictFamilyConfig {
-    /// The default regime — matches the pre-activation engine's behavior
-    /// (null/undefined isolated; contravariant function parameters).
+    /// TypeScript's default regime (`strict` ON, exact optionality OFF) —
+    /// the configuration of a project that declares nothing, and the
+    /// fallback the reducer branches on before any relation root has
+    /// snapshotted the request's configuration.
     pub(crate) const TS_STRICT: Self = Self {
         strict_null_checks: true,
         strict_function_types: true,
         exact_optional_property_types: false,
     };
+
+    /// Project the reducer-relevant members out of a project's effective
+    /// option set.
+    pub(crate) fn from_options(
+        options: &verter_semantic::resolver_core::SemanticCompilerOptions,
+    ) -> Self {
+        Self {
+            strict_null_checks: options.strict_null_checks,
+            strict_function_types: options.strict_function_types,
+            exact_optional_property_types: options.exact_optional_property_types,
+        }
+    }
 
     /// The parameter-variance regime this configuration selects — folded
     /// into the key's [`crate::semantic_query::RelationPolicy`] so the
@@ -133,26 +152,25 @@ impl StrictFamilyConfig {
             VariancePolicy::MethodParameterBivariance
         }
     }
+}
 
-    /// Fold the strict family into a base `type_env_hash` (the `T`
-    /// dimension of the relation key's env, R21 split). Deterministic,
-    /// injective over the four configurations, and deliberately NOT the
-    /// identity fold for any non-default configuration so strict-on and
-    /// strict-off relations occupy distinct slots.
-    pub(crate) fn mix_into_type_env_hash(self, base: [u8; 16]) -> [u8; 16] {
-        if self == Self::TS_STRICT {
-            return base;
-        }
-        let mut out = base;
-        // Domain-separate marker byte plus the two config bits, mixed into
-        // every lane so any base hash stays collision-free per config.
-        let marker: u8 =
-            0x5C ^ (self.strict_null_checks as u8) ^ ((self.strict_function_types as u8) << 1);
-        for (i, b) in out.iter_mut().enumerate() {
-            *b = b.wrapping_add(marker.rotate_left(i as u32));
-        }
-        out
-    }
+/// The environment one dispatch runs its relation judgements under: the
+/// `R/T/L/J` dimensions and the strict-family configuration of the project
+/// owning the REQUEST's canonical (the program doing the checking, as in
+/// TypeScript, where strictness is a program-wide option — never the file a
+/// related node happens to be declared in).
+///
+/// Derived once per dispatch ([`super::ProjectSemanticDispatch::relation_environment`])
+/// from the same published project tables the env hashes were composed
+/// from, so the key's `T` and the reducer's branch are two projections of
+/// ONE option set. A dispatch running outside any request context (no
+/// canonical to own it) runs the workspace default: TypeScript's default
+/// options under the workspace-default env.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RelationEnvironment {
+    pub(crate) env: crate::session_view::EnvHashes,
+    pub(crate) project_identity: crate::semantic_query::HashValue,
+    pub(crate) strict: StrictFamilyConfig,
 }
 
 /// The engine-internal step result of one [`super::relation`] authority
@@ -821,6 +839,9 @@ pub(crate) struct ResolveCallPendingState {
     pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineResolveCallFlight>,
     /// The call site's own file roots.
     pub(crate) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    /// `true` when the call-site file is servable and the transitive
+    /// self-root walk finished. Incomplete proofs stay transaction-local.
+    pub(crate) proof_complete: bool,
 }
 
 /// The domain deferral payload of a popped member.

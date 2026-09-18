@@ -83,7 +83,7 @@ impl SemanticGraphStore {
         key: &crate::semantic_query::ResolveCallKey,
     ) -> Option<crate::semantic_query::ResolvedCallResult> {
         let family = FamilyKey::ResolveCall {
-            key: Box::new(key.clone()),
+            key: super::family_intern::InternedResolveCallKey::intern(key.clone()),
         };
         let snapshot: CandidateList = {
             let entries = self.entries_lock_diagnosed();

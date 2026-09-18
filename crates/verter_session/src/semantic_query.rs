@@ -70,6 +70,22 @@ pub mod display;
 /// generator binary writes and the diff-test re-checks. See the module for the
 /// generator-is-sole-writer contract.
 pub mod query_key_spec;
+pub mod semantic_context;
+pub use semantic_context::{
+    project_order_domain, project_union_order, IntersectionPoliciesByPurpose, OrderDomainId,
+    SemanticContext, SemanticContextId, SemanticOrderPolicyId, SemanticPolicySet,
+    SemanticPolicySetId, SemanticUnionMembersKey,
+};
+pub mod outcome;
+pub use outcome::{
+    DependencyProofId, DiagnosticRecipeSetId, IncompleteReason, OutcomeEvidence, OutcomeEvidenceId,
+    QueryOutcome, Ready, RecoveryProvenanceId, CONTEXT_FREE_EVIDENCE, EMPTY_DIAGNOSTICS,
+    EMPTY_PROOF, NO_RECOVERY,
+};
+#[cfg(test)]
+mod outcome_tests;
+#[cfg(test)]
+mod semantic_context_tests;
 
 /// Selector-aware projection facts for authored object-spread programs.
 ///
@@ -1907,9 +1923,9 @@ pub struct SignatureOccurrenceIdentity {
 /// content-free [`Authored`](Self::Authored) origin. A callable type with
 /// NO authored position at all — an inline function value, a
 /// function-typed parameter / local annotation, an object-type call
-/// signature — is genuinely [`Rootless`](Self::Rootless): it has no stable
-/// identity to key on, so its results stay transaction-local and
-/// `ReturnOnly`, and it is never compared as if it had an occurrence.
+/// signature — is [`Rootless`](Self::Rootless) as PROVENANCE. Admission is
+/// the dependency-proof oracle, not this origin: a complete self-root
+/// proof admits; an incomplete or empty proof stays transaction-local.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SignatureCandidateOrigin {
     /// A content-free authored origin.
@@ -2018,34 +2034,34 @@ pub struct ResolvedUnionArm {
 
 /// A [`ResolvedCallResult`] that MAY be admitted to a shared cache.
 ///
-/// Admission requires a stable identity across transactions, which only a
-/// content-free authored occurrence supplies. A winner with no authored
-/// origin is genuinely rootless: it cannot be constructed here, so a
-/// rootless result is structurally unable to reach a shared-cache write
-/// and stays transaction-local.
+/// Admission is the dependency-proof oracle, not the winner's
+/// [`SignatureCandidateOrigin`]: a complete selected / union / dynamic
+/// result whose call-site serve root exists and whose transitive self-root
+/// walk finished is a candidate for publication. An empty or incomplete
+/// self-root proof stays transaction-local. Origin `Rootless` is provenance
+/// on the result, never this gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissibleCallResult(ResolvedCallResult);
 
 impl AdmissibleCallResult {
-    /// `None` when the winner is rootless.
+    /// `None` when `result` is not a complete selected value or its
+    /// dependency proof is incomplete.
     #[must_use]
-    pub fn new(result: ResolvedCallResult) -> Option<Self> {
-        Self::admits(&result).then_some(Self(result))
+    pub fn new(result: ResolvedCallResult, proof_complete: bool) -> Option<Self> {
+        Self::admits(&result, proof_complete).then_some(Self(result))
     }
 
-    /// Whether `result` may be admitted to a shared cache. A union win is
-    /// admissible only when EVERY arm's winner is authored.
+    /// Whether `result` is a complete call value whose dependency proof
+    /// is complete. Origin is not consulted.
     #[must_use]
-    pub fn admits(result: &ResolvedCallResult) -> bool {
+    pub fn admits(result: &ResolvedCallResult, proof_complete: bool) -> bool {
+        if !proof_complete {
+            return false;
+        }
         match result {
-            ResolvedCallResult::Selected {
-                selected: SignatureCandidateOrigin::Rootless,
-                ..
-            } => false,
-            ResolvedCallResult::UnionSelected { selections, .. } => selections
-                .iter()
-                .all(|arm| arm.selected.authored().is_some()),
-            ResolvedCallResult::Selected { .. } | ResolvedCallResult::DynamicAny { .. } => true,
+            ResolvedCallResult::Selected { .. }
+            | ResolvedCallResult::UnionSelected { .. }
+            | ResolvedCallResult::DynamicAny { .. } => true,
         }
     }
 
@@ -6487,10 +6503,13 @@ pub struct EnumContext {
 /// lowering resolves imported parameter / return references. The
 /// substitution axis is carried by the key's `type_args` field. NO
 /// `parse_env`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct OverloadSetContext {
     /// Import / name-resolution dimension (`R`).
     pub resolve_env_hash: HashValue,
+    /// Context-owned semantic policy set. Changing it changes this set's
+    /// identity; a formatting-only change does not.
+    pub policy_set: SemanticPolicySetId,
 }
 
 /// Environment a modeless broad-runtime classification depends on.
@@ -6901,6 +6920,9 @@ pub struct RelationPolicy {
     /// Variance regime — including the method-parameter bivariance quirk
     /// (§4.0:1176-1182).
     pub variance: VariancePolicy,
+    /// Context-owned semantic policy set. Changing it changes the identity
+    /// of a resident `Relate` parent; a formatting-only change does not.
+    pub policy_set: SemanticPolicySetId,
 }
 
 /// How an overloaded callee's signatures are selected during a relation
@@ -8349,7 +8371,7 @@ impl SemanticQueryKeyTag {
     /// nested `execute_read` sub-dispatches are recorded too) ORs
     /// `1 << bit_index()` into a `u32` mask surfaced on
     /// [`verter_audit::TypeResolutionPayload::semantic_query_dispatch_mask`];
-    /// `ALL.len()` is 28 (≤ 32) so the mask never overflows `u32`.
+    /// `ALL.len()` is 30 (≤ 32) so the mask never overflows `u32`.
     #[must_use]
     pub fn bit_index(self) -> u32 {
         Self::ALL

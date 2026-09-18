@@ -9,6 +9,7 @@ use crate::traits::WorkspaceRead;
 use crate::ProjectMembership;
 use verter_semantic::resolver_core::{
     join_paths, normalize_canonical_id, parent_dir, IdeProjectCompilerOptions,
+    RawSemanticCompilerOptions,
 };
 
 /// Maximum depth for tsconfig `extends` chain resolution.
@@ -366,18 +367,82 @@ pub fn parse_tsconfig_json(ws: &dyn WorkspaceRead, tsconfig_path: &str) -> Optio
 }
 
 /// Load compiler options from a tsconfig.json, following `extends`.
+///
+/// The type-semantic options (`strict` family, `exactOptionalPropertyTypes`,
+/// `noUncheckedIndexedAccess`, `noLib`, `lib`, `target`) are gathered as
+/// DECLARED spellings across the whole chain first (leaf over ancestors,
+/// last-wins per key) and canonicalised into the effective
+/// [`SemanticCompilerOptions`] exactly once here — so an umbrella `strict`
+/// inherited from a base and a member spelled explicitly on the leaf go
+/// through one rule set, and two configs with the same effective values are
+/// equal however they spelled them.
 pub fn load_compiler_options(
     ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
 ) -> IdeProjectCompilerOptions {
-    load_compiler_options_inner(ws, tsconfig_path, 0).unwrap_or_default()
+    let LoadedCompilerOptions {
+        mut options,
+        semantic,
+        ..
+    } = load_compiler_options_inner(ws, tsconfig_path, 0).unwrap_or_default();
+    options.semantic = semantic.effective();
+    options
+}
+
+/// The `extends`-recursion carrier: the resolution-facing options merged so
+/// far plus the raw (spelling-level, `Option`-per-key) semantic layer that
+/// [`load_compiler_options`] canonicalises after the whole chain is read.
+///
+/// Declared flags keep array-`extends` overlay last-wins-per-key: a later
+/// base that never mentioned `allowJs` must not reset an earlier `true`
+/// to the `IdeProjectCompilerOptions` default.
+#[derive(Default)]
+struct LoadedCompilerOptions {
+    options: IdeProjectCompilerOptions,
+    semantic: RawSemanticCompilerOptions,
+    paths_declared: bool,
+    allow_js_declared: bool,
+    check_js_declared: bool,
+    allow_importing_ts_extensions_declared: bool,
+    disable_solution_searching_declared: bool,
+}
+
+fn overlay_loaded_compiler_options(
+    mut earlier: LoadedCompilerOptions,
+    later: LoadedCompilerOptions,
+) -> LoadedCompilerOptions {
+    earlier.semantic.layer(later.semantic);
+    if later.options.base_url.is_some() {
+        earlier.options.base_url = later.options.base_url;
+    }
+    if later.paths_declared {
+        earlier.options.paths = later.options.paths;
+        earlier.paths_declared = true;
+    }
+    if later.allow_js_declared {
+        earlier.options.allow_js = later.options.allow_js;
+        earlier.allow_js_declared = true;
+    }
+    if later.check_js_declared {
+        earlier.options.check_js = later.options.check_js;
+        earlier.check_js_declared = true;
+    }
+    if later.allow_importing_ts_extensions_declared {
+        earlier.options.allow_importing_ts_extensions = later.options.allow_importing_ts_extensions;
+        earlier.allow_importing_ts_extensions_declared = true;
+    }
+    if later.disable_solution_searching_declared {
+        earlier.options.disable_solution_searching = later.options.disable_solution_searching;
+        earlier.disable_solution_searching_declared = true;
+    }
+    earlier
 }
 
 fn load_compiler_options_inner(
     ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
     depth: u8,
-) -> Option<IdeProjectCompilerOptions> {
+) -> Option<LoadedCompilerOptions> {
     if depth > MAX_TSCONFIG_EXTENDS_DEPTH {
         return None;
     }
@@ -387,17 +452,32 @@ fn load_compiler_options_inner(
     let cleaned = strip_json_comments(&content);
     let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
 
-    let inherited = json
-        .get("extends")
-        .and_then(|value| value.as_str())
-        .and_then(|extends| resolve_tsconfig_extends(ws, &tsconfig_dir, extends))
-        .and_then(|base_path| load_compiler_options_inner(ws, &base_path, depth + 1))
-        .unwrap_or_default();
+    let inherited = load_inherited_compiler_options(ws, &tsconfig_dir, &json, depth);
 
-    let mut compiler_options = inherited;
+    let LoadedCompilerOptions {
+        options: mut compiler_options,
+        semantic: mut raw_semantic,
+        mut paths_declared,
+        mut allow_js_declared,
+        mut check_js_declared,
+        mut allow_importing_ts_extensions_declared,
+        mut disable_solution_searching_declared,
+    } = inherited;
     let Some(raw_compiler_options) = json.get("compilerOptions") else {
-        return Some(compiler_options);
+        return Some(LoadedCompilerOptions {
+            options: compiler_options,
+            semantic: raw_semantic,
+            paths_declared,
+            allow_js_declared,
+            check_js_declared,
+            allow_importing_ts_extensions_declared,
+            disable_solution_searching_declared,
+        });
     };
+
+    // Type-semantic options: this config's DECLARED keys layer over the
+    // inherited raw layer; canonicalisation waits for the chain end.
+    raw_semantic.layer(read_raw_semantic_options(raw_compiler_options));
 
     if let Some(base_url) = raw_compiler_options
         .get("baseUrl")
@@ -414,12 +494,14 @@ fn load_compiler_options_inner(
         .and_then(serde_json::Value::as_bool)
     {
         compiler_options.allow_js = allow_js;
+        allow_js_declared = true;
     }
     if let Some(check_js) = raw_compiler_options
         .get("checkJs")
         .and_then(serde_json::Value::as_bool)
     {
         compiler_options.check_js = check_js;
+        check_js_declared = true;
     }
 
     if let Some(allow_importing_ts_extensions) = raw_compiler_options
@@ -427,6 +509,7 @@ fn load_compiler_options_inner(
         .and_then(serde_json::Value::as_bool)
     {
         compiler_options.allow_importing_ts_extensions = allow_importing_ts_extensions;
+        allow_importing_ts_extensions_declared = true;
     }
 
     // `disableSolutionSearching` stops default-project selection from climbing a
@@ -437,6 +520,7 @@ fn load_compiler_options_inner(
         .and_then(serde_json::Value::as_bool)
     {
         compiler_options.disable_solution_searching = disable_solution_searching;
+        disable_solution_searching_declared = true;
     }
 
     if let Some(paths) = raw_compiler_options
@@ -460,9 +544,61 @@ fn load_compiler_options_inner(
                 (pattern.clone(), targets)
             })
             .collect();
+        paths_declared = true;
     }
 
-    Some(compiler_options)
+    Some(LoadedCompilerOptions {
+        options: compiler_options,
+        semantic: raw_semantic,
+        paths_declared,
+        allow_js_declared,
+        check_js_declared,
+        allow_importing_ts_extensions_declared,
+        disable_solution_searching_declared,
+    })
+}
+
+/// Read the type-semantic keys ONE `compilerOptions` object declares, as
+/// raw spellings (`None` per absent key). Booleans are taken only when the
+/// JSON value is a boolean, `lib` only when it is an array (its string
+/// entries), `target` only when it is a string — a malformed value reads as
+/// undeclared, exactly like the other keys this loader consumes.
+fn read_raw_semantic_options(
+    raw_compiler_options: &serde_json::Value,
+) -> RawSemanticCompilerOptions {
+    let flag = |key: &str| {
+        raw_compiler_options
+            .get(key)
+            .and_then(serde_json::Value::as_bool)
+    };
+    RawSemanticCompilerOptions {
+        strict: flag("strict"),
+        strict_null_checks: flag("strictNullChecks"),
+        strict_function_types: flag("strictFunctionTypes"),
+        strict_bind_call_apply: flag("strictBindCallApply"),
+        strict_property_initialization: flag("strictPropertyInitialization"),
+        no_implicit_any: flag("noImplicitAny"),
+        no_implicit_this: flag("noImplicitThis"),
+        use_unknown_in_catch_variables: flag("useUnknownInCatchVariables"),
+        always_strict: flag("alwaysStrict"),
+        exact_optional_property_types: flag("exactOptionalPropertyTypes"),
+        no_unchecked_indexed_access: flag("noUncheckedIndexedAccess"),
+        no_lib: flag("noLib"),
+        lib: raw_compiler_options
+            .get("lib")
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            }),
+        target: raw_compiler_options
+            .get("target")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    }
 }
 
 /// Load project membership (files/include/exclude) from a tsconfig.json.
@@ -568,12 +704,7 @@ fn load_project_membership_inner(
     let cleaned = strip_json_comments(&content);
     let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
 
-    let inherited = json
-        .get("extends")
-        .and_then(|value| value.as_str())
-        .and_then(|extends| resolve_tsconfig_extends(ws, &tsconfig_dir, extends))
-        .and_then(|base_path| load_project_membership_inner(ws, &base_path, depth + 1))
-        .unwrap_or_else(ResolvedMembership::match_all);
+    let inherited = load_inherited_membership(ws, &tsconfig_dir, &json, depth);
 
     let has_files = json.get("files").is_some();
     let has_include = json.get("include").is_some();
@@ -730,14 +861,36 @@ pub fn raw_paths_json(
     ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
 ) -> Option<(String, serde_json::Value)> {
-    raw_paths_json_inner(ws, tsconfig_path, 0)
+    raw_paths_json_inner(ws, tsconfig_path, 0).map(|acc| (acc.base_url, acc.paths))
+}
+
+/// Array-`extends` overlay for `raw_paths_json`: last-wins per declared key.
+/// A later base that never mentioned `paths` must not replace inherited
+/// mappings with the empty-object fallback a config-without-`paths` returns.
+struct RawPathsOverlay {
+    base_url: String,
+    paths: serde_json::Value,
+    base_url_declared: bool,
+    paths_declared: bool,
+}
+
+fn overlay_raw_paths(mut earlier: RawPathsOverlay, later: RawPathsOverlay) -> RawPathsOverlay {
+    if later.base_url_declared {
+        earlier.base_url = later.base_url;
+        earlier.base_url_declared = true;
+    }
+    if later.paths_declared {
+        earlier.paths = later.paths;
+        earlier.paths_declared = true;
+    }
+    earlier
 }
 
 fn raw_paths_json_inner(
     ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
     depth: u8,
-) -> Option<(String, serde_json::Value)> {
+) -> Option<RawPathsOverlay> {
     if depth > 5 {
         return None;
     }
@@ -747,11 +900,7 @@ fn raw_paths_json_inner(
     let cleaned = strip_json_comments(&content);
     let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
 
-    let inherited = json
-        .get("extends")
-        .and_then(|v| v.as_str())
-        .and_then(|extends| resolve_tsconfig_extends(ws, &tsconfig_dir, extends))
-        .and_then(|base_path| raw_paths_json_inner(ws, &base_path, depth + 1));
+    let inherited = load_inherited_raw_paths(ws, &tsconfig_dir, &json, depth);
 
     let co = json.get("compilerOptions");
     let own_base_url = co
@@ -761,10 +910,30 @@ fn raw_paths_json_inner(
     let own_paths = co.and_then(|c| c.get("paths")).cloned();
 
     match (own_paths, own_base_url, inherited) {
-        (Some(paths), Some(base_url), _) => Some((base_url, paths)),
-        (Some(paths), None, Some((inherited_base_url, _))) => Some((inherited_base_url, paths)),
-        (Some(paths), None, None) => Some((tsconfig_dir, paths)),
-        (None, Some(base_url), Some((_, inherited_paths))) => Some((base_url, inherited_paths)),
+        (Some(paths), Some(base_url), _) => Some(RawPathsOverlay {
+            base_url,
+            paths,
+            base_url_declared: true,
+            paths_declared: true,
+        }),
+        (Some(paths), None, Some(inherited)) => Some(RawPathsOverlay {
+            base_url: inherited.base_url,
+            paths,
+            base_url_declared: inherited.base_url_declared,
+            paths_declared: true,
+        }),
+        (Some(paths), None, None) => Some(RawPathsOverlay {
+            base_url: tsconfig_dir,
+            paths,
+            base_url_declared: false,
+            paths_declared: true,
+        }),
+        (None, Some(base_url), Some(inherited)) => Some(RawPathsOverlay {
+            base_url,
+            paths: inherited.paths,
+            base_url_declared: true,
+            paths_declared: inherited.paths_declared,
+        }),
         (None, _, Some(inherited)) => Some(inherited),
         (None, own_base_url, None) => {
             if let Some(refs) = json.get("references").and_then(|v| v.as_array()) {
@@ -781,7 +950,12 @@ fn raw_paths_json_inner(
                     }
                 }
             }
-            Some((own_base_url.unwrap_or(tsconfig_dir), serde_json::json!({})))
+            Some(RawPathsOverlay {
+                base_url_declared: own_base_url.is_some(),
+                base_url: own_base_url.unwrap_or(tsconfig_dir),
+                paths: serde_json::json!({}),
+                paths_declared: false,
+            })
         }
     }
 }
@@ -790,7 +964,96 @@ fn raw_paths_json_inner(
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Resolve `extends` field from tsconfig.json.
+/// String or array `extends` specs in declaration order. Later array
+/// entries override earlier bases (TypeScript 5.0 last-wins).
+fn extends_specs(json: &serde_json::Value) -> Vec<&str> {
+    match json.get("extends") {
+        Some(serde_json::Value::String(spec)) => vec![spec.as_str()],
+        Some(serde_json::Value::Array(specs)) => {
+            specs.iter().filter_map(serde_json::Value::as_str).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn load_inherited_compiler_options(
+    ws: &dyn WorkspaceRead,
+    tsconfig_dir: &str,
+    json: &serde_json::Value,
+    depth: u8,
+) -> LoadedCompilerOptions {
+    let mut acc = LoadedCompilerOptions::default();
+    for spec in extends_specs(json) {
+        if let Some(path) = resolve_tsconfig_extends(ws, tsconfig_dir, spec) {
+            if let Some(base) = load_compiler_options_inner(ws, &path, depth + 1) {
+                acc = overlay_loaded_compiler_options(acc, base);
+            }
+        }
+    }
+    acc
+}
+
+fn overlay_membership(
+    mut earlier: ResolvedMembership,
+    later: ResolvedMembership,
+) -> ResolvedMembership {
+    if later.files_declared {
+        earlier.files = later.files;
+        earlier.files_declared = true;
+    }
+    if later.include_declared {
+        earlier.include = later.include;
+        earlier.include_declared = true;
+    }
+    if later.exclude_declared {
+        earlier.exclude = later.exclude;
+        earlier.exclude_declared = true;
+    }
+    earlier
+}
+
+fn load_inherited_membership(
+    ws: &dyn WorkspaceRead,
+    tsconfig_dir: &str,
+    json: &serde_json::Value,
+    depth: u8,
+) -> ResolvedMembership {
+    let mut acc = ResolvedMembership::match_all();
+    for spec in extends_specs(json) {
+        if let Some(path) = resolve_tsconfig_extends(ws, tsconfig_dir, spec) {
+            if let Some(base) = load_project_membership_inner(ws, &path, depth + 1) {
+                acc = overlay_membership(acc, base);
+            }
+        }
+    }
+    acc
+}
+
+fn load_inherited_raw_paths(
+    ws: &dyn WorkspaceRead,
+    tsconfig_dir: &str,
+    json: &serde_json::Value,
+    depth: u8,
+) -> Option<RawPathsOverlay> {
+    let mut acc = None;
+    for spec in extends_specs(json) {
+        if let Some(path) = resolve_tsconfig_extends(ws, tsconfig_dir, spec) {
+            if let Some(base) = raw_paths_json_inner(ws, &path, depth + 1) {
+                acc = Some(match acc {
+                    Some(earlier) => overlay_raw_paths(earlier, base),
+                    None => base,
+                });
+            }
+        }
+    }
+    acc
+}
+
+/// Resolve one `extends` specifier from tsconfig.json.
+///
+/// Relative specs resolve against `tsconfig_dir`. Bare package specs walk
+/// `node_modules` looking for the file, its `.json` form, the package's
+/// `package.json` `"tsconfig"` field, then `<package>/tsconfig.json`.
 pub fn resolve_tsconfig_extends(
     ws: &dyn WorkspaceRead,
     tsconfig_dir: &str,
@@ -810,12 +1073,15 @@ pub fn resolve_tsconfig_extends(
         loop {
             let nm = join_paths(&dir, "node_modules");
             let candidate = join_paths(&nm, extends);
-            if ws.file_exists(&candidate) {
+            if ws.file_exists(&candidate) && !ws.is_dir(&candidate) {
                 return Some(candidate);
             }
             let with_json = format!("{candidate}.json");
             if ws.file_exists(&with_json) {
                 return Some(with_json);
+            }
+            if let Some(from_pkg) = resolve_package_tsconfig_field(ws, &candidate) {
+                return Some(from_pkg);
             }
             let as_dir = join_paths(&candidate, "tsconfig.json");
             if ws.file_exists(&as_dir) {
@@ -827,6 +1093,25 @@ pub fn resolve_tsconfig_extends(
             }
             dir = next;
         }
+    }
+    None
+}
+
+/// TypeScript package-specifier lookup: `package.json`'s `tsconfig` field
+/// names a config that is not necessarily `<package>/tsconfig.json`.
+fn resolve_package_tsconfig_field(ws: &dyn WorkspaceRead, package_dir: &str) -> Option<String> {
+    let manifest = join_paths(package_dir, "package.json");
+    let content = ws.read_file(&manifest)?;
+    let cleaned = strip_json_comments(&content);
+    let json: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
+    let tsconfig = json.get("tsconfig")?.as_str()?;
+    let resolved = join_paths(package_dir, tsconfig);
+    if ws.file_exists(&resolved) && !ws.is_dir(&resolved) {
+        return Some(resolved);
+    }
+    let with_json = format!("{resolved}.json");
+    if ws.file_exists(&with_json) {
+        return Some(with_json);
     }
     None
 }

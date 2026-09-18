@@ -4237,43 +4237,93 @@ fn comparable_budget_exhaustion_is_typed_and_non_admissible() {
     assert!(graph.get_relation_payload(&host, &key).is_none());
 }
 
-/// D7.5: the paired strict-on/off fixture — `null → string` flips its
-/// verdict between the TS-strict regime (NotAssignable) and the relaxed
-/// `strictNullChecks`-off regime (Assignable), and the two judgements
-/// occupy DISTINCT slots (no cross-hit in either direction).
+/// Strictness is a per-project tsconfig fact that reaches the relation
+/// engine through the project owning the REQUEST's canonical. Two projects
+/// in one workspace differing only in `strict` judge `null → string` and an
+/// optional-vs-required property row differently (the TS-default strict
+/// project rejects, the relaxed project admits), the two judgements occupy
+/// DISTINCT memo slots because the request project's `type_env_hash`
+/// differs, and neither slot is ever served to the other project's request
+/// — a warm strict-on payload never answers a relaxed request, and
+/// re-asking under the strict project after the relaxed judgement warmed
+/// still answers strict.
 #[test]
 fn strict_family_flip_changes_verdict_without_cross_hit() {
-    let host = host_for_relation_tests();
+    let host = VerterHost::new_standalone_with_tsconfig_projects(
+        HostConfig {
+            dev_mode: false,
+            compile_error_policy: CompileErrorPolicy::StrictError,
+            ..HostConfig::default()
+        },
+        &[
+            ("/strict", r#"{ "compilerOptions": { "strict": true } }"#),
+            ("/relaxed", r#"{ "compilerOptions": { "strict": false } }"#),
+        ],
+    );
     let graph = host.project_type_store().semantic_graph();
     let null = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Null));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let optional_source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+        optional_member("kind", string),
+    ])));
+    let required_target = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+        required_member("kind", string),
+    ])));
 
-    // Strict regime (production default).
-    let strict_dispatch = ProjectSemanticDispatch::new(&host);
-    let strict_key = strict_dispatch.relate_key_for(null, string);
+    // A request checking a file of the strict project.
+    let (strict_key, strict_verdict, strict_row_verdict) = {
+        let _request = crate::request_context::install_test_request_for("/strict/main.ts");
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        (
+            dispatch.relate_key_for(null, string),
+            dispatch.execute_relate_pair_as_result_for_tests(null, string),
+            dispatch.execute_relate_pair_as_result_for_tests(optional_source, required_target),
+        )
+    };
     assert_eq!(
-        strict_dispatch.execute_relate_pair_as_result_for_tests(null, string),
+        strict_verdict,
         RelationResult::NotAssignable,
         "strictNullChecks ON isolates null from string"
     );
+    assert_eq!(
+        strict_row_verdict,
+        RelationResult::NotAssignable,
+        "strictNullChecks ON: an optional row cannot fill a required slot"
+    );
 
-    // Relaxed regime: flip strictNullChecks OFF (fresh dispatch — the
-    // config snapshot is per-request).
-    host.relation_knobs
-        .strict_family_relax_bits
-        .store(0b01, std::sync::atomic::Ordering::Relaxed);
-    let relaxed_dispatch = ProjectSemanticDispatch::new(&host);
-    let relaxed_key = relaxed_dispatch.relate_key_for(null, string);
+    // A request checking a file of the relaxed project — a fresh dispatch,
+    // the configuration is resolved per request.
+    let (relaxed_key, relaxed_verdict, relaxed_row_verdict) = {
+        let _request = crate::request_context::install_test_request_for("/relaxed/main.ts");
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        (
+            dispatch.relate_key_for(null, string),
+            dispatch.execute_relate_pair_as_result_for_tests(null, string),
+            dispatch.execute_relate_pair_as_result_for_tests(optional_source, required_target),
+        )
+    };
     assert_ne!(
-        strict_key, relaxed_key,
-        "the strict fold must isolate the two identities (type_env_hash)"
+        strict_key.context.type_env_hash, relaxed_key.context.type_env_hash,
+        "the two projects' effective options give the relation keys distinct type_env_hash"
+    );
+    assert_eq!(
+        strict_key.context.type_env_hash,
+        host.host_view_env_hashes_for("/strict/main.ts")
+            .type_env_hash,
+        "the key carries the REQUEST project's type_env_hash"
+    );
+    assert_eq!(
+        relaxed_key.context.type_env_hash,
+        host.host_view_env_hashes_for("/relaxed/main.ts")
+            .type_env_hash,
     );
     assert!(
-        matches!(
-            relaxed_dispatch.execute_relate_pair_as_result_for_tests(null, string),
-            RelationResult::Assignable { .. }
-        ),
+        matches!(relaxed_verdict, RelationResult::Assignable { .. }),
         "strictNullChecks OFF admits null into string — the BEHAVIORAL branch"
+    );
+    assert!(
+        matches!(relaxed_row_verdict, RelationResult::Assignable { .. }),
+        "strictNullChecks OFF relates the optional row on its value type alone"
     );
 
     // No cross-hit: each slot holds its own verdict.
@@ -4292,16 +4342,97 @@ fn strict_family_flip_changes_verdict_without_cross_hit() {
         crate::semantic_query::RelationOutcome::Assignable
     );
 
-    // Back to strict: the verdict is the strict one again (never the
-    // relaxed slot's).
-    host.relation_knobs
-        .strict_family_relax_bits
-        .store(0, std::sync::atomic::Ordering::Relaxed);
-    let strict_again = ProjectSemanticDispatch::new(&host);
+    // Back under the strict project: the verdict is the strict one again
+    // (never the relaxed slot's), and a dispatch running outside any request
+    // runs TypeScript's defaults, never a project it was not asked for.
+    {
+        let _request = crate::request_context::install_test_request_for("/strict/other.ts");
+        let strict_again = ProjectSemanticDispatch::new(&host);
+        assert_eq!(
+            strict_again.execute_relate_pair_as_result_for_tests(null, string),
+            RelationResult::NotAssignable,
+            "a strict request must never cross-hit the relaxed slot"
+        );
+    }
+    let no_request = ProjectSemanticDispatch::new(&host);
     assert_eq!(
-        strict_again.execute_relate_pair_as_result_for_tests(null, string),
+        no_request.execute_relate_pair_as_result_for_tests(null, string),
         RelationResult::NotAssignable,
-        "restoring strict must never cross-hit the relaxed slot"
+        "outside any request the dispatch runs TypeScript's default strictness"
+    );
+}
+
+/// The env-hash tables published for a multi-project workspace scope each
+/// option to its dimension: projects differing ONLY in strictness get
+/// distinct `type_env_hash` and identical `lib_env_hash`; a project
+/// differing ONLY in `lib` moves `lib_env_hash` and not `type_env_hash`; an
+/// umbrella `strict: false` and the same eight members spelled out are ONE
+/// type environment. Read through the host's per-canonical env accessor and
+/// the per-canonical effective-option accessor the dispatch branches on.
+#[test]
+fn published_project_env_hashes_scope_strictness_and_lib_to_their_dimensions() {
+    let host = VerterHost::new_standalone_with_tsconfig_projects(
+        HostConfig::default(),
+        &[
+            ("/strict", r#"{ "compilerOptions": { "strict": true } }"#),
+            ("/relaxed", r#"{ "compilerOptions": { "strict": false } }"#),
+            (
+                "/spelled",
+                r#"{ "compilerOptions": {
+                    "strictNullChecks": false, "strictFunctionTypes": false,
+                    "strictBindCallApply": false, "strictPropertyInitialization": false,
+                    "noImplicitAny": false, "noImplicitThis": false,
+                    "useUnknownInCatchVariables": false, "alwaysStrict": false
+                } }"#,
+            ),
+            (
+                "/strict-lib",
+                r#"{ "compilerOptions": { "strict": true, "lib": ["ES2020", "DOM"] } }"#,
+            ),
+        ],
+    );
+    let strict = host.host_view_env_hashes_for("/strict/main.ts");
+    let relaxed = host.host_view_env_hashes_for("/relaxed/main.ts");
+    let spelled = host.host_view_env_hashes_for("/spelled/main.ts");
+    let strict_lib = host.host_view_env_hashes_for("/strict-lib/main.ts");
+
+    assert_ne!(
+        strict.type_env_hash, relaxed.type_env_hash,
+        "strict vs relaxed projects MUST have distinct type_env_hash"
+    );
+    assert_eq!(
+        strict.lib_env_hash, relaxed.lib_env_hash,
+        "a strictness-only difference MUST NOT move lib_env_hash"
+    );
+    assert_eq!(
+        relaxed.type_env_hash, spelled.type_env_hash,
+        "an inherited umbrella and the spelled-out members are ONE type environment"
+    );
+    assert_eq!(
+        strict.type_env_hash, strict_lib.type_env_hash,
+        "a lib-only difference MUST NOT move type_env_hash"
+    );
+    assert_ne!(
+        strict.lib_env_hash, strict_lib.lib_env_hash,
+        "a lib-only difference MUST move lib_env_hash"
+    );
+
+    let relaxed_options = host.semantic_compiler_options_for("/relaxed/main.ts");
+    assert!(!relaxed_options.strict_null_checks && !relaxed_options.strict_function_types);
+    assert_eq!(
+        relaxed_options,
+        host.semantic_compiler_options_for("/spelled/main.ts")
+    );
+    assert_eq!(
+        host.semantic_compiler_options_for("/strict-lib/main.ts")
+            .lib
+            .as_deref(),
+        Some(&["lib.dom.d.ts".to_string(), "lib.es2020.d.ts".to_string()][..])
+    );
+    assert_eq!(
+        host.semantic_compiler_options_for("/nowhere/main.ts"),
+        verter_semantic::resolver_core::SemanticCompilerOptions::default(),
+        "a canonical with no owning project runs on TypeScript's defaults"
     );
 }
 

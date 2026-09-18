@@ -136,6 +136,7 @@ pub struct OwnershipProject {
 /// `Configured { .. }` — there is no way to accidentally read options from
 /// a fallback project.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum ProjectPayload {
     Configured {
         tsconfig_path: CanonicalPath,
@@ -551,6 +552,25 @@ impl WorkspaceSnapshot {
     /// Get a project by ID.
     pub fn project(&self, id: ProjectId) -> &OwnershipProject {
         &self.projects[id.0 as usize]
+    }
+
+    /// The EFFECTIVE type-semantic compiler options of project `id`: a
+    /// configured project's parsed tsconfig set, TypeScript's defaults for a
+    /// fallback (tsconfig-less) project, `None` for an id this snapshot does
+    /// not hold.
+    pub fn semantic_compiler_options(
+        &self,
+        id: ProjectId,
+    ) -> Option<verter_semantic::resolver_core::SemanticCompilerOptions> {
+        let project = self.projects.get(id.0 as usize)?;
+        Some(match &project.payload {
+            ProjectPayload::Configured {
+                compiler_options, ..
+            } => compiler_options.semantic.clone(),
+            ProjectPayload::Fallback { .. } => {
+                verter_semantic::resolver_core::SemanticCompilerOptions::default()
+            }
+        })
     }
 
     /// Check if a project is configured (tsconfig-backed).

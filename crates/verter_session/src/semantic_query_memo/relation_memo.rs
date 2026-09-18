@@ -198,7 +198,7 @@ impl SemanticGraphStore {
         key: &crate::semantic_query::RelateMemoKey,
     ) -> Option<crate::semantic_query::RelationPayload> {
         let family = FamilyKey::Relate {
-            key: Box::new(key.clone()),
+            key: super::family_intern::InternedRelateKey::intern(key.clone()),
         };
         // Snapshot the candidate list under the `entries` lock, then
         // validate OUTSIDE the lock (the family warm-read discipline:
@@ -244,7 +244,7 @@ impl SemanticGraphStore {
         key: &crate::semantic_query::RelateMemoKey,
     ) -> Option<RelationPublishedCarrier> {
         let family = FamilyKey::Relate {
-            key: Box::new(key.clone()),
+            key: super::family_intern::InternedRelateKey::intern(key.clone()),
         };
         let entries = self.entries_lock_diagnosed();
         let slots = entries.get(&family)?;
@@ -378,7 +378,9 @@ impl SemanticGraphStore {
     ) {
         self.publish_unfenced_candidate_for_tests(
             None,
-            FamilyKey::Relate { key: Box::new(key) },
+            FamilyKey::Relate {
+                key: super::family_intern::InternedRelateKey::intern(key),
+            },
             SemanticQueryValue::Relation(payload),
             relation_satisfied_projection(),
             carrier,
@@ -404,7 +406,9 @@ impl SemanticGraphStore {
     ) {
         self.publish_unfenced_candidate_for_tests(
             Some(host),
-            FamilyKey::Relate { key: Box::new(key) },
+            FamilyKey::Relate {
+                key: super::family_intern::InternedRelateKey::intern(key),
+            },
             SemanticQueryValue::Relation(payload),
             relation_satisfied_projection(),
             carrier,

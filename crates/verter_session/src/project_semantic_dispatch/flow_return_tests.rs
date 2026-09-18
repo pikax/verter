@@ -9182,8 +9182,9 @@ fn refused_member_cause_reaches_the_root_that_consumed_its_value() {
                         (
                             "call root",
                             SemanticQueryKey::ResolveCall(Box::new(
-                                super::call_resolve_tests::call_key(
+                                super::call_resolve_tests::call_key_at(
                                     dispatch,
+                                    CANONICAL,
                                     callee,
                                     CallKind::Call,
                                     None,
@@ -9458,8 +9459,9 @@ fn unproven_flow_member_makes_call_root_complete_return_only() {
         );
         let callee = super::call_resolve_tests::callable(dispatch, vec![declared], Vec::new());
         let query_key =
-            SemanticQueryKey::ResolveCall(Box::new(super::call_resolve_tests::call_key(
+            SemanticQueryKey::ResolveCall(Box::new(super::call_resolve_tests::call_key_at(
                 dispatch,
+                CANONICAL,
                 callee,
                 CallKind::Call,
                 None,

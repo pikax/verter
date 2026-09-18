@@ -61,9 +61,6 @@ fn baseline_inputs() -> EnvHashInputs<'static> {
     EnvHashInputs {
         parser_flags: &["preserve_jsx"],
         resolve_extensions: &[".ts", ".tsx", ".vue"],
-        type_strict: true,
-        type_no_implicit_any: true,
-        lib_names: &["lib.dom.d.ts", "lib.es2022.d.ts"],
         type_roots: &["/ws/node_modules/@types"],
         module_resolution_mode: ModuleResolutionMode::Bundler,
         export_conditions: baseline_conditions(),
@@ -80,10 +77,16 @@ fn lib_env_change_does_not_change_file_artifact_key() {
     let baseline = baseline_inputs();
     let parse_env_hash_a = cfg.parse_env_hash(&baseline);
 
+    // A lib-domain edit on BOTH lib inputs: the project's lib selection and
+    // the ambient corpus fingerprint.
+    let mut lib_cfg = cfg.clone();
+    lib_cfg.compiler_options.semantic.lib = Some(vec![
+        "lib.dom.d.ts".to_string(),
+        "lib.es2023.d.ts".to_string(),
+    ]);
     let mut updated = baseline;
-    updated.lib_names = &["lib.dom.d.ts", "lib.es2023.d.ts"]; // bumped lib
     updated.ambient_corpus_fingerprint = 0xfeed;
-    let parse_env_hash_b = cfg.parse_env_hash(&updated);
+    let parse_env_hash_b = lib_cfg.parse_env_hash(&updated);
 
     assert_eq!(
         parse_env_hash_a, parse_env_hash_b,
@@ -115,10 +118,14 @@ fn lib_env_change_does_change_augmentation_target_key() {
     let baseline = baseline_inputs();
     let lib_a = cfg.lib_env_hash(&baseline);
 
+    let mut lib_cfg = cfg.clone();
+    lib_cfg.compiler_options.semantic.lib = Some(vec![
+        "lib.dom.d.ts".to_string(),
+        "lib.es2023.d.ts".to_string(),
+    ]);
     let mut updated = baseline;
-    updated.lib_names = &["lib.dom.d.ts", "lib.es2023.d.ts"];
     updated.ambient_corpus_fingerprint = 0xfeed;
-    let lib_b = cfg.lib_env_hash(&updated);
+    let lib_b = lib_cfg.lib_env_hash(&updated);
 
     assert_ne!(lib_a, lib_b, "lib data change MUST change lib_env_hash");
 

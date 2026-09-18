@@ -999,6 +999,94 @@ fn raw_paths_json_child_base_url_overrides_inherited_paths() {
     );
 }
 
+/// Ordered array `extends`: a later base that does not declare `paths`
+/// must keep the earlier base's mappings. Mutation: `raw_paths_json_inner`
+/// returns an empty object for a config without `paths`, and last-wins
+/// assignment replaces the inherited map.
+#[test]
+fn raw_paths_json_array_extends_preserves_undeclared_paths() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    std::fs::write(
+        tmp.path().join("with-paths.json"),
+        r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@lib/*": ["lib/*"] } } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("no-paths.json"),
+        r#"{ "compilerOptions": { "strict": true } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("tsconfig.json"),
+        r#"{ "extends": ["./with-paths.json", "./no-paths.json"] }"#,
+    )
+    .unwrap();
+
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let (base_url, paths) = raw_paths_json(&ws, &tsconfig_path).expect("should find paths");
+    let expected_base =
+        verter_semantic::resolver_core::normalize_canonical_id(&tmp.path().to_string_lossy());
+    assert_eq!(
+        base_url, expected_base,
+        "undeclared later base must keep the earlier baseUrl"
+    );
+    let paths_obj = paths.as_object().expect("paths should be an object");
+    assert!(
+        paths_obj.contains_key("@lib/*"),
+        "undeclared later base must keep inherited paths, got {paths:?}"
+    );
+}
+
+/// Later array base that DOES declare `paths` last-wins the map (TypeScript
+/// replaces, it does not merge path entries).
+#[test]
+fn raw_paths_json_array_extends_later_declared_paths_replace() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    std::fs::write(
+        tmp.path().join("first.json"),
+        r#"{ "compilerOptions": { "paths": { "@old/*": ["old/*"] } } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("second.json"),
+        r#"{ "compilerOptions": { "paths": { "@new/*": ["new/*"] } } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("tsconfig.json"),
+        r#"{ "extends": ["./first.json", "./second.json"] }"#,
+    )
+    .unwrap();
+
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let (_, paths) = raw_paths_json(&ws, &tsconfig_path).expect("should find paths");
+    let paths_obj = paths.as_object().expect("paths should be an object");
+    assert!(
+        paths_obj.contains_key("@new/*"),
+        "later declared paths must win"
+    );
+    assert!(
+        !paths_obj.contains_key("@old/*"),
+        "later declared paths replace earlier mappings entirely"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // discover_tsconfigs — descent pruning
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1395,5 +1483,310 @@ fn has_configured_ts_project_anywhere_still_accepts_root_tsconfig() {
     assert!(
         super::has_configured_ts_project_anywhere(root),
         "a classic single-root workspace is still accepted (a superset of a root-only gate)"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// load_compiler_options — effective type-semantic options through `extends`
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Write `files` (name → JSON) into a temp dir and load the compiler options
+/// of `leaf` through the real filesystem workspace.
+fn semantic_options_from_files(
+    files: &[(&str, &str)],
+    leaf: &str,
+) -> verter_semantic::resolver_core::SemanticCompilerOptions {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    let tmp = tempfile::TempDir::new().unwrap();
+    for (name, json) in files {
+        let path = tmp.path().join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, json).unwrap();
+    }
+    let leaf_path = tmp.path().join(leaf).to_string_lossy().replace('\\', "/");
+    load_compiler_options(&ws, &leaf_path).semantic
+}
+
+/// A config declaring no semantic option runs on TypeScript's defaults
+/// (the whole `strict` family ON) — including a missing file.
+#[test]
+fn semantic_options_default_to_typescript_defaults_when_undeclared() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    assert_eq!(
+        load_compiler_options(&ws, "/nonexistent/tsconfig.json").semantic,
+        verter_semantic::resolver_core::SemanticCompilerOptions::default()
+    );
+    assert_eq!(
+        semantic_options_from_files(
+            &[(
+                "tsconfig.json",
+                r#"{ "compilerOptions": { "baseUrl": "." } }"#
+            )],
+            "tsconfig.json",
+        ),
+        verter_semantic::resolver_core::SemanticCompilerOptions::default()
+    );
+}
+
+/// The umbrella inherited through `extends` and a member declared on the
+/// leaf resolve through ONE rule set: the leaf member overrides the
+/// inherited umbrella for itself only, and an inherited umbrella vs. the
+/// same values spelled out on a leaf are the SAME effective set.
+#[test]
+fn semantic_options_inherit_through_extends_with_leaf_members_winning() {
+    let base = r#"{ "compilerOptions": { "strict": false, "target": "ES2020" } }"#;
+
+    let inherited = semantic_options_from_files(
+        &[
+            ("tsconfig.base.json", base),
+            ("tsconfig.json", r#"{ "extends": "./tsconfig.base.json" }"#),
+        ],
+        "tsconfig.json",
+    );
+    assert!(!inherited.strict_null_checks);
+    assert!(!inherited.strict_function_types);
+    assert!(!inherited.no_implicit_any);
+    assert_eq!(
+        inherited.target,
+        verter_semantic::resolver_core::ScriptTarget::Es2020
+    );
+
+    let leaf_member = semantic_options_from_files(
+        &[
+            ("tsconfig.base.json", base),
+            (
+                "tsconfig.json",
+                r#"{ "extends": "./tsconfig.base.json", "compilerOptions": { "strictNullChecks": true } }"#,
+            ),
+        ],
+        "tsconfig.json",
+    );
+    assert!(
+        leaf_member.strict_null_checks,
+        "an explicit leaf member overrides the inherited umbrella"
+    );
+    assert!(
+        !leaf_member.strict_function_types,
+        "the other members still follow the inherited umbrella"
+    );
+
+    let spelled_out = semantic_options_from_files(
+        &[(
+            "tsconfig.json",
+            r#"{ "compilerOptions": {
+                "strictNullChecks": false, "strictFunctionTypes": false,
+                "strictBindCallApply": false, "strictPropertyInitialization": false,
+                "noImplicitAny": false, "noImplicitThis": false,
+                "useUnknownInCatchVariables": false, "alwaysStrict": false,
+                "target": "es2020"
+            } }"#,
+        )],
+        "tsconfig.json",
+    );
+    assert_eq!(
+        inherited, spelled_out,
+        "inherited umbrella and spelled-out members are one effective set"
+    );
+
+    let leaf_umbrella_over_base_member = semantic_options_from_files(
+        &[
+            (
+                "tsconfig.base.json",
+                r#"{ "compilerOptions": { "strictNullChecks": true } }"#,
+            ),
+            (
+                "tsconfig.json",
+                r#"{ "extends": "./tsconfig.base.json", "compilerOptions": { "strict": false } }"#,
+            ),
+        ],
+        "tsconfig.json",
+    );
+    assert!(
+        leaf_umbrella_over_base_member.strict_null_checks,
+        "an inherited explicit member is not undone by a nearer umbrella"
+    );
+}
+
+/// `lib` / `noLib` / `target` / the two non-umbrella type options read
+/// through the same layer: `lib` canonicalises to a sorted file-name set
+/// and REPLACES an inherited array wholesale; the rest last-wins per key.
+#[test]
+fn semantic_lib_and_flag_options_parse_and_layer_per_key() {
+    let options = semantic_options_from_files(
+        &[
+            (
+                "tsconfig.base.json",
+                r#"{ "compilerOptions": { "lib": ["esnext", "webworker"], "noLib": true, "exactOptionalPropertyTypes": true } }"#,
+            ),
+            (
+                "tsconfig.json",
+                r#"{ "extends": "./tsconfig.base.json", "compilerOptions": {
+                    "lib": ["DOM", "ES6", "dom"], "noLib": false, "noUncheckedIndexedAccess": true
+                } }"#,
+            ),
+        ],
+        "tsconfig.json",
+    );
+    assert_eq!(
+        options.lib.as_deref(),
+        Some(&["lib.dom.d.ts".to_string(), "lib.es2015.d.ts".to_string()][..]),
+        "the leaf `lib` array replaces the inherited one and canonicalises"
+    );
+    assert!(
+        !options.no_lib,
+        "an explicit leaf false overrides an inherited true"
+    );
+    assert!(
+        options.exact_optional_property_types,
+        "inherited when the leaf is silent"
+    );
+    assert!(options.no_unchecked_indexed_access);
+    assert!(
+        options.strict_null_checks,
+        "undeclared strict family stays default ON"
+    );
+}
+
+/// Ordered array `extends`: later bases override earlier declared keys,
+/// then the leaf wins. Mutation: `as_str()` on `extends` skips the array
+/// and both bases are ignored.
+#[test]
+fn semantic_options_layer_ordered_array_extends() {
+    let options = semantic_options_from_files(
+        &[
+            (
+                "first.json",
+                r#"{ "compilerOptions": { "strict": false, "target": "ES2018" } }"#,
+            ),
+            (
+                "second.json",
+                r#"{ "compilerOptions": { "strictNullChecks": true, "target": "ES2020" } }"#,
+            ),
+            (
+                "tsconfig.json",
+                r#"{ "extends": ["./first.json", "./second.json"], "compilerOptions": { "noImplicitAny": false } }"#,
+            ),
+        ],
+        "tsconfig.json",
+    );
+    assert!(
+        options.strict_null_checks,
+        "later array base overrides the earlier umbrella for this member"
+    );
+    assert!(
+        !options.strict_function_types,
+        "undeclared members on the later base keep the earlier umbrella"
+    );
+    assert!(
+        !options.no_implicit_any,
+        "the leaf declared key wins over both bases"
+    );
+    assert_eq!(
+        options.target,
+        verter_semantic::resolver_core::ScriptTarget::Es2020,
+        "later array base last-wins per key"
+    );
+}
+
+/// A bare package specifier whose `package.json` `tsconfig` field points
+/// at a non-root config. Mutation: only `<package>/tsconfig.json` is
+/// probed, so the leaf runs on TypeScript defaults instead of the package
+/// base.
+#[test]
+fn semantic_options_resolve_package_tsconfig_field() {
+    let options = semantic_options_from_files(
+        &[
+            (
+                "node_modules/pkg-config/package.json",
+                r#"{ "name": "pkg-config", "tsconfig": "./configs/strict.json" }"#,
+            ),
+            (
+                "node_modules/pkg-config/configs/strict.json",
+                r#"{ "compilerOptions": { "strict": false, "target": "ES2019" } }"#,
+            ),
+            (
+                "node_modules/pkg-config/tsconfig.json",
+                r#"{ "compilerOptions": { "strict": true, "target": "ESNext" } }"#,
+            ),
+            ("tsconfig.json", r#"{ "extends": "pkg-config" }"#),
+        ],
+        "tsconfig.json",
+    );
+    assert!(
+        !options.strict_null_checks,
+        "package.json tsconfig field must win over <package>/tsconfig.json"
+    );
+    assert_eq!(
+        options.target,
+        verter_semantic::resolver_core::ScriptTarget::Es2019
+    );
+}
+
+/// `file_exists` is true for directories on some backends (recorder/frozen,
+/// NativeFs). Returning the package directory as a tsconfig file skips
+/// `package.json`'s `tsconfig` field. Mutation: `file_exists(candidate)`
+/// alone returns the directory.
+#[test]
+fn resolve_tsconfig_extends_does_not_return_package_directory() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    struct DirExistsWorkspace {
+        files: HashMap<String, String>,
+    }
+
+    impl crate::traits::WorkspaceRead for DirExistsWorkspace {
+        fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
+            self.files.get(canonical_id).map(|s| Arc::from(s.as_str()))
+        }
+        fn file_exists(&self, canonical_id: &str) -> bool {
+            self.files.contains_key(canonical_id) || self.is_dir(canonical_id)
+        }
+        fn is_dir(&self, path: &str) -> bool {
+            let prefix = format!("{path}/");
+            self.files.keys().any(|id| id.starts_with(&prefix))
+        }
+        fn realpath(&self, canonical_id: &str) -> Option<String> {
+            self.file_exists(canonical_id)
+                .then(|| canonical_id.to_string())
+        }
+        fn reverse_deps_for(&self, _id: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn forward_deps_for(&self, _id: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn dependency_snapshot(&self, _id: &str) -> Option<crate::DependencySnapshotView> {
+            None
+        }
+    }
+
+    let ws = DirExistsWorkspace {
+        files: HashMap::from([
+            (
+                "/ws/node_modules/pkg-config/package.json".into(),
+                r#"{ "name": "pkg-config", "tsconfig": "./configs/strict.json" }"#.into(),
+            ),
+            (
+                "/ws/node_modules/pkg-config/configs/strict.json".into(),
+                r#"{ "compilerOptions": { "strict": false, "target": "ES2019" } }"#.into(),
+            ),
+            (
+                "/ws/node_modules/pkg-config/tsconfig.json".into(),
+                r#"{ "compilerOptions": { "strict": true, "target": "ESNext" } }"#.into(),
+            ),
+        ]),
+    };
+    let resolved = resolve_tsconfig_extends(&ws, "/ws", "pkg-config");
+    assert_eq!(
+        resolved.as_deref(),
+        Some("/ws/node_modules/pkg-config/configs/strict.json"),
+        "package directory must not be returned as a tsconfig file, got {resolved:?}"
     );
 }

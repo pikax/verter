@@ -35,19 +35,15 @@ use crate::{host_executor, VerterHost};
 ///   its first driver pass — the deterministic trigger for the typed
 ///   `BudgetExceeded` public outcome and its three-layer non-admission (no
 ///   warm memo entry, no fact signature, no reverse-index registration).
-/// - `strict_family_relax_bits` (RI-10): bit 0 relaxes `strictNullChecks`
-///   (null/undefined assignable to any non-`never` target); bit 1 relaxes
-///   `strictFunctionTypes` (bivariant function parameters); bit 2 enables
-///   `exactOptionalPropertyTypes` (authored `undefined` preserved in
-///   optional writes). Zero — the production default — is the TS-strict
-///   regime with exact optionality disabled. The relaxed configuration
-///   folds into the relation key's `type_env_hash`, so a relaxed judgement
-///   never warm-hits a strict request.
+///
+/// The strict-family configuration is NOT a knob: the relation reducer reads
+/// it from the effective tsconfig options of the project owning the
+/// request's canonical ([`VerterHost::semantic_compiler_options_for`]), the
+/// same option set that project's `type_env_hash` folds.
 #[derive(Debug, Default)]
 pub(crate) struct RelationHostKnobs {
     pub(crate) force_overflow_observations: std::sync::atomic::AtomicUsize,
     pub(crate) force_budget_exhaustion: std::sync::atomic::AtomicBool,
-    pub(crate) strict_family_relax_bits: std::sync::atomic::AtomicU8,
 }
 
 /// Construction-time source for the host's execution-only worker pools.
@@ -631,6 +627,43 @@ impl VerterHost {
         Self::new(config, workspace)
     }
 
+    /// TEST-ONLY: a standalone host over an in-memory workspace whose
+    /// configured projects are PARSED from tsconfig sources. Each
+    /// `(root, tsconfig_json)` pair is written to `{root}/tsconfig.json`
+    /// and loaded through the real tsconfig loader (`extends`-aware,
+    /// effective-option canonicalising), so a test drives strictness the
+    /// way a user does — through `compilerOptions` — and the options reach
+    /// the env-hash tables and the dispatch through the production
+    /// project publication path.
+    #[cfg(test)]
+    pub(crate) fn new_standalone_with_tsconfig_projects(
+        config: HostConfig,
+        projects: &[(&str, &str)],
+    ) -> Self {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        let configs: Vec<verter_semantic::resolver_core::IdeProjectConfig> = projects
+            .iter()
+            .map(|(root, tsconfig_json)| {
+                let root = root.trim_end_matches('/').to_string();
+                let tsconfig_path = format!("{root}/tsconfig.json");
+                workspace.inject_file(tsconfig_path.clone(), Arc::from(*tsconfig_json));
+                let mut project = verter_workspace::ide_project_config(
+                    root.clone(),
+                    root,
+                    Some(tsconfig_path.clone()),
+                );
+                project.compiler_options =
+                    verter_workspace::load_compiler_options(&*workspace, &tsconfig_path);
+                project
+            })
+            .collect();
+        let host = Self::new(config, workspace);
+        host.configure_projects(configs);
+        host
+    }
+
     /// Create a standalone host with an explicit [`SchedulerConfig`].
     ///
     /// See [`Self::new_with_scheduler_config`] for the rationale.
@@ -919,6 +952,30 @@ impl VerterHost {
             .and_then(|p| workspace.env_hash_array_for_project(p))
             .unwrap_or_else(|| workspace.workspace_default_env_hash_array());
         self.apply_parse_env_override(env_hashes_from_array(arr))
+    }
+
+    /// The EFFECTIVE type-semantic compiler options (`strict` family,
+    /// `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, lib
+    /// selection, target) of the project owning `canonical`.
+    ///
+    /// Resolves the owner exactly like [`Self::host_view_env_hashes_for`]
+    /// (published snapshot, `owners_for_file().first()`) and reads the
+    /// owner's parsed tsconfig option set from the same published
+    /// snapshot the project's `type_env_hash` / `lib_env_hash` were
+    /// composed from — so a consumer branching on these options branches
+    /// on exactly the configuration its cache keys carry. Falls back to
+    /// TypeScript's defaults ([`SemanticCompilerOptions::default`]) when
+    /// the canonical has no owning project, matching the workspace-default
+    /// env-hash array those canonicals key under.
+    #[must_use]
+    pub fn semantic_compiler_options_for(
+        &self,
+        canonical: &str,
+    ) -> verter_semantic::resolver_core::SemanticCompilerOptions {
+        let workspace = self.workspace();
+        self.resolve_project_for_canonical(canonical)
+            .and_then(|p| workspace.semantic_compiler_options_for_project(p))
+            .unwrap_or_default()
     }
 
     /// TEST-ONLY: the live `parse_env_hash` dimension for `canonical`, as

@@ -741,8 +741,7 @@ pub struct VerterHost {
     /// takes locks, so the cost is in the noise.
     pub(crate) compile_force_overflow_observations: std::sync::atomic::AtomicUsize,
     /// Per-host relation-engine knobs: the overflow / budget test-injection
-    /// triggers plus the strict-family relax bits — see
-    /// [`crate::host_construction::RelationHostKnobs`].
+    /// triggers — see [`crate::host_construction::RelationHostKnobs`].
     pub(crate) relation_knobs: host_construction::RelationHostKnobs,
     /// Per-host test-injection knob for the cross-file declaration-augmentation
     /// folder ([`crate::project_semantic_dispatch`]'s
