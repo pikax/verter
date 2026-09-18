@@ -1,0 +1,572 @@
+{
+  "id": "DesktopWebSharedBoundary",
+  "schema": 1,
+  "status": "ratified",
+  "ratifiedBy": "VSC0",
+  "sourceOfTruth": "packages/vue-vscode/src (re-derived from the live tree by tests/vscode-product/VSC0/verify.mjs)",
+  "tiers": {
+    "desktop": "Node activation tier: runtime Node builtin import, process.* usage, require(), or a runtime (non-type) vscode-languageclient/node import. Owns binary discovery, stdio LSP transport, child spawn, fs/os/env, tsdk staging, project-bound TypeScript loading.",
+    "presentation": "Host-neutral VS Code API tier: imports the vscode API, no Node dependency. Tree views, webview panel, content providers, decorations surfaces, output channels, extension-side CSS intellisense service.",
+    "pure": "No host imports: decision logic, state machines, launch-arg building, source-map decode model, CSS transpile/style structure."
+  },
+  "testFiles": {
+    "policy": "Spec and test-util files (*.spec.ts, *.test.ts, extensionTsService.testUtils.ts) are evidence for their module's rows, not product surface; they are counted, never classified.",
+    "population": [
+      "activationGate.spec.ts",
+      "analysis-response.spec.ts",
+      "audit.spec.ts",
+      "bindingTypeDisplay.spec.ts",
+      "carrier-routing-no-vue-gate.spec.ts",
+      "claudeCodeDetection.spec.ts",
+      "clientProcessLifetime.spec.ts",
+      "css/cssDiagnosticsPublisher.spec.ts",
+      "css/cssService.spec.ts",
+      "css/styleDocumentText.spec.ts",
+      "css/styleStructure.spec.ts",
+      "e2eLogMirror.spec.ts",
+      "e2eProfileProvisioning.spec.ts",
+      "e2eProviderAttestation.spec.ts",
+      "editorProcessTopology.spec.ts",
+      "editorTsserverBootstrap.spec.ts",
+      "extensionBundle.spec.ts",
+      "extensionStartAttemptLifetime.spec.ts",
+      "extensionTsService.autoimport.spec.ts",
+      "extensionTsService.codefix.spec.ts",
+      "extensionTsService.diagnostics.spec.ts",
+      "extensionTsService.moduleResolutionMode.spec.ts",
+      "extensionTsService.projectIdentity.spec.ts",
+      "extensionTsService.resolution.spec.ts",
+      "extensionTsService.testUtils.ts",
+      "extensionTsService.verterTypes.spec.ts",
+      "extensionTsServiceRegistry.spec.ts",
+      "frameworkWiring.spec.ts",
+      "languageServerConfig.spec.ts",
+      "mcpServer.spec.ts",
+      "nativePreviewRelayController.spec.ts",
+      "package.spec.ts",
+      "packageDependencies.spec.ts",
+      "packageManifest.spec.ts",
+      "packageManifestFramework.spec.ts",
+      "plainScriptDocumentSync.spec.ts",
+      "releasePackaging.spec.ts",
+      "restart.spec.ts",
+      "runSummaryOracle.spec.ts",
+      "rustHostTriple.test.ts",
+      "sharedTsgoLaunch.spec.ts",
+      "ssrReadiness.spec.ts",
+      "startupOptimizations.spec.ts",
+      "statusBar.spec.ts",
+      "svelteGrammar.spec.ts",
+      "typescriptPluginRefreshScheduler.spec.ts",
+      "utils.spec.ts"
+    ]
+  },
+  "rules": [
+    {
+      "id": "shared-no-node-imports",
+      "rule": "Common modules (presentation and pure tiers) cannot import Node builtins, use process.*, or call require()",
+      "enforcement": "mechanical: re-derived from the live tree on every harness run (VSC0-AC2)"
+    },
+    {
+      "id": "shared-no-module-load-work",
+      "rule": "Common modules cannot execute work at module-load time; loading shared code with Node globals absent does not execute native provisioning",
+      "enforcement": "runtime: bound to VSW1 (browser entrypoint and worker transport) as the owning test node; the import boundary above is the mechanical proxy enforced here"
+    },
+    {
+      "id": "transport-desktop-owned",
+      "rule": "The runtime vscode-languageclient/node import is desktop-owned (extension.ts today); a browser worker transport is added by VSW1 behind the same client-facing feature surface, never a fork of client logic",
+      "enforcement": "mechanical: lspClient=value implies tier=desktop"
+    },
+    {
+      "id": "type-elided-node-client-imports",
+      "rule": "Type-position LanguageClient imports written as value imports (the eight view/decoration providers) keep their modules in the desktop tier until they become explicit import type; the browser cutover (VSW1) owns that conversion",
+      "enforcement": "mechanical: value imports classify desktop regardless of type-only usage"
+    },
+    {
+      "id": "no-class-change-by-moving-code",
+      "rule": "A tier change is an owning-node port with its own evidence, never a relabel in this inventory",
+      "enforcement": "contract: any tier delta in this product is drift against the live tree and is rejected"
+    },
+    {
+      "id": "browser-is-distinct-product",
+      "rule": "A browser sibling binds to producer services through this boundary; it never forks the extension, gains a second semantic/type/project engine, or copies the whole extension to claim parity (DX0 sections 3 and 8)",
+      "enforcement": "contract: consumed by VSW0/VSW1 charters"
+    }
+  ],
+  "counts": {
+    "productionModules": 47,
+    "desktop": 20,
+    "presentation": 6,
+    "pure": 21,
+    "testSupportFiles": 1,
+    "specFiles": 46,
+    "totalSourceFiles": 94
+  },
+  "modules": [
+    {
+      "path": "AnalysisTreeProvider.ts",
+      "tier": "desktop",
+      "vscodeApi": true,
+      "nodeImports": [
+        "path"
+      ],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "value",
+      "note": "portable-path-only: imports basename from path; the trivial port belongs to the browser cutover (VSW1), not a silent reclassification"
+    },
+    {
+      "path": "BindingColorDecorationProvider.ts",
+      "tier": "desktop",
+      "vscodeApi": true,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "value"
+    },
+    {
+      "path": "CompiledCodeContentProvider.ts",
+      "tier": "desktop",
+      "vscodeApi": true,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "value"
+    },
+    {
+      "path": "ComponentTreeProvider.ts",
+      "tier": "desktop",
+      "vscodeApi": true,
+      "nodeImports": [
+        "path"
+      ],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "value",
+      "note": "portable-path-only: imports basename/dirname/resolve from path; the trivial port belongs to the browser cutover (VSW1), not a silent reclassification"
+    },
+    {
+      "path": "PropConstnessDecorationProvider.ts",
+      "tier": "desktop",
+      "vscodeApi": true,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "value"
+    },
+    {
+      "path": "RouteTreeProvider.ts",
+      "tier": "desktop",
+      "vscodeApi": true,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "value"
+    },
+    {
+      "path": "SourceMapWebviewPanel.ts",
+      "tier": "presentation",
+      "vscodeApi": true,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "UnifiedVirtualFilesProvider.ts",
+      "tier": "desktop",
+      "vscodeApi": true,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "value"
+    },
+    {
+      "path": "VirtualFileManager.ts",
+      "tier": "presentation",
+      "vscodeApi": true,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "VueApiDecorationProvider.ts",
+      "tier": "desktop",
+      "vscodeApi": true,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "value"
+    },
+    {
+      "path": "activationGate.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "audit.transforms.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "audit.ts",
+      "tier": "presentation",
+      "vscodeApi": true,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "bindingTypeDisplay.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "carrierProviderSupport.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "claudeCodeDetection.ts",
+      "tier": "desktop",
+      "vscodeApi": true,
+      "nodeImports": [
+        "fs",
+        "path",
+        "os"
+      ],
+      "usesProcess": true,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "clientProcessLifetime.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "css/cssDiagnosticsPublisher.ts",
+      "tier": "presentation",
+      "vscodeApi": true,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "css/cssService.ts",
+      "tier": "presentation",
+      "vscodeApi": true,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "type"
+    },
+    {
+      "path": "css/preprocessorResolver.ts",
+      "tier": "desktop",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": true,
+      "lspClient": "none",
+      "note": "node-bound-by-design: resolves sass/less/stylus from the workspace through require.resolve at runtime; CSS transpile/style-structure stay shared, preprocessor resolution stays desktop"
+    },
+    {
+      "path": "css/sourceMapMapper.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "css/styleDocumentText.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "css/styleStructure.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "css/transpiler.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "e2eEnv.ts",
+      "tier": "desktop",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": true,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "e2eLogMirror.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "e2eProviderAttestation.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "editorTsserverBootstrap.ts",
+      "tier": "desktop",
+      "vscodeApi": false,
+      "nodeImports": [
+        "node:crypto",
+        "node:fs",
+        "node:path"
+      ],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "extension.ts",
+      "tier": "desktop",
+      "vscodeApi": true,
+      "nodeImports": [
+        "path",
+        "fs",
+        "os"
+      ],
+      "usesProcess": true,
+      "usesRequire": true,
+      "lspClient": "value",
+      "note": "single runtime vscode-languageclient/node import in the package: transport is desktop-owned"
+    },
+    {
+      "path": "extensionTsService.ts",
+      "tier": "desktop",
+      "vscodeApi": false,
+      "nodeImports": [
+        "fs",
+        "module",
+        "path"
+      ],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "extensionTsServiceRegistry.ts",
+      "tier": "desktop",
+      "vscodeApi": false,
+      "nodeImports": [
+        "fs",
+        "path"
+      ],
+      "usesProcess": true,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "frameworkWiring.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "languageServerConfig.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "mcpServer.ts",
+      "tier": "desktop",
+      "vscodeApi": false,
+      "nodeImports": [
+        "node:child_process",
+        "node:fs",
+        "node:path",
+        "node:readline"
+      ],
+      "usesProcess": true,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "nativePreviewRelayController.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "plainScriptDocumentSync.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "restart.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "runSummaryOracle.ts",
+      "tier": "desktop",
+      "vscodeApi": false,
+      "nodeImports": [
+        "fs"
+      ],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "rustHostTriple.ts",
+      "tier": "desktop",
+      "vscodeApi": false,
+      "nodeImports": [
+        "node:fs"
+      ],
+      "usesProcess": true,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "sharedTsgoLaunch.ts",
+      "tier": "desktop",
+      "vscodeApi": false,
+      "nodeImports": [
+        "fs",
+        "path",
+        "crypto"
+      ],
+      "usesProcess": true,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "sourcemap.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "ssrReadiness.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "startupOptimizations.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "startupProbe.ts",
+      "tier": "desktop",
+      "vscodeApi": true,
+      "nodeImports": [
+        "fs"
+      ],
+      "usesProcess": true,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "statusBar.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "typescriptPluginRefreshScheduler.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "utils.ts",
+      "tier": "presentation",
+      "vscodeApi": true,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    }
+  ]
+}

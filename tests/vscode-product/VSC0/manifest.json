@@ -1,0 +1,66 @@
+{
+  "node": "VSC0",
+  "kind": "constitution",
+  "products": [
+    "VsCodeProductInventory v1",
+    "DesktopWebSharedBoundary v1",
+    "FeatureOwnershipMatrix v1",
+    "contracts/vscode-desktop-product.md",
+    "plans/expansion-vscode-product.md"
+  ],
+  "cases": [
+    {
+      "id": "VSC0-AC1",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "manifest-command-without-implementation",
+        "internal-command-drift",
+        "dx0-command-population-drift",
+        "missing-evidence-file"
+      ]
+    },
+    {
+      "id": "VSC0-AC2",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "boundary-class-drift",
+        "shared-tier-node-import",
+        "unknown-tier",
+        "missing-boundary-rule",
+        "module-population-drift"
+      ]
+    },
+    {
+      "id": "VSC0-AC3",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "manifest-population-drift",
+        "not-required-current",
+        "feature-population-drift",
+        "missing-preserved-integration",
+        "gap-claimed-repaired",
+        "stale-gap-state"
+      ]
+    },
+    {
+      "id": "VSC0-ratification",
+      "disposition": "accept",
+      "twins": [
+        "clean products",
+        "missing-amendment",
+        "docs-only-production-capable",
+        "unknown-owner",
+        "premature-retirement",
+        "missing-contract-marker",
+        "missing-plan-marker",
+        "counts-drift",
+        "missing-evidence-file"
+      ]
+    }
+  ],
+  "runtimeCorrectness": false,
+  "notes": "Contract/inventory node: 0 production LOC. VSC0-AC-BASIS binds runtime basis/lifetime tests to VSC1 (activation/recovery/teardown) and the shared-code module-load runtime check to VSW1 (browser entrypoint) instead of fabricating them here; the import boundary is the mechanical proxy enforced by this harness. VSC0-AC-RESOURCE: no hot paths or UI touched; the WSP equal-work obligation does not apply. VSC0-AC-EXPOSURE: DX1 owns the registration schema; no new operation is promoted by this node. The harness grounds itself in the live repository (manifest, source registrations, module import derivation, language config files, authority DAG, DX0 machine products), so drift in any of them is a failing case, not a stale pass."
+}
