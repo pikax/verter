@@ -213,7 +213,7 @@ schema = 2
 "EPR5" = { status = "pending" }
 "EPR6" = { status = "pending" }
 "F1" = { status = "implemented", commit_message = "feat(inputs): commit one InputBasis and snapshot fence as input authority", commit_date = "2026-09-18T12:00:00+01:00" }
-"F2" = { status = "pending" }
+"F2" = { status = "implemented", commit_message = "feat(inputs): retry InputBasis load waves with reusable negative facts", commit_date = "2026-09-18T14:00:00+01:00" }
 "FB0" = { status = "implemented", commit_message = "docs(ci): define non-DAG feedback labels and finding follow-up", commit_date = "2026-08-29T03:45:51+01:00" }
 "FB1" = { status = "implemented", commit_message = "feat(ci): inspect GitHub issues and write local feedback reports", commit_date = "2026-08-29T04:14:40+01:00" }
 "FB2" = { status = "implemented", commit_message = "docs(ci): require manual patches to map existing issues into the DAG", commit_date = "2026-08-29T04:55:09+01:00" }

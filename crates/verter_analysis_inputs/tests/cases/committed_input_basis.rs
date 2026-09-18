@@ -6,7 +6,7 @@
 
 use verter_analysis_inputs::{
     CommitError, DirectoryEntry, InputBasis, LoadWave, NegativeFact, Observation, ObserveError,
-    SnapshotFence, TornSnapshot,
+    RetryError, RetryOutcome, SnapshotFence, TornSnapshot,
 };
 
 fn file(canonical: &str, content: &str) -> Observation {
@@ -194,4 +194,167 @@ fn commit_requires_every_wave_key_to_have_exactly_one_row() {
             canonical: "/a.ts".into()
         }
     );
+}
+
+/// F2: unrecorded keys become a sorted, deduplicated load wave. Recorded
+/// positives and negatives are not rediscovered.
+#[test]
+fn discovery_wave_sorts_and_dedups_unrecorded_keys() {
+    let basis = InputBasis::commit(
+        LoadWave::from_keys(["/a.ts", "/missing.ts"]),
+        [file("/a.ts", "a")],
+        [NegativeFact::absent("/missing.ts")],
+    )
+    .expect("commit");
+    let wave = basis.discovery_wave(["/c.ts", "/b.ts", "/a.ts", "/c.ts", "/missing.ts"]);
+    assert_eq!(
+        wave.keys().iter().map(|k| k.as_ref()).collect::<Vec<_>>(),
+        vec!["/b.ts", "/c.ts"]
+    );
+}
+
+/// F2-AC3: extending with discovered rows equals a fresh union commit.
+#[test]
+fn retry_extended_basis_equals_fresh_union_commit() {
+    let first = InputBasis::commit(
+        LoadWave::from_keys(["/a.ts", "/gone.ts"]),
+        [file("/a.ts", "a")],
+        [NegativeFact::absent("/gone.ts")],
+    )
+    .expect("first");
+    let wave = first.discovery_wave(["/b.ts"]);
+    let RetryOutcome::Extended(retried) =
+        first.retry(wave, [file("/b.ts", "b")], []).expect("retry")
+    else {
+        panic!("expected extended basis");
+    };
+    let fresh = InputBasis::commit(
+        LoadWave::from_keys(["/a.ts", "/gone.ts", "/b.ts"]),
+        [file("/a.ts", "a"), file("/b.ts", "b")],
+        [NegativeFact::absent("/gone.ts")],
+    )
+    .expect("fresh");
+    assert_eq!(retried.id(), fresh.id());
+    assert_eq!(retried, fresh);
+    assert_ne!(retried.id(), first.id());
+}
+
+#[test]
+fn retry_reuses_unprobed_negative_and_still_absent_identity() {
+    let first = InputBasis::commit(
+        LoadWave::from_keys(["/a.ts", "/gone.ts"]),
+        [file("/a.ts", "a")],
+        [NegativeFact::absent("/gone.ts")],
+    )
+    .expect("first");
+    let reused = first
+        .negatives()
+        .find(|fact| fact.canonical() == "/gone.ts")
+        .expect("gone")
+        .clone();
+    let RetryOutcome::Extended(extended) = first
+        .retry(
+            LoadWave::from_keys(["/gone.ts", "/b.ts"]),
+            [file("/b.ts", "b")],
+            [NegativeFact::absent("/gone.ts")],
+        )
+        .expect("retry")
+    else {
+        panic!("expected extended basis");
+    };
+    match extended.observe("/gone.ts") {
+        Err(ObserveError::Negative(fact)) => assert_eq!(fact, &reused),
+        other => panic!("expected reused negative, got {other:?}"),
+    }
+    assert_eq!(extended.observe("/b.ts").unwrap().file_content(), Some("b"));
+}
+
+#[test]
+fn retry_drops_negative_when_the_key_becomes_present() {
+    let first = InputBasis::commit(
+        LoadWave::from_keys(["/gone.ts"]),
+        [],
+        [NegativeFact::absent("/gone.ts")],
+    )
+    .expect("first");
+    let RetryOutcome::Extended(extended) = first
+        .retry(
+            LoadWave::from_keys(["/gone.ts"]),
+            [file("/gone.ts", "now")],
+            [],
+        )
+        .expect("retry")
+    else {
+        panic!("expected extended basis");
+    };
+    assert_eq!(
+        extended.observe("/gone.ts").unwrap().file_content(),
+        Some("now")
+    );
+}
+
+/// Fail-closed: a directory revision that justified a child absence changed,
+/// and the producer did not re-record that child.
+#[test]
+fn retry_refuses_stale_negative_after_parent_directory_revision_change() {
+    let first = InputBasis::commit(
+        LoadWave::from_keys(["/d", "/d/missing.ts"]),
+        [directory("/d", vec![DirectoryEntry::new("/d/a.ts", false)])],
+        [NegativeFact::absent("/d/missing.ts")],
+    )
+    .expect("first");
+    let error = first
+        .retry(
+            LoadWave::from_keys(["/d"]),
+            [directory(
+                "/d",
+                vec![
+                    DirectoryEntry::new("/d/a.ts", false),
+                    DirectoryEntry::new("/d/b.ts", false),
+                ],
+            )],
+            [],
+        )
+        .expect_err("stale child negative");
+    assert_eq!(
+        error,
+        RetryError::StaleNegative {
+            canonical: "/d/missing.ts".into()
+        }
+    );
+}
+
+#[test]
+fn retry_of_empty_or_already_recorded_wave_is_terminal() {
+    let first = InputBasis::commit(LoadWave::from_keys(["/a.ts"]), [file("/a.ts", "a")], [])
+        .expect("first");
+    assert_eq!(
+        first
+            .retry(LoadWave::from_keys(Vec::<&str>::new()), [], [])
+            .expect("empty"),
+        RetryOutcome::Terminal
+    );
+    assert_eq!(
+        first
+            .retry(LoadWave::from_keys(["/a.ts"]), [file("/a.ts", "a")], [])
+            .expect("identical"),
+        RetryOutcome::Terminal
+    );
+}
+
+#[test]
+fn prior_fence_refuses_the_retry_extended_basis() {
+    let first = InputBasis::commit(LoadWave::from_keys(["/a.ts"]), [file("/a.ts", "a")], [])
+        .expect("first");
+    let fence = SnapshotFence::bind(&first);
+    let RetryOutcome::Extended(extended) = first
+        .retry(LoadWave::from_keys(["/b.ts"]), [file("/b.ts", "b")], [])
+        .expect("retry")
+    else {
+        panic!("expected extended basis");
+    };
+    assert_eq!(fence.admit(&first), Ok(()));
+    assert_eq!(fence.admit(&extended), Err(TornSnapshot::BasisMismatch));
+    let next = SnapshotFence::bind(&extended);
+    assert_eq!(next.admit(&first), Err(TornSnapshot::BasisMismatch));
 }

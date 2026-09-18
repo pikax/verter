@@ -457,9 +457,9 @@ use std::sync::Arc;
 
 pub use id::resolve_external;
 pub use input_basis::{
-    commit_workspace_canonical, CommitError, DirectoryEntry, InputBasis, LoadWave, NegativeFact,
-    NegativeKind, Observation, ObservationKind, ObserveError, RequestInputBinding, SnapshotFence,
-    TornSnapshot,
+    commit_workspace_canonical, retry_workspace_wave, CommitError, DirectoryEntry, InputBasis,
+    LoadWave, NegativeFact, NegativeKind, Observation, ObservationKind, ObserveError,
+    RequestInputBinding, RetryError, RetryOutcome, SnapshotFence, TornSnapshot,
 };
 pub(crate) use parsed_eval_program::ParsedEvalProgram;
 use rustc_hash::FxHashMap;

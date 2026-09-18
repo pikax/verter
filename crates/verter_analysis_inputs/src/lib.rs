@@ -34,7 +34,7 @@ pub use error::AnalysisInputError;
 pub use id::{ProjectId, ProjectIdError};
 pub use input_basis::{
     CommitError, DirectoryEntry, InputBasis, LoadWave, NegativeFact, NegativeKind, Observation,
-    ObservationKind, ObserveError, SnapshotFence, TornSnapshot,
+    ObservationKind, ObserveError, RetryError, RetryOutcome, SnapshotFence, TornSnapshot,
 };
 pub use loader::ANALYSIS_CORPUS_ENV;
 pub use redact::Redactor;

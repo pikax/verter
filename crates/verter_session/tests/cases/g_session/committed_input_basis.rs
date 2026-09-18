@@ -8,8 +8,8 @@ use verter_session::route_analysis_inputs::{
     build_route_analysis_inputs, commit_route_analysis_basis, project_route_analysis_inputs,
 };
 use verter_session::{
-    commit_workspace_canonical, InputBasis, LoadWave, Observation, ObserveError, SnapshotFence,
-    TornSnapshot,
+    commit_workspace_canonical, retry_workspace_wave, InputBasis, LoadWave, Observation,
+    ObserveError, RetryOutcome, SnapshotFence, TornSnapshot,
 };
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceRead};
 
@@ -157,5 +157,75 @@ fn request_route_analysis_projects_the_bound_basis_after_workspace_mutation() {
     assert_eq!(
         ctx.committed_input().expect("still bound").basis().id(),
         bound.basis().id()
+    );
+}
+
+/// F2: retry probes only discovered keys. A later write to a previously
+/// committed file must not leak into the extended basis.
+#[test]
+fn retry_workspace_wave_does_not_reread_previous_keys() {
+    let ws = memory();
+    ws.inject_file("/a.ts".to_string(), Arc::from("one"));
+    let first = commit_workspace_canonical(&ws, "/a.ts");
+    ws.inject_file("/a.ts".to_string(), Arc::from("mutated"));
+    ws.inject_file("/b.ts".to_string(), Arc::from("two"));
+    let RetryOutcome::Extended(extended) =
+        retry_workspace_wave(&ws, &first, ["/b.ts", "/b.ts", "/a.ts"]).expect("retry")
+    else {
+        panic!("expected extended basis");
+    };
+    assert_eq!(
+        extended.observe("/a.ts").unwrap().file_content(),
+        Some("one")
+    );
+    assert_eq!(
+        extended.observe("/b.ts").unwrap().file_content(),
+        Some("two")
+    );
+    assert_eq!(ws.read_file("/a.ts").as_deref(), Some("mutated"));
+    assert_eq!(extended.observe("/c.ts"), Err(ObserveError::Unrecorded));
+}
+
+#[test]
+fn retry_workspace_wave_records_discovered_absence_and_then_terminates() {
+    let ws = memory();
+    ws.inject_file("/a.ts".to_string(), Arc::from("one"));
+    let first = commit_workspace_canonical(&ws, "/a.ts");
+    let RetryOutcome::Extended(extended) =
+        retry_workspace_wave(&ws, &first, ["/missing.ts"]).expect("retry")
+    else {
+        panic!("expected extended basis");
+    };
+    match extended.observe("/missing.ts") {
+        Err(ObserveError::Negative(fact)) => assert_eq!(fact.canonical(), "/missing.ts"),
+        other => panic!("expected recorded negative, got {other:?}"),
+    }
+    assert_eq!(
+        retry_workspace_wave(&ws, &extended, ["/missing.ts", "/a.ts"]).expect("second"),
+        RetryOutcome::Terminal
+    );
+}
+
+#[test]
+fn bound_request_fence_refuses_a_retry_extended_basis() {
+    let ws = memory();
+    ws.inject_file("/a.ts".to_string(), Arc::from("one"));
+    let ctx = RequestContext::new(3, Arc::from("/a.ts"), false, None);
+    let first = commit_workspace_canonical(&ws, "/a.ts");
+    ctx.bind_committed_input(first).expect("bind");
+    ws.inject_file("/b.ts".to_string(), Arc::from("two"));
+    let bound = ctx.committed_input().expect("bound");
+    let RetryOutcome::Extended(extended) =
+        retry_workspace_wave(&ws, bound.basis(), ["/b.ts"]).expect("retry")
+    else {
+        panic!("expected extended basis");
+    };
+    assert_eq!(
+        bound.admit_publication(&extended),
+        Err(TornSnapshot::BasisMismatch)
+    );
+    assert!(
+        ctx.bind_committed_input(extended).is_err(),
+        "retry cannot rebind a request already fenced to the prior basis"
     );
 }
