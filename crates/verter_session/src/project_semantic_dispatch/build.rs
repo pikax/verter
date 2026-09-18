@@ -3819,8 +3819,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         use verter_semantic::analysis::type_eval::AugmentationScopeKind;
 
         let host = self.ctx.host_for_fact_tracer_install();
-        let env_hashes = self.request_view_env_hashes();
-        let project_identity = self.request_view_project_identity();
+        // Store-view / workspace-default basis: the warm-validate
+        // `AugmentationTargetKey` is recomposed from the sealed store
+        // view's `project_env_root` (workspace-default env + identity).
+        // Request-ambient keys split populate vs validate and miss on
+        // replay when no request is installed. Per-canonical target
+        // identity must move populate and validate together.
+        let env_hashes = host.host_view_env_hashes();
+        let project_identity = host.host_view_project_identity();
 
         // Population identity (overlay-aware augmentation index): under an
         // active session view the augmenter set is keyed under

@@ -1305,10 +1305,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// the workspace default when no request is installed.
     ///
     /// Query-key constructors that have no per-declaration canonical of
-    /// their own (awaited / template-literal reduce, request-scoped
-    /// augmentation index) must use this rather than the host's
-    /// workspace-default env bundle: that default is ambient session
-    /// state, not a fact of the demand.
+    /// their own (awaited / template-literal reduce) must use this rather
+    /// than the host's workspace-default env bundle: that default is
+    /// ambient session state, not a fact of the demand. The augmentation
+    /// index key is not request-scoped — it is the store-view basis.
     #[must_use]
     pub(crate) fn request_view_env_hashes(&self) -> crate::session_view::EnvHashes {
         let host = self.ctx.host_for_fact_tracer_install();
