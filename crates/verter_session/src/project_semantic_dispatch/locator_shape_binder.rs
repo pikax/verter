@@ -569,13 +569,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             slot.anchor.symbol.as_ref(),
         )?;
         let source = prepared.type_annotation.expression_source.as_ref()?;
+        // Raise under the locator's recorded owner only. `typeof` already
+        // evaluates this source at that owner; a fabricated `ordinary_file()`
+        // retry would be a cross-scope raise for SFC instance bindings.
         self.execute_semantic_expression_source(source, slot.anchor.owner)
-            .or_else(|| {
-                self.execute_semantic_expression_source(
-                    source,
-                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                )
-            })
     }
 
     fn navigate_lowered_locator(
