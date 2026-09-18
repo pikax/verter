@@ -1,19 +1,33 @@
 name: release-tag
 
-# Turns a version commit on main into the v<version> tag that triggers
-# release.yml. Flow: a developer runs `pnpm bump` locally (writes the version
-# across the release surface, commits `release: v<version>`, no tag, no push),
-# reviews the commit, and pushes it to main; this workflow then creates and
-# pushes the annotated tag.
+# Turns a version commit on main into the tag that starts a release workflow.
+#
+# One repository, several things to ship, each on its own version line. The
+# SCOPE of the release commit names the lane; scripts/release-lanes.mjs is the
+# table of them, and this workflow is lane-agnostic — adding a lane is an entry
+# there plus the workflow that listens on its tag.
+#
+#   commit                       tag              workflow
+#   --------------------------   --------------   ---------------
+#   release: v<version>          v<version>       release.yml
+#   release(ide): v<version>     ide/v<version>   release-ide.yml
+#
+# Flow in every lane: a developer runs that lane's bump locally (writes the
+# version across its surface, commits, no tag, no push), reviews the commit, and
+# pushes it to main; this workflow then creates and pushes the annotated tag.
 #
 # This job is a deliberate no-op (clean exit, no tag) for:
-#   - ordinary commits — the message does not match `release: v<version>`;
-#   - release.yml's own CHANGELOG commit — its message matches, but the tag
+#   - ordinary commits — the subject is not a release subject;
+#   - release.yml's own CHANGELOG commit — its subject matches, but the tag
 #     already exists by then, so the idempotency check exits before tagging.
 #
+# It FAILS, rather than doing nothing, on a release commit naming a lane that
+# does not exist: a typo'd scope is a release nobody is going to notice never
+# happened.
+#
 # The commit message is only a signal; the tree is the truth. The version is
-# read from Cargo.toml [workspace.package], must agree with the message, and
-# must not already be tagged. Before tagging, the full publish surface is
+# read from the lane's own source, must agree with the message, and must not
+# already be tagged. Before tagging, that lane's full publish surface is
 # verified so a partial bump can never reach a tag.
 
 on:
@@ -36,13 +50,13 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          # The tag this job pushes has to START release.yml, and a push made
-          # with the workflow's own GITHUB_TOKEN never starts another workflow
-          # run (GitHub's anti-recursion rule). v0.0.1-beta.4 was tagged here
-          # on 2026-09-18 and release.yml did not fire at all, while every
-          # earlier tag — pushed by hand, with a person's credentials — did.
-          # A deploy key is not GITHUB_TOKEN, so its push triggers normally.
-          # The key is repo-scoped, write-enabled and has no expiry:
+          # The tag this job pushes has to START a release workflow, and a push
+          # made with the workflow's own GITHUB_TOKEN never starts another
+          # workflow run (GitHub's anti-recursion rule). v0.0.1-beta.4 was
+          # tagged here on 2026-09-18 and release.yml did not fire at all, while
+          # every earlier tag — pushed by hand, with a person's credentials —
+          # did. A deploy key is not GITHUB_TOKEN, so its push triggers
+          # normally. The key is repo-scoped, write-enabled and has no expiry:
           # Settings > Deploy keys > "release-tag: tag pushes that trigger
           # release.yml".
           ssh-key: ${{ secrets.RELEASE_TAG_SSH_KEY }}
@@ -60,43 +74,51 @@ jobs:
         id: detect
         run: |
           msg="$(git log -1 --format=%s)"
-          re='^release: v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$'
+
+          # `release: v<version>` or `release(<lane>): v<version>`. The monorepo
+          # lane has no scope, and the `v` before the version keeps a scoped
+          # subject from ever matching the unscoped pattern.
+          re='^release(\(([a-z0-9][a-z0-9-]*)\))?: v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$'
           if [[ ! "$msg" =~ $re ]]; then
             echo "Not a version commit ('$msg') — nothing to do."
             exit 0
           fi
-          msg_version="${BASH_REMATCH[1]}"
+          lane="${BASH_REMATCH[2]}"
+          msg_version="${BASH_REMATCH[3]}"
 
-          # The tree is authoritative: read the workspace version, not the message.
-          tree_version="$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          if [[ -z "$tree_version" ]]; then
-            echo "::error::could not read the workspace version from Cargo.toml"
-            exit 1
-          fi
+          # The lane table answers where its version lives and how it is tagged.
+          # An unknown lane exits non-zero here, naming the lanes that exist.
+          resolved="$(node scripts/release-lanes.mjs resolve "${lane:--}")"
+          tree_version="${resolved%% *}"
+          tag="${resolved#* }"
+
           if [[ "$msg_version" != "$tree_version" ]]; then
-            echo "::error::commit message says v$msg_version but the tree is at $tree_version — refusing to guess"
+            echo "::error::commit message says $msg_version but the ${lane:-monorepo} lane's tree is at $tree_version — refusing to guess"
             exit 1
           fi
 
           # Idempotency: never re-tag (covers re-runs and release.yml's
           # CHANGELOG commit, which lands after the tag already exists).
-          if git rev-parse -q --verify "refs/tags/v$tree_version" >/dev/null; then
-            echo "Tag v$tree_version already exists — nothing to do."
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "Tag $tag already exists — nothing to do."
             exit 0
           fi
 
+          echo "lane=${lane}" >> "$GITHUB_OUTPUT"
           echo "version=$tree_version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Tagging $tag for the ${lane:-monorepo} lane"
 
+      # Every check that lane declares: the whole publish surface holds exactly
+      # this version. A partial bump fails here, before the tag exists.
       - name: Verify the version is complete
-        if: steps.detect.outputs.version != ''
-        run: |
-          node scripts/set-version.mjs --check "${{ steps.detect.outputs.version }}"
-          node scripts/check-versions.mjs
+        if: steps.detect.outputs.tag != ''
+        run: node scripts/release-lanes.mjs verify "${{ steps.detect.outputs.lane || '-' }}" "${{ steps.detect.outputs.version }}"
 
       - name: Create and push the tag
-        if: steps.detect.outputs.version != ''
+        if: steps.detect.outputs.tag != ''
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${{ steps.detect.outputs.version }}" -m "release: v${{ steps.detect.outputs.version }}"
-          git push origin "v${{ steps.detect.outputs.version }}"
+          git tag -a "${{ steps.detect.outputs.tag }}" -m "$(git log -1 --format=%s)"
+          git push origin "${{ steps.detect.outputs.tag }}"

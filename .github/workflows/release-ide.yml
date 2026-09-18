@@ -1,0 +1,732 @@
+name: Release IDE
+
+# The editor distribution's release lane: every editor Verter supports, on one
+# version. It publishes the VS Code extension to the Marketplace, and the engine
+# every OTHER editor launches — the per-platform `verter-lsp` and `verter-mcp`
+# binaries — as GitHub Release assets. Helix, Zed, Lapce and nvim have no store
+# between them; a downloadable binary at a known tag IS their channel. (Registry
+# publication for Zed and Lapce is a roadmap item in their READMEs; when it
+# lands it is a job here, against the same tag, not a lane of its own.)
+#
+# One version for all of them, because they are all launchers for the SAME
+# `verter-lsp` build: the VSIX embeds it, the Zed extension and the Lapce volt
+# spawn it. `ide/v<version>` is what makes "which engine is in my editor?"
+# answerable. `scripts/set-ide-version.mjs` writes that version into
+# `packages/vue-vscode/package.json`, `extensions/zed/extension.toml` and
+# `extensions/lapce/volt.toml`.
+#
+# Why a lane of its own, rather than more jobs in release.yml:
+#
+#   - The editor packages carry an INDEPENDENT version. `packages/vue-vscode`
+#     is `private: true`, so `MARKETPLACE_ONLY` keeps it out of the npm publish
+#     set and `pnpm bump` never touches it, and the Zed/Lapce manifests are not
+#     npm packages at all. Shipping an editor fix must not re-publish crates.io
+#     and npm at a version they already hold.
+#   - Marketplace versions are plain MAJOR.MINOR.PATCH — vsce rejects the
+#     `-beta.N` line the monorepo releases on — so the two version lines cannot
+#     be the same line even in principle.
+#
+# Flow, the same shape as the monorepo's: `pnpm bump:ide` writes the version and
+# commits `release(ide): v<version>` locally -> push to main -> release-tag.yml
+# tags `ide/v<version>` -> this workflow publishes it. The lane — its subject,
+# its tag, where its version is read from — is one entry in
+# scripts/release-lanes.mjs, which is also what the tagging job resolves, so a
+# third thing shipped on its own line is an entry there and a workflow here.
+#
+# Everything built here is built exactly as release.yml builds it (same
+# toolchain pin, same zigbuild cross legs, same artifact names, same packaging
+# script). `packages/vue-vscode/src/releasePackaging.spec.ts` pins the two
+# files' target maps to each other, so a target added to one and not the other
+# fails a test rather than a release.
+
+on:
+  push:
+    tags:
+      - "ide/v*"
+  # A rehearsal: build and package everything, publish nothing. The Marketplace
+  # has no unpublish, so the only safe way to exercise this lane is a run that
+  # cannot reach it.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: >-
+          Build every binary and package all five VSIXes, but skip the
+          Marketplace publish and the GitHub Release.
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-ide-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Validate
+  #
+  # The tag is only a signal; the tree is the truth. The version comes from the
+  # editor manifests and the tag has to agree with them, so a tag pushed by hand
+  # can never publish a VSIX carrying a different version than it claims.
+  # ---------------------------------------------------------------------------
+  validate:
+    name: Validate Tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      dry-run: ${{ steps.check.outputs.dry-run }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - id: check
+        run: |
+          # A dispatched run has no tag to read, so it takes the version from
+          # the tree and cannot publish (see the default below).
+          DRY_RUN="${{ inputs.dry_run == true || github.event_name == 'workflow_dispatch' }}"
+          echo "dry-run=${DRY_RUN}" >> "$GITHUB_OUTPUT"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "::notice::DRY RUN — every binary and VSIX will be built; nothing will be published"
+          fi
+
+          VERSION="$(node -p "require('./packages/vue-vscode/package.json').version")"
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            TAG_VERSION="${TAG#ide/v}"
+            if [ "$TAG_VERSION" = "$TAG" ]; then
+              echo "::error::tag $TAG is not an ide/v<version> tag"
+              exit 1
+            fi
+            if [ "$TAG_VERSION" != "$VERSION" ]; then
+              echo "::error::tag $TAG says $TAG_VERSION but packages/vue-vscode is at $VERSION — refusing to guess"
+              exit 1
+            fi
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Editor distribution version: ${VERSION}"
+
+      # Every editor manifest — the VSIX, the Zed extension, the Lapce volt —
+      # must hold exactly this version, or the tag names one thing and ships
+      # another. It also rejects a prerelease version, which vsce would reject
+      # an hour from now, after every binary has been cross-compiled.
+      - name: Verify the version is complete
+        run: node scripts/set-ide-version.mjs --check "${{ steps.check.outputs.version }}"
+
+  # ---------------------------------------------------------------------------
+  # Test
+  #
+  # The extension's own suite: its unit tests plus the e2e library and
+  # acceptance units (vitest — no VS Code download, no display). The full
+  # editor-driven e2e matrix stays in ci.yml where a pull request already runs
+  # it; this lane asserts that what is about to be published still passes its
+  # own contracts.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test Extension
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Run the extension suite
+        run: pnpm --filter verter-vscode test
+
+  # ---------------------------------------------------------------------------
+  # Build LSP binary (matrix)
+  #
+  # All seven targets, not the five the VSIX bundles: the two musl legs have no
+  # vsce target but they are exactly what a Helix or Zed user on Alpine
+  # downloads. Artifacts are named after the npm platform package the monorepo
+  # release feeds (`lsp-<npm-pkg>`), so the packaging step below maps its five
+  # vsce targets onto the same names release.yml uses.
+  # ---------------------------------------------------------------------------
+  build-lsp:
+    name: Build LSP (${{ matrix.target }})
+    needs: [validate, test]
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            npm-pkg: linux-x64-gnu
+            binary: verter-lsp
+            shim-binary: verter-relay-shim
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: true
+            npm-pkg: linux-x64-musl
+            binary: verter-lsp
+            shim-binary: verter-relay-shim
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use-cross: true
+            npm-pkg: linux-arm64-gnu
+            binary: verter-lsp
+            shim-binary: verter-relay-shim
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: true
+            npm-pkg: linux-arm64-musl
+            binary: verter-lsp
+            shim-binary: verter-relay-shim
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            npm-pkg: darwin-x64
+            binary: verter-lsp
+            shim-binary: verter-relay-shim
+          - target: aarch64-apple-darwin
+            os: macos-15
+            npm-pkg: darwin-arm64
+            binary: verter-lsp
+            shim-binary: verter-relay-shim
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            npm-pkg: win32-x64-msvc
+            binary: verter-lsp.exe
+            shim-binary: verter-relay-shim.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v5
+      # `@1.97.1`, not `@stable`, and it MUST equal `rust-toolchain.toml`'s
+      # `channel` — the same pin release.yml carries, for the same reason: the
+      # action installs `targets:` onto the toolchain named by its `@ref`, while
+      # rustup's toolchain-file override decides which toolchain compiles.
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-lsp-${{ matrix.target }}
+      - name: Setup Zig
+        if: matrix.use-cross
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+      - name: Install cargo-zigbuild
+        if: matrix.use-cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - name: Build editor binaries
+        run: |
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            cargo zigbuild --release --package verter_lsp --package verter_relay_shim --target ${{ matrix.target }}
+          else
+            cargo build --release --package verter_lsp --package verter_relay_shim --target ${{ matrix.target }}
+          fi
+        shell: bash
+      - uses: actions/upload-artifact@v6
+        with:
+          name: lsp-${{ matrix.npm-pkg }}
+          path: |
+            target/${{ matrix.target }}/release/${{ matrix.binary }}
+            target/${{ matrix.target }}/release/${{ matrix.shim-binary }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Build verter-mcp (matrix)
+  #
+  # The extension spawns the standalone MCP server (`verter.mcp.enabled`
+  # defaults to true) and the other editors' users install it the same way they
+  # install the LSP: as a downloaded binary. Built on the same seven targets.
+  # ---------------------------------------------------------------------------
+  build-mcp:
+    name: Build MCP (${{ matrix.target }})
+    needs: [validate, test]
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            npm-pkg: linux-x64-gnu
+            binary: verter-mcp
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: true
+            npm-pkg: linux-x64-musl
+            binary: verter-mcp
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use-cross: true
+            npm-pkg: linux-arm64-gnu
+            binary: verter-mcp
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: true
+            npm-pkg: linux-arm64-musl
+            binary: verter-mcp
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            npm-pkg: darwin-x64
+            binary: verter-mcp
+          - target: aarch64-apple-darwin
+            os: macos-15
+            npm-pkg: darwin-arm64
+            binary: verter-mcp
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            npm-pkg: win32-x64-msvc
+            binary: verter-mcp.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-mcp-${{ matrix.target }}
+      - name: Setup Zig
+        if: matrix.use-cross
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+      - name: Install cargo-zigbuild
+        if: matrix.use-cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - name: Build verter-mcp binary
+        run: |
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            cargo zigbuild --release --package verter_mcp --bin verter-mcp --target ${{ matrix.target }}
+          else
+            cargo build --release --package verter_mcp --bin verter-mcp --target ${{ matrix.target }}
+          fi
+        shell: bash
+      - uses: actions/upload-artifact@v6
+        with:
+          name: mcp-${{ matrix.npm-pkg }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Build native binding (matrix — the five the VSIX bundles)
+  #
+  # The napi `.node` ships INSIDE the VSIX, so unlike the LSP it is built only
+  # for the five vsce targets. The npm platform packages are the monorepo
+  # release's business and are not republished here.
+  # ---------------------------------------------------------------------------
+  build-native:
+    name: Build Native (${{ matrix.target }})
+    needs: [validate, test]
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use-cross: true
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-native-${{ matrix.target }}
+      - name: Setup Zig
+        if: matrix.use-cross
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+      - name: Install cargo-zigbuild
+        if: matrix.use-cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - name: Build native
+        working-directory: packages/native
+        run: |
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            npx napi build -o dist --dts napi.generated.d.ts --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml --target ${{ matrix.target }} --cross-compile
+          else
+            npx napi build -o dist --dts napi.generated.d.ts --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml --target ${{ matrix.target }}
+          fi
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ startsWith(matrix.target, 'aarch64-apple') && '11.0' || startsWith(matrix.target, 'x86_64-apple') && '10.12' || '' }}
+      - uses: actions/upload-artifact@v6
+        with:
+          name: native-${{ matrix.target }}
+          path: packages/native/dist/*.node
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Package VS Code Extension
+  #
+  # Five platform VSIXes, each carrying its own LSP, MCP and napi binary — the
+  # same loop release.yml runs, from the same `package.mjs`, which inspects the
+  # packed bytes and fails closed on a missing engine.
+  # ---------------------------------------------------------------------------
+  build-vsix:
+    name: Package VS Code Extension
+    needs: [validate, build-lsp, build-mcp, build-native]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build TS packages
+        run: pnpm run build:ts
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: lsp-*
+          path: /tmp/lsp-artifacts
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: native-*
+          path: /tmp/native-artifacts
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: mcp-*
+          path: /tmp/mcp-artifacts
+
+      - name: Package VSIX
+        run: |
+          # Map: vsce target → rust target → native .node filename → lsp artifact
+          declare -A RUST_TARGET=(
+            [linux-x64]="x86_64-unknown-linux-gnu"
+            [linux-arm64]="aarch64-unknown-linux-gnu"
+            [darwin-x64]="x86_64-apple-darwin"
+            [darwin-arm64]="aarch64-apple-darwin"
+            [win32-x64]="x86_64-pc-windows-msvc"
+          )
+          declare -A NATIVE_FILE=(
+            [linux-x64]="verter-native.linux-x64-gnu.node"
+            [linux-arm64]="verter-native.linux-arm64-gnu.node"
+            [darwin-x64]="verter-native.darwin-x64.node"
+            [darwin-arm64]="verter-native.darwin-arm64.node"
+            [win32-x64]="verter-native.win32-x64-msvc.node"
+          )
+          # build-lsp names its artifacts after the npm platform package they
+          # feed, so the VSIX targets map onto those names here.
+          declare -A LSP_PKG=(
+            [linux-x64]="linux-x64-gnu"
+            [linux-arm64]="linux-arm64-gnu"
+            [darwin-x64]="darwin-x64"
+            [darwin-arm64]="darwin-arm64"
+            [win32-x64]="win32-x64-msvc"
+          )
+
+          for platform in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64; do
+            echo ""
+            echo "=========================================="
+            echo "  Packaging $platform"
+            echo "=========================================="
+
+            rust_target="${RUST_TARGET[$platform]}"
+            native_file="${NATIVE_FILE[$platform]}"
+            lsp_pkg="${LSP_PKG[$platform]}"
+
+            # --- LSP binary ---
+            mkdir -p packages/vue-vscode/bin
+            if [ "$platform" = "win32-x64" ]; then
+              LSP_BIN="verter-lsp.exe"
+              SHIM_BIN="verter-relay-shim.exe"
+              MCP_BIN="verter-mcp.exe"
+            else
+              LSP_BIN="verter-lsp"
+              SHIM_BIN="verter-relay-shim"
+              MCP_BIN="verter-mcp"
+            fi
+            cp "/tmp/lsp-artifacts/lsp-${lsp_pkg}/${LSP_BIN}" "packages/vue-vscode/bin/${LSP_BIN}"
+            chmod +x "packages/vue-vscode/bin/${LSP_BIN}" 2>/dev/null || true
+
+            # --- MCP server binary ---
+            # Fail closed here AND in package.mjs (which inspects the packed
+            # VSIX bytes): the per-target verter-mcp must ship, or
+            # `verter.mcp.enabled` (default true) is dead on real installs.
+            MCP_SOURCE="/tmp/mcp-artifacts/mcp-${lsp_pkg}/${MCP_BIN}"
+            test -f "$MCP_SOURCE"
+            cp "$MCP_SOURCE" "packages/vue-vscode/bin/${MCP_BIN}"
+            chmod +x "packages/vue-vscode/bin/${MCP_BIN}" 2>/dev/null || true
+
+            # package.mjs validates the target-specific relay executable's
+            # format, architecture, and embedded Verter identity before it
+            # mutates the extension dependency tree.
+            SHIM_SOURCE="/tmp/lsp-artifacts/lsp-${lsp_pkg}/${SHIM_BIN}"
+            test -f "$SHIM_SOURCE"
+            export VERTER_RELAY_SHIM_BINARY="$(realpath "$SHIM_SOURCE")"
+
+            # --- Native binding ---
+            mkdir -p packages/native/dist
+            rm -f packages/native/dist/verter-native.*.node
+            cp "/tmp/native-artifacts/native-${rust_target}/${native_file}" "packages/native/dist/${native_file}"
+
+            # --- Clean previous build output ---
+            rm -rf packages/vue-vscode/dist/node_modules
+            # Only remove packages that package.mjs will recreate as real copies.
+            # Keep @verter/language-shared (pnpm symlink) — esbuild bundles it.
+            rm -rf packages/vue-vscode/node_modules/@verter/typescript-plugin
+            rm -rf packages/vue-vscode/node_modules/@verter/native
+
+            # --- Build & package ---
+            cd packages/vue-vscode
+            node package.mjs --target "$platform"
+            cd "$GITHUB_WORKSPACE"
+            unset VERTER_RELAY_SHIM_BINARY
+
+            # --- Move VSIX ---
+            VSIX_FILE=$(ls packages/vue-vscode/*.vsix | head -1)
+            VSIX_NAME="verter-vscode-${platform}.vsix"
+            mv "$VSIX_FILE" "/tmp/${VSIX_NAME}"
+
+            echo "  VSIX: /tmp/${VSIX_NAME} ($(du -h "/tmp/${VSIX_NAME}" | cut -f1))"
+
+            # --- Clean up for next platform ---
+            rm -rf packages/vue-vscode/bin
+          done
+
+          echo ""
+          echo "All platform VSIXes:"
+          ls -lh /tmp/verter-vscode-*.vsix
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: vsix
+          path: /tmp/verter-vscode-*.vsix
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Publish VS Code Extension
+  #
+  # Push-only: every VSIX was packaged by build-vsix. Published to the ordinary
+  # Marketplace channel — the extension's version line is plain semver, which is
+  # what validate enforces.
+  # ---------------------------------------------------------------------------
+  publish-vscode:
+    name: Publish VS Code Extension
+    needs: [validate, build-vsix]
+    if: needs.validate.outputs.dry-run != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: vscode-marketplace
+      url: https://marketplace.visualstudio.com/items?itemName=verter.verter-vscode
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      # `vsce` itself is the only thing needed here — the VSIXes are prebuilt.
+      - run: pnpm install --frozen-lockfile
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: vsix
+          path: /tmp/vsix
+
+      - name: Publish VSIXes to the Marketplace
+        run: |
+          # One VSIX per platform packaged by build-vsix. A short count is a
+          # partial release, not something to publish quietly.
+          EXPECTED=5
+          shopt -s nullglob
+          vsixes=(/tmp/vsix/verter-vscode-*.vsix)
+          echo "Found ${#vsixes[@]} VSIX(es):"
+          ls -lh /tmp/vsix/ || true
+
+          if [ "${#vsixes[@]}" -ne "$EXPECTED" ]; then
+            echo "::error::expected $EXPECTED platform VSIXes, found ${#vsixes[@]}"
+            exit 1
+          fi
+
+          for vsix in "${vsixes[@]}"; do
+            echo ""
+            echo "--- Publishing $(basename "$vsix") ---"
+            pnpm exec vsce publish --packagePath "$vsix"
+          done
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+  # ---------------------------------------------------------------------------
+  # GitHub Release — the editor distribution
+  #
+  # The Marketplace serves VS Code. Every other editor installs the engine by
+  # downloading it, so the release for this tag carries the per-platform
+  # `verter-lsp` and `verter-mcp` binaries under explicit, platform-qualified
+  # names, plus the VSIXes for a manual install.
+  #
+  # Gated on the BUILD jobs only, exactly as the monorepo release is: a failed
+  # Marketplace publish must not withhold the binaries the other editors need.
+  # The relay shim is a VSIX internal and is deliberately NOT an asset.
+  # ---------------------------------------------------------------------------
+  github-release:
+    name: GitHub Release
+    needs: [validate, build-lsp, build-mcp, build-vsix]
+    if: needs.validate.outputs.dry-run != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: vsix
+          path: /tmp/release-assets/vsix
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: lsp-*
+          path: /tmp/release-assets/lsp
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: mcp-*
+          path: /tmp/release-assets/mcp
+
+      # Stage every asset under an explicit, platform-qualified name, assert a
+      # per-family count, and reject duplicates — a partial release is a failed
+      # release, not a quiet one.
+      - name: Stage release assets
+        run: |
+          STAGED=/tmp/release-assets/staged
+          rm -rf "$STAGED"
+          mkdir -p "$STAGED"
+
+          EXPECTED_LSP=7
+          EXPECTED_MCP=7
+          EXPECTED_VSIX=5
+          FAILURES=0
+
+          stage() {
+            src="$1"
+            name="$2"
+            if [ ! -f "$src" ]; then
+              echo "::error::release asset source missing: $src (intended name: $name)"
+              FAILURES=$((FAILURES + 1))
+              return
+            fi
+            if [ -e "$STAGED/$name" ]; then
+              echo "::error::duplicate release asset name: $name"
+              FAILURES=$((FAILURES + 1))
+              return
+            fi
+            cp "$src" "$STAGED/$name"
+            chmod +x "$STAGED/$name" 2>/dev/null || true
+          }
+
+          expect_count() {
+            label="$1"
+            want="$2"
+            got="$3"
+            if [ "$got" -ne "$want" ]; then
+              echo "::error::expected $want $label asset(s), staged $got"
+              FAILURES=$((FAILURES + 1))
+            fi
+          }
+
+          # --- engine binaries, one per platform package ---
+          lsp_staged=0
+          mcp_staged=0
+          for pkg in linux-x64-gnu linux-x64-musl linux-arm64-gnu linux-arm64-musl darwin-x64 darwin-arm64 win32-x64-msvc; do
+            if [ "$pkg" = "win32-x64-msvc" ]; then
+              stage "/tmp/release-assets/lsp/lsp-${pkg}/verter-lsp.exe" "verter-lsp-${pkg}.exe"
+              stage "/tmp/release-assets/mcp/mcp-${pkg}/verter-mcp.exe" "verter-mcp-${pkg}.exe"
+            else
+              stage "/tmp/release-assets/lsp/lsp-${pkg}/verter-lsp" "verter-lsp-${pkg}"
+              stage "/tmp/release-assets/mcp/mcp-${pkg}/verter-mcp" "verter-mcp-${pkg}"
+            fi
+            lsp_staged=$((lsp_staged + 1))
+            mcp_staged=$((mcp_staged + 1))
+          done
+
+          # --- VSIXes, already platform-qualified by build-vsix ---
+          vsix_staged=0
+          for vsix in /tmp/release-assets/vsix/verter-vscode-*.vsix; do
+            stage "$vsix" "$(basename "$vsix")"
+            vsix_staged=$((vsix_staged + 1))
+          done
+
+          expect_count "LSP" "$EXPECTED_LSP" "$lsp_staged"
+          expect_count "MCP" "$EXPECTED_MCP" "$mcp_staged"
+          expect_count "VSIX" "$EXPECTED_VSIX" "$vsix_staged"
+
+          echo ""
+          ls -lh "$STAGED"
+
+          if [ "$FAILURES" -gt 0 ]; then
+            echo "::error::$FAILURES release-asset problem(s) — refusing to create a partial release"
+            exit 1
+          fi
+
+      - name: Write release notes
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          cat > /tmp/RELEASE_NOTES.md <<NOTES
+          Verter editor distribution \`${VERSION}\` — one version across every
+          editor, all launching the same \`verter-lsp\` build.
+
+          **VS Code** — installed from the
+          [Marketplace](https://marketplace.visualstudio.com/items?itemName=verter.verter-vscode);
+          the \`.vsix\` files here are the same builds for a manual install.
+
+          **Every other editor** (Helix, Zed, Lapce, nvim) launches the engine
+          directly: download \`verter-lsp-<platform>\` for your machine, mark it
+          executable and point your editor's server command at it.
+          \`verter-mcp-<platform>\` is the standalone MCP server the same builds
+          ship, for agents that want Vue analysis without the LSP.
+
+          The npm packages (\`verter-lsp\`, \`@verter/lsp-*\`) and the crates track
+          the monorepo's own version line and are published by its \`v*\` releases.
+          NOTES
+
+      - name: Create GitHub Release
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release create "$TAG" \
+            --title "Editors ${{ needs.validate.outputs.version }}" \
+            --notes-file /tmp/RELEASE_NOTES.md \
+            /tmp/release-assets/staged/*
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

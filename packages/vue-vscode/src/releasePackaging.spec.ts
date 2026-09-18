@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { deflateRawSync } from "node:zlib";
@@ -858,5 +859,261 @@ describe("VSIX inspection helpers", () => {
     expect(() =>
       assertVsixContainsMcpEngine({ vsixPath: zipPath, vsceTarget: "linux-x64" }),
     ).not.toThrow();
+  });
+});
+
+/**
+ * The editor distribution's release lane (release-ide.yml).
+ *
+ * Every editor Verter supports ships on ONE version, because they are all
+ * launchers for the same `verter-lsp` build: the extension goes to the
+ * Marketplace, and the others download the engine from the release for that
+ * same tag. Three things can quietly break that and none shows up until a
+ * release is already half-published:
+ *
+ *   - the lane drifting from release.yml, which builds and packages the same
+ *     artifacts — a target added to one map and not the other packages a VSIX
+ *     against the wrong binary, or drops a platform silently;
+ *   - the version line crossing the monorepo's, which would let `pnpm bump`
+ *     and `pnpm bump:ide` fight over one manifest;
+ *   - an editor manifest falling out of the version set, which would ship a
+ *     launcher whose number no longer says which engine it carries.
+ */
+describe("editor distribution release lane", () => {
+  const release = read(".github/workflows/release.yml");
+  const lane = read(".github/workflows/release-ide.yml");
+  const releaseTag = read(".github/workflows/release-tag.yml");
+  const extensionPkg = JSON.parse(read("packages/vue-vscode/package.json")) as {
+    name: string;
+    version: string;
+    private?: boolean;
+    publisher: string;
+  };
+  /**
+   * `release-lanes.mjs list`, parsed back: lane id -> what it commits, tags,
+   * reads its version from. Reading the table through its own CLI is what
+   * proves the workflow and this spec are looking at the same answer.
+   */
+  const LANES = (() => {
+    const out = execFileSync(process.execPath, ["scripts/release-lanes.mjs", "list"], {
+      cwd: path.resolve(here, "..", "..", ".."),
+      encoding: "utf8",
+    });
+    const lanes = new Map<string, { commit: string; tag: string; version: string }>();
+    let current = "";
+    for (const line of out.split("\n")) {
+      const header = line.match(/^(\S+)\t/);
+      if (header) {
+        current = header[1] === "(none)" ? "" : header[1];
+        lanes.set(current, { commit: "", tag: "", version: "" });
+        continue;
+      }
+      const field = line.match(/^ {2}(commit|tag|version)\s+(.+)$/);
+      if (field) lanes.get(current)![field[1] as "commit" | "tag" | "version"] = field[2].trim();
+    }
+    return lanes;
+  })();
+
+  it("is started by the editor tag, never the monorepo's", () => {
+    // `v*` is release.yml's. A lane that also answered to it would publish the
+    // Marketplace twice per monorepo release, at two different versions.
+    expect(lane, "release-ide.yml must trigger on ide/v* tags").toMatch(
+      /tags:\s*\n\s*- "ide\/v\*"/,
+    );
+    expect(
+      /tags:\s*\n\s*- "v\*"/.test(lane),
+      "release-ide.yml must NOT also trigger on the monorepo's v* tags",
+    ).toBe(false);
+  });
+
+  it("versions every editor manifest together, so one number names one engine", () => {
+    // The Zed extension and the Lapce volt are launchers for the binary the
+    // VSIX embeds. Leaving one out of the version set is how a user ends up
+    // unable to tell which engine their editor is running.
+    const setVersion = read("scripts/set-ide-version.mjs");
+    expect(setVersion).toContain("extensions/zed/extension.toml");
+    expect(setVersion).toContain("extensions/lapce/volt.toml");
+    expect(setVersion, "the VSIX version comes from the Marketplace publish set").toContain(
+      "marketplaceOnly",
+    );
+    const validate = workflowJobs(lane).get("validate") ?? "";
+    expect(
+      validate,
+      "the lane must prove every editor manifest holds the tag's version before it builds",
+    ).toContain("node scripts/set-ide-version.mjs --check");
+  });
+
+  it("publishes the extension the Marketplace actually serves", () => {
+    expect(extensionPkg.publisher).toBe("verter");
+    expect(extensionPkg.name).toBe("verter-vscode");
+    // The environment URL is what an operator clicks from the run; a wrong id
+    // there points a release at someone else's extension page.
+    expect(lane).toContain(
+      "https://marketplace.visualstudio.com/items?itemName=verter.verter-vscode",
+    );
+    expect(lane, "the publish step authenticates with the Marketplace PAT").toContain(
+      "VSCE_PAT: ${{ secrets.VSCE_PAT }}",
+    );
+  });
+
+  it("keeps the extension out of the npm publish set so its version line stays its own", () => {
+    // `private: true` is what MARKETPLACE_ONLY exempts, and what keeps
+    // scripts/set-version.mjs (the monorepo bump) from writing this manifest.
+    expect(
+      extensionPkg.private,
+      "packages/vue-vscode must stay private — it ships to the Marketplace, not npm, and " +
+        "`pnpm bump` must never move its version",
+    ).toBe(true);
+    // MARKETPLACE_ONLY is the authority both publish lanes read: it is what
+    // exempts a private package from the npm closure check AND what keeps it
+    // out of the set scripts/set-version.mjs writes.
+    const publishSet = read("scripts/lib/publish-set.mjs");
+    expect(publishSet).toMatch(/MARKETPLACE_ONLY = \["verter-vscode"\]/);
+  });
+
+  it("refuses a tag that disagrees with the manifest, and a version vsce would reject", () => {
+    const validate = workflowJobs(lane).get("validate") ?? "";
+    expect(validate, "validate reads the version from the tree, not the tag").toContain(
+      "require('./packages/vue-vscode/package.json').version",
+    );
+    expect(
+      validate,
+      "a tag that names a different version than the manifest must fail before anything is built",
+    ).toMatch(/refusing to guess/);
+    // set-ide-version --check is where the prerelease refusal lives; the
+    // lane has to actually run it, or vsce rejects the version an hour later.
+    expect(validate).toContain("node scripts/set-ide-version.mjs --check");
+  });
+
+  it("resolves every lane from one table, and tags each under its own prefix", () => {
+    // The tagging job is lane-agnostic: it parses the scope and asks the table.
+    // A lane that lived in the workflow instead would have to be added twice.
+    expect(releaseTag, "release-tag.yml must resolve the lane from the table").toContain(
+      "node scripts/release-lanes.mjs resolve",
+    );
+    expect(releaseTag, "and run that lane's own verification before tagging").toContain(
+      "node scripts/release-lanes.mjs verify",
+    );
+
+    const monorepo = LANES.get("");
+    const ide = LANES.get("ide");
+    expect(monorepo, "the unscoped lane is the monorepo").toBeTruthy();
+    expect(ide, "the ide lane must be in the table").toBeTruthy();
+    expect(monorepo!.tag).toBe("v<version>");
+    expect(ide!.tag).toBe("ide/v<version>");
+    expect(monorepo!.version).toBe("Cargo.toml [workspace.package]");
+    expect(ide!.version).toContain("packages/vue-vscode/package.json");
+    // The `v` before the version is what keeps `release(ide): v1.2.3` from
+    // ever matching the unscoped `release: v<version>` pattern.
+    expect(monorepo!.commit).toBe("release: v<version>");
+    expect(ide!.commit).toBe("release(ide): v<version>");
+  });
+
+  it("builds every VSIX platform the packaging loop maps, and no more", () => {
+    const laneNative = workflowJobs(lane).get("build-native") ?? "";
+    const vsix = workflowJobs(lane).get("build-vsix") ?? "";
+    // The five vsce targets the loop packages, and the rust targets it copies
+    // a .node from. A target in the map with no build leg copies nothing.
+    for (const target of [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc",
+    ]) {
+      expect(laneNative, `build-native must build ${target} for the VSIX`).toContain(target);
+    }
+    for (const platform of [
+      "linux-x64",
+      "linux-arm64",
+      "darwin-x64",
+      "darwin-arm64",
+      "win32-x64",
+    ]) {
+      expect(vsix, `the packaging loop must cover ${platform}`).toContain(platform);
+    }
+  });
+
+  it("builds the engine for every platform the other editors download, including musl", () => {
+    const laneLsp = workflowJobs(lane).get("build-lsp") ?? "";
+    const laneMcp = workflowJobs(lane).get("build-mcp") ?? "";
+    // musl has no vsce target: these legs exist only for the editors that
+    // install the binary directly, which is the other half of this lane.
+    for (const target of ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]) {
+      expect(laneLsp, `build-lsp must cover ${target} for direct installs`).toContain(target);
+      expect(laneMcp, `build-mcp must cover ${target} for direct installs`).toContain(target);
+    }
+    const staging = workflowJobs(lane).get("github-release") ?? "";
+    expect(staging, "the release must carry the LSP binaries").toContain("verter-lsp-${pkg}");
+    expect(staging, "and the standalone MCP server").toContain("verter-mcp-${pkg}");
+    expect(
+      staging.includes("verter-relay-shim"),
+      "the relay shim is a VSIX internal and must NOT be a release asset",
+    ).toBe(false);
+  });
+
+  it("maps vsce targets onto the same artifact names release.yml uses", () => {
+    // Both workflows name their LSP artifacts after the npm platform package.
+    // If one map changes, packaging copies a binary for the wrong platform —
+    // which installs and then fails at launch, not at build.
+    const laneVsix = workflowJobs(lane).get("build-vsix") ?? "";
+    const releaseVsix = workflowJobs(release).get("build-vsix") ?? "";
+    const lspMap = (body: string) =>
+      body
+        .match(/declare -A LSP_PKG=\(([\s\S]*?)\)/)?.[1]
+        ?.trim()
+        .replace(/\s+/g, " ");
+    const nativeMap = (body: string) =>
+      body
+        .match(/declare -A NATIVE_FILE=\(([\s\S]*?)\)/)?.[1]
+        ?.trim()
+        .replace(/\s+/g, " ");
+    const rustMap = (body: string) =>
+      body
+        .match(/declare -A RUST_TARGET=\(([\s\S]*?)\)/)?.[1]
+        ?.trim()
+        .replace(/\s+/g, " ");
+
+    expect(lspMap(laneVsix), "release-ide.yml must declare an LSP_PKG map").toBeTruthy();
+    expect(lspMap(laneVsix)).toBe(lspMap(releaseVsix));
+    expect(nativeMap(laneVsix)).toBe(nativeMap(releaseVsix));
+    expect(rustMap(laneVsix)).toBe(rustMap(releaseVsix));
+  });
+
+  it("stages the MCP engine fail-closed, exactly as the monorepo lane does", () => {
+    const body = workflowJobs(lane).get("build-vsix") ?? "";
+    expect(body, "the lane must download the mcp-* artifacts").toContain("pattern: mcp-*");
+    expect(
+      body,
+      "a missing MCP artifact must fail the packaging step (test -f), not fall through",
+    ).toMatch(/test -f "\$MCP_SOURCE"/);
+    expect(body, "win32 stages the .exe engine name").toContain('MCP_BIN="verter-mcp.exe"');
+  });
+
+  it("packages every platform before it publishes any, and counts them", () => {
+    const graph = parseNeedsGraph(lane);
+    expect(graph.get("publish-vscode"), "publishing consumes build-vsix's artifact").toContain(
+      "build-vsix",
+    );
+    expect(graph.get("build-vsix"), "packaging needs all three binary matrices").toEqual(
+      expect.arrayContaining(["build-lsp", "build-mcp", "build-native"]),
+    );
+    const publish = workflowJobs(lane).get("publish-vscode") ?? "";
+    expect(publish, "a short VSIX count is a partial release, not a quiet one").toContain(
+      "EXPECTED=5",
+    );
+  });
+
+  it("cannot publish from a rehearsal", () => {
+    const publish = workflowJobs(lane).get("publish-vscode") ?? "";
+    const githubRelease = workflowJobs(lane).get("github-release") ?? "";
+    // The Marketplace has no unpublish, so the dry run has to be unable to
+    // reach it — not merely discouraged from it.
+    expect(publish).toContain("if: needs.validate.outputs.dry-run != 'true'");
+    expect(githubRelease).toContain("if: needs.validate.outputs.dry-run != 'true'");
+    expect(
+      workflowJobs(lane).get("validate") ?? "",
+      "a dispatched run has no tag to trust, so it never publishes",
+    ).toContain("github.event_name == 'workflow_dispatch'");
   });
 });
