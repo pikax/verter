@@ -1,6 +1,6 @@
 {
   "name": "@verter/tsc-win32-x64-msvc",
-  "version": "0.0.1-beta.4",
+  "version": "0.0.1-beta.5",
   "description": "verter-tsc binary for Windows x64",
   "license": "MIT",
   "repository": {

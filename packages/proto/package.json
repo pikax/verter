@@ -1,6 +1,6 @@
 {
   "name": "@verter/proto",
-  "version": "0.0.1-beta.4",
+  "version": "0.0.1-beta.5",
   "description": "Shared protobuf schemas for Verter packages",
   "homepage": "https://verterjs.dev/",
   "license": "MIT",

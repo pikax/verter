@@ -3165,7 +3165,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "verter-editor-client"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "serde_json",
  "toml",
@@ -3173,7 +3173,7 @@ dependencies = [
 
 [[package]]
 name = "verter_actions"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "oxc_allocator",
  "oxc_span",
@@ -3187,7 +3187,7 @@ dependencies = [
 
 [[package]]
 name = "verter_analysis_inputs"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -3195,7 +3195,7 @@ dependencies = [
 
 [[package]]
 name = "verter_audit"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "clap",
  "oxc_allocator",
@@ -3213,7 +3213,7 @@ dependencies = [
 
 [[package]]
 name = "verter_bench"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "blake3",
  "criterion",
@@ -3243,14 +3243,14 @@ dependencies = [
 
 [[package]]
 name = "verter_compile_contracts"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "trybuild",
 ]
 
 [[package]]
 name = "verter_compile_contracts_bench"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "trybuild",
  "verter_compiler",
@@ -3260,7 +3260,7 @@ dependencies = [
 
 [[package]]
 name = "verter_compile_contracts_session_variants"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "trybuild",
  "verter_compiler",
@@ -3270,7 +3270,7 @@ dependencies = [
 
 [[package]]
 name = "verter_compiler"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "base64 0.22.1",
  "bitflags",
@@ -3317,7 +3317,7 @@ dependencies = [
 
 [[package]]
 name = "verter_css_syntax"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "bumpalo",
  "memchr",
@@ -3329,11 +3329,11 @@ dependencies = [
 
 [[package]]
 name = "verter_debug_assert"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 
 [[package]]
 name = "verter_diagnostics"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "hotpath",
  "rustc-hash",
@@ -3348,7 +3348,7 @@ dependencies = [
 
 [[package]]
 name = "verter_dx_baseline"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "oxc_sourcemap",
  "serde",
@@ -3367,14 +3367,14 @@ dependencies = [
 
 [[package]]
 name = "verter_ecma"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "verter_debug_assert",
 ]
 
 [[package]]
 name = "verter_ffi"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "log",
  "serde_json",
@@ -3393,7 +3393,7 @@ dependencies = [
 
 [[package]]
 name = "verter_identity"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "blake3",
  "serde_json",
@@ -3401,7 +3401,7 @@ dependencies = [
 
 [[package]]
 name = "verter_language"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "getrandom 0.2.17",
  "serde",
@@ -3411,7 +3411,7 @@ dependencies = [
 
 [[package]]
 name = "verter_lsp"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "blake3",
  "dashmap",
@@ -3460,7 +3460,7 @@ dependencies = [
 
 [[package]]
 name = "verter_macro_dto"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "serde_json",
  "static_assertions",
@@ -3472,7 +3472,7 @@ dependencies = [
 
 [[package]]
 name = "verter_mcp"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "axum",
  "clap",
@@ -3502,7 +3502,7 @@ dependencies = [
 
 [[package]]
 name = "verter_mcp_server"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "clap",
  "tokio",
@@ -3513,7 +3513,7 @@ dependencies = [
 
 [[package]]
 name = "verter_napi"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "backtrace",
  "napi",
@@ -3544,7 +3544,7 @@ dependencies = [
 
 [[package]]
 name = "verter_napi_request_fixture"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "napi",
  "napi-build",
@@ -3554,7 +3554,7 @@ dependencies = [
 
 [[package]]
 name = "verter_no_storedspan"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "rustc-hash",
  "static_assertions",
@@ -3564,7 +3564,7 @@ dependencies = [
 
 [[package]]
 name = "verter_no_storedspan_derive"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3573,7 +3573,7 @@ dependencies = [
 
 [[package]]
 name = "verter_no_typeexpr"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "rustc-hash",
  "static_assertions",
@@ -3583,7 +3583,7 @@ dependencies = [
 
 [[package]]
 name = "verter_no_typeexpr_derive"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3592,7 +3592,7 @@ dependencies = [
 
 [[package]]
 name = "verter_parser"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "bumpalo",
  "hotpath",
@@ -3617,7 +3617,7 @@ dependencies = [
 
 [[package]]
 name = "verter_protocol"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "hashbrown 0.15.5",
  "prost",
@@ -3639,7 +3639,7 @@ dependencies = [
 
 [[package]]
 name = "verter_relay_shim"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "getrandom 0.2.17",
  "libc",
@@ -3657,7 +3657,7 @@ dependencies = [
 
 [[package]]
 name = "verter_scheduler"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "arc-swap",
  "crossbeam-channel",
@@ -3676,7 +3676,7 @@ dependencies = [
 
 [[package]]
 name = "verter_semantic"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "bitflags",
  "glob",
@@ -3713,7 +3713,7 @@ dependencies = [
 
 [[package]]
 name = "verter_session"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "arc-swap",
  "bitflags",
@@ -3784,7 +3784,7 @@ dependencies = [
 
 [[package]]
 name = "verter_session_oracle_macro"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3793,7 +3793,7 @@ dependencies = [
 
 [[package]]
 name = "verter_session_query"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "serde_json",
  "verter_type_expr",
@@ -3801,7 +3801,7 @@ dependencies = [
 
 [[package]]
 name = "verter_shipped_cfg_contract"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "verter_compiler",
  "verter_session",
@@ -3809,7 +3809,7 @@ dependencies = [
 
 [[package]]
 name = "verter_source_policy_gate"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3827,7 +3827,7 @@ dependencies = [
 
 [[package]]
 name = "verter_span"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "oxc_span",
  "serde",
@@ -3836,7 +3836,7 @@ dependencies = [
 
 [[package]]
 name = "verter_svelte_conformance"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "oxc_allocator",
  "serde",
@@ -3849,11 +3849,11 @@ dependencies = [
 
 [[package]]
 name = "verter_test_support"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 
 [[package]]
 name = "verter_tsc"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -3878,7 +3878,7 @@ dependencies = [
 
 [[package]]
 name = "verter_tsgo_api"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -3896,7 +3896,7 @@ dependencies = [
 
 [[package]]
 name = "verter_type_expr"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "rustc-hash",
  "serde",
@@ -3910,7 +3910,7 @@ dependencies = [
 
 [[package]]
 name = "verter_type_expr_oxc"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "oxc_allocator",
  "oxc_ast",
@@ -3924,7 +3924,7 @@ dependencies = [
 
 [[package]]
 name = "verter_type_runtime"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "blake3",
  "parking_lot",
@@ -3943,7 +3943,7 @@ dependencies = [
 
 [[package]]
 name = "verter_validation_probe"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -3958,7 +3958,7 @@ dependencies = [
 
 [[package]]
 name = "verter_vue_conformance"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "hex",
  "oxc_allocator",
@@ -3975,7 +3975,7 @@ dependencies = [
 
 [[package]]
 name = "verter_wasm"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.4.2",
@@ -4002,7 +4002,7 @@ dependencies = [
 
 [[package]]
 name = "verter_workspace"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "arc-swap",
  "dashmap",
@@ -4426,7 +4426,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 dependencies = [
  "serde",
  "toml",

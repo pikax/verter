@@ -11,7 +11,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.0.1-beta.4"
+version = "0.0.1-beta.5"
 edition = "2021"
 # Consumer-facing MSRV floor, set by transitive deps in
 # `[workspace.dependencies]`: `oxc_*` 0.126 requires rustc 1.92.
