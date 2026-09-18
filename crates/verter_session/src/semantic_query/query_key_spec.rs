@@ -985,7 +985,8 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
         // `MaterializationCycleGate` (NOT `TypeNode`) — the opaque
         // Decided/LegacyFallback outcome. LIVE producer; only `Decided`
         // admits through the family singleflight (`LegacyFallback` always
-        // suppresses), and the family carries the live-generation gate.
+        // suppresses). Project-shape invalidation rides the carrier's
+        // `FactVersionRef::ProjectGeneration` fact.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::ClassifyMaterializationCycleGate,
             lifecycle: KeyLifecycle::Live,

@@ -1,10 +1,12 @@
-//! In-flight admission — per-entry Mutex + Condvar pair.
+//! FlightCell — same-key production owner.
 //!
-//! Cold builds register an `InflightEntry` keyed by the prepared query
-//! token ([`PreparedKeyHandle`] — full-key equality behind one `Arc`);
-//! joiners block on the entry's `Condvar` until the winner publishes.
-//! RAII guards keep the recursion stack and the in-flight table
-//! consistent across panics and early returns.
+//! One [`FlightCell`] owns production for each in-flight semantic key
+//! ([`PreparedKeyHandle`] — full-key equality behind one `Arc`). Concurrent
+//! waiters join that cell; only the winner computes. Failed, incomplete,
+//! cancelled, or stale production never publishes into
+//! [`crate::project_type_store::ProjectTypeStore`]. RAII guards keep the
+//! recursion stack and the in-flight table consistent across panics and
+//! early returns.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -17,12 +19,13 @@ use crate::semantic_query::{DepSignature, QueryError, QueryResult, SemanticQuery
 use super::empty_signature;
 use super::prepared::PreparedKeyHandle;
 
-/// In-flight admission state for one cold build.
+/// Same-key production cell for one in-flight semantic query.
 ///
 /// The inner mutex guards `state` exclusively; `ready` is signalled when
 /// the winner publishes. Joiners wait on `ready` via `wait_while`, so they
-/// do not busy-retry.
-pub(super) struct InflightEntry {
+/// do not busy-retry. Ownership is released when the cell is retired from
+/// the store's flight table after completion, abort, or panic.
+pub(super) struct FlightCell {
     pub(super) state: Mutex<InflightState>,
     pub(super) ready: Condvar,
 }
@@ -117,7 +120,7 @@ pub(super) struct InflightState {
     pub(super) aborted: bool,
 }
 
-impl InflightEntry {
+impl FlightCell {
     pub(super) fn new() -> Self {
         Self {
             state: Mutex::new(InflightState::default()),
@@ -181,21 +184,21 @@ impl Drop for RecursionStackGuard {
 /// joiners, and removes the entry from the in-flight table so fresh
 /// callers start a new build.
 pub(super) struct InflightPanicGuard<'a> {
-    inflight: Arc<InflightEntry>,
+    inflight: Arc<FlightCell>,
     registration: InflightRegistration<'a>,
     key: PreparedKeyHandle,
     finished: bool,
 }
 
 enum InflightRegistration<'a> {
-    Joining(&'a Mutex<FxHashMap<PreparedKeyHandle, Arc<InflightEntry>>>),
-    Independent(&'a Mutex<FxHashMap<PreparedKeyHandle, Vec<Arc<InflightEntry>>>>),
+    Joining(&'a Mutex<FxHashMap<PreparedKeyHandle, Arc<FlightCell>>>),
+    Independent(&'a Mutex<FxHashMap<PreparedKeyHandle, Vec<Arc<FlightCell>>>>),
 }
 
 impl<'a> InflightPanicGuard<'a> {
     pub(super) fn new(
-        inflight: Arc<InflightEntry>,
-        inflight_table: &'a Mutex<FxHashMap<PreparedKeyHandle, Arc<InflightEntry>>>,
+        inflight: Arc<FlightCell>,
+        inflight_table: &'a Mutex<FxHashMap<PreparedKeyHandle, Arc<FlightCell>>>,
         key: PreparedKeyHandle,
     ) -> Self {
         Self {
@@ -207,8 +210,8 @@ impl<'a> InflightPanicGuard<'a> {
     }
 
     pub(super) fn new_independent(
-        inflight: Arc<InflightEntry>,
-        inflight_table: &'a Mutex<FxHashMap<PreparedKeyHandle, Vec<Arc<InflightEntry>>>>,
+        inflight: Arc<FlightCell>,
+        inflight_table: &'a Mutex<FxHashMap<PreparedKeyHandle, Vec<Arc<FlightCell>>>>,
         key: PreparedKeyHandle,
     ) -> Self {
         Self {
@@ -244,7 +247,7 @@ impl<'a> Drop for InflightPanicGuard<'a> {
         self.inflight.ready.notify_all();
         // `ptr_eq`-guarded remove: only retire THIS guard's own
         // in-flight entry. A cross-view joiner that forked may have
-        // installed a fresh `InflightEntry` for the same key; an
+        // installed a fresh `FlightCell` for the same key; an
         // unconditional remove would evict that fresh entry. (On the
         // panic path the winner never published a `graph_carrier`, so
         // a joiner cannot have forked off THIS build — but the guard
