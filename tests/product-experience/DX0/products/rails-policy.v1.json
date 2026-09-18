@@ -1,0 +1,36 @@
+{
+  "id": "rails-policy.v1",
+  "schema": 1,
+  "semanticRail": {
+    "authority": "typescript",
+    "law": "TypeScript is the authority for strict Vue/Svelte projection typing: hover types, diagnostics, project checks, completion types. Provider modes select which TypeScript engine answers; nothing else does. This restates the STP0 type-authority law at the consumer boundary.",
+    "operations": ["lsp.hover", "lsp.diagnostics", "tsc.project-check.vue", "tsc.project-check.svelte"],
+    "providerModes": ["auto", "tsgo", "shared-tsgo", "tsserver", "editor-tsserver", "extension", "off"],
+    "evidence": ["crates/verter_lsp/src/capabilities.rs", "crates/verter_tsc/src/main.rs"]
+  },
+  "inspectionRail": {
+    "authority": "verter-native analysis",
+    "law": "Native flow facts, native-checker observations, compiler analyses and component-meta are separately labelled inspection answers. They may describe the same source file but are labelled, carry their own provenance, and never substitute a semantic-rail answer.",
+    "labelling": "required",
+    "labellingEvidence": "hover provenance display (verter.hover.provenance setting; hover init-option key) is the existing labelling edge this generalizes",
+    "operations": ["inspection.flow-return", "lsp.component-meta", "playground.lint-file", "mcp.lint-project"],
+    "evidence": ["crates/verter_session/src/host_flow_return_audit.rs", "crates/verter-editor-client/src/init_options.rs"]
+  },
+  "comparisonRail": {
+    "selection": "explicit",
+    "law": "Comparing rails (native inspection vs TypeScript) is an explicitly selected operation per request, in the lineage of the STP1 verify-node engine comparisons. Silent substitution, or a comparison offered as the default answer to a semantic question, is forbidden.",
+    "evidence": ["crates/verter_lsp/src/capabilities.rs"]
+  },
+  "discriminators": [
+    {
+      "id": "DX0-AC3",
+      "scenario": "In one source file, native flow-return facts (inspection rail) and TypeScript hover/diagnostics (semantic rail) stay separately queryable, separately labelled, and never merge into one answer or one authority.",
+      "operations": ["inspection.flow-return", "lsp.hover", "lsp.diagnostics"]
+    }
+  ],
+  "forbidden": [
+    "inspection substituting semantic answers",
+    "silent comparison as the default answer",
+    "merging the two authorities into one engine or one answer channel"
+  ]
+}

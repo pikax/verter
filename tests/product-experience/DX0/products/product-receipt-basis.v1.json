@@ -1,0 +1,52 @@
+{
+  "id": "product-receipt-basis.v1",
+  "schema": 1,
+  "fields": ["sourceRevisions", "projectConfiguration", "engineIdentity", "hostIdentity", "completenessState"],
+  "fieldBindings": {
+    "sourceRevisions": "The input basis / file revisions the result was computed from, under the existing input-basis and source-identity authority.",
+    "projectConfiguration": "Project identity plus configuration facts: tsconfig/paths, .verterrc.json, lint preset, vite-config trust state, framework profile.",
+    "engineIdentity": "Engine kind and exact version: playground typescript@6.0.3, verter-tsc tsgo pin, or the resolved provider engine.",
+    "hostIdentity": "The executing host: server binary and version, editor client and version, MCP transport, or browser runtime plus WASM build selector.",
+    "completenessState": "One of the completenessStates enum; complete-empty is a successful empty answer and every other non-complete state is distinct from it."
+  },
+  "completenessStates": [
+    "complete",
+    "complete-empty",
+    "partial",
+    "pending",
+    "unsupported",
+    "ambiguous",
+    "failed",
+    "cancelled",
+    "stale"
+  ],
+  "distinctnessRule": "complete-empty is a successful empty answer; partial, pending, unsupported, ambiguous, failed, cancelled and stale are distinct from it and from complete, and none of them may be published as a complete result.",
+  "currentSubstrate": [
+    {
+      "id": "audit-records",
+      "binds": "per-request observability records including flow-return payloads with partiality tags",
+      "evidence": ["crates/verter_session/src/host_flow_return_audit.rs"]
+    },
+    {
+      "id": "engine-pins",
+      "binds": "engineIdentity for CLI and editor provider modes",
+      "evidence": ["crates/verter_tsc/src/main.rs", "crates/verter_lsp/src/main.rs"]
+    },
+    {
+      "id": "wasm-build-selector",
+      "binds": "hostIdentity for the browser product (local bundle / commit / release selector)",
+      "evidence": ["packages/playground/src/core/wasmLoader.ts"]
+    },
+    {
+      "id": "project-config",
+      "binds": "projectConfiguration lint preset and vite-config trust state",
+      "evidence": ["crates/verter_mcp/src/config.rs", "crates/verter_lsp/src/config.rs"]
+    }
+  ],
+  "rules": [
+    "Stale publication is forbidden: a result handle is checked against the current basis before display; old-source, old-project, old-engine, old-worker and wrong-handle results are rejected.",
+    "Cancellation prevents additional irrelevant work and releases retained handles; a cancelled request cannot warm a complete cache.",
+    "Receipts reuse the existing substrate (audit records, env-hash identity, engine pins) and add no second status store.",
+    "The receipt is bound before display, not reconstructed after the fact."
+  ]
+}

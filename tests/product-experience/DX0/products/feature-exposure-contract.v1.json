@@ -1,0 +1,372 @@
+{
+  "id": "feature-exposure-contract.v1",
+  "schema": 1,
+  "vocabulary": {
+    "profiles": ["editor", "browser", "cli", "agent", "inspection"],
+    "maturity": ["stable", "preview", "experimental", "internal"],
+    "obligations": ["RequiredCurrent"],
+    "exposureStates": ["executable", "registered", "absent"],
+    "answerRails": ["semantic", "inspection", "comparison", "none"],
+    "playgroundStatus": ["exposed", "partial", "missing"]
+  },
+  "rules": [
+    "Every shipped valid feature is RequiredCurrent; consumer surfaces may not remove, optionalize, or externalize a row.",
+    "A playground gap keeps product promotion blocked until an executable route and replay case exist.",
+    "A NativeOnly operation claimed browser-executable requires shipped browser build evidence; otherwise the claim is rejected.",
+    "Inspection-rail answers are labelled and never substitute semantic-rail answers.",
+    "Maturity and catalog truth come from the producing owner and catalogs/product-surface-catalog.toml, never from a surface's presentation."
+  ],
+  "operations": [
+    {
+      "id": "lsp.hover",
+      "operation": "textDocument/hover",
+      "profile": "editor",
+      "version": "lsp-3.17",
+      "producerOwner": "crates/verter_lsp language service over the session TypeProvider (tsgo/tsserver)",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "semantic",
+      "semanticAuthority": "typescript",
+      "catalogSurfaces": ["vue.language_service.typing", "svelte.language_service.typing"],
+      "exposure": {
+        "state": "executable",
+        "route": "LSP textDocument/hover (crates/verter_lsp/src/capabilities.rs)",
+        "replayCase": "editor client smoke suites (editors/nvim/tests/smoke_spec.lua; packages/vue-vscode e2e)",
+        "test": "editors/nvim/tests/smoke_spec.lua; extensions lapce/zed contract_plan examples"
+      },
+      "playground": {
+        "status": "exposed",
+        "route": "Monaco hover provider over the browser TS worker (packages/playground/src/editor/lspProviders.ts)",
+        "test": "packages/playground vitest provider suites",
+        "evidence": ["packages/playground/src/editor/tsWorker.ts"]
+      },
+      "browserExecutable": false
+    },
+    {
+      "id": "lsp.diagnostics",
+      "operation": "textDocument/publishDiagnostics (TypeScript projection diagnostics)",
+      "profile": "editor",
+      "version": "lsp-3.17",
+      "producerOwner": "crates/verter_lsp diagnostics bridge over the session TypeProvider",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "semantic",
+      "semanticAuthority": "typescript",
+      "catalogSurfaces": ["vue.language_service.typing", "svelte.language_service.typing"],
+      "exposure": {
+        "state": "executable",
+        "route": "push diagnostics (crates/verter_lsp/src/features/diagnostics_bridge.rs)",
+        "replayCase": "editor client diagnostic publications suites",
+        "test": "editors/nvim/tests/diagnostic_publications_spec.lua"
+      },
+      "playground": {
+        "status": "exposed",
+        "route": "Diagnostics tab badge over per-file browser TS worker queries (packages/playground/src/editor/tsService.ts)",
+        "test": "packages/playground vitest diagnostics suites",
+        "scope": "per-file TypeScript diagnostics via the pinned browser worker",
+        "evidence": ["packages/playground/src/editor/tsWorker.ts"]
+      },
+      "browserExecutable": false
+    },
+    {
+      "id": "editor.rename",
+      "operation": "textDocument/rename + prepareRename",
+      "profile": "editor",
+      "version": "lsp-3.17",
+      "producerOwner": "crates/verter_lsp edit operations over authored coordinates",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "none",
+      "catalogSurfaces": ["vue.language_service.edit", "svelte.language_service.edit"],
+      "exposure": {
+        "state": "executable",
+        "route": "LSP rename with prepareProvider (crates/verter_lsp/src/capabilities.rs)",
+        "replayCase": "nvim smoke rename case",
+        "test": "editors/nvim/tests/smoke_spec.lua"
+      },
+      "playground": {
+        "status": "exposed",
+        "route": "Monaco rename provider over the browser TS worker (packages/playground/src/editor/lspProviders.ts)",
+        "test": "packages/playground vitest provider suites",
+        "evidence": ["packages/playground/src/editor/tsWorker.ts"]
+      },
+      "browserExecutable": false
+    },
+    {
+      "id": "tsc.project-check.vue",
+      "operation": "verter-tsc project type check (Vue)",
+      "profile": "cli",
+      "version": "1",
+      "producerOwner": "crates/verter_tsc over the pinned native tsgo engine",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "semantic",
+      "semanticAuthority": "typescript",
+      "catalogSurfaces": ["vue.tsc.project_check"],
+      "exposure": {
+        "state": "executable",
+        "route": "verter-tsc CLI (packages/verter-tsc bin; crates/verter_tsc/src/main.rs)",
+        "replayCase": "verter-tsc project fixtures",
+        "test": "crates/verter_tsc test suite"
+      },
+      "enginePin": ">=7.0.2, <7.1.0 (tsgo; no tsc fallback)",
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "explicitly selected local-native execution via the DX4/DX5 companion route or the DX8 terminal",
+          "replayCase": "DX1 exposure registration plus a DX6/DX6R-lineage replay case"
+        },
+        "evidence": [
+          "packages/playground/src/editor/inContextLs.ts",
+          "packages/playground/src/editor/wasmTsgoFailClosed.spec.ts"
+        ],
+        "reason": "no WASM tsgo exists and the playground is fail-closed about attempting one"
+      },
+      "browserExecutable": false
+    },
+    {
+      "id": "tsc.project-check.svelte",
+      "operation": "verter-tsc project type check (Svelte)",
+      "profile": "cli",
+      "version": "1",
+      "producerOwner": "crates/verter_tsc over the pinned native tsgo engine",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "semantic",
+      "semanticAuthority": "typescript",
+      "catalogSurfaces": ["svelte.tsc.project_check"],
+      "exposure": {
+        "state": "executable",
+        "route": "verter-tsc CLI (packages/verter-tsc bin; crates/verter_tsc/src/main.rs)",
+        "replayCase": "verter-tsc project fixtures",
+        "test": "crates/verter_tsc test suite"
+      },
+      "enginePin": ">=7.0.2, <7.1.0 (tsgo; no tsc fallback)",
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "explicitly selected local-native execution via the DX4/DX5 companion route or the DX8 terminal",
+          "replayCase": "DX1 exposure registration plus a DX6/DX6R-lineage replay case"
+        },
+        "evidence": [
+          "packages/playground/src/editor/inContextLs.ts",
+          "packages/playground/src/editor/wasmTsgoFailClosed.spec.ts"
+        ],
+        "reason": "no WASM tsgo exists and the playground is fail-closed about attempting one"
+      },
+      "browserExecutable": false
+    },
+    {
+      "id": "mcp.lint-project",
+      "operation": "verter-mcp lint_project tool",
+      "profile": "agent",
+      "version": "1",
+      "producerOwner": "crates/verter_mcp over crates/verter_diagnostics",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "catalogSurfaces": ["vue.host_lint", "svelte.host_lint"],
+      "exposure": {
+        "state": "executable",
+        "route": "MCP lint_project (crates/verter_mcp/src/server.rs; --lint-preset in crates/verter_mcp/src/config.rs)",
+        "replayCase": "mcp/README.md tool table scenarios",
+        "test": "crates/verter_mcp test suite"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "explicitly selected local-native execution via the DX4/DX5 companion route or the DX8 terminal",
+          "replayCase": "DX1 exposure registration plus a replay case"
+        },
+        "evidence": ["packages/playground/src/core/store.ts"],
+        "reason": "the playground lints the active file only; no project-wide aggregate exists in-browser"
+      },
+      "browserExecutable": false
+    },
+    {
+      "id": "playground.lint-file",
+      "operation": "playground per-file lint with per-rule disable",
+      "profile": "browser",
+      "version": "1",
+      "producerOwner": "@verter/wasm host over crates/verter_diagnostics rules",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "Portable",
+      "answerRail": "inspection",
+      "catalogSurfaces": ["vue.host_lint", "svelte.host_lint"],
+      "exposure": {
+        "state": "executable",
+        "route": "playground Lint tab (packages/playground/src/core/compiler.ts relintFile)",
+        "replayCase": "playground unit suites over relint",
+        "test": "packages/playground vitest suites"
+      },
+      "playground": {
+        "status": "partial",
+        "route": "playground Lint tab over the WASM host (packages/playground/src/core/compiler.ts)",
+        "test": "packages/playground vitest relint suites",
+        "scope": "active file only; the project-wide host_lint catalog surface is not covered in-browser",
+        "evidence": ["packages/playground/src/core/compiler.ts"]
+      },
+      "browserExecutable": true
+    },
+    {
+      "id": "lsp.component-meta",
+      "operation": "$/verter/getComponentMeta{,Surface,TypeExpansion}",
+      "profile": "inspection",
+      "version": "1",
+      "producerOwner": "crates/verter_lsp custom methods over the component-meta producer",
+      "maturity": "experimental",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "catalogSurfaces": [
+        "vue.component_meta.scalar",
+        "vue.component_meta.batch",
+        "svelte.component_meta.scalar",
+        "svelte.component_meta.batch"
+      ],
+      "exposure": {
+        "state": "executable",
+        "route": "LSP custom methods (crates/verter_lsp/src/main.rs registrations)",
+        "replayCase": "component-meta compat suites",
+        "test": "packages/component-meta suites"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "registered browser adapter through the DX2 inspection facade, or explicit local-native execution",
+          "replayCase": "DX1 exposure registration plus a replay case"
+        },
+        "evidence": ["packages/playground/src/output/ComponentMetaPanel.spec.ts"],
+        "reason": "the playground component-meta panel was removed; legacy URL modes remap to the analysis snapshot"
+      },
+      "browserExecutable": false
+    },
+    {
+      "id": "inspection.flow-return",
+      "operation": "flow-return inference with audit payload",
+      "profile": "inspection",
+      "version": "1",
+      "producerOwner": "crates/verter_session flow-return producer (host_flow_return_audit)",
+      "maturity": "internal",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "labelled": true,
+      "provenanceField": "FlowReturnInferencePayload partiality/degradation tags in verter_audit records",
+      "catalogSurfaces": [],
+      "exposure": {
+        "state": "executable",
+        "route": "$/verter/audit/getRecord and getRecent over audited flow-return execution",
+        "replayCase": "audit record inspection",
+        "test": "crates/verter_session audit suites"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "registered inspection projection through the DX3 evidence projections",
+          "replayCase": "DX1 exposure registration plus a replay case"
+        },
+        "evidence": ["crates/verter_session/src/host_flow_return_audit.rs"],
+        "reason": "flow facts are session-internal with audit-record edges only; no browser surface exists"
+      },
+      "browserExecutable": false
+    },
+    {
+      "id": "lsp.format-document",
+      "operation": "textDocument/formatting (structural SFC formatting)",
+      "profile": "editor",
+      "version": "lsp-3.17",
+      "producerOwner": "crates/verter_lsp formatting feature (content formatting delegated to Prettier/dprint)",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "none",
+      "catalogSurfaces": [],
+      "exposure": {
+        "state": "executable",
+        "route": "LSP formatting handler (crates/verter_lsp/src/features/formatting.rs)",
+        "replayCase": "LSP formatting fixtures",
+        "test": "crates/verter_lsp formatting suites"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "registered browser adapter (formatter train owns the producer; DX0 registers only the gap)",
+          "replayCase": "DX1 exposure registration plus a replay case"
+        },
+        "evidence": ["crates/verter_lsp/src/features/formatting.rs"],
+        "reason": "no format provider is registered in the playground; the LSP surface is structural-only"
+      },
+      "browserExecutable": false
+    },
+    {
+      "id": "playground.compile-carrier",
+      "operation": "playground in-browser carrier compile (JS/CSS, SSR pass, timings)",
+      "profile": "browser",
+      "version": "1",
+      "producerOwner": "@verter/wasm VerterHost over the compiler crates",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "Portable",
+      "answerRail": "none",
+      "catalogSurfaces": [],
+      "exposure": {
+        "state": "executable",
+        "route": "playground compile dispatch (packages/playground/src/core/compiler.ts)",
+        "replayCase": "playground compile suites",
+        "test": "packages/playground vitest suites"
+      },
+      "playground": {
+        "status": "exposed",
+        "route": "playground compile dispatch (packages/playground/src/core/compiler.ts)",
+        "test": "packages/playground vitest compile suites",
+        "evidence": ["packages/playground/src/core/compiler.ts"]
+      },
+      "browserExecutable": true
+    },
+    {
+      "id": "tsc.engine-tsgo",
+      "operation": "native TypeScript engine binding for project checks",
+      "profile": "cli",
+      "version": "1",
+      "producerOwner": "external TypeScript engine, pinned and provisioned by crates/verter_tsc",
+      "maturity": "preview",
+      "obligation": "RequiredCurrent",
+      "hostExecutionClass": "ExternalOwner",
+      "answerRail": "semantic",
+      "semanticAuthority": "typescript",
+      "catalogSurfaces": [],
+      "exposure": {
+        "state": "executable",
+        "route": "verter-tsc engine resolution (--tsgo-bin, VERTER_TSGO_BIN, PATH, project-local)",
+        "replayCase": "verter-tsc engine-resolution fixtures",
+        "test": "crates/verter_tsc test suite"
+      },
+      "enginePin": ">=7.0.2, <7.1.0",
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "a shipped WASM/native-bridge build with its own producer-owned evidence, or explicit local-native execution",
+          "replayCase": "DX1 exposure registration plus a replay case"
+        },
+        "evidence": ["packages/playground/src/editor/inContextLs.ts"],
+        "reason": "ExternalOwner native engine; no browser build exists"
+      },
+      "browserExecutable": false
+    }
+  ]
+}

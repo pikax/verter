@@ -1,0 +1,68 @@
+{
+  "id": "host-execution-class.v1",
+  "schema": 1,
+  "enum": ["Portable", "NativeOnly", "ExternalOwner"],
+  "classes": {
+    "Portable": {
+      "definition": "Runs in a pure-browser sandbox with no local native process. Only the playground family qualifies today: the @verter/wasm compiler host plus the pinned in-browser typescript@6.0.3 worker.",
+      "evidence": ["packages/playground/package.json", "packages/playground/src/editor/inContextLs.ts"]
+    },
+    "NativeOnly": {
+      "definition": "Requires an explicitly selected local native binary or host process (verter-lsp, verter-tsc, verter-mcp, native flow/semantic solving, project-wide lint and SSR reports).",
+      "evidence": [
+        "packages/verter-lsp/package.json",
+        "packages/verter-tsc/package.json",
+        "packages/verter-mcp/package.json"
+      ]
+    },
+    "ExternalOwner": {
+      "definition": "The executing engine is owned outside Verter; Verter pins, provisions, and binds its identity (TypeScript engines under provider modes).",
+      "evidence": ["crates/verter_tsc/src/main.rs"]
+    }
+  },
+  "rules": [
+    "No hidden replacement engine: an execution class is never made true by substituting a different engine.",
+    "A browser-executable claim requires the Portable class or (for NativeOnly) shipped browser build evidence; otherwise the claim is rejected (DX0-AC2).",
+    "Lapce/Zed WASM launchers stay launchers: they discover and start the native verter-lsp and are NativeOnly, not Portable products.",
+    "A Portable product may embed ExternalOwner engines pinned at build time; it may not embed or imply NativeOnly execution.",
+    "A class change is a producer-owned port with its own evidence, not an adapter relabel.",
+    "Pure-browser and explicit local-native execution are distinct products with distinct receipts."
+  ],
+  "surfaces": [
+    {
+      "id": "playground.browser",
+      "class": "Portable",
+      "evidence": ["packages/playground/package.json", "packages/playground/src/core/compiler.ts"]
+    },
+    {
+      "id": "engine.typescript-browser",
+      "class": "ExternalOwner",
+      "executesWithin": "playground.browser (Portable product; typescript@6.0.3 pinned at build time)",
+      "evidence": ["packages/playground/package.json", "packages/playground/src/editor/tsWorker.ts"]
+    },
+    { "id": "verter-lsp", "class": "NativeOnly", "evidence": ["packages/verter-lsp/package.json", "crates/verter_lsp/src/main.rs"] },
+    { "id": "verter-tsc", "class": "NativeOnly", "evidence": ["packages/verter-tsc/package.json", "crates/verter_tsc/src/main.rs"] },
+    { "id": "verter-mcp", "class": "NativeOnly", "evidence": ["packages/verter-mcp/package.json", "crates/verter_mcp/src/config.rs"] },
+    { "id": "vscode.extension", "class": "NativeOnly", "evidence": ["packages/vue-vscode/package.json"] },
+    { "id": "editor.nvim", "class": "NativeOnly", "evidence": ["editors/nvim/lua/verter/config.lua", "editors/nvim/README.md"] },
+    { "id": "editor.helix", "class": "NativeOnly", "evidence": ["editors/helix/languages.toml", "editors/helix/README.md"] },
+    {
+      "id": "editor.lapce",
+      "class": "NativeOnly",
+      "note": "wasm32-wasip1 launcher that starts the native verter-lsp; not a Portable product",
+      "evidence": ["extensions/lapce/src/lib.rs", "extensions/lapce/README.md"]
+    },
+    {
+      "id": "editor.zed",
+      "class": "NativeOnly",
+      "note": "wasm32-wasip2 launcher that starts the native verter-lsp; not a Portable product",
+      "evidence": ["extensions/zed/src/lib.rs", "extensions/zed/README.md"]
+    },
+    {
+      "id": "engine.typescript-native",
+      "class": "ExternalOwner",
+      "note": "tsgo pinned >=7.0.2, <7.1.0 by verter-tsc; provider modes tsgo/shared-tsgo/tsserver/editor-tsserver/extension bind it in editors",
+      "evidence": ["crates/verter_tsc/src/main.rs"]
+    }
+  ]
+}

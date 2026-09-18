@@ -1,0 +1,67 @@
+{
+  "node": "DX0",
+  "kind": "constitution",
+  "products": [
+    "FeatureExposureContract v1",
+    "HostExecutionClass",
+    "ProductReceiptBasis",
+    "Rails policy (semantic/inspection/comparison)",
+    "Cross-surface inventory",
+    "Exposure ownership map",
+    "contracts/product-experience.md",
+    "plans/expansion-product-observability.md"
+  ],
+  "cases": [
+    {
+      "id": "DX0-AC1",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "gap-claimed-exposed",
+        "unblocked-gap",
+        "missing-gap-row"
+      ]
+    },
+    {
+      "id": "DX0-AC2",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "native-only-browser-claim",
+        "unknown-host-class",
+        "portable-not-browser-executable"
+      ]
+    },
+    {
+      "id": "DX0-AC3",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "rail-substitution",
+        "unlabelled-inspection",
+        "implicit-comparison"
+      ]
+    },
+    {
+      "id": "DX0-ratification",
+      "disposition": "accept",
+      "twins": [
+        "clean products",
+        "not-required-current",
+        "missing-amendment",
+        "unknown-owner",
+        "premature-retirement",
+        "unknown-catalog-surface",
+        "missing-evidence-file",
+        "lint-count-drift",
+        "missing-contract-marker",
+        "missing-preserved-client",
+        "provider-modes"
+      ]
+    }
+  ],
+  "verify": "node tests/product-experience/DX0/verify.mjs",
+  "test": "node --test tests/product-experience/DX0/dx0.test.mjs",
+  "runtimeCorrectness": false,
+  "notes": "Contract/inventory node: 0 production LOC. DX0-AC-BASIS binds incremental-vs-fresh and receipt-binding runtime tests to DX2 and DX8 instead of fabricating one here. DX0-AC-RESOURCE: no hot paths or UI touched; the WSP equal-work obligation does not apply. DX0-AC-EXPOSURE: DX1 owns the registration schema; promotion stays blocked on executable exposure. The harness grounds itself in the live repository (authority DAG, conflict-domain catalog, product-surface catalog, lint rule count, evidence files), so drift in any of them is a failing case, not a stale pass."
+}

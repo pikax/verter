@@ -1,0 +1,70 @@
+{
+  "id": "exposure-ownership-map.v1",
+  "schema": 1,
+  "contractNode": "DX0",
+  "finalOwner": "expansion.product-observability",
+  "outcomes": [
+    {
+      "id": "feature-exposure-contract.v1",
+      "currentOwner": "DX0",
+      "finalOwner": "DX0",
+      "receivingAcceptance": "DX0-AC1: playground gaps keep promotion blocked until an executable route and replay case exist"
+    },
+    {
+      "id": "host-execution-class.v1",
+      "currentOwner": "DX0",
+      "finalOwner": "DX0",
+      "receivingAcceptance": "DX0-AC2: native-only browser capability claims without a build are rejected"
+    },
+    {
+      "id": "product-receipt-basis.v1",
+      "currentOwner": "DX0",
+      "finalOwner": "DX0",
+      "receivingAcceptance": "DX0-AC-BASIS: receipt-binding runtime tests are bound to the downstream inspection owners, not fabricated here"
+    },
+    {
+      "id": "cross-surface-inventory.v1",
+      "currentOwner": "DX0",
+      "finalOwner": "DX0",
+      "receivingAcceptance": "DX0.1: current commands, analyses, clients and provider modes captured before consumers are added"
+    },
+    {
+      "id": "rails-policy.v1",
+      "currentOwner": "DX0",
+      "finalOwner": "DX0",
+      "receivingAcceptance": "DX0-AC3: native Flow facts stay separate from TypeScript hover/diagnostics"
+    }
+  ],
+  "receivingAmendments": [
+    { "receiver": "DX1", "product": "exposure descriptor contract and promotion rule over FeatureExposureContract v1", "productionCapable": true },
+    { "receiver": "DX1G", "product": "generated exposure bindings and coverage report", "productionCapable": true },
+    { "receiver": "DX2", "product": "bounded inspection request and snapshot facade binding ProductReceiptBasis", "productionCapable": true },
+    { "receiver": "DX3", "product": "semantic and compiler evidence projections on the inspection rail", "productionCapable": true },
+    { "receiver": "DX3T", "product": "query, dependency and compiler trace projection", "productionCapable": true },
+    { "receiver": "DX4", "product": "authenticated local companion transport (explicit local-native product)", "productionCapable": true },
+    { "receiver": "DX5", "product": "native companion operation adapter and execution parity", "productionCapable": true },
+    { "receiver": "DX6", "product": "portable reproduction capsule on the receipt basis", "productionCapable": true },
+    { "receiver": "DX6R", "product": "deterministic replay core", "productionCapable": true },
+    { "receiver": "DX7", "product": "local doctor and actionable failure explanations on completeness states", "productionCapable": true },
+    { "receiver": "DX8", "product": "inspection and reproduction cross-surface terminal proving exposure end-to-end", "productionCapable": true },
+    { "receiver": "BWH0", "product": "browser execution and dependency-closure constitution consumes Portable/NativeOnly law", "productionCapable": true },
+    { "receiver": "COX0", "product": "per-profile editor participation and coexistence consumes the preserved-client inventory", "productionCapable": true },
+    { "receiver": "ED0", "product": "non-VS-Code client preservation and acceptance contract", "productionCapable": true },
+    { "receiver": "EPR0", "product": "external engine provisioning policy consumes ExternalOwner law", "productionCapable": true },
+    { "receiver": "JBT0", "product": "official JetBrains baseline consumes the exposure and receipt obligations", "productionCapable": true },
+    { "receiver": "LSO0", "product": "authored-coordinate semantic operations keep semantic-rail law", "productionCapable": true },
+    { "receiver": "LSPX0", "product": "LSP capability and interoperability ownership consumes the capability inventory", "productionCapable": true },
+    { "receiver": "PG0", "product": "all-feature workbench consumes producer-coverage obligations", "productionCapable": true },
+    { "receiver": "PM0", "product": "project-model derivation authority keeps projectConfiguration receipt binding", "productionCapable": true },
+    { "receiver": "PUB0", "product": "versioned public request/result and capability truth reuses exposure vocabulary", "productionCapable": true },
+    { "receiver": "RFX0", "product": "semantic refactor and preservation constitution keeps rail separation", "productionCapable": true },
+    { "receiver": "SVI0", "product": "semantic visual vocabulary on the inspection rail", "productionCapable": true },
+    { "receiver": "TIF1", "product": "TypeInfo-first ComponentInfo consumes inspection-rail labelling", "productionCapable": true },
+    { "receiver": "VSC0", "product": "desktop feature inventory and host-separation contract consumes the client inventory", "productionCapable": true }
+  ],
+  "displacedRoutes": [],
+  "deletionPopulationThisNode": [],
+  "acBasisDownstreamTestOwner": "DX2 (inspection facade) and DX8 (cross-surface terminal) own the incremental-vs-fresh and receipt-binding runtime tests; DX0 is contract-only and adds no runtime test",
+  "acResourceRationale": "DX0 touches no hot paths and no UI: 0 production LOC across 0 files, so the WSP equal-work corpus and client-paint obligations do not apply to this node",
+  "acExposureRegistration": "DX1 owns the exposure-descriptor registration schema; every operation this train exposes stays promotion-blocked until its executable adapter and replay case exist (DX0-AC-EXPOSURE)"
+}
