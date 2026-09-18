@@ -89,6 +89,18 @@ pub struct SemanticContext {
 }
 
 impl SemanticContext {
+    /// Production default: default effective options, empty env hashes,
+    /// production policy set.
+    #[must_use]
+    pub fn production() -> Self {
+        Self {
+            effective_semantic_options: SemanticCompilerOptions::default(),
+            resolver_library_project_environment: EnvHashes::default(),
+            policy_set: SemanticPolicySetId::default(),
+            project_identity: Hash16::default(),
+        }
+    }
+
     /// Intern this context by exact equality. The digest is a lookup
     /// accelerator, not a substitute for equality.
     #[must_use]
@@ -212,10 +224,18 @@ fn lookup_policy_set(id: SemanticPolicySetId) -> SemanticPolicySet {
         .unwrap_or_else(SemanticPolicySet::production)
 }
 
-fn intern_context(ctx: SemanticContext) -> SemanticContextId {
+fn context_table() -> &'static Mutex<InternTable<SemanticContext>> {
     static TABLE: OnceLock<Mutex<InternTable<SemanticContext>>> = OnceLock::new();
-    let table = TABLE.get_or_init(|| Mutex::new(InternTable::default()));
-    SemanticContextId(intern_value(table, ctx))
+    TABLE.get_or_init(|| Mutex::new(InternTable::default()))
+}
+
+fn intern_context(ctx: SemanticContext) -> SemanticContextId {
+    SemanticContextId(intern_value(context_table(), ctx))
+}
+
+fn lookup_context(id: SemanticContextId) -> Option<SemanticContext> {
+    let guard = context_table().lock();
+    guard.items.get(id.0 as usize).cloned()
 }
 
 fn intern_order_domain(key: OrderDomainKey) -> OrderDomainId {
@@ -228,6 +248,18 @@ impl SemanticContextId {
     #[must_use]
     pub fn as_u32(self) -> u32 {
         self.0
+    }
+
+    /// Lookup the interned context. `None` if the id was never interned.
+    #[must_use]
+    pub fn lookup(self) -> Option<SemanticContext> {
+        lookup_context(self)
+    }
+
+    /// Intern the production default.
+    #[must_use]
+    pub fn production() -> Self {
+        SemanticContext::production().intern()
     }
 }
 

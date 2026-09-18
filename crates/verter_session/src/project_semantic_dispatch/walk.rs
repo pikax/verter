@@ -7073,9 +7073,10 @@ fn merge_value_nodes_recursive(
             )),
         ))
     } else {
-        let composite = crate::project_semantic_dispatch::canonical_algebra::canonical_intersection(
-            graph, values,
-        );
+        let composite =
+            crate::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection(
+                graph, values,
+            );
         evidence.absorb(composite.evidence);
         composite.node
     }

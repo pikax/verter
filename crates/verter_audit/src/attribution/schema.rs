@@ -216,7 +216,7 @@ declare_work_sites! {
     CollapsePath            => "workspace.collapse_path",            Normalization, Bytes;
     NormalizeRelativeSpec   => "workspace.normalize_relative_specifier", Normalization, Calls;
     NormalizeUnion          => "session.normalize_union",            Normalization, Calls;
-    NormalizeIntersection   => "session.normalize_intersection",     Normalization, Calls;
+    ReduceIntersection      => "session.reduce_intersection",        Normalization, Calls;
 
     // hashing
     ContentHash             => "session.hash_16",                    Hashing, Bytes;

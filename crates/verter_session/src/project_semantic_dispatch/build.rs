@@ -10224,17 +10224,49 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.build_normalize_composite(members, /* is_union */ true)
     }
 
-    /// Intersection normalization — the `NormalizeIntersection` query
-    /// builder. Same canonical routing, evidence threading, and origin-edge
-    /// discipline as [`Self::build_normalize_union`]; the algebra
-    /// additionally applies the intersection lattice laws and the
-    /// PROVEN-disjoint scalar collapse (`string & number = never`).
-    pub(super) fn build_normalize_intersection(
+    /// Ordered intersection reduction — the `ReduceIntersection` query
+    /// builder. Same evidence threading and origin-edge discipline as
+    /// [`Self::build_normalize_union`]; the algebra additionally applies
+    /// the intersection lattice laws and the PROVEN-disjoint scalar
+    /// collapse (`string & number = never`). Operand order is preserved.
+    pub(super) fn build_reduce_intersection(
         &self,
-        members: &Arc<[SemanticNodeId]>,
+        input: crate::semantic_query::IntersectionInputRef,
+        _purpose: crate::semantic_query::IntersectionPurpose,
+        _context: crate::semantic_query::SemanticContextId,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        verter_audit::attribute!(NormalizeIntersection);
-        self.build_normalize_composite(members, /* is_union */ false)
+        verter_audit::attribute!(ReduceIntersection);
+        if let Some(steps) = input.as_steps() {
+            let mut members: Vec<SemanticNodeId> = Vec::with_capacity(steps.len());
+            for step in steps.iter() {
+                match *step {
+                    crate::semantic_query::IntersectionTerm::Value(id) => members.push(id),
+                    crate::semantic_query::IntersectionTerm::EvaluateSubgroup {
+                        input: nested,
+                        purpose,
+                    } => {
+                        let nested_key =
+                            crate::semantic_query::SemanticQueryKey::ReduceIntersection {
+                                input: nested,
+                                purpose,
+                                context: _context,
+                            };
+                        match self.execute_read(nested_key).value {
+                            crate::semantic_query::QueryResult::Value(node) => members.push(node),
+                            crate::semantic_query::QueryResult::Recursive(node) => {
+                                members.push(node)
+                            }
+                            crate::semantic_query::QueryResult::Error(_) => {}
+                        }
+                    }
+                }
+            }
+            let members: Arc<[SemanticNodeId]> = Arc::from(members.into_boxed_slice());
+            self.build_normalize_composite(&members, /* is_union */ false)
+        } else {
+            let members: Arc<[SemanticNodeId]> = Arc::from(input.as_ordered_values());
+            self.build_normalize_composite(&members, /* is_union */ false)
+        }
     }
 
     /// Shared body of the two normalization builders.
@@ -10246,7 +10278,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let composite = if is_union {
             super::canonical_algebra::canonical_union(self.graph(), members)
         } else {
-            super::canonical_algebra::canonical_intersection(self.graph(), members)
+            super::canonical_algebra::intern_ordered_intersection(self.graph(), members)
         };
         let node = composite.node;
         let fence = self.project_generation_signature();
@@ -11788,9 +11820,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else if type_args.len() == 1 {
                     QueryResult::Value(type_args[0])
                 } else {
-                    let read = self.execute_read(SemanticQueryKey::NormalizeIntersection {
-                        members: Arc::clone(type_args),
-                    });
+                    let read = self.execute_read(SemanticQueryKey::reduce_intersection_operands(
+                        Arc::clone(type_args),
+                    ));
                     crate::component_meta_audit::merge_dep_signature_into_local_fence(
                         &mut local_fence,
                         &read.dep_signature,
@@ -11951,13 +11983,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
         members: &[SemanticNodeId],
         is_union: bool,
     ) -> SemanticNodeId {
-        let composite = if is_union {
-            super::canonical_algebra::canonical_union(self.graph(), members)
+        if is_union {
+            let composite = super::canonical_algebra::canonical_union(self.graph(), members);
+            self.deposit_canonical_evidence(composite.evidence);
+            composite.node
         } else {
-            super::canonical_algebra::canonical_intersection(self.graph(), members)
-        };
-        self.deposit_canonical_evidence(composite.evidence);
-        composite.node
+            match self
+                .execute_read(
+                    crate::semantic_query::SemanticQueryKey::reduce_intersection_operands(
+                        std::sync::Arc::from(members.to_vec().into_boxed_slice()),
+                    ),
+                )
+                .value
+            {
+                crate::semantic_query::QueryResult::Value(node) => node,
+                crate::semantic_query::QueryResult::Recursive(node) => node,
+                crate::semantic_query::QueryResult::Error(_) => {
+                    let composite = super::canonical_algebra::intern_ordered_intersection(
+                        self.graph(),
+                        members,
+                    );
+                    self.deposit_canonical_evidence(composite.evidence);
+                    composite.node
+                }
+            }
+        }
     }
 
     /// Whether a member-wise composite REBUILD may re-decide its arm list

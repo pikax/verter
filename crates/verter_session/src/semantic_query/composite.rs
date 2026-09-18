@@ -236,17 +236,19 @@ impl CompositeMembers {
     }
 }
 
-/// Identity is the member list ONLY — the origin category is an at-rest
-/// fact, never an identity dimension (see the module docs).
+/// Union identity is carrier-qualified: members plus origin category.
+/// Distinct authored/synthetic origins of the same shape intern apart,
+/// closing the first-wins category window.
 impl PartialEq for CompositeMembers {
     fn eq(&self, other: &Self) -> bool {
-        self.members == other.members
+        self.members == other.members && self.category == other.category
     }
 }
 impl Eq for CompositeMembers {}
 impl std::hash::Hash for CompositeMembers {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.members.hash(state);
+        self.category.hash(state);
     }
 }
 
@@ -401,7 +403,7 @@ impl<K: CompositeKind> std::ops::Deref for CompositeList<K> {
 /// The at-rest projection of a payload's mint category: a plain fact enum
 /// (no witnesses) rebuild sites and the pre-seal closure dispatch on.
 /// EXHAUSTIVE consumers match it without a wildcard arm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum CompositeOriginCategory {
     /// Minted by a COMPLETE canonicalization: the list is PROVEN canonical
     /// form. This is the sole tag the pre-seal closure's O(1) skip

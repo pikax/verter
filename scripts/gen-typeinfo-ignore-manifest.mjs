@@ -2147,10 +2147,7 @@ const ROW_MECHANISM_OVERRIDE = new Map([
 const MECHANISM_TO_KEYS = new Map([
   // Zero-row substrate mechanisms.
   ["LedgerCoverageGate", []],
-  [
-    "QueryValueDomainFoundation",
-    ["ResolveDecl", "TypeOf", "NormalizeUnion", "NormalizeIntersection"],
-  ],
+  ["QueryValueDomainFoundation", ["ResolveDecl", "TypeOf", "NormalizeUnion", "ReduceIntersection"]],
   // The algebra closure owns ONE key of its own — the demand-scoped
   // truthiness-domain classifier. The normalization queries it closes
   // construction over stay owned by the value-domain foundation it is a
@@ -3566,7 +3563,7 @@ const KEY_OWNING_BLOCK = new Map([
   ["ResolveDecl", "U2QueryValueDomain"],
   ["TypeOf", "U2QueryValueDomain"],
   ["NormalizeUnion", "U2QueryValueDomain"],
-  ["NormalizeIntersection", "U2QueryValueDomain"],
+  ["ReduceIntersection", "U2QueryValueDomain"],
   // Generic substitution is a value-domain instantiation produced by
   // U2.QUERY_VALUE_DOMAIN's foundation, NOT a relation inference.
   ["Instantiate", "U2QueryValueDomain"],

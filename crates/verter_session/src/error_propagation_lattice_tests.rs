@@ -203,19 +203,19 @@ fn error_any_never_propagation_lattice() {
     );
 
     // intersection: X & never = never; X & unknown = X; X & any = any.
-    let i = canonical_algebra::canonical_intersection(graph, &[string, never]).node;
+    let i = canonical_algebra::intern_ordered_intersection(graph, &[string, never]).node;
     assert_eq!(
         kind(i),
         Some(SemanticNodeData::Primitive(PrimitiveKind::Never)),
         "X & never = never"
     );
-    let i = canonical_algebra::canonical_intersection(graph, &[string, unknown]).node;
+    let i = canonical_algebra::intern_ordered_intersection(graph, &[string, unknown]).node;
     assert_eq!(
         kind(i),
         Some(SemanticNodeData::Primitive(PrimitiveKind::String)),
         "X & unknown = X"
     );
-    let i = canonical_algebra::canonical_intersection(graph, &[string, any]).node;
+    let i = canonical_algebra::intern_ordered_intersection(graph, &[string, any]).node;
     assert_eq!(
         kind(i),
         Some(SemanticNodeData::Primitive(PrimitiveKind::Any)),

@@ -441,27 +441,27 @@ struct StableKeyRow {
 }
 
 const STABLE_KEY_TABLE: &[StableKeyRow] = &[
-    StableKeyRow { variant: "IntrinsicApplication", domain: "synthetic", inputs: "closed intrinsic op tag plus ordered argument stable-key references", owed: Some("V4") },
-    StableKeyRow { variant: "Alias", domain: "authored carriers", inputs: "owner/role anchor of the aliasing declaration plus the aliased stable-key reference", owed: Some("V4") },
-    StableKeyRow { variant: "Object", domain: "authored carriers", inputs: "owner/role anchor plus member-name-keyed child stable keys (declared order where authored order is semantic)", owed: Some("V4") },
-    StableKeyRow { variant: "ObjectSpreadProgram", domain: "synthetic", inputs: "closed spread-program recipe with stable arm references and authored member anchors", owed: Some("V4") },
-    StableKeyRow { variant: "Union", domain: "synthetic", inputs: "set of member stable keys under the carrier category mint (first-occurrence dedup per the composite identity discipline)", owed: Some("V4") },
-    StableKeyRow { variant: "Intersection", domain: "synthetic", inputs: "ORDERED member stable keys preserving the authored reduction grouping", owed: Some("V4") },
-    StableKeyRow { variant: "Primitive", domain: "intrinsics/sentinels", inputs: "fixed distinct primitive tag; no source or allocation ordinal", owed: Some("V4") },
-    StableKeyRow { variant: "Literal", domain: "literals", inputs: "canonical scalar value plus literal kind with explicit scalar edge-case handling", owed: Some("V4") },
-    StableKeyRow { variant: "Opaque", domain: "intrinsics/sentinels", inputs: "typed error tag; a refusal identity, never an allocation ordinal", owed: Some("V4") },
-    StableKeyRow { variant: "Array", domain: "synthetic", inputs: "readonly flag plus element stable-key reference", owed: Some("V4") },
-    StableKeyRow { variant: "Tuple", domain: "synthetic", inputs: "ordered element stable keys with label/optionality/rest metadata", owed: Some("V4") },
-    StableKeyRow { variant: "TemplateLiteral", domain: "synthetic", inputs: "ordered quasi text spans plus expression stable-key references", owed: Some("V4") },
-    StableKeyRow { variant: "KeyOf", domain: "synthetic", inputs: "operand stable-key reference under the closed keyof recipe", owed: Some("V4") },
-    StableKeyRow { variant: "IndexedAccess", domain: "synthetic", inputs: "object and index stable-key references under the closed indexed-access recipe", owed: Some("V4") },
-    StableKeyRow { variant: "Mapped", domain: "synthetic", inputs: "source stable-key reference plus mapper key-space anchor", owed: Some("V4") },
-    StableKeyRow { variant: "TypeOf", domain: "authored carriers", inputs: "value-root owner anchor plus remaining member path roles", owed: Some("V4") },
-    StableKeyRow { variant: "TypeOfNominal", domain: "authored carriers", inputs: "the declaring value-declaration identity parts (nominal by construction)", owed: Some("V4") },
-    StableKeyRow { variant: "TypeParam", domain: "binders", inputs: "declaration identity (owner anchor plus declaration-local ordinal only where the language needs disambiguation) and binder role", owed: Some("V4") },
-    StableKeyRow { variant: "Infer", domain: "binders", inputs: "owner/recursive-region anchor plus infer binder position/role", owed: Some("V4") },
-    StableKeyRow { variant: "InferRef", domain: "binders", inputs: "referenced infer binder's stable anchor", owed: Some("V4") },
-    StableKeyRow { variant: "Conditional", domain: "synthetic", inputs: "closed conditional recipe: check/extrema/default arm stable-key references", owed: Some("V4") },
+    StableKeyRow { variant: "IntrinsicApplication", domain: "synthetic", inputs: "closed intrinsic op tag plus ordered argument stable-key references", owed: None },
+    StableKeyRow { variant: "Alias", domain: "authored carriers", inputs: "owner/role anchor of the aliasing declaration plus the aliased stable-key reference", owed: None },
+    StableKeyRow { variant: "Object", domain: "authored carriers", inputs: "owner/role anchor plus member-name-keyed child stable keys (declared order where authored order is semantic)", owed: None },
+    StableKeyRow { variant: "ObjectSpreadProgram", domain: "synthetic", inputs: "closed spread-program recipe with stable arm references and authored member anchors", owed: None },
+    StableKeyRow { variant: "Union", domain: "synthetic", inputs: "set of member stable keys under the carrier category mint (first-occurrence dedup per the composite identity discipline)", owed: None },
+    StableKeyRow { variant: "Intersection", domain: "synthetic", inputs: "ORDERED member stable keys preserving the authored reduction grouping", owed: None },
+    StableKeyRow { variant: "Primitive", domain: "intrinsics/sentinels", inputs: "fixed distinct primitive tag; no source or allocation ordinal", owed: None },
+    StableKeyRow { variant: "Literal", domain: "literals", inputs: "canonical scalar value plus literal kind with explicit scalar edge-case handling", owed: None },
+    StableKeyRow { variant: "Opaque", domain: "intrinsics/sentinels", inputs: "typed error tag; a refusal identity, never an allocation ordinal", owed: None },
+    StableKeyRow { variant: "Array", domain: "synthetic", inputs: "readonly flag plus element stable-key reference", owed: None },
+    StableKeyRow { variant: "Tuple", domain: "synthetic", inputs: "ordered element stable keys with label/optionality/rest metadata", owed: None },
+    StableKeyRow { variant: "TemplateLiteral", domain: "synthetic", inputs: "ordered quasi text spans plus expression stable-key references", owed: None },
+    StableKeyRow { variant: "KeyOf", domain: "synthetic", inputs: "operand stable-key reference under the closed keyof recipe", owed: None },
+    StableKeyRow { variant: "IndexedAccess", domain: "synthetic", inputs: "object and index stable-key references under the closed indexed-access recipe", owed: None },
+    StableKeyRow { variant: "Mapped", domain: "synthetic", inputs: "source stable-key reference plus mapper key-space anchor", owed: None },
+    StableKeyRow { variant: "TypeOf", domain: "authored carriers", inputs: "value-root owner anchor plus remaining member path roles", owed: None },
+    StableKeyRow { variant: "TypeOfNominal", domain: "authored carriers", inputs: "the declaring value-declaration identity parts (nominal by construction)", owed: None },
+    StableKeyRow { variant: "TypeParam", domain: "binders", inputs: "declaration identity (owner anchor plus declaration-local ordinal only where the language needs disambiguation) and binder role", owed: None },
+    StableKeyRow { variant: "Infer", domain: "binders", inputs: "owner/recursive-region anchor plus infer binder position/role", owed: None },
+    StableKeyRow { variant: "InferRef", domain: "binders", inputs: "referenced infer binder's stable anchor", owed: None },
+    StableKeyRow { variant: "Conditional", domain: "synthetic", inputs: "closed conditional recipe: check/extrema/default arm stable-key references", owed: None },
     StableKeyRow { variant: "Signature", domain: "authored carriers", inputs: "owner/role anchor plus the positional model (binder anchors, optionality, rest/receiver/predicate layout)", owed: Some("V5") },
     StableKeyRow { variant: "DeferredCallable", domain: "authored carriers", inputs: "the deferred callable's closed carrier recipe with stable subject reference", owed: Some("V5") },
     StableKeyRow { variant: "DeclRef", domain: "authored carriers", inputs: "logical source-unit identity plus declaration identity (content hashes stay freshness evidence, R6 content-free key rails)", owed: None },
@@ -598,13 +598,7 @@ const MATRIX: &[MatrixRow] = &[
     MatrixRow {
         id: "DET-06",
         perturbation: "Hash seed changes, equal prefixes, forced full stable-fingerprint collisions",
-        driver: Driver::Ignored {
-            reason: "V4 owns representation-only stable keys and VerterStableV1 views: hash-seed \
-                     perturbation and forced full stable-fingerprint collision injection are \
-                     un-drivable until the stable key exists (today's keys are content-free \
-                     identity slots pinned by the R6 guard rails, which the stable-key table \
-                     records per variant)",
-        },
+        driver: Driver::Ready { test: "det_06_hash_seed_and_forced_collisions" },
     },
     MatrixRow {
         id: "DET-07",
@@ -1118,15 +1112,8 @@ fn det_12_unrelated_preceding_outputs() {
 /// changes and forced full stable-fingerprint collisions cannot be
 /// injected or survived until representation-only stable keys exist.
 #[test]
-#[ignore = "V4 owns representation-only stable keys and VerterStableV1 views: hash-seed \
-            perturbation and forced full stable-fingerprint collision injection are known \
-            failures of the current arena-order union projection (first-wins composite \
-            category) and are un-injectable until the stable key exists"]
 fn det_06_hash_seed_and_forced_collisions() {
-    match matrix_row("DET-06").driver {
-        Driver::Ignored { .. } => {}
-        Driver::Ready { test } => panic!("DET-06 is registered ready ({test}) — update this row"),
-    }
+    assert_ready("DET-06", "det_06_hash_seed_and_forced_collisions");
     const EQUAL_PREFIX_TS: &str = r#"
 export function witness(v: "a" | "ab" | "abc" | "b") { return v; }
 "#;

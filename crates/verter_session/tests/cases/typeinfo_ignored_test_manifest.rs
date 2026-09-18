@@ -439,7 +439,7 @@ semantic_query_names! {
     Conditional,
     TypeOf,
     NormalizeUnion,
-    NormalizeIntersection,
+    ReduceIntersection,
     ProjectObjectSpread,
     ProjectPath,
     Relate,
@@ -732,12 +732,9 @@ fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
     use SemanticQueryName::*;
     use TypeInfoParityBlockId::*;
     match key {
-        ResolveDecl
-        | TypeOf
-        | NormalizeUnion
-        | NormalizeIntersection
-        | Instantiate
-        | LowerLocator => U2QueryValueDomain,
+        ResolveDecl | TypeOf | NormalizeUnion | ReduceIntersection | Instantiate | LowerLocator => {
+            U2QueryValueDomain
+        }
         Relate | Conditional => U2RelationInfer,
         IndexedAccess | KeyOf | ProjectMember | ProjectPath => U2IndexedAccess,
         // The correlated object-spread projection is core query-value
@@ -2029,7 +2026,7 @@ fn key_owning_block_owner_mapping_is_pinned_closed_set() {
         (ResolveDecl, U2QueryValueDomain),
         (TypeOf, U2QueryValueDomain),
         (NormalizeUnion, U2QueryValueDomain),
-        (NormalizeIntersection, U2QueryValueDomain),
+        (ReduceIntersection, U2QueryValueDomain),
         // Generic substitution (`Instantiate`) is a value-domain instantiation
         // produced by U2.QUERY_VALUE_DOMAIN's foundation, NOT a relation
         // inference — it joins the foundational decl/value keys here.

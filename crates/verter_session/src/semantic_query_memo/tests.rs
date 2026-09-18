@@ -10520,13 +10520,9 @@ mod prepared_identity_bijection {
                     members: nodes(&[1, 3]),
                 },
             ),
-            SemanticQueryKeyTag::NormalizeIntersection => (
-                SemanticQueryKey::NormalizeIntersection {
-                    members: nodes(&[1, 2]),
-                },
-                SemanticQueryKey::NormalizeIntersection {
-                    members: nodes(&[1, 3]),
-                },
+            SemanticQueryKeyTag::ReduceIntersection => (
+                SemanticQueryKey::reduce_intersection_operands(nodes(&[1, 2])),
+                SemanticQueryKey::reduce_intersection_operands(nodes(&[1, 3])),
             ),
             SemanticQueryKeyTag::ProjectObjectSpread => {
                 let context =

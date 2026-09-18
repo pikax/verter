@@ -881,11 +881,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     )),
                 ))
             }
-            SemanticQueryKey::NormalizeIntersection { members } => {
+            SemanticQueryKey::ReduceIntersection { input, .. } => {
+                let members: Arc<[SemanticNodeId]> = Arc::from(input.as_ordered_values());
                 graph.intern_node(SemanticNodeData::Intersection(
-                    crate::semantic_query::composite::CompositeList::query_subject(Arc::clone(
-                        members,
-                    )),
+                    crate::semantic_query::composite::CompositeList::query_subject(members),
                 ))
             }
             SemanticQueryKey::Relate { source, .. } => *source,
@@ -2217,15 +2216,12 @@ pub(super) fn utility_param_names(name: &str) -> &'static [&'static str] {
 // should match on `SemanticNodeData::Literal` and derive the kind
 // inline rather than collapsing the literal to its underlying primitive.
 
-/// Stable-sort + dedup a list of semantic node ids. Used to canonicalize
-/// the key surface for union / intersection dispatches so
-/// `NormalizeUnion({A,B})` and `NormalizeUnion({B,A})` converge on one
-/// warm memo entry.
-pub(super) fn canonicalize_node_list(members: &[SemanticNodeId]) -> Arc<[SemanticNodeId]> {
-    let mut sorted: Vec<SemanticNodeId> = members.to_vec();
-    sorted.sort_by_key(|id| id.0);
-    sorted.dedup();
-    Arc::from(sorted.into_boxed_slice())
+/// Sort + dedup a union member list by `VerterStableV1`.
+pub(super) fn canonicalize_node_list(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    members: &[SemanticNodeId],
+) -> Arc<[SemanticNodeId]> {
+    crate::semantic_query::stable_key::canonicalize_union_members(graph, members)
 }
 
 fn widen_node_cache_read(
@@ -2547,13 +2543,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             SemanticQueryKey::NormalizeUnion { members } => SemanticQueryKey::NormalizeUnion {
-                members: canonicalize_node_list(&members),
+                members: canonicalize_node_list(self.graph(), &members),
             },
-            SemanticQueryKey::NormalizeIntersection { members } => {
-                SemanticQueryKey::NormalizeIntersection {
-                    members: canonicalize_node_list(&members),
-                }
-            }
+            SemanticQueryKey::ReduceIntersection {
+                input,
+                purpose,
+                context,
+            } => SemanticQueryKey::ReduceIntersection {
+                input,
+                purpose,
+                context,
+            },
             other => other,
         };
 
@@ -2853,9 +2853,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     pending.clone(),
                 ),
                 SemanticQueryKey::NormalizeUnion { members } => self.build_normalize_union(members),
-                SemanticQueryKey::NormalizeIntersection { members } => {
-                    self.build_normalize_intersection(members)
-                }
+                SemanticQueryKey::ReduceIntersection {
+                    input,
+                    purpose,
+                    context,
+                } => self.build_reduce_intersection(*input, *purpose, *context),
                 SemanticQueryKey::ProjectObjectSpread { .. } => {
                     unreachable!(
                         "ProjectObjectSpread returns its typed projection value before node-domain build"

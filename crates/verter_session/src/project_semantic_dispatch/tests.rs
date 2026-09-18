@@ -2970,7 +2970,7 @@ fn canonical_algebra_collapses_only_proven_facts() {
     assert!(!union.evidence.incomplete);
 
     // PROVEN disjoint scalar intersection collapses to `never`.
-    let disjoint = canonical_algebra::canonical_intersection(&graph, &[string, number]);
+    let disjoint = canonical_algebra::intern_ordered_intersection(&graph, &[string, number]);
     assert!(
         matches!(
             graph.node_data(disjoint.node).as_deref(),
@@ -2982,7 +2982,7 @@ fn canonical_algebra_collapses_only_proven_facts() {
     // UNDECIDED disjointness (two object surfaces) keeps the carrier.
     let obj_x = simple_object(&graph, &[("x", string)]);
     let obj_y = simple_object(&graph, &[("y", number)]);
-    let undecided = canonical_algebra::canonical_intersection(&graph, &[obj_x, obj_y]);
+    let undecided = canonical_algebra::intern_ordered_intersection(&graph, &[obj_x, obj_y]);
     assert!(
         matches!(
             graph.node_data(undecided.node).as_deref(),
@@ -3085,7 +3085,7 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
         !union.evidence.incomplete,
         "a span-only collapse is a completed comparison, never Incomplete"
     );
-    let intersection = canonical_algebra::canonical_intersection(&graph, &[at_62, at_94]);
+    let intersection = canonical_algebra::intern_ordered_intersection(&graph, &[at_62, at_94]);
     assert_eq!(
         intersection.node, at_62,
         "the intersection twin collapses under T & T = T"
@@ -3381,10 +3381,11 @@ fn negative_zero_and_zero_are_one_numeric_literal_type() {
     );
 
     // `0 & -0` is the inhabited literal `0`, never `never`.
-    let intersection = crate::project_semantic_dispatch::canonical_algebra::canonical_intersection(
-        &graph,
-        &[zero, neg_zero],
-    );
+    let intersection =
+        crate::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection(
+            &graph,
+            &[zero, neg_zero],
+        );
     assert!(
         matches!(
             graph.node_data(intersection.node).as_deref(),
@@ -3530,10 +3531,11 @@ fn singleton_extreme_normalization_returns_input_node_with_scope() {
         SemanticNodeData::Primitive(PrimitiveKind::Unknown),
         file_scope("/w/unknown_owner.ts"),
     );
-    let intersection = crate::project_semantic_dispatch::canonical_algebra::canonical_intersection(
-        &graph,
-        &[scoped_unknown],
-    );
+    let intersection =
+        crate::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection(
+            &graph,
+            &[scoped_unknown],
+        );
     assert_eq!(
         intersection.node, scoped_unknown,
         "singleton intersection of a file-scoped `unknown` returns the input node"
@@ -3553,7 +3555,11 @@ fn extreme_and_disjoint_folds_record_contributor_origin_edge() {
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
     let members: Arc<[SemanticNodeId]> = Arc::from(vec![string, number].into_boxed_slice());
-    let output = dispatch.build_normalize_intersection(&members);
+    let output = dispatch.build_reduce_intersection(
+        crate::semantic_query::IntersectionInputRef::from_operands(&members),
+        crate::semantic_query::IntersectionPurpose::CheckerReduction,
+        crate::semantic_query::SemanticContextId::production(),
+    );
     let QueryResult::Value(node) = output.result else {
         panic!("normalization must produce a value");
     };
@@ -8171,9 +8177,9 @@ fn normalize_records_sources() {
     let obj_a = simple_object(&graph, &[("a", a)]);
     let obj_b = simple_object(&graph, &[("b", b)]);
     let int_members: Arc<[SemanticNodeId]> = Arc::from(vec![obj_a, obj_b].into_boxed_slice());
-    let int_result = match dispatch.execute_type_node(SemanticQueryKey::NormalizeIntersection {
-        members: Arc::clone(&int_members),
-    }) {
+    let int_result = match dispatch.execute_type_node(
+        SemanticQueryKey::reduce_intersection_operands(Arc::clone(&int_members)),
+    ) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -20959,9 +20965,9 @@ fn resolve_macro_payload_define_props_multi_arg_normalize_intersection() {
     let b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let direct = dispatch.execute_type_node(SemanticQueryKey::NormalizeIntersection {
-        members: Arc::from(vec![a, b].into_boxed_slice()),
-    });
+    let direct = dispatch.execute_type_node(SemanticQueryKey::reduce_intersection_operands(
+        Arc::from(vec![a, b].into_boxed_slice()),
+    ));
     let direct_node = match direct {
         QueryResult::Value(SemanticQueryOutput { value: n, .. }) => n,
         other => panic!("direct NormalizeIntersection failed: {other:?}"),
@@ -21168,7 +21174,7 @@ fn dispatch_mask_records_execute_read_only_nested_normalize_intersection() {
     // instead of the shared `execute_via_cold_build_helper` choke point — the
     // correctness hole this test pins shut.
     assert!(
-        tags.contains(&SemanticQueryKeyTag::NormalizeIntersection),
+        tags.contains(&SemanticQueryKeyTag::ReduceIntersection),
         "the nested execute_read(NormalizeIntersection) sub-dispatch MUST be \
          recorded in the per-request dispatch mask — it enters ONLY via \
          execute_read, never the top-level execute path. Its absence proves \
@@ -22267,7 +22273,7 @@ fn semantic_query_key_variant_set_is_structurally_pinned() {
             Conditional { .. } => "Conditional",
             TypeOf { .. } => "TypeOf",
             NormalizeUnion { .. } => "NormalizeUnion",
-            NormalizeIntersection { .. } => "NormalizeIntersection",
+            ReduceIntersection { .. } => "ReduceIntersection",
             ProjectObjectSpread { .. } => "ProjectObjectSpread",
             ProjectPath { .. } => "ProjectPath",
             Relate { .. } => "Relate",

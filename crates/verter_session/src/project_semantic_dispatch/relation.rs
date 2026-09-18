@@ -939,6 +939,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             project_identity: relation_env.project_identity,
             substitution: crate::semantic_query::SubstitutionCanonicalHash::empty(),
             projection_reduction: ProjectionReductionContext::structural_transit(),
+            semantic_context: crate::semantic_query::SemanticContextId::production(),
         };
         let mut key = RelateMemoKey::for_kind(source, target, relation, context);
         key.policy = RelationPolicy {
@@ -2367,7 +2368,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             [single] => *single,
             many => {
                 let mut dedup: Vec<SemanticNodeId> = many.to_vec();
-                dedup.sort_by_key(|id| id.0);
+                crate::semantic_query::stable_key::sort_by_stable_key(graph, &mut dedup);
                 dedup.dedup();
                 if dedup.len() == 1 {
                     return dedup[0];
@@ -4143,7 +4144,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
-        targets.sort_by_key(|node| node.0);
+        crate::semantic_query::stable_key::sort_by_stable_key(graph, &mut targets);
         targets.dedup();
         targets
     }
@@ -5017,7 +5018,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
             RelationKind::Assignable => {}
             RelationKind::Identity => return self.reduce_identity(key),
             RelationKind::Comparable => return self.reduce_comparable(key),
-            RelationKind::Subtype | RelationKind::StrictSubtype => return RelationResult::Unknown,
+            RelationKind::Subtype => {}
+            RelationKind::StrictSubtype => {
+                let mut sub = key.clone();
+                sub.relation = RelationKind::Subtype;
+                let forward = self.reduce_relation(&sub, bindings);
+                if !matches!(forward, RelationResult::Assignable { .. }) {
+                    return forward;
+                }
+                std::mem::swap(&mut sub.source, &mut sub.target);
+                let mut reverse_bindings = Vec::new();
+                let reverse = self.reduce_relation(&sub, &mut reverse_bindings);
+                if matches!(reverse, RelationResult::Assignable { .. }) {
+                    return RelationResult::NotAssignable;
+                }
+                return forward;
+            }
         }
         let occurrence = self.relation_current_occurrence();
         if let Some(result) =
@@ -5154,9 +5170,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             (Some(data), _) | (_, Some(data)) if error_swallows(data) => {
                 return Some(assignable(bindings));
             }
-            (Some(SemanticNodeData::Primitive(PrimitiveKind::Never)), _)
-            | (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown)))
-            | (Some(SemanticNodeData::Primitive(PrimitiveKind::Any)), _) => {
+            (Some(SemanticNodeData::Primitive(PrimitiveKind::Never)), _) => {
+                return Some(assignable(bindings));
+            }
+            (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))) => {
+                return Some(assignable(bindings));
+            }
+            (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Any))) => {
+                return Some(assignable(bindings));
+            }
+            (Some(SemanticNodeData::Primitive(PrimitiveKind::Any)), _) => {
+                if self.subtype_mode() {
+                    return Some(RelationResult::NotAssignable);
+                }
                 return Some(assignable(bindings));
             }
             (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Never))) => {
@@ -5664,7 +5690,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             (SemanticNodeData::Primitive(PrimitiveKind::Never), _) => ShallowRelation::Assignable,
             (_, SemanticNodeData::Primitive(PrimitiveKind::Unknown)) => ShallowRelation::Assignable,
             (_, SemanticNodeData::Primitive(PrimitiveKind::Any)) => ShallowRelation::Assignable,
-            (SemanticNodeData::Primitive(PrimitiveKind::Any), _) => ShallowRelation::Assignable,
+            (SemanticNodeData::Primitive(PrimitiveKind::Any), _) => {
+                if self.subtype_mode() {
+                    ShallowRelation::NotAssignable
+                } else {
+                    ShallowRelation::Assignable
+                }
+            }
             (_, SemanticNodeData::Primitive(PrimitiveKind::Never)) => {
                 ShallowRelation::NotAssignable
             }
@@ -6135,7 +6167,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return;
             }
             (SemanticNodeData::Primitive(PrimitiveKind::Any), _) => {
-                results.push(assignable(bindings));
+                if self.subtype_mode() {
+                    results.push(RelationResult::NotAssignable);
+                } else {
+                    results.push(assignable(bindings));
+                }
                 return;
             }
             (_, SemanticNodeData::Primitive(PrimitiveKind::Any)) => {
@@ -7504,11 +7540,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    fn last_required_position(params: &[crate::semantic_query::FunctionParam]) -> usize {
+        let fixed: Vec<_> = params.iter().filter(|param| !param.rest).collect();
+        fixed
+            .iter()
+            .rposition(|param| !param.optional)
+            .map_or(0, |position| position + 1)
+    }
+
+    fn current_relation_kind(&self) -> crate::semantic_query::RelationKind {
+        self.dispatch_txn
+            .borrow()
+            .reentry()
+            .nearest_relate()
+            .map(|(key, _)| key.relation)
+            .unwrap_or(crate::semantic_query::RelationKind::Assignable)
+    }
+
+    fn subtype_mode(&self) -> bool {
+        matches!(
+            self.current_relation_kind(),
+            crate::semantic_query::RelationKind::Subtype
+                | crate::semantic_query::RelationKind::StrictSubtype
+        )
+    }
+
     /// Relate two [`SemanticNodeData::Signature`] shells. Parameter
     /// variance follows the key's policy (RI-10 behavioral branch):
     /// strictly contravariant under `strictFunctionTypes`, bivariant
     /// otherwise (either direction suffices per parameter pair); the
-    /// return is covariant.
+    /// return is covariant. Subtype never uses the bivariant shortcut.
     pub(super) fn relate_function(
         &self,
         source_params: &[crate::semantic_query::FunctionParam],
@@ -7517,21 +7578,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target_return: SemanticNodeId,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
-        let source_required = source_params
-            .iter()
-            .filter(|p| !p.optional && !p.rest)
-            .count();
-        let target_required = target_params
-            .iter()
-            .filter(|p| !p.optional && !p.rest)
-            .count();
-        if target_required < source_required {
+        let (source_this, source_pos) = crate::semantic_query::split_this_receiver(source_params);
+        let (target_this, target_pos) = crate::semantic_query::split_this_receiver(target_params);
+        if let (Some(src_this), Some(tgt_this)) = (source_this, target_this) {
+            let this_rel = self.relate_member(
+                tgt_this.ty,
+                src_this.ty,
+                bindings,
+                InferPosition::ContravariantParam,
+            );
+            if matches!(this_rel, RelationResult::NotAssignable) {
+                return RelationResult::NotAssignable;
+            }
+        }
+        let source_required = Self::last_required_position(source_pos);
+        let target_required = Self::last_required_position(target_pos);
+        let source_has_rest = source_pos.iter().any(|p| p.rest);
+        if source_required > target_required && !source_has_rest {
             return RelationResult::NotAssignable;
         }
+        let source_params = source_pos;
+        let target_params = target_pos;
         let bivariant = {
             let txn = self.dispatch_txn.borrow();
             let strict = txn.relation.strict.unwrap_or(StrictFamilyConfig::TS_STRICT);
-            !strict.strict_function_types
+            !strict.strict_function_types && !self.subtype_mode()
         };
         let mut acc = RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),

@@ -191,8 +191,8 @@ pub enum SemanticNodeKind {
     TemplateLiteral,
     /// Normalized union (post-flatten).
     NormalizeUnion,
-    /// Normalized intersection (post-flatten).
-    NormalizeIntersection,
+    /// Ordered intersection reduction (post-flatten).
+    ReduceIntersection,
     /// Catch-all for variants added to the semantic graph after the
     /// substrate's enum was last refreshed. `#[non_exhaustive]` +
     /// `Other` lets future variants land without breaking the audit
