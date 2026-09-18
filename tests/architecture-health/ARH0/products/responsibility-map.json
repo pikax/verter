@@ -1,0 +1,1292 @@
+{
+  "schema": "ARH0ResponsibilityMap",
+  "version": 1,
+  "contractNode": "ARH0",
+  "candidate": "f69c7eee7aba2b1a260cc4d85a282bbedbbde349",
+  "charterRef": "charters/expansion-architecture-health/ARH0.md",
+  "ac3Rationale": "ARH0 is a zero-production-mutation constitution: no state, query, map, cache or scheduling boundary is touched, so fresh-vs-incremental equivalence, edit/revert, cancellation, stale/partial rejection and deterministic ordering remain owned and proven by their untouched owners (B4R0 source lineage, LSO0 snapshot publication, rev11.scheduler-runtime admission, rev11.flow dispatch).",
+  "ac4Rationale": "ARH0 adds no editor surface; VIM/DX capability evidence is the capability matrix product with exact host/profile pins, and the examples/reference obligations are specified for DOC1 in the contract.",
+  "planAuthorityGap": [
+    {
+      "id": "ARH1",
+      "kind": "node",
+      "reason": "web-product delta train expansion.architecture-health is trusted-plan authority not yet synced into repo authority DAG files"
+    },
+    {
+      "id": "DOC1",
+      "kind": "node",
+      "reason": "web-product delta train expansion.documentation is trusted-plan authority not yet synced into repo authority DAG files"
+    },
+    {
+      "id": "DOC2",
+      "kind": "node",
+      "reason": "web-product delta train expansion.documentation is trusted-plan authority not yet synced into repo authority DAG files"
+    },
+    {
+      "id": "DX0",
+      "kind": "node",
+      "reason": "DX0 is tracked by the trusted plan (successor of ORC0, phase FIXING) but its train is not present in repo authority DAG files"
+    },
+    {
+      "id": "ARH2",
+      "kind": "node",
+      "reason": "web-product delta train expansion.architecture-health is trusted-plan authority not yet synced into repo authority DAG files"
+    },
+    {
+      "id": "ARH12",
+      "kind": "node",
+      "reason": "web-product delta train expansion.architecture-health is trusted-plan authority not yet synced into repo authority DAG files"
+    }
+  ],
+  "owners": [
+    {
+      "module": "crates/verter_span",
+      "owner": {
+        "id": "expansion.kernel",
+        "kind": "train"
+      },
+      "responsibility": [
+        "span types and position encoding law"
+      ],
+      "evidence": [
+        "graph: fan-in 24, highest in workspace",
+        "documented: architecture skill shared-substrate"
+      ]
+    },
+    {
+      "module": "crates/verter_language",
+      "owner": {
+        "id": "expansion.kernel",
+        "kind": "train"
+      },
+      "responsibility": [
+        "zero-dependency language routing authority and framework-neutral parse payload"
+      ],
+      "evidence": [
+        "documented: architecture skill",
+        "charter-declared: 99 charter mentions"
+      ]
+    },
+    {
+      "module": "crates/verter_identity",
+      "owner": {
+        "id": "expansion.kernel",
+        "kind": "train"
+      },
+      "responsibility": [
+        "opaque identity type law and immutable registration (VID0/CAT0)"
+      ],
+      "evidence": [
+        "charter-declared: 33 mentions"
+      ]
+    },
+    {
+      "module": "crates/verter_protocol",
+      "owner": {
+        "id": "expansion.kernel",
+        "kind": "train"
+      },
+      "responsibility": [
+        "transport-facing schema DTOs and .proto sources"
+      ],
+      "evidence": [
+        "charter-declared",
+        "documented: architecture skill"
+      ]
+    },
+    {
+      "module": "crates/verter_ecma",
+      "owner": {
+        "id": "expansion.kernel",
+        "kind": "train"
+      },
+      "responsibility": [
+        "ECMA script baseline utilities leaf"
+      ],
+      "evidence": [
+        "graph: leaf crate, fan-out 1"
+      ]
+    },
+    {
+      "module": "crates/verter_semantic",
+      "owner": {
+        "id": "rev11.flow",
+        "kind": "train"
+      },
+      "responsibility": [
+        "reusable semantics, analysis facts, flow products"
+      ],
+      "evidence": [
+        "charter-declared: 71 mentions",
+        "coupling: 63 shared commits with verter_session"
+      ]
+    },
+    {
+      "module": "crates/verter_compiler",
+      "owner": {
+        "id": "compiler.compiler-core",
+        "kind": "train"
+      },
+      "responsibility": [
+        "lowering and template codegen; Vue/Svelte specific behavior under compiler-vue-compiler and compiler-svelte-compiler"
+      ],
+      "evidence": [
+        "charter-declared: compiler-bridge 95 mentions",
+        "coupling: 105 shared commits with verter_session"
+      ]
+    },
+    {
+      "module": "crates/verter_css_syntax",
+      "owner": {
+        "id": "rev11.style",
+        "kind": "train"
+      },
+      "responsibility": [
+        "lossless five-dialect CSS token/IR authority"
+      ],
+      "evidence": [
+        "charter-declared: 16 mentions",
+        "documented: architecture skill CSS section"
+      ]
+    },
+    {
+      "module": "crates/verter_session",
+      "owner": {
+        "id": "rev11.flow",
+        "kind": "train"
+      },
+      "responsibility": [
+        "host/session boundary, resolver_core orchestration, project semantic dispatch, component-meta host caches"
+      ],
+      "evidence": [
+        "charter-declared: 138 mentions",
+        "coupling: top hub of shared-commit graph"
+      ]
+    },
+    {
+      "module": "crates/verter_scheduler",
+      "owner": {
+        "id": "rev11.scheduler-runtime",
+        "kind": "train"
+      },
+      "responsibility": [
+        "CPU/IO pool submission, batching, admission"
+      ],
+      "evidence": [
+        "charter-declared"
+      ]
+    },
+    {
+      "module": "crates/verter_tsgo_api",
+      "owner": {
+        "id": "rev11.provider-runtime",
+        "kind": "train"
+      },
+      "responsibility": [
+        "tsgo provider process API"
+      ],
+      "evidence": [
+        "charter-declared: 14 mentions"
+      ]
+    },
+    {
+      "module": "crates/verter_type_runtime",
+      "owner": {
+        "id": "rev11.provider-runtime",
+        "kind": "train"
+      },
+      "responsibility": [
+        "tsserver/tsgo IPC runtimes; dual-plane law with rev11.typescript-mapper (TCM0R)"
+      ],
+      "evidence": [
+        "charter-declared",
+        "documented: host-session skill"
+      ]
+    },
+    {
+      "module": "crates/verter_relay_shim",
+      "owner": {
+        "id": "rev11.provider-runtime",
+        "kind": "train"
+      },
+      "responsibility": [
+        "dumb tsgo relay: egress taint + carrier injection control"
+      ],
+      "evidence": [
+        "documented: crate header contract"
+      ]
+    },
+    {
+      "module": "crates/verter_tsc",
+      "owner": {
+        "id": "rev11.typescript-mapper",
+        "kind": "train"
+      },
+      "responsibility": [
+        "TS checker projection"
+      ],
+      "evidence": [
+        "documented: typescript-mapper dual-plane contract"
+      ]
+    },
+    {
+      "module": "crates/verter_type_expr",
+      "owner": {
+        "id": "rev11.type-evaluation",
+        "kind": "train"
+      },
+      "responsibility": [
+        "type expression facts"
+      ],
+      "evidence": [
+        "charter-declared"
+      ]
+    },
+    {
+      "module": "crates/verter_type_expr_oxc",
+      "owner": {
+        "id": "rev11.type-evaluation",
+        "kind": "train"
+      },
+      "responsibility": [
+        "oxc-backed type expression lowering"
+      ],
+      "evidence": [
+        "graph: fan-in 4 from type_expr"
+      ]
+    },
+    {
+      "module": "crates/verter_lsp",
+      "owner": {
+        "id": "expansion.language-service",
+        "kind": "train"
+      },
+      "responsibility": [
+        "LSP server features and host integration"
+      ],
+      "evidence": [
+        "charter-declared: 18 mentions",
+        "coupling: 80 shared commits with verter_session"
+      ]
+    },
+    {
+      "module": "packages/vue-vscode",
+      "owner": {
+        "id": "expansion.language-service",
+        "kind": "train"
+      },
+      "responsibility": [
+        "VS Code extension host, LSP/MCP lifecycle"
+      ],
+      "evidence": [
+        "documented: architecture skill TS packages"
+      ]
+    },
+    {
+      "module": "packages/typescript-plugin",
+      "owner": {
+        "id": "expansion.language-service",
+        "kind": "train"
+      },
+      "responsibility": [
+        "TS plugin resolving .vue imports in TS/JS"
+      ],
+      "evidence": [
+        "documented: architecture skill"
+      ]
+    },
+    {
+      "module": "packages/language-shared",
+      "owner": {
+        "id": "expansion.language-service",
+        "kind": "train"
+      },
+      "responsibility": [
+        "shared custom protocol types between client and Rust LSP"
+      ],
+      "evidence": [
+        "documented: architecture skill"
+      ]
+    },
+    {
+      "module": "packages/lsp-test-client",
+      "owner": {
+        "id": "expansion.language-service",
+        "kind": "train"
+      },
+      "responsibility": [
+        "LSP test client harness"
+      ],
+      "evidence": [
+        "documented: e2e vscode testing skill"
+      ]
+    },
+    {
+      "module": "packages/svelte-jsx",
+      "owner": {
+        "id": "expansion.language-service",
+        "kind": "train"
+      },
+      "responsibility": [
+        "types-only Svelte JSX namespace for IDE projections"
+      ],
+      "evidence": [
+        "documented: package readme, byte-pinned by Rust freshness test"
+      ]
+    },
+    {
+      "module": "crates/verter-editor-client",
+      "owner": {
+        "id": "expansion.language-service",
+        "kind": "train"
+      },
+      "responsibility": [
+        "pure launch-contract logic shared by editor clients"
+      ],
+      "evidence": [
+        "graph: consumed by extensions/zed, extensions/lapce; pinned by editors/nvim+helix contract tests"
+      ]
+    },
+    {
+      "module": "extensions/zed",
+      "owner": {
+        "id": "expansion.language-service",
+        "kind": "train"
+      },
+      "responsibility": [
+        "Zed editor extension (wasm32-wasip2)"
+      ],
+      "evidence": [
+        "documented: verter-editor-client header"
+      ]
+    },
+    {
+      "module": "extensions/lapce",
+      "owner": {
+        "id": "expansion.language-service",
+        "kind": "train"
+      },
+      "responsibility": [
+        "Lapce editor extension (wasm32-wasip1)"
+      ],
+      "evidence": [
+        "documented: verter-editor-client header"
+      ]
+    },
+    {
+      "module": "editors/helix",
+      "owner": {
+        "id": "expansion.language-service",
+        "kind": "train"
+      },
+      "responsibility": [
+        "Helix editor config contract"
+      ],
+      "evidence": [
+        "graph: verter-editor-client helix config contract test"
+      ]
+    },
+    {
+      "module": "editors/nvim",
+      "owner": {
+        "id": "expansion.language-service",
+        "kind": "train"
+      },
+      "responsibility": [
+        "Neovim editor config contract"
+      ],
+      "evidence": [
+        "graph: verter-editor-client nvim config contract test"
+      ]
+    },
+    {
+      "module": "crates/verter_napi",
+      "owner": {
+        "id": "compiler.compiler-bridge",
+        "kind": "train"
+      },
+      "responsibility": [
+        "N-API native binding surface"
+      ],
+      "evidence": [
+        "charter-declared: 9 mentions"
+      ]
+    },
+    {
+      "module": "crates/verter_wasm",
+      "owner": {
+        "id": "compiler.compiler-bridge",
+        "kind": "train"
+      },
+      "responsibility": [
+        "WASM binding surface"
+      ],
+      "evidence": [
+        "charter-declared"
+      ]
+    },
+    {
+      "module": "crates/verter_ffi",
+      "owner": {
+        "id": "compiler.compiler-bridge",
+        "kind": "train"
+      },
+      "responsibility": [
+        "thin native/WASM adapter layer"
+      ],
+      "evidence": [
+        "documented: architecture skill"
+      ]
+    },
+    {
+      "module": "packages/native",
+      "owner": {
+        "id": "compiler.compiler-bridge",
+        "kind": "train"
+      },
+      "responsibility": [
+        "published native npm binding"
+      ],
+      "evidence": [
+        "charter-declared: 159 mentions"
+      ]
+    },
+    {
+      "module": "packages/wasm",
+      "owner": {
+        "id": "compiler.compiler-bridge",
+        "kind": "train"
+      },
+      "responsibility": [
+        "published wasm npm binding"
+      ],
+      "evidence": [
+        "charter-declared"
+      ]
+    },
+    {
+      "module": "crates/verter_mcp",
+      "owner": {
+        "id": "expansion.cli",
+        "kind": "train"
+      },
+      "responsibility": [
+        "analysis MCP server implementation"
+      ],
+      "evidence": [
+        "documented: architecture skill MCP section"
+      ]
+    },
+    {
+      "module": "crates/verter_mcp_server",
+      "owner": {
+        "id": "expansion.cli",
+        "kind": "train"
+      },
+      "responsibility": [
+        "LSP-decoupled MCP binary sharing verter_mcp::run entry"
+      ],
+      "evidence": [
+        "documented: lsp-mcp-decoupling doc"
+      ]
+    },
+    {
+      "module": "packages/verter-lsp",
+      "owner": {
+        "id": "expansion.cli",
+        "kind": "train"
+      },
+      "responsibility": [
+        "published verter-lsp binary launcher"
+      ],
+      "evidence": [
+        "charter-declared: 10 mentions"
+      ]
+    },
+    {
+      "module": "packages/verter-tsc",
+      "owner": {
+        "id": "expansion.cli",
+        "kind": "train"
+      },
+      "responsibility": [
+        "published verter-tsc launcher"
+      ],
+      "evidence": [
+        "charter-declared"
+      ]
+    },
+    {
+      "module": "packages/binary-launcher",
+      "owner": {
+        "id": "expansion.cli",
+        "kind": "train"
+      },
+      "responsibility": [
+        "shared binary launcher plumbing"
+      ],
+      "evidence": [
+        "charter-declared: 30 mentions"
+      ]
+    },
+    {
+      "module": "mcp",
+      "owner": {
+        "id": "expansion.cli",
+        "kind": "train"
+      },
+      "responsibility": [
+        "MCP server manifests (stdio and HTTP)"
+      ],
+      "evidence": [
+        "charter-declared"
+      ]
+    },
+    {
+      "module": "packages/unplugin",
+      "owner": {
+        "id": "expansion.bundler-host",
+        "kind": "train"
+      },
+      "responsibility": [
+        "universal bundler plugin host integration"
+      ],
+      "evidence": [
+        "charter-declared: 18 mentions"
+      ]
+    },
+    {
+      "module": "packages/nuxt",
+      "owner": {
+        "id": "expansion.project-profiles",
+        "kind": "train"
+      },
+      "responsibility": [
+        "Nuxt project profile module"
+      ],
+      "evidence": [
+        "charter-declared: 9 mentions"
+      ]
+    },
+    {
+      "module": "packages/component-meta",
+      "owner": {
+        "id": "expansion.kernel",
+        "kind": "train"
+      },
+      "responsibility": [
+        "component-meta native/compat TS boundary"
+      ],
+      "evidence": [
+        "documented: component-meta skill"
+      ]
+    },
+    {
+      "module": "packages/typeinfo",
+      "owner": {
+        "id": "rev11.public-typeinfo",
+        "kind": "train"
+      },
+      "responsibility": [
+        "public typeinfo TS surface"
+      ],
+      "evidence": [
+        "charter-declared: 25 mentions"
+      ]
+    },
+    {
+      "module": "packages/types",
+      "owner": {
+        "id": "expansion.language-service",
+        "kind": "train"
+      },
+      "responsibility": [
+        "TS utility types for LSP injection"
+      ],
+      "evidence": [
+        "documented: architecture skill"
+      ]
+    },
+    {
+      "module": "packages/type-ir",
+      "owner": {
+        "id": "rev11.typescript-mapper",
+        "kind": "train"
+      },
+      "responsibility": [
+        "type IR TS surface"
+      ],
+      "evidence": [
+        "documented: typescript-mapper dual-plane contract"
+      ]
+    },
+    {
+      "module": "packages/playground",
+      "owner": {
+        "id": "expansion.kernel",
+        "kind": "train"
+      },
+      "responsibility": [
+        "in-repo playground app over native/wasm"
+      ],
+      "evidence": [
+        "charter-declared: 35 mentions"
+      ]
+    },
+    {
+      "module": "examples",
+      "owner": {
+        "id": "expansion.kernel",
+        "kind": "train"
+      },
+      "responsibility": [
+        "Vue examples app; examples/reference obligations specified for DOC1 in the contract"
+      ],
+      "evidence": [
+        "documented: repo layout"
+      ]
+    },
+    {
+      "module": "packages/example",
+      "owner": {
+        "id": "expansion.kernel",
+        "kind": "train"
+      },
+      "responsibility": [
+        "minimal usage example package"
+      ],
+      "evidence": [
+        "documented: repo layout"
+      ]
+    },
+    {
+      "module": "crates/verter_vue_conformance",
+      "owner": {
+        "id": "compiler.vue-compiler",
+        "kind": "train"
+      },
+      "responsibility": [
+        "Vue conformance corpus runner"
+      ],
+      "evidence": [
+        "charter-declared: 24 mentions"
+      ]
+    },
+    {
+      "module": "packages/vue-conformance-oracle",
+      "owner": {
+        "id": "compiler.vue-compiler",
+        "kind": "train"
+      },
+      "responsibility": [
+        "Vue compiler oracle lift"
+      ],
+      "evidence": [
+        "charter-declared: 16 mentions"
+      ]
+    },
+    {
+      "module": "crates/verter_svelte_conformance",
+      "owner": {
+        "id": "compiler.svelte-compiler",
+        "kind": "train"
+      },
+      "responsibility": [
+        "Svelte conformance corpus runner"
+      ],
+      "evidence": [
+        "charter-declared"
+      ]
+    },
+    {
+      "module": "packages/svelte-runtime-tests",
+      "owner": {
+        "id": "compiler.svelte-compiler",
+        "kind": "train"
+      },
+      "responsibility": [
+        "Svelte runtime tests"
+      ],
+      "evidence": [
+        "charter-declared"
+      ]
+    },
+    {
+      "module": "packages/framework-conformance-harness",
+      "owner": {
+        "id": "compiler.compiler-core",
+        "kind": "train"
+      },
+      "responsibility": [
+        "framework conformance harness"
+      ],
+      "evidence": [
+        "documented: conformance harness oracle caches note"
+      ]
+    },
+    {
+      "module": "crates/verter_diagnostics",
+      "owner": {
+        "id": "expansion.lint",
+        "kind": "train"
+      },
+      "responsibility": [
+        "lint/diagnostic rules"
+      ],
+      "evidence": [
+        "charter-declared: 24 mentions"
+      ]
+    },
+    {
+      "module": "crates/verter_actions",
+      "owner": {
+        "id": "expansion.lint",
+        "kind": "train"
+      },
+      "responsibility": [
+        "code actions and quick fixes"
+      ],
+      "evidence": [
+        "charter-declared"
+      ]
+    },
+    {
+      "module": "crates/verter_bench",
+      "owner": {
+        "id": "compiler.compiler-perf",
+        "kind": "train"
+      },
+      "responsibility": [
+        "Rust benchmark harness"
+      ],
+      "evidence": [
+        "charter-declared: 12 mentions"
+      ]
+    },
+    {
+      "module": "packages/benchmark",
+      "owner": {
+        "id": "compiler.compiler-perf",
+        "kind": "train"
+      },
+      "responsibility": [
+        "TS benchmark corpora"
+      ],
+      "evidence": [
+        "charter-declared: 20 mentions"
+      ]
+    },
+    {
+      "module": "crates/verter_dx_baseline",
+      "owner": {
+        "id": "DX0",
+        "kind": "node"
+      },
+      "responsibility": [
+        "DX feature-preservation baseline"
+      ],
+      "evidence": [
+        "documented: DX0 cross-surface preservation node"
+      ]
+    },
+    {
+      "module": "packages/dx-harness",
+      "owner": {
+        "id": "DX0",
+        "kind": "node"
+      },
+      "responsibility": [
+        "DX feature-preservation harness"
+      ],
+      "evidence": [
+        "documented: DX0 cross-surface preservation node"
+      ]
+    },
+    {
+      "module": "crates/verter_validation_probe",
+      "owner": {
+        "id": "compiler.validation-observability",
+        "kind": "train"
+      },
+      "responsibility": [
+        "validation probes"
+      ],
+      "evidence": [
+        "charter-declared: 36 mentions"
+      ]
+    },
+    {
+      "module": "crates/verter_audit",
+      "owner": {
+        "id": "rev11.flow",
+        "kind": "train"
+      },
+      "responsibility": [
+        "audit substrate and structured events"
+      ],
+      "evidence": [
+        "documented: audit-infrastructure skill"
+      ]
+    },
+    {
+      "module": "crates/verter_analysis_inputs",
+      "owner": {
+        "id": "rev11.inputs",
+        "kind": "train"
+      },
+      "responsibility": [
+        "InputBasis and snapshot fence"
+      ],
+      "evidence": [
+        "charter-declared: 6 mentions"
+      ]
+    },
+    {
+      "module": "crates/verter_workspace",
+      "owner": {
+        "id": "rev11.host-session",
+        "kind": "train"
+      },
+      "responsibility": [
+        "workspace management and engine"
+      ],
+      "evidence": [
+        "documented: host-session skill"
+      ]
+    },
+    {
+      "module": "scripts",
+      "owner": {
+        "id": "governance.github-control-plane",
+        "kind": "train"
+      },
+      "responsibility": [
+        "CI/gate/release scripts; gate.mjs testing authority stays with CLAUDE.md testing rules"
+      ],
+      "evidence": [
+        "documented: CI workflows consume them"
+      ]
+    },
+    {
+      "module": "xtask",
+      "owner": {
+        "id": "governance.release-control",
+        "kind": "train"
+      },
+      "responsibility": [
+        "release/codegen xtasks"
+      ],
+      "evidence": [
+        "documented: build-and-profiling skill"
+      ]
+    },
+    {
+      "module": "tests",
+      "owner": {
+        "id": "expansion.kernel",
+        "kind": "train"
+      },
+      "responsibility": [
+        "root cross-cutting test trees (architecture-health, sfc-projection); per-feature test owners keep their subtrees"
+      ],
+      "evidence": [
+        "documented: testing skill"
+      ]
+    },
+    {
+      "module": "test-corpora",
+      "owner": {
+        "id": "compiler.compiler-core",
+        "kind": "train"
+      },
+      "responsibility": [
+        "pinned compiler test corpora"
+      ],
+      "evidence": [
+        "documented: testing skill"
+      ]
+    }
+  ],
+  "godModuleCandidates": [
+    {
+      "path": "crates/verter_scheduler/src/scheduler.rs",
+      "loc": 20743,
+      "classification": "god-module-candidate",
+      "responsibilities": [
+        "pool submission and admission control",
+        "batch coordination",
+        "cancellation and retry bookkeeping"
+      ],
+      "couplingEvidence": {
+        "touchesSinceJune": 19,
+        "fanIn": 5,
+        "topCoChangePair": "crates/verter_compiler <-> crates/verter_session (105 shared commits)"
+      },
+      "evidenceKinds": [
+        "multi-responsibility",
+        "coupling",
+        "size"
+      ],
+      "provenance": "hand-written"
+    },
+    {
+      "path": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
+      "loc": 15021,
+      "classification": "god-module-candidate",
+      "responsibilities": [
+        "flow-return semantic dispatch",
+        "flow product assembly"
+      ],
+      "couplingEvidence": {
+        "touchesSinceJune": 48,
+        "fanIn": 9
+      },
+      "evidenceKinds": [
+        "multi-responsibility",
+        "coupling",
+        "size"
+      ],
+      "provenance": "hand-written"
+    },
+    {
+      "path": "crates/verter_session/src/project_semantic_dispatch/build.rs",
+      "loc": 12449,
+      "classification": "god-module-candidate",
+      "responsibilities": [
+        "dispatch build/admission",
+        "project semantic store assembly"
+      ],
+      "couplingEvidence": {
+        "touchesSinceJune": 28,
+        "fanIn": 9,
+        "cratePairCoupling": "crates/verter_compiler <-> crates/verter_session (105 shared commits)"
+      },
+      "evidenceKinds": [
+        "multi-responsibility",
+        "coupling",
+        "size"
+      ],
+      "provenance": "hand-written"
+    },
+    {
+      "path": "crates/verter_session/src/semantic_query.rs",
+      "loc": 10634,
+      "classification": "god-module-candidate",
+      "responsibilities": [
+        "semantic query envelope assembly",
+        "query key/env binding"
+      ],
+      "couplingEvidence": {
+        "touchesSinceJune": 26,
+        "fanIn": 9
+      },
+      "evidenceKinds": [
+        "multi-responsibility",
+        "coupling",
+        "size"
+      ],
+      "provenance": "hand-written"
+    },
+    {
+      "path": "crates/verter_session/src/flow_slice_content.rs",
+      "loc": 9427,
+      "classification": "god-module-candidate",
+      "responsibilities": [
+        "flow slice content projection",
+        "slice publication admission"
+      ],
+      "couplingEvidence": {
+        "touchesSinceJune": 34
+      },
+      "evidenceKinds": [
+        "multi-responsibility",
+        "coupling",
+        "size"
+      ],
+      "provenance": "hand-written"
+    }
+  ],
+  "generatedDataSources": [
+    "crates/verter_semantic/src/analysis/html_intrinsics_data.rs",
+    "crates/verter_compiler/src/svelte/bind_contract_data.rs",
+    "crates/verter_compiler/src/svelte/runtime/entity_table.rs",
+    "crates/verter_compiler/src/svelte/runtime/diff_oracle_divergences.rs"
+  ],
+  "retiredPhase11Targets": [
+    {
+      "target": "crates/verter_session/src/meta_resolve.rs",
+      "currentForm": "thin shell (142 LOC) beside meta_resolve/ directory module",
+      "classification": "retired",
+      "freshEvidenceRequiredForReclassification": true
+    },
+    {
+      "target": "crates/verter_session/src/resolver_core/component_meta_query_engine",
+      "currentForm": "directory module",
+      "classification": "retired",
+      "freshEvidenceRequiredForReclassification": true
+    },
+    {
+      "target": "crates/verter_session/src/host_manage.rs",
+      "currentForm": "thin shell (1352 LOC) beside host_manage/ directory module",
+      "classification": "retired",
+      "freshEvidenceRequiredForReclassification": true
+    },
+    {
+      "target": "crates/verter_compiler/src/ide/script",
+      "currentForm": "directory module (file form gone)",
+      "classification": "retired",
+      "freshEvidenceRequiredForReclassification": true
+    },
+    {
+      "target": "crates/verter_lsp/src/server",
+      "currentForm": "directory module (file form gone)",
+      "classification": "retired",
+      "freshEvidenceRequiredForReclassification": true
+    }
+  ],
+  "largeFilePopulation": {
+    "threshold": 4000,
+    "count": 33,
+    "files": [
+      {
+        "path": "crates/verter_scheduler/src/scheduler.rs",
+        "loc": 20743,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
+        "loc": 15021,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_session/src/project_semantic_dispatch/build.rs",
+        "loc": 12449,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_session/src/semantic_query.rs",
+        "loc": 10634,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_semantic/src/analysis/html_intrinsics_data.rs",
+        "loc": 9971,
+        "generated": true
+      },
+      {
+        "path": "crates/verter_session/src/flow_slice_content.rs",
+        "loc": 9427,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_session/src/project_semantic_dispatch/walk.rs",
+        "loc": 8569,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_session/src/project_semantic_dispatch/relation.rs",
+        "loc": 8096,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_tsc/src/checker.rs",
+        "loc": 7708,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_compiler/src/tsc/script.rs",
+        "loc": 7161,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_compiler/src/template/code_gen/ssr/mod.rs",
+        "loc": 6835,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_semantic/src/analysis/type_eval_build.rs",
+        "loc": 6392,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_type_runtime/src/tsserver/ipc.rs",
+        "loc": 5777,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_session/src/project_semantic_dispatch/raise.rs",
+        "loc": 5712,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_session/src/types.rs",
+        "loc": 5493,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_session/src/resolver_core/mod.rs",
+        "loc": 5478,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_napi/src/lib.rs",
+        "loc": 5409,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_workspace/src/engine.rs",
+        "loc": 5392,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_session/src/resolver_store.rs",
+        "loc": 5042,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_type_expr/src/facts.rs",
+        "loc": 4947,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_type_runtime/src/tsgo/ipc.rs",
+        "loc": 4892,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_compiler/src/standalone.rs",
+        "loc": 4760,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_semantic/src/analysis/build.rs",
+        "loc": 4547,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_semantic/src/analysis/function_program.rs",
+        "loc": 4505,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_session/src/project_semantic_dispatch/mod.rs",
+        "loc": 4397,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_mcp/src/server.rs",
+        "loc": 4320,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_compiler/src/framework_common/vue_bridge.rs",
+        "loc": 4273,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_session/src/parse.rs",
+        "loc": 4243,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_semantic/src/analysis/macros.rs",
+        "loc": 4217,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_compiler/src/template/code_gen/vapor/mod.rs",
+        "loc": 4180,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_session/src/resolver_core/shallow_file_state.rs",
+        "loc": 4148,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_compiler/src/style_planner.rs",
+        "loc": 4083,
+        "generated": false
+      },
+      {
+        "path": "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
+        "loc": 4008,
+        "generated": false
+      }
+    ],
+    "note": "production .rs files under crates/*/src over threshold, excluding test-named files and tests/ dirs; one row is a generated data source and is flagged; godModuleCandidates lists only rows with responsibility evidence"
+  },
+  "changeCoupling": {
+    "window": "2026-06-01..2026-09-18",
+    "commits": 781,
+    "topPairs": [
+      {
+        "pair": [
+          "crates/verter_compiler",
+          "crates/verter_session"
+        ],
+        "sharedCommits": 105
+      },
+      {
+        "pair": [
+          "crates/verter_session",
+          "docs"
+        ],
+        "sharedCommits": 103
+      },
+      {
+        "pair": [
+          "crates/verter_session",
+          "roadmap"
+        ],
+        "sharedCommits": 90
+      },
+      {
+        "pair": [
+          "crates/verter_lsp",
+          "crates/verter_session"
+        ],
+        "sharedCommits": 80
+      },
+      {
+        "pair": [
+          "crates/verter_semantic",
+          "crates/verter_session"
+        ],
+        "sharedCommits": 63
+      },
+      {
+        "pair": [
+          "crates/verter_compiler",
+          "crates/verter_lsp"
+        ],
+        "sharedCommits": 44
+      },
+      {
+        "pair": [
+          "crates/verter_compiler",
+          "crates/verter_semantic"
+        ],
+        "sharedCommits": 30
+      }
+    ],
+    "hotFiles": [
+      {
+        "path": "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
+        "touches": 52
+      },
+      {
+        "path": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
+        "touches": 48
+      },
+      {
+        "path": "crates/verter_compiler/src/framework_common/vue_bridge.rs",
+        "touches": 44
+      },
+      {
+        "path": "crates/verter_compiler/src/svelte/carrier.rs",
+        "touches": 39
+      }
+    ]
+  }
+}

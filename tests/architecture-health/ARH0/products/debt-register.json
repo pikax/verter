@@ -1,0 +1,55 @@
+{
+  "schema": "ARH0DebtRegister",
+  "version": 1,
+  "contractNode": "ARH0",
+  "candidate": "f69c7eee7aba2b1a260cc4d85a282bbedbbde349",
+  "emptyDeletionSetRationale": "ARH0 is a genuinely additive inventory boundary: it introduces no new API and supersedes no current route, so its own deletion set is empty; every other row binds an existing candidate to its already-named disposition owner.",
+  "rows": [
+    {
+      "id": "ARH0-DEBT-1",
+      "candidate": "packages/core",
+      "candidatePath": "packages/core",
+      "evidence": "directory contains only .gitignore; no package.json, no sources (products/codebase-inventory.json row with all-zero counts)",
+      "disposition": "delete the placeholder or populate it with a named purpose; decision required in the ARH1 visibility pass",
+      "owner": { "id": "ARH1", "kind": "node" },
+      "class": "unassigned-purpose"
+    },
+    {
+      "id": "ARH0-DEBT-2",
+      "candidate": "rev11.simplification retirement blocks SIMP3-SIMP6, SIMP8-SIMP15",
+      "candidatePath": "roadmap/0.1.0-tama/contracts/codebase-simplification.md",
+      "evidence": "codebase-simplification contract; SIMP1/SIMP2/SIMP7 already delivered per the trusted ledger",
+      "disposition": "execute under their own nodes; ARH0 does not pre-delete any population",
+      "owner": { "id": "SIMP3", "kind": "node" },
+      "coOwners": ["SIMP4", "SIMP5", "SIMP6", "SIMP8", "SIMP9", "SIMP10", "SIMP11", "SIMP12", "SIMP13", "SIMP14", "SIMP15"],
+      "class": "bound-to-existing-train"
+    },
+    {
+      "id": "ARH0-DEBT-3",
+      "candidate": "STATUS-vue-collapse.md (repo root)",
+      "candidatePath": "STATUS-vue-collapse.md",
+      "evidence": "committed chore working-note for the completed workspace Vue 3.6.0-rc.5 collapse",
+      "disposition": "fold into docs history or remove; working notes are not repo-root documentation",
+      "owner": { "id": "governance.feedback-intake", "kind": "train" },
+      "class": "root-artifact-hygiene"
+    },
+    {
+      "id": "ARH0-DEBT-4",
+      "candidate": "crates/verter_scheduler/src/scheduler.rs and the four other god-module candidates in responsibility-map.json",
+      "candidatePath": "crates/verter_scheduler/src/scheduler.rs",
+      "evidence": "multi-responsibility + coupling + size evidence rows (responsibility-map.json godModuleCandidates)",
+      "disposition": "behavioral characterization and complexity measurement; no split is pre-declared by ARH0",
+      "owner": { "id": "ARH2", "kind": "node" },
+      "class": "complexity-measurement"
+    },
+    {
+      "id": "ARH0-DEBT-5",
+      "candidate": "god-module declaration discipline for future large files",
+      "candidatePath": "crates/verter_session/tests/cases/architecture_guards.rs",
+      "evidence": "33 production files over 4000 LOC while god_module_size_budget only walks the five retired Phase 11 targets",
+      "disposition": "extend the existing architecture_guards.rs pattern only after ARH2 measurement ratifies thresholds; no new status system",
+      "owner": { "id": "ARH12", "kind": "node" },
+      "class": "drift-prevention"
+    }
+  ]
+}

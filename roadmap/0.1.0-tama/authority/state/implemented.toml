@@ -26,6 +26,7 @@ schema = 2
 "A6" = { status = "implemented", commit_message = "docs(arch): accept the current-owner inventories and the implementation lock record into the program ledger", commit_date = "2026-08-12T08:32:50+01:00" }
 "ALPP" = { status = "pending" }
 "ANGP" = { status = "pending" }
+"ARH0" = { status = "pending" }
 "ASTP" = { status = "pending" }
 "B1" = { status = "implemented", commit_message = "fix(*): give each parse owner domain its own identity", commit_date = "2026-08-25T12:08:32+01:00" }
 "B2" = { status = "implemented", commit_message = "docs(core): record framework parse-facet conformance re-review evidence", commit_date = "2026-08-19T06:39:27+01:00" }

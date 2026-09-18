@@ -1,0 +1,704 @@
+{
+  "schema": "ARH0CodebaseInventory",
+  "version": 1,
+  "contractNode": "ARH0",
+  "candidate": "f69c7eee7aba2b1a260cc4d85a282bbedbbde349",
+  "measuredAt": "2026-09-18",
+  "platform": "win32-x64, Node 26, cargo metadata --no-deps",
+  "method": {
+    "production": "files under src/ excluding test-named files and generated-marked files; Rust in-file #[cfg(test)] counted as production file lines (filename-level classification, same convention as god_module_size_budget)",
+    "test": "Rust: *_tests.rs, tests.rs, tests/ dirs. TS: test|tests|__tests__|e2e|fixtures dirs and *.test.*/*.spec.*/*.bench.* files",
+    "generated": "packages/proto/src/gen/** (buf), *.generated.ts, */generated/*, Rust header-marked data sources (is_generated_data_source predicate)",
+    "note": "packages/* root-level build/config scripts counted as otherLoc, not production"
+  },
+  "rustWorkspace": {
+    "members": 50,
+    "crates": 49,
+    "productionLoc": 1108242,
+    "testLoc": 1062523,
+    "generatedLoc": 12926
+  },
+  "typescriptPackages": {
+    "packages": 26,
+    "productionLoc": 121543,
+    "testLoc": 178326,
+    "generatedLoc": 20397,
+    "otherLoc": 16518
+  },
+  "crates": [
+    {
+      "module": "crates/verter-editor-client",
+      "crate": "verter-editor-client",
+      "productionLoc": 1532,
+      "testLoc": 542,
+      "generatedLoc": 0,
+      "srcFiles": 5,
+      "fanIn": 0,
+      "fanOut": 0
+    },
+    {
+      "module": "crates/verter_actions",
+      "crate": "verter_actions",
+      "productionLoc": 7287,
+      "testLoc": 1977,
+      "generatedLoc": 0,
+      "srcFiles": 31,
+      "fanIn": 5,
+      "fanOut": 3
+    },
+    {
+      "module": "crates/verter_analysis_inputs",
+      "crate": "verter_analysis_inputs",
+      "productionLoc": 2063,
+      "testLoc": 1196,
+      "generatedLoc": 0,
+      "srcFiles": 7,
+      "fanIn": 1,
+      "fanOut": 1
+    },
+    {
+      "module": "crates/verter_audit",
+      "crate": "verter_audit",
+      "productionLoc": 9714,
+      "testLoc": 2843,
+      "generatedLoc": 0,
+      "srcFiles": 46,
+      "fanIn": 10,
+      "fanOut": 1
+    },
+    {
+      "module": "crates/verter_bench",
+      "crate": "verter_bench",
+      "productionLoc": 2352,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "srcFiles": 4,
+      "fanIn": 0,
+      "fanOut": 9
+    },
+    {
+      "module": "crates/verter_compile_contracts",
+      "crate": "verter_compile_contracts",
+      "productionLoc": 165,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "srcFiles": 1,
+      "fanIn": 0,
+      "fanOut": 0
+    },
+    {
+      "module": "crates/verter_compile_contracts_bench",
+      "crate": "verter_compile_contracts_bench",
+      "productionLoc": 19,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "srcFiles": 1,
+      "fanIn": 0,
+      "fanOut": 3
+    },
+    {
+      "module": "crates/verter_compile_contracts_session_variants",
+      "crate": "verter_compile_contracts_session_variants",
+      "productionLoc": 26,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "srcFiles": 1,
+      "fanIn": 0,
+      "fanOut": 3
+    },
+    {
+      "module": "crates/verter_compiler",
+      "crate": "verter_compiler",
+      "productionLoc": 198029,
+      "testLoc": 199898,
+      "generatedLoc": 2955,
+      "srcFiles": 345,
+      "fanIn": 9,
+      "fanOut": 12
+    },
+    {
+      "module": "crates/verter_css_syntax",
+      "crate": "verter_css_syntax",
+      "productionLoc": 10119,
+      "testLoc": 8615,
+      "generatedLoc": 0,
+      "srcFiles": 23,
+      "fanIn": 5,
+      "fanOut": 3
+    },
+    {
+      "module": "crates/verter_debug_assert",
+      "crate": "verter_debug_assert",
+      "productionLoc": 364,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "srcFiles": 1,
+      "fanIn": 13,
+      "fanOut": 0
+    },
+    {
+      "module": "crates/verter_diagnostics",
+      "crate": "verter_diagnostics",
+      "productionLoc": 35013,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "srcFiles": 212,
+      "fanIn": 7,
+      "fanOut": 4
+    },
+    {
+      "module": "crates/verter_dx_baseline",
+      "crate": "verter_dx_baseline",
+      "productionLoc": 4161,
+      "testLoc": 3197,
+      "generatedLoc": 0,
+      "srcFiles": 8,
+      "fanIn": 0,
+      "fanOut": 6
+    },
+    {
+      "module": "crates/verter_ecma",
+      "crate": "verter_ecma",
+      "productionLoc": 477,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "srcFiles": 1,
+      "fanIn": 3,
+      "fanOut": 1
+    },
+    {
+      "module": "crates/verter_ffi",
+      "crate": "verter_ffi",
+      "productionLoc": 4637,
+      "testLoc": 5895,
+      "generatedLoc": 0,
+      "srcFiles": 14,
+      "fanIn": 3,
+      "fanOut": 10
+    },
+    {
+      "module": "crates/verter_identity",
+      "crate": "verter_identity",
+      "productionLoc": 1431,
+      "testLoc": 757,
+      "generatedLoc": 0,
+      "srcFiles": 7,
+      "fanIn": 5,
+      "fanOut": 0
+    },
+    {
+      "module": "crates/verter_language",
+      "crate": "verter_language",
+      "productionLoc": 6849,
+      "testLoc": 666,
+      "generatedLoc": 0,
+      "srcFiles": 11,
+      "fanIn": 13,
+      "fanOut": 2
+    },
+    {
+      "module": "crates/verter_lsp",
+      "crate": "verter_lsp",
+      "productionLoc": 109096,
+      "testLoc": 120575,
+      "generatedLoc": 0,
+      "srcFiles": 228,
+      "fanIn": 0,
+      "fanOut": 16
+    },
+    {
+      "module": "crates/verter_macro_dto",
+      "crate": "verter_macro_dto",
+      "productionLoc": 635,
+      "testLoc": 782,
+      "generatedLoc": 0,
+      "srcFiles": 1,
+      "fanIn": 3,
+      "fanOut": 2
+    },
+    {
+      "module": "crates/verter_mcp",
+      "crate": "verter_mcp",
+      "productionLoc": 6262,
+      "testLoc": 1629,
+      "generatedLoc": 0,
+      "srcFiles": 15,
+      "fanIn": 1,
+      "fanOut": 7
+    },
+    {
+      "module": "crates/verter_mcp_server",
+      "crate": "verter_mcp_server",
+      "productionLoc": 39,
+      "testLoc": 39,
+      "generatedLoc": 0,
+      "srcFiles": 1,
+      "fanIn": 0,
+      "fanOut": 1
+    },
+    {
+      "module": "crates/verter_napi",
+      "crate": "verter_napi",
+      "productionLoc": 9305,
+      "testLoc": 5124,
+      "generatedLoc": 0,
+      "srcFiles": 12,
+      "fanIn": 1,
+      "fanOut": 13
+    },
+    {
+      "module": "crates/verter_no_storedspan",
+      "crate": "verter_no_storedspan",
+      "productionLoc": 327,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "srcFiles": 1,
+      "fanIn": 2,
+      "fanOut": 1
+    },
+    {
+      "module": "crates/verter_no_storedspan_derive",
+      "crate": "verter_no_storedspan_derive",
+      "productionLoc": 544,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "srcFiles": 1,
+      "fanIn": 1,
+      "fanOut": 0
+    },
+    {
+      "module": "crates/verter_no_typeexpr",
+      "crate": "verter_no_typeexpr",
+      "productionLoc": 319,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "srcFiles": 1,
+      "fanIn": 5,
+      "fanOut": 2
+    },
+    {
+      "module": "crates/verter_no_typeexpr_derive",
+      "crate": "verter_no_typeexpr_derive",
+      "productionLoc": 563,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "srcFiles": 1,
+      "fanIn": 1,
+      "fanOut": 0
+    },
+    {
+      "module": "crates/verter_parser",
+      "crate": "verter_parser",
+      "productionLoc": 27447,
+      "testLoc": 14839,
+      "generatedLoc": 0,
+      "srcFiles": 66,
+      "fanIn": 4,
+      "fanOut": 5
+    },
+    {
+      "module": "crates/verter_protocol",
+      "crate": "verter_protocol",
+      "productionLoc": 11228,
+      "testLoc": 3760,
+      "generatedLoc": 0,
+      "srcFiles": 16,
+      "fanIn": 6,
+      "fanOut": 5
+    },
+    {
+      "module": "crates/verter_relay_shim",
+      "crate": "verter_relay_shim",
+      "productionLoc": 1122,
+      "testLoc": 5676,
+      "generatedLoc": 0,
+      "srcFiles": 2,
+      "fanIn": 0,
+      "fanOut": 1
+    },
+    {
+      "module": "crates/verter_scheduler",
+      "crate": "verter_scheduler",
+      "productionLoc": 30865,
+      "testLoc": 4228,
+      "generatedLoc": 0,
+      "srcFiles": 30,
+      "fanIn": 5,
+      "fanOut": 4
+    },
+    {
+      "module": "crates/verter_semantic",
+      "crate": "verter_semantic",
+      "productionLoc": 85625,
+      "testLoc": 45699,
+      "generatedLoc": 9971,
+      "srcFiles": 181,
+      "fanIn": 13,
+      "fanOut": 10
+    },
+    {
+      "module": "crates/verter_session",
+      "crate": "verter_session",
+      "productionLoc": 425049,
+      "testLoc": 543807,
+      "generatedLoc": 0,
+      "srcFiles": 747,
+      "fanIn": 9,
+      "fanOut": 18
+    },
+    {
+      "module": "crates/verter_session_oracle_macro",
+      "crate": "verter_session_oracle_macro",
+      "productionLoc": 107,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "srcFiles": 1,
+      "fanIn": 0,
+      "fanOut": 0
+    },
+    {
+      "module": "crates/verter_session_query",
+      "crate": "verter_session_query",
+      "productionLoc": 336,
+      "testLoc": 739,
+      "generatedLoc": 0,
+      "srcFiles": 1,
+      "fanIn": 1,
+      "fanOut": 1
+    },
+    {
+      "module": "crates/verter_shipped_cfg_contract",
+      "crate": "verter_shipped_cfg_contract",
+      "productionLoc": 552,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "srcFiles": 1,
+      "fanIn": 0,
+      "fanOut": 0
+    },
+    {
+      "module": "crates/verter_source_policy_gate",
+      "crate": "verter_source_policy_gate",
+      "productionLoc": 6,
+      "testLoc": 1904,
+      "generatedLoc": 0,
+      "srcFiles": 1,
+      "fanIn": 0,
+      "fanOut": 0
+    },
+    {
+      "module": "crates/verter_span",
+      "crate": "verter_span",
+      "productionLoc": 2381,
+      "testLoc": 1369,
+      "generatedLoc": 0,
+      "srcFiles": 9,
+      "fanIn": 24,
+      "fanOut": 0
+    },
+    {
+      "module": "crates/verter_svelte_conformance",
+      "crate": "verter_svelte_conformance",
+      "productionLoc": 3774,
+      "testLoc": 7446,
+      "generatedLoc": 0,
+      "srcFiles": 11,
+      "fanIn": 0,
+      "fanOut": 1
+    },
+    {
+      "module": "crates/verter_test_support",
+      "crate": "verter_test_support",
+      "productionLoc": 300,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "srcFiles": 1,
+      "fanIn": 0,
+      "fanOut": 0
+    },
+    {
+      "module": "crates/verter_tsc",
+      "crate": "verter_tsc",
+      "productionLoc": 10446,
+      "testLoc": 5180,
+      "generatedLoc": 0,
+      "srcFiles": 9,
+      "fanIn": 0,
+      "fanOut": 7
+    },
+    {
+      "module": "crates/verter_tsgo_api",
+      "crate": "verter_tsgo_api",
+      "productionLoc": 16619,
+      "testLoc": 11686,
+      "generatedLoc": 0,
+      "srcFiles": 53,
+      "fanIn": 7,
+      "fanOut": 2
+    },
+    {
+      "module": "crates/verter_type_expr",
+      "crate": "verter_type_expr",
+      "productionLoc": 15769,
+      "testLoc": 3747,
+      "generatedLoc": 0,
+      "srcFiles": 19,
+      "fanIn": 13,
+      "fanOut": 4
+    },
+    {
+      "module": "crates/verter_type_expr_oxc",
+      "crate": "verter_type_expr_oxc",
+      "productionLoc": 2084,
+      "testLoc": 1259,
+      "generatedLoc": 0,
+      "srcFiles": 3,
+      "fanIn": 4,
+      "fanOut": 3
+    },
+    {
+      "module": "crates/verter_type_runtime",
+      "crate": "verter_type_runtime",
+      "productionLoc": 20379,
+      "testLoc": 15787,
+      "generatedLoc": 0,
+      "srcFiles": 28,
+      "fanIn": 3,
+      "fanOut": 4
+    },
+    {
+      "module": "crates/verter_validation_probe",
+      "crate": "verter_validation_probe",
+      "productionLoc": 8014,
+      "testLoc": 7195,
+      "generatedLoc": 0,
+      "srcFiles": 15,
+      "fanIn": 0,
+      "fanOut": 2
+    },
+    {
+      "module": "crates/verter_vue_conformance",
+      "crate": "verter_vue_conformance",
+      "productionLoc": 2875,
+      "testLoc": 1650,
+      "generatedLoc": 0,
+      "srcFiles": 6,
+      "fanIn": 1,
+      "fanOut": 0
+    },
+    {
+      "module": "crates/verter_wasm",
+      "crate": "verter_wasm",
+      "productionLoc": 2936,
+      "testLoc": 2553,
+      "generatedLoc": 0,
+      "srcFiles": 6,
+      "fanIn": 0,
+      "fanOut": 10
+    },
+    {
+      "module": "crates/verter_workspace",
+      "crate": "verter_workspace",
+      "productionLoc": 28266,
+      "testLoc": 30264,
+      "generatedLoc": 0,
+      "srcFiles": 71,
+      "fanIn": 8,
+      "fanOut": 8
+    },
+    {
+      "module": "xtask",
+      "crate": "xtask",
+      "productionLoc": 734,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "srcFiles": 3,
+      "fanIn": 0,
+      "fanOut": 0
+    }
+  ],
+  "packages": [
+    {
+      "module": "packages/benchmark",
+      "productionLoc": 16728,
+      "testLoc": 12181,
+      "generatedLoc": 0,
+      "otherLoc": 29
+    },
+    {
+      "module": "packages/binary-launcher",
+      "productionLoc": 0,
+      "testLoc": 785,
+      "generatedLoc": 0,
+      "otherLoc": 1112
+    },
+    {
+      "module": "packages/component-meta",
+      "productionLoc": 14555,
+      "testLoc": 17138,
+      "generatedLoc": 0,
+      "otherLoc": 0
+    },
+    {
+      "module": "packages/core",
+      "productionLoc": 0,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "otherLoc": 0
+    },
+    {
+      "module": "packages/dx-harness",
+      "productionLoc": 24966,
+      "testLoc": 22145,
+      "generatedLoc": 0,
+      "otherLoc": 634
+    },
+    {
+      "module": "packages/example",
+      "productionLoc": 0,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "otherLoc": 142
+    },
+    {
+      "module": "packages/framework-conformance-harness",
+      "productionLoc": 9652,
+      "testLoc": 12639,
+      "generatedLoc": 0,
+      "otherLoc": 3053
+    },
+    {
+      "module": "packages/language-shared",
+      "productionLoc": 3980,
+      "testLoc": 1294,
+      "generatedLoc": 191,
+      "otherLoc": 36
+    },
+    {
+      "module": "packages/lsp-test-client",
+      "productionLoc": 3100,
+      "testLoc": 2023,
+      "generatedLoc": 0,
+      "otherLoc": 13
+    },
+    {
+      "module": "packages/native",
+      "productionLoc": 0,
+      "testLoc": 4762,
+      "generatedLoc": 299,
+      "otherLoc": 4192
+    },
+    {
+      "module": "packages/nuxt",
+      "productionLoc": 205,
+      "testLoc": 165,
+      "generatedLoc": 0,
+      "otherLoc": 0
+    },
+    {
+      "module": "packages/playground",
+      "productionLoc": 16311,
+      "testLoc": 9995,
+      "generatedLoc": 0,
+      "otherLoc": 1063
+    },
+    {
+      "module": "packages/proto",
+      "productionLoc": 427,
+      "testLoc": 1050,
+      "generatedLoc": 16344,
+      "otherLoc": 0
+    },
+    {
+      "module": "packages/svelte-jsx",
+      "productionLoc": 0,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "otherLoc": 0
+    },
+    {
+      "module": "packages/svelte-runtime-tests",
+      "productionLoc": 0,
+      "testLoc": 2082,
+      "generatedLoc": 0,
+      "otherLoc": 15
+    },
+    {
+      "module": "packages/type-ir",
+      "productionLoc": 454,
+      "testLoc": 160,
+      "generatedLoc": 0,
+      "otherLoc": 0
+    },
+    {
+      "module": "packages/typeinfo",
+      "productionLoc": 2320,
+      "testLoc": 2693,
+      "generatedLoc": 0,
+      "otherLoc": 13
+    },
+    {
+      "module": "packages/types",
+      "productionLoc": 2979,
+      "testLoc": 12537,
+      "generatedLoc": 3563,
+      "otherLoc": 1822
+    },
+    {
+      "module": "packages/typescript-plugin",
+      "productionLoc": 8064,
+      "testLoc": 11835,
+      "generatedLoc": 0,
+      "otherLoc": 0
+    },
+    {
+      "module": "packages/unplugin",
+      "productionLoc": 3424,
+      "testLoc": 9465,
+      "generatedLoc": 0,
+      "otherLoc": 924
+    },
+    {
+      "module": "packages/verter-lsp",
+      "productionLoc": 0,
+      "testLoc": 24,
+      "generatedLoc": 0,
+      "otherLoc": 136
+    },
+    {
+      "module": "packages/verter-mcp",
+      "productionLoc": 0,
+      "testLoc": 24,
+      "generatedLoc": 0,
+      "otherLoc": 135
+    },
+    {
+      "module": "packages/verter-tsc",
+      "productionLoc": 0,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "otherLoc": 188
+    },
+    {
+      "module": "packages/vue-conformance-oracle",
+      "productionLoc": 0,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "otherLoc": 1019
+    },
+    {
+      "module": "packages/vue-vscode",
+      "productionLoc": 13417,
+      "testLoc": 54866,
+      "generatedLoc": 0,
+      "otherLoc": 1546
+    },
+    {
+      "module": "packages/wasm",
+      "productionLoc": 961,
+      "testLoc": 463,
+      "generatedLoc": 0,
+      "otherLoc": 446
+    }
+  ]
+}

@@ -1,0 +1,165 @@
+{
+  "schema": "ARH0CapabilityMatrix",
+  "version": 1,
+  "contractNode": "ARH0",
+  "candidate": "f69c7eee7aba2b1a260cc4d85a282bbedbbde349",
+  "rule": "implemented rows carry an exact or resolved version string that must appear verbatim in the pinned source file; required-planned rows name the repo authority that requires them",
+  "rows": [
+    {
+      "capability": "vue-sfc-compilation-conformance",
+      "status": "implemented",
+      "engine": "vue/@vue/compiler-sfc/@vue/compiler-core",
+      "version": "3.6.0-rc.5",
+      "versionSource": "package.json",
+      "consumers": [
+        "crates/verter_vue_conformance",
+        "packages/vue-conformance-oracle",
+        "packages/unplugin",
+        "packages/playground",
+        "examples"
+      ],
+      "uncertainty": "rc pin: workspace-collapsed preview pin; upgrade is a conscious re-pin, not a floating range"
+    },
+    {
+      "capability": "svelte-compilation-conformance",
+      "status": "implemented",
+      "engine": "svelte",
+      "version": "5.56.10",
+      "versionSource": "package.json",
+      "consumers": [
+        "crates/verter_svelte_conformance",
+        "packages/svelte-runtime-tests",
+        "packages/unplugin"
+      ],
+      "uncertainty": ""
+    },
+    {
+      "capability": "typescript-tsserver-plane",
+      "status": "implemented",
+      "engine": "typescript (tsserver IPC)",
+      "version": "^6.0.3",
+      "versionSource": "packages/typescript-plugin/package.json",
+      "consumers": [
+        "crates/verter_type_runtime",
+        "packages/typescript-plugin"
+      ],
+      "uncertainty": "range pin resolved by pnpm-lock at install time"
+    },
+    {
+      "capability": "typescript-tsgo-plane",
+      "status": "implemented",
+      "engine": "typescript (native preview toolchain at repo root)",
+      "version": "7.0.2",
+      "versionSource": "package.json",
+      "consumers": [
+        "crates/verter_tsgo_api",
+        "crates/verter_relay_shim"
+      ],
+      "uncertainty": "tsgo plane is dual-plane law (TCM0R); relay shim pins editor tsdk routing"
+    },
+    {
+      "capability": "rust-parser-substrate",
+      "status": "implemented",
+      "engine": "oxc",
+      "version": "0.126.0",
+      "versionSource": "Cargo.toml",
+      "consumers": [
+        "crates/verter_parser",
+        "crates/verter_type_expr_oxc"
+      ],
+      "uncertainty": ""
+    },
+    {
+      "capability": "transport-schemas",
+      "status": "implemented",
+      "engine": "buf + @bufbuild/protoc-gen-es",
+      "version": "protoc-gen-es",
+      "versionSource": "buf.gen.yaml",
+      "consumers": [
+        "packages/proto",
+        "packages/native",
+        "crates/verter_protocol"
+      ],
+      "uncertainty": "generated output freshness-gated by scripts/check-proto-generated.mjs"
+    },
+    {
+      "capability": "bundler-host-plugin",
+      "status": "implemented",
+      "engine": "vite (dev/test surface for unplugin)",
+      "version": "^8.0.14",
+      "versionSource": "packages/unplugin/package.json",
+      "consumers": [
+        "packages/unplugin"
+      ],
+      "uncertainty": "unplugin targets Vite/Rollup/webpack/esbuild/rspack/Rolldown/Farm; only the Vite dev pin is asserted here"
+    },
+    {
+      "capability": "nuxt-project-profile",
+      "status": "implemented",
+      "engine": "@nuxt/kit",
+      "version": "^4.4.6",
+      "versionSource": "packages/nuxt/package.json",
+      "consumers": [
+        "packages/nuxt"
+      ],
+      "uncertainty": ""
+    },
+    {
+      "capability": "vscode-host",
+      "status": "implemented",
+      "engine": "VS Code extension host",
+      "version": "verter-lsp",
+      "versionSource": "packages/vue-vscode/package.json",
+      "consumers": [
+        "packages/vue-vscode",
+        "packages/verter-lsp"
+      ],
+      "uncertainty": "pin string is the launched binary name in the extension manifest"
+    },
+    {
+      "capability": "zed-lapce-helix-nvim-hosts",
+      "status": "implemented",
+      "engine": "editor host adapters",
+      "version": "wasm32-wasip1",
+      "versionSource": "crates/verter-editor-client/src/lib.rs",
+      "consumers": [
+        "extensions/zed",
+        "extensions/lapce",
+        "editors/helix",
+        "editors/nvim"
+      ],
+      "uncertainty": "pin string is the documented Lapce target; Zed is wasm32-wasip2 in the same header"
+    },
+    {
+      "capability": "analysis-mcp",
+      "status": "implemented",
+      "engine": "MCP (stdio + HTTP)",
+      "version": "verter-mcp",
+      "versionSource": "mcp/verter.mcp.json",
+      "consumers": [
+        "crates/verter_mcp",
+        "crates/verter_mcp_server",
+        "packages/vue-vscode"
+      ],
+      "uncertainty": ""
+    },
+    {
+      "capability": "solid-2-target",
+      "status": "required-planned",
+      "engine": "Solid 2",
+      "version": "target",
+      "versionSource": "roadmap/0.1.0-tama/decisions/2026-09-08-solid2-htmx4-targets.md",
+      "consumers": [],
+      "uncertainty": "no Verter support claim until the owning expansion trains deliver the authored integration"
+    },
+    {
+      "capability": "htmx-4-target",
+      "status": "required-planned",
+      "engine": "htmx 4",
+      "version": "target",
+      "versionSource": "roadmap/0.1.0-tama/decisions/2026-09-08-solid2-htmx4-targets.md",
+      "consumers": [],
+      "uncertainty": "no Verter support claim until the owning expansion trains deliver the authored integration"
+    }
+  ]
+}
