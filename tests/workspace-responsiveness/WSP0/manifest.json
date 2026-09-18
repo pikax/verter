@@ -1,0 +1,89 @@
+{
+  "node": "WSP0",
+  "kind": "constitution",
+  "products": [
+    "workspace-responsiveness-contract.v1 (measurement definitions, workload matrix, budget and basis law)",
+    "reference-machine-manifests.v1 (manifest requirements, empty population at ratification)",
+    "issue93-evidence-plan.v1 (unverified hypothesis, version capture, client/server/provider timelines)",
+    "interactive-slo-catalog.v1 (pinned-candidate-target budgets with correctness and equal-work denominators)",
+    "contracts/workspace-responsiveness-v1.md",
+    "plans/expansion-workspace-responsiveness.md"
+  ],
+  "cases": [
+    {
+      "id": "WSP0-AC1",
+      "disposition": "reject",
+      "twins": [
+        "server-only-responsiveness",
+        "server-dependent-ui-metric",
+        "server-certified-interactivity"
+      ]
+    },
+    {
+      "id": "WSP0-AC2",
+      "disposition": "reject",
+      "twins": [
+        "reduced-feature-set",
+        "diagnostic-truncation",
+        "unequal-work-denominator",
+        "forbidden-improvement-vocabulary-drift"
+      ]
+    },
+    {
+      "id": "WSP0-AC3",
+      "disposition": "reject",
+      "twins": ["unverified-issue-claim", "fabricated-version-capture"]
+    },
+    {
+      "id": "WSP0-AC-OWNER",
+      "disposition": "reject",
+      "twins": [
+        "missing-final-owner",
+        "missing-retirement-obligation",
+        "conflict-domain-drift",
+        "conflict-domain-unregistered"
+      ]
+    },
+    {
+      "id": "WSP0-AC-BASIS",
+      "disposition": "reject",
+      "twins": ["downstream-owner-drift", "basis-vocabulary-drift"]
+    },
+    {
+      "id": "WSP0-AC-RESOURCE",
+      "disposition": "reject",
+      "twins": [
+        "missing-measurement-definition",
+        "rss-classes-merged",
+        "unlabelled-metric",
+        "fabricated-instrumentation",
+        "fabricated-measurement",
+        "workload-population-drift",
+        "corpus-drift",
+        "pin-without-machine",
+        "incomplete-machine-manifest",
+        "manifest-requirement-drift"
+      ]
+    },
+    {
+      "id": "WSP0-AC-EXPOSURE",
+      "disposition": "reject",
+      "twins": ["unregistered-introduced-operation", "slo-population-drift"]
+    },
+    {
+      "id": "WSP0-ratification",
+      "disposition": "accept",
+      "twins": [
+        "missing-product",
+        "missing-contract-marker",
+        "missing-plan",
+        "node-profile-drift",
+        "zero-budget-violation",
+        "missing-ledger-row",
+        "predecessor-not-settled",
+        "missing-issue-catalog-row",
+        "missing-evidence-file"
+      ]
+    }
+  ]
+}

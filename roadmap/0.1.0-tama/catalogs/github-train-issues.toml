@@ -394,3 +394,12 @@ expected_outcome = "One disposition matrix, evidence-class policy and claim law 
 acceptance = ["Each attached recommendation is ratified into exactly one producing train, extension or explicit exclusion with a named terminal.", "Static proof, runtime observation and estimates are distinct classes; no proof-only or two-owner item passes coverage review.", "Implemented-ledger completions and the vue/svelte capability catalog are preserved untouched.", "The added portfolio starts with zero advertised catalog surfaces and zero support claims."]
 problem_label = "problem:architecture"
 gh_milestone = "0.0.4"
+
+[[train_issue]]
+train = "expansion.workspace-responsiveness"
+title = "Make workspace responsiveness measured, budgeted and client-true"
+problem = "Large-workspace editor responsiveness is claimed from server-side timings and anecdotes, so a frozen client behind a fast server passes, retained memory is only ever a whole-process figure, cancellation waste and protocol volume are invisible, and the suspected excess LSP traffic behind issue 93 has never been isolated or disproved."
+expected_outcome = "One constitution ratifying the equal-work corpus (1k/10k/50k authored-source tiers, monorepo references, 1 MiB file, high diagnostic density, Unicode/CRLF, ignored dependency trees, edit storms, slow-reading client), the measurement definitions, reference-machine manifest requirements and interactive SLO budgets before any optimization lands, with the instrumented replay harness bound to WSP1."
+acceptance = ["Every interactive SLO row carries a client-domain budget and correctness and equivalent-work denominators.", "The workload population is closed and grounded in the ratified semantic-memory workload corpus, with real project pins owned by WSP1.", "Issue 93 remains an unverified hypothesis until reproduced under the ratified workloads; raw failed measurements are retained.", "No new semantic, project or orchestration authority is created; semantic algorithms, project resolution, format/lint logic, TypeScript projection and edit transactions stay with their producing owners."]
+problem_label = "problem:architecture"
+gh_milestone = "0.0.4"
