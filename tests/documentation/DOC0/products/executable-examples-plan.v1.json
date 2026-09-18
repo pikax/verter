@@ -2,8 +2,8 @@
   "id": "executable-examples-plan.v1",
   "harnessOwner": "DOC1",
   "home": "examples/reference",
-  "status": "unbuilt",
-  "registration": "the public executable-example home is registered by contracts/web-product-expansion-v1.md §7 and built by DOC1",
+  "status": "built",
+  "registration": "the public executable-example home is registered by contracts/web-product-expansion-v1.md §7 and built by the docs reference harness (docs/scripts/reference-harness.mjs, invoked from pnpm docs:build)",
   "currentEstates": [
     {
       "path": "examples",
@@ -24,7 +24,7 @@
     "an example is publishable only when it runs under a release-selected documentation check with pinned engine and package versions",
     "example output is reproducible from the product receipt basis of contracts/product-experience.md §4",
     "screenshots and roadmap claims never stand in for working examples",
-    "until DOC1 delivers the harness, no documentation page may present an example as executed evidence"
+    "only examples/reference entries that pass the docs reference harness may be presented as executed evidence; contributor sandboxes remain unpublished"
   ],
   "doc1Acceptance": [
     "the harness executes every published example in the release lane",

@@ -1,0 +1,43 @@
+{
+  "home": "examples/reference",
+  "pin": {
+    "node": ">=22",
+    "typescript": "7.0.2",
+    "vue": "3.6.0-rc.5"
+  },
+  "examples": [
+    {
+      "id": "unplugin-vite",
+      "files": ["unplugin-vite/vite.config.ts"],
+      "imports": ["vite", "@verter/unplugin/vite"],
+      "peers": ["vite"],
+      "surfaces": ["vue.managed.compile.raw"],
+      "executionClass": "NativeOnly",
+      "proofClass": "static-proof"
+    },
+    {
+      "id": "types-helpers",
+      "files": ["types-helpers/example.ts"],
+      "imports": ["@verter/types"],
+      "surfaces": ["vue.language_service.typing"],
+      "executionClass": "ExternalOwner",
+      "proofClass": "static-proof"
+    },
+    {
+      "id": "component-meta-session",
+      "files": ["component-meta/session.ts"],
+      "imports": ["@verter/component-meta"],
+      "surfaces": ["vue.component_meta.scalar"],
+      "executionClass": "NativeOnly",
+      "proofClass": "static-proof"
+    },
+    {
+      "id": "shipped-cli",
+      "files": ["cli/commands.json"],
+      "commands": ["verter-tsc", "verter-lsp", "verter-mcp"],
+      "surfaces": ["vue.tsc.project_check"],
+      "executionClass": "NativeOnly",
+      "proofClass": "static-proof"
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "node": "DOC1",
+  "kind": "implementation",
+  "products": [
+    "docs/scripts/reference-harness.mjs (sole owning interface for example, generated-reference, link and capability checks)",
+    "examples/reference public example home (pinned, public-export and shipped-bin examples)",
+    "docs package build/check wiring through the existing pnpm docs:build command",
+    "reference-harness.v1 machine product"
+  ],
+  "cases": [
+    {
+      "id": "DOC1-AC1",
+      "disposition": "reject",
+      "twins": [
+        "clean public examples pass against shipped exports and bins",
+        "public export map accepts shipped subpaths and rejects source internals"
+      ]
+    },
+    {
+      "id": "DOC1-AC2",
+      "disposition": "reject",
+      "twins": [
+        "an example that imports package source internals fails",
+        "an example that invokes cargo rather than a shipped bin fails"
+      ]
+    },
+    {
+      "id": "DOC1-AC3",
+      "disposition": "reject",
+      "twins": [
+        "a missing example source is a partial result",
+        "a generated page unbound from its generator is stale",
+        "pre-aborted signal yields cancelled and never complete",
+        "perturbed discovery order yields an identical canonical receipt",
+        "incremental receipt with the same digest matches a fresh run",
+        "edit fails and revert restores a complete receipt"
+      ]
+    },
+    {
+      "id": "DOC1-AC4",
+      "disposition": "accept",
+      "twins": [
+        "clean public examples pass against shipped exports and bins"
+      ]
+    },
+    {
+      "id": "DOC1-AC5",
+      "disposition": "accept",
+      "twins": [
+        "clean public examples pass against shipped exports and bins"
+      ]
+    }
+  ],
+  "runtimeCorrectness": false,
+  "notes": "Implementation node: docs-build harness plus the public examples/reference home. Checks are static-proof over published package.json exports, shipped bins, the DOC0 generated-reference plan (sole capability catalog citation) and the existing pnpm gen:typeinfo-manifest:check command. No second capability matrix. Contributor sandboxes examples/ and packages/example are not displaced. Native compile of examples is not claimed; proofClass is static-proof."
+}
