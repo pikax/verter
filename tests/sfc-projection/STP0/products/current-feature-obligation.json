@@ -1,0 +1,150 @@
+{
+  "schema": "CurrentFeatureObligation",
+  "version": 1,
+  "rule": "shipped-valid-features-are-RequiredCurrent",
+  "allowedObligations": ["RequiredCurrent"],
+  "forbiddenOnShippedValid": ["optional", "external", "removed"],
+  "bugFixRequires": ["source-backed-oracle", "clean-dirty-pair"],
+  "rows": [
+    {
+      "id": "instancetype-typeof-comp",
+      "obligation": "RequiredCurrent",
+      "family": "constructor",
+      "shipped": true,
+      "source": "packages/types/src/components/components.ts"
+    },
+    {
+      "id": "vue-constructor-default-export",
+      "obligation": "RequiredCurrent",
+      "family": "constructor",
+      "shipped": true,
+      "source": "packages/types/src/components/components.ts"
+    },
+    {
+      "id": "define-options-name-inheritattrs-literals",
+      "obligation": "RequiredCurrent",
+      "family": "macros",
+      "shipped": true,
+      "source": "packages/types/src/components/components.ts"
+    },
+    {
+      "id": "define-props",
+      "obligation": "RequiredCurrent",
+      "family": "macros",
+      "shipped": true,
+      "source": "packages/types/src/props"
+    },
+    {
+      "id": "define-emits",
+      "obligation": "RequiredCurrent",
+      "family": "macros",
+      "shipped": true,
+      "source": "packages/types/src/emits"
+    },
+    {
+      "id": "define-model",
+      "obligation": "RequiredCurrent",
+      "family": "macros",
+      "shipped": true,
+      "source": "packages/types/src/model"
+    },
+    {
+      "id": "define-slots",
+      "obligation": "RequiredCurrent",
+      "family": "macros",
+      "shipped": true,
+      "source": "packages/types/src/slots"
+    },
+    {
+      "id": "define-expose",
+      "obligation": "RequiredCurrent",
+      "family": "macros",
+      "shipped": true,
+      "source": "packages/types/src/setup"
+    },
+    {
+      "id": "with-defaults",
+      "obligation": "RequiredCurrent",
+      "family": "macros",
+      "shipped": true,
+      "source": "packages/types/src/setup"
+    },
+    {
+      "id": "script-setup-macros",
+      "obligation": "RequiredCurrent",
+      "family": "macros",
+      "shipped": true,
+      "source": "docs/guide/features.md"
+    },
+    {
+      "id": "options-api",
+      "obligation": "RequiredCurrent",
+      "family": "script-dialect",
+      "shipped": true,
+      "source": "docs/guide/features.md"
+    },
+    {
+      "id": "generic-components",
+      "obligation": "RequiredCurrent",
+      "family": "generics",
+      "shipped": true,
+      "source": "docs/guide/features.md"
+    },
+    {
+      "id": "typed-directives",
+      "obligation": "RequiredCurrent",
+      "family": "directives",
+      "shipped": true,
+      "source": "packages/types/src/directives"
+    },
+    {
+      "id": "native-event-handler-inference",
+      "obligation": "RequiredCurrent",
+      "family": "events",
+      "shipped": true,
+      "source": "docs/guide/features.md"
+    },
+    {
+      "id": "jsx-tsx-interop",
+      "obligation": "RequiredCurrent",
+      "family": "jsx",
+      "shipped": true,
+      "source": "packages/types/src/tsx"
+    },
+    {
+      "id": "vue-jsx-runtime",
+      "obligation": "RequiredCurrent",
+      "family": "jsx",
+      "shipped": true,
+      "source": "packages/types/src/vue/jsx-runtime.ts"
+    },
+    {
+      "id": "public-instance-members",
+      "obligation": "RequiredCurrent",
+      "family": "instance",
+      "shipped": true,
+      "source": "packages/types/src/instance"
+    },
+    {
+      "id": "v-for-loops",
+      "obligation": "RequiredCurrent",
+      "family": "template",
+      "shipped": true,
+      "source": "packages/types/src/loops"
+    },
+    {
+      "id": "typed-fallthrough-inheritattrs",
+      "obligation": "RequiredCurrent",
+      "family": "fallthrough",
+      "shipped": true,
+      "source": "packages/language-shared/src/generated.ts"
+    },
+    {
+      "id": "class-style-never-consumed",
+      "obligation": "RequiredCurrent",
+      "family": "fallthrough",
+      "shipped": true,
+      "source": "CLAUDE.md"
+    }
+  ]
+}

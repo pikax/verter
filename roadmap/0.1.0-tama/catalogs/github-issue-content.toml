@@ -1736,3 +1736,10 @@ title = "Verify simplification outcomes and coverage"
 problem = "Line and test counts alone can fall while duplicated mechanisms remain or meaningful coverage disappears. This leaves maintainers unable to establish whether the combined cleanup simplified ownership or supports its claimed performance benefits."
 expected_outcome = "Completed simplification has explicit removed mechanisms, retained proof and separate truthful test/build and application-work measurements."
 acceptance = ["Every scoped outcome has a final owner, removed mechanism and preserved proof.","Production, tests and comments are measured separately without quotas or unsupported runtime claims.","Independent cumulative review passes with no unresolved required outcome."]
+
+[[issue]]
+node_id = "STP0"
+title = "Lock Vue SFC TypeScript projection constitution and current features"
+problem = "Without a ratified projection constitution, later Vue TypeScript work can route types through native assignability, invent a second mapping owner, drop shipped InstanceType or feature rows, or treat default inheritAttrs as distinct from explicit true."
+expected_outcome = "ProjectionPolicy v1, CurrentFeatureObligation, InferenceParticipation, and ProjectionOwnershipMap are schema-validated with planted-negative twins for the four STP0 cases, and production Vue projection code is unchanged."
+acceptance = ["Native assignability and a second mapping owner are rejected.", "Shipped valid features including InstanceType cannot be removed, optionalized, or marked external.", "Default inheritAttrs equals explicit true unless a real runtime distinction exists.", "The contract names current and final owners, mandatory rows, and receiving amendments."]
