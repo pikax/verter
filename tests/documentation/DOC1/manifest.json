@@ -21,7 +21,10 @@
       "disposition": "reject",
       "twins": [
         "an example that imports package source internals fails",
-        "an example that invokes cargo rather than a shipped bin fails"
+        "a side-effect import of package source internals fails",
+        "an example that invokes cargo rather than a shipped bin fails",
+        "an example that invokes a bin absent from shipped packages fails",
+        "a declared node: builtin import is not treated as an unpublished export"
       ]
     },
     {
@@ -31,6 +34,9 @@
         "a missing example source is a partial result",
         "a generated page unbound from its generator is stale",
         "pre-aborted signal yields cancelled and never complete",
+        "mid-discovery cancellation yields cancelled with a source digest",
+        "overlay-added README is walked using overlay-aware listing",
+        "custom examplesRoot labels receipts with that path",
         "perturbed discovery order yields an identical canonical receipt",
         "incremental receipt with the same digest matches a fresh run",
         "edit fails and revert restores a complete receipt"
@@ -40,7 +46,8 @@
       "id": "DOC1-AC4",
       "disposition": "accept",
       "twins": [
-        "clean public examples pass against shipped exports and bins"
+        "clean public examples pass against shipped exports and bins",
+        "executable-examples plan does not claim harness execution"
       ]
     },
     {

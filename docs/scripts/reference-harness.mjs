@@ -17,7 +17,7 @@ import { spawn } from "node:child_process";
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REPO_ROOT = resolve(SCRIPT_DIR, "..", "..");
 
-const SPECIFIER_RE = /(?:from\s+|import\s*\(\s*|require\s*\(\s*)["']([^"']+)["']/g;
+const SPECIFIER_RE = /(?:from\s+|import\s*\(\s*|require\s*\(\s*|import\s+)["']([^"']+)["']/g;
 const MD_LINK_RE = /\[[^\]]*]\(([^)]+)\)/g;
 const INTERNAL_DIR_RE = /^(packages\/[^/]+\/src\/|crates\/|scripts\/)/;
 
@@ -185,6 +185,31 @@ function existsAbs(absPath, overlays, repoRoot) {
   return existsSync(absPath);
 }
 
+function isFileAbs(absPath, overlays, repoRoot) {
+  const rel = posixRel(repoRoot, absPath);
+  if (overlays && Object.prototype.hasOwnProperty.call(overlays, rel)) return overlays[rel] != null;
+  return existsSync(absPath) && statSync(absPath).isFile();
+}
+
+function listNames(absDir, overlays, repoRoot) {
+  const names = new Set();
+  if (existsSync(absDir) && statSync(absDir).isDirectory()) {
+    for (const name of readdirSync(absDir)) names.add(name);
+  }
+  const relDir = posixRel(repoRoot, absDir);
+  const prefix = relDir ? `${relDir}/` : "";
+  if (overlays) {
+    for (const [rel, value] of Object.entries(overlays)) {
+      if (!rel.startsWith(prefix)) continue;
+      const rest = rel.slice(prefix.length);
+      if (!rest || rest.includes("/")) continue;
+      if (value == null) names.delete(rest);
+      else names.add(rest);
+    }
+  }
+  return [...names].sort();
+}
+
 export function extractSpecifiers(source) {
   const found = [];
   SPECIFIER_RE.lastIndex = 0;
@@ -272,7 +297,7 @@ export async function validate(options = {}) {
     sourceRevisions: { digest: null },
     projectConfiguration: {
       examplesRoot: posixRel(repoRoot, examplesRoot),
-      manifest: "examples/reference/manifest.json",
+      manifest: posixRel(repoRoot, join(examplesRoot, "manifest.json")),
     },
     engineIdentity: { node: process.version, harness: HARNESS_ID },
     hostIdentity: { platform: process.platform, arch: process.arch },
@@ -331,7 +356,7 @@ export async function validate(options = {}) {
     return receipt;
   }
   const manifestBytes = read(manifestPath);
-  digestEntries.push({ path: "examples/reference/manifest.json", bytes: manifestBytes });
+  digestEntries.push({ path: posixRel(repoRoot, manifestPath), bytes: manifestBytes });
   const manifest = JSON.parse(manifestBytes);
   if (!Array.isArray(manifest.examples) || manifest.examples.length === 0) {
     fail(err("empty-examples", "public example home declares no examples"));
@@ -359,6 +384,7 @@ export async function validate(options = {}) {
       receipt.completenessState = "cancelled";
       receipt.errors = [...errors, err("cancelled", "validation aborted during example discovery")];
       receipt.examples = exampleRows.sort((a, b) => a.id.localeCompare(b.id));
+      receipt.sourceRevisions.digest = sourceDigest(digestEntries);
       return receipt;
     }
     const example = byId.get(id);
@@ -385,7 +411,7 @@ export async function validate(options = {}) {
         continue;
       }
       const bytes = read(abs);
-      digestEntries.push({ path: `examples/reference/${relFile.split(sep).join("/")}`, bytes });
+      digestEntries.push({ path: posixRel(repoRoot, abs), bytes });
       const fromDir = dirname(abs);
       if (relFile.endsWith(".json")) {
         const json = JSON.parse(bytes);
@@ -416,7 +442,7 @@ export async function validate(options = {}) {
           if (/^[a-z]+:/i.test(href) || href.startsWith("#")) continue;
           const target = resolve(fromDir, href.split("#")[0]);
           receipt.links.push({
-            from: `examples/reference/${relFile.split(sep).join("/")}`,
+            from: posixRel(repoRoot, abs),
             href,
             ok: exists(target),
           });
@@ -428,7 +454,7 @@ export async function validate(options = {}) {
     }
     for (const specifier of declaredImports) {
       const split = splitPackageSpecifier(specifier);
-      if (split.kind === "relative") continue;
+      if (split.kind === "relative" || split.kind === "node") continue;
       if ((example.peers ?? []).includes(specifier) || (example.peers ?? []).includes(split.name)) {
         continue;
       }
@@ -507,17 +533,17 @@ export async function validate(options = {}) {
   exampleRows.sort((a, b) => a.id.localeCompare(b.id));
   receipt.examples = exampleRows;
 
-  for (const name of readdirSync(examplesRoot).sort()) {
+  for (const name of listNames(examplesRoot, overlays, repoRoot)) {
     if (!name.endsWith(".md")) continue;
     const abs = join(examplesRoot, name);
-    if (!exists(abs) || !statSync(abs).isFile()) continue;
+    if (!isFileAbs(abs, overlays, repoRoot)) continue;
     const bytes = read(abs);
-    digestEntries.push({ path: `examples/reference/${name}`, bytes });
+    digestEntries.push({ path: posixRel(repoRoot, abs), bytes });
     for (const href of extractMarkdownHrefs(bytes)) {
       if (/^[a-z]+:/i.test(href) || href.startsWith("#")) continue;
       const target = resolve(examplesRoot, href.split("#")[0]);
       receipt.links.push({
-        from: `examples/reference/${name}`,
+        from: posixRel(repoRoot, abs),
         href,
         ok: exists(target),
       });

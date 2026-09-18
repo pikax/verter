@@ -68,6 +68,9 @@ test("shipped bins accept package bin names and reject cargo", () => {
   const cargo = resolveShippedCommand(bins, "cargo run -p verter_tsc");
   assert.equal(cargo.ok, false);
   assert.equal(cargo.code, "unshipped-toolchain");
+  const absent = resolveShippedCommand(bins, "verter-dev");
+  assert.equal(absent.ok, false);
+  assert.equal(absent.code, "unshipped-command");
 });
 
 test("an example that imports package source internals fails", async () => {
@@ -82,6 +85,37 @@ test("an example that imports package source internals fails", async () => {
   assert.ok(receipt.errors.some((item) => item.code === "internal-import"));
 });
 
+test("a side-effect import of package source internals fails", async () => {
+  const receipt = await validate(
+    opts({
+      overlays: {
+        [viteConfigRel]: `${viteConfig}\nimport "../../../packages/unplugin/src/vite.ts";\n`,
+      },
+    }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  assert.ok(receipt.errors.some((item) => item.code === "internal-import"));
+});
+
+test("a declared node: builtin import is not treated as an unpublished export", async () => {
+  const mutated = structuredClone(manifest);
+  const example = mutated.examples.find((row) => row.id === "unplugin-vite");
+  example.imports = [...example.imports, "node:fs"];
+  const receipt = await validate(
+    opts({
+      overlays: {
+        "examples/reference/manifest.json": JSON.stringify(mutated),
+        [viteConfigRel]: `${viteConfig}\nimport fs from "node:fs";\n`,
+      },
+    }),
+  );
+  assert.equal(receipt.completenessState, "complete");
+  assert.equal(
+    receipt.errors.some((item) => item.specifier === "node:fs"),
+    false,
+  );
+});
+
 test("an example that invokes cargo rather than a shipped bin fails", async () => {
   const receipt = await validate(
     opts({
@@ -92,6 +126,20 @@ test("an example that invokes cargo rather than a shipped bin fails", async () =
   );
   assert.notEqual(receipt.completenessState, "complete");
   assert.ok(receipt.errors.some((item) => item.code === "unshipped-command"));
+});
+
+test("an example that invokes a bin absent from shipped packages fails", async () => {
+  const receipt = await validate(
+    opts({
+      overlays: {
+        [commandsRel]: JSON.stringify({ commands: ["verter-dev"] }, null, 2),
+      },
+    }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  const miss = receipt.errors.find((item) => item.code === "unshipped-command");
+  assert.ok(miss);
+  assert.equal(miss.reason, "unshipped-command");
 });
 
 test("an example citing a surface absent from the capability catalog fails", async () => {
@@ -136,6 +184,89 @@ test("pre-aborted signal yields cancelled and never complete", async () => {
   const receipt = await validate(opts({ signal: AbortSignal.abort() }));
   assert.equal(receipt.completenessState, "cancelled");
   assert.ok(receipt.errors.some((item) => item.code === "cancelled"));
+});
+
+test("mid-discovery cancellation yields cancelled with a source digest", async () => {
+  let seen = 0;
+  const signal = {
+    get aborted() {
+      seen += 1;
+      return seen > 1;
+    },
+  };
+  const receipt = await validate(opts({ signal }));
+  assert.equal(receipt.completenessState, "cancelled");
+  assert.equal(typeof receipt.sourceRevisions.digest, "string");
+  assert.match(receipt.sourceRevisions.digest, /^[0-9a-f]{64}$/);
+  assert.ok(receipt.errors.some((item) => item.code === "cancelled"));
+});
+
+test("overlay-added README is walked using overlay-aware listing", async () => {
+  const extraRel = "examples/reference/overlay-home.md";
+  const receipt = await validate(
+    opts({
+      overlays: {
+        [extraRel]: "[missing](./does-not-exist.md)\n",
+      },
+    }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  assert.ok(
+    receipt.errors.some((item) => item.code === "broken-link" && item.file === "overlay-home.md"),
+  );
+  assert.ok(receipt.links.some((item) => item.from === extraRel && item.ok === false));
+});
+
+test("digest labels follow posixRel of the examples root", async () => {
+  const receipt = await clean();
+  assert.equal(receipt.projectConfiguration.manifest, "examples/reference/manifest.json");
+  assert.equal(receipt.projectConfiguration.examplesRoot, "examples/reference");
+});
+
+test("custom examplesRoot labels receipts with that path", async () => {
+  const root = "examples/alt-reference";
+  const receipt = await validate(
+    opts({
+      examplesRoot: join(repoRoot, root),
+      overlays: {
+        [`${root}/manifest.json`]: JSON.stringify({
+          examples: [
+            {
+              id: "alt",
+              files: ["alt.ts"],
+              imports: ["@verter/types"],
+              surfaces: ["vue.language_service.typing"],
+            },
+          ],
+        }),
+        [`${root}/alt.ts`]:
+          'import type { PatchHidden } from "@verter/types";\nexport type T = PatchHidden<{}, {}>;\n',
+      },
+    }),
+  );
+  assert.equal(receipt.projectConfiguration.manifest, `${root}/manifest.json`);
+  assert.equal(receipt.projectConfiguration.examplesRoot, root);
+  assert.equal(receipt.completenessState, "complete");
+});
+
+test("executable-examples plan does not claim harness execution", () => {
+  const plan = JSON.parse(
+    readFileSync(
+      join(repoRoot, "tests/documentation/DOC0/products/executable-examples-plan.v1.json"),
+      "utf8",
+    ),
+  );
+  const harness = JSON.parse(
+    readFileSync(
+      join(repoRoot, "tests/documentation/DOC1/products/reference-harness.v1.json"),
+      "utf8",
+    ),
+  );
+  assert.equal(harness.runtimeClaim, "none");
+  const claimed = [...plan.requirements, ...plan.doc1Acceptance].join("\n");
+  assert.equal(/the harness executes every published example/i.test(claimed), false);
+  assert.match(claimed, /static-proof/);
+  assert.match(claimed, /does not execute examples/);
 });
 
 test("perturbed discovery order yields an identical canonical receipt", async () => {

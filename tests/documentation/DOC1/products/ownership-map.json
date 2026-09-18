@@ -22,7 +22,7 @@
   "deletionRationale": "genuinely additive boundary: the public example home and docs-build checks did not exist; contributor sandbox examples/ and packages/example stay contributor estates and are not published as executed user evidence",
   "acRationales": {
     "ac1": { "applicable": true, "evidence": "docs/scripts/reference-harness.mjs is the sole importable owner; docs/package.json build and check invoke it; every published example is resolved through that interface" },
-    "ac2": { "applicable": true, "evidence": "twins fail an example that imports packages/unplugin/src and an example that runs cargo run -p verter_tsc" },
+    "ac2": { "applicable": true, "evidence": "twins fail an example that imports packages/unplugin/src (named and side-effect), an example that runs cargo run -p verter_tsc, and a bins-lookup miss for verter-dev" },
     "ac3": { "applicable": true, "evidence": "fresh versus incremental digest equality, edit/revert, AbortSignal cancellation, missing-source partial, stale generated-page rejection, and canonical equality under reversed discovery order" },
     "ac4": { "applicable": true, "evidence": "examples/reference is the DOC1-tested public home; pins, proofClass static-proof, NativeOnly/ExternalOwner execution classes, and uncertainty notes live in reference-harness.v1.json; no VIM/DX catalog family is added" },
     "ac5": { "applicable": true, "evidence": "no latency/work/allocation/RSS budget is bound; the deletion population is empty with the rationale above; no required check is dropped" }
