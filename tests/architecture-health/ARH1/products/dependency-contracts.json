@@ -1255,7 +1255,7 @@
               "crates/verter_session/tests/cases/relation_nominal_authority.rs",
               "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs"
             ],
-            "note": "at ratification 246 pub types and 170 pub fns are pub while the cross-crate population imports only the retained ten types (plus the seven retained assoc items below); retaining a type alone does not retain its methods, so PartialReasonSet::{empty,is_empty,iter,PROPAGATED,SEMANTIC_QUERY_FAULT}, ResultCompleteness::partial and ScopeId::file stay pub for the ffi/napi/wasm production consumers; the 68 recorded consumer files each import at least one narrowed name (integration tests and benches of verter_session compile as separate crates) and migrate to the existing for_tests test-support surface pattern in the same change as the narrowing"
+            "note": "at ratification 198 pub types and 170 pub fns are pub while the cross-crate population imports only the retained ten types (plus the seven retained assoc items below); retaining a type alone does not retain its methods, so PartialReasonSet::{empty,is_empty,iter,PROPAGATED,SEMANTIC_QUERY_FAULT}, ResultCompleteness::partial and ScopeId::file stay pub for the ffi/napi/wasm production consumers; the 68 recorded consumer files each import at least one narrowed name (integration tests and benches of verter_session compile as separate crates) and migrate to the existing for_tests test-support surface pattern in the same change as the narrowing"
           }
         ],
         "rationale": "one authority (semantic_query.rs) with the cross-crate surface cut to exactly the imported envelope types and their used assoc items; the inline pub mods stay pub inside the module",

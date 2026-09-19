@@ -11,8 +11,10 @@
     {
       "id": "PG0-AC1",
       "disposition": "reject",
+      "cleanChecks": [
+        "clean matrix joins every DX0 operation exactly once with descriptor equality"
+      ],
       "twins": [
-        "clean matrix joins every DX0 operation exactly once with descriptor equality",
         "promoted-operation-row-removed",
         "workbench-status-drift",
         "execution-class-drift",
@@ -22,14 +24,18 @@
         "single-ts-worker-authority-route-obligation",
         "replaycase-dropped-from-row",
         "missing-family-cites-unrelated-live-panel",
-        "orphan-operation-not-claimed-by-family"
+        "orphan-operation-not-claimed-by-family",
+        "blockeduntil-pin-declared-on-unblocked-op",
+        "merge-pin-declared-without-dx0-pin"
       ]
     },
     {
       "id": "PG0-AC2",
       "disposition": "reject",
+      "cleanChecks": [
+        "future family (performance) names PG14 and claims no shipping operation"
+      ],
       "twins": [
-        "future family (performance) names PG14 and claims no shipping operation",
         "future-family-claims-shipping-operation",
         "missing-family-presented-as-partial",
         "future-family-without-named-producer"
@@ -38,10 +44,12 @@
     {
       "id": "PG0-AC-OWNER",
       "disposition": "reject",
-      "twins": [
+      "cleanChecks": [
         "one final owner and three delivered interfaces",
         "matrix vocabulary equals the DX0 enums (no parallel namespace)",
-        "PG0 recorded as contract-only receiver in the DX0 ownership map",
+        "PG0 recorded as contract-only receiver in the DX0 ownership map"
+      ],
+      "twins": [
         "pg0-flipped-production-capable twin fails the contract-only receiver predicate",
         "session-model drops a receipt-basis field binding",
         "promotion rule loses the native-only companion clause",
@@ -51,18 +59,20 @@
     {
       "id": "PG0-grounding",
       "disposition": "reject",
-      "twins": [
+      "cleanChecks": [
         "every cited evidence path exists in the live repository",
         "the displaced curated tab list is characterized in Output.vue",
         "every Output.vue allTabs mode plus the ssr insert is family-owned via displacedRoute.tabs",
         "every App.vue Output|Why? nav control is owned via displacedRoute.appNav (Why? mounts AuditTree.vue)",
+        "each family cites at least one preservation evidence path",
+        "cutover stays with PG2 and this node deletes nothing"
+      ],
+      "twins": [
         "tab-mode-unowned-by-any-family",
         "tab-panel-dropped-from-owning-family-evidence",
         "appnav-why-control-unowned",
         "appnav-panel-dropped-from-owning-family-evidence",
-        "appnav-why-attached-to-missing-family",
-        "each family cites at least one preservation evidence path",
-        "cutover stays with PG2 and this node deletes nothing"
+        "appnav-why-attached-to-missing-family"
       ]
     }
   ],
