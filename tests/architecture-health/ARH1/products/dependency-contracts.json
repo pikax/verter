@@ -1,0 +1,1463 @@
+{
+  "schema": "ARH1DependencyContracts",
+  "version": 2,
+  "contractNode": "ARH1",
+  "candidate": "260be884014110ffd3b72850509e765c8752b011",
+  "predecessorProducts": {
+    "responsibilityMap": "../ARH0/products/responsibility-map.json",
+    "debtRegister": "../ARH0/products/debt-register.json"
+  },
+  "ac3Rationale": "ARH1 changes contract bytes only: no state, query, map, cache or scheduling boundary is touched at this node, so fresh-versus-incremental equivalence, edit/revert, cancellation, stale/partial rejection and deterministic ordering remain owned and proven by their untouched owners (rev11.scheduler-runtime admission and cancellation, rev11.flow dispatch, B4R0 source lineage, LSO0 snapshot publication). The state-lifetime rows below name those owners so the heirs (ARH3/ARH4) inherit the obligations instead of re-deriving them.",
+  "ac4Obligations": [
+    {
+      "producer": {
+        "id": "DOC2",
+        "kind": "node"
+      },
+      "obligation": "document the per-hotspot import direction, constructor capabilities, state lifetimes and minimal public surfaces in the architecture/contributor documentation, including the VIM/DX capability mapping for each retained surface and the exact host/profile evidence every measured population was taken on; the contract rows are the source of truth, the docs are delivery."
+    },
+    {
+      "producer": {
+        "id": "ARH12",
+        "kind": "node"
+      },
+      "obligation": "enforce layerRules mayImport/mustNotImport and the module surfaceDeclarations (including the pub(crate) boundaries) as targeted compile-time visibility/dependency checks in existing tooling; no second status system."
+    },
+    {
+      "producer": {
+        "id": "ARH2",
+        "kind": "node"
+      },
+      "obligation": "characterize current surfaces before any narrowing lands and re-derive the ARH0 inventory populations and this node's importer/consumer populations on the then-current candidate (the recorded snapshot counts and populations are live invariants the verifier derives from the measured tree on every run, so a re-derivation that changes the tree must refresh them in the same change); record any drift in host/profile basis alongside the re-derived counts."
+    },
+    {
+      "producer": {
+        "id": "DOC1",
+        "kind": "node"
+      },
+      "obligation": "any examples/reference addition that consumes these hotspots uses only the retained public surfaces listed here (DOC1-tested examples stay inside the contract)."
+    },
+    {
+      "producer": {
+        "id": "ARH3",
+        "kind": "node"
+      },
+      "obligation": "the semantic_query narrowing lands together with the recorded migration notes: the 68 consumer files on the bulk row move to the test-support re-export surface in the same change, and the seven retained assoc items stay pub for the ffi/napi/wasm production consumers; no unrecorded consumer may appear between ratification and the narrowing."
+    },
+    {
+      "producer": {
+        "id": "ARH4",
+        "kind": "node"
+      },
+      "obligation": "the scheduler field and test-hook narrowings land together with their recorded per-hook consumer migrations (same-change, per the cutover register dispositions); the exact-consumer invariant is re-derived on the executing candidate so no unrecorded consumer breaks."
+    }
+  ],
+  "ac5Rationale": "No new latency, work, allocation or RSS budget is created or measured at this node; the ratified performance methodology is untouched. Visibility narrowing (pub -> pub(crate), test hooks to test configuration) shrinks compile surfaces only via the heirs and is not claimed as a performance win. No obsolete path is retired here: ARH1 supersedes nothing with a second authority, so there is no capability to narrow in-tree at this node.",
+  "layerRules": [
+    {
+      "id": "ARH1-LAYER-1",
+      "crate": "crates/verter_scheduler",
+      "rule": "scheduler-runtime stays below every orchestration crate: it may depend only on the leaf utility crates",
+      "mayImport": ["verter_audit", "verter_debug_assert", "verter_language", "verter_span"],
+      "mustNotImport": [
+        "verter_session",
+        "verter_compiler",
+        "verter_semantic",
+        "verter_lsp",
+        "verter_workspace",
+        "verter_parser",
+        "verter_type_expr"
+      ],
+      "evidence": "crates/verter_scheduler/Cargo.toml [dependencies] is exactly audit/debug_assert/language/span; scheduler.rs imports verter_language and verter_audit only",
+      "heir": {
+        "id": "ARH12",
+        "kind": "node"
+      }
+    },
+    {
+      "id": "ARH1-LAYER-2",
+      "crate": "crates/verter_semantic",
+      "rule": "the semantic core never depends upward on orchestration or transport",
+      "mayImport": [
+        "verter_audit",
+        "verter_css_syntax",
+        "verter_debug_assert",
+        "verter_language",
+        "verter_macro_dto",
+        "verter_no_typeexpr",
+        "verter_parser",
+        "verter_span",
+        "verter_type_expr",
+        "verter_type_expr_oxc"
+      ],
+      "mustNotImport": [
+        "verter_session",
+        "verter_scheduler",
+        "verter_compiler",
+        "verter_lsp",
+        "verter_workspace"
+      ],
+      "evidence": "crates/verter_semantic/Cargo.toml [dependencies]; the verter_session:: mentions inside verter_semantic sources are doc comments, not imports",
+      "nonHotspotRationale": "verter_semantic owns no ARH1 hotspot, but it is the semantic substrate under the semantic_query and flow-dispatch authorities (the FunctionFlowGraph and FlowSliceIR state owners live here); its layer rule is ratified in this constitution so the semantic core stays governed below orchestration until a semantic-core node owns it",
+      "heir": {
+        "id": "ARH12",
+        "kind": "node"
+      }
+    },
+    {
+      "id": "ARH1-LAYER-3",
+      "crate": "crates/verter_session",
+      "rule": "editor/transport/FFI crates are leaves: the session core never imports them (they import the session)",
+      "mayImport": [
+        "verter_analysis_inputs",
+        "verter_audit",
+        "verter_compiler",
+        "verter_debug_assert",
+        "verter_identity",
+        "verter_language",
+        "verter_macro_dto",
+        "verter_no_typeexpr",
+        "verter_parser",
+        "verter_protocol",
+        "verter_scheduler",
+        "verter_semantic",
+        "verter_session_query",
+        "verter_span",
+        "verter_type_expr",
+        "verter_type_expr_oxc",
+        "verter_type_runtime",
+        "verter_workspace"
+      ],
+      "mustNotImport": ["verter_lsp", "verter_napi", "verter_ffi", "verter_wasm"],
+      "evidence": "crates/verter_session/Cargo.toml [dependencies] contains no editor/transport crate",
+      "heir": {
+        "id": "ARH12",
+        "kind": "node"
+      }
+    }
+  ],
+  "hotspots": [
+    {
+      "path": "crates/verter_scheduler/src/scheduler.rs",
+      "surfaceDeclarations": [
+        {
+          "file": "crates/verter_scheduler/src/lib.rs",
+          "declaration": "pub mod scheduler;"
+        }
+      ],
+      "snapshot": {
+        "pubFn": 55,
+        "pubFnTestHooks": 15,
+        "pubCrateFn": 12,
+        "pubType": 9,
+        "pubCrateMod": 0,
+        "inlinePubMod": 0,
+        "pubStructField": 20
+      },
+      "authority": [
+        {
+          "responsibility": "pool submission and admission control",
+          "survivingOwner": "crates/verter_scheduler/src/dag.rs",
+          "evidence": "dag.rs module contract: SchedulerDag is the SOLE readiness authority; all admission, dedup, generation supersession, dependency gating, blocker resolution and capacity accounting flow through it"
+        },
+        {
+          "responsibility": "batch coordination",
+          "survivingOwner": "crates/verter_scheduler/src/driver.rs",
+          "evidence": "driver.rs module contract: the driver owns all admission and ordering policy and drains the SubmissionInbox"
+        },
+        {
+          "responsibility": "cancellation and retry bookkeeping",
+          "survivingOwner": "crates/verter_scheduler/src/cancellation.rs",
+          "evidence": "cancellation.rs module contract: one-shot clonable cancellation latches; dropping a handle cancels its still-pending work"
+        }
+      ],
+      "allowedImportDirection": {
+        "verter": ["verter_audit", "verter_language"],
+        "external": ["crossbeam_channel", "dashmap", "hotpath", "parking_lot", "web_time"],
+        "crateInternal": [
+          "audit_publish",
+          "cache_id",
+          "caller_kind",
+          "cancellation",
+          "dag",
+          "dedupe_hook",
+          "driver",
+          "edges",
+          "executor",
+          "job",
+          "node",
+          "overlay",
+          "owner_command",
+          "pool",
+          "request_context",
+          "source_loader",
+          "source_root",
+          "stage"
+        ],
+        "mustNotImport": [
+          "verter_session",
+          "verter_compiler",
+          "verter_semantic",
+          "verter_lsp",
+          "verter_workspace"
+        ],
+        "importers": [
+          "crates/verter_lsp/tests/cases/lsp_audit_diagnostics_completion.rs",
+          "crates/verter_lsp/tests/cases/lsp_audit_hover_record.rs",
+          "crates/verter_lsp/tests/cases/lsp_audit_query_methods.rs",
+          "crates/verter_dx_baseline/src/materialize.rs",
+          "crates/verter_napi/src/lib.rs",
+          "crates/verter_session/src/component_meta_flow_return_admission_tests.rs",
+          "crates/verter_session/src/component_meta_host.rs",
+          "crates/verter_session/src/component_meta_host_tests.rs",
+          "crates/verter_session/src/component_meta_pick_omit_tests.rs",
+          "crates/verter_session/src/component_meta_publication_demand_tests.rs",
+          "crates/verter_session/src/component_meta_surface_equivalence_tests.rs",
+          "crates/verter_session/src/cooperative_scheduler.rs",
+          "crates/verter_session/src/cooperative_scheduler_tests.rs",
+          "crates/verter_session/src/host_batch_coordinator.rs",
+          "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
+          "crates/verter_session/src/host_construction.rs",
+          "crates/verter_session/src/host_lifecycle.rs",
+          "crates/verter_session/src/host_manage/component_meta_extract_tests.rs",
+          "crates/verter_session/src/host_upsert.rs",
+          "crates/verter_session/src/host_views.rs",
+          "crates/verter_session/src/lib.rs",
+          "crates/verter_session/src/lib_tests.rs",
+          "crates/verter_session/src/materialized_structure_equivalence_tests.rs",
+          "crates/verter_session/src/meta_batch_fixed_view_tests.rs",
+          "crates/verter_session/src/meta_tests.rs",
+          "crates/verter_session/src/prepared_surface_intersection_tests.rs",
+          "crates/verter_session/src/public_api_batch_fixed_view_tests.rs",
+          "crates/verter_session/src/test_worker_pools.rs",
+          "crates/verter_session/src/typeinfo/vue_macro_codegen.rs",
+          "crates/verter_session/src/u6_flow_expect_tests.rs",
+          "crates/verter_session/src/u6_flow_shape_corpus_tests.rs",
+          "crates/verter_session/tests/cases/component_meta_audit_corpus/chunk_harness.rs",
+          "crates/verter_session/tests/cases/corpus_audit_layout.rs",
+          "crates/verter_session/tests/cases/exposed_binding_regression.rs",
+          "crates/verter_session/tests/cases/g_block/block_6i_runtime_arch_guards.rs",
+          "crates/verter_session/tests/cases/g_block/semantic_determinism_matrix.rs",
+          "crates/verter_session/tests/cases/g_component/component_meta_degraded_flow_interior_not_warm.rs",
+          "crates/verter_session/tests/cases/g_component/component_meta_no_cache_poisoning.rs",
+          "crates/verter_session/tests/cases/g_component/component_meta_partial_no_replay_and_benign_warms.rs",
+          "crates/verter_session/tests/cases/g_misc0/batch_api_shared_admissions.rs",
+          "crates/verter_session/tests/cases/g_misc0/batch_meta_cold_deps_no_pool_starvation.rs",
+          "crates/verter_session/tests/cases/g_misc2/scheduler_audit_attributes_worker.rs",
+          "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs",
+          "crates/verter_session/tests/cases/g_misc2/scheduler_worker_tls_propagation.rs",
+          "crates/verter_session/tests/cases/g_session/cooperative_drive_seam.rs",
+          "crates/verter_session/tests/cases/g_session/inline_execute_clears_all_install_tls_slots.rs",
+          "crates/verter_session/tests/cases/relation_nominal_authority.rs",
+          "crates/verter_session/tests/cases/runtime_constructor_matrix.rs"
+        ],
+        "ownerCratePopulation": "the importers array is the complete cross-crate population (48 files: 26 verter_session src files, 17 verter_session integration tests, three verter_lsp audit test cases, verter_dx_baseline materialize and verter_napi lib), enforced by the verifier in both directions on comment-stripped syntax; crates/verter_lsp/src/external_ts_sync.rs references verter_scheduler::cancellation, not the scheduler module, and is deliberately absent; population re-derivation on a moving candidate is ARH2's recorded obligation",
+        "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and BOTH use statements and inline crate paths in code position (verter_audit::attribute! macros, crossbeam_channel::Sender parameter types, the feature-gated hotpath::wrap alias, and crate::module::Item paths like crate::cache_id::SchedulerCacheId fields, crate::pool::SchedulerCpuPool constructor parameters, crate::request_context::RequestContext, crate::audit_publish, crate::dedupe_hook, crate::owner_command and crate::source_root references) are measured, so the declared sets equal the production direction both ways; verter_audit has no production use-statement in this file (its use is test configuration) but its inline attribute! paths are production references; cache_id, request_context and pool are production crate-internal roots measured through inline paths (their use-statement imports are test configuration)"
+      },
+      "constructorCapabilities": [
+        {
+          "constructor": "new",
+          "signatureAnchors": ["Arc<dyn SourceLoader>", "SchedulerCpuPool", "SchedulerIoPool"],
+          "rules": [
+            "pools and the source loader are host-injected Arc handles: the scheduler constructs no pool and performs no file I/O in the constructor",
+            "spawns exactly one driver thread on native targets and none on wasm32",
+            "no parse, analysis, compile or semantic work happens at construction time"
+          ]
+        },
+        {
+          "constructor": "with_executor",
+          "signatureAnchors": [
+            "Arc<dyn SourceLoader>",
+            "Arc<dyn StageExecutor>",
+            "SchedulerCpuPool",
+            "SchedulerIoPool"
+          ],
+          "rules": [
+            "the stage executor is injected: DefaultExecutor is chosen by the caller, never constructed here to reach semantic crates",
+            "same pool-injection and single-driver-thread capability as new"
+          ]
+        },
+        {
+          "constructor": "new_sync",
+          "signatureAnchors": ["Arc<dyn SourceLoader>", "SchedulerCpuPool"],
+          "rules": [
+            "synchronous-driver variant of new with the same injected-pool capability; wasm32 target carries no native pool parameter"
+          ]
+        },
+        {
+          "constructor": "new_sync_with_executor",
+          "signatureAnchors": [
+            "Arc<dyn SourceLoader>",
+            "Arc<dyn StageExecutor>",
+            "SchedulerCpuPool"
+          ],
+          "rules": [
+            "synchronous-driver variant of with_executor with the same injected-executor capability"
+          ]
+        }
+      ],
+      "stateLifetimes": [
+        {
+          "state": "Scheduler.nodes",
+          "owner": "Scheduler (Arc<FileNode> per canonical file)",
+          "lifetime": "session",
+          "evidence": "per-file CURRENT snapshots only; a generation bump makes the prior source immediately unreachable",
+          "soleOwner": "crates/verter_scheduler/src/scheduler.rs"
+        },
+        {
+          "state": "Scheduler.source_root (SchedulerSourceDirectory)",
+          "owner": "SchedulerSourceDirectory (source_root.rs)",
+          "lifetime": "snapshot-epoch",
+          "evidence": "epoch-indexed MVCC source authority; consumers capture an O(1) SchedulerSourceRoot and read the world as of that capture",
+          "soleOwner": "crates/verter_scheduler/src/source_root.rs"
+        },
+        {
+          "state": "Scheduler.dag (SchedulerDag)",
+          "owner": "DagMutex (dag.rs), shared via Arc",
+          "lifetime": "session",
+          "evidence": "single driver-owned readiness authority; lock rank dag > source-root publication > nodes shard",
+          "soleOwner": "crates/verter_scheduler/src/dag.rs"
+        },
+        {
+          "state": "Scheduler.inbox (SubmissionInbox)",
+          "owner": "SubmissionInbox (driver.rs)",
+          "lifetime": "session",
+          "evidence": "lock-free submission inbox drained by the driver loop",
+          "soleOwner": "crates/verter_scheduler/src/driver.rs"
+        },
+        {
+          "state": "Scheduler.overlay",
+          "owner": "OverlayMap behind an atomically swapped Arc",
+          "lifetime": "session",
+          "evidence": "atomically swappable resolver snapshot",
+          "soleOwner": "crates/verter_scheduler/src/scheduler.rs"
+        },
+        {
+          "state": "Scheduler.scoped_cache_flights",
+          "owner": "Scheduler",
+          "lifetime": "request",
+          "evidence": "overlapping borrowed cache-node calls keyed by full DAG identity; request-scoped rendezvous only, never durable cache entries",
+          "soleOwner": "crates/verter_scheduler/src/scheduler.rs"
+        },
+        {
+          "state": "Scheduler.tombstones, Scheduler.generation_floors, Scheduler.deferred_blocker_ids",
+          "owner": "Scheduler",
+          "lifetime": "session",
+          "evidence": "removal/re-add bookkeeping: tombstoned files, per-file generation floors, deferred blocker ids replayed at Source completion",
+          "soleOwner": "crates/verter_scheduler/src/scheduler.rs"
+        },
+        {
+          "state": "Scheduler.shutdown and Scheduler.driver_handle",
+          "owner": "Scheduler",
+          "lifetime": "session",
+          "evidence": "teardown pair driven by quiesce/restart_driver",
+          "soleOwner": "crates/verter_scheduler/src/scheduler.rs"
+        },
+        {
+          "state": "cancellation tokens (CancellationOwner/CancellationToken)",
+          "owner": "cancellation.rs",
+          "lifetime": "request",
+          "evidence": "one-shot latches riding work items; the owning handle trips the token on Drop",
+          "soleOwner": "crates/verter_scheduler/src/cancellation.rs"
+        }
+      ],
+      "minimalPublicSurface": {
+        "retainedFns": [
+          "resolved_dag_budget",
+          "len",
+          "is_empty",
+          "handles",
+          "into_handles",
+          "new",
+          "with_executor",
+          "new_sync",
+          "new_sync_with_executor",
+          "execute_scoped_cache_node",
+          "submit_request",
+          "submit_batch_atomic",
+          "wait_batch",
+          "account_batch_submission",
+          "counters",
+          "try_get_source",
+          "capture_source_root",
+          "source_directory",
+          "try_get_analysis",
+          "try_get_artifact",
+          "try_get_last_known_good",
+          "has_node",
+          "node_ids",
+          "reset",
+          "restart_driver",
+          "quiesce",
+          "register_resolved_deps",
+          "config",
+          "commit_artifact",
+          "remove_artifact_if_not_newer_than",
+          "overlay",
+          "invalidate",
+          "remove",
+          "close_file",
+          "has_driver_thread",
+          "driver_loop_native",
+          "drive_one",
+          "drive_all",
+          "wait_or_drive",
+          "wait_or_drive_with_caller"
+        ],
+        "retainedTypes": [
+          "SchedulerCounters",
+          "SchedulerConfig",
+          "Request",
+          "ScopedCacheNodeRequest",
+          "ScopedCacheNodeError",
+          "ScopedCacheFlight",
+          "Admission",
+          "BatchHandle",
+          "Scheduler"
+        ],
+        "narrow": [
+          {
+            "item": "tombstones",
+            "kind": "field",
+            "to": "pub(crate)",
+            "consumersAffected": [],
+            "note": "no reference outside crates/verter_scheduler at ratification"
+          },
+          {
+            "item": "generation_floors",
+            "kind": "field",
+            "to": "pub(crate)",
+            "consumersAffected": [],
+            "note": "no reference outside crates/verter_scheduler at ratification"
+          },
+          {
+            "item": "deferred_blocker_ids",
+            "kind": "field",
+            "to": "pub(crate)",
+            "consumersAffected": [],
+            "note": "no reference outside crates/verter_scheduler at ratification"
+          },
+          {
+            "item": "test_worker_pool_ids",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": ["crates/verter_session/src/host_construction.rs"],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": ["Scheduler::test_worker_pool_ids", "scheduler.test_worker_pool_ids("]
+          },
+          {
+            "item": "test_new",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": ["crates/verter_session/src/cooperative_scheduler_tests.rs", "crates/verter_session/src/host_batch_coordinator.rs"],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": ["Scheduler::test_new", ".test_new("]
+          },
+          {
+            "item": "test_with_executor",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": [
+              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_attributes_worker.rs",
+              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs",
+              "crates/verter_session/tests/cases/g_misc2/scheduler_worker_tls_propagation.rs",
+              "crates/verter_session/tests/cases/g_session/inline_execute_clears_all_install_tls_slots.rs"
+            ],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": ["Scheduler::test_with_executor", ".test_with_executor("]
+          },
+          {
+            "item": "test_new_sync",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": ["crates/verter_session/src/cooperative_scheduler_tests.rs"],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": ["Scheduler::test_new_sync", ".test_new_sync("]
+          },
+          {
+            "item": "test_new_sync_with_executor",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": [],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_new_sync_with_executor",
+              ".test_new_sync_with_executor("
+            ]
+          },
+          {
+            "item": "test_scoped_cache_owner_count",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": [],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_scoped_cache_owner_count",
+              ".test_scoped_cache_owner_count("
+            ]
+          },
+          {
+            "item": "test_arm_dispatch_pause",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": [
+              "crates/verter_session/src/cooperative_scheduler_tests.rs",
+              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs",
+              "crates/verter_session/tests/cases/g_session/cooperative_drive_seam.rs"
+            ],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": ["Scheduler::test_arm_dispatch_pause", ".test_arm_dispatch_pause("]
+          },
+          {
+            "item": "test_wait_until_dispatch_paused",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": [
+              "crates/verter_session/src/cooperative_scheduler_tests.rs",
+              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs",
+              "crates/verter_session/tests/cases/g_session/cooperative_drive_seam.rs"
+            ],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_wait_until_dispatch_paused",
+              ".test_wait_until_dispatch_paused("
+            ]
+          },
+          {
+            "item": "test_job_queue_depth",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": [
+              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
+            ],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": ["Scheduler::test_job_queue_depth", ".test_job_queue_depth("]
+          },
+          {
+            "item": "test_release_dispatch_pause",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": [
+              "crates/verter_session/src/cooperative_scheduler_tests.rs",
+              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs",
+              "crates/verter_session/tests/cases/g_session/cooperative_drive_seam.rs"
+            ],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_release_dispatch_pause",
+              ".test_release_dispatch_pause("
+            ]
+          },
+          {
+            "item": "test_install_batch_admit_seam",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": [],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_install_batch_admit_seam",
+              ".test_install_batch_admit_seam("
+            ]
+          },
+          {
+            "item": "test_install_batch_admit_epoch_trace",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": ["crates/verter_session/src/host_compile_atomic_upsert_tests.rs"],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_install_batch_admit_epoch_trace",
+              ".test_install_batch_admit_epoch_trace("
+            ]
+          },
+          {
+            "item": "test_peek_batch_admit_epoch_count",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": [],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_peek_batch_admit_epoch_count",
+              ".test_peek_batch_admit_epoch_count("
+            ]
+          },
+          {
+            "item": "test_take_batch_admit_epochs",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": ["crates/verter_session/src/host_compile_atomic_upsert_tests.rs"],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_take_batch_admit_epochs",
+              ".test_take_batch_admit_epochs("
+            ]
+          },
+          {
+            "item": "test_clear_analysis",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": [
+              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs"
+            ],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": ["Scheduler::test_clear_analysis", ".test_clear_analysis("]
+          }
+        ],
+        "crossCrateRetainedVerifiedByConsumers": false,
+        "consumerProofNote": "the importers population above is enforced by the verifier for this hotspot exactly as for every other (both directions, comment mentions never count); the retained-name/assoc-item deep join (crossCrateRetainedVerifiedByConsumers) is scoped to semantic_query because the scheduler retains its whole pub surface (no bulk row) — every pub fn/type/field is individually retained or narrowed"
+      },
+      "cohesiveModules": [
+        {
+          "module": "crates/verter_scheduler/src/dag.rs",
+          "responsibility": "pool submission and admission control",
+          "stateOwnership": [
+            {
+              "state": "Scheduler.dag (SchedulerDag)",
+              "mode": "sole"
+            }
+          ]
+        },
+        {
+          "module": "crates/verter_scheduler/src/driver.rs",
+          "responsibility": "batch coordination",
+          "stateOwnership": [
+            {
+              "state": "Scheduler.inbox (SubmissionInbox)",
+              "mode": "sole"
+            }
+          ]
+        },
+        {
+          "module": "crates/verter_scheduler/src/cancellation.rs",
+          "responsibility": "cancellation and retry bookkeeping",
+          "stateOwnership": [
+            {
+              "state": "cancellation tokens (CancellationOwner/CancellationToken)",
+              "mode": "sole"
+            }
+          ]
+        },
+        {
+          "module": "crates/verter_scheduler/src/source_root.rs",
+          "responsibility": "pool submission and admission control",
+          "stateOwnership": [
+            {
+              "state": "Scheduler.source_root (SchedulerSourceDirectory)",
+              "mode": "sole"
+            }
+          ]
+        },
+        {
+          "module": "crates/verter_scheduler/src/pool.rs",
+          "responsibility": "pool submission and admission control",
+          "stateOwnership": [],
+          "note": "host-constructed pools injected as Arc into every Scheduler constructor; the scheduler owns no pool construction"
+        }
+      ],
+      "heirs": {
+        "characterization": {
+          "id": "ARH2",
+          "kind": "node"
+        },
+        "narrowing": {
+          "id": "ARH4",
+          "kind": "node"
+        },
+        "enforcement": {
+          "id": "ARH12",
+          "kind": "node"
+        },
+        "residue": {
+          "id": "ARH11",
+          "kind": "node"
+        },
+        "documentation": {
+          "id": "DOC2",
+          "kind": "node"
+        }
+      }
+    },
+    {
+      "path": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
+      "surfaceDeclarations": [
+        {
+          "file": "crates/verter_session/src/project_semantic_dispatch/mod.rs",
+          "declaration": "pub(crate) mod flow_return;"
+        }
+      ],
+      "snapshot": {
+        "pubFn": 0,
+        "pubFnTestHooks": 0,
+        "pubCrateFn": 14,
+        "pubType": 0,
+        "pubCrateMod": 1,
+        "inlinePubMod": 0,
+        "pubStructField": 0
+      },
+      "authority": [
+        {
+          "responsibility": "flow-return semantic dispatch",
+          "survivingOwner": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
+          "evidence": "flow_return.rs module contract: the demand-sliced FlowReturn authority, the one SemanticQueryKey::FlowReturn producer through ProjectSemanticDispatch"
+        },
+        {
+          "responsibility": "flow product assembly",
+          "survivingOwner": "crates/verter_session/src/project_semantic_dispatch/flow_products.rs",
+          "evidence": "flow_products.rs module contract: selected, scoped flow products; ALL mutable product state lives there"
+        }
+      ],
+      "allowedImportDirection": {
+        "verter": [
+          "verter_audit",
+          "verter_identity",
+          "verter_semantic",
+          "verter_span",
+          "verter_type_expr"
+        ],
+        "external": ["rustc_hash", "smallvec", "tracing"],
+        "crateInternal": [
+          "build_toolchain_fingerprint",
+          "cache_runtime",
+          "file_artifact_store",
+          "flow_completion_inventory",
+          "flow_return_audit",
+          "flow_slice_content",
+          "project_semantic_dispatch",
+          "project_type_store",
+          "request_context",
+          "resolver_core",
+          "semantic_query",
+          "semantic_query_memo"
+        ],
+        "mustNotImport": [
+          "verter_compiler",
+          "verter_parser",
+          "verter_lsp",
+          "verter_napi",
+          "verter_ffi",
+          "verter_wasm"
+        ],
+        "importers": [],
+        "ownerCratePopulation": "12 verter_session files plus the dispatch parent reference flow_return:: at ratification; the module is pub(crate) inside project_semantic_dispatch, so there is no cross-crate importer (the enforced cross-crate population is empty)",
+        "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and both use statements and inline crate paths (verter_audit::/verter_identity::/verter_span:: qualified items, tracing::/smallvec::/rustc_hash:: references, and crate::module::Item paths like crate::flow_slice_content::, crate::semantic_query::, crate::cache_runtime::, crate::semantic_query_memo:: and crate::request_context:: references) are measured, so the declared sets equal the production direction both ways"
+      },
+      "constructorCapabilities": [],
+      "constructorRationale": "no public or crate constructors: pub(crate) functions on ProjectSemanticDispatch/impl blocks only; the fault-injection seam (flow_admission_fault_injection) is a pub(crate) module for host audit wiring",
+      "stateLifetimes": [
+        {
+          "state": "FunctionFlowGraph",
+          "owner": "verter_semantic flow substrate (analysis::flow), re-planned once per content version",
+          "lifetime": "content-version",
+          "evidence": "the demanded function's slice is planned as graph reachability over the once-per-content-version FunctionFlowGraph",
+          "soleOwner": "crates/verter_semantic/src/analysis/flow/flow_graph.rs"
+        },
+        {
+          "state": "FlowSliceIR",
+          "owner": "flow_return.rs (lowered slice)",
+          "lifetime": "content-version",
+          "evidence": "planned slice is hashed and lowered into the content-free FlowSliceIR before evaluation",
+          "soleOwner": "crates/verter_semantic/src/analysis/flow/flow_ir.rs"
+        },
+        {
+          "state": "flow-return compute frame (demand site + MaterializedSet)",
+          "owner": "flow_return.rs",
+          "lifetime": "request",
+          "evidence": "the demand site is derived once and the MaterializedSet recorded at the one place the compute knows what it served",
+          "soleOwner": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs"
+        },
+        {
+          "state": "mutable flow product state",
+          "owner": "flow_products.rs (sole owner)",
+          "lifetime": "dispatch-transaction",
+          "evidence": "flow_products.rs: all mutable product state lives here; typed accessors share one canonical product store",
+          "soleOwner": "crates/verter_session/src/project_semantic_dispatch/flow_products.rs"
+        },
+        {
+          "state": "admission budget outcome",
+          "owner": "flow_return.rs",
+          "lifetime": "request",
+          "evidence": "the budget outcome gates slice admission; an over-budget plan is a typed Budget failure (ReturnOnly at the memo)",
+          "soleOwner": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs"
+        }
+      ],
+      "minimalPublicSurface": {
+        "retainedFns": [],
+        "retainedTypes": [],
+        "narrow": [],
+        "rationale": "the module is already pub(crate) inside project_semantic_dispatch with zero cross-crate surface; the contract is the surfaceDeclarations boundary itself (no widening to pub without a charter amendment)"
+      },
+      "cohesiveModules": [
+        {
+          "module": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
+          "responsibility": "flow-return semantic dispatch",
+          "stateOwnership": [
+            {
+              "state": "flow-return compute frame (demand site + MaterializedSet)",
+              "mode": "sole"
+            },
+            {
+              "state": "admission budget outcome",
+              "mode": "sole"
+            }
+          ],
+          "note": "sole owner of the flow-return compute frame and the admission budget outcome; the once-per-content-version FunctionFlowGraph and FlowSliceIR stay owned by the verter_semantic flow substrate (flow_graph.rs/flow_ir.rs)"
+        },
+        {
+          "module": "crates/verter_session/src/project_semantic_dispatch/flow_products.rs",
+          "responsibility": "flow product assembly",
+          "stateOwnership": [
+            {
+              "state": "mutable flow product state",
+              "mode": "sole"
+            }
+          ]
+        },
+        {
+          "module": "crates/verter_session/src/project_semantic_dispatch/flow_return_callee.rs",
+          "responsibility": "flow-return semantic dispatch",
+          "stateOwnership": [],
+          "note": "the ONE gate between a callee's return and its caller's value; owns no second semantic state map"
+        },
+        {
+          "module": "crates/verter_session/src/project_semantic_dispatch/flow_return_products.rs",
+          "responsibility": "flow product assembly",
+          "stateOwnership": [],
+          "note": "typed accessors over the shared selected product execution; performs no lattice operations and owns no second semantic state map"
+        }
+      ],
+      "heirs": {
+        "characterization": {
+          "id": "ARH2",
+          "kind": "node"
+        },
+        "narrowing": {
+          "id": "ARH3",
+          "kind": "node"
+        },
+        "enforcement": {
+          "id": "ARH12",
+          "kind": "node"
+        },
+        "residue": {
+          "id": "ARH11",
+          "kind": "node"
+        },
+        "documentation": {
+          "id": "DOC2",
+          "kind": "node"
+        }
+      }
+    },
+    {
+      "path": "crates/verter_session/src/project_semantic_dispatch/build.rs",
+      "surfaceDeclarations": [
+        {
+          "file": "crates/verter_session/src/project_semantic_dispatch/mod.rs",
+          "declaration": "pub(crate) mod build;"
+        }
+      ],
+      "snapshot": {
+        "pubFn": 0,
+        "pubFnTestHooks": 0,
+        "pubCrateFn": 6,
+        "pubType": 0,
+        "pubCrateMod": 0,
+        "inlinePubMod": 0,
+        "pubStructField": 0
+      },
+      "authority": [
+        {
+          "responsibility": "dispatch build/admission",
+          "survivingOwner": "crates/verter_session/src/project_semantic_dispatch/build.rs",
+          "evidence": "build.rs module contract: every semantic query variant that produces a new SemanticNodeId does so through one of the build_* methods collected here, with helpers kept pub(super)"
+        },
+        {
+          "responsibility": "project semantic store assembly",
+          "survivingOwner": "crates/verter_session/src/project_semantic_dispatch/mod.rs",
+          "evidence": "psd mod.rs module contract: the project-global SemanticQueryApi dispatcher, the single dispatch site every reusable type-resolution operation flows through"
+        }
+      ],
+      "allowedImportDirection": {
+        "verter": [
+          "verter_audit",
+          "verter_semantic",
+          "verter_span",
+          "verter_type_expr"
+        ],
+        "external": ["indexmap", "rustc_hash", "tracing"],
+        "crateInternal": [
+          "cache_runtime",
+          "component_meta_audit",
+          "fact_emission",
+          "fact_signature_helpers",
+          "file_artifact_store",
+          "host_manage",
+          "intrinsic_registry",
+          "loop5_instrumentation",
+          "meta_resolve",
+          "project_semantic_dispatch",
+          "project_type_store",
+          "request_context",
+          "resolver_core",
+          "semantic_query",
+          "semantic_query_memo",
+          "session_view"
+        ],
+        "mustNotImport": [
+          "verter_compiler",
+          "verter_parser",
+          "verter_lsp",
+          "verter_napi",
+          "verter_ffi",
+          "verter_wasm"
+        ],
+        "importers": [],
+        "ownerCratePopulation": "referenced only inside project_semantic_dispatch (build_* impl block on ProjectSemanticDispatch); no cross-crate importer (the enforced cross-crate population is empty)",
+        "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and both use statements and inline crate paths (verter_span:: qualified items, tracing::error!/indexmap::IndexMap/rustc_hash:: references, and crate::module::Item paths like crate::semantic_query::, crate::resolver_core::, crate::cache_runtime:: and crate::request_context:: references) are measured, so the declared sets equal the production direction both ways; types and VerterHost (carrier_type_param_descent_tests) are imported only by the file's test configuration at ratification and are therefore not declared here"
+      },
+      "constructorCapabilities": [],
+      "constructorRationale": "no constructors: dispatch-layer builders kept on ProjectSemanticDispatch via impl blocks so inner helpers stay pub(super) without widening visibility",
+      "stateLifetimes": [
+        {
+          "state": "project semantic store (SemanticGraphStore)",
+          "owner": "semantic_query_memo (SemanticGraphStore) bound by the psd dispatcher",
+          "lifetime": "session",
+          "evidence": "psd mod.rs: binds SemanticQueryKey variants onto the shared SemanticGraphStore memo and routes them to existing resolver/solver entry points",
+          "soleOwner": "crates/verter_session/src/semantic_query_memo"
+        },
+        {
+          "state": "dispatch transaction frames (CheckerDispatchTransaction, per obligation root)",
+          "owner": "dispatch_txn.rs",
+          "lifetime": "dispatch-transaction",
+          "evidence": "dispatch_txn.rs: the transient per-obligation-root cold-compute frame of the ONE resolver",
+          "soleOwner": "crates/verter_session/src/project_semantic_dispatch/dispatch_txn.rs"
+        }
+      ],
+      "minimalPublicSurface": {
+        "retainedFns": [],
+        "retainedTypes": [],
+        "narrow": [],
+        "rationale": "pub(crate) module with pub(super) helpers: already at the minimal boundary; the contract is the surfaceDeclarations line itself"
+      },
+      "cohesiveModules": [
+        {
+          "module": "crates/verter_session/src/project_semantic_dispatch/build.rs",
+          "responsibility": "dispatch build/admission",
+          "stateOwnership": [],
+          "note": "builders only: every produced SemanticNodeId flows through build_*; no builder-local semantic state"
+        },
+        {
+          "module": "crates/verter_session/src/project_semantic_dispatch/mod.rs",
+          "responsibility": "project semantic store assembly",
+          "stateOwnership": [
+            {
+              "state": "project semantic store (SemanticGraphStore)",
+              "mode": "readonly"
+            }
+          ]
+        },
+        {
+          "module": "crates/verter_session/src/project_semantic_dispatch/dispatch_txn.rs",
+          "responsibility": "dispatch build/admission",
+          "stateOwnership": [
+            {
+              "state": "dispatch transaction frames (CheckerDispatchTransaction, per obligation root)",
+              "mode": "sole"
+            }
+          ]
+        }
+      ],
+      "heirs": {
+        "characterization": {
+          "id": "ARH2",
+          "kind": "node"
+        },
+        "narrowing": {
+          "id": "ARH3",
+          "kind": "node"
+        },
+        "enforcement": {
+          "id": "ARH12",
+          "kind": "node"
+        },
+        "residue": {
+          "id": "ARH11",
+          "kind": "node"
+        },
+        "documentation": {
+          "id": "DOC2",
+          "kind": "node"
+        }
+      }
+    },
+    {
+      "path": "crates/verter_session/src/semantic_query.rs",
+      "surfaceDeclarations": [
+        {
+          "file": "crates/verter_session/src/lib.rs",
+          "declaration": "pub mod semantic_query;"
+        }
+      ],
+      "snapshot": {
+        "pubFn": 170,
+        "pubFnTestHooks": 0,
+        "pubCrateFn": 41,
+        "pubType": 198,
+        "pubCrateMod": 2,
+        "inlinePubMod": 15,
+        "pubStructField": 287
+      },
+      "authority": [
+        {
+          "responsibility": "semantic query envelope assembly",
+          "survivingOwner": "crates/verter_session/src/semantic_query.rs",
+          "evidence": "semantic_query.rs module contract: the host-owned memo table keyed by SemanticQueryKey, the single query-time type-resolution engine of the project-global cache"
+        },
+        {
+          "responsibility": "query key/env binding",
+          "survivingOwner": "crates/verter_session/src/semantic_query/query_key_spec.rs",
+          "evidence": "query_key_spec.rs: the SemanticQueryKeySpec table, one authoritative row per live SemanticQueryKey variant; the checked-in table is written only by the gen-query-key-spec generator"
+        }
+      ],
+      "allowedImportDirection": {
+        "verter": [
+          "verter_audit",
+          "verter_identity",
+          "verter_no_typeexpr",
+          "verter_semantic",
+          "verter_span",
+          "verter_type_expr"
+        ],
+        "external": ["serde", "smallvec", "static_assertions", "xxhash_rust"],
+        "crateInternal": [
+          "locator_identity",
+          "project_semantic_dispatch",
+          "resolver_core",
+          "semantic_query",
+          "semantic_query_memo"
+        ],
+        "mustNotImport": [
+          "verter_compiler",
+          "verter_parser",
+          "verter_lsp",
+          "verter_napi",
+          "verter_ffi",
+          "verter_wasm"
+        ],
+        "importers": [
+          "crates/verter_bench/benches/fact_validation_hot_path.rs",
+          "crates/verter_ffi/src/convert/component_meta.rs",
+          "crates/verter_ffi/src/convert/tests.rs",
+          "crates/verter_ffi/src/convert/typeinfo.rs",
+          "crates/verter_napi/src/lib.rs",
+          "crates/verter_napi/src/typeinfo.rs",
+          "crates/verter_session/benches/projection_safety_bench.rs",
+          "crates/verter_session/tests/allocation_cases/flow_literal_provenance.rs",
+          "crates/verter_session/tests/allocation_cases/flow_products.rs",
+          "crates/verter_session/tests/allocator_canaries.rs",
+          "crates/verter_session/tests/cases/compile-fail/composite_mint_unforgeable.rs",
+          "crates/verter_session/tests/cases/compile-fail/composite_replay_cross_kind.rs",
+          "crates/verter_session/tests/cases/compile-fail/composite_struct_literal_forge.rs",
+          "crates/verter_session/tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs",
+          "crates/verter_session/tests/cases/compile-fail/dto_names_session_hot_handle.rs",
+          "crates/verter_session/tests/cases/compile-fail/instantiate_body_source_sealed_to_dispatch_factory.rs",
+          "crates/verter_session/tests/cases/compile-fail/instantiate_key_context_not_extractable.rs",
+          "crates/verter_session/tests/cases/compile-fail/instantiate_key_seal_no_features.rs",
+          "crates/verter_session/tests/cases/compile-fail/locator_shape_ctx_no_prc_conversion.rs",
+          "crates/verter_session/tests/cases/compile-fail/member_role_stamps_not_mintable_without_witness.rs",
+          "crates/verter_session/tests/cases/compile-fail/object_projection_witness_not_forgeable.rs",
+          "crates/verter_session/tests/cases/compile-fail/object_projection_witness_only.rs",
+          "crates/verter_session/tests/cases/compile-fail/r6_key_forbidden_dimension.rs",
+          "crates/verter_session/tests/cases/compile-fail/r6_key_nested_forbidden_dimension.rs",
+          "crates/verter_session/tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs",
+          "crates/verter_session/tests/cases/compile-fail/semantic_operand_force_projection_not_importable.rs",
+          "crates/verter_session/tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs",
+          "crates/verter_session/tests/cases/compile-fail/surface_resolution_reason_mint_is_sealed.rs",
+          "crates/verter_session/tests/cases/family_warm_read_releases_mutex_before_validate.rs",
+          "crates/verter_session/tests/cases/flow_product_lattice.rs",
+          "crates/verter_session/tests/cases/flow_solve_completeness.rs",
+          "crates/verter_session/tests/cases/g_binder/binder_identity_facts.rs",
+          "crates/verter_session/tests/cases/g_block/block_1_i_discriminators.rs",
+          "crates/verter_session/tests/cases/g_block/block_6i_leak_option_a_discriminator.rs",
+          "crates/verter_session/tests/cases/g_block/block_6i_mapped_source_declref_enum.rs",
+          "crates/verter_session/tests/cases/g_block/block_6i_round7_selected_key_callable_realization.rs",
+          "crates/verter_session/tests/cases/g_block/r6_query_identity_keys_content_free.rs",
+          "crates/verter_session/tests/cases/g_block/semantic_determinism_matrix.rs",
+          "crates/verter_session/tests/cases/g_block/typeinfo_graph_contract_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2_demand_lattice_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2_display_projection_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2_spec_table_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b5_class_ns_enum_overload_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b6_apparent_template_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b7_flow_contextual_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b8_relate_upgrade_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b9_awaited_relation_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u6_call_resolve_guards.rs",
+          "crates/verter_session/tests/cases/g_cache/r6_r21_query_identity_keys.rs",
+          "crates/verter_session/tests/cases/g_family/family_slots_multi_candidate.rs",
+          "crates/verter_session/tests/cases/g_misc0/capture_token_smoke.rs",
+          "crates/verter_session/tests/cases/g_misc0/closure_boundary_invalidation.rs",
+          "crates/verter_session/tests/cases/g_misc0/declaration_merge_guards.rs",
+          "crates/verter_session/tests/cases/g_misc0/dep_signature_to_fact_signature.rs",
+          "crates/verter_session/tests/cases/g_misc0/dispatch_bridges_convert_project_generation.rs",
+          "crates/verter_session/tests/cases/g_misc0/flow_return_audit_tls_propagation.rs",
+          "crates/verter_session/tests/cases/g_misc0/synthetic_carrier_explicit_deepen_proof.rs",
+          "crates/verter_session/tests/cases/g_misc1/memo_traced_parse_fact_survives_warm_hit.rs",
+          "crates/verter_session/tests/cases/g_misc1/merged_symbol_identity.rs",
+          "crates/verter_session/tests/cases/g_misc1/path_precision_navigate_then_terminal.rs",
+          "crates/verter_session/tests/cases/g_misc1/pe4_evaluate_deferred_memo.rs",
+          "crates/verter_session/tests/cases/g_misc2/generic_instantiation_identity_and_bounded_work.rs",
+          "crates/verter_session/tests/cases/g_misc2/mapped_remap_dead_key_value_forcing.rs",
+          "crates/verter_session/tests/cases/g_misc2/pe4_evaluate_depth_budget.rs",
+          "crates/verter_session/tests/cases/g_misc2/pe4_mapped_type_k_independent_hoist.rs",
+          "crates/verter_session/tests/cases/g_misc2/pe4_substitute_hash_cons.rs",
+          "crates/verter_session/tests/cases/g_misc2/per_macro_projector_decomposition_tests.rs",
+          "crates/verter_session/tests/cases/g_misc2/recursive_substitute_memo.rs",
+          "crates/verter_session/tests/cases/g_misc3/slot_binding_graph_matrix_member_presence.rs",
+          "crates/verter_session/tests/cases/g_misc3/typeinfo_public_api.rs",
+          "crates/verter_session/tests/cases/g_type/flow_return_audit_contract.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_cache_reuse_across_entrypoints.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_diamond_repeated_prop.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_intermediate_navigate_terminal_caller_mode.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_long_chain_stack_safe.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_no_unrelated_imports.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_pathological_recursion.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_read_once.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_tls_propagation.rs",
+          "crates/verter_session/tests/cases/relation_nominal_authority.rs",
+          "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs",
+          "crates/verter_source_policy_gate/tests/cases/semantic_capability_witnesses.rs",
+          "crates/verter_wasm/src/feasibility_probe_tests.rs",
+          "crates/verter_wasm/src/lib.rs",
+          "crates/verter_wasm/src/typeinfo.rs"
+        ],
+        "ownerCratePopulation": "78 verter_session src files use crate-internal semantic_query paths at ratification; the importers array is the complete cross-crate population (85 files: ffi/napi/wasm sources through direct and aliased verter_session paths, plus verter_session benches and integration tests, which compile as separate crates) and the verifier enforces it exactly in both directions; population re-derivation is ARH2's recorded obligation",
+        "internalNote": [
+          "locator_identity",
+          "project_semantic_dispatch",
+          "resolver_core",
+          "semantic_query_memo",
+          "semantic_query (inline crate::semantic_query:: self-paths and inline submodules: admit, carrier, compat_spelling, composite, deferred_callable, demand, display, flow_return_result, index_key, infer_binder_names, intersection_input, node_tag, object_spread_projection, operand, outcome, query_key_spec, semantic_context, stable_key)"
+        ],
+        "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and both use statements and inline crate paths (serde/xxhash_rust qualified items and crate::module::Item paths like crate::locator_identity::, crate::resolver_core::, crate::semantic_query_memo:: and crate::project_semantic_dispatch:: references) are measured, so the declared sets equal the production direction both ways"
+      },
+      "constructorCapabilities": [],
+      "constructorRationale": "the memo engine is constructed and owned by the host session (semantic_query_memo SemanticGraphStore binding); semantic_query.rs itself declares value/type constructors for its envelope types, not state-holding services",
+      "stateLifetimes": [
+        {
+          "state": "SemanticGraphStore memo",
+          "owner": "semantic_query_memo (session host)",
+          "lifetime": "session",
+          "evidence": "psd mod.rs: binds SemanticQueryKey variants onto the shared SemanticGraphStore memo; identity is semantic meaning, not request identity",
+          "soleOwner": "crates/verter_session/src/semantic_query_memo"
+        },
+        {
+          "state": "cache-admission decisions (admit_decision)",
+          "owner": "semantic_query/admit.rs (sole decision point)",
+          "lifetime": "request",
+          "evidence": "admit.rs: admit_decision is the SOLE place mapping an error-tolerant semantic result to a cache-admission disposition",
+          "soleOwner": "crates/verter_session/src/semantic_query/admit.rs"
+        },
+        {
+          "state": "stable keys (StableKey, fingerprint_v1)",
+          "owner": "semantic_query/stable_key.rs",
+          "lifetime": "content-version",
+          "evidence": "stable_key.rs: representation-only stable keys; comparators never force bodies, resolve names, run relations, instantiate or reduce unions",
+          "soleOwner": "crates/verter_session/src/semantic_query/stable_key.rs"
+        }
+      ],
+      "minimalPublicSurface": {
+        "retainedTypes": [
+          "HashValue",
+          "SemanticNodeId",
+          "ScopeId",
+          "ResolveDeclKey",
+          "SemanticQueryKey",
+          "ResultCompleteness",
+          "PartialReason",
+          "PartialReasonSet",
+          "ProjectionMode",
+          "OriginEdgeKind"
+        ],
+        "retainedFns": [],
+        "narrow": [
+          {
+            "item": "all other pub items beyond retainedTypes",
+            "kind": "bulk",
+            "to": "pub(crate)",
+            "consumersAffected": [
+              "crates/verter_session/benches/projection_safety_bench.rs",
+              "crates/verter_session/tests/allocation_cases/flow_literal_provenance.rs",
+              "crates/verter_session/tests/allocation_cases/flow_products.rs",
+              "crates/verter_session/tests/cases/compile-fail/composite_mint_unforgeable.rs",
+              "crates/verter_session/tests/cases/compile-fail/composite_replay_cross_kind.rs",
+              "crates/verter_session/tests/cases/compile-fail/composite_struct_literal_forge.rs",
+              "crates/verter_session/tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs",
+              "crates/verter_session/tests/cases/compile-fail/dto_names_session_hot_handle.rs",
+              "crates/verter_session/tests/cases/compile-fail/instantiate_body_source_sealed_to_dispatch_factory.rs",
+              "crates/verter_session/tests/cases/compile-fail/instantiate_key_context_not_extractable.rs",
+              "crates/verter_session/tests/cases/compile-fail/instantiate_key_seal_no_features.rs",
+              "crates/verter_session/tests/cases/compile-fail/locator_shape_ctx_no_prc_conversion.rs",
+              "crates/verter_session/tests/cases/compile-fail/member_role_stamps_not_mintable_without_witness.rs",
+              "crates/verter_session/tests/cases/compile-fail/object_projection_witness_not_forgeable.rs",
+              "crates/verter_session/tests/cases/compile-fail/object_projection_witness_only.rs",
+              "crates/verter_session/tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs",
+              "crates/verter_session/tests/cases/compile-fail/semantic_operand_force_projection_not_importable.rs",
+              "crates/verter_session/tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs",
+              "crates/verter_session/tests/cases/family_warm_read_releases_mutex_before_validate.rs",
+              "crates/verter_session/tests/cases/flow_product_lattice.rs",
+              "crates/verter_session/tests/cases/flow_solve_completeness.rs",
+              "crates/verter_session/tests/cases/g_binder/binder_identity_facts.rs",
+              "crates/verter_session/tests/cases/g_block/block_1_i_discriminators.rs",
+              "crates/verter_session/tests/cases/g_block/block_6i_leak_option_a_discriminator.rs",
+              "crates/verter_session/tests/cases/g_block/block_6i_mapped_source_declref_enum.rs",
+              "crates/verter_session/tests/cases/g_block/block_6i_round7_selected_key_callable_realization.rs",
+              "crates/verter_session/tests/cases/g_block/r6_query_identity_keys_content_free.rs",
+              "crates/verter_session/tests/cases/g_block/semantic_determinism_matrix.rs",
+              "crates/verter_session/tests/cases/g_block/u2_demand_lattice_guards.rs",
+              "crates/verter_session/tests/cases/g_block/u2_display_projection_guards.rs",
+              "crates/verter_session/tests/cases/g_block/u2_spec_table_guards.rs",
+              "crates/verter_session/tests/cases/g_block/u2b5_class_ns_enum_overload_guards.rs",
+              "crates/verter_session/tests/cases/g_block/u2b6_apparent_template_guards.rs",
+              "crates/verter_session/tests/cases/g_block/u2b7_flow_contextual_guards.rs",
+              "crates/verter_session/tests/cases/g_block/u2b8_relate_upgrade_guards.rs",
+              "crates/verter_session/tests/cases/g_block/u2b9_awaited_relation_guards.rs",
+              "crates/verter_session/tests/cases/g_block/u6_call_resolve_guards.rs",
+              "crates/verter_session/tests/cases/g_cache/r6_r21_query_identity_keys.rs",
+              "crates/verter_session/tests/cases/g_family/family_slots_multi_candidate.rs",
+              "crates/verter_session/tests/cases/g_misc0/capture_token_smoke.rs",
+              "crates/verter_session/tests/cases/g_misc0/declaration_merge_guards.rs",
+              "crates/verter_session/tests/cases/g_misc0/dep_signature_to_fact_signature.rs",
+              "crates/verter_session/tests/cases/g_misc0/dispatch_bridges_convert_project_generation.rs",
+              "crates/verter_session/tests/cases/g_misc0/flow_return_audit_tls_propagation.rs",
+              "crates/verter_session/tests/cases/g_misc0/synthetic_carrier_explicit_deepen_proof.rs",
+              "crates/verter_session/tests/cases/g_misc1/memo_traced_parse_fact_survives_warm_hit.rs",
+              "crates/verter_session/tests/cases/g_misc1/merged_symbol_identity.rs",
+              "crates/verter_session/tests/cases/g_misc1/path_precision_navigate_then_terminal.rs",
+              "crates/verter_session/tests/cases/g_misc1/pe4_evaluate_deferred_memo.rs",
+              "crates/verter_session/tests/cases/g_misc2/generic_instantiation_identity_and_bounded_work.rs",
+              "crates/verter_session/tests/cases/g_misc2/mapped_remap_dead_key_value_forcing.rs",
+              "crates/verter_session/tests/cases/g_misc2/pe4_evaluate_depth_budget.rs",
+              "crates/verter_session/tests/cases/g_misc2/pe4_mapped_type_k_independent_hoist.rs",
+              "crates/verter_session/tests/cases/g_misc2/pe4_substitute_hash_cons.rs",
+              "crates/verter_session/tests/cases/g_misc2/per_macro_projector_decomposition_tests.rs",
+              "crates/verter_session/tests/cases/g_misc2/recursive_substitute_memo.rs",
+              "crates/verter_session/tests/cases/g_misc3/slot_binding_graph_matrix_member_presence.rs",
+              "crates/verter_session/tests/cases/g_type/flow_return_audit_contract.rs",
+              "crates/verter_session/tests/cases/g_type/type_resolution_audit_cache_reuse_across_entrypoints.rs",
+              "crates/verter_session/tests/cases/g_type/type_resolution_audit_diamond_repeated_prop.rs",
+              "crates/verter_session/tests/cases/g_type/type_resolution_audit_intermediate_navigate_terminal_caller_mode.rs",
+              "crates/verter_session/tests/cases/g_type/type_resolution_audit_long_chain_stack_safe.rs",
+              "crates/verter_session/tests/cases/g_type/type_resolution_audit_no_unrelated_imports.rs",
+              "crates/verter_session/tests/cases/g_type/type_resolution_audit_pathological_recursion.rs",
+              "crates/verter_session/tests/cases/g_type/type_resolution_audit_read_once.rs",
+              "crates/verter_session/tests/cases/g_type/type_resolution_audit_tls_propagation.rs",
+              "crates/verter_session/tests/cases/relation_nominal_authority.rs",
+              "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs"
+            ],
+            "note": "at ratification 246 pub types and 170 pub fns are pub while the cross-crate population imports only the retained ten types (plus the seven retained assoc items below); retaining a type alone does not retain its methods, so PartialReasonSet::{empty,is_empty,iter,PROPAGATED,SEMANTIC_QUERY_FAULT}, ResultCompleteness::partial and ScopeId::file stay pub for the ffi/napi/wasm production consumers; the 68 recorded consumer files each import at least one narrowed name (integration tests and benches of verter_session compile as separate crates) and migrate to the existing for_tests test-support surface pattern in the same change as the narrowing"
+          }
+        ],
+        "rationale": "one authority (semantic_query.rs) with the cross-crate surface cut to exactly the imported envelope types and their used assoc items; the inline pub mods stay pub inside the module",
+        "crossCrateRetainedVerifiedByConsumers": true,
+        "retainedAssocItems": [
+          "PartialReasonSet::PROPAGATED",
+          "PartialReasonSet::SEMANTIC_QUERY_FAULT",
+          "PartialReasonSet::empty",
+          "PartialReasonSet::is_empty",
+          "PartialReasonSet::iter",
+          "ResultCompleteness::partial",
+          "ScopeId::file"
+        ],
+        "consumerProofNote": "the importers list is the complete cross-crate population, derived from use-statement and inline-path syntax (direct verter_session::semantic_query paths, aliased crate roots, module imports) with comments stripped, so mirror-documentation mentions are never consumers; every referenced name is either retained or carried by the bulk row's consumer migration, every retained type is imported by a real consumer, and assoc items used on retained types are retained"
+      },
+      "cohesiveModules": [
+        {
+          "module": "crates/verter_session/src/semantic_query.rs",
+          "responsibility": "semantic query envelope assembly",
+          "stateOwnership": [
+            {
+              "state": "SemanticGraphStore memo",
+              "mode": "readonly"
+            }
+          ]
+        },
+        {
+          "module": "crates/verter_session/src/semantic_query/query_key_spec.rs",
+          "responsibility": "query key/env binding",
+          "stateOwnership": [],
+          "note": "generator-written spec table; the generator is the sole writer"
+        },
+        {
+          "module": "crates/verter_session/src/semantic_query/admit.rs",
+          "responsibility": "semantic query envelope assembly",
+          "stateOwnership": [
+            {
+              "state": "cache-admission decisions (admit_decision)",
+              "mode": "sole"
+            }
+          ]
+        },
+        {
+          "module": "crates/verter_session/src/semantic_query/stable_key.rs",
+          "responsibility": "query key/env binding",
+          "stateOwnership": [
+            {
+              "state": "stable keys (StableKey, fingerprint_v1)",
+              "mode": "sole"
+            }
+          ]
+        }
+      ],
+      "heirs": {
+        "characterization": {
+          "id": "ARH2",
+          "kind": "node"
+        },
+        "narrowing": {
+          "id": "ARH3",
+          "kind": "node"
+        },
+        "enforcement": {
+          "id": "ARH12",
+          "kind": "node"
+        },
+        "residue": {
+          "id": "ARH11",
+          "kind": "node"
+        },
+        "documentation": {
+          "id": "DOC2",
+          "kind": "node"
+        }
+      }
+    },
+    {
+      "path": "crates/verter_session/src/flow_slice_content.rs",
+      "surfaceDeclarations": [
+        {
+          "file": "crates/verter_session/src/lib.rs",
+          "declaration": "pub(crate) mod flow_slice_content;"
+        }
+      ],
+      "snapshot": {
+        "pubFn": 13,
+        "pubFnTestHooks": 0,
+        "pubCrateFn": 11,
+        "pubType": 31,
+        "pubCrateMod": 1,
+        "inlinePubMod": 0,
+        "pubStructField": 44
+      },
+      "authority": [
+        {
+          "responsibility": "flow slice content projection",
+          "survivingOwner": "crates/verter_session/src/flow_slice_content.rs",
+          "evidence": "flow_slice_content.rs module contract: the OWNED, arena-free content lowering of exactly one planned flow slice (the content half of the flow-slice substrate)"
+        },
+        {
+          "responsibility": "slice publication admission",
+          "survivingOwner": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
+          "evidence": "flow_return.rs: plans + hashes the demand slice through the project-global flow-slice nodes where the budget outcome gates admission; an over-budget plan is a typed Budget failure (ReturnOnly at the memo)"
+        }
+      ],
+      "allowedImportDirection": {
+        "verter": [
+          "verter_semantic",
+          "verter_span",
+          "verter_type_expr",
+          "verter_type_expr_oxc"
+        ],
+        "external": [
+          "oxc_allocator",
+          "oxc_ast",
+          "oxc_ast_visit",
+          "oxc_span",
+          "oxc_syntax",
+          "rustc_hash"
+        ],
+        "crateInternal": ["decl_lowering", "flow_completion_inventory", "semantic_query"],
+        "mustNotImport": [
+          "verter_compiler",
+          "verter_parser",
+          "verter_lsp",
+          "verter_napi",
+          "verter_ffi",
+          "verter_wasm"
+        ],
+        "importers": [],
+        "ownerCratePopulation": "6 verter_session files reference flow_slice_content:: at ratification; the module is pub(crate), so there is no cross-crate importer",
+        "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and both use statements and inline crate paths (oxc-qualified items and crate::module::Item paths like crate::semantic_query:: and crate::decl_lowering:: references in lowering helpers) are measured, so the declared sets equal the production direction both ways"
+      },
+      "constructorCapabilities": [],
+      "constructorRationale": "value constructors on the owned slice IR types only; the module holds no service state, so it needs no capability-bearing constructor",
+      "stateLifetimes": [
+        {
+          "state": "retained parse-snapshot lease",
+          "owner": "semantic_query memo lease-only run",
+          "lifetime": "request",
+          "evidence": "flow_slice_content.rs: reborrows the retained parse snapshot ONCE through the memo's lease-only run, exactly like every other body product",
+          "soleOwner": "crates/verter_session/src/semantic_query_memo"
+        },
+        {
+          "state": "owned slice content IR (SliceContent and friends)",
+          "owner": "flow_slice_content.rs",
+          "lifetime": "content-version",
+          "evidence": "arena-free owned typed IR lowered from exactly the slice-selected expression content",
+          "soleOwner": "crates/verter_session/src/flow_slice_content.rs"
+        }
+      ],
+      "minimalPublicSurface": {
+        "retainedFns": [],
+        "retainedTypes": [],
+        "narrow": [],
+        "rationale": "pub(crate) module with zero cross-crate consumers; the contract is the surfaceDeclarations boundary itself"
+      },
+      "cohesiveModules": [
+        {
+          "module": "crates/verter_session/src/flow_slice_content.rs",
+          "responsibility": "flow slice content projection",
+          "stateOwnership": [
+            {
+              "state": "owned slice content IR (SliceContent and friends)",
+              "mode": "sole"
+            },
+            {
+              "state": "retained parse-snapshot lease",
+              "mode": "readonly"
+            }
+          ]
+        },
+        {
+          "module": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
+          "responsibility": "slice publication admission",
+          "stateOwnership": [],
+          "note": "the demand-side admission gate over this module's lowered slices: plans, hashes and budget-gates the slice where the budget outcome gates admission; owns no content-side state"
+        }
+      ],
+      "heirs": {
+        "characterization": {
+          "id": "ARH2",
+          "kind": "node"
+        },
+        "narrowing": {
+          "id": "ARH3",
+          "kind": "node"
+        },
+        "enforcement": {
+          "id": "ARH12",
+          "kind": "node"
+        },
+        "residue": {
+          "id": "ARH11",
+          "kind": "node"
+        },
+        "documentation": {
+          "id": "DOC2",
+          "kind": "node"
+        }
+      }
+    }
+  ],
+  "ac4Rationale": "AC4 surfaces a contract-only node cannot discharge with artifacts are specified for its producers instead: the VIM/DX capability mapping and the exact host/profile evidence are DOC2/ARH2 obligations above; migration notes are each narrowing row's exact consumersAffected inventory plus the cutover dispositions; permissions are not applicable (no capability, filesystem, network or editor-permission surface is created or widened at this node, so there is no permission note to publish); uncertainty is recorded as population and snapshot counts enforced by the verifier against the live tree on every run, with the pinned candidate naming the last ratification basis (the CI architecture-health lane runs verify.mjs --provenance, proving the pinned commit is a real ancestor of the checked-out head) — never a fabricated source-revision claim, and no partial or conditional runtime result is claimed anywhere in these bytes."
+}
