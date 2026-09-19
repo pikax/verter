@@ -67,6 +67,14 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP5-raw-cli",
     "STP5-capability",
   ]),
+  STP6: Object.freeze([
+    "STP6-package-instance",
+    "STP6-package-generics",
+    "STP6-hidden-metadata",
+    "STP6-closure",
+    "STP6-decl-map",
+    "STP6-resolution",
+  ]),
 });
 
 export const MANDATORY_CASES = NODE_MANDATORY_CASES.STP1;
@@ -78,9 +86,10 @@ export function canonicalMandatoryCases(nodeId) {
 export const STP3_MANDATORY_CASES = NODE_MANDATORY_CASES.STP3;
 export const STP4_MANDATORY_CASES = NODE_MANDATORY_CASES.STP4;
 export const STP5_MANDATORY_CASES = NODE_MANDATORY_CASES.STP5;
+export const STP6_MANDATORY_CASES = NODE_MANDATORY_CASES.STP6;
 
 function usesCaseFileRunner(nodeId) {
-  return nodeId === "STP2" || nodeId === "STP3" || nodeId === "STP4";
+  return nodeId === "STP2" || nodeId === "STP3" || nodeId === "STP4" || nodeId === "STP6";
 }
 
 export function mandatoryCasesFor(nodeManifest) {
@@ -623,6 +632,121 @@ export function assertStp4Products(repoRoot, nodeManifest) {
   if (inputs.jsxRewrite?.tsAngleAssertion !== "no-jsx-rewrite") {
     errors.push(
       err("STP4-tsx-authored", "removed-fixture", "TS angle assertions must not be JSX-rewritten"),
+    );
+  }
+  return errors;
+}
+
+const STP6_CONSUMPTION_MODES = Object.freeze([
+  "direct-import",
+  "alias",
+  "barrel",
+  "namespace",
+  "project-references",
+  "package-exports",
+]);
+
+const STP6_RESOLUTION_MODES = Object.freeze(["bundler", "node16", "nodenext"]);
+
+export function assertStp6Products(repoRoot, nodeManifest) {
+  const errors = [];
+  const declared = new Set(nodeManifest?.products || []);
+  for (const product of ["PackedConsumerFeasibility", "PublicDependencyClosurePolicy"]) {
+    if (!declared.has(product)) {
+      errors.push(err("STP6-package-instance", "removed-fixture", `missing product ${product}`));
+    }
+  }
+  const feasibilityRel = "tests/sfc-projection/STP6/products/packed-consumer-feasibility.json";
+  const closureRel = "tests/sfc-projection/STP6/products/public-dependency-closure-policy.json";
+  const feasibilityAbs = repoPath(repoRoot, feasibilityRel);
+  const closureAbs = repoPath(repoRoot, closureRel);
+  if (!fs.existsSync(feasibilityAbs)) {
+    errors.push(err("STP6-package-instance", "removed-fixture", `missing ${feasibilityRel}`));
+    return errors;
+  }
+  if (!fs.existsSync(closureAbs)) {
+    errors.push(err("STP6-closure", "removed-fixture", `missing ${closureRel}`));
+    return errors;
+  }
+  const feasibility = readJson(feasibilityAbs);
+  const closure = readJson(closureAbs);
+  if (feasibility.schema !== "PackedConsumerFeasibility") {
+    errors.push(
+      err("STP6-package-instance", "removed-fixture", "PackedConsumerFeasibility schema"),
+    );
+  }
+  if (closure.schema !== "PublicDependencyClosurePolicy") {
+    errors.push(err("STP6-closure", "removed-fixture", "PublicDependencyClosurePolicy schema"));
+  }
+  const modes = new Set((feasibility.consumptionModes || []).map((row) => row.id));
+  for (const mode of STP6_CONSUMPTION_MODES) {
+    if (!modes.has(mode)) {
+      errors.push(
+        err("STP6-package-instance", "removed-fixture", `missing consumption mode ${mode}`),
+      );
+    }
+  }
+  const resolutions = new Set((feasibility.resolutionModes || []).map((row) => row.id));
+  for (const mode of STP6_RESOLUTION_MODES) {
+    if (!resolutions.has(mode)) {
+      errors.push(err("STP6-resolution", "removed-fixture", `missing resolution mode ${mode}`));
+    }
+  }
+  const evidenceIds = new Set((feasibility.cases || []).map((row) => row.id));
+  for (const id of NODE_MANDATORY_CASES.STP6) {
+    if (!evidenceIds.has(id)) {
+      errors.push(err("STP6-package-instance", "removed-fixture", `feasibility missing ${id}`));
+    }
+  }
+  if (!String(feasibility.constructorSpelling || "").includes("declare class Comp")) {
+    errors.push(
+      err("STP6-package-instance", "removed-fixture", "missing packed constructor spelling"),
+    );
+  }
+  if (feasibility.package?.producerWorkspaceResolution !== false) {
+    errors.push(
+      err(
+        "STP6-package-instance",
+        "removed-fixture",
+        "packed consumer must not use producer workspace resolution",
+      ),
+    );
+  }
+  if (!String(feasibility.ac3Rationale || "").trim()) {
+    errors.push(
+      err("STP6-package-instance", "removed-fixture", "missing AC3 untouched-owner rationale"),
+    );
+  }
+  if (!String(feasibility.ac4Rationale || "").trim()) {
+    errors.push(
+      err("STP6-package-instance", "removed-fixture", "missing AC4 untouched-owner rationale"),
+    );
+  }
+  if (closure.typeOnlyCheckingContract?.required !== false) {
+    errors.push(
+      err(
+        "STP6-hidden-metadata",
+        "removed-fixture",
+        "type-only checking contract must not be required for precision",
+      ),
+    );
+  }
+  if (closure.declarationMaps?.sourcesMustBePackRelativeAuthoredFiles !== true) {
+    errors.push(
+      err(
+        "STP6-decl-map",
+        "removed-fixture",
+        "declaration maps must target shipped authored source",
+      ),
+    );
+  }
+  if (closure.hiddenMetadata?.inExports !== false || closure.hiddenMetadata?.inFiles !== false) {
+    errors.push(
+      err(
+        "STP6-hidden-metadata",
+        "removed-fixture",
+        "unpublished sidecar must stay out of the pack",
+      ),
     );
   }
   return errors;
@@ -1496,6 +1620,9 @@ export async function verifyNode(options) {
   if (nodeId === "STP4") {
     errors.push(...assertStp4Products(repoRoot, nodeLoad.manifest));
   }
+  if (nodeId === "STP6") {
+    errors.push(...assertStp6Products(repoRoot, nodeLoad.manifest));
+  }
 
   const matrix =
     options.engineMatrix || readJson(repoPath(repoRoot, rootLoad.manifest.engineMatrix));
@@ -1584,6 +1711,15 @@ export async function verifyNode(options) {
     });
     errors.push(...stp5.errors);
     capabilityRows = stp5.capabilityRows;
+  }
+
+  if (nodeId === "STP6") {
+    const stp6 = await evaluateStp6Node({
+      repoRoot,
+      resolvedEngines,
+      skipProbes: options.skipProbes,
+    });
+    errors.push(...stp6.errors);
   }
 
   return summarize({
@@ -1692,6 +1828,34 @@ async function evaluateStp5Node({ repoRoot, resolvedEngines, harnessRuns, skipPr
   return { errors, capabilityRows: stp5.capabilityRows };
 }
 
+async function evaluateStp6Node({ repoRoot, resolvedEngines, skipProbes }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STP6/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  const jsPin = resolvedEngines.find((engine) => engine.kind === "javascript");
+  let ts = null;
+  if (jsPin) {
+    ts = loadJsTypeScript(jsPin, repoRoot);
+  }
+  const stp6 = await protocol.evaluateStp6({
+    ts,
+    repoRoot,
+    skipLive: skipProbes || !ts,
+  });
+  const errors = [...stp6.errors];
+  if (!skipProbes && !ts) {
+    errors.push(
+      err(
+        "STP6-resolution",
+        "missing-probes",
+        "STP6 live packed-consumer resolution needs the ts-js engine",
+      ),
+    );
+  }
+  return { errors };
+}
+
 function summarize({
   options,
   errors,
@@ -1738,6 +1902,12 @@ function summarize({
     "tests/sfc-projection/STP4/probes/reject-supplemental-import.ts",
     "tests/sfc-projection/STP4/probes/accept-external-owner.ts",
     "tests/sfc-projection/STP4/probes/reject-illegal-vue.ts",
+    "tests/sfc-projection/STP6/probes/accept-package-instance.ts",
+    "tests/sfc-projection/STP6/probes/accept-package-generics.ts",
+    "tests/sfc-projection/STP6/probes/accept-decl-map.ts",
+    "tests/sfc-projection/STP6/probes/accept-resolution.ts",
+    "tests/sfc-projection/STP6/probes/reject-hidden-metadata.ts",
+    "tests/sfc-projection/STP6/probes/reject-closure.ts",
   ].filter(Boolean);
   for (const rel of probeFiles) {
     const abs = repoPath(repoRoot, rel);
@@ -1786,17 +1956,18 @@ export function selectedCaseIds(result) {
   return [...(result.selectedCaseIds || [])];
 }
 
-const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper)
+const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer)
 
 USAGE
-  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5 [--engine all|ts-js|ts-native] [--require-all] [--json]
+  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
 vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted
 executable under the same engine label, omitted probes, non-exact type matches,
 missing references, and duplicate file checks. STP5 additionally rejects Alias
 rename codecs, query-snapshot reuse, Verter-as-stock-CLI claims, duplicate
-guards, version-label capability, and dormant-product complete claims.
+guards, version-label capability, and dormant-product complete claims. STP6
+rejects unpublished-metadata precision and private virtual declaration paths.
 `;
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
