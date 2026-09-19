@@ -120,6 +120,10 @@ jobs:
             # contracts.
             arch:
               - 'tests/architecture-health/**'
+              # ARH5's public-example guard scans examples/reference for the
+              # displaced VueCarrierCompiler compile_ide/compile_bundle routes,
+              # so example-only edits must still schedule this lane.
+              - 'examples/reference/**'
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'

@@ -118,10 +118,10 @@
         "evidence": [
           {
             "file": "crates/verter_compiler/src/assembly/artifact_schema_tests.rs",
-            "test": "qualified_maps_fail_closed_on_foreign_missing_and_ambiguous_spaces"
+            "test": "terminal_order_is_independent_of_artifact_source_map_and_relation_insertion"
           }
         ],
-        "note": "artifact-set map qualification remains fail-closed on ambiguous spaces"
+        "note": "terminal order is invariant under perturbed artifact-source-map and relation insertion order"
       }
     ]
   },

@@ -191,6 +191,10 @@ test("ARH5 CI: architecture-health filter still selects the train home", () => {
     paths.includes("tests/architecture-health/**"),
     `arch filter omits tests/architecture-health/**: ${paths.join(", ")}`,
   );
+  assert.ok(
+    paths.includes("examples/reference/**"),
+    `arch filter omits examples/reference/**, the ARH5 public-example guard input: ${paths.join(", ")}`,
+  );
 });
 
 test("ARH5-verify CLI: the manifest verify command runs validate() and exits 0", () => {
