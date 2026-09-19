@@ -65,10 +65,11 @@ pub use catalog::{
 pub use generated_identifier::{is_generated_identifier, GENERATED_IDENTIFIER_PREFIX};
 pub use projection_plan::{
     build_projection_plan, build_projection_plan_incremental, incomplete_missing_parse,
-    plan_from_source, AdmittedExpressionId, BindingOrigin, BindingOriginId, BranchEdge,
-    BranchOutcome, CompleteCacheRefusal, CompletePlanCache, ComponentUse, ComponentUseId,
-    GenericBinderRef, Incompleteness, LexicalScopeId, ObligationKind, OrderedAttributeOp,
-    PlanCompleteness, PlanInput, PlanSnapshotId, ProjectionPlan, SyntaxObligation,
+    incomplete_parse_snapshot_mismatch, plan_from_source, AdmittedExpressionId, BindingOrigin,
+    BindingOriginId, BranchEdge, BranchOutcome, CompleteCacheRefusal, CompletePlanCache,
+    ComponentUse, ComponentUseId, ExpressionOccurrence, GenericBinderRef, Incompleteness,
+    LexicalScopeId, ObligationKind, OrderedAttributeOp, PlanCompleteness, PlanInput,
+    PlanSnapshotId, ProjectionPlan, SyntaxObligation,
 };
 #[doc(hidden)]
 pub use registered_carrier_projection::FrameworkParseArtifact;

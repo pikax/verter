@@ -839,3 +839,47 @@ fn projection_plan_is_source_backed_and_dormant_from_ide_route() {
         .expect("existing IDE route stays on the companion path");
     assert!(!ide.ide.code.is_empty());
 }
+
+#[test]
+fn projection_plan_refuses_unbound_parse_artifact() {
+    const WITH_USE: &str = concat!(
+        "<script setup lang=\"ts\">\n",
+        "const x = 1;\n",
+        "</script>\n",
+        "<template>\n",
+        "  <Foo :bar=\"x\" />\n",
+        "</template>\n",
+    );
+    let artifact = registered_artifact("file:///plan.vue", WITH_USE);
+    let mismatched = VueProjectionBackend.projection_plan(SIMPLE, &artifact, "file:///plan.vue");
+    assert!(!mismatched.is_complete(), "{:?}", mismatched.completeness);
+    match &mismatched.completeness {
+        verter_compiler::framework_common::PlanCompleteness::Incomplete { reasons } => {
+            assert!(
+                reasons.iter().any(|reason| matches!(
+                    reason,
+                    verter_compiler::framework_common::Incompleteness::ParseSnapshotMismatch
+                )),
+                "{reasons:?}"
+            );
+        }
+        other => panic!("expected incomplete mismatch, got {other:?}"),
+    }
+    let mut cache = verter_compiler::framework_common::CompletePlanCache::default();
+    assert_eq!(
+        cache.admit(mismatched.clone()).err(),
+        Some(verter_compiler::framework_common::CompleteCacheRefusal::Incomplete)
+    );
+    let matched = VueProjectionBackend.projection_plan(WITH_USE, &artifact, "file:///plan.vue");
+    assert!(matched.is_complete(), "{:?}", matched.completeness);
+    let other_profile = registered_artifact_with_grammar(
+        "file:///plan.vue",
+        WITH_USE,
+        "{{",
+        "}}",
+        std::iter::once("ion-"),
+    );
+    let profiled =
+        VueProjectionBackend.projection_plan(WITH_USE, &other_profile, "file:///plan.vue");
+    assert_ne!(matched.snapshot, profiled.snapshot);
+}

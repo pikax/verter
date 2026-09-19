@@ -6,6 +6,7 @@ import {
   DIRTY_CACHE,
   STP9_MANDATORY_CASES,
   assertCompleteCachePolicy,
+  assertRustCases,
   assertTypeFree,
   cloneJson,
   evaluateRejectTwins,
@@ -56,4 +57,37 @@ test("STP9 evaluate joins rust identity/shadow/determinism cases", async () => {
     [...STP9_MANDATORY_CASES],
     ["STP9-ids", "STP9-shadow", "STP9-type-free", "STP9-complete-cache", "STP9-determinism"],
   );
+});
+
+test("mandatory rust cases fail closed on zero-selection, ignored, and unrelated-only cargo output", () => {
+  const zero = assertRustCases({
+    status: 0,
+    error: null,
+    stdout: "test result: ok. 0 passed; 0 failed\n",
+    ok: true,
+  });
+  assert.ok(zero.length > 0, "zero-selection cargo ok must not pass");
+  const ignored = assertRustCases({
+    status: 0,
+    error: null,
+    stdout: [
+      "test framework_common::projection_plan::tests::stp9_ids_comment_and_unrelated_sibling_preserve_use_identities ... ok",
+      "test framework_common::projection_plan::tests::stp9_shadow_nested_slot_and_loop_origins_are_distinct ... ok",
+      "test framework_common::projection_plan::tests::stp9_type_free_plan_module_does_not_call_typeinfo ... ok",
+      "test framework_common::projection_plan::tests::stp9_determinism_fresh_matches_incremental ... ok",
+      "test result: ok. 4 passed; 0 failed",
+    ].join("\n"),
+    ok: true,
+  });
+  assert.ok(
+    ignored.some((row) => row.caseId === "STP9-complete-cache"),
+    JSON.stringify(ignored),
+  );
+  const unrelated = assertRustCases({
+    status: 0,
+    error: null,
+    stdout: "test some_other_filter ... ok\ntest result: ok. 1 passed; 0 failed\n",
+    ok: true,
+  });
+  assert.equal(unrelated.length, STP9_MANDATORY_CASES.length, JSON.stringify(unrelated));
 });
