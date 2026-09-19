@@ -1,0 +1,63 @@
+{
+  "id": "producer-promotion-rule.v1",
+  "schema": 1,
+  "contractNode": "PG0",
+  "law": "A producer capability is promoted to supported-and-exposed product status only when the executable workbench covers it. Promotion is earned by executable playground/inspection coverage on the canonical exposure descriptors, not asserted by a producer's own claim.",
+  "rule": {
+    "preconditions": [
+      {
+        "id": "descriptor-registration",
+        "requirement": "The capability has a DX1 exposure-descriptor registration (a DX0 feature-exposure-contract.v1 operation row, or its successor DX1 contract), with hostExecutionClass, answerRail, maturity and producing owner taken from the producing owner and the product-surface catalog, never from the consuming surface's presentation."
+      },
+      {
+        "id": "executable-route",
+        "requirement": "An executable workbench route exists: a runnable route in the playground workbench (or inspection surface) that a user can invoke without internal tooling, producing a source-linked result or explanation on the correct answer rail with its completeness state."
+      },
+      {
+        "id": "replay-case",
+        "requirement": "A replay scenario exists and is registered (DX6/DX6R-lineage replay case): re-running the route on the recorded receipt basis reproduces the recorded result; routes that cannot be replayed are not executable coverage."
+      },
+      {
+        "id": "receipt-binding",
+        "requirement": "Every route result binds the DX0 product-receipt-basis field set (sourceRevisions, projectConfiguration, engineIdentity, hostIdentity, completenessState) and rejects stale-basis results instead of publishing them."
+      }
+    ],
+    "nativeOnlyClause": "A NativeOnly capability is promoted only with real, explicitly selected native execution through the DX4/DX5 companion route (or a BWH1-admitted browser semantic host whose build proves the closure). An inactive/disabled card, an undocumented shell escape, arbitrary companion command execution, or a silently substituted Portable engine each fail the rule regardless of UI presence.",
+    "futureClause": "A capability whose producer does not ship anywhere yet is future: it registers as a named obligation with its producing node (PG0-AC2), renders as the distinct future/unsupported state, and stays out of promotion. Future framework/profile support (PG0.4) acquires these obligations automatically when its descriptors register; the workbench neither implements missing framework compilers nor replaces TypeScript.",
+    "demotion": "Removing an executable route, breaking its replay case, or unbinding its receipt basis demotes the capability back to promotion-blocked. Product superiority claims from installation or protocol smoke alone are forbidden; a protocol smoke or screenshot is not semantic-correctness proof.",
+    "enforcement": [
+      "PG0-AC1: the discriminating join runs in tests/playground/PG0/pg0.test.mjs — every DX0 operation id maps to exactly one feature-matrix operationCoverage row with equality on hostExecutionClass, answerRail, browserExecutable, workbenchState and promotionBlocked; a promoted (exposed/unblocked) operation without its matrix row, route owner and obligations fails coverage.",
+      "PG0-AC2: a family row with familyState future must name its futureProducer and must not claim any exposed operation; a family presenting success without a shipping producer fails.",
+      "The promotion ledger itself is owned by the existing PM/ledger authority; this rule is the contract the ledger enforces, not a second status store."
+    ],
+    "ownership": {
+      "finalOwner": "expansion.playground-workbench",
+      "producerAuthority": "Semantic algorithms, project resolution, format/lint logic, TypeScript projection and edit transactions stay with their existing producing owners; promotion changes exposure status, never producer ownership.",
+      "retirement": "The manually curated compiler-demo feature list (Output.vue allTabs) is retired by PG2's generated explorer cutover; between ratification and cutover the curated list is characterized and preserved, and after cutover two active feature-coverage authorities may not coexist."
+    }
+  },
+  "receivingAmendments": [
+    { "receiver": "DX1", "product": "exposure-descriptor registration schema consumed as the promotion precondition; PG0 registers matrix rows against it and keeps promotion blocked until executable exposure exists", "productionCapable": true },
+    { "receiver": "PG1", "product": "project workspace, source editing and input management bind the session sources/project state", "productionCapable": true },
+    { "receiver": "PG2", "product": "generated feature explorer and executable operation console generated from playground-feature-matrix.v1; owns the curated-tab-list cutover", "productionCapable": true },
+    { "receiver": "PG3", "product": "semantic and TypeInfo explorer routes (typeinfo, scopes/bindings, metadata families)", "productionCapable": true },
+    { "receiver": "PG3P", "product": "project-model and configuration evidence explorer routes (typechecking family, projects/configuration registration)", "productionCapable": true },
+    { "receiver": "PG4", "product": "flow, query and proof explanation laboratory routes (flow/query family)", "productionCapable": true },
+    { "receiver": "PG5", "product": "projection, source-map, AST and IR explorer routes (compiler/IR/mappings family)", "productionCapable": true },
+    { "receiver": "PG6", "product": "compiler target and artifact workbench routes (compile carrier artifacts)", "productionCapable": true },
+    { "receiver": "PG7", "product": "Monaco language-service adapter routes (semantics family operations)", "productionCapable": true },
+    { "receiver": "PG7I", "product": "language-operation inspector and edit-plan panel routes (rename/format action operations)", "productionCapable": true },
+    { "receiver": "PG8", "product": "lint, formatter and semantic refactor workbench routes (lint and format/actions/refactors families)", "productionCapable": true },
+    { "receiver": "PG9", "product": "isolated runtime preview and runtime-error mapping (runtime family)", "productionCapable": true },
+    { "receiver": "PG10", "product": "SSR, hydration and framework runtime inspection (runtime family)", "productionCapable": true },
+    { "receiver": "PG11", "product": "bundler and HMR behavior inspection through the companion (runtime family)", "productionCapable": true },
+    { "receiver": "PG11D", "product": "runtime DOM and style correspondence probes (runtime family)", "productionCapable": true },
+    { "receiver": "PG12", "product": "shareable reproduction sessions and local export binding the session receipt basis", "productionCapable": true },
+    { "receiver": "PG13", "product": "isolated dual-version comparison binding engineIdentity (typechecking family)", "productionCapable": true },
+    { "receiver": "PG13B", "product": "predicate-driven regression search across pinned versions", "productionCapable": true },
+    { "receiver": "PG14", "product": "interactive performance and invalidation laboratory (performance family; AC-RESOURCE corpus binds here)", "productionCapable": true },
+    { "receiver": "PG15", "product": "reproduction-to-regression fixture promotion feeding replay cases", "productionCapable": true },
+    { "receiver": "PG16", "product": "workbench interaction, accessibility and browser qualification", "productionCapable": true },
+    { "receiver": "PG17", "product": "all-supported-feature workbench terminal proving generated coverage end-to-end", "productionCapable": true }
+  ]
+}

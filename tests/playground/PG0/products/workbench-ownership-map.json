@@ -1,0 +1,39 @@
+{
+  "id": "workbench-ownership-map.v1",
+  "schema": 1,
+  "contractNode": "PG0",
+  "finalOwner": "expansion.playground-workbench",
+  "outcomes": [
+    {
+      "id": "playground-feature-matrix.v1",
+      "currentOwner": "PG0",
+      "finalOwner": "PG0 (contract) with PG2 (generated explorer as the live projection)",
+      "receivingAcceptance": "PG0-AC1: a promoted supported feature absent from the executable workbench matrix fails coverage; pg0.test.mjs joins every DX0 operation id to exactly one matrix row with descriptor equality"
+    },
+    {
+      "id": "workbench-session.v1",
+      "currentOwner": "PG0",
+      "finalOwner": "PG0 (contract) with PG1 (workspace/input management) and PG12 (sharing/export) as binding consumers",
+      "receivingAcceptance": "the session model binds the DX0 product-receipt-basis field set verbatim and adds no second engine; PG0-AC-BASIS binds receipt/incremental runtime tests to the downstream owners instead of fabricating a runtime test here"
+    },
+    {
+      "id": "producer-promotion-rule.v1",
+      "currentOwner": "PG0",
+      "finalOwner": "PG0 (contract) enforced through the existing PM/ledger authority and DX1 registration",
+      "receivingAcceptance": "PG0-AC-EXPOSURE: promotion requires DX1 registration, an executable playground/inspection route and a replay case; native-only capabilities require explicitly selected native execution, not an inactive card"
+    }
+  ],
+  "receivingAmendments": "See producer-promotion-rule.v1.receivingAmendments for the per-node product handoffs (DX1, PG1–PG17); PG0 itself is a contract-only receiver of DX0 exposure law and BWH0 browser-execution law.",
+  "displacedRoutes": [
+    {
+      "route": "manually curated compiler-demo feature list (Output.vue allTabs: preview, files, analysis, lint, outline, cssMatch, map, diagnostics, templateAst, cssVarFlow, depGraph, ssr insert)",
+      "characterisation": "The current user-visible tab set is characterized by packages/playground/e2e/output-tabs.spec.ts, analysis-tab.spec.ts and compilation.spec.ts before any cutover.",
+      "cutoverOwner": "PG2",
+      "rule": "Do not remove useful existing behavior merely because the generated explorer is not ready; inert adapters may land first; after cutover no two active feature-coverage authorities coexist."
+    }
+  ],
+  "deletionPopulationThisNode": "empty: PG0 is contract-only (0 production LOC, 0 files) and deletes nothing",
+  "acBasisDownstreamTestOwner": "PG2 (generated explorer equality: matrix rows vs presented features), PG12 (replay on the session receipt basis) and PG16 (browser qualification) own the incremental-vs-fresh and receipt-binding runtime tests; PG0 is contract-only and adds no runtime test",
+  "acResourceRationale": "PG0 touches no hot paths and no UI: 0 production LOC across 0 files, so the WSP equal-work corpus and client-paint obligations do not apply; performance-family obligations bind to PG14 with real-client cost accounting",
+  "acExposureRegistration": "DX1 owns the exposure-descriptor registration schema; every operation this train exposes supplies DX1 registration, an executable playground adapter and a replay case before promotion, and until the DX1 explorer ships the schema and cases are registered in playground-feature-matrix.v1 with promotion blocked on executable exposure"
+}

@@ -54,7 +54,7 @@
     { "receiver": "JBT0", "product": "official JetBrains baseline consumes the exposure and receipt obligations", "productionCapable": false },
     { "receiver": "LSO0", "product": "authored-coordinate semantic operations keep semantic-rail law", "productionCapable": false },
     { "receiver": "LSPX0", "product": "LSP capability and interoperability ownership consumes the capability inventory", "productionCapable": true },
-    { "receiver": "PG0", "product": "all-feature workbench consumes producer-coverage obligations", "productionCapable": true },
+    { "receiver": "PG0", "product": "all-feature workbench consumes producer-coverage obligations (contract-only receiver; PG1+ own workbench production)", "productionCapable": false },
     { "receiver": "PM0", "product": "project-model derivation authority keeps projectConfiguration receipt binding", "productionCapable": false },
     { "receiver": "PUB0", "product": "versioned public request/result and capability truth reuses exposure vocabulary", "productionCapable": false },
     { "receiver": "RFX0", "product": "semantic refactor and preservation constitution keeps rail separation", "productionCapable": true },
