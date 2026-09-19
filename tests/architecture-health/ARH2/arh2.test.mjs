@@ -133,6 +133,28 @@ test("ARH2-deletion dirty twin: unexecuted deletion is rejected (AC1)", () => {
   );
 });
 
+test("ARH2-deletion dirty twin: an arbitrary absent path is not the executed deletion (AC1)", () => {
+  const dirty = cloneProducts();
+  dirty["characterization"].deletion.deletedPath = "packages/definitely-never-existed";
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.caseId === "ARH2-deletion" && e.code === "deletion-path-unbound"),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-deletion dirty twin: empty same-change refresh is rejected (AC1)", () => {
+  const dirty = cloneProducts();
+  dirty["characterization"].deletion.sameChangeRefresh = [];
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.caseId === "ARH2-deletion" && e.code === "deletion-refresh-empty"),
+    JSON.stringify(result.errors),
+  );
+});
+
 test("ARH2-deletion dirty twin: unknown satisfied debt is rejected", () => {
   const dirty = cloneProducts();
   dirty["characterization"].deletion.satisfies = "ARH0-DEBT-99";
@@ -213,6 +235,57 @@ const retargetLane = (products, from, to) => {
     if (idx !== -1) lanes[idx] = to;
   }
 };
+
+test("ARH2-characterization dirty twin: nested inline module is not a cross-product witness id (AC2)", () => {
+  const dirty = cloneProducts();
+  const retarget = (pin) => {
+    if (pin.filter !== "scheduler::tests") return;
+    const previous = pin.command;
+    pin.filter = "scheduler::pool_topology";
+    pin.command = `cargo nextest run -p verter_scheduler ${pin.filter}`;
+    retargetLane(dirty, previous, pin.command);
+  };
+  for (const h of dirty["characterization"].hotspots) {
+    for (const pin of h.pins) retarget(pin);
+  }
+  for (const r of dirty["characterization"].routes) {
+    for (const pin of r.pins) retarget(pin);
+  }
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH2-characterization" &&
+        e.code === "pin-filter-selects-nothing" &&
+        e.detail.includes("scheduler::pool_topology"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: witness is bound to its enclosing module (AC2)", () => {
+  const dirty = cloneProducts();
+  const pin = dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-2").pins[0];
+  const previous = pin.command;
+  pin.witnesses = [
+    pin.witnesses.find((w) => w.test === "tombstone_rejects_pre_remove_source_submission"),
+  ];
+  pin.filter = "scheduler::tombstone_rejects_pre_remove_source_submission";
+  pin.command = `cargo nextest run -p verter_scheduler ${pin.filter}`;
+  retargetLane(dirty, previous, pin.command);
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH2-characterization" &&
+        e.code === "pin-filter-selects-nothing" &&
+        e.detail.includes("scheduler::tests::tombstone_rejects_pre_remove_source_submission"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
 
 test("ARH2-characterization dirty twin: filesystem src:: filter selecting no compiled module is rejected (AC2)", () => {
   const dirty = cloneProducts();
@@ -489,6 +562,23 @@ test("ARH2-separation dirty twin: absent runner class is rejected (AC5)", () => 
   );
 });
 
+test("ARH2-separation dirty twin: clean and warm recipes measuring different crates are rejected (AC5)", () => {
+  const dirty = cloneProducts();
+  const dim = dirty["complexity-measurements"].dimensions.find(
+    (d) => d.id === "clean-warm-build-time",
+  );
+  dim.mechanisms.find((recipe) => recipe.cacheState === "warm").command =
+    "cargo build -p verter_debug_assert --timings";
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-separation" && e.code === "cargo-build-recipe-identity-mismatch",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
 test("ARH2-separation dirty twin: clean/warm missing a cache state is rejected (AC5)", () => {
   const dirty = cloneProducts();
   const dim = dirty["complexity-measurements"].dimensions.find(
@@ -668,6 +758,24 @@ test("ARH2-provenance: the pinned candidate is a 40-hex ancestor commit of HEAD"
   assert.match(candidate, /^[0-9a-f]{40}$/);
   assert.deepEqual(validateProvenance(candidate), { ok: true });
   assert.equal(validateProvenance("0".repeat(40)).ok, false);
+});
+
+test("ARH2 CI: architecture-health filter selects performance methodology inputs", () => {
+  const ci = fs.readFileSync(new URL("../../../.github/workflows/ci.yml", import.meta.url), "utf8");
+  const start = ci.indexOf("\n            arch:\n");
+  assert.notEqual(start, -1, "ci.yml must declare the arch filter");
+  const rest = ci.slice(start + 1);
+  const next = rest.search(/\n            [a-z_]+:\n/);
+  const block = next === -1 ? rest : rest.slice(0, next);
+  const paths = [...block.matchAll(/- '([^']+)'/g)].map((m) => m[1]);
+  assert.ok(
+    paths.includes("performance-gates.toml"),
+    `arch filter omits performance-gates.toml: ${paths.join(", ")}`,
+  );
+  assert.ok(
+    paths.includes("scripts/validate-performance-gates.mjs"),
+    `arch filter omits scripts/validate-performance-gates.mjs: ${paths.join(", ")}`,
+  );
 });
 
 test("ARH2-verify CLI: the manifest verify command runs validate() and exits 0 on the clean tree", () => {

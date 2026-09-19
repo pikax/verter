@@ -106,19 +106,25 @@ jobs:
               # release graph; release-only changes must execute that guard.
               - '.github/workflows/release.yml'
               - '.github/workflows/ci.yml'
-            # Gates the `architecture-health` lane (ARH0/ARH1 constitution
+            # Gates the `architecture-health` lane (ARH0/ARH1/ARH2 constitution
             # verifiers). Their products join the live Rust tree — hotspot
             # sources, crate Cargo manifests and the cross-crate consumer
             # population derived from EVERY crate — so a product/verifier-only
             # edit under tests/architecture-health/ and any Rust dependency or
-            # surface change must both run the guard. The js filter does not
-            # cover either input class, which is exactly how an ARH1 edit or a
-            # scheduler.rs change could skip the ratified contracts.
+            # surface change must both run the guard. ARH2 also reads
+            # performance-gates.toml and imports scripts/validate-performance-gates.mjs
+            # to bind runner class and measurement cells, so those methodology
+            # inputs must select this lane; they are not in the js filter.
+            # The js filter does not cover either input class, which is exactly
+            # how an ARH1 edit or a scheduler.rs change could skip the ratified
+            # contracts.
             arch:
               - 'tests/architecture-health/**'
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'performance-gates.toml'
+              - 'scripts/validate-performance-gates.mjs'
               - '.github/workflows/ci.yml'
             # Gates `wasm-build` ALONE, which both builds the browser artifact
             # and verifies the committed carrier fixture against it. So this

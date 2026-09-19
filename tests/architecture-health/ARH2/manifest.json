@@ -31,6 +31,9 @@
         "deletion-cutover-unknown",
         "deletion-key-mismatch",
         "deletion-owner-mismatch (the executing owner of the cutover row is ARH2)",
+        "deletion-path-unbound (deletedPath equals the ARH0-DEBT-1 candidate path with the (deleted) marker stripped; an arbitrary absent path is not the executed deletion)",
+        "deletion-refresh-empty",
+        "deletion-refresh-population-drift (sameChangeRefresh is exactly the nonempty ARH1-CUT-1 predecessor refresh population)",
         "deletion-refresh-path-missing",
         "deletion-rationale-missing"
       ]
@@ -49,7 +52,7 @@
         "witness-file-missing",
         "witness-test-missing",
         "witness-not-a-test (a #[test]/#[tokio::test] attribute must sit by the declaration)",
-        "pin-filter-selects-nothing (the filter is a substring of the compiled nextest id from mod/#[path] declarations; a filesystem src:: fragment selecting no module is rejected)",
+        "pin-filter-selects-nothing (the filter is a substring of the compiled nextest id from the file's mod/#[path] path plus the witness function's enclosing inline module; a filesystem src:: fragment, a sibling inline module, or a file-level module that does not enclose the function is rejected)",
         "route-characterization-cardinality (every ARH3/ARH4 narrowing cutover row is characterized exactly once before its heir narrows it)",
         "route-characterization-invented",
         "route-path-mismatch",
@@ -78,6 +81,7 @@
         "gate-cell-wrong-operation (application-latency must cite a host/session cell, not a standalone compiler process)",
         "cargo-build-recipe-malformed",
         "cargo-build-cache-state-unknown",
+        "cargo-build-recipe-identity-mismatch (clean and warm recipes must measure the same cargo build targets)",
         "dimension-cache-state-incomplete (clean/warm build time must bind both cache states)",
         "behavior-lane-unbound (every pinned characterization lane is recorded in the behavior dimension)",
         "behavior-lane-invented (every recorded lane is a real pin)",

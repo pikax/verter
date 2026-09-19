@@ -14,8 +14,9 @@
  * real cargo nextest lane: the command is canonical (`cargo nextest run`),
  * the crate is a live workspace member, the filter selects the recorded
  * witnesses under nextest substring semantics over the compiled module path
- * (`mod` / `#[path]`, never a filesystem `src::` fragment), and every
- * witness is a real #[test] function in a real file. Every cutover route a successor
+ * (`mod` / `#[path]` plus the enclosing inline `mod` of each function, never
+ * a filesystem `src::` fragment or a cross-product of sibling inline modules),
+ * and every witness is a real #[test] function in a real file. Every cutover route a successor
  * narrows (ARH1 register rows owned by ARH3/ARH4, plus the ARH2-executed
  * deletion) is characterized exactly once, with the narrowed surface
  * derived live (the scheduler pub bookkeeping fields, the pub fn test_*
@@ -68,6 +69,16 @@ const DIMENSION_MECHANISM_KIND = Object.freeze({
   "application-latency": "gate-cell",
 });
 const CARGO_BUILD_CACHE_STATES = Object.freeze(["clean", "warm"]);
+// ARH1-CUT-1 same-change refresh: the predecessor products that recorded the
+// packages/core deletion (inventory row removed, debt/cutover dispositions
+// updated, dependency-contracts re-derived). Vacuous or swapped lists cannot
+// claim that refresh.
+const REQUIRED_DELETION_REFRESH = Object.freeze([
+  "tests/architecture-health/ARH0/products/codebase-inventory.json",
+  "tests/architecture-health/ARH0/products/debt-register.json",
+  "tests/architecture-health/ARH1/products/cutover-register.json",
+  "tests/architecture-health/ARH1/products/dependency-contracts.json",
+]);
 // Charter AC3 concerns, verbatim; each must carry existing named evidence.
 const AC3_CONCERNS = Object.freeze([
   "fresh-versus-incremental equivalence",
@@ -178,10 +189,130 @@ function stripComments(text) {
   return text.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
 }
 
+/** Length-preserving blank of comments and string literals so brace matching
+ *  and `mod` scans see only code. Newlines stay so `fn` indices still align. */
+function blankCommentsAndStrings(text) {
+  const chars = text.split("");
+  const n = chars.length;
+  const blankRange = (from, to) => {
+    for (let i = from; i < to && i < n; i++) {
+      if (chars[i] !== "\n" && chars[i] !== "\r") chars[i] = " ";
+    }
+  };
+  let i = 0;
+  while (i < n) {
+    const next = i + 1 < n ? chars[i + 1] : "";
+    if (chars[i] === "/" && next === "/") {
+      let j = i + 2;
+      while (j < n && chars[j] !== "\n") j++;
+      blankRange(i, j);
+      i = j;
+      continue;
+    }
+    if (chars[i] === "/" && next === "*") {
+      let j = i + 2;
+      while (j + 1 < n && !(chars[j] === "*" && chars[j + 1] === "/")) j++;
+      blankRange(i, Math.min(j + 2, n));
+      i = Math.min(j + 2, n);
+      continue;
+    }
+    let k = i;
+    if (chars[k] === "b" || chars[k] === "c") k++;
+    if (k < n && chars[k] === "r") {
+      k++;
+      let hashes = 0;
+      while (k < n && chars[k] === "#") {
+        hashes++;
+        k++;
+      }
+      if (k < n && chars[k] === '"') {
+        const close = `"${"#".repeat(hashes)}`;
+        const rest = chars.slice(k + 1).join("");
+        const idx = rest.indexOf(close);
+        const end = idx === -1 ? n : k + 1 + idx + close.length;
+        blankRange(i, end);
+        i = end;
+        continue;
+      }
+    }
+    k = i;
+    if (chars[k] === "b" || chars[k] === "c") k++;
+    if (k < n && chars[k] === '"') {
+      let j = k + 1;
+      while (j < n) {
+        if (chars[j] === "\\") {
+          j += 2;
+          continue;
+        }
+        if (chars[j] === '"') {
+          j++;
+          break;
+        }
+        j++;
+      }
+      blankRange(i, j);
+      i = j;
+      continue;
+    }
+    i++;
+  }
+  return chars.join("");
+}
+
+function matchingBrace(text, open) {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === "{") depth++;
+    else if (text[i] === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/** Outermost-first names of inline `mod` blocks whose body contains `pos`.
+ *  Nested `mod tests { mod pool_topology { } }` yields `["tests", "pool_topology"]`. */
+function enclosingInlineModules(blanked, pos) {
+  const re = /(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/g;
+  const containing = [];
+  let match;
+  while ((match = re.exec(blanked))) {
+    const open = match.index + match[0].length - 1;
+    const close = matchingBrace(blanked, open);
+    if (close === -1) continue;
+    if (pos > open && pos < close) containing.push({ name: match[1], open });
+  }
+  containing.sort((a, b) => a.open - b.open);
+  return containing.map((m) => m.name);
+}
+
+function cargoBuildRecipeIdentity(command) {
+  const tokens = command.trim().split(/\s+/);
+  const packages = [];
+  const rest = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] === "-p" || tokens[i] === "--package") {
+      if (i + 1 < tokens.length) packages.push(tokens[++i]);
+      continue;
+    }
+    rest.push(tokens[i]);
+  }
+  packages.sort();
+  return `${packages.join(",")}::${rest.join(" ")}`;
+}
+
+function executedDeletionPath(debt) {
+  if (!debt || typeof debt.candidate !== "string") return null;
+  const trimmed = debt.candidate.trim();
+  return trimmed.endsWith(" (deleted)") ? trimmed.slice(0, -" (deleted)".length) : trimmed;
+}
+
 /**
- * `mod` declarations of a Rust file, including `#[path]` retargets and
- * inline `mod name { ... }` blocks. Used to reconstruct the compiled
- * nextest module path; a filesystem path under `src/` is not a module.
+ * File-level `mod` declarations of a Rust file, including `#[path]`
+ * retargets. Inline `mod name { ... }` blocks are not extra paths for the
+ * whole file; each function binds to its enclosing inline module separately.
+ * A filesystem path under `src/` is not a module.
  */
 function parseModDecls(text) {
   const stripped = stripComments(text);
@@ -226,15 +357,10 @@ function indexCrateModules(crate) {
     const key = `${file}|${modulePath}`;
     if (seen.has(key) || !existsRel(file)) return;
     seen.add(key);
-    const paths = map.get(file) || [];
-    paths.push(modulePath);
-    map.set(file, paths);
+    if (!map.has(file)) map.set(file, modulePath);
     for (const decl of parseModDecls(readRel(file))) {
       const childPath = modulePath ? `${modulePath}::${decl.name}` : decl.name;
-      if (decl.inline) {
-        paths.push(childPath);
-        continue;
-      }
+      if (decl.inline) continue;
       const childFile = resolveModFile(file, decl);
       if (childFile) walk(childFile, childPath);
     }
@@ -252,15 +378,21 @@ function indexCrateModules(crate) {
 }
 
 /**
- * Compiled nextest module paths for a witness file, derived from the crate's
- * `mod` / `#[path]` tree. Filesystem `src::…` fragments are not IDs.
+ * Compiled nextest id for one witness: the file's crate-module path, then
+ * the inline `mod` chain that actually encloses the function, then the
+ * function name. Flattening every inline module onto the file and pairing
+ * it with every function invents IDs such as `scheduler::pool_topology::tombstone_…`.
  */
-function compiledModulePaths(crate, file) {
+function compiledWitnessId(crate, file, testName) {
   const rel = posixRel(file);
   const index = indexCrateModules(crate);
-  const paths = index.get(rel);
-  if (!paths || paths.length === 0) return [];
-  return [...new Set(paths.filter((p) => p.length > 0))];
+  if (!index.has(rel)) return null;
+  const fileModule = index.get(rel);
+  const text = readRel(file);
+  const fnMatch = text.match(new RegExp(`fn\\s+${testName}\\s*\\(`));
+  if (!fnMatch) return null;
+  const inline = enclosingInlineModules(blankCommentsAndStrings(text), fnMatch.index);
+  return [...(fileModule ? [fileModule] : []), ...inline, testName].join("::");
 }
 
 /**
@@ -315,8 +447,8 @@ function checkPin(pin, crate, errors, caseId) {
   }
   for (const witness of pin.witnesses) {
     if (!checkWitness(witness, errors, caseId)) continue;
-    const modules = compiledModulePaths(crate, witness.file);
-    if (modules.length === 0) {
+    const id = compiledWitnessId(crate, witness.file, witness.test);
+    if (!id) {
       errors.push({
         caseId,
         code: "pin-filter-selects-nothing",
@@ -324,12 +456,11 @@ function checkPin(pin, crate, errors, caseId) {
       });
       continue;
     }
-    const ids = modules.map((mod) => `${mod}::${witness.test}`);
-    if (!ids.some((id) => id.includes(pin.filter))) {
+    if (!id.includes(pin.filter)) {
       errors.push({
         caseId,
         code: "pin-filter-selects-nothing",
-        detail: `filter ${pin.filter} is not a substring of the compiled nextest id ${ids[0]}`,
+        detail: `filter ${pin.filter} is not a substring of the compiled nextest id ${id}`,
       });
     }
   }
@@ -538,6 +669,15 @@ function validateDeletion(products, predecessors, errors) {
       code: "deletion-debt-unknown",
       detail: `${deletion.satisfies} is not a shipped ARH0 debt row`,
     });
+  } else {
+    const executed = executedDeletionPath(debt);
+    if (deletion.deletedPath !== executed) {
+      errors.push({
+        caseId,
+        code: "deletion-path-unbound",
+        detail: `${deletion.deletedPath} is not the executed ${deletion.satisfies} path ${executed}`,
+      });
+    }
   }
   const cutover = arh1["cutover-register"].rows.find((r) => r.id === deletion.cutoverRow);
   if (!cutover) {
@@ -562,7 +702,21 @@ function validateDeletion(products, predecessors, errors) {
       });
     }
   }
-  for (const refreshed of deletion.sameChangeRefresh || []) {
+  const refresh = Array.isArray(deletion.sameChangeRefresh) ? deletion.sameChangeRefresh : [];
+  if (refresh.length === 0) {
+    errors.push({
+      caseId,
+      code: "deletion-refresh-empty",
+      detail: "sameChangeRefresh must be the nonempty predecessor refresh population",
+    });
+  } else if (!sameSet(refresh, [...REQUIRED_DELETION_REFRESH])) {
+    errors.push({
+      caseId,
+      code: "deletion-refresh-population-drift",
+      detail: "sameChangeRefresh is not exactly the ARH1-CUT-1 predecessor refresh population",
+    });
+  }
+  for (const refreshed of refresh) {
     if (!existsRel(refreshed)) {
       errors.push({ caseId, code: "deletion-refresh-path-missing", detail: refreshed });
     }
@@ -863,6 +1017,7 @@ function validateSeparation(products, predecessors, errors) {
     }
     if (dimension.mechanismKind === "cargo-build") {
       const states = new Set();
+      const identities = [];
       for (const recipe of mechanisms) {
         if (
           !recipe ||
@@ -887,12 +1042,20 @@ function validateSeparation(products, predecessors, errors) {
           continue;
         }
         states.add(recipe.cacheState);
+        identities.push(cargoBuildRecipeIdentity(recipe.command));
       }
       if (!states.has("clean") || !states.has("warm")) {
         errors.push({
           caseId,
           code: "dimension-cache-state-incomplete",
           detail: `${dimension.id} must bind both clean and warm repository-build cache states`,
+        });
+      }
+      if (identities.length >= 2 && new Set(identities).size !== 1) {
+        errors.push({
+          caseId,
+          code: "cargo-build-recipe-identity-mismatch",
+          detail: `${dimension.id} clean and warm recipes must measure the same cargo build targets`,
         });
       }
     }
