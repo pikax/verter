@@ -204,6 +204,8 @@
           "crates/verter_session/src/component_meta_pick_omit_tests.rs",
           "crates/verter_session/src/component_meta_publication_demand_tests.rs",
           "crates/verter_session/src/component_meta_surface_equivalence_tests.rs",
+          "crates/verter_session/src/cooperative_scheduler.rs",
+          "crates/verter_session/src/cooperative_scheduler_tests.rs",
           "crates/verter_session/src/host_batch_coordinator.rs",
           "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
           "crates/verter_session/src/host_construction.rs",
@@ -235,11 +237,12 @@
           "crates/verter_session/tests/cases/g_misc2/scheduler_audit_attributes_worker.rs",
           "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs",
           "crates/verter_session/tests/cases/g_misc2/scheduler_worker_tls_propagation.rs",
+          "crates/verter_session/tests/cases/g_session/cooperative_drive_seam.rs",
           "crates/verter_session/tests/cases/g_session/inline_execute_clears_all_install_tls_slots.rs",
           "crates/verter_session/tests/cases/relation_nominal_authority.rs",
           "crates/verter_session/tests/cases/runtime_constructor_matrix.rs"
         ],
-        "ownerCratePopulation": "the importers array is the complete cross-crate population (45 files: 24 verter_session src files, 16 verter_session integration tests, three verter_lsp audit test cases, verter_dx_baseline materialize and verter_napi lib), enforced by the verifier in both directions on comment-stripped syntax; crates/verter_lsp/src/external_ts_sync.rs references verter_scheduler::cancellation, not the scheduler module, and is deliberately absent; population re-derivation on a moving candidate is ARH2's recorded obligation",
+        "ownerCratePopulation": "the importers array is the complete cross-crate population (48 files: 26 verter_session src files, 17 verter_session integration tests, three verter_lsp audit test cases, verter_dx_baseline materialize and verter_napi lib), enforced by the verifier in both directions on comment-stripped syntax; crates/verter_lsp/src/external_ts_sync.rs references verter_scheduler::cancellation, not the scheduler module, and is deliberately absent; population re-derivation on a moving candidate is ARH2's recorded obligation",
         "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and BOTH use statements and inline crate paths in code position (verter_audit::attribute! macros, crossbeam_channel::Sender parameter types, the feature-gated hotpath::wrap alias) are measured, so the declared sets equal the production direction both ways; verter_audit has no production use-statement in this file (its use is test configuration) but its inline attribute! paths are production references; cache_id, request_context and pool remain test-only crate-internal roots"
       },
       "constructorCapabilities": [
@@ -385,6 +388,7 @@
           "invalidate",
           "remove",
           "close_file",
+          "has_driver_thread",
           "driver_loop_native",
           "drive_one",
           "drive_all",
@@ -436,7 +440,7 @@
             "item": "test_new",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": ["crates/verter_session/src/host_batch_coordinator.rs"],
+            "consumersAffected": ["crates/verter_session/src/cooperative_scheduler_tests.rs", "crates/verter_session/src/host_batch_coordinator.rs"],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
             "referenceForms": ["Scheduler::test_new", ".test_new("]
           },
@@ -457,7 +461,7 @@
             "item": "test_new_sync",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": [],
+            "consumersAffected": ["crates/verter_session/src/cooperative_scheduler_tests.rs"],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
             "referenceForms": ["Scheduler::test_new_sync", ".test_new_sync("]
           },
@@ -488,7 +492,9 @@
             "kind": "fn",
             "to": "test-configuration",
             "consumersAffected": [
-              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
+              "crates/verter_session/src/cooperative_scheduler_tests.rs",
+              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs",
+              "crates/verter_session/tests/cases/g_session/cooperative_drive_seam.rs"
             ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
             "referenceForms": ["Scheduler::test_arm_dispatch_pause", ".test_arm_dispatch_pause("]
@@ -498,7 +504,9 @@
             "kind": "fn",
             "to": "test-configuration",
             "consumersAffected": [
-              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
+              "crates/verter_session/src/cooperative_scheduler_tests.rs",
+              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs",
+              "crates/verter_session/tests/cases/g_session/cooperative_drive_seam.rs"
             ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
             "referenceForms": [
@@ -521,7 +529,9 @@
             "kind": "fn",
             "to": "test-configuration",
             "consumersAffected": [
-              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
+              "crates/verter_session/src/cooperative_scheduler_tests.rs",
+              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs",
+              "crates/verter_session/tests/cases/g_session/cooperative_drive_seam.rs"
             ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
             "referenceForms": [

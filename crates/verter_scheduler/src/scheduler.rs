@@ -6808,6 +6808,26 @@ impl Scheduler {
 
     // ── Test/WASM Driver Control ──
 
+    /// Whether the native driver thread owns this scheduler's pump.
+    ///
+    /// When true, a non-worker caller (host / `External` thread) must not
+    /// pump [`Self::drive_one`] — it dequeues and inline-executes scheduler
+    /// stage work on the calling thread, breaking the dual-pool isolation
+    /// between host-coordinator threads and the scheduler's stage pools.
+    /// Such callers park through [`Self::wait_or_drive`] instead and the
+    /// driver dispatches. Always `false` on wasm32 (no driver exists).
+    #[must_use]
+    pub fn has_driver_thread(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.driver_handle.lock().is_some()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
+
     /// Process one submission + dispatch one job. Returns false if nothing to do.
     pub fn drive_one(&self) -> bool {
         self.drain_inbox();

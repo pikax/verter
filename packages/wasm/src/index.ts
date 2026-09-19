@@ -131,6 +131,14 @@ type WasmHostResolveSymbolWithAuditFn = (
   mode?: string | null,
 ) => unknown;
 type WasmHostResolveTypeWithAuditFn = (canonicalId: string, declName: string) => unknown;
+type WasmHostCommitInputSnapshotFn = (
+  files: HostAcquiredInputRow[],
+  missing: string[],
+) => HostCommittedInputSnapshotReceipt;
+type WasmHostObserveInputSnapshotFn = (
+  basisId: string,
+  canonical: string,
+) => HostInputSnapshotObservation;
 interface WasmHostBinding {
   resolve: WasmHostResolveFn;
   upsert: WasmHostUpsertFn;
@@ -149,8 +157,49 @@ interface WasmHostBinding {
   listSymbols: WasmHostListSymbolsFn;
   resolveSymbolWithAudit: WasmHostResolveSymbolWithAuditFn;
   resolveTypeWithAudit: WasmHostResolveTypeWithAuditFn;
+  commitInputSnapshot: WasmHostCommitInputSnapshotFn;
+  observeInputSnapshot: WasmHostObserveInputSnapshotFn;
 }
 type WasmHostCtor = new (config?: HostConfig) => WasmHostBinding;
+
+/**
+ * One asynchronously acquired file row: canonical identity plus the
+ * captured bytes. Acquisition happens outside any semantic callback;
+ * committing the wave is the synchronous handoff.
+ */
+export interface HostAcquiredInputRow {
+  canonical: string;
+  content: string;
+}
+
+/**
+ * Receipt for one committed input snapshot. `basisId` is the handle
+ * later observations present; the receipt also binds the execution
+ * host (`"browser"` on wasm32) and the semantic-host engine version
+ * the snapshot was committed under.
+ */
+export interface HostCommittedInputSnapshotReceipt {
+  basisId: string;
+  files: number;
+  missing: number;
+  executionHost: string;
+  engineVersion: string;
+}
+
+/**
+ * Typed observation over a committed input snapshot.
+ *
+ * - `status: "file"` — committed bytes in `content`.
+ * - `status: "absent"` — the acquisition wave probed this canonical and
+ *   recorded it missing (a complete negative).
+ * - `status: "needInputs"` — the canonical was never acquired: the
+ *   caller must run the next asynchronous acquisition wave. The host
+ *   boundary never fetches to fill the gap.
+ */
+export type HostInputSnapshotObservation =
+  | { canonical: string; status: "file"; content: string }
+  | { canonical: string; status: "absent" }
+  | { canonical: string; status: "needInputs" };
 
 let wasmHostCtor: WasmHostCtor | null = null;
 let initialized = false;
@@ -338,6 +387,41 @@ export class Host {
   /** Resolve `declName` in the ordinary module top-level and return the audit record. */
   resolveTypeWithAudit(canonicalId: string, declName: string): unknown {
     return this.inner.resolveTypeWithAudit(canonicalId, declName);
+  }
+
+  /**
+   * Commit one asynchronously-acquired input wave as an immutable
+   * input snapshot.
+   *
+   * The browser acquires file bytes outside any semantic callback, then
+   * hands the acquired rows (`files`) and probed-missing canonicals
+   * (`missing`) here in one synchronous call. Probed-missing keys are
+   * committed as explicit negatives, so observations answer `absent` —
+   * a complete negative distinct from `needInputs`.
+   *
+   * This route writes no source and compiles nothing — registering
+   * acquired bytes for compilation stays on `upsert()`. An incoherent
+   * wave (one canonical with two contents, or both acquired and
+   * probed-missing) throws and stores nothing.
+   */
+  commitInputSnapshot(
+    files: HostAcquiredInputRow[],
+    missing: string[],
+  ): HostCommittedInputSnapshotReceipt {
+    return this.inner.commitInputSnapshot(files, missing);
+  }
+
+  /**
+   * Observe one canonical under a committed input snapshot.
+   *
+   * Returns the typed observation: `"file"` (committed bytes),
+   * `"absent"` (probed missing by the acquiring wave), or
+   * `"needInputs"` (never acquired — the caller must run the next
+   * asynchronous acquisition wave; this boundary never fetches to fill
+   * the gap). An unknown basis id throws.
+   */
+  observeInputSnapshot(basisId: string, canonical: string): HostInputSnapshotObservation {
+    return this.inner.observeInputSnapshot(basisId, canonical);
   }
 }
 

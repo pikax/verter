@@ -169,6 +169,10 @@ mod component_meta_warm_invalidation_oracle_tests;
 /// into retained mapping products, and the fail-closed wire semantics for
 /// asking that projection a position question.
 pub mod content_mapper;
+/// Cooperative drive adapter over the existing scheduler execution
+/// contracts: cancellation and yield points for nonthreaded workers,
+/// preserving scheduler outcomes when not cancelled.
+pub mod cooperative_scheduler;
 pub mod cross_file;
 #[cfg(test)]
 mod cross_file_augmentation_merge_equivalence_tests;
@@ -339,6 +343,11 @@ mod test_worker_pools;
 #[cfg(test)]
 mod artifact_root_retention_tests;
 pub mod input_basis;
+/// Asynchronous input acquisition to committed-snapshot handoff: one
+/// immutable committed `InputBasis` per acquisition wave, typed
+/// `NeedInputs` for unacquired keys, no acquisition capability inside
+/// the seam.
+pub mod input_handoff;
 pub mod meta_resolve;
 #[cfg(test)]
 mod negative_import_route_tests;
@@ -348,6 +357,10 @@ pub mod owner_import_surface;
 mod parity_tests;
 mod parse;
 mod parsed_eval_program;
+/// Portable platform-services boundary: the per-target inventory of
+/// the io/time/scheduling/persistence/process service classes and the
+/// browser-closure dependency guard.
+pub mod platform_services;
 #[cfg(test)]
 mod project_global_cache_tests;
 pub(crate) mod project_semantic_dispatch;
@@ -539,6 +552,18 @@ pub struct VerterHost {
     /// Scheduler for async per-file staging and blocker management.
     /// Upsert delegates coherent source transitions to it.
     pub(crate) scheduler: Arc<verter_scheduler::scheduler::Scheduler>,
+    /// The bound platform-services profile: which io/time/scheduling/
+    /// persistence/process routes this host received, plus the engine
+    /// version they execute under. Verified against the scheduler seam
+    /// at construction.
+    pub(crate) platform_services: crate::platform_services::PortableHostServices,
+    /// Cooperative drive adapter threading cancellation and yield
+    /// points through the scheduler execution contract. Default
+    /// construction is uncancellable with the inline yield hook, so
+    /// driving through it is behaviourally identical to driving the
+    /// scheduler directly until an embedding runtime installs a hook
+    /// or cancels.
+    pub(crate) cooperative_drive: crate::cooperative_scheduler::CooperativeSchedulerAdapter,
     /// Provenance counters for component-meta observability.
     /// Shared with sessions via `Arc`.
     pub(crate) provenance: Arc<MetaProvenance>,

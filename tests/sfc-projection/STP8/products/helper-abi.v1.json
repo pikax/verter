@@ -1,0 +1,50 @@
+{
+  "schema": "HelperABI",
+  "version": 1,
+  "product": "HelperABI",
+  "node": "STP8",
+  "kind": "lock",
+  "frozen": true,
+  "helpers": [
+    {
+      "id": "vue-createApp",
+      "signature": "createApp(comp: Component, props?: RawProps)",
+      "kind": "vue-public-utility",
+      "runtime": true,
+      "case": "STP2-vue-utilities"
+    },
+    {
+      "id": "vue-h",
+      "signature": "h(comp: Component, props?: RawProps, children?: RawChildren)",
+      "kind": "vue-public-utility",
+      "runtime": true,
+      "case": "STP2-vue-utilities"
+    },
+    {
+      "id": "vue-tsx",
+      "signature": "<Comp {...props} /> (jsxImportSource: vue)",
+      "kind": "vue-public-utility",
+      "runtime": true,
+      "case": "STP2-vue-utilities"
+    },
+    {
+      "id": "component-public-instance",
+      "signature": "ComponentPublicInstance<Props, Exposed, RawBindings, CustomProperties, Options, Emits>",
+      "kind": "type-only-witness",
+      "runtime": false,
+      "case": "STP2-instance-concrete"
+    },
+    {
+      "id": "supplemental-template-specifier",
+      "signature": "*.vue.__template",
+      "kind": "compiler-named-supplemental",
+      "runtime": false,
+      "case": "STP4-supplemental-import"
+    }
+  ],
+  "noNewPublicHelperWithoutNamedPredecessorEvidence": true,
+  "noSecondCheckerAbi": true,
+  "noSilentPerCaseFallback": true,
+  "runtimeActivation": "not-authorized-by-STP8",
+  "ac4Rationale": "HelperABI v1 freezes signatures without emitting helpers; generated text/helper size is unchanged and no runtime activation is authorized by this node."
+}
