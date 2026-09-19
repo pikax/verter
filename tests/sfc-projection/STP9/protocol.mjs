@@ -49,6 +49,17 @@ const TYPE_FREE_NEEDLES = Object.freeze([
   "type_info::",
 ]);
 
+export const TYPE_FREE_CRATE_ALLOWLIST = Object.freeze([
+  "crate::assembly::source_unit",
+  "crate::ast::types",
+  "crate::ide::event_to_jsx_name",
+  "crate::ide::get_directive_name",
+  "crate::parser::types",
+  "crate::template::oxc",
+  "crate::types",
+  "crate::compile::parse_sfc",
+]);
+
 const RUST_CASE_FILTERS = Object.freeze({
   "STP9-ids": "stp9_ids_comment_and_unrelated_sibling_preserve_use_identities",
   "STP9-shadow": "stp9_shadow_nested_slot_and_loop_origins_are_distinct",
@@ -58,6 +69,7 @@ const RUST_CASE_FILTERS = Object.freeze({
 });
 
 export const DIRTY_TYPEINFO = "TypeInfoCore::attempt";
+export const DIRTY_TYPEINFO_HELPER = "crate::ide::template::choose_answer";
 export const DIRTY_CACHE = { malformedCachedAsComplete: true };
 
 function err(caseId, code, message) {
@@ -78,6 +90,54 @@ export function productionPlanSource(src = fs.readFileSync(path.join(REPO_ROOT, 
   return src.split("#[cfg(test)]")[0] ?? src;
 }
 
+export function cratePathAllowed(path, allowlist = TYPE_FREE_CRATE_ALLOWLIST) {
+  return allowlist.some((allow) => path === allow || path.startsWith(`${allow}::`));
+}
+
+function identLen(src) {
+  if (!/^[A-Za-z_]/.test(src)) return 0;
+  const match = src.match(/^[A-Za-z_][A-Za-z0-9_]*/);
+  return match ? match[0].length : 0;
+}
+
+export function cratePaths(source) {
+  const paths = [];
+  let rest = String(source || "");
+  while (rest.includes("crate::")) {
+    const at = rest.indexOf("crate::");
+    const from = rest.slice(at);
+    let end = "crate::".length;
+    for (;;) {
+      const ident = identLen(from.slice(end));
+      if (ident === 0) break;
+      end += ident;
+      if (from.slice(end).startsWith("::")) {
+        end += 2;
+        continue;
+      }
+      break;
+    }
+    const path = from.slice(0, end).replace(/::$/, "");
+    if (from.slice(path.length).startsWith("::{")) {
+      const close = from.indexOf("}", path.length + 3);
+      if (close !== -1) {
+        const inner = from.slice(path.length + 3, close);
+        for (const item of inner.split(",")) {
+          const name = item.split(/\s+as\s+/)[0].trim();
+          if (name && identLen(name) === name.length) {
+            paths.push(`${path}::${name}`);
+          }
+        }
+        rest = from.slice(close + 1);
+        continue;
+      }
+    }
+    paths.push(path);
+    rest = from.slice(path.length);
+  }
+  return paths;
+}
+
 export function assertTypeFree(source = productionPlanSource()) {
   const errors = [];
   for (const needle of TYPE_FREE_NEEDLES) {
@@ -87,6 +147,17 @@ export function assertTypeFree(source = productionPlanSource()) {
           "STP9-type-free",
           "native-type-answer",
           `plan construction calls ${needle} to choose an answer`,
+        ),
+      );
+    }
+  }
+  for (const path of cratePaths(source)) {
+    if (!cratePathAllowed(path)) {
+      errors.push(
+        err(
+          "STP9-type-free",
+          "native-type-answer",
+          `plan construction reaches ${path} outside the parse-only crate path allowlist`,
         ),
       );
     }
@@ -188,6 +259,13 @@ export function evaluateRejectTwins({
   const typeFree = assertTypeFree(dirtySource);
   if (!typeFree.some((row) => row.caseId === "STP9-type-free")) {
     errors.push(err("STP9-type-free", "twin-miss", "TypeInfo dirty twin was not rejected"));
+  }
+  const helperSource = `${typeFreeSource}\nfn forbidden() { ${DIRTY_TYPEINFO_HELPER}(); }`;
+  const helper = assertTypeFree(helperSource);
+  if (!helper.some((row) => row.caseId === "STP9-type-free")) {
+    errors.push(
+      err("STP9-type-free", "twin-miss", "type-engine helper-path dirty twin was not rejected"),
+    );
   }
   const dirtyCache = cloneJson(product);
   Object.assign(dirtyCache.completeCache, DIRTY_CACHE);
