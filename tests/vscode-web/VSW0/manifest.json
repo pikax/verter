@@ -1,0 +1,58 @@
+{
+  "node": "VSW0",
+  "kind": "constitution",
+  "products": [
+    "WebExtensionFeatureContract v1",
+    "MainBrowserEntrypointPolicy v1",
+    "HostStatusVocabulary v1",
+    "charters/expansion-vscode-web/VSW0.md",
+    "contracts/product-experience.md",
+    "plans/expansion-vscode-web.md"
+  ],
+  "cases": [
+    {
+      "id": "VSW0-AC1",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "web-admission-without-policy",
+        "browser-only-entry",
+        "browser-entry-node-platform",
+        "node-import-in-browser-entry",
+        "live-state-drift"
+      ]
+    },
+    {
+      "id": "VSW0-AC2",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "remote-native-claimed-browser-local",
+        "missing-hostidentity-binding",
+        "hidden-host-status",
+        "status-term-drift"
+      ]
+    },
+    {
+      "id": "VSW0-ratification",
+      "disposition": "accept",
+      "twins": [
+        "clean products",
+        "feature-row-missing",
+        "feature-disposition-drift",
+        "receipt-field-missing",
+        "remote-row-without-host-override",
+        "unknown-bwh-service",
+        "contribution-category-missing",
+        "contribution-compat-drift",
+        "counts-drift",
+        "dx0-receiver-row-missing",
+        "vsc0-receiver-drift",
+        "downstream-owner-unknown",
+        "missing-evidence-file"
+      ]
+    }
+  ],
+  "runtimeCorrectness": false,
+  "notes": "Contract/inventory node: 0 production LOC. VSW0-AC1's admission predicate is re-derived live from packages/vue-vscode/package.json (main declared, browser absent) and esbuild.config.mjs (platform node, entry src/extension.ts) plus the shipped entry graph's vscode-languageclient/node import; the same predicate admits a compliant manifest, so rejection is discrimination, not vacuity. VSW0-AC2's vocabulary binds the DX0 hostIdentity receipt field and the non-parity law (a remote Node service serving a browser client is remote-native); runtime visibility tests bind to VSW1 (browser entrypoint, worker transport, shared-code module-load) and VSW5 (packaging, offline, browser matrix) as downstream owners per VSW0-AC-BASIS. VSW0-AC-RESOURCE: no hot paths or UI touched; the WSP equal-work obligation binds to VSW5 for real-client claims. VSW0-AC-EXPOSURE: DX1 owns the registration schema; no new operation is promoted by this node. The harness grounds itself in the live repository (extension manifest and build config, VSC0 feature/boundary products, BWH0 platform-host services, DX0 receipt-basis/host-class/ownership products) and joins every feature row to VSC0 ids, every cited service to the BWH0 inventory, every receipt field to the DX0 basis and every contribution row to the live manifest counts, so drift in any of them is a failing case, not a stale pass."
+}

@@ -1,0 +1,107 @@
+{
+  "id": "MainBrowserEntrypointPolicy",
+  "schema": 1,
+  "status": "ratified",
+  "ratifiedBy": "VSW0",
+  "sourceOfTruth": "packages/vue-vscode/package.json and packages/vue-vscode/esbuild.config.mjs re-read live by tests/vscode-web/VSW0/vsw0.test.mjs",
+  "law": "A build with only a Node main entry cannot pass as a web extension (VSW0-AC1). Web admission requires a real browser entrypoint and a browser-targeted build; contribution compatibility is declared per category, never assumed.",
+  "entrypoint": {
+    "webAdmissionRules": [
+      "the extension manifest must declare both main (Node extension host: desktop and remote) and browser (web extension host) entries; main-only is not a web extension and browser-only is not the desktop product",
+      "the browser entry bundle must target the browser platform and import no Node builtins and no vscode-languageclient/node (the Node transport stays desktop-owned per VSC0 transport-desktop-owned)",
+      "the web entry never spawns a child process, never reads fs/os/process, and reaches native capability only through the explicitly selected companion route",
+      "the browser entry lives at packages/vue-vscode/src/browser and host-neutral modules at packages/vue-vscode/src/shared: a sibling consumer of the same producers, never a fork of the desktop extension (VSC0 browser-is-distinct-product)",
+      "admission is a build predicate re-derived from the live manifest and build config, not a claim stamped at packaging time"
+    ],
+    "liveState": {
+      "manifestMain": "dist/extension.js (declared)",
+      "manifestBrowser": "absent",
+      "buildEntry": "src/extension.ts",
+      "buildPlatform": "node",
+      "buildTarget": "node18",
+      "verdict": "not-admitted: node-main-only",
+      "evidence": ["packages/vue-vscode/package.json", "packages/vue-vscode/esbuild.config.mjs"]
+    }
+  },
+  "webCompatibilityEnum": ["host-neutral", "entry-bound", "engine-following", "web-incompatible"],
+  "contributions": [
+    {
+      "category": "languages",
+      "liveCount": 5,
+      "webCompatibility": "host-neutral",
+      "rule": "declarative language contributions ship unchanged from either entry (vue, svelte, vue-html, vue-postcss, vue-sugarss with their configuration files)"
+    },
+    {
+      "category": "grammars",
+      "liveCount": 8,
+      "webCompatibility": "host-neutral",
+      "rule": "TextMate grammars and injectTo rules are static assets; identical in web mode"
+    },
+    {
+      "category": "commands",
+      "liveCount": 16,
+      "webCompatibility": "entry-bound",
+      "rule": "command declarations are shared, but each command's implementation binds its WebExtensionFeatureContract row: a command whose producer is remote-native-only or companion-route surfaces the HostStatusVocabulary status for its surface, never a silent no-op or a dropped registration"
+    },
+    {
+      "category": "menus",
+      "liveCount": 2,
+      "webCompatibility": "host-neutral",
+      "rule": "declarative when-clauses; the context keys they reference (view == verterVirtualFiles, viewItem == virtual-file) are set by whichever entry is active"
+    },
+    {
+      "category": "viewsContainers",
+      "liveCount": 1,
+      "webCompatibility": "host-neutral",
+      "rule": "the verter-analysis activity-bar container is declarative"
+    },
+    {
+      "category": "views",
+      "liveCount": 4,
+      "webCompatibility": "entry-bound",
+      "rule": "view declarations are shared, but their when-clauses (verter.analysisEnabled, verter.hasActiveCarrierFile) must be set by the web entry too; a view that cannot be populated in a mode is not registered in that mode (no permanently empty views)"
+    },
+    {
+      "category": "colors",
+      "liveCount": 9,
+      "webCompatibility": "host-neutral",
+      "rule": "theme color contributions are declarative and identical in web mode"
+    },
+    {
+      "category": "configuration",
+      "liveCount": 32,
+      "webCompatibility": "entry-bound",
+      "rule": "settings are shared, but node-bound settings (verter.lspBinaryPath, verter.typescript.tsdk, verter.statistics.persistToFile, verter.statistics.filePath, verter.viteConfig.trustedFiles, verter.mcp.*) declare their web behavior: unsupported or companion-scoped per the HostStatusVocabulary, never silently ignored"
+    },
+    {
+      "category": "configurationDefaults",
+      "liveCount": 3,
+      "webCompatibility": "host-neutral",
+      "rule": "editor defaults for vue/svelte are declarative"
+    },
+    {
+      "category": "typescriptServerPlugins",
+      "liveCount": 1,
+      "webCompatibility": "engine-following",
+      "rule": "the plugin runs inside the editor-owned TypeScript engine wherever that engine runs (ExternalOwner); on the web the built-in TypeScript service uses its own web worker — no Node enters Verter's closure through this contribution; compatibility is owned by VSW3"
+    },
+    {
+      "category": "mcpServerDefinitionProviders",
+      "liveCount": 1,
+      "webCompatibility": "web-incompatible",
+      "rule": "the definition registers a spawned verter-mcp child; browser-local mode has no process capability, so the definition is registered only when the companion (VSW4N) or a remote-native host is actually serving — never a dead definition"
+    },
+    {
+      "category": "activationEvents",
+      "liveCount": 11,
+      "webCompatibility": "host-neutral",
+      "rule": "onLanguage (6), onView (2) and onCommand (3) activations are host-neutral and drive the same activation gate from either entry"
+    }
+  ],
+  "rules": [
+    "contribution categories cover exactly the live package.json contributes keys plus activationEvents; a new contribution category without a compatibility row is drift",
+    "liveCount values are re-derived from the live manifest by the harness; count drift is a failing case, not a stale pass",
+    "host-neutral and entry-bound contributions ship in both entries; engine-following contributions follow the editor-owned engine; web-incompatible contributions are conditional on a live serving host",
+    "packaging a web build while this policy's liveState verdict is not-admitted: node-main-only is forbidden; VSW5 owns the packaging gate that enforces it"
+  ]
+}

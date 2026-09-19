@@ -1,0 +1,62 @@
+{
+  "id": "HostStatusVocabulary",
+  "schema": 1,
+  "status": "ratified",
+  "ratifiedBy": "VSW0",
+  "sourceOfTruth": "packages/vue-vscode live tree joined to the DX0 product-receipt-basis hostIdentity field, the VSC0 host-separation contract and the BWH0 platform-host-services law",
+  "law": "Browser-local and remote-native are distinct products with distinct receipts. The active host/backend is visible and correct in every browser-connected workspace (VSW0-AC2): a remote Node service serving a browser client is not browser-local parity.",
+  "statusEnum": ["browser-local", "remote-native", "desktop-local", "companion-native"],
+  "terms": {
+    "browser-local": {
+      "definition": "Extension code executes in the browser web extension host (web worker) on the user's machine: vscode.dev / github.dev local web workers. Semantic work rides the BWH wasm host through in-memory platform services; the browser closure has no process, filesystem, socket or thread capability.",
+      "derivesFrom": "executing entry = browser entry; workspace topology = local web workspace",
+      "evidence": [
+        "tests/browser-host/BWH0/products/platform-host-services.v1.json",
+        "tests/browser-host/BWH0/products/browser-execution-manifest.v1.json"
+      ]
+    },
+    "remote-native": {
+      "definition": "Extension code executes in a remote Node extension host (Codespaces, SSH, WSL, tunnel/reverse-proxy). A browser is only the viewport: viewing or editing through vscode.dev does not make this browser-local, and it may never claim browser-local receipts.",
+      "derivesFrom": "workspace topology = remote extension host; client kind is irrelevant",
+      "evidence": [
+        "packages/vue-vscode/src/extension.ts",
+        "packages/vue-vscode/src/clientProcessLifetime.ts"
+      ]
+    },
+    "desktop-local": {
+      "definition": "Extension code executes in the local desktop Node extension host (VS Code desktop). The Node transport, binary discovery and child spawn are desktop-owned (VSC0 transport-desktop-owned).",
+      "derivesFrom": "executing entry = main entry; workspace topology = local",
+      "evidence": ["packages/vue-vscode/package.json", "packages/vue-vscode/src/extension.ts"]
+    },
+    "companion-native": {
+      "definition": "Explicitly selected authenticated local native companion execution (DX4/DX5 route; VSW4N owns the opt-in selector). A browser-local product with one labelled native execution rail: companion results carry the companion engine identity and version and never merge silently into browser-local results.",
+      "derivesFrom": "browser-local execution plus an explicit user-selected companion connection",
+      "evidence": [
+        "tests/browser-host/BWH0/products/platform-host-services.v1.json",
+        "tests/product-experience/DX0/products/host-execution-class.v1.json"
+      ]
+    }
+  },
+  "claims": [
+    "browser-local parity for a feature exists only when its WebExtensionFeatureContract webDisposition route is live; a protocol smoke or screenshot is not real-editor responsiveness or semantic-correctness proof",
+    "a remote Node service serving a browser client is not browser-local parity; it is remote-native and displays as remote-native",
+    "unsupported in browser-local mode is the DX0 unsupported completeness state, surfaced on the feature surface — never dropped diagnostics, weakened typing or a silently removed feature",
+    "companion-native execution is explicitly selected, authenticated and labelled; guessing a companion connection or hiding its identity is a failing claim",
+    "the desktop extension and the web entry are one product family over one producer set (VSC0 browser-is-distinct-product); neither may claim the other's receipts"
+  ],
+  "visibility": {
+    "rule": "The active host status is derived from the executing entry and the workspace topology, never guessed from the client kind, and it is surfaced: bound to the hostIdentity receipt field on every feature result and displayed on the provider status surface. A wrong or hidden host status is a failing claim, not a degraded mode.",
+    "binding": {
+      "hostIdentity": "the executing host per this vocabulary (browser runtime plus WASM build selector, remote extension host, desktop extension host, or the selected companion), carried on the DX0 product-receipt-basis hostIdentity field",
+      "surface": "the provider-status surface the desktop extension already renders (statusBar binding) gains the web status; every feature result carries the same binding"
+    },
+    "evidence": ["packages/vue-vscode/src/statusBar.ts", "packages/vue-vscode/src/extension.ts"]
+  },
+  "receivingAmendments": [
+    { "receiver": "VSW1", "productionCapable": true },
+    { "receiver": "VSW3", "productionCapable": true },
+    { "receiver": "VSW4N", "productionCapable": true },
+    { "receiver": "VSW5", "productionCapable": true },
+    { "receiver": "VSW6", "productionCapable": true }
+  ]
+}
