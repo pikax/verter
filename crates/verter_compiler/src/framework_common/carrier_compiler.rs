@@ -355,7 +355,9 @@ pub enum CompileUnsupported {
 /// at the route boundary, because those routes carry no host-issued
 /// admission. Crate-private: an external caller reaches a product backend
 /// only through an admission carve, so grant minting authority never
-/// leaves the crate.
+/// leaves the crate. Production host-integration carves grants off
+/// admission; this helper exists only for the test-support registry shim.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn registry_route_execution_grants(
     opts: &RuntimeCompileOptions,
 ) -> super::capability::ProductExecutionGrants {

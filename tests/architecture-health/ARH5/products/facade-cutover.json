@@ -1,0 +1,134 @@
+{
+  "schema": "ARH5FacadeCutover",
+  "version": 1,
+  "contractNode": "ARH5",
+  "candidate": "ee362804d3e85c0ee67fbb0b6f4038c7cfe7553c",
+  "predecessorProducts": {
+    "characterization": "tests/architecture-health/ARH2/products/characterization.json"
+  },
+  "boundary": {
+    "path": "crates/verter_compiler/src/framework_common/vue_bridge.rs",
+    "typeName": "VueCarrierCompiler",
+    "retainedProductionMethods": ["adapter_id", "carrier_language_id", "parse"],
+    "displacedProductionMethods": ["compile_bundle", "compile_ide"],
+    "gate": "cfg(any(test, feature = \"test-support\"))"
+  },
+  "parallelAlreadyNarrow": {
+    "path": "crates/verter_compiler/src/svelte/carrier.rs",
+    "typeName": "SvelteCarrierCompiler",
+    "note": "Svelte already exposes parse plus identity/downcast only; this node does not displace a second combined Svelte production route"
+  },
+  "cutover": [
+    {
+      "id": "ARH5-CUT-1",
+      "route": "VueCarrierCompiler::compile_ide",
+      "decision": "remove the mixed IDE registry method from the production parse/identity type",
+      "survivingOwner": {
+        "path": "crates/verter_compiler/src/framework_common/vue_projection_backend.rs",
+        "typeName": "VueProjectionBackend",
+        "method": "project_ide"
+      },
+      "disposition": "production-absent via cfg(any(test, feature = \"test-support\")); test-support callers keep the IdeCompileOptions shim; CMP1 owns deleting that conversion",
+      "class": "visibility-narrowing"
+    },
+    {
+      "id": "ARH5-CUT-2",
+      "route": "VueCarrierCompiler::compile_bundle",
+      "decision": "remove the mixed runtime/IDE/facts registry method from the production parse/identity type",
+      "survivingOwner": {
+        "path": "crates/verter_compiler/src/framework_common/vue_host_integration.rs",
+        "typeName": "VueHostIntegrationBackend",
+        "method": "compile_host_products"
+      },
+      "orchestration": {
+        "path": "crates/verter_compiler/src/framework_common/vue_bridge.rs",
+        "fn": "vue_carrier_bundle"
+      },
+      "disposition": "production-absent via cfg(any(test, feature = \"test-support\")); host-integration remains the production bundle owner; CMP1 owns deleting the RuntimeCompileOptions conversion",
+      "class": "visibility-narrowing"
+    }
+  ],
+  "retainedAdapters": [
+    {
+      "shape": "IdeCompileOptions and RuntimeCompileOptions registry conversion",
+      "owner": "CMP1",
+      "liveWitness": "crates/verter_compiler/src/framework_common/carrier_compiler.rs",
+      "symbols": ["IdeCompileOptions", "RuntimeCompileOptions"]
+    },
+    {
+      "shape": "legacy request/policy derivation into compile_inner",
+      "owner": "CMP1",
+      "liveWitness": "crates/verter_compiler/src/compile/mod.rs",
+      "symbols": ["derive_legacy_vue_options", "compile_from_parsed_legacy"]
+    }
+  ],
+  "ac2": {
+    "defect": "A shorter facade that reparses output or merges semantic and runtime compiler authority",
+    "evidence": [
+      {
+        "file": "crates/verter_compiler/tests/cases/compile-fail/frontend_only_has_no_runtime_accessor.rs",
+        "proves": "a frontend-only catalog row has no runtime accessor"
+      },
+      {
+        "file": "crates/verter_compiler/tests/cases/compile-fail/projection_only_has_no_runtime_accessor.rs",
+        "proves": "a projection-only catalog row has no runtime accessor"
+      },
+      {
+        "file": "crates/verter_compiler/tests/cases/compile-fail/vue_carrier_compiler_has_no_production_compile_bundle.rs",
+        "proves": "production VueCarrierCompiler has no compile_bundle"
+      },
+      {
+        "file": "crates/verter_compiler/tests/cases/compile-fail/vue_carrier_compiler_has_no_production_compile_ide.rs",
+        "proves": "production VueCarrierCompiler has no compile_ide"
+      }
+    ]
+  },
+  "ac3": {
+    "note": "ARH5 does not mutate a state, query or map boundary: CompileArtifactSet, qualified maps and source-backed descriptors stay the publication authority. The concerns below bind existing named evidence rather than new invariants.",
+    "concerns": [
+      {
+        "concern": "fresh-versus-incremental equivalence",
+        "applicable": false,
+        "rationale": "no incremental compile cache, query memo or generation supersession is touched; the gated methods are registry shims over already-admitted parses"
+      },
+      {
+        "concern": "edit/revert",
+        "applicable": false,
+        "rationale": "no edit transaction or source-revision boundary is touched"
+      },
+      {
+        "concern": "cancellation",
+        "applicable": false,
+        "rationale": "no scheduler latch, query-memo cancellation or compile-admission cancellation is touched"
+      },
+      {
+        "concern": "stale/partial rejection",
+        "applicable": true,
+        "evidence": [
+          {
+            "file": "crates/verter_compiler/src/assembly/artifact_schema_tests.rs",
+            "test": "qualified_maps_reject_stale_output_bytes_and_input_basis_without_renaming_artifacts"
+          }
+        ],
+        "note": "qualified maps still reject stale output bytes; this node does not reparse output or rebase maps"
+      },
+      {
+        "concern": "deterministic ordering under perturbed discovery or scheduling",
+        "applicable": true,
+        "evidence": [
+          {
+            "file": "crates/verter_compiler/src/assembly/artifact_schema_tests.rs",
+            "test": "terminal_order_is_independent_of_artifact_source_map_and_relation_insertion"
+          }
+        ],
+        "note": "terminal order is invariant under perturbed artifact-source-map and relation insertion order"
+      }
+    ]
+  },
+  "ac4Rationale": "No public example, VIM/DX capability or host/profile surface names VueCarrierCompiler.compile_ide or compile_bundle; examples/reference is consumed, not duplicated. Migration is the compile-time absence of those methods on a production build. Permissions are not applicable. Uncertainty is the live cfg-join and compile-fail fixtures re-derived by this verifier; DOC1 executable-example obligations are unchanged because no public example called the displaced methods.",
+  "ac5Rationale": "No new latency/work/allocation/RSS budget is created. The obsolete production combined methods are gated out of shipped builds; required work is not removed — VueProjectionBackend.project_ide, VueHostIntegrationBackend.compile_host_products and vue_carrier_bundle remain. CMP1/CPER1 retained adapters are not deleted here.",
+  "sessionGuard": {
+    "path": "crates/verter_session/tests/cases/host_backend_routing_guards.rs",
+    "forbidden": ["compile_bundle", "compiler_for_carrier_language"]
+  }
+}
