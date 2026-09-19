@@ -72,10 +72,124 @@
       "owner": "rune-props"
     },
     {
+      "id": "harness-props-events-attribute-handlers",
+      "population": "framework-conformance-harness-fixtures",
+      "path": "packages/framework-conformance-harness/fixtures/svelte/props-events.svelte",
+      "owner": "events-attribute-handlers"
+    },
+    {
+      "id": "harness-basic-runes-interpolation",
+      "population": "framework-conformance-harness-fixtures",
+      "path": "packages/framework-conformance-harness/fixtures/svelte/basic-runes.svelte",
+      "owner": "template-interpolation"
+    },
+    {
+      "id": "harness-legacy-slots-export-let",
+      "population": "framework-conformance-harness-fixtures",
+      "path": "packages/framework-conformance-harness/fixtures/svelte/legacy-slots.svelte",
+      "owner": "legacy-export-let"
+    },
+    {
       "id": "css-attr-selectors",
       "population": "svelte-css-conformance",
       "path": "crates/verter_svelte_conformance/corpus/fixtures/attr-dec-lit-attr-uq-comp-ext-plain-m.svelte",
       "owner": "css-scoping-attr-selectors"
+    },
+    {
+      "id": "compiler-rune-derived",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/ide/prelude.rs",
+      "owner": "rune-derived"
+    },
+    {
+      "id": "compiler-rune-effect",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/ide/prelude.rs",
+      "owner": "rune-effect"
+    },
+    {
+      "id": "compiler-rune-bindable",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/ide/prelude.rs",
+      "owner": "rune-bindable"
+    },
+    {
+      "id": "compiler-rune-inspect",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/ide/prelude.rs",
+      "owner": "rune-inspect"
+    },
+    {
+      "id": "compiler-rune-host",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/ide/prelude.rs",
+      "owner": "rune-host"
+    },
+    {
+      "id": "compiler-template-each",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/parser/block_head.rs",
+      "owner": "template-each"
+    },
+    {
+      "id": "compiler-template-await",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/parser/block_head.rs",
+      "owner": "template-await"
+    },
+    {
+      "id": "compiler-template-snippet",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/parser/block_head.rs",
+      "owner": "template-snippet"
+    },
+    {
+      "id": "compiler-template-svelte-specials",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/ide/projector/special.rs",
+      "owner": "template-svelte-specials"
+    },
+    {
+      "id": "compiler-events-legacy-directive",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/ide/projector/directive.rs",
+      "owner": "events-legacy-directive"
+    },
+    {
+      "id": "compiler-store-auto-subscription",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/ide/store_scan.rs",
+      "owner": "legacy-store-auto-subscription"
+    },
+    {
+      "id": "compiler-transitions-actions-animate",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/ide/projector/directive.rs",
+      "owner": "legacy-transitions-actions-animate"
+    },
+    {
+      "id": "compiler-class-directive",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/ide/projector/directive.rs",
+      "owner": "class-directive"
+    },
+    {
+      "id": "compiler-style-directive",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/ide/projector/directive.rs",
+      "owner": "style-directive"
+    },
+    {
+      "id": "compiler-bind-directive",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/ide/projector/bind.rs",
+      "owner": "bind-directive"
+    },
+    {
+      "id": "compiler-script-module-context",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/ide/projector/mod.rs",
+      "owner": "script-module-context"
     },
     {
       "id": "template-html",
@@ -360,7 +474,7 @@
     {
       "id": "template-attach",
       "family": "template",
-      "semantics": "runes",
+      "semantics": "both",
       "requiredCurrent": true,
       "path": "crates/verter_compiler/src/svelte/ide/projector/mod.rs",
       "surface": "verter-projector"
@@ -376,7 +490,7 @@
     {
       "id": "events-legacy-directive",
       "family": "events",
-      "semantics": "legacy",
+      "semantics": "both",
       "requiredCurrent": true,
       "path": "crates/verter_compiler/src/svelte/ide/projector/directive.rs",
       "surface": "verter-projector"
@@ -384,7 +498,7 @@
     {
       "id": "legacy-slots",
       "family": "legacy",
-      "semantics": "legacy",
+      "semantics": "both",
       "requiredCurrent": true,
       "path": "packages/framework-conformance-harness/fixtures/svelte/legacy-slots.svelte",
       "surface": "fixture"
@@ -462,5 +576,5 @@
       "surface": "conformance-fixture"
     }
   ],
-  "notes": "Historical feature families (the legacy- id prefix) are naming only; legal-mode support is carried per row by semantics, pinned by the mode-paired compiler controls under probes/modes/. Store auto-subscription, transitions/actions/animate, snippets, event attributes and the class/style directives are mode-shared (semantics both); export let stays legacy-only (legacy_export_invalid in runes mode). A rune mislabeled as legacy fails STS0-svelte-inventory. Official, css, harness and benchmark population recordedRows are joined to the live imported members; selectedMembers join imported fixtures, official suites and the pinned benchmark smoke inventory to mandatory owning rows."
+  "notes": "Historical feature families (the legacy- id prefix) are naming only; legal-mode support is carried per row by semantics, pinned by the mode-paired compiler controls under probes/modes/. Store auto-subscription, transitions/actions/animate, snippets, event attributes, attachments and the class/style directives are mode-shared (semantics both); the on:click directive and <slot> outlets are legal in BOTH modes and merely deprecated in runes mode (event_directive_deprecated / slot_element_deprecated), which the controls keep distinct from genuine unsupported-mode rejection; export let stays legacy-only (legacy_export_invalid in runes mode). A rune mislabeled as legacy fails STS0-svelte-inventory. Population recordedRows are recorded import evidence, never an acceptance gate: completeness is identity-based only. selectedMembers join imported fixtures, official suites and the pinned benchmark smoke inventory to mandatory owning rows, and every RequiredCurrent feature row must keep at least one selected member citing it as owner, so no selected population (official, css, compiler, harness, benchmarks) can silently lose its ownership joins."
 }

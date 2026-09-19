@@ -3,7 +3,6 @@
 </script>
 
 <script lang="ts">
-  import { moduleAnswer } from "./module-context.svelte";
   const shown: number = moduleAnswer;
 </script>
 

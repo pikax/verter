@@ -8,11 +8,14 @@ import {
   DIRTY_ABI_SHAPE,
   DIRTY_INVENTORY_DROP_DIRECTIVE_ROW,
   DIRTY_INVENTORY_DROP_FEATURE,
-  DIRTY_INVENTORY_DROP_SELECTED_MAPPING,
+  DIRTY_INVENTORY_DROP_SELECTED_MAPPING_PATH,
   DIRTY_INVENTORY_DROP_SMOKE_CASE,
   DIRTY_INVENTORY_FABRICATED_FEATURE,
   DIRTY_INVENTORY_MISLABELED_FEATURE,
   DIRTY_INVENTORY_MISSING_FIXTURE,
+  DIRTY_INVENTORY_DROP_OFFICIAL_JOIN,
+  DIRTY_INVENTORY_DROP_CSS_JOIN,
+  DIRTY_INVENTORY_DROP_COMPILER_JOIN,
   DIRTY_PIN_DIVERGED_VERSION,
   DIRTY_PIN_FLOATING_VERSION,
   DIRTY_PIN_LATEST_VERSION,
@@ -22,6 +25,7 @@ import {
   DIRTY_POLICY_DROP_PROFILE,
   DIRTY_POLICY_DROP_REFUSAL,
   DIRTY_POLICY_DROP_UNCHECKED_LEGACY,
+  DIRTY_POLICY_PUBLISHING_FLIP_PROFILE,
   DIRTY_POLICY_REFUSED_OPTION,
   DIRTY_POLICY_UNSPECIFIED_PROFILE,
   PINNED_DERIVED_DECLARE,
@@ -29,21 +33,20 @@ import {
   REQUIRED_SVELTE_FEATURES,
   SVELTE_BENCHMARKS_ADAPTER,
   assertModeClassification,
-  assertProfileBehavior,
+  assertProfileContract,
   assertRuneProbeMatchesPinnedProjection,
   assertEngineFrameworkPins,
   assertInstanceShapePin,
   assertPolicyLock,
   assertPredecessorJoins,
+  assertProfileBehavior,
   assertSvelteAbi,
   assertSvelteInventory,
   assertSvelteShapeSource,
-  checkProfileBehavior,
   cloneJson,
   evaluateRejectTwins,
   evaluateSts0,
   loadEngineMatrix,
-  loadPinnedTsJs,
   loadRootPackageJson,
   loadSts0Product,
   shippedDirectiveKinds,
@@ -180,13 +183,16 @@ test("STS0-svelte-inventory: every canonical feature has a mandatory owning row"
     assertSvelteInventory(emptiedPopulations).some((error) => error.code === "removed-fixture"),
     JSON.stringify(assertSvelteInventory(emptiedPopulations)),
   );
-  const zeroRows = cloneJson(INVENTORY());
-  const official = zeroRows.populations.find((row) => row.id === "svelte-official-cases");
+  // Recorded counts are evidence, never gates: a drifted recordedRows value
+  // alone must NOT fail the inventory (identity-based completeness only).
+  const driftedCount = cloneJson(INVENTORY());
+  const official = driftedCount.populations.find((row) => row.id === "svelte-official-cases");
   assert.ok(official, "official population must exist");
-  official.recordedRows = 0;
-  assert.ok(
-    assertSvelteInventory(zeroRows).some((error) => error.code === "population-count-mismatch"),
-    JSON.stringify(assertSvelteInventory(zeroRows)),
+  official.recordedRows = official.recordedRows + 1;
+  assert.equal(
+    assertSvelteInventory(driftedCount).length,
+    0,
+    "a drifted recordedRows count must not gate the inventory",
   );
   const unowned = cloneJson(INVENTORY());
   unowned.selectedMembers = [
@@ -202,14 +208,14 @@ test("STS0-svelte-inventory: every canonical feature has a mandatory owning row"
 test("STS0-svelte-inventory: selected membership derives from the population authorities", () => {
   const droppedMapping = cloneJson(INVENTORY());
   droppedMapping.selectedMembers = droppedMapping.selectedMembers.filter(
-    (member) => member.id !== DIRTY_INVENTORY_DROP_SELECTED_MAPPING,
+    (member) => member.path !== DIRTY_INVENTORY_DROP_SELECTED_MAPPING_PATH,
   );
   assert.ok(
     assertSvelteInventory(droppedMapping).some(
       (error) =>
         error.caseId === "STS0-svelte-inventory" && error.code === "unselected-population-member",
     ),
-    "removing one harness fixture's selected mapping while retaining the fixture was not rejected",
+    "removing every selected mapping of a harness fixture while retaining the fixture was not rejected",
   );
   const shrank = cloneJson(INVENTORY());
   shrank.selectedMembers = shrank.selectedMembers.slice(0, 1);
@@ -252,6 +258,23 @@ test("STS0-svelte-inventory: selected membership derives from the population aut
     kinds.includes("Class") && kinds.includes("Style"),
     "directive projector must expose class/style kinds",
   );
+  // Every RequiredCurrent row keeps an owning selected join: deleting one
+  // population's mapping (official suite, css fixture, compiler surface)
+  // while its source and population record remain must be rejected.
+  for (const [dropId, label] of [
+    [DIRTY_INVENTORY_DROP_OFFICIAL_JOIN, "official suite join"],
+    [DIRTY_INVENTORY_DROP_CSS_JOIN, "css corpus join"],
+    [DIRTY_INVENTORY_DROP_COMPILER_JOIN, "compiler surface join"],
+  ]) {
+    const droppedJoin = cloneJson(INVENTORY());
+    droppedJoin.selectedMembers = droppedJoin.selectedMembers.filter(
+      (member) => member.id !== dropId,
+    );
+    assert.ok(
+      assertSvelteInventory(droppedJoin).some((error) => error.code === "unselected-feature-row"),
+      `deleting the ${label} while retaining its source and population record was not rejected`,
+    );
+  }
 });
 
 test("STS0-svelte-inventory: mode-shared features stay both and legacy-only stays legacy", () => {
@@ -270,6 +293,26 @@ test("STS0-svelte-inventory: mode-shared features stay both and legacy-only stay
     ),
     "a mode-shared feature mislabeled legacy-only was not rejected",
   );
+  const attachAsRunesOnly = cloneJson(INVENTORY());
+  const attachRow = attachAsRunesOnly.rows.find((row) => row.id === "template-attach");
+  assert.ok(attachRow, "template-attach row must exist");
+  attachRow.semantics = "runes";
+  assert.ok(
+    assertModeClassification(attachAsRunesOnly).some(
+      (error) => error.code === "mode-misclassified",
+    ),
+    "marking the mode-shared attachment runes-only was not rejected",
+  );
+  const eventsAsLegacyOnly = cloneJson(INVENTORY());
+  const eventsRow = eventsAsLegacyOnly.rows.find((row) => row.id === "events-legacy-directive");
+  assert.ok(eventsRow, "events-legacy-directive row must exist");
+  eventsRow.semantics = "legacy";
+  assert.ok(
+    assertModeClassification(eventsAsLegacyOnly).some(
+      (error) => error.code === "mode-misclassified",
+    ),
+    "excluding the runes-mode leg of a deprecated-but-legal feature was not rejected",
+  );
   const legacyAsBoth = cloneJson(INVENTORY());
   const exportLetRow = legacyAsBoth.rows.find((row) => row.id === "legacy-export-let");
   assert.ok(exportLetRow, "export-let row must exist");
@@ -283,32 +326,39 @@ test("STS0-svelte-inventory: mode-shared features stay both and legacy-only stay
   assert.equal(clean.length, 0, JSON.stringify(clean, null, 2));
 });
 
-test("STS0-policy-lock: claimed checking and publishing behavior executes through the pinned engine", () => {
-  const ts = loadPinnedTsJs();
-  assert.ok(ts, "the pinned ts-js engine must resolve for live profile behavior");
-  const errors = assertProfileBehavior(ts, POLICY());
+test("STS0-policy-lock: publishing claims match the profile's script context and stay pinned", () => {
+  assert.equal(
+    assertProfileContract(POLICY()).length,
+    0,
+    JSON.stringify(assertProfileContract(POLICY()), null, 2),
+  );
+  const flipped = cloneJson(POLICY());
+  const flippedRow = flipped.profiles.find(
+    (row) => row.id === DIRTY_POLICY_PUBLISHING_FLIP_PROFILE,
+  );
+  assert.ok(flippedRow, "publishing-flip profile row must exist");
+  flippedRow.publishing = "module-exports-published";
+  assert.ok(
+    assertProfileContract(flipped).some((error) => error.code === "publication-mismatch"),
+    "an instance profile flipped to module-exports-published was not rejected",
+  );
+  const missingSymbols = cloneJson(POLICY());
+  const symbolsRow = missingSymbols.profiles.find(
+    (row) => row.id === DIRTY_POLICY_PUBLISHING_FLIP_PROFILE,
+  );
+  delete symbolsRow.publishedSymbols;
+  assert.ok(
+    assertProfileContract(missingSymbols).some((error) => error.code === "publication-missing"),
+    "a profile dropping its publishedSymbols pin was not rejected",
+  );
+});
+
+test("STS0-policy-lock: claimed checking and publishing behavior executes through the owned backend gate", () => {
+  // Live behavior executes the verter_session gate: every profile fixture is
+  // projected through the owned SvelteProjectionBackend and checked on BOTH
+  // claimed engines with corruption and publication twins (charter §14).
+  const errors = assertProfileBehavior(POLICY());
   assert.equal(errors.length, 0, JSON.stringify(errors, null, 2));
-  const runesRow = POLICY().profiles.find((row) => row.id === "svelte-ts-instance-runes");
-  const evidence = fs.readFileSync(path.resolve(HERE, "../../../", runesRow.evidencePath), "utf8");
-  const typeCorrupted = checkProfileBehavior(ts, runesRow, {
-    publishedSymbols: ["count", "doubled"],
-    evidenceText: evidence.replace(
-      "let count = $state(0);",
-      'let count: number = $state("corrupted");',
-    ),
-  });
-  assert.ok(
-    typeCorrupted.some((error) => error.code === "profile-behavior-failed"),
-    "an invalid projected type in the evidence must fail the live checking path",
-  );
-  const publicationCorrupted = checkProfileBehavior(ts, runesRow, {
-    publishedSymbols: ["count", "doubled"],
-    evidenceText: evidence.split("count").join("count__removed"),
-  });
-  assert.ok(
-    publicationCorrupted.length > 0,
-    "losing a published declaration must fail the live publication path",
-  );
 });
 
 test("STS0-svelte-inventory: runes versus legacy semantics is carried per row", () => {

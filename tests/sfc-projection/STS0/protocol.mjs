@@ -13,6 +13,7 @@
  * No production emit.
  */
 
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -163,10 +164,13 @@ export const DIRECTIVE_KIND_ROWS = Object.freeze({
 });
 
 /**
- * Mode-paired compiler controls: the pinned svelte compiler accepts every
- * mode-shared feature in BOTH runes and legacy mode, and rejects a genuinely
- * legacy-only construct in runes mode. These controls — not the historical
- * family prefix — decide the row semantics.
+ * Mode-paired compiler controls: the pinned svelte compiler decides row
+ * semantics — every mode-shared feature compiles clean under BOTH runes and
+ * legacy mode (attachments included), the on:click directive and <slot>
+ * outlets are ACCEPTED in runes mode with deprecation warnings (legal-but-
+ * deprecated, kept distinct from unsupported-mode rejection), and a
+ * genuinely legacy-only construct is rejected in runes mode. These controls
+ * — not the historical family prefix — decide the row semantics.
  */
 export const MODE_CONTROL_RUNES_FIXTURE =
   "tests/sfc-projection/STS0/probes/modes/shared-features-runes.svelte";
@@ -174,6 +178,14 @@ export const MODE_CONTROL_LEGACY_FIXTURE =
   "tests/sfc-projection/STS0/probes/modes/shared-features-legacy.svelte";
 export const MODE_CONTROL_LEGACY_ONLY_FIXTURE =
   "tests/sfc-projection/STS0/probes/modes/legacy-only-export-let.svelte";
+export const MODE_CONTROL_ATTACH_RUNES_FIXTURE =
+  "tests/sfc-projection/STS0/probes/modes/attach-runes.svelte";
+export const MODE_CONTROL_ATTACH_LEGACY_FIXTURE =
+  "tests/sfc-projection/STS0/probes/modes/attach-legacy.svelte";
+export const MODE_CONTROL_EVENTS_SLOTS_LEGACY_FIXTURE =
+  "tests/sfc-projection/STS0/probes/modes/events-slots-legacy-clean.svelte";
+export const MODE_CONTROL_EVENTS_SLOTS_RUNES_FIXTURE =
+  "tests/sfc-projection/STS0/probes/modes/events-slots-runes-deprecated.svelte";
 export const MODE_CONTROL_SHARED_FEATURES = Object.freeze([
   "legacy-store-auto-subscription",
   "legacy-transitions-actions-animate",
@@ -181,7 +193,17 @@ export const MODE_CONTROL_SHARED_FEATURES = Object.freeze([
   "events-attribute-handlers",
   "class-directive",
   "style-directive",
+  "template-attach",
 ]);
+/** Legal in both modes, accepted in runes mode only with deprecation warnings. */
+export const MODE_CONTROL_DEPRECATED_IN_RUNES = Object.freeze([
+  "events-legacy-directive",
+  "legacy-slots",
+]);
+export const MODE_DEPRECATED_WARNING_CODES = Object.freeze({
+  "events-legacy-directive": "event_directive_deprecated",
+  "legacy-slots": "slot_element_deprecated",
+});
 export const MODE_LEGACY_ONLY_FEATURE = "legacy-export-let";
 
 export const SVELTE_OWNED_SOURCE_FILES = Object.freeze([
@@ -275,35 +297,6 @@ export function loadOfficialSvelteCases(repoRoot = REPO_ROOT) {
   return parseOfficialCasesTsv(
     fs.readFileSync(path.resolve(repoRoot, SVELTE_OFFICIAL_CASES_TSV), "utf8"),
   );
-}
-
-function countFilesWithExtension(abs, extension) {
-  if (!fs.existsSync(abs)) return 0;
-  const stat = fs.statSync(abs);
-  if (stat.isFile()) return abs.endsWith(extension) ? 1 : 0;
-  let n = 0;
-  for (const ent of fs.readdirSync(abs, { withFileTypes: true })) {
-    const child = path.join(abs, ent.name);
-    if (ent.isDirectory()) n += countFilesWithExtension(child, extension);
-    else if (ent.name.endsWith(extension)) n += 1;
-  }
-  return n;
-}
-
-export function countPopulationMembers(population, { repoRoot = REPO_ROOT } = {}) {
-  const rel = population?.path;
-  if (!rel) return 0;
-  const abs = path.resolve(repoRoot, rel);
-  if (!fs.existsSync(abs)) return 0;
-  if (rel.endsWith(".tsv")) {
-    return parseOfficialCasesTsv(fs.readFileSync(abs, "utf8")).length;
-  }
-  if (rel.endsWith(".toml")) {
-    return (fs.readFileSync(abs, "utf8").match(/^\[\[inventory\]\]/gm) || []).length;
-  }
-  const stat = fs.statSync(abs);
-  if (stat.isDirectory()) return countFilesWithExtension(abs, ".svelte");
-  return 1;
 }
 
 function parseBenchmarkSmokeCases(text) {
@@ -744,18 +737,10 @@ export function assertSvelteInventory(
       continue;
     }
     populationById.set(population.id, population);
-    if (typeof population.recordedRows === "number") {
-      const live = countPopulationMembers(population, { repoRoot });
-      if (live !== population.recordedRows) {
-        errors.push(
-          err(
-            "STS0-svelte-inventory",
-            "population-count-mismatch",
-            `population ${population.id} recordedRows ${population.recordedRows} does not match imported live count ${live}`,
-          ),
-        );
-      }
-    }
+    // recordedRows is recorded import evidence only. Count equality is
+    // deliberately NOT an acceptance gate: a live population legitimately
+    // grows or shrinks without a product edit, and equal counts cannot
+    // detect a replaced member anyway. Completeness below is identity-based.
   }
   for (const id of REQUIRED_POPULATION_IDS) {
     if (!populationById.has(id)) {
@@ -834,7 +819,27 @@ export function assertSvelteInventory(
       );
     }
   }
-  // Completeness is derived from the live population authorities, not from
+  // Every RequiredCurrent row keeps an owning selected join. This is the
+  // selected-population completeness obligation (STS0-AC1): no population's
+  // ownership mappings — official, css, compiler, harness or benchmarks —
+  // can silently disappear while the row, its source fixture and the
+  // population record all remain.
+  const citedOwners = new Set(
+    selectedMembers.map((member) => member?.owner).filter((owner) => owner),
+  );
+  for (const row of rows) {
+    if (!citedOwners.has(row.id)) {
+      errors.push(
+        err(
+          "STS0-svelte-inventory",
+          "unselected-feature-row",
+          `feature row ${row.id} lost every selected member citing it as owner`,
+        ),
+      );
+    }
+  }
+  // Membership of the file- and case-addressable populations is derived from
+  // the live population authorities, not from
   // the mappings the product chose to supply: every harness fixture and
   // every pinned benchmark smoke case must keep an owning selected member.
   const memberKeys = new Set(
@@ -880,9 +885,12 @@ function compileSvelteFixture(compile, source, runes) {
 /**
  * STS0-svelte-inventory mode classification, pinned by the pinned compiler:
  * the mode-shared features compile clean under BOTH runes and legacy mode,
- * and a genuinely legacy-only construct is rejected in runes mode. A row
- * classified against this live evidence (a legacy-named feature marked
- * legacy-only, or export-let marked mode-shared) fails.
+ * the deprecated-in-runes features (on:click, <slot>) are ACCEPTED in runes
+ * mode with their recorded deprecation warnings rather than rejected, and a
+ * genuinely legacy-only construct is rejected in runes mode. A row
+ * classified against this live evidence (a mode-shared feature marked
+ * single-mode, a deprecated-in-runes feature marked legacy-only, or
+ * export-let marked mode-shared) fails.
  */
 export function assertModeClassification(inventory, { repoRoot = REPO_ROOT, compile = null } = {}) {
   const errors = [];
@@ -914,25 +922,53 @@ export function assertModeClassification(inventory, { repoRoot = REPO_ROOT, comp
       label: "runes-mode shared-features control",
       rel: MODE_CONTROL_RUNES_FIXTURE,
       runes: true,
-      clean: true,
+      expect: "clean",
     },
     {
       label: "legacy-mode shared-features control",
       rel: MODE_CONTROL_LEGACY_FIXTURE,
       runes: false,
-      clean: true,
+      expect: "clean",
+    },
+    {
+      label: "attach control under runes mode",
+      rel: MODE_CONTROL_ATTACH_RUNES_FIXTURE,
+      runes: true,
+      expect: "clean",
+    },
+    {
+      label: "attach control under legacy mode",
+      rel: MODE_CONTROL_ATTACH_LEGACY_FIXTURE,
+      runes: false,
+      expect: "clean",
+    },
+    {
+      label: "events/slots control under legacy mode",
+      rel: MODE_CONTROL_EVENTS_SLOTS_LEGACY_FIXTURE,
+      runes: false,
+      expect: "clean",
+    },
+    {
+      label: "events/slots control under runes mode",
+      rel: MODE_CONTROL_EVENTS_SLOTS_RUNES_FIXTURE,
+      runes: true,
+      expect: "deprecated",
+      warningCodes: [
+        MODE_DEPRECATED_WARNING_CODES["events-legacy-directive"],
+        MODE_DEPRECATED_WARNING_CODES["legacy-slots"],
+      ],
     },
     {
       label: "legacy-only control under legacy mode",
       rel: MODE_CONTROL_LEGACY_ONLY_FIXTURE,
       runes: false,
-      clean: true,
+      expect: "clean",
     },
     {
       label: "legacy-only control under runes mode",
       rel: MODE_CONTROL_LEGACY_ONLY_FIXTURE,
       runes: true,
-      clean: false,
+      expect: "rejected",
     },
   ];
   for (const control of controls) {
@@ -948,24 +984,50 @@ export function assertModeClassification(inventory, { repoRoot = REPO_ROOT, comp
       continue;
     }
     const outcome = compileSvelteFixture(compileFn, source, control.runes);
-    const accepted = outcome.errors.length === 0 && outcome.warnings.length === 0;
-    if (control.clean && !accepted) {
-      errors.push(
-        err(
-          "STS0-svelte-inventory",
-          "mode-control-failed",
-          `${control.label} was not accepted cleanly by the pinned compiler (errors ${JSON.stringify(outcome.errors)}, warnings ${JSON.stringify(outcome.warnings)})`,
-        ),
-      );
-    }
-    if (!control.clean && outcome.errors.length === 0) {
-      errors.push(
-        err(
-          "STS0-svelte-inventory",
-          "mode-control-failed",
-          `${control.label} was not rejected by the pinned compiler`,
-        ),
-      );
+    if (control.expect === "clean") {
+      const accepted = outcome.errors.length === 0 && outcome.warnings.length === 0;
+      if (!accepted) {
+        errors.push(
+          err(
+            "STS0-svelte-inventory",
+            "mode-control-failed",
+            `${control.label} was not accepted cleanly by the pinned compiler (errors ${JSON.stringify(outcome.errors)}, warnings ${JSON.stringify(outcome.warnings)})`,
+          ),
+        );
+      }
+    } else if (control.expect === "rejected") {
+      if (outcome.errors.length === 0) {
+        errors.push(
+          err(
+            "STS0-svelte-inventory",
+            "mode-control-failed",
+            `${control.label} was not rejected by the pinned compiler`,
+          ),
+        );
+      }
+    } else {
+      // "deprecated": accepted WITHOUT errors, WITH the recorded deprecation
+      // warnings — deprecation stays separate from unsupported-mode errors.
+      if (outcome.errors.length > 0) {
+        errors.push(
+          err(
+            "STS0-svelte-inventory",
+            "mode-control-failed",
+            `${control.label} was rejected by the pinned compiler instead of accepted with deprecation warnings (errors ${JSON.stringify(outcome.errors)})`,
+          ),
+        );
+      }
+      for (const code of control.warningCodes || []) {
+        if (!outcome.warnings.includes(code)) {
+          errors.push(
+            err(
+              "STS0-svelte-inventory",
+              "mode-control-failed",
+              `${control.label} did not record the expected deprecation warning ${code} (warnings ${JSON.stringify(outcome.warnings)})`,
+            ),
+          );
+        }
+      }
     }
   }
   for (const id of MODE_CONTROL_SHARED_FEATURES) {
@@ -977,6 +1039,19 @@ export function assertModeClassification(inventory, { repoRoot = REPO_ROOT, comp
           "STS0-svelte-inventory",
           "mode-misclassified",
           `feature ${id} compiles clean in both runes and legacy mode under the pinned compiler but is classified ${row.semantics}`,
+        ),
+      );
+    }
+  }
+  for (const id of MODE_CONTROL_DEPRECATED_IN_RUNES) {
+    const row = rowsById.get(id);
+    if (!row) continue; // a missing row is already flagged by the required list
+    if (row.semantics !== "both") {
+      errors.push(
+        err(
+          "STS0-svelte-inventory",
+          "mode-misclassified",
+          `feature ${id} is accepted in runes mode with only deprecation warnings by the pinned compiler but is classified ${row.semantics}; deprecation must not exclude a legal mode`,
         ),
       );
     }
@@ -995,190 +1070,56 @@ export function assertModeClassification(inventory, { repoRoot = REPO_ROOT, comp
 }
 
 /**
- * The ambient rune declarations the virtual profile projection runs
- * against — the same signatures the CCA1I prelude and the pinned svelte
- * types carry ($derived expression form; callback evaluation is
- * $derived.by).
+ * The publishing surface a profile's script context can legally claim:
+ * `.svelte` instance/template surfaces publish the component declaration
+ * carrier; module contexts and the `.svelte.ts`/`.svelte.js` module-file
+ * kinds publish their module exports. A row claiming the other publishing
+ * behavior is a contract break, not a stylistic choice.
  */
-export const PROFILE_RUNE_AMBIENT = [
-  "declare function $state<T>(initial: T): T;",
-  `${PINNED_DERIVED_DECLARE};`,
-  "declare namespace $derived {",
-  "  function by<T>(fn: () => T): T;",
-  "}",
-].join("\n");
-const PROFILE_RUNE_AMBIENT_NAME = "/sts0-virtual/runes-ambient.d.ts";
-const RUNE_USE_RE = /\$(?:state|derived|effect|props|bindable|inspect|host)\b/;
-
-/**
- * Declaration-visible binding names per policy profile id. Every profile
- * row must carry a pin (gaining canon demands one); the live behavior path
- * requires the pinned engine's declaration emit to contain each name and a
- * corruption twin to fail.
- */
-export const PROFILE_PUBLISHED_SYMBOLS = Object.freeze({
-  "svelte-ts-instance-runes": ["count", "doubled"],
-  "svelte-ts-instance-legacy": ["title"],
-  "svelte-js-instance-runes-unchecked": ["count", "doubled"],
-  "svelte-js-instance-runes-checked": ["count", "doubled"],
-  "svelte-js-instance-legacy-checked": ["title"],
-  "svelte-js-instance-legacy-unchecked": ["name"],
-  "svelte-ts-module-context": ["moduleAnswer"],
-  "svelte-js-module-context-unchecked": ["moduleAnswer"],
-  "svelte-js-module-context-checked": ["moduleAnswer"],
-  "svelte-ts-svelte-ts-module": ["CounterCell", "counter", "derivedCount", "bump"],
-  "svelte-js-svelte-js-module-unchecked": ["counter", "derivedCount", "bump"],
-  "svelte-js-svelte-js-module-checked": ["counter", "derivedCount", "bump"],
-  "svelte-template-only": [],
-});
-
-function escapeRegExp(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+export function expectedPublishingForRow(row) {
+  const moduleSurface =
+    row?.fileKind === ".svelte.ts" ||
+    row?.fileKind === ".svelte.js" ||
+    (row?.fileKind === ".svelte" && row?.scriptContext === "module");
+  return moduleSurface ? "module-exports-published" : "declarations-published";
 }
 
 /**
- * Project a policy profile's evidence fixture to the virtual source files
- * the engine checks and publishes: module-file kinds project whole, .svelte
- * files project their module/instance scripts, a script's self-import is
- * rewritten to the projected module, an instance that relies on Svelte's
- * instance-sees-module scope gets the module exports imported, and an
- * instance projection publishes its declared bindings (the component
- * declaration surface).
+ * STS0-policy-lock structural contract for the live behavior path: every
+ * profile row pins the declaration-visible binding names its publishing
+ * surface must expose (empty only for the template-only surface), and the
+ * claimed publishing behavior must match the row's script context. The
+ * behavioral proof itself runs through the owned CCA1I backend gate below —
+ * this projector-free check only pins what the product claims.
  */
-export function projectProfileSources(row, evidenceText, { publishedSymbols = [] } = {}) {
-  const rel = String(row.evidencePath || "");
-  const text = String(evidenceText || "");
-  const ext = row.dialect === "js" ? "js" : "ts";
-  const files = [];
-  const usesRunes = RUNE_USE_RE.test(text);
-  if (usesRunes) {
-    files.push({ name: PROFILE_RUNE_AMBIENT_NAME, text: PROFILE_RUNE_AMBIENT });
-  }
-  if (!rel.endsWith(".svelte")) {
-    files.push({ name: `/sts0-virtual/${row.id}.${ext}`, text });
-    return { files, entry: files[files.length - 1].name };
-  }
-  const fixtureBase = path.posix.basename(rel);
-  const scripts = [...text.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
-  const moduleScript = scripts.find((match) => MODULE_ATTR.test(match[1]));
-  const instanceScript = scripts.find((match) => !MODULE_ATTR.test(match[1]));
-  let moduleName = null;
-  let moduleText = "";
-  if (moduleScript) {
-    moduleName = `${row.id}.module.${ext}`;
-    moduleText = moduleScript[2];
-  }
-  const rewriteSelfImport = (scriptText) =>
-    scriptText.replace(/(["'])([^"']+\.svelte)\1/g, (whole, quote, specifier) =>
-      path.posix.basename(specifier) === fixtureBase && moduleName
-        ? `${quote}./${moduleName}${quote}`
-        : whole,
-    );
-  const moduleExports =
-    moduleName && moduleText
-      ? [
-          ...moduleText.matchAll(
-            /export\s+(?:const|let|var|function|class|interface|type)\s+(\w+)/g,
-          ),
-        ].map((match) => match[1])
-      : [];
-  if (moduleName) {
-    files.push({ name: `/sts0-virtual/${moduleName}`, text: rewriteSelfImport(moduleText) });
-  }
-  const instanceName = `${row.id}.instance.${ext}`;
-  let instanceText = instanceScript ? rewriteSelfImport(instanceScript[2]).trim() : "";
-  if (moduleName && moduleExports.length > 0 && !instanceText.includes(`"./${moduleName}"`)) {
-    instanceText = `import { ${moduleExports.join(", ")} } from "./${moduleName}";\n${instanceText}`;
-  }
-  if (row.scriptContext === "instance") {
-    const alreadyExported = (symbol) =>
-      new RegExp(
-        `export\\s+(?:let|const|var|function|class|interface|type)\\s+${escapeRegExp(symbol)}\\b`,
-      ).test(instanceText) ||
-      new RegExp(`export\\s*\\{[^}]*\\b${escapeRegExp(symbol)}\\b`).test(instanceText);
-    const missing = publishedSymbols.filter((symbol) => !alreadyExported(symbol));
-    if (missing.length > 0) {
-      instanceText += `\nexport { ${missing.join(", ")} };\n`;
-    } else if (publishedSymbols.length === 0) {
-      instanceText += "\nexport {};\n";
-    }
-  } else if (row.scriptContext === "none") {
-    instanceText = "export {};\n";
-  }
-  files.push({ name: `/sts0-virtual/${instanceName}`, text: instanceText });
-  if (row.scriptContext === "module") {
-    if (!moduleName) {
-      files.push({ name: `/sts0-virtual/${row.id}.module.${ext}`, text: "export {};\n" });
-    }
-    return { files, entry: `/sts0-virtual/${row.id}.module.${ext}` };
-  }
-  return { files, entry: `/sts0-virtual/${instanceName}` };
-}
-
-function runVirtualProfileProgram(ts, files, row) {
-  const names = new Map(files.map((file) => [file.name, file.text]));
-  const emitted = new Map();
-  const host = {
-    getSourceFile: (fileName, languageVersion) =>
-      names.has(fileName)
-        ? ts.createSourceFile(fileName, names.get(fileName), languageVersion, true)
-        : undefined,
-    getDefaultLibFileName: () => "/sts0-virtual/lib.d.ts",
-    writeFile: (name, text) => emitted.set(name, text),
-    fileExists: (name) => names.has(name),
-    readFile: (name) => names.get(name),
-    getCurrentDirectory: () => "/sts0-virtual",
-    getDirectories: () => [],
-    getCanonicalFileName: (name) => name,
-    useCaseSensitiveFileNames: () => true,
-    getNewLine: () => "\n",
-  };
-  const options = {
-    strict: true,
-    target: ts.ScriptTarget.ES2022,
-    module: ts.ModuleKind.ESNext,
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    skipLibCheck: true,
-    types: [],
-    lib: [],
-    declaration: true,
-    emitDeclarationOnly: true,
-    outDir: "/sts0-virtual/out",
-    noEmit: false,
-    allowImportingTsExtensions: true,
-    allowJs: row.dialect === "js",
-    checkJs: row.dialect === "js" && row.checking === "engine-checked",
-  };
-  const program = ts.createProgram({ rootNames: [...names.keys()], options, host });
-  const sourceNames = new Set([...names.keys()].filter((name) => !name.endsWith(".d.ts")));
-  const inSources = (diagnostic) => diagnostic.file && sourceNames.has(diagnostic.file.fileName);
-  const diagnostics = [...ts.getPreEmitDiagnostics(program).filter(inSources)];
-  const emitResult = program.emit(undefined, (name, text) => emitted.set(name, text));
-  for (const diagnostic of emitResult.diagnostics || []) {
-    if (inSources(diagnostic)) diagnostics.push(diagnostic);
-  }
-  return { diagnostics, emitted };
-}
-
-function profilePublicationErrors(row, run, publishedSymbols) {
+export function assertProfileContract(policy) {
   const errors = [];
-  if (run.emitted.size === 0) {
-    errors.push(
-      err(
-        "STS0-policy-lock",
-        "publication-missing",
-        `profile ${row.id} published no declarations through the pinned engine`,
-      ),
-    );
-  }
-  const declaredText = [...run.emitted.values()].join("\n\n");
-  for (const symbol of publishedSymbols) {
-    if (!new RegExp(`\\b${escapeRegExp(symbol)}\\b`).test(declaredText)) {
+  const rows = Array.isArray(policy?.profiles) ? policy.profiles : [];
+  for (const row of rows) {
+    if (!Array.isArray(row?.publishedSymbols)) {
       errors.push(
         err(
           "STS0-policy-lock",
           "publication-missing",
-          `profile ${row.id} declaration publish lost ${symbol}`,
+          `profile ${row?.id} carries no publishedSymbols pin for the live behavior path`,
+        ),
+      );
+    } else if (row.publishedSymbols.length === 0 && row.publishing === "module-exports-published") {
+      errors.push(
+        err(
+          "STS0-policy-lock",
+          "publication-missing",
+          `profile ${row?.id} claims module-exports-published but pins no exported symbols`,
+        ),
+      );
+    }
+    const expected = expectedPublishingForRow(row);
+    if (row?.publishing && row.publishing !== expected) {
+      errors.push(
+        err(
+          "STS0-policy-lock",
+          "publication-mismatch",
+          `profile ${row?.id} claims publishing ${row.publishing} but its script context publishes ${expected}`,
         ),
       );
     }
@@ -1186,81 +1127,88 @@ function profilePublicationErrors(row, run, publishedSymbols) {
   return errors;
 }
 
-function corruptTypeText(row, projectedText) {
-  if (row.dialect === "js") {
-    return `${projectedText}\nconst __sts0_type_corruption = "sts0".sts0MissingProperty;\n`;
-  }
-  return `${projectedText}\nconst __sts0_type_corruption: number = "sts0-type-corruption";\n`;
-}
-
 /**
- * Live behavior for one policy profile: its evidence fixture is projected to
- * virtual sources, checked and declaration-emitted through the pinned engine
- * — clean — and both corruption twins must be caught: a corrupted projected
- * type must fail engine-checked rows (and must NOT be reported by
- * js-unchecked rows), and a renamed published binding must lose its
- * declaration.
+ * The Rust-side profile gate in `verter_session` (tests/cases/
+ * sts0_profile_gate.rs): it projects every policy profile's evidence
+ * fixture through the OWNED CCA1I `SvelteProjectionBackend` (project_ide),
+ * checks the real generated carriers on BOTH claimed engines (ts-js 6.0.3
+ * and ts-native 7.0.2), corrupts the evidence templates and the generated
+ * carriers themselves (engine-checked rows must fail, js-unchecked rows
+ * must not report), and consumes the declaration/module publication
+ * surfaces with renaming twins. STS0's runtimeCorrectness claim rests on
+ * these named tests executing — a documentation-only substitute is
+ * forbidden by the frozen charter §14.
  */
-export function checkProfileBehavior(ts, row, { publishedSymbols, evidenceText }) {
-  const errors = [];
-  const projection = projectProfileSources(row, evidenceText, { publishedSymbols });
-  const clean = runVirtualProfileProgram(ts, projection.files, row);
-  for (const diagnostic of clean.diagnostics) {
-    errors.push(
-      err(
-        "STS0-policy-lock",
-        "profile-behavior-failed",
-        `profile ${row.id} projected source did not check clean (${ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")})`,
-      ),
-    );
-  }
-  errors.push(...profilePublicationErrors(row, clean, publishedSymbols));
-  if (clean.diagnostics.length > 0) return errors;
+export const STS0_PROFILE_GATE_TESTS = Object.freeze([
+  "cases::sts0_profile_gate::backend_projection_checks_clean_on_both_claimed_engines",
+  "cases::sts0_profile_gate::evidence_template_corruption_is_caught_on_both_claimed_engines",
+  "cases::sts0_profile_gate::projected_carrier_corruption_is_caught_on_both_claimed_engines",
+  "cases::sts0_profile_gate::publication_surfaces_publish_and_survive_renames_on_both_claimed_engines",
+]);
 
-  const corruptRun = runVirtualProfileProgram(
-    ts,
-    projection.files.map((file) =>
-      file.name === projection.entry ? { ...file, text: corruptTypeText(row, file.text) } : file,
-    ),
-    row,
+const CARGO_SUMMARY_RE = /test result: (ok|FAILED)\. (\d+) passed; (\d+) failed/;
+
+export function runSts0ProfileGate(repoRoot = REPO_ROOT) {
+  const result = spawnSync(
+    "cargo",
+    [
+      "test",
+      "-p",
+      "verter_session",
+      "--test",
+      "main",
+      "cases::sts0_profile_gate",
+      "--",
+      "--test-threads=1",
+    ],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 600000,
+      env: process.env,
+    },
   );
-  const flagged = corruptRun.diagnostics.length > 0;
-  if (row.checking === "engine-checked" && !flagged) {
+  const stdout = `${result.stdout || ""}${result.stderr || ""}`;
+  return { status: result.status, error: result.error, stdout };
+}
+
+export function assertProfileGateRun(run) {
+  const errors = [];
+  if (run.error) {
     errors.push(
       err(
         "STS0-policy-lock",
-        "missed-type-corruption",
-        `engine-checked profile ${row.id} did not flag a corrupted projected type`,
+        "profile-gate-missing",
+        `the owned-backend profile gate failed to spawn: ${run.error.message}`,
       ),
     );
+    return errors;
   }
-  if (row.checking === "js-unchecked" && flagged) {
+  const summary = CARGO_SUMMARY_RE.exec(run.stdout);
+  if (!summary || run.status !== 0 || summary[1] !== "ok" || Number(summary[2]) === 0) {
+    const detail = summary
+      ? `status=${run.status} passed=${summary[2]} failed=${summary[3]}`
+      : `status=${run.status} (no cargo test summary)`;
     errors.push(
       err(
         "STS0-policy-lock",
-        "unchecked-profile-reports-types",
-        `js-unchecked profile ${row.id} reported type diagnostics on the same corruption`,
+        "profile-gate-missing",
+        `the owned-backend profile gate did not execute its cases (${detail})`,
       ),
     );
   }
-  if (publishedSymbols.length > 0) {
-    const renamed = evidenceText
-      .split(publishedSymbols[0])
-      .join(`${publishedSymbols[0]}__sts0_removed`);
-    const publicationRun = runVirtualProfileProgram(
-      ts,
-      projectProfileSources(row, renamed, { publishedSymbols }).files,
-      row,
-    );
-    const caught =
-      publicationRun.diagnostics.length > 0 ||
-      profilePublicationErrors(row, publicationRun, publishedSymbols).length > 0;
-    if (!caught) {
+  for (const name of STS0_PROFILE_GATE_TESTS) {
+    const failed = run.stdout.includes(`${name} ... FAILED`);
+    const passed = run.stdout.includes(`${name} ... ok`);
+    if (!passed || failed) {
       errors.push(
         err(
           "STS0-policy-lock",
-          "missed-publication-corruption",
-          `renaming published binding ${publishedSymbols[0]} still published a declaration for profile ${row.id}`,
+          "profile-gate-failed",
+          passed
+            ? `owned-backend profile gate test ${name} failed`
+            : `owned-backend profile gate test ${name} did not pass (status=${run.status})`,
         ),
       );
     }
@@ -1269,59 +1217,15 @@ export function checkProfileBehavior(ts, row, { publishedSymbols, evidenceText }
 }
 
 /**
- * STS0-policy-lock live path: every policy profile's claimed checking and
- * publishing behavior is executed through the pinned engine's real
- * projection/check/declaration path, with corruption twins that must fail.
+ * STS0-policy-lock live path: the claimed checking/publishing behavior is
+ * proven by EXECUTION — the structural publication pins here, plus the
+ * verter_session gate that drives the evidence fixtures through the owned
+ * SvelteProjectionBackend on each claimed engine with corruption twins.
  */
-export function assertProfileBehavior(ts, policy, { repoRoot = REPO_ROOT } = {}) {
-  if (!ts || typeof ts.createProgram !== "function") {
-    return [
-      err(
-        "STS0-policy-lock",
-        "missing-engine",
-        "the pinned ts-js engine did not resolve for live profile behavior",
-      ),
-    ];
-  }
-  const errors = [];
-  const rows = Array.isArray(policy?.profiles) ? policy.profiles : [];
-  for (const row of rows) {
-    const publishedSymbols = PROFILE_PUBLISHED_SYMBOLS[row?.id];
-    if (!Array.isArray(publishedSymbols)) {
-      errors.push(
-        err(
-          "STS0-policy-lock",
-          "profile-behavior-missing",
-          `profile ${row?.id} has no published-symbol pin for the live behavior path`,
-        ),
-      );
-      continue;
-    }
-    let evidenceText;
-    try {
-      evidenceText = fs.readFileSync(path.resolve(repoRoot, row.evidencePath || ""), "utf8");
-    } catch {
-      continue; // missing evidence is already flagged by assertPolicyLock
-    }
-    errors.push(...checkProfileBehavior(ts, row, { publishedSymbols, evidenceText }));
-  }
+export function assertProfileBehavior(policy, { repoRoot = REPO_ROOT } = {}) {
+  const errors = [...assertProfileContract(policy)];
+  errors.push(...assertProfileGateRun(runSts0ProfileGate(repoRoot)));
   return errors;
-}
-
-/** Loads the ts-js engine the STP1 matrix pins (the harness passes its own). */
-export function loadPinnedTsJs({ repoRoot = REPO_ROOT } = {}) {
-  try {
-    const matrix = loadEngineMatrix();
-    const pin = (matrix?.engines || []).find(
-      (engine) => engine.id === "ts-js" && engine.kind === "javascript",
-    );
-    if (!pin?.resolveFrom) return null;
-    const pkgDir = path.resolve(repoRoot, pin.resolveFrom);
-    const require = createRequire(path.join(pkgDir, "package.json"));
-    return require(path.join(pkgDir, "lib", "typescript.js"));
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -1448,7 +1352,11 @@ export function assertPolicyLock(policy, { repoRoot = REPO_ROOT, optionsTsv = nu
             ),
           );
         }
-        if (!classified.jsCheckingHint) {
+        // A scriptless surface has no script body to carry a @ts-check or
+        // @ts-nocheck pragma; its carrier is checked by the live provider's
+        // checkJs default instead, so the hint is required only where a
+        // script body exists.
+        if (!classified.jsCheckingHint && classified.scriptContext !== "none") {
           errors.push(
             err(
               "STS0-policy-lock",
@@ -2011,8 +1919,16 @@ export const DIRTY_POLICY_DROP_UNCHECKED_LEGACY = "svelte-js-instance-legacy-unc
 export const DIRTY_POLICY_DROP_REFUSAL = "accessors";
 
 export const DIRTY_INVENTORY_DROP_SELECTED_MAPPING = "harness-props-events";
+/** Every selected member cites this fixture; deleting them all while the
+ * file remains must trip the file-identity completeness rule. */
+export const DIRTY_INVENTORY_DROP_SELECTED_MAPPING_PATH =
+  "packages/framework-conformance-harness/fixtures/svelte/props-events.svelte";
 export const DIRTY_INVENTORY_DROP_SMOKE_CASE = "svelte/fixtures/20/Comp00000.svelte";
 export const DIRTY_INVENTORY_DROP_DIRECTIVE_ROW = "class-directive";
+export const DIRTY_INVENTORY_DROP_OFFICIAL_JOIN = "official-runtime-runes";
+export const DIRTY_INVENTORY_DROP_CSS_JOIN = "css-attr-selectors";
+export const DIRTY_INVENTORY_DROP_COMPILER_JOIN = "template-attach";
+export const DIRTY_POLICY_PUBLISHING_FLIP_PROFILE = "svelte-ts-instance-runes";
 
 export const DIRTY_INVENTORY_UNOWNED_SELECTED = Object.freeze({
   id: "unowned-upstream-case",
@@ -2040,6 +1956,40 @@ export function evaluateRejectTwins() {
   // STS0-policy-lock clean pass, then the dirty twins.
   const cleanPolicy = assertPolicyLock(policy);
   if (cleanPolicy.length) errors.push(...cleanPolicy);
+  const cleanContract = assertProfileContract(policy);
+  if (cleanContract.length) errors.push(...cleanContract);
+  const flippedPublishing = cloneJson(policy);
+  const flippedRow = flippedPublishing.profiles.find(
+    (row) => row.id === DIRTY_POLICY_PUBLISHING_FLIP_PROFILE,
+  );
+  if (flippedRow) flippedRow.publishing = "module-exports-published";
+  if (
+    !assertProfileContract(flippedPublishing).some((error) => error.code === "publication-mismatch")
+  ) {
+    errors.push(
+      err(
+        "STS0-policy-lock",
+        "missed-unspecified",
+        "an instance profile flipped to module-exports-published was not rejected",
+      ),
+    );
+  }
+  const missingSymbols = cloneJson(policy);
+  const symbolsRow = missingSymbols.profiles.find(
+    (row) => row.id === DIRTY_POLICY_PUBLISHING_FLIP_PROFILE,
+  );
+  if (symbolsRow) delete symbolsRow.publishedSymbols;
+  if (
+    !assertProfileContract(missingSymbols).some((error) => error.code === "publication-missing")
+  ) {
+    errors.push(
+      err(
+        "STS0-policy-lock",
+        "missed-unspecified",
+        "a profile dropping its publishedSymbols pin was not rejected",
+      ),
+    );
+  }
   const unspecified = cloneJson(policy);
   unspecified.profiles.push(cloneJson(DIRTY_POLICY_UNSPECIFIED_PROFILE));
   if (!assertPolicyLock(unspecified).some((error) => error.code === "unspecified-behavior")) {
@@ -2227,19 +2177,29 @@ export function evaluateRejectTwins() {
       ),
     );
   }
-  const zeroRows = cloneJson(inventory);
-  const official = zeroRows.populations.find((row) => row.id === "svelte-official-cases");
-  if (official) official.recordedRows = 0;
-  if (
-    !assertSvelteInventory(zeroRows).some((error) => error.code === "population-count-mismatch")
-  ) {
-    errors.push(
-      err(
-        "STS0-svelte-inventory",
-        "missed-unowned-feature",
-        "zeroing official recordedRows was not rejected",
-      ),
+  // Selected ownership joins cannot disappear population-wide: deleting the
+  // official, css or compiler population's mapping while its source fixture,
+  // suite and population record all remain must be rejected.
+  for (const [dropId, label] of [
+    [DIRTY_INVENTORY_DROP_OFFICIAL_JOIN, "official suite join"],
+    [DIRTY_INVENTORY_DROP_CSS_JOIN, "css corpus join"],
+    [DIRTY_INVENTORY_DROP_COMPILER_JOIN, "compiler surface join"],
+  ]) {
+    const droppedJoin = cloneJson(inventory);
+    droppedJoin.selectedMembers = droppedJoin.selectedMembers.filter(
+      (member) => member.id !== dropId,
     );
+    if (
+      !assertSvelteInventory(droppedJoin).some((error) => error.code === "unselected-feature-row")
+    ) {
+      errors.push(
+        err(
+          "STS0-svelte-inventory",
+          "missed-unowned-feature",
+          `deleting the ${label} while retaining its source and population record was not rejected`,
+        ),
+      );
+    }
   }
   const unownedSelected = cloneJson(inventory);
   unownedSelected.selectedMembers = [
@@ -2261,7 +2221,7 @@ export function evaluateRejectTwins() {
   // smoke case must each be rejected.
   const droppedMapping = cloneJson(inventory);
   droppedMapping.selectedMembers = droppedMapping.selectedMembers.filter(
-    (member) => member.id !== DIRTY_INVENTORY_DROP_SELECTED_MAPPING,
+    (member) => member.path !== DIRTY_INVENTORY_DROP_SELECTED_MAPPING_PATH,
   );
   if (
     !assertSvelteInventory(droppedMapping).some(
@@ -2459,18 +2419,9 @@ export function evaluateSts0(input = {}) {
   const policy = loadSts0Product("svelte-projection-policy.json");
   const inventory = loadSts0Product("svelte-current-feature-inventory.json");
   errors.push(...assertModeClassification(inventory, { compile: input.compile ?? undefined }));
-  const ts = input.ts ?? loadPinnedTsJs();
-  if (!ts) {
-    errors.push(
-      err(
-        "STS0-policy-lock",
-        "missing-engine",
-        "the pinned ts-js engine did not resolve for live profile behavior",
-      ),
-    );
-  } else {
-    errors.push(...assertProfileBehavior(ts, policy));
-  }
+  // Live profile behavior executes through the owned CCA1I backend gate
+  // (both claimed engines); the in-process ts-js projector path is retired.
+  errors.push(...assertProfileBehavior(policy, { repoRoot: input.repoRoot ?? REPO_ROOT }));
   const positiveAbs = path.join(STS0_DIR, "probes", "positive.ts");
   const positiveSource = fs.readFileSync(positiveAbs, "utf8");
   errors.push(...assertSvelteShapeSource(positiveSource));
