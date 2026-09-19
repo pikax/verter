@@ -67,6 +67,22 @@ test("ARH7-authority dirty twin: dropping the reload discriminator is rejected (
   );
 });
 
+test("ARH7-work dirty twin: dropping stale-generation evidence is rejected (AC3)", () => {
+  const dirty = cloneProducts();
+  const concern = dirty["activation-cutover"].ac3.concerns.find(
+    (c) => c.concern === "stale/partial rejection",
+  );
+  concern.evidence = [];
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH7-work" && e.code === "ac3-concern-without-evidence",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
 test("ARH7-work dirty twin: dropping cancellation evidence is rejected (AC3)", () => {
   const dirty = cloneProducts();
   const concern = dirty["activation-cutover"].ac3.concerns.find(

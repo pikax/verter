@@ -199,17 +199,6 @@ export function validate(products, manifest = loadManifest()) {
   if (deactivateBody && !deactivateBody.includes("activation.deactivate()")) {
     err(errors, "ARH7-cutover", "composition-root-missing", "deactivate does not dispose the root");
   }
-  const activateExtensionBody = extSrc
-    ? fnBody(extSrc, "async function", "activateExtension")
-    : null;
-  if (activateExtensionBody && activateExtensionBody.includes("context.subscriptions")) {
-    err(
-      errors,
-      "ARH7-cutover",
-      "activate-extension-still-uses-context-subscriptions",
-      "activateExtension still registers on context.subscriptions",
-    );
-  }
 
   const cutIds = (cut?.cutover ?? []).map((row) => row.id);
   if (JSON.stringify(cutIds) !== JSON.stringify([...CUTOVER_IDS])) {

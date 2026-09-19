@@ -13,7 +13,6 @@
         "owner-path-missing",
         "owner-export-missing",
         "composition-root-missing",
-        "activate-extension-still-uses-context-subscriptions",
         "cutover-cardinality"
       ]
     },

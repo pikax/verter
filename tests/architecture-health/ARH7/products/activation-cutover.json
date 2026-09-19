@@ -71,12 +71,13 @@
       },
       {
         "file": "packages/vue-vscode/src/extensionStartAttemptLifetime.spec.ts",
-        "proves": "a failed language-server start attempt still disposes its own registrations, status bar items and timers"
+        "test": "stops a started client that deactivates before runtime publication",
+        "proves": "a failed language-server start attempt still disposes its own registrations, and a start that finishes after the post-start guard still cannot publish an ownerless process"
       }
     ]
   },
   "ac3": {
-    "note": "ARH7 does not mutate a compiler state, query or map boundary. Language-server start-attempt cancellation and disposal are the touched lifetime concern; the rest stay with their existing owners.",
+    "note": "ARH7 does not mutate a compiler state, query or map boundary. Language-server start-attempt cancellation, disposal and activation-generation stale rejection are the touched lifetime concerns; compiler map/query stay with their existing owners.",
     "concerns": [
       {
         "concern": "fresh-versus-incremental equivalence",
@@ -101,8 +102,22 @@
       },
       {
         "concern": "stale/partial rejection",
-        "applicable": false,
-        "rationale": "no qualified-map, snapshot or partial-result envelope is touched"
+        "applicable": true,
+        "evidence": [
+          {
+            "file": "packages/vue-vscode/src/activationSession.spec.ts",
+            "test": "a stale activation's success cannot republish its runtime"
+          },
+          {
+            "file": "packages/vue-vscode/src/activationSession.spec.ts",
+            "test": "a stale activation's rejection cannot dispose or replace the live session"
+          },
+          {
+            "file": "packages/vue-vscode/src/activationGate.spec.ts",
+            "test": "a superseded attempt's late rejection does not unlock a third start"
+          }
+        ],
+        "note": "activation generations fence stale completions; a superseded run cannot dispose, replace or republish over the live session"
       },
       {
         "concern": "deterministic ordering under perturbed discovery or scheduling",

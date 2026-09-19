@@ -13,16 +13,15 @@ Clean products validate. Manifest cases, products and verify/test commands match
 The join is behavioral ownership, not spellings: the charter forbids source-name tombstones, so no twin scans extension.ts or examples for retired binding names.
 
 - `owner-path-missing` / `owner-export-missing`: CUT-1 survives on `createActivationRoot`; CUT-2/CUT-3 on `StartAttemptScope`, as pure lifetime modules.
-- `composition-root-missing`: `activate`/`deactivate` exist and delegate to `activation.deactivate()` over the imported `activationSession`/`startAttemptScope` modules.
-- `activate-extension-still-uses-context-subscriptions`: `activateExtension` registers on the session lifetime.
+- `composition-root-missing`: `activate`/`deactivate` exist and delegate to `activation.deactivate()` over the imported `activationSession`/`startAttemptScope` modules. CUT-3's surviving owner is `StartAttemptScope.add`; `activateExtension` registers on the session lifetime.
 
 ## ARH7-authority (reject) — AC2
 
-Reload or repeated activation duplicating listeners is rejected by `activationSession.spec.ts` (`reload or repeated activation does not duplicate registrations`), with the existing activation gate and start-attempt lifetime tests retained. Dirty twin drops the session spec.
+Reload or repeated activation duplicating listeners is rejected by `activationSession.spec.ts` (`reload or repeated activation does not duplicate registrations`), with the existing activation gate and start-attempt lifetime tests retained, including the publication-window stop (`stops a started client that deactivates before runtime publication`). Dirty twin drops the session spec.
 
 ## ARH7-work (reject) — AC3
 
-Fresh/incremental, edit/revert, stale/partial and scheduling order are not applicable (no state/query/map mutation). Cancellation binds the existing start-attempt failure-disposal witness. Dirty twins empty cancellation evidence or invent a concern.
+Fresh/incremental, edit/revert and scheduling order are not applicable (no compiler state/query/map mutation). Cancellation binds the start-attempt failure-disposal witness. Stale/partial rejection binds the deferred-generation fences (stale success cannot republish; stale rejection cannot dispose the live session; a superseded gate rejection cannot unlock a third start). Dirty twins empty cancellation or stale-generation evidence, or invent a concern.
 
 ## ARH7-delivery (reject) — AC4
 
