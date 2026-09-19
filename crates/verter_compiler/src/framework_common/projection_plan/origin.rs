@@ -318,7 +318,8 @@ impl ProjectionEmission {
                 role: observation.role,
             });
         }
-        if span_is_wholly_synthesized(&self.mapping, observation.generated)
+        if !span_on_char_boundaries(&self.checking_text, observation.generated)
+            || span_is_wholly_synthesized(&self.mapping, observation.generated)
             || !span_is_verbatim(&self.mapping, observation.generated)
         {
             return Err(EmissionRefusal::EditNotVerbatim {
@@ -339,18 +340,79 @@ impl ProjectionEmission {
     }
 }
 
-/// Lower an [`EmitOp`] to a mapper class only where the variant's geometry
-/// already is that class. Never invents a correspondence.
+/// Lower an [`EmitOp`] to mapper classes only where the variant's byte
+/// geometry already is those classes. Never invents a correspondence.
+///
+/// [`EmitOp::InsertMapped`] follows the TCM1 partition: bytes before
+/// `content_offset` are [`ProjectedClass::Synthesized`]; the suffix is
+/// [`ProjectedClass::Rewritten`]. An offset equal to the text length
+/// produces only Synthesized regions.
 #[must_use]
-pub fn projected_class_for_emit_op(op: &EmitOp<'_>) -> ProjectedClass {
+pub fn projected_class_for_emit_op(op: &EmitOp<'_>) -> Vec<(MappingSpan, ProjectedClass)> {
     match op {
-        EmitOp::PreserveOriginal { .. } => ProjectedClass::Identity,
-        EmitOp::MoveOriginal { .. } => ProjectedClass::Relocated,
-        EmitOp::InsertMapped { .. } => ProjectedClass::Rewritten,
-        EmitOp::InsertUnmapped { .. } | EmitOp::OverwriteSyntheticBoundary { .. } => {
-            ProjectedClass::Synthesized
+        EmitOp::PreserveOriginal { source } => {
+            vec![(
+                MappingSpan {
+                    start: 0,
+                    end: source.len(),
+                },
+                ProjectedClass::Identity,
+            )]
+        }
+        EmitOp::MoveOriginal { source, .. } => {
+            vec![(
+                MappingSpan {
+                    start: 0,
+                    end: source.len(),
+                },
+                ProjectedClass::Relocated,
+            )]
+        }
+        EmitOp::InsertMapped {
+            text,
+            content_offset,
+            ..
+        } => mapped_insertion_classes(text.as_str().len() as u32, content_offset.0),
+        EmitOp::InsertUnmapped { text, .. } | EmitOp::OverwriteSyntheticBoundary { text, .. } => {
+            vec![(
+                MappingSpan {
+                    start: 0,
+                    end: text.as_str().len() as u32,
+                },
+                ProjectedClass::Synthesized,
+            )]
         }
     }
+}
+
+fn mapped_insertion_classes(len: u32, content_offset: u32) -> Vec<(MappingSpan, ProjectedClass)> {
+    let offset = content_offset.min(len);
+    let mut regions = Vec::new();
+    if offset > 0 {
+        regions.push((
+            MappingSpan {
+                start: 0,
+                end: offset,
+            },
+            ProjectedClass::Synthesized,
+        ));
+    }
+    if offset < len {
+        regions.push((
+            MappingSpan {
+                start: offset,
+                end: len,
+            },
+            ProjectedClass::Rewritten,
+        ));
+    }
+    if regions.is_empty() {
+        regions.push((
+            MappingSpan { start: 0, end: 0 },
+            ProjectedClass::Synthesized,
+        ));
+    }
+    regions
 }
 
 /// Compose an upstream preprocessor/external map through the transform that
@@ -367,6 +429,16 @@ fn assemble(
     mapping: MappingProduct,
     mut observations: Vec<RoleQualifiedObservation>,
 ) -> Result<ProjectionEmission, EmissionRefusal> {
+    for observation in &observations {
+        if observation.generated.start > observation.generated.end
+            || observation.generated.end > mapping.projected_len()
+            || observation.generated.start > mapping.projected_len()
+        {
+            return Err(EmissionRefusal::ObservationOutsideMapping {
+                generated: observation.generated,
+            });
+        }
+    }
     observations.sort_by_key(|obs| (obs.generated.start, obs.generated.end));
     for window in observations.windows(2) {
         let first = window[0].generated;
@@ -376,13 +448,6 @@ fn assemble(
         }
     }
     for observation in &observations {
-        if observation.generated.end > mapping.projected_len()
-            || observation.generated.start > mapping.projected_len()
-        {
-            return Err(EmissionRefusal::ObservationOutsideMapping {
-                generated: observation.generated,
-            });
-        }
         if observation.origin.is_authored()
             && span_is_wholly_synthesized(&mapping, observation.generated)
         {
@@ -416,11 +481,28 @@ fn slice_bytes(text: &str, span: MappingSpan) -> &str {
     }
 }
 
+fn span_on_char_boundaries(text: &str, span: MappingSpan) -> bool {
+    let start = span.start as usize;
+    let end = span.end as usize;
+    start <= end && end <= text.len() && text.is_char_boundary(start) && text.is_char_boundary(end)
+}
+
+fn span_is_exact_insertion_anchor(mapping: &MappingProduct, span: MappingSpan) -> bool {
+    span.start == span.end
+        && mapping
+            .insertion_anchors()
+            .iter()
+            .any(|anchor| anchor.projected == span.start)
+}
+
 fn span_is_wholly_synthesized(mapping: &MappingProduct, span: MappingSpan) -> bool {
-    if span.end > mapping.projected_len() {
+    if span.start > span.end || span.end > mapping.projected_len() {
         return true;
     }
-    if span.is_empty() {
+    if span.start == span.end {
+        if span_is_exact_insertion_anchor(mapping, span) {
+            return false;
+        }
         return mapping
             .projected_at(span.start)
             .is_none_or(|region| region.class == ProjectedClass::Synthesized);
@@ -635,7 +717,7 @@ mod tests {
 
     use super::*;
     use crate::code_transform::CarrierClass;
-    use crate::framework_common::projection_plan::plan_from_source;
+    use crate::framework_common::projection_plan::{plan_from_source, ExpressionKind};
     use crate::ide::template::emit::EmitText;
 
     const ROLE_SFC: &str = concat!(
@@ -646,6 +728,19 @@ mod tests {
         "  <div v-for=\"item in items\">{{ item }}</div>\n",
         "</template>\n",
     );
+
+    const VIEW_PROP_SFC: &str = concat!(
+        "<script>\n",
+        "export default {\n",
+        "  data() { return { count: 1 } }\n",
+        "}\n",
+        "</script>\n",
+        "<template>\n",
+        "  <div>{{ count }}</div>\n",
+        "</template>\n",
+    );
+
+    const VIEW_PROPERTY_PREFIX: &str = "___VERTER___instance.";
 
     fn binding_item() -> BindingOriginId {
         let plan = plan_from_source("file:///stp10-role.vue", ROLE_SFC);
@@ -678,44 +773,124 @@ mod tests {
     #[test]
     fn stp10_role_view_property_and_binding_share_origin_not_symbol() {
         let allocator = Allocator::default();
-        let source = "item;item";
+        let source = VIEW_PROP_SFC;
+        let plan = plan_from_source("file:///stp10-role.vue", source);
+        let expression = plan
+            .expressions()
+            .iter()
+            .find(|occurrence| occurrence.kind == ExpressionKind::Interpolation)
+            .expect("authored count interpolation");
+        let origin = ProjectionOrigin::new(None, None, Some(expression.id.clone()));
+        let script_count = source.find("count").expect("original binding") as u32;
+        let template_count = source.rfind("count").expect("view property ident") as u32;
+        assert_ne!(script_count, template_count);
         let mut ct = CodeTransform::new(source, &allocator);
-        ct.overwrite_unmapped(4, 5, "+");
-        assert_eq!(ct.build_string(), "item+item");
-        let binding = binding_item();
-        let origin = authored(binding);
-        let view = RoleQualifiedObservation::new(
-            MappingSpan { start: 0, end: 4 },
-            ObservationRole::Feature,
-            origin.clone(),
-        );
+        ct.prepend_left(template_count, VIEW_PROPERTY_PREFIX);
+        let prefix_len = VIEW_PROPERTY_PREFIX.len() as u32;
+        let view_span = MappingSpan {
+            start: template_count,
+            end: template_count + prefix_len + 5,
+        };
+        let binding_span = MappingSpan {
+            start: script_count,
+            end: script_count + 5,
+        };
+        let view =
+            RoleQualifiedObservation::new(view_span, ObservationRole::Feature, origin.clone());
         let original = RoleQualifiedObservation::new(
-            MappingSpan { start: 5, end: 9 },
+            binding_span,
             ObservationRole::Definition,
             origin.clone(),
         );
-        let emission = ProjectionEmission::from_operation(&ct, vec![view, original])
-            .expect("two observations of one origin");
-        assert_eq!(emission.observations().len(), 2);
+        let edits = RoleQualifiedObservation::new(binding_span, ObservationRole::Edits, origin);
+        let emission = ProjectionEmission::from_operation(&ct, vec![view.clone(), original])
+            .expect("view property and original binding of one authored token");
+        assert!(
+            emission
+                .checking_text()
+                .contains("___VERTER___instance.count"),
+            "view property must be the instance-prefixed generated symbol: {}",
+            emission.checking_text()
+        );
+        assert_eq!(slice_bytes(emission.checking_text(), binding_span), "count");
+        let view_obs = emission
+            .observations()
+            .iter()
+            .find(|obs| obs.role() == ObservationRole::Feature)
+            .expect("view property");
+        let binding_obs = emission
+            .observations()
+            .iter()
+            .find(|obs| obs.role() == ObservationRole::Definition)
+            .expect("original binding");
         assert_eq!(
-            emission.observations()[0].origin().binding(),
-            emission.observations()[1].origin().binding()
+            view_obs.origin().expression(),
+            binding_obs.origin().expression()
         );
         assert_ne!(
-            emission.observations()[0].generated(),
-            emission.observations()[1].generated(),
+            view_obs.generated(),
+            binding_obs.generated(),
             "view property and original binding are not one generated TS span"
         );
-        assert_eq!(emission.observations()[0].role(), ObservationRole::Feature);
+        assert_eq!(view_obs.generated(), view_span);
+        assert_eq!(binding_obs.generated(), binding_span);
+        let prefix_region = emission
+            .mapping()
+            .projected_at(view_span.start)
+            .expect("instance prefix");
+        let ident_region = emission
+            .mapping()
+            .projected_at(view_span.start + prefix_len)
+            .expect("view property ident");
+        let binding_region = emission
+            .mapping()
+            .projected_at(binding_span.start)
+            .expect("original binding");
+        assert_eq!(prefix_region.class, ProjectedClass::Synthesized);
+        assert_eq!(ident_region.class, ProjectedClass::Identity);
+        assert_eq!(binding_region.class, ProjectedClass::Identity);
         assert_eq!(
-            emission.observations()[1].role(),
-            ObservationRole::Definition
+            ident_region.carrier.map(|span| span.start),
+            Some(template_count)
         );
-        let first = emission.mapping().projected_at(0).expect("first item");
-        let second = emission.mapping().projected_at(5).expect("second item");
-        assert_eq!(first.class, ProjectedClass::Identity);
-        assert_eq!(second.class, ProjectedClass::Identity);
-        assert_ne!(first.generated, second.generated);
+        assert!(
+            binding_region
+                .carrier
+                .is_some_and(|span| { span.start <= script_count && script_count + 5 <= span.end }),
+            "script count must sit in the original-binding Identity region: {:?}",
+            binding_region.carrier
+        );
+        assert_ne!(
+            ident_region.generated, binding_region.generated,
+            "template ident and script binding are distinct generated symbols"
+        );
+        assert_ne!(
+            ident_region.carrier, binding_region.carrier,
+            "template ident and script binding are distinct carrier targets of one origin"
+        );
+        let edit = emission
+            .edit_origin(&edits)
+            .expect("original binding edits");
+        assert_eq!(edit.carrier(), binding_span);
+        assert!(
+            matches!(
+                emission.edit_origin(&view),
+                Err(EmissionRefusal::EditNotVerbatim { .. })
+            ),
+            "feature participation is not edit safety"
+        );
+        let view_edits = RoleQualifiedObservation::new(
+            view_span,
+            ObservationRole::Edits,
+            view_obs.origin().clone(),
+        );
+        assert!(
+            matches!(
+                emission.edit_origin(&view_edits),
+                Err(EmissionRefusal::EditNotVerbatim { .. })
+            ),
+            "mixed synthesized prefix is not an edit-safe view-property span"
+        );
     }
 
     #[test]
@@ -877,23 +1052,61 @@ mod tests {
         };
         assert_eq!(
             projected_class_for_emit_op(&unmapped),
-            ProjectedClass::Synthesized
+            vec![(
+                MappingSpan {
+                    start: 0,
+                    end: "__VLS_ctx.".len() as u32,
+                },
+                ProjectedClass::Synthesized
+            )]
         );
         assert_eq!(
             projected_class_for_emit_op(&mapped),
-            ProjectedClass::Rewritten
+            vec![(MappingSpan { start: 0, end: 3 }, ProjectedClass::Rewritten)]
         );
         assert_eq!(
             projected_class_for_emit_op(&preserve),
-            ProjectedClass::Identity
+            vec![(MappingSpan { start: 0, end: 3 }, ProjectedClass::Identity)]
         );
         assert_eq!(
             projected_class_for_emit_op(&r#move),
-            ProjectedClass::Relocated
+            vec![(MappingSpan { start: 0, end: 3 }, ProjectedClass::Relocated)]
         );
         assert_eq!(
             projected_class_for_emit_op(&boundary),
-            ProjectedClass::Synthesized
+            vec![(
+                MappingSpan { start: 0, end: 1 },
+                ProjectedClass::Synthesized
+            )]
+        );
+        let mixed = EmitOp::InsertMapped {
+            at: SourceByteOffset(0),
+            text: EmitText::Borrowed("xyfoo"),
+            source_start: SourceByteOffset(0),
+            content_offset: GeneratedByteLen(2),
+        };
+        assert_eq!(
+            projected_class_for_emit_op(&mixed),
+            vec![
+                (
+                    MappingSpan { start: 0, end: 2 },
+                    ProjectedClass::Synthesized
+                ),
+                (MappingSpan { start: 2, end: 5 }, ProjectedClass::Rewritten),
+            ]
+        );
+        let wholly_unmapped = EmitOp::InsertMapped {
+            at: SourceByteOffset(0),
+            text: EmitText::Borrowed("foo"),
+            source_start: SourceByteOffset(0),
+            content_offset: GeneratedByteLen(3),
+        };
+        assert_eq!(
+            projected_class_for_emit_op(&wholly_unmapped),
+            vec![(
+                MappingSpan { start: 0, end: 3 },
+                ProjectedClass::Synthesized
+            )]
         );
     }
 
@@ -1093,6 +1306,183 @@ mod tests {
         assert!(
             matches!(whole_edit, Err(EmissionRefusal::EditNotVerbatim { .. })),
             "def+abc is a reordered preimage, not carrier [3,3): {whole_edit:?}"
+        );
+    }
+
+    #[test]
+    fn stp10_overlap_rejects_inverted_span_before_adjacent_check() {
+        let allocator = Allocator::default();
+        let source = "abcdefghij";
+        let ct = CodeTransform::new(source, &allocator);
+        let origin = ProjectionOrigin::empty();
+        let masked = ProjectionEmission::from_operation(
+            &ct,
+            vec![
+                RoleQualifiedObservation::new(
+                    MappingSpan { start: 0, end: 10 },
+                    ObservationRole::Hover,
+                    origin.clone(),
+                ),
+                RoleQualifiedObservation::new(
+                    MappingSpan { start: 2, end: 0 },
+                    ObservationRole::Definition,
+                    origin.clone(),
+                ),
+                RoleQualifiedObservation::new(
+                    MappingSpan { start: 3, end: 4 },
+                    ObservationRole::Feature,
+                    origin.clone(),
+                ),
+            ],
+        );
+        assert!(
+            matches!(
+                masked,
+                Err(EmissionRefusal::ObservationOutsideMapping { .. })
+                    | Err(EmissionRefusal::OverlappingVirtualSpans { .. })
+            ),
+            "{masked:?}"
+        );
+        let overlap = ProjectionEmission::from_operation(
+            &ct,
+            vec![
+                RoleQualifiedObservation::new(
+                    MappingSpan { start: 0, end: 10 },
+                    ObservationRole::Hover,
+                    origin.clone(),
+                ),
+                RoleQualifiedObservation::new(
+                    MappingSpan { start: 3, end: 4 },
+                    ObservationRole::Feature,
+                    origin.clone(),
+                ),
+            ],
+        );
+        assert!(
+            matches!(
+                overlap,
+                Err(EmissionRefusal::OverlappingVirtualSpans { .. })
+            ),
+            "removing the reversed interval must still reject the overlap: {overlap:?}"
+        );
+        let abcdef = CodeTransform::new("abcdef", &allocator);
+        let inverted = ProjectionEmission::from_operation(
+            &abcdef,
+            vec![RoleQualifiedObservation::new(
+                MappingSpan { start: 5, end: 3 },
+                ObservationRole::Edits,
+                origin.clone(),
+            )],
+        );
+        assert!(
+            matches!(
+                inverted,
+                Err(EmissionRefusal::ObservationOutsideMapping { .. })
+            ),
+            "{inverted:?}"
+        );
+        let valid = ProjectionEmission::from_operation(
+            &abcdef,
+            vec![RoleQualifiedObservation::new(
+                MappingSpan { start: 3, end: 5 },
+                ObservationRole::Edits,
+                origin,
+            )],
+        );
+        assert!(valid.is_ok(), "{valid:?}");
+    }
+
+    #[test]
+    fn stp10_insertion_anchor_admits_zero_width_authored_observation() {
+        let allocator = Allocator::default();
+        let source = ROLE_SFC;
+        let binding = {
+            let plan = plan_from_source("file:///stp10-role.vue", source);
+            plan.origins
+                .iter()
+                .find(|origin| origin.name == "item")
+                .expect("v-for alias")
+                .id
+                .clone()
+        };
+        let origin = authored(binding);
+        let anchored_ct = helper_preamble_at(&allocator, source, "X", 0);
+        let projected = MappingProduct::of(&anchored_ct).insertion_anchors()[0].projected;
+        let anchored = RoleQualifiedObservation::new(
+            MappingSpan {
+                start: projected,
+                end: projected,
+            },
+            ObservationRole::Diagnostic,
+            origin.clone(),
+        );
+        let clean = ProjectionEmission::from_operation(&anchored_ct, vec![anchored]);
+        assert!(clean.is_ok(), "{clean:?}");
+        let mut unanchored_ct = CodeTransform::new(source, &allocator);
+        unanchored_ct.prepend("X");
+        let unanchored = ProjectionEmission::from_operation(
+            &unanchored_ct,
+            vec![RoleQualifiedObservation::new(
+                MappingSpan { start: 0, end: 0 },
+                ObservationRole::Diagnostic,
+                origin.clone(),
+            )],
+        );
+        assert!(
+            matches!(
+                unanchored,
+                Err(EmissionRefusal::SyntheticAuthoredLocation { .. })
+            ),
+            "{unanchored:?}"
+        );
+        let nonempty = ProjectionEmission::from_operation(
+            &anchored_ct,
+            vec![RoleQualifiedObservation::new(
+                MappingSpan { start: 0, end: 1 },
+                ObservationRole::Diagnostic,
+                origin,
+            )],
+        );
+        assert!(
+            matches!(
+                nonempty,
+                Err(EmissionRefusal::SyntheticAuthoredLocation { .. })
+            ),
+            "{nonempty:?}"
+        );
+    }
+
+    #[test]
+    fn stp10_edit_origin_rejects_mid_utf8_span() {
+        let allocator = Allocator::default();
+        let source = "é";
+        let ct = CodeTransform::new(source, &allocator);
+        let origin = authored(binding_item());
+        let split = RoleQualifiedObservation::new(
+            MappingSpan { start: 1, end: 2 },
+            ObservationRole::Edits,
+            origin.clone(),
+        );
+        let whole = RoleQualifiedObservation::new(
+            MappingSpan { start: 0, end: 2 },
+            ObservationRole::Edits,
+            origin,
+        );
+        let whole_emission =
+            ProjectionEmission::from_operation(&ct, vec![whole.clone()]).expect("whole character");
+        assert_eq!(
+            whole_emission
+                .edit_origin(&whole)
+                .expect("whole-character edit")
+                .carrier(),
+            MappingSpan { start: 0, end: 2 }
+        );
+        let split_emission =
+            ProjectionEmission::from_operation(&ct, vec![split.clone()]).expect("assemble split");
+        let split_edit = split_emission.edit_origin(&split);
+        assert!(
+            matches!(split_edit, Err(EmissionRefusal::EditNotVerbatim { .. })),
+            "mid-UTF-8 [1,2) of é must not be an edit origin: {split_edit:?}"
         );
     }
 }
