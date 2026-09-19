@@ -15,6 +15,24 @@
  *    positions in the negotiated `positionEncoding`.
  */
 export { LspClient, type LspClientOptions } from "./lspClient.js";
+export {
+  SERVER_STAGE_ORDER,
+  WSP1_UNAVAILABLE_METRICS,
+  combineInteractionTrace,
+  discriminateThroughputVsQuery,
+  emptyReplay,
+  firstBlockedServerStage,
+  rejectReplay,
+  type InteractionTrace,
+  type ProtocolDirection,
+  type ProtocolStage,
+  type ProtocolWireEvent,
+  type RecordedLspReplay,
+  type ReplayExpectation,
+  type ReplayRejectReason,
+  type StageStamp,
+  type ThroughputKind,
+} from "./protocolReplay.js";
 export { StderrBuffer, type StderrBufferOptions } from "./stderrBuffer.js";
 export {
   DocumentPositions,

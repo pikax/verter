@@ -1,0 +1,55 @@
+{
+  "id": "wsp1-ownership-map.v1",
+  "schema": 1,
+  "contractNode": "WSP1",
+  "finalOwner": "expansion.workspace-responsiveness",
+  "retirementObligation": "server/protocol InteractionTrace and RecordedLspReplay stay owned here until a successor constitution supersedes them; client decode/apply/paint stages retire to WSP1L and are never inferred from this node's traces; Issue 93 remains unverified until reproduced on a recorded reference machine or WSP1L real-client evidence",
+  "preservedOwners": [
+    "semantic algorithms",
+    "project resolution",
+    "format/lint logic",
+    "TypeScript projection",
+    "edit transactions"
+  ],
+  "conflictDomains": ["lsp_publication", "performance_evidence", "scheduler_admission"],
+  "outcomes": [
+    {
+      "id": "InteractionTrace",
+      "currentOwner": "WSP1",
+      "finalOwner": "expansion.workspace-responsiveness",
+      "surface": "crates/verter_lsp/src/interaction_trace.rs"
+    },
+    {
+      "id": "RecordedLspReplay",
+      "currentOwner": "WSP1",
+      "finalOwner": "expansion.workspace-responsiveness",
+      "surface": "packages/lsp-test-client/src/protocolReplay.ts + packages/dx-harness/src/protocol-replay"
+    },
+    {
+      "id": "Issue93ReproCase",
+      "currentOwner": "WSP1",
+      "finalOwner": "expansion.workspace-responsiveness",
+      "surface": "tests/workspace-responsiveness/WSP1/products/issue93-reproduction.v1.json",
+      "state": "unreproduced"
+    }
+  ],
+  "receivingAmendments": [
+    {
+      "receiver": "WSP1L",
+      "product": "client decode/apply/paint stages and real-Lapce interaction driver",
+      "productionCapable": true
+    },
+    {
+      "receiver": "WSP1A",
+      "product": "evidence-bounded early repair consumes this timeline once Issue 93 is reproduced",
+      "productionCapable": true
+    },
+    {
+      "receiver": "DX1",
+      "product": "exposure descriptor registration over the protocol replay operations",
+      "productionCapable": true
+    }
+  ],
+  "displacedRoutes": [],
+  "deletionPopulationThisNode": []
+}

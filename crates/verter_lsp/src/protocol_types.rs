@@ -372,6 +372,9 @@ pub struct StatisticsRequestParams {
 pub struct StatisticsSnapshot {
     pub enabled: bool,
     pub session: StatisticsSession,
+    /// Present only when `interactionTrace.enabled` was set at initialize.
+    #[serde(rename = "interactionTrace", skip_serializing_if = "Option::is_none")]
+    pub interaction_trace: Option<crate::interaction_trace::InteractionTraceSnapshot>,
 }
 
 #[derive(Debug, Serialize)]

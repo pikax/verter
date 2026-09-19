@@ -15,6 +15,26 @@ use tower_lsp_server::ls_types::*;
 use super::nav_features::{handle_completion, handle_hover};
 use super::nav_features_navigation::{handle_goto_definition, handle_references, handle_rename};
 use super::VerterLanguageServer;
+use crate::interaction_trace::ProtocolStage;
+
+async fn with_protocol_trace<T>(
+    server: &VerterLanguageServer,
+    method: &'static str,
+    source_epoch: Option<u64>,
+    fut: impl std::future::Future<Output = Result<T>>,
+    byte_len: impl FnOnce(&T) -> u32,
+) -> Result<T> {
+    let span = server.interaction_trace.begin(method, source_epoch);
+    span.mark(ProtocolStage::Admitted);
+    span.mark(ProtocolStage::ProviderWork);
+    let result = fut.await;
+    span.mark(ProtocolStage::Serialize);
+    if let Ok(value) = result.as_ref() {
+        let n = u64::from(byte_len(value));
+        span.mark_with_bytes(ProtocolStage::OutboundEnqueued, Some(n));
+    }
+    result
+}
 
 /// Audit-aware wrapper for
 /// [`super::nav_features::handle_hover`].
@@ -36,15 +56,22 @@ pub(super) async fn handle_hover_with_audit(
         .clone();
     let position = params.text_document_position_params.position;
     let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
-    crate::audit_harness::run_with_audit(
-        &host,
-        verter_audit::payloads::tags::LspMethodTag::Hover,
-        target_identity,
-        Some(position),
-        async move { handle_hover(server, params).await },
-        |payload, value| {
-            payload.response_size_bytes = hover_response_size(value.as_ref());
-        },
+    let source_epoch = server.documents.get(&uri).map(|doc| doc.version as u64);
+    with_protocol_trace(
+        server,
+        "textDocument/hover",
+        source_epoch,
+        crate::audit_harness::run_with_audit(
+            &host,
+            verter_audit::payloads::tags::LspMethodTag::Hover,
+            target_identity,
+            Some(position),
+            async move { handle_hover(server, params).await },
+            |payload, value| {
+                payload.response_size_bytes = hover_response_size(value.as_ref());
+            },
+        ),
+        |value| hover_response_size(value.as_ref()),
     )
     .await
 }
@@ -59,21 +86,36 @@ pub(super) async fn handle_completion_with_audit(
     let uri = params.text_document_position.text_document.uri.clone();
     let position = params.text_document_position.position;
     let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
-    crate::audit_harness::run_with_audit(
-        &host,
-        verter_audit::payloads::tags::LspMethodTag::Completion,
-        target_identity,
-        Some(position),
-        async move { handle_completion(server, params).await },
-        |payload, value| {
-            let count = match value {
-                Some(CompletionResponse::Array(items)) => items.len(),
-                Some(CompletionResponse::List(list)) => list.items.len(),
-                None => 0,
-            };
-            payload.num_completion_items = Some(u32::try_from(count).unwrap_or(u32::MAX));
-            payload.response_size_bytes =
-                u32::try_from(count.saturating_mul(64)).unwrap_or(u32::MAX);
+    let source_epoch = server.documents.get(&uri).map(|doc| doc.version as u64);
+    with_protocol_trace(
+        server,
+        "textDocument/completion",
+        source_epoch,
+        crate::audit_harness::run_with_audit(
+            &host,
+            verter_audit::payloads::tags::LspMethodTag::Completion,
+            target_identity,
+            Some(position),
+            async move { handle_completion(server, params).await },
+            |payload, value| {
+                let count = match value {
+                    Some(CompletionResponse::Array(items)) => items.len(),
+                    Some(CompletionResponse::List(list)) => list.items.len(),
+                    None => 0,
+                };
+                payload.num_completion_items = Some(u32::try_from(count).unwrap_or(u32::MAX));
+                payload.response_size_bytes =
+                    u32::try_from(count.saturating_mul(64)).unwrap_or(u32::MAX);
+            },
+        ),
+        |value| match value {
+            Some(CompletionResponse::Array(items)) => {
+                u32::try_from(items.len().saturating_mul(64)).unwrap_or(u32::MAX)
+            }
+            Some(CompletionResponse::List(list)) => {
+                u32::try_from(list.items.len().saturating_mul(64)).unwrap_or(u32::MAX)
+            }
+            None => 0,
         },
     )
     .await
@@ -93,21 +135,36 @@ pub(super) async fn handle_goto_definition_with_audit(
         .clone();
     let position = params.text_document_position_params.position;
     let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
-    crate::audit_harness::run_with_audit(
-        &host,
-        verter_audit::payloads::tags::LspMethodTag::GotoDefinition,
-        target_identity,
-        Some(position),
-        async move { handle_goto_definition(server, params).await },
-        |payload, value| {
+    let source_epoch = server.documents.get(&uri).map(|doc| doc.version as u64);
+    with_protocol_trace(
+        server,
+        "textDocument/definition",
+        source_epoch,
+        crate::audit_harness::run_with_audit(
+            &host,
+            verter_audit::payloads::tags::LspMethodTag::GotoDefinition,
+            target_identity,
+            Some(position),
+            async move { handle_goto_definition(server, params).await },
+            |payload, value| {
+                let count = match value {
+                    Some(GotoDefinitionResponse::Scalar(_)) => 1,
+                    Some(GotoDefinitionResponse::Array(v)) => v.len(),
+                    Some(GotoDefinitionResponse::Link(v)) => v.len(),
+                    None => 0,
+                };
+                payload.response_size_bytes =
+                    u32::try_from(count.saturating_mul(96)).unwrap_or(u32::MAX);
+            },
+        ),
+        |value| {
             let count = match value {
                 Some(GotoDefinitionResponse::Scalar(_)) => 1,
                 Some(GotoDefinitionResponse::Array(v)) => v.len(),
                 Some(GotoDefinitionResponse::Link(v)) => v.len(),
                 None => 0,
             };
-            payload.response_size_bytes =
-                u32::try_from(count.saturating_mul(96)).unwrap_or(u32::MAX);
+            u32::try_from(count.saturating_mul(96)).unwrap_or(u32::MAX)
         },
     )
     .await
@@ -123,17 +180,27 @@ pub(super) async fn handle_references_with_audit(
     let uri = params.text_document_position.text_document.uri.clone();
     let position = params.text_document_position.position;
     let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
-    crate::audit_harness::run_with_audit(
-        &host,
-        verter_audit::payloads::tags::LspMethodTag::References,
-        target_identity,
-        Some(position),
-        async move { handle_references(server, params).await },
-        |payload, value| {
+    let source_epoch = server.documents.get(&uri).map(|doc| doc.version as u64);
+    with_protocol_trace(
+        server,
+        "textDocument/references",
+        source_epoch,
+        crate::audit_harness::run_with_audit(
+            &host,
+            verter_audit::payloads::tags::LspMethodTag::References,
+            target_identity,
+            Some(position),
+            async move { handle_references(server, params).await },
+            |payload, value| {
+                let count = value.as_ref().map(Vec::len).unwrap_or(0);
+                payload.num_references = Some(u32::try_from(count).unwrap_or(u32::MAX));
+                payload.response_size_bytes =
+                    u32::try_from(count.saturating_mul(96)).unwrap_or(u32::MAX);
+            },
+        ),
+        |value| {
             let count = value.as_ref().map(Vec::len).unwrap_or(0);
-            payload.num_references = Some(u32::try_from(count).unwrap_or(u32::MAX));
-            payload.response_size_bytes =
-                u32::try_from(count.saturating_mul(96)).unwrap_or(u32::MAX);
+            u32::try_from(count.saturating_mul(96)).unwrap_or(u32::MAX)
         },
     )
     .await
@@ -149,20 +216,34 @@ pub(super) async fn handle_rename_with_audit(
     let uri = params.text_document_position.text_document.uri.clone();
     let position = params.text_document_position.position;
     let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
-    crate::audit_harness::run_with_audit(
-        &host,
-        verter_audit::payloads::tags::LspMethodTag::Rename,
-        target_identity,
-        Some(position),
-        async move { handle_rename(server, params).await },
-        |payload, value| {
+    let source_epoch = server.documents.get(&uri).map(|doc| doc.version as u64);
+    with_protocol_trace(
+        server,
+        "textDocument/rename",
+        source_epoch,
+        crate::audit_harness::run_with_audit(
+            &host,
+            verter_audit::payloads::tags::LspMethodTag::Rename,
+            target_identity,
+            Some(position),
+            async move { handle_rename(server, params).await },
+            |payload, value| {
+                let edit_count = value
+                    .as_ref()
+                    .and_then(|w| w.changes.as_ref())
+                    .map(|m| m.values().map(Vec::len).sum::<usize>())
+                    .unwrap_or(0);
+                payload.response_size_bytes =
+                    u32::try_from(edit_count.saturating_mul(96)).unwrap_or(u32::MAX);
+            },
+        ),
+        |value| {
             let edit_count = value
                 .as_ref()
                 .and_then(|w| w.changes.as_ref())
                 .map(|m| m.values().map(Vec::len).sum::<usize>())
                 .unwrap_or(0);
-            payload.response_size_bytes =
-                u32::try_from(edit_count.saturating_mul(96)).unwrap_or(u32::MAX);
+            u32::try_from(edit_count.saturating_mul(96)).unwrap_or(u32::MAX)
         },
     )
     .await

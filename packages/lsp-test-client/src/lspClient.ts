@@ -20,6 +20,7 @@ import {
   type LspPosition,
   type PositionEncoding,
 } from "./positionEncoding.js";
+import type { ProtocolWireEvent } from "./protocolReplay.js";
 
 const DEFAULT_REQUEST_TIMEOUT = 30_000;
 const HEADER_SEPARATOR = "\r\n\r\n";
@@ -42,6 +43,13 @@ export interface LspClientOptions {
    * notification stream through it.
    */
   onAnyNotification?: (method: string, params: any) => void;
+  /**
+   * When true, inbound bytes accumulate without decode so a stalled reader can
+   * be observed even if the server has already written the response.
+   */
+  stallReads?: boolean;
+  /** Optional wire observer for protocol replay (method, bytes, timestamps). */
+  onWireEvent?: (event: import("./protocolReplay.js").ProtocolWireEvent) => void;
 }
 
 interface PendingRequest {
@@ -80,6 +88,9 @@ export class LspClient {
   private spawnError_: Error | null = null;
   private negotiatedEncoding: PositionEncoding = DEFAULT_POSITION_ENCODING;
   private serverCapabilities_: unknown = undefined;
+  private readsStalled: boolean;
+  private readonly onWireEvent?: (event: ProtocolWireEvent) => void;
+  private wireEpoch = 1;
 
   constructor(
     name: string,
@@ -92,6 +103,8 @@ export class LspClient {
     this.defaultTimeout = options.defaultTimeout ?? DEFAULT_REQUEST_TIMEOUT;
     this.advertisedEncodings = options.positionEncodings ?? defaultClientPositionEncodings();
     this.onAnyNotification = options.onAnyNotification;
+    this.readsStalled = options.stallReads === true;
+    this.onWireEvent = options.onWireEvent;
     this.stderr = new StderrBuffer(options.stderr);
 
     this.process = spawn(command, args, {
@@ -105,7 +118,7 @@ export class LspClient {
 
     this.process.stdout!.on("data", (chunk: Buffer) => {
       this.stdoutBuf = this.stdoutBuf.length === 0 ? chunk : Buffer.concat([this.stdoutBuf, chunk]);
-      this.drainMessages();
+      if (!this.readsStalled) this.drainMessages();
     });
 
     this.process.stderr!.on("data", (chunk: Buffer) => {
@@ -144,6 +157,22 @@ export class LspClient {
   /** The spawn error, if the child failed to start. */
   get spawnError(): Error | null {
     return this.spawnError_;
+  }
+
+  /** Bytes received from the server that have not been decoded yet. */
+  get unreadByteLength(): number {
+    return this.stdoutBuf.length;
+  }
+
+  /** Pause inbound decode so a stalled reader is observable. */
+  stallReads(): void {
+    this.readsStalled = true;
+  }
+
+  /** Resume inbound decode after {@link stallReads}. */
+  resumeReads(): void {
+    this.readsStalled = false;
+    this.drainMessages();
   }
 
   /** Whether the child is still running. */
@@ -195,6 +224,8 @@ export class LspClient {
 
       const body = this.stdoutBuf.subarray(bodyStart, bodyEnd).toString("utf-8");
       this.stdoutBuf = this.stdoutBuf.subarray(bodyEnd);
+      const decodedMs = performance.now();
+      const byteLength = contentLength;
 
       let msg: any;
       try {
@@ -202,6 +233,7 @@ export class LspClient {
       } catch {
         continue; // skip undecodable body
       }
+      this.emitInboundWire(msg, byteLength, decodedMs);
       this.handleMessage(msg);
     }
   }
@@ -209,10 +241,70 @@ export class LspClient {
   private writeMessage(payload: unknown): boolean {
     const stdin = this.process.stdin;
     if (!stdin || !stdin.writable) return false;
+    const encodeStartedMs = performance.now();
     const body = JSON.stringify(payload);
-    const header = `Content-Length: ${Buffer.byteLength(body, "utf-8")}${HEADER_SEPARATOR}`;
+    const byteLength = Buffer.byteLength(body, "utf-8");
+    const header = `Content-Length: ${byteLength}${HEADER_SEPARATOR}`;
     stdin.write(header + body);
+    const encodeCompletedMs = performance.now();
+    this.emitOutboundWire(payload, byteLength, encodeStartedMs, encodeCompletedMs);
     return true;
+  }
+
+  private emitOutboundWire(
+    payload: any,
+    byteLength: number,
+    encodeStartedMs: number,
+    encodeCompletedMs: number,
+  ): void {
+    if (!this.onWireEvent) return;
+    const method = typeof payload?.method === "string" ? payload.method : "(response)";
+    const kind =
+      payload && "method" in payload && "id" in payload
+        ? "request"
+        : payload && "method" in payload
+          ? "notification"
+          : "response";
+    this.onWireEvent({
+      requestEpoch: this.wireEpoch++,
+      method,
+      direction: "client_to_server",
+      byteLength,
+      encodeStartedMs,
+      encodeCompletedMs,
+      queuedMs: encodeCompletedMs,
+      decodedMs: encodeCompletedMs,
+      completedMs: encodeCompletedMs,
+      kind,
+    });
+  }
+
+  private emitInboundWire(msg: any, byteLength: number, decodedMs: number): void {
+    if (!this.onWireEvent) return;
+    const method =
+      typeof msg?.method === "string"
+        ? msg.method
+        : msg && "id" in msg
+          ? "(response)"
+          : "(unknown)";
+    const kind =
+      msg && "method" in msg && "id" in msg
+        ? "request"
+        : msg && "method" in msg
+          ? "notification"
+          : "response";
+    this.onWireEvent({
+      requestEpoch: this.wireEpoch++,
+      method,
+      direction: "server_to_client",
+      byteLength,
+      encodeStartedMs: decodedMs,
+      encodeCompletedMs: decodedMs,
+      queuedMs: decodedMs,
+      decodedMs,
+      completedMs: decodedMs,
+      kind,
+    });
   }
 
   private handleMessage(msg: any): void {

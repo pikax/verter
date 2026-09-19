@@ -177,6 +177,22 @@ pub fn server_capabilities(
                     "$/verter/audit/getRecord",
                     "$/verter/audit/getRecent",
                 ],
+            },
+            "verterInteractionTrace": {
+                "version": 1,
+                "stages": [
+                    "request_received",
+                    "admitted",
+                    "provider_work",
+                    "serialize",
+                    "outbound_enqueued",
+                    "outbound_written",
+                    "complete",
+                ],
+                "queryMethod": "$/verter/getStatistics",
+                "initOption": "interactionTrace.enabled",
+                "sourceLogging": "off-by-default",
+                "clientStagesOwner": "WSP1L",
             }
         })),
         workspace: Some(WorkspaceServerCapabilities {
