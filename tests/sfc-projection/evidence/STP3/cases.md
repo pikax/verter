@@ -13,6 +13,6 @@ Deletion population this node: empty. Later Vue removal: STP58. Later Svelte rem
 
 STP3-AC3/AC4 production projection state remains with the untouched owners named in `coupled-inference-evidence.json`. Harness-owned probe runs are `incremental=fresh` and close the native API after use.
 
-Negative twins discriminate: toFixed under U=string, number model write, broad-any constructor, callback-only T lost by split/post-check deferral, sequential first-channel permutation, last-write-wins listener merge, and shared specialization across sibling uses.
+Negative twins discriminate: toFixed under U=string, number model write, broad-any constructor, callback-only T lost by split/post-check deferral, sequential first-channel permutation, last-write-wins overwrite of a spread-derived listener, and shared specialization across sibling uses.
 
 This file does not claim the cases executed. Copying the charter here is not evidence.

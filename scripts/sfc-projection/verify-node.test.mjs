@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -479,6 +480,13 @@ test("STP3-ordered-merge dirty twin is last-write-wins, not accumulation", () =>
   assert.equal(row.disposition, "reject");
   assert.equal(row.expectedCode, 2322);
   assert.match(row.dirtyTwin, /reject-ordered-merge-lww\.ts$/);
+  const clean = fs.readFileSync(repoPath(REPO_ROOT, row.file), "utf8");
+  const dirty = fs.readFileSync(repoPath(REPO_ROOT, row.dirtyTwin), "utf8");
+  assert.match(clean, /typeof spread/);
+  assert.match(clean, /&\s*\{\s*onChange:\s*SecondListener/);
+  assert.doesNotMatch(clean, /void spread/);
+  assert.match(dirty, /\.\.\.spread/);
+  assert.doesNotMatch(dirty, /void spread/);
 });
 
 test("STP3 verify: all mandatory cases run on each admitted engine", async () => {
