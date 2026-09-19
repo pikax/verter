@@ -58,12 +58,20 @@ Responsibility split among cohesive modules:
   (one-shot clonable latches; dropping a handle cancels its pending work).
 - Snapshot-epoch source authority: `crates/verter_scheduler/src/source_root.rs`.
 
-Constructor capabilities: every constructor (`new`, `with_executor`,
-`new_sync`, `new_sync_with_executor`) takes host-injected
-`Arc<dyn SourceLoader>` and pool handles — the scheduler constructs no pool
-and performs no file I/O at construction; it spawns exactly one driver
-thread on native targets and none on `wasm32`; no parse, analysis or
-compile work happens in a constructor.
+Constructor capabilities, two modes — do not mix them:
+
+- Threaded native constructors (`new`, `with_executor`): host-injected
+  `Arc<dyn SourceLoader>` plus CPU/I/O pool handles; spawn exactly one
+  driver thread. Native-only (`cfg(not(target_arch = "wasm32"))`).
+- Synchronous constructors (`new_sync`, `new_sync_with_executor`): no
+  driver thread; the caller must `drive_one()` / `drive_all()` (or
+  `wait_or_drive`). Waiting on a sync scheduler without driving it never
+  completes. On native they still take host-injected pool handles; on
+  `wasm32` the pool arguments are omitted and stages run inline on the
+  calling thread.
+
+The scheduler constructs no pool and performs no file I/O at construction;
+no parse, analysis or compile work happens in a constructor.
 
 Minimal public surface: the submission API (`submit_request`,
 `submit_batch_atomic`, `wait_batch`, `account_batch_submission`,
@@ -127,12 +135,18 @@ with its exact sources, is the ARH0 capability matrix linked above; this
 page adds no second matrix.
 
 Population and snapshot counts in the contract (importers, retained
-surfaces, test-hook consumers) were measured on the pinned candidate commit
-recorded in the contract JSON, and the CI architecture-health lane re-derives
-them from the live tree on every run — a drifted count fails
-`node tests/architecture-health/ARH1/verify.mjs`, whose `--provenance` mode
-proves the pinned candidate is a real ancestor of the checked-out head.
-Any doc claim that contradicts a live verifier result is a bug in the doc.
+surfaces, test-hook consumers) were measured on the candidate commit
+recorded in the contract JSON, and the CI architecture-health lane
+re-derives them from the live tree on every run — a drifted count fails
+`node tests/architecture-health/ARH1/verify.mjs`. That command is the
+canonical ARH1 ratification; it does not require `--provenance`.
+
+`--provenance` is an extra ancestor check on the product-pinned candidate.
+After ARH1's squash onto main that pin is not an ancestor of this tree, so
+`--provenance` currently fails on main-side checkouts while canonical
+`verify.mjs` still passes. Re-pinning those JSON files is ARH1's job, not
+this page's. Any count claim that contradicts a live `verify.mjs` result
+is a bug in the doc.
 
 ## Related pages
 

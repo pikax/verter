@@ -16,6 +16,15 @@ const walkthroughRel = model.pages.find((page) => page.id === "first-contributio
 const walkthroughPath = join(repoRoot, ...walkthroughRel.split("/"));
 const walkthrough = readFileSync(walkthroughPath, "utf8");
 const queryPageRel = model.pages.find((page) => page.id === "query-lifetimes").path;
+const queryPagePath = join(repoRoot, ...queryPageRel.split("/"));
+const queryPage = readFileSync(queryPagePath, "utf8");
+const sourcePageRel = model.pages.find((page) => page.id === "source-identity").path;
+const sourcePagePath = join(repoRoot, ...sourcePageRel.split("/"));
+const sourcePage = readFileSync(sourcePagePath, "utf8");
+const architecturePageRel = model.pages.find((page) => page.id === "architecture-contracts").path;
+const architecturePage = readFileSync(join(repoRoot, ...architecturePageRel.split("/")), "utf8");
+const schedulerRel = "crates/verter_scheduler/src/scheduler.rs";
+const schedulerSource = readFileSync(join(repoRoot, ...schedulerRel.split("/")), "utf8");
 const indexRel = model.index;
 const indexPath = join(repoRoot, ...indexRel.split("/"));
 const index = readFileSync(indexPath, "utf8");
@@ -70,6 +79,26 @@ test("the walkthrough teaches the canonical owners, not local substitutes", () =
     "the walkthrough teaches lint registration through the owning registry",
   );
   assert.ok(
+    walkthrough.includes("crates/verter_diagnostics/src/rules/reactivity/mod.rs"),
+    "the walkthrough wires the category barrel before register_builtin_rules",
+  );
+  assert.ok(
+    walkthrough.includes("pub use your_rule::YourRule"),
+    "the walkthrough shows the category re-export",
+  );
+  assert.ok(
+    walkthrough.includes("docs/lint-rules.md"),
+    "the walkthrough names the authored lint reference",
+  );
+  assert.ok(
+    walkthrough.includes("lint-count-drift"),
+    "the walkthrough names the live registry count check",
+  );
+  assert.ok(
+    !/regenerate rather than hand-edit/.test(walkthrough),
+    "the walkthrough must not invent a lint-page generator",
+  );
+  assert.ok(
     !/write your own (import )?resolver|local resolver|your own cache|HashMap<.*cache/i.test(
       walkthrough,
     ),
@@ -79,6 +108,31 @@ test("the walkthrough teaches the canonical owners, not local substitutes", () =
     !/\btest_[a-z_]+\(/.test(walkthrough),
     "the walkthrough must not invoke test-only hooks",
   );
+});
+
+test("architecture contracts distinguish sync constructors from the native driver", () => {
+  assert.ok(architecturePage.includes("new_sync"));
+  assert.ok(architecturePage.includes("drive_one"));
+  assert.ok(!/every constructor[\s\S]*spawns exactly one driver thread/.test(architecturePage));
+  assert.ok(
+    architecturePage.includes("node tests/architecture-health/ARH1/verify.mjs"),
+    "the page cites the canonical ARH1 verifier",
+  );
+  assert.ok(
+    !/whose `--provenance` mode\s+proves the pinned candidate is a real ancestor/.test(
+      architecturePage,
+    ),
+    "the page must not claim --provenance currently proves ancestry",
+  );
+});
+
+test("source identity names the live PositionMapper APIs", () => {
+  assert.ok(sourcePage.includes("tsx_to_carrier"));
+  assert.ok(sourcePage.includes("carrier_to_tsx"));
+  assert.ok(!sourcePage.includes("tsx_to_vue"));
+  assert.ok(!sourcePage.includes("vue_to_tsx"));
+  assert.ok(sourcePage.includes("crates/verter_lsp/src/vue_assets.rs"));
+  assert.ok(!/sole\s+`std::fs` boundary/.test(sourcePage));
 });
 
 test("a tutorial that teaches a local resolver fails", async () => {
@@ -138,6 +192,30 @@ test("a tutorial that teaches a test-only scheduler hook fails", async () => {
   );
   assert.notEqual(receipt.completenessState, "complete");
   assert.ok(receipt.errors.some((item) => item.code === "test-only-api"));
+});
+
+test("a page-only test-only hook recommendation fails without a model edit", async () => {
+  const receipt = await validate(
+    opts({
+      overlays: {
+        [queryPageRel]: `${queryPage}\nCall \`test_new()\` to construct a scheduler.\n`,
+      },
+    }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  assert.ok(receipt.errors.some((item) => item.code === "test-only-api"));
+});
+
+test("a taught symbol dropped from its documentation page fails", async () => {
+  const receipt = await validate(
+    opts({
+      overlays: {
+        [sourcePageRel]: sourcePage.replaceAll("PositionMapper", "position mapper"),
+      },
+    }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  assert.ok(receipt.errors.some((item) => item.code === "taught-page-missing-symbol"));
 });
 
 test("a taught interface whose symbol left its source fails", async () => {
@@ -255,6 +333,32 @@ test("incremental receipt with the same digest matches a fresh run", async () =>
   assert.equal(fresh.completenessState, "complete");
   assert.deepEqual(incremental.sourceRevisions, fresh.sourceRevisions);
   assert.equal(incremental.completenessState, "complete");
+});
+
+test("a taught-source edit changes receipt identity", async () => {
+  const fresh = canonicalizeReceipt(await validate(opts()));
+  const renamed = await validate(
+    opts({
+      overlays: {
+        [schedulerRel]: schedulerSource.replaceAll("submit_batch_atomic", "submit_batch_renamed"),
+      },
+      priorReceipt: fresh,
+    }),
+  );
+  assert.notEqual(renamed.completenessState, "complete");
+  assert.ok(renamed.errors.some((item) => item.code === "taught-symbol-missing"));
+  assert.notEqual(renamed.sourceRevisions.digest, fresh.sourceRevisions.digest);
+  assert.ok(!renamed.errors.some((item) => item.code === "incremental-mismatch"));
+
+  const commented = canonicalizeReceipt(
+    await validate(
+      opts({
+        overlays: { [schedulerRel]: `${schedulerSource}\n// contributor-docs identity probe\n` },
+      }),
+    ),
+  );
+  assert.equal(commented.completenessState, "complete");
+  assert.notEqual(commented.sourceRevisions.digest, fresh.sourceRevisions.digest);
 });
 
 test("edit fails and revert restores a complete receipt", async () => {

@@ -20,11 +20,20 @@ The store behind canonical post-parse artifacts is
 
 Import resolution is context-sensitive and has exactly one owner:
 `crates/verter_workspace` — the `WorkspaceAccess` trait
-(`crates/verter_workspace/src/traits.rs`) with `NativeFs` as the sole
-`std::fs` boundary. No contributor code outside that crate touches the
-filesystem directly, and there is no heuristic fallback resolution
-anywhere: exact resolutions injected by the bundler/LSP win, then the
-project resolver (tsconfig paths, aliases, `node_modules`), then nothing.
+(`crates/verter_workspace/src/traits.rs`) with `NativeFs` as that crate's
+`std::fs` adapter. Contributor code that resolves files or overlays must
+go through that trait; there is no heuristic fallback resolution:
+exact resolutions injected by the bundler/LSP win, then the project
+resolver (tsconfig paths, aliases, `node_modules`), then nothing.
+
+`NativeFs` is not the repository-wide filesystem boundary. Other crates
+keep their own disk I/O for non-workspace concerns, including
+`crates/verter_lsp/src/vue_assets.rs` (managed-tsgo Vue JSX adapter
+files), `crates/verter_validation_probe/src/disk.rs` (CI corpus bytes),
+and `crates/verter_audit/src/memory.rs` (`current_process_rss` reading
+`/proc/self/statm` on Linux). Those are not import-resolution owners
+and are not a license for a lint rule or contributor feature to open
+files itself.
 
 ## Typed spans
 
@@ -65,8 +74,8 @@ UTF-32, then UTF-16) and everything that emits an LSP position — including
 
 Generated↔source mapping is strict, not fuzzy:
 `crates/verter_lsp/src/documents/position_map.rs` (`PositionMapper`)
-answers `tsx_to_vue`/`vue_to_tsx` only when the query lies strictly inside
-one mapped token run; no cross-token extrapolation, no snap-to-nearest.
+answers `tsx_to_carrier`/`carrier_to_tsx` only when the query lies strictly
+inside one mapped token run; no cross-token extrapolation, no snap-to-nearest.
 Unmapped synthetic content (`_ctx.` prefixes and friends) returns `None`,
 and callers must treat that as "no position", never guess.
 

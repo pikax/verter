@@ -25,6 +25,7 @@ const PRODUCTION_ROOT_RE = /^(crates|packages)\/[^/]+/;
 const REPO_CITATION_RE = /^(?:crates|packages|tests|scripts|docs|examples)\/[^\s`*{}]+$/;
 const REPO_CITATION_EXT_RE = /\.(?:rs|ts|tsx|mts|cts|js|mjs|cjs|json|md|toml|ya?ml)$/;
 const TEST_ONLY_SYMBOL_RE = /^test_/;
+const TEST_ONLY_CALL_RE = /\btest_[a-z_]+\(/;
 
 export const CONTRIBUTOR_MODEL_REL =
   "tests/documentation/DOC2/products/contributor-docs-model.v1.json";
@@ -1552,13 +1553,17 @@ async function validateContributorDocs({ repoRoot, read, exists, signal, fail, d
       }),
     );
   } else {
-    contracts = JSON.parse(read(contractsAbs));
+    const contractsBytes = read(contractsAbs);
+    digestEntry(contractsRel, contractsBytes);
+    contracts = JSON.parse(contractsBytes);
   }
   const mapAbs = join(repoRoot, ...mapRel.split("/"));
   if (!exists(mapAbs)) {
     fail(err("contract-source-missing", "responsibility map product is missing", { path: mapRel }));
   } else {
-    responsibilityMap = JSON.parse(read(mapAbs));
+    const mapBytes = read(mapAbs);
+    digestEntry(mapRel, mapBytes);
+    responsibilityMap = JSON.parse(mapBytes);
   }
   if (contracts == null || responsibilityMap == null) {
     return { cancelled: false, fragment };
@@ -1586,7 +1591,12 @@ async function validateContributorDocs({ repoRoot, read, exists, signal, fail, d
 
   const documentedHotspots = new Set();
   const seenPageIds = new Set();
+  const pageBytesByPath = new Map();
+  const digestedTaught = new Set();
   const declaredPages = Array.isArray(model.pages) ? model.pages : [];
+  const declaredPagePaths = new Set(
+    declaredPages.map((page) => page?.path).filter((path) => typeof path === "string"),
+  );
   if (declaredPages.length === 0) {
     fail(err("contributor-model-invalid", "model declares no pages"));
   }
@@ -1613,6 +1623,7 @@ async function validateContributorDocs({ repoRoot, read, exists, signal, fail, d
     }
     const bytes = read(pageAbs);
     digestEntry(path, bytes);
+    pageBytesByPath.set(path, bytes);
     const listed = listedPages.has(path) || listedPages.has(path.replace(/\.md$/, ""));
     if (!listed) {
       fail(err("docs-page-unlisted", "page is not listed by the contributor index", { id, path }));
@@ -1658,6 +1669,17 @@ async function validateContributorDocs({ repoRoot, read, exists, signal, fail, d
         pageOk = false;
       }
     }
+    const taughtCall = bytes.match(TEST_ONLY_CALL_RE);
+    if (taughtCall) {
+      fail(
+        err("test-only-api", "contribution docs must not teach test-only hooks", {
+          id,
+          path,
+          symbol: taughtCall[0].slice(0, -1),
+        }),
+      );
+      pageOk = false;
+    }
     for (const hotspot of page.documentsHotspots ?? []) {
       if (!contractHotspots.has(hotspot)) {
         fail(
@@ -1700,7 +1722,12 @@ async function validateContributorDocs({ repoRoot, read, exists, signal, fail, d
       fragment.taughtInterfaces.push({ capability, path, symbol, taughtIn, ok: false });
       continue;
     }
-    if (!read(taughtAbs).includes(symbol)) {
+    const taughtBytes = read(taughtAbs);
+    if (!digestedTaught.has(path)) {
+      digestEntry(path, taughtBytes);
+      digestedTaught.add(path);
+    }
+    if (!taughtBytes.includes(symbol)) {
       fail(
         err("taught-symbol-missing", "taught symbol is absent from its source", {
           capability,
@@ -1709,6 +1736,57 @@ async function validateContributorDocs({ repoRoot, read, exists, signal, fail, d
         }),
       );
       rowOk = false;
+    }
+    if (!declaredPagePaths.has(taughtIn)) {
+      fail(
+        err("taught-page-unbound", "taughtIn is not a declared contributor page", {
+          capability,
+          path,
+          symbol,
+          taughtIn,
+        }),
+      );
+      rowOk = false;
+    } else {
+      const pageBytes = pageBytesByPath.get(taughtIn);
+      if (pageBytes == null) {
+        fail(
+          err("taught-page-unbound", "taughtIn page could not be read", {
+            capability,
+            path,
+            symbol,
+            taughtIn,
+          }),
+        );
+        rowOk = false;
+      } else {
+        if (!pageBytes.includes(symbol)) {
+          fail(
+            err(
+              "taught-page-missing-symbol",
+              "taught symbol is absent from its documentation page",
+              {
+                capability,
+                path,
+                symbol,
+                taughtIn,
+              },
+            ),
+          );
+          rowOk = false;
+        }
+        if (!pageBytes.includes(path)) {
+          fail(
+            err("taught-page-missing-path", "taught path is absent from its documentation page", {
+              capability,
+              path,
+              symbol,
+              taughtIn,
+            }),
+          );
+          rowOk = false;
+        }
+      }
     }
     if (TEST_ONLY_SYMBOL_RE.test(symbol)) {
       fail(

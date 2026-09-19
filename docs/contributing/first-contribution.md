@@ -50,11 +50,21 @@ string search to "find" a construct: the analysis snapshot is the parsed
 truth, and [source identity](./source-identity.md) explains why byte
 spans are the only stable currency.
 
-## Step 3 — register and run
+## Step 3 — wire the module, register, and run
 
-Add one `registry.register(Box::new(...))` line to
-`register_builtin_rules` in `crates/verter_diagnostics/src/rules/mod.rs`
-(keeping the category grouping), then iterate:
+Declare and re-export the new rule in that category's `mod.rs` (copy
+`crates/verter_diagnostics/src/rules/reactivity/mod.rs`):
+
+```rust
+mod your_rule;
+pub use your_rule::YourRule;
+```
+
+Without that `mod` / `pub use`, `register_builtin_rules` cannot name the
+type and the crate will not compile. Then add one
+`registry.register(Box::new(...))` line to `register_builtin_rules` in
+`crates/verter_diagnostics/src/rules/mod.rs` (keeping the category
+grouping), then iterate:
 
 ```bash
 cargo test -p verter_diagnostics        # targeted iteration
@@ -74,12 +84,14 @@ These are the three ways tutorial code rots into architecture debt; each
 has a ratified owner already:
 
 - **No filesystem access of your own.** Rules receive parsed snapshots;
-  if you genuinely need file access, the sole authority is the
-  `WorkspaceAccess` trait in `crates/verter_workspace/src/traits.rs`
-  (with `NativeFs` as the only `std::fs` boundary). A rule that opens
-  files directly has no review path to merge.
+  if you genuinely need file access for import/workspace resolution, the
+  sole authority is the `WorkspaceAccess` trait in
+  `crates/verter_workspace/src/traits.rs` (`NativeFs` is that crate's
+  adapter, not a repo-wide `std::fs` monopoly). A rule that opens files
+  directly has no review path to merge.
 - **No private caches.** Reuse flows through the session's existing
   stores — the memo and artifact authorities such as
+  `FileArtifactStore` in
   `crates/verter_session/src/file_artifact_store.rs`. A rule-local
   memo table is a second semantic authority; the narrowing contracts in
   `tests/architecture-health/ARH1/products/dependency-contracts.json`
@@ -91,12 +103,17 @@ has a ratified owner already:
 
 ## Step 5 — update the owning documentation
 
-If your rule adds user-visible behavior, the lint rule reference is a
-generated page bound to the registry — regenerate rather than hand-edit
-(the docs build fails on drift, per Step 3). For anything else, follow
-the repository rule: update the owning document, keep conventional
-commits (`feat(diagnostics): ...`), and include both test assertions in
-the PR checklist.
+`docs/lint-rules.md` is authored prose, not a generated page. If the rule
+is user-visible, add it to the matching category table there by hand.
+The docs harness (`pnpm --filter docs check`) does not regenerate that
+page; it compares the live `register_builtin_rules` count with
+`tests/documentation/DOC0/products/generated-reference-plan.v1.json`
+(`lintReference.ruleCount`). A new rule that does not bump that count
+fails `lint-count-drift`. Typeinfo generated-page freshness is a
+different check (`pnpm gen:typeinfo-manifest:check`) and is not the lint
+reference. For anything else, follow the repository rule: update the
+owning document, keep conventional commits (`feat(diagnostics): ...`),
+and include both test assertions in the PR checklist.
 
 ## Where to go next
 

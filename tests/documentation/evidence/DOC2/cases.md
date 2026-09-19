@@ -6,10 +6,15 @@ Commands (run on the candidate; do not treat this file as an execution transcrip
 
 - `node --test tests/documentation/DOC2/doc2.test.mjs`
 - `node --test tests/documentation/DOC1/doc1.test.mjs`
-- `node --test tests/architecture-health/ARH1/arh1.test.mjs`
+- `node tests/architecture-health/ARH1/verify.mjs`
 - `node docs/scripts/reference-harness.mjs`
 - `pnpm --filter docs check`
 - `pnpm docs:build`
+
+Predecessor ARH1 is ratified by `verify.mjs` (live counts). The
+`arh1.test.mjs` `--provenance` case pins an ARH1 feature-branch merge
+that is not an ancestor of the squash on main; that pin is ARH1-owned
+and is not re-ratified here.
 
 Deletion population this node: empty. The four contributor pages, their
 model and the harness `contributorDocs` section are additive; no existing

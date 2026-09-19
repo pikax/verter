@@ -53,6 +53,9 @@
       "path": "docs/contributing/first-contribution.md",
       "requiredCitations": [
         "crates/verter_diagnostics/src/rules/mod.rs",
+        "crates/verter_diagnostics/src/rules/reactivity/mod.rs",
+        "docs/lint-rules.md",
+        "tests/documentation/DOC0/products/generated-reference-plan.v1.json",
         "tests/architecture-health/ARH1/products/dependency-contracts.json"
       ],
       "documentsHotspots": []
