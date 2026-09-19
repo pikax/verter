@@ -11,14 +11,19 @@ transcript):
   complete-negative Absent, identical-basis equivalence, incremental
   retry vs fresh commit, cooperative cancel/yield points (before the
   first stage, between driven stages, and at admission), cancelled
-  drive exposing no half-committed snapshot.
+  drive exposing no half-committed snapshot, and a driver-installed
+  drive that parks on the driver instead of inline-pumping stages on
+  the caller's thread.
 - `cargo nextest run -p verter_session --test main -E 'test(cooperative_drive_seam) + test(verter_session_public_surface)'`
   — the host load-seam discriminators at the exact `ensure_loaded`
   production route (cancelled drive refuses admission; constructor-time
   yield hook installed through `HostConfig::cooperative_yield`;
   withdrawn drive answers not-loaded without running the integrate
-  step) plus the Guard 5 public-surface snapshot covering the three
-  new pub modules.
+  step; native `ensure_loaded` parks on the driver instead of
+  inline-executing scheduler stages; Source-without-Analysis never
+  answers the loaded fast path — the resumed load goes through the
+  submit/drive seam to Analysis + integrate) plus the Guard 5
+  public-surface snapshot covering the three new pub modules.
 - `cargo nextest run -p verter_wasm --lib` — includes the
   committed input-snapshot core statuses (file / absent / needInputs,
   identical basis identity, incoherent wave refusal).

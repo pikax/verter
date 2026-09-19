@@ -216,14 +216,18 @@ impl CooperativeSchedulerAdapter {
     /// cancellation plus the yield hook between stages, so a
     /// nonthreaded worker can withdraw mid-request; a later drive
     /// call resumes the same handle, so withdrawal never rewrites
-    /// the request's eventual outcome. When no stage is ready on
-    /// this thread (a native driver thread owns the pump), the
-    /// drive defers to [`Scheduler::wait_or_drive`] — parking on the
-    /// driver or returning the scheduler's own controlled-failure
-    /// state exactly as before. An uncancellable adapter with the
-    /// inline yield hook is therefore behaviourally identical to
-    /// driving the scheduler directly: query outcomes are never
-    /// rewritten by this adapter.
+    /// the request's eventual outcome. When a driver thread owns the
+    /// pump (native threaded scheduler), the calling thread is NOT
+    /// the pump: `drive_one` would dequeue and inline-execute
+    /// scheduler stage work on the caller's thread, breaking the
+    /// dual-pool isolation between host-coordinator threads and the
+    /// scheduler's stage pools — so the adapter offers the pre-park
+    /// cooperative point once and defers to
+    /// [`Scheduler::wait_or_drive`] (parking on the driver)
+    /// unchanged, never pumping stages itself. An uncancellable
+    /// adapter with the inline yield hook is therefore behaviourally
+    /// identical to driving the scheduler directly: query outcomes
+    /// are never rewritten by this adapter.
     pub fn drive<T: Clone>(
         &self,
         scheduler: &Arc<Scheduler>,
@@ -233,6 +237,26 @@ impl CooperativeSchedulerAdapter {
             return CooperativeDrive::Cancelled(CooperativeStop {
                 point: CooperativePoint::BeforeDrive,
             });
+        }
+        if scheduler.has_driver_thread() {
+            // The driver owns the pump: this thread must not dequeue
+            // and inline-execute scheduler stages. Offer the one
+            // pre-park cooperative point, then hand the wait to the
+            // scheduler's own contract.
+            if self.yield_hook.yield_to_runtime() == YieldDecision::Cancelled {
+                return CooperativeDrive::Cancelled(CooperativeStop {
+                    point: CooperativePoint::AtYield,
+                });
+            }
+            if let Some(state) = handle.try_get() {
+                return CooperativeDrive::Driven(state);
+            }
+            if self.cancellation.is_cancelled() {
+                return CooperativeDrive::Cancelled(CooperativeStop {
+                    point: CooperativePoint::BetweenStages,
+                });
+            }
+            return CooperativeDrive::Driven(scheduler.wait_or_drive(handle));
         }
         loop {
             if self.yield_hook.yield_to_runtime() == YieldDecision::Cancelled {

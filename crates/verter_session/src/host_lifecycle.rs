@@ -952,13 +952,23 @@ impl VerterHost {
         // may create an empty derived_raw_cache stub before the file is
         // loaded into the scheduler; in that case we must proceed to
         // submit a load request. The `evicted` flag lives on
-        // DerivedRawState (D48 split).
+        // DerivedRawState (D48 split). The fast path requires the
+        // committed ANALYSIS snapshot, not just Source: a drive that
+        // stopped between stages (a withdrawn/cancelled cooperative
+        // drive) leaves Source published with no Analysis, and
+        // reporting loaded from that leftover would expose a
+        // half-committed snapshot (BWH2-AC3). Source-without-Analysis
+        // falls through to the submit/drive seam, which resumes the
+        // load through Analysis + integrate before answering.
         let evicted_flag = self
             .derived_raw_cache()
             .get(canonical_id)
             .map(|d| d.evicted)
             .unwrap_or(false);
-        if !evicted_flag && self.scheduler.try_get_source(canonical_id).is_some() {
+        if !evicted_flag
+            && self.scheduler.try_get_source(canonical_id).is_some()
+            && self.scheduler.try_get_analysis(canonical_id).is_some()
+        {
             return true;
         }
 
@@ -1010,10 +1020,12 @@ impl VerterHost {
         // (one `drive_one` stage per iteration while this thread is
         // the pump); uncancellable (the default adapter state) it is
         // behaviourally `wait_or_drive` exactly — driving stages
-        // inline on WASM (no driver thread) and delegating to
-        // `handle.wait()` on native when the driver thread is
-        // installed. A cancelled or withdrawn drive is a not-loaded
-        // outcome: no partial result is integrated. Split
+        // inline on WASM (no driver thread) and parking through
+        // `wait_or_drive` on native when the driver thread is
+        // installed (the driver owns the pump; the host thread never
+        // inline-executes scheduler stages). A cancelled or withdrawn
+        // drive is a not-loaded outcome: no partial result is
+        // integrated. Split
         // wait (scheduler drive) vs work (integrate_scheduler_snapshot)
         // so diagnosis can tell load-path contention from post-load
         // processing.

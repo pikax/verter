@@ -391,3 +391,79 @@ impl CooperativeYield for CancelTokenAtSecondOffer {
         YieldDecision::Continue
     }
 }
+
+/// With a driver thread installed, the adapter's drive NEVER pumps
+/// `Scheduler::drive_one` on the calling thread: the driver owns the
+/// pump, and a host/External caller that dequeues and inline-executes
+/// ready stages breaks the dual-pool isolation between host
+/// coordinator threads and the scheduler's stage pools. The armed
+/// dispatch pause parks the driver after one sacrificial dispatch, so
+/// the driven request's stages sit READY and undispatched — an
+/// uncancellable drive on this thread cannot complete the work itself
+/// (it must park on the driver); only releasing the driver finishes
+/// the request.
+#[test]
+fn threaded_drive_parks_on_the_driver_instead_of_inline_pumping() {
+    use std::time::Duration;
+    use verter_scheduler::scheduler::Scheduler;
+    use verter_scheduler::source_loader::MemorySourceLoader;
+
+    let scheduler = Scheduler::test_new(
+        verter_scheduler::scheduler::SchedulerConfig::default(),
+        Arc::new(MemorySourceLoader::new()),
+    );
+    assert!(
+        scheduler.has_driver_thread(),
+        "precondition: the threaded test scheduler must have a driver"
+    );
+    scheduler.test_arm_dispatch_pause(0);
+    // The sacrificial request gives the driver its one dispatch before
+    // it parks, so nothing else is dispatched while it is parked.
+    let _sacrificial = scheduler.submit_request(Request {
+        file_id: "/coop/h1.ts".to_string(),
+        target: TargetStage::Analysis,
+        priority: Priority::Interactive,
+        source: Some(Arc::from("export const h1 = 1;\n")),
+        file_language: None,
+        request_context: None,
+    });
+    scheduler.test_wait_until_dispatch_paused();
+
+    let adapter = CooperativeSchedulerAdapter::new();
+    let request = Request {
+        file_id: "/coop/h2.ts".to_string(),
+        target: TargetStage::Analysis,
+        priority: Priority::Interactive,
+        source: Some(Arc::from("export const h2 = 2;\n")),
+        file_language: None,
+        request_context: None,
+    };
+    let CooperativeSubmit::Submitted(handle) = adapter.submit(&scheduler, request) else {
+        panic!("uncancelled adapter must submit");
+    };
+
+    let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let drive_thread = {
+        let scheduler = Arc::clone(&scheduler);
+        let completed = Arc::clone(&completed);
+        std::thread::spawn(move || {
+            let driven = adapter.drive(&scheduler, &handle);
+            completed.store(true, Ordering::SeqCst);
+            assert!(
+                matches!(driven, CooperativeDrive::Driven(CompletionState::Ready(_))),
+                "the parked-on-driver drive must still reach Ready (got {driven:?})"
+            );
+        })
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !completed.load(Ordering::SeqCst),
+        "with the driver parked and the request's stages ready but \
+         undispatched, a threaded drive must not complete the work \
+         itself — the calling thread is not the pump"
+    );
+    scheduler.test_release_dispatch_pause();
+    drive_thread
+        .join()
+        .expect("the drive thread must not panic");
+}

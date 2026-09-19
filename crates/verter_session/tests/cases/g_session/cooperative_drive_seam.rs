@@ -10,7 +10,7 @@
 //! drive, or integrates a snapshot after a cancelled/withdrawn drive,
 //! cannot hide behind adapter-only coverage.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use verter_session::cooperative_scheduler::{CooperativeYield, YieldDecision};
@@ -178,5 +178,124 @@ fn withdrawn_drive_returns_not_loaded_without_integration() {
         provenance.ensure_loaded_work_ns, 0,
         "a withdrawn drive must not run the snapshot integrate step — no \
          partial scheduler snapshot may be published as loaded"
+    );
+}
+
+/// With the host scheduler's driver parked, `ensure_loaded` must not
+/// inline-execute scheduler stages on the calling (host/External)
+/// thread: the driver owns the pump under the dual-pool isolation
+/// invariant (host-coordinator work never runs scheduler stage work).
+/// A sacrificial dispatch parks the driver first, so the load's own
+/// stages sit READY and undispatched — the load can only complete
+/// once the driver is released.
+#[test]
+fn native_ensure_loaded_parks_on_the_driver_instead_of_inline_pumping() {
+    use std::time::Duration;
+    use verter_scheduler::scheduler::Request;
+    use verter_scheduler::stage::{Priority, TargetStage};
+
+    let host = host_with_workspace_file(
+        HostConfig::default(),
+        "/coop/seam/e.ts",
+        "export const e = 4;\n",
+    );
+    let scheduler = Arc::clone(host.scheduler());
+    scheduler.test_arm_dispatch_pause(0);
+    // The sacrificial request gives the driver its one dispatch before
+    // it parks, so the load's own stages are never dispatched while it
+    // is parked.
+    let _sacrificial = scheduler.submit_request(Request {
+        file_id: "/coop/seam/sacrificial.ts".to_string(),
+        target: TargetStage::Source,
+        priority: Priority::Interactive,
+        source: Some(Arc::from("export const s = 0;\n")),
+        file_language: None,
+        request_context: None,
+    });
+    scheduler.test_wait_until_dispatch_paused();
+
+    let completed = Arc::new(AtomicBool::new(false));
+    let load_thread = {
+        let completed = Arc::clone(&completed);
+        std::thread::spawn(move || {
+            let loaded = host.ensure_loaded("/coop/seam/e.ts");
+            completed.store(true, Ordering::SeqCst);
+            assert!(loaded, "the parked-on-driver load must still complete");
+            assert!(
+                host.scheduler_analysis("/coop/seam/e.ts").is_some(),
+                "the released load must reach the committed Analysis snapshot"
+            );
+        })
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !completed.load(Ordering::SeqCst),
+        "with the driver parked and the load's stages ready but \
+         undispatched, ensure_loaded must not inline-execute scheduler \
+         stages on the host thread"
+    );
+    scheduler.test_release_dispatch_pause();
+    load_thread.join().expect("the load thread must not panic");
+}
+
+/// Source-without-Analysis must never answer the loaded fast path. A
+/// drive that stopped between stages (a withdrawn cooperative drive)
+/// leaves exactly that committed pair — Source published, Analysis
+/// not, the dropped handle cancelling nothing. The deterministic
+/// threaded producer of the same pair is a Source-target request
+/// through the host's scheduler; the next `ensure_loaded` must not
+/// report loaded from the leftover Source: it goes through the
+/// submit/drive seam again and answers true only after Analysis
+/// commits and the integrate step runs.
+#[test]
+fn source_without_analysis_never_answers_the_loaded_fast_path() {
+    use verter_scheduler::scheduler::Request;
+    use verter_scheduler::stage::{Priority, TargetStage};
+
+    let host = host_with_workspace_file(
+        HostConfig::default(),
+        "/coop/seam/f.ts",
+        "export const f = 5;\n",
+    );
+    assert!(
+        host.scheduler_source("/coop/seam/f.ts").is_none(),
+        "precondition: the scheduler must not hold the source yet, so \
+         ensure_loaded has to go through the submit/drive seam"
+    );
+
+    // Commit exactly the Source stage: the between-stages snapshot pair.
+    let handle = host.scheduler().submit_request(Request {
+        file_id: "/coop/seam/f.ts".to_string(),
+        target: TargetStage::Source,
+        priority: Priority::Interactive,
+        source: None,
+        file_language: None,
+        request_context: None,
+    });
+    host.scheduler().wait_or_drive(&handle);
+    assert!(
+        host.scheduler_source("/coop/seam/f.ts").is_some(),
+        "precondition: the Source stage committed"
+    );
+    assert!(
+        host.scheduler_analysis("/coop/seam/f.ts").is_none(),
+        "precondition: the Analysis stage has not run"
+    );
+
+    let submits_before = submitted_requests(&host);
+    assert!(
+        host.ensure_loaded("/coop/seam/f.ts"),
+        "the resumed load must complete through Analysis and integrate"
+    );
+    assert_eq!(
+        submitted_requests(&host),
+        submits_before + 1,
+        "Source-without-Analysis must go through the submit/drive seam, \
+         not answer loaded from the leftover Source"
+    );
+    assert!(
+        host.scheduler_analysis("/coop/seam/f.ts").is_some(),
+        "ensure_loaded may answer true only after the Analysis snapshot \
+         commits"
     );
 }
