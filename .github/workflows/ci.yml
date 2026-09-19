@@ -30,6 +30,7 @@ jobs:
       svelte_client_smokes: ${{ steps.filter.outputs.svelte_client_smokes }}
       svelte_perf: ${{ steps.filter.outputs.svelte_perf }}
       editors: ${{ steps.filter.outputs.editors }}
+      jetbrains: ${{ steps.filter.outputs.jetbrains }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v4
@@ -260,6 +261,15 @@ jobs:
               - 'packages/lsp-test-client/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            # JetBrains plugin lane (JBT1+): the pinned Gradle build resolves
+            # its own WebStorm SDK; only the plugin tree, its gate and the
+            # supported-IDE declaration feed it.
+            jetbrains:
+              - 'extensions/jetbrains/**'
+              - 'scripts/jetbrains-gate.mjs'
+              - 'scripts/jetbrains-gate.test.mjs'
+              - 'tests/jetbrains-product/**'
               - '.github/workflows/ci.yml'
             svelte_perf:
               - 'crates/verter_compiler/**'
@@ -1932,6 +1942,40 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # JetBrains plugin lane (JBT1): the pinned extensions/jetbrains Gradle
+  # build. The jetbrains-product gate profile starts here — it runs the real
+  # JVM tests against the pinned WebStorm SDK, the plugin verifier (failure on
+  # every level, pinned build only) and installable packaging, and fails
+  # closed on a missing JDK/SDK, missing build output or missing test
+  # evidence. No Rust toolchain and no pnpm install are needed: the gate is a
+  # plain Node script driving the pinned Gradle wrapper.
+  # ---------------------------------------------------------------------------
+  jetbrains-plugin:
+    name: JetBrains plugin (pinned WebStorm SDK)
+    needs: [detect-changes]
+    if: needs.detect-changes.outputs.jetbrains == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      # This lane never installs the JS workspace. setup-node@v5 otherwise
+      # auto-caches from package.json#packageManager and fails looking up
+      # `pnpm` (the rust-test-build job documents the same gotcha).
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Run the jetbrains-product gate (JVM tests, verifier, packaging)
+        run: node scripts/jetbrains-gate.mjs
+
+  # ---------------------------------------------------------------------------
   # Aggregate gate. The ruleset must require the check named "CI Required"
   # (this job's `name:`) and nothing else. `scripts/check-ci-aggregate.mjs`
   # statically enforces that every job in this workflow is listed in its
@@ -1981,6 +2025,7 @@ jobs:
       - editor-lapce
       - editor-zed
       - editor-neovim
+      - jetbrains-plugin
     steps:
       - name: Verify no dependency failed
         env:

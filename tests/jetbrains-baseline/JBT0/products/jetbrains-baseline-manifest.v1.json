@@ -136,9 +136,9 @@
   ],
   "adapterState": {
     "extensions/jetbrains": {
-      "state": "absent",
-      "note": "no JetBrains adapter exists yet; extensions/ currently ships only the lapce and zed launchers. An adapter landing later is inert until its activation boundary and must update this row",
-      "evidence": ["extensions/lapce/README.md", "extensions/zed/README.md"]
+      "state": "skeleton-inert",
+      "note": "JBT1 landed the Gradle plugin skeleton pinned to WebStorm 2026.2.3: a loading plugin with a health action only, no semantic features. It stays inert until its activation boundary (JBT2 owns the lifecycle); the sole semantic entry remains verter-lsp. The scaffolding is deleted once JBT2 owns the lifecycle. JBT1H's real-IDE harness captures this row's IDE pins.",
+      "evidence": ["extensions/jetbrains/README.md", "extensions/jetbrains/gradle.properties", "tests/jetbrains-product/JBT1/products/ide-support-range.v1.json"]
     },
     "packages/dx-harness/jetbrains": {
       "state": "absent",
