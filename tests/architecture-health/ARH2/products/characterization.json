@@ -20,7 +20,8 @@
     "sameChangeRefresh": [
       "tests/architecture-health/ARH0/products/codebase-inventory.json",
       "tests/architecture-health/ARH0/products/debt-register.json",
-      "tests/architecture-health/ARH1/products/cutover-register.json"
+      "tests/architecture-health/ARH1/products/cutover-register.json",
+      "tests/architecture-health/ARH1/products/dependency-contracts.json"
     ],
     "consumerPopulation": "empty by measurement: no importer of packages/core existed at deletion time (ARH1-CUT-1 evidence); an empty deletion-set consumer population, not a silent one"
   },
