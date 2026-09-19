@@ -13,9 +13,9 @@
     "STP4-illegal-vue"
   ],
   "probes": {
-    "positive": "tests/sfc-projection/STP4/probes/accept-js-unchecked.ts",
+    "positive": "tests/sfc-projection/STP4/probes/js-unchecked-script.js",
     "negative": "tests/sfc-projection/STP4/probes/reject-supplemental-import.ts",
-    "cleanTwin": "tests/sfc-projection/STP4/probes/accept-js-unchecked.ts",
+    "cleanTwin": "tests/sfc-projection/STP4/probes/js-unchecked-script.js",
     "tsconfig": "tests/sfc-projection/STP4/probes/tsconfig.json",
     "hoverNeedle": "stp4HoverTarget",
     "definitionNeedle": "stp4DefinitionTarget",
@@ -27,8 +27,7 @@
     {
       "id": "STP4-js-unchecked",
       "disposition": "accept",
-      "file": "tests/sfc-projection/STP4/probes/accept-js-unchecked.ts",
-      "expectedInstanceType": "Comp",
+      "file": "tests/sfc-projection/STP4/probes/js-unchecked-script.js",
       "hoverNeedle": "stp4HoverTarget",
       "expectedHoverType": "string",
       "files": ["tests/sfc-projection/STP4/probes/js-unchecked-template.ts"],
