@@ -4,6 +4,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  fieldUseForms,
   loadArh0Products,
   loadManifest,
   loadProducts,
@@ -181,7 +182,7 @@ test("ARH1-import-direction dirty twin: a layer rule that contradicts the live m
   );
 });
 
-test("ARH1-import-direction dirty twin: an importer that stopped referencing the module is rejected", () => {
+test("ARH1-import-direction dirty twin: a declared importer that references nothing is rejected by the exact population join", () => {
   const dirty = cloneProducts();
   hotspot(dirty, SEMANTIC_QUERY).allowedImportDirection.importers.push(
     "crates/verter_span/src/lib.rs",
@@ -190,7 +191,10 @@ test("ARH1-import-direction dirty twin: an importer that stopped referencing the
   assert.equal(result.ok, false);
   assert.ok(
     result.errors.some(
-      (e) => e.caseId === "ARH1-import-direction" && e.code === "importer-without-reference",
+      (e) =>
+        e.caseId === "ARH1-surface" &&
+        e.code === "importer-population-drift" &&
+        e.detail.includes("declared an importer but references no"),
     ),
     JSON.stringify(result.errors),
   );
@@ -797,4 +801,404 @@ test("ARH1-verify CLI: the manifest verify command runs validate() and exits 0 o
   const verifyPath = fileURLToPath(new URL("./verify.mjs", import.meta.url));
   const stdout = execFileSync(process.execPath, [verifyPath], { encoding: "utf8" });
   assert.match(stdout, /ARH1 verify: PASS/);
+});
+
+// ---------------------------------------------------------------------------
+// Layer-rule population pins (F2/F11): mayImport equals the live manifest
+// both ways and the rule population cannot shrink or widen silently.
+// ---------------------------------------------------------------------------
+
+test("ARH1-import-direction dirty twin: an invented mayImport allowance is rejected both ways", () => {
+  const invented = cloneProducts();
+  const rule = invented["dependency-contracts"].layerRules.find((r) => r.id === "ARH1-LAYER-1");
+  rule.mayImport.push("verter_fake");
+  let result = validate(invented, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-import-direction" &&
+        e.code === "layer-allowance-without-dependency" &&
+        e.detail.includes("verter_fake"),
+    ),
+    JSON.stringify(result.errors),
+  );
+
+  const unused = cloneProducts();
+  unused["dependency-contracts"].layerRules
+    .find((r) => r.id === "ARH1-LAYER-1")
+    .mayImport.push(
+      "verter_macro_dto", // a real crate, but not a dependency of verter_scheduler
+    );
+  result = validate(unused, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-import-direction" && e.code === "layer-allowance-without-dependency",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-import-direction dirty twin: deleting a layer rule for a hotspot crate is rejected", () => {
+  const dirty = cloneProducts();
+  const rules = dirty["dependency-contracts"].layerRules;
+  const idx = rules.findIndex((r) => r.id === "ARH1-LAYER-1"); // governs verter_scheduler
+  rules.splice(idx, 1);
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH1-import-direction" && e.code === "missing-layer-rule",
+    ),
+    JSON.stringify(result.errors),
+  );
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH1-import-direction" && e.code === "layer-rule-population-drift",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-import-direction dirty twin: deleting a middle layer rule leaves an id gap and is rejected", () => {
+  const dirty = cloneProducts();
+  const rules = dirty["dependency-contracts"].layerRules;
+  const idx = rules.findIndex((r) => r.id === "ARH1-LAYER-2"); // verter_semantic: non-hotspot crate
+  rules.splice(idx, 1);
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-import-direction" &&
+        e.code === "layer-rule-population-drift" &&
+        e.detail.includes("ARH1-LAYER-3"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-import-direction dirty twin: a rule for an ungoverned non-hotspot crate without rationale is rejected", () => {
+  const dirty = cloneProducts();
+  const template = dirty["dependency-contracts"].layerRules[0];
+  dirty["dependency-contracts"].layerRules.push({
+    ...structuredClone(template),
+    id: "ARH1-LAYER-4",
+    crate: "crates/verter_lsp",
+    rule: "invented twin",
+    mayImport: [...template.mayImport], // contents irrelevant: the crate is unexplained
+  });
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-import-direction" &&
+        e.code === "layer-crate-unexplained" &&
+        e.detail.includes("verter_lsp"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Cutover key binding (F5/F10): every disposition binds exactly one
+// recognized key, so a keyless row cannot record a competing owner.
+// ---------------------------------------------------------------------------
+
+test("ARH1-cutover dirty twin: a keyless row with a competing owner is rejected", () => {
+  const dirty = cloneProducts();
+  const rows = dirty["cutover-register"].rows;
+  const cut2 = rows.find((r) => r.id === "ARH1-CUT-2");
+  rows.push({
+    ...cut2,
+    id: "ARH1-CUT-5",
+    decision: "keep the bookkeeping fields pub",
+    disposition: "competing disposition with no route",
+    owner: { id: "ARH11", kind: "node" },
+    route: undefined,
+    satisfies: undefined,
+  });
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.caseId === "ARH1-cutover" && e.code === "cutover-row-unbound"),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-cutover dirty twin: a row carrying both keys is rejected", () => {
+  const dirty = cloneProducts();
+  const rows = dirty["cutover-register"].rows;
+  const cut2 = rows.find((r) => r.id === "ARH1-CUT-2");
+  cut2.satisfies = "ARH0-DEBT-1"; // route already set
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.caseId === "ARH1-cutover" && e.code === "cutover-row-double-keyed"),
+    JSON.stringify(result.errors),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Exact importer inventories for every hotspot (F6): comment mentions are
+// never consumers and a real consumer cannot be dropped.
+// ---------------------------------------------------------------------------
+
+test("ARH1-surface dirty twin: a comment-only scheduler importer is rejected (comments never count)", () => {
+  const dirty = cloneProducts();
+  const aid = hotspot(dirty, SCHEDULER).allowedImportDirection;
+  // footprint.rs mentions "scheduler" in doc prose only.
+  aid.importers.push("crates/verter_audit/src/footprint.rs");
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-surface" &&
+        e.code === "importer-population-drift" &&
+        e.detail.includes("footprint.rs is declared an importer but references no"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-surface dirty twin: dropping a real scheduler importer is rejected", () => {
+  const dirty = cloneProducts();
+  const aid = hotspot(dirty, SCHEDULER).allowedImportDirection;
+  aid.importers = aid.importers.filter((i) => i !== "crates/verter_napi/src/lib.rs");
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-surface" &&
+        e.code === "importer-population-drift" &&
+        e.detail.includes("crates/verter_napi/src/lib.rs references scheduler cross-crate"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// State ownership binds to declarations (F13/F15/F23): a consumer file that
+// constructs the type, or a file mentioning the state in comments, is not
+// the sole owner.
+// ---------------------------------------------------------------------------
+
+test("ARH1-state-lifetimes dirty twin: a consumer file constructing the type is not the sole owner", () => {
+  const dirty = cloneProducts();
+  const row = hotspot(dirty, SCHEDULER).stateLifetimes.find((s) => s.state === "Scheduler.nodes");
+  // host_construction.rs constructs Scheduler but declares no nodes state.
+  row.soleOwner = "crates/verter_session/src/host_construction.rs";
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-state-lifetimes" &&
+        e.code === "state-owner-without-declaration" &&
+        e.detail.includes("host_construction.rs"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-state-lifetimes dirty twin: an unrelated file mentioning the state in comments is not the sole owner", () => {
+  const dirty = cloneProducts();
+  const row = hotspot(dirty, SCHEDULER).stateLifetimes.find((s) => s.state === "Scheduler.nodes");
+  // semantic_query.rs mentions "nodes" in prose/comments; it declares none.
+  row.soleOwner = "crates/verter_session/src/semantic_query.rs";
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-state-lifetimes" &&
+        e.code === "state-owner-without-declaration" &&
+        e.detail.includes("semantic_query.rs"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Retained assoc items cover receiver-call usage (F16/F19): the ffi
+// consumer calls PartialReasonSet::is_empty / ::iter through receiver
+// syntax, so unlisting either must fail.
+// ---------------------------------------------------------------------------
+
+test("ARH1-surface dirty twin: receiver-called assoc items must stay retained (is_empty, iter)", () => {
+  for (const member of ["is_empty", "iter"]) {
+    const dirty = cloneProducts();
+    const surface = hotspot(dirty, SEMANTIC_QUERY).minimalPublicSurface;
+    surface.retainedAssocItems = surface.retainedAssocItems.filter(
+      (i) => i !== `PartialReasonSet::${member}`,
+    );
+    const result = validate(dirty, loadManifest(), arh0);
+    assert.equal(result.ok, false, member);
+    assert.ok(
+      result.errors.some(
+        (e) =>
+          e.caseId === "ARH1-surface" &&
+          e.code === "assoc-item-unretained" &&
+          e.detail.includes(`PartialReasonSet::${member}`) &&
+          e.detail.includes("component_meta.rs"),
+      ),
+      `${member}: ${JSON.stringify(result.errors)}`,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Capability-table completeness (F17): constructor rows, surface
+// declarations and retained rows cannot be deleted silently.
+// ---------------------------------------------------------------------------
+
+test("ARH1-constructor dirty twin: deleting a constructor capability row is drift, not silence", () => {
+  const dirty = cloneProducts();
+  const rows = hotspot(dirty, SCHEDULER).constructorCapabilities;
+  const idx = rows.findIndex((c) => c.constructor === "new");
+  rows.splice(idx, 1);
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-constructor" &&
+        e.code === "constructor-population-drift" &&
+        e.detail.includes("pub fn Scheduler::new"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-surface dirty twin: clearing the surface declarations list is rejected", () => {
+  const dirty = cloneProducts();
+  hotspot(dirty, SCHEDULER).surfaceDeclarations = [];
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-surface" &&
+        e.code === "missing-surface-declaration" &&
+        e.detail.includes("pub mod scheduler;"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-surface dirty twin: deleting a retained fn row uncovers the pub fn and is rejected", () => {
+  const dirty = cloneProducts();
+  const surface = hotspot(dirty, SCHEDULER).minimalPublicSurface;
+  surface.retainedFns = surface.retainedFns.filter((fn) => fn !== "len");
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-surface" &&
+        e.code === "surface-item-uncovered" &&
+        e.detail.includes("pub fn len"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Inline crate paths are imports (F18): macro/derive/alias paths in code
+// position are measured, so an undeclared one is drift and a forbidden one
+// is caught without a use statement.
+// ---------------------------------------------------------------------------
+
+test("ARH1-import-direction dirty twin: an inline-only verter reference must be declared", () => {
+  const dirty = cloneProducts();
+  const aid = hotspot(dirty, SCHEDULER).allowedImportDirection;
+  // scheduler.rs production calls verter_audit::attribute! inline.
+  aid.verter = aid.verter.filter((v) => v !== "verter_audit");
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-import-direction" &&
+        e.code === "import-drift" &&
+        e.detail.includes("measured verter import verter_audit is not declared"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-import-direction: inline paths are measured and noise is not", () => {
+  const synth = [
+    "fn main() {",
+    "    let x = verter_session::spawn();", // inline crate path, no use statement
+    '    let label = "verter_semantic::fake";', // string data, never an import
+    "    let n: u64 = u64::from(3u8);", // primitive path root
+    "    let v: Vec<u8> = (0..2).collect::<Vec<u8>>();", // turbofish
+    "    #[allow(clippy::let_and_return)]", // tool-lint namespace
+    "    let y = x;",
+    "    y",
+    "}",
+  ].join("\n");
+  const measured = measureImports(synth);
+  assert.ok(measured.verter.has("verter_session"), "inline crate path is measured");
+  assert.ok(!measured.verter.has("verter_semantic"), "string literals are not imports");
+  assert.deepEqual([...measured.external], []);
+});
+
+// ---------------------------------------------------------------------------
+// Field narrowing joins to qualified field use (F21): an ambiguous field
+// name is only a consumer through the owning type's struct literal, and a
+// same-named field of an unrelated type is never a false consumer.
+// ---------------------------------------------------------------------------
+
+test("ARH1-surface dirty twin: a recorded field consumer without qualified use is rejected", () => {
+  const dirty = cloneProducts();
+  const row = hotspot(dirty, SCHEDULER).minimalPublicSurface.narrow.find(
+    (n) => n.item === "tombstones",
+  );
+  // host_construction.rs hits "tombstones" in neither Scheduler-qualified
+  // form (SessionOverlayRoot owns the ambiguous mentions).
+  row.consumersAffected.push("crates/verter_session/src/host_construction.rs");
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-surface" &&
+        e.code === "narrow-consumer-without-reference" &&
+        e.detail.includes("Scheduler.tombstones"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-surface: field use forms are type-qualified", () => {
+  // A struct literal of the owning type names the field.
+  assert.equal(
+    fieldUseForms(
+      "let s = Scheduler { nodes: m, tombstones: t };",
+      "Scheduler",
+      "tombstones",
+      false,
+    ).literal,
+    true,
+  );
+  // An ambiguous field name: a bare receiver access on ANOTHER type is not
+  // the owning type's consumer.
+  assert.equal(
+    fieldUseForms("let n = overlay.tombstones.len();", "Scheduler", "tombstones", false).any,
+    false,
+  );
+  // An unambiguous field name: a bare receiver access outside the crate is
+  // the owning type's consumer.
+  assert.equal(
+    fieldUseForms("let g = sched.generation_floors.len();", "Scheduler", "generation_floors", true)
+      .receiver,
+    true,
+  );
 });

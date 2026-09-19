@@ -8,27 +8,44 @@
  * hotspot contract (and vice versa) with no dropped or invented
  * responsibility, each surviving authority/cohesive module exists, the
  * declared import direction equals the production import tree actually
- * measured in the live source (cfg(test)/cfg(all(test, ..)) items are
- * stripped before measuring, so the equality claim covers every direction
- * and never counts test configuration as production direction; the
- * forbidden directions are absent from the full source — including its test
- * configuration — and the owning crate's Cargo.toml), layer rules match the
- * live crate dependency manifests, constructors and their capability
- * anchors are real declarations, state-lifetime rows name live identifiers
- * and one sole owner whose declaration actually lives in the named owner,
- * surface declarations and retained/narrowed items bind the live source,
- * every narrowing consumer is a live referencing file and every live
- * referencing file is a recorded consumer (exact populations, comment
- * mentions never count), no cohesive split retains shared unrestricted
- * state (ARH1-AC2), every route ARH0 assigned to this node (plus every
- * narrowing route declared here, keyed per narrow kind so two routes on one
- * file cannot merge or vanish) has exactly one cutover disposition, and the
- * AC4 surface obligations name every charter-mandated surface. The program
- * DAG is database-owned by the TAMA controller, so owner/heir ids are
- * checked structurally only and no DAG file is read; the ARH0 products are
- * joined as shipped predecessor evidence, never re-derived here.
- * ARH1-ratification fails when the manifest and the verifier disagree about
- * the case contract, so the manifest cannot claim checks that do not run.
+ * measured in the live source — use statements AND inline crate paths
+ * (macro paths like `verter_audit::attribute!`, feature-gated type aliases,
+ * derive paths) measured on the production-stripped text, so an inline-only
+ * crate reference is drift in every direction and a forbidden root is
+ * caught in use or inline form alike (cfg(test)/cfg(all(test, ..)) items
+ * are stripped before measuring, so the equality claim covers every
+ * direction and never counts test configuration as production direction;
+ * the forbidden directions are absent from the full source — including its
+ * test configuration — and the owning crate's Cargo.toml), layer rules
+ * equal the live crate dependency manifests BOTH ways with a pinned rule
+ * population (every hotspot crate governed exactly once, contiguous ids,
+ * non-hotspot crates declared with a rationale), constructors and their
+ * capability anchors are real declarations with the constructor population
+ * derived from the module's primary type (a deleted constructor row is
+ * drift, not silence), state-lifetime rows name live identifiers and one
+ * sole owner that DECLARES the state (a comment mention or the enclosing
+ * type's name in a consumer file is not ownership), surface declarations
+ * are pinned against the derived parent-module declaration, public
+ * modules' complete pub-item populations must be retained/narrowed or
+ * carried by a bulk row (deleted rows are drift), every narrowing consumer
+ * is a live referencing file and every live referencing file is a recorded
+ * consumer — fn rows by qualified reference forms, field rows by
+ * type-qualified field use (an ambiguous field name is only a consumer
+ * through a struct literal of the owning type), importers by the derived
+ * cross-crate population for EVERY hotspot (comment mentions never count)
+ * — retained assoc items must cover qualified, receiver and
+ * binding-evidenced usage on retained types, no cohesive split retains
+ * shared unrestricted state (ARH1-AC2), every route ARH0 assigned to this
+ * node (plus every narrowing route declared here, keyed per narrow kind so
+ * two routes on one file cannot merge or vanish) has exactly one cutover
+ * disposition carried by a row bound to exactly one recognized route/debt
+ * key, and the AC4 surface obligations name every charter-mandated surface.
+ * The program DAG is database-owned by the TAMA controller, so owner/heir
+ * ids are checked structurally only and no DAG file is read; the ARH0
+ * products are joined as shipped predecessor evidence, never re-derived
+ * here. ARH1-ratification fails when the manifest and the verifier
+ * disagree about the case contract, so the manifest cannot claim checks
+ * that do not run.
  */
 
 import fs from "node:fs";
@@ -43,6 +60,31 @@ export const PRODUCT_FILES = Object.freeze(["dependency-contracts.json", "cutove
 
 const TAMA_DAG_PROVENANCE = "tama-dag";
 const SKIPPED_ROOTS = new Set(["std", "core", "alloc", "crate", "super", "self"]);
+// Path roots that are primitive types, never crate names (`u64::from`, `str::from_utf8`).
+const PRIMITIVE_ROOTS = new Set([
+  "bool",
+  "char",
+  "str",
+  "u8",
+  "u16",
+  "u32",
+  "u64",
+  "u128",
+  "usize",
+  "i8",
+  "i16",
+  "i32",
+  "i64",
+  "i128",
+  "isize",
+  "f32",
+  "f64",
+]);
+// Tool-lint namespaces in attributes (`#[allow(clippy::..)]`), not crate references.
+const TOOL_LINT_ROOTS = new Set(["clippy", "rustc", "rustdoc"]);
+// A receiver-call chain must sit within this many lines of a qualified
+// assoc reference (`T::assoc`) for the call to count as usage evidence of T.
+const RECEIVER_EVIDENCE_LINE_WINDOW = 8;
 const LIFETIMES = new Set([
   "process",
   "session",
@@ -160,8 +202,9 @@ function strippedFileText(rel) {
 }
 
 const ownerTextCache = new Map();
-/** Text of a sole-owner target: the file itself, or every .rs under a
- * module directory (recursive). */
+/** Comment-stripped text of a sole-owner target: the file itself, or every
+ * .rs under a module directory (recursive). Doc mentions never prove
+ * ownership, so comments are stripped before any declaration check. */
 function soleOwnerText(rel) {
   let t = ownerTextCache.get(rel);
   if (t !== undefined) return t;
@@ -170,14 +213,14 @@ function soleOwnerText(rel) {
   if (fs.existsSync(abs)) {
     const stat = fs.statSync(abs);
     if (stat.isFile()) {
-      out = readRel(rel);
+      out = stripComments(readRel(rel));
     } else if (stat.isDirectory()) {
       out = "";
       const rec = (dir) => {
         for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
           const p = path.join(dir, e.name);
           if (e.isDirectory()) rec(p);
-          else if (e.name.endsWith(".rs")) out += fs.readFileSync(p, "utf8");
+          else if (e.name.endsWith(".rs")) out += stripComments(fs.readFileSync(p, "utf8"));
         }
       };
       rec(abs);
@@ -376,12 +419,50 @@ function stripComments(text) {
   return text.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
 }
 
+/** Replaces string literals with blanks (escape- and char-literal-aware, so
+ * `'a` lifetimes stay and `'\n'` chars vanish). Path-like text inside string
+ * literals is data, never an import. */
+function blankStrings(text) {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '"') {
+      i++;
+      while (i < text.length && text[i] !== '"') {
+        if (text[i] === "\\") i++;
+        i++;
+      }
+      i++;
+      out += " ";
+    } else if (ch === "'") {
+      const n = text.indexOf("'", i + 1);
+      const span = n === -1 ? Infinity : n - i;
+      if (n !== -1 && ((text[i + 1] === "\\" && span <= 4) || span <= 2)) {
+        out += " ";
+        i = n + 1;
+      } else {
+        out += ch;
+        i++;
+      }
+    } else {
+      out += ch;
+      i++;
+    }
+  }
+  return out;
+}
+
 /**
  * Measures the import tree of one source file the way the contract declares
  * it: `use`/`pub use` statements expanded into full paths (nested groups
- * inherit their prefix), classified by first path segment. `crate::` roots
- * become the crate-internal set; module names declared inside the file (its
- * inline `mod` items) are internal re-exports, not external crates;
+ * inherit their prefix), classified by first path segment, PLUS every
+ * inline crate path in code position — `verter_audit::attribute!(..)`,
+ * `crossbeam_channel::Sender`, `#[derive(serde::Serialize)]`, feature-gated
+ * `hotpath::wrap::..` type aliases — with string literals blanked,
+ * turbofish forms (`collect::<..>`) skipped and use-bound names (imported
+ * terminals and renames, file-local mods and macro_rules) never
+ * misread as crate roots. `crate::` roots become the crate-internal set;
  * `super::`/`self::` stay internal without naming a root. This is the FULL
  * measurement (test configuration included); the import-direction equality
  * runs on measureProductionImports below.
@@ -404,12 +485,22 @@ function measureStrippedImports(source) {
   const verter = new Set();
   const external = new Set();
   const internal = new Set();
+  // Names bound by use statements (terminals and `as` renames): an inline
+  // `bound_name::path` resolves to the import, not to a crate root.
+  const boundNames = new Set(fileMods);
   for (const sm of source.matchAll(/\b(?:pub\s+)?use\s([^;]*);/g)) {
     for (const usePath of expandUsePaths(sm[1])) {
-      const first = usePath.split("::")[0];
+      const segs = usePath.split("::");
+      // Every segment of a use path is import context (crate root, module,
+      // terminal or rename): an inline `segment::path` reference resolves
+      // through the import, never to a bare crate root.
+      for (const seg of segs) {
+        if (/^[a-z_][a-z_0-9]*$/.test(seg)) boundNames.add(seg);
+      }
+      const first = segs[0];
       if (!/^[a-z_][a-z_0-9]*$/.test(first)) continue;
       if (first === "crate") {
-        const root = usePath.split("::")[1];
+        const root = segs[1];
         if (root) internal.add(root);
         continue;
       }
@@ -417,6 +508,24 @@ function measureStrippedImports(source) {
       if (first.startsWith("verter_")) verter.add(first);
       else if (!fileMods.has(first)) external.add(first);
     }
+    const rename = sm[1].match(/\bas\s+([A-Za-z_][A-Za-z_0-9]*)\s*$/);
+    if (rename) boundNames.add(rename[1]);
+  }
+  // Inline crate paths in code position (macro calls, qualified types,
+  // derive paths, feature-gated aliases).
+  for (const m of blankStrings(source).matchAll(/(?<![A-Za-z_0-9\]:])([a-z_][a-z_0-9]*)::(?!<)/g)) {
+    const first = m[1];
+    if (
+      SKIPPED_ROOTS.has(first) ||
+      PRIMITIVE_ROOTS.has(first) ||
+      TOOL_LINT_ROOTS.has(first) ||
+      boundNames.has(first) ||
+      internal.has(first)
+    ) {
+      continue;
+    }
+    if (first.startsWith("verter_")) verter.add(first);
+    else external.add(first);
   }
   return { verter, external, internal };
 }
@@ -615,25 +724,71 @@ function validateImportDirection(contracts, errors) {
         });
       }
     }
-    const moduleToken = path.basename(hotspot.path).replace(/\.rs$/, "");
     for (const importer of declared.importers || []) {
       if (!existsRel(importer)) {
         errors.push({ caseId, code: "missing-importer", detail: importer });
-        continue;
       }
-      if (!readRel(importer).includes(moduleToken)) {
-        errors.push({
-          caseId,
-          code: "importer-without-reference",
-          detail: `${importer} does not reference ${moduleToken}`,
-        });
-      }
+      // Reference evidence is enforced by the exact cross-crate population
+      // join in validateSurface (ARH1-surface/importer-population-drift):
+      // a comment mention of the module name is never a consumer.
     }
+  }
+  // The layer-rule population is pinned, not advisory: every hotspot's
+  // owning crate is governed exactly once, ids are contiguous from 1 (so a
+  // deleted middle rule leaves a gap), a crate outside every hotspot needs
+  // a declared rationale to be governed at all, and mayImport equals the
+  // live manifest BOTH ways (an invented allowance is drift exactly like a
+  // missing one).
+  const ruleCrates = new Map();
+  for (const rule of contracts.layerRules) {
+    ruleCrates.set(rule.crate, (ruleCrates.get(rule.crate) || 0) + 1);
+  }
+  for (const [crate, count] of ruleCrates) {
+    if (count > 1) {
+      errors.push({
+        caseId,
+        code: "duplicate-layer-crate",
+        detail: `${crate} carries ${count} layer rules; one crate, one rule`,
+      });
+    }
+  }
+  const hotspotCrates = new Set(contracts.hotspots.map((h) => owningCrateDir(h.path)));
+  for (const crate of hotspotCrates) {
+    if (!ruleCrates.has(crate)) {
+      errors.push({
+        caseId,
+        code: "missing-layer-rule",
+        detail: `${crate} owns a hotspot but no layer rule governs its crate dependencies`,
+      });
+    }
+  }
+  const ruleNums = contracts.layerRules.map((r) =>
+    /^ARH1-LAYER-([0-9]+)$/.test(r.id) ? Number(r.id.slice("ARH1-LAYER-".length)) : NaN,
+  );
+  const contiguous =
+    ruleNums.every(Number.isInteger) &&
+    new Set(ruleNums).size === ruleNums.length &&
+    [...ruleNums].sort((a, b) => a - b).every((v, i) => v === i + 1);
+  if (!contiguous) {
+    errors.push({
+      caseId,
+      code: "layer-rule-population-drift",
+      detail: `layer rule ids must be exactly ARH1-LAYER-1..n with no gap or duplicate (found ${contracts.layerRules.map((r) => r.id).join(", ")})`,
+    });
   }
   for (const rule of contracts.layerRules) {
     if (!existsRel(rule.crate)) {
       errors.push({ caseId, code: "layer-crate-missing", detail: rule.crate });
       continue;
+    }
+    if (!hotspotCrates.has(rule.crate)) {
+      if (typeof rule.nonHotspotRationale !== "string" || rule.nonHotspotRationale.length === 0) {
+        errors.push({
+          caseId,
+          code: "layer-crate-unexplained",
+          detail: `${rule.id}: ${rule.crate} owns no hotspot; a nonHotspotRationale is required to keep it governed`,
+        });
+      }
     }
     const deps = crateVerterDeps(rule.crate);
     for (const dep of deps) {
@@ -649,6 +804,15 @@ function validateImportDirection(contracts, errors) {
           caseId,
           code: "layer-violation",
           detail: `${rule.crate} depends on forbidden root ${dep}`,
+        });
+      }
+    }
+    for (const allowed of rule.mayImport) {
+      if (!deps.has(allowed)) {
+        errors.push({
+          caseId,
+          code: "layer-allowance-without-dependency",
+          detail: `${rule.id}: ${rule.crate} has no dependency on ${allowed}; mayImport must equal the live manifest both ways`,
         });
       }
     }
@@ -669,8 +833,12 @@ function validateImportDirection(contracts, errors) {
  * ARH1-AC1: constructor capabilities bind real declarations. Each declared
  * constructor exists as a visibility-carrying fn, its signature anchors are
  * present in the declaration span (so the capability talks about the real
- * parameter list, not a wish), and a hotspot without constructors records
- * why. Test-only seams must be named as such.
+ * parameter list, not a wish), a hotspot without constructors records why,
+ * and the constructor table is COMPLETE: for the module's primary type
+ * (the retained type named after the module), every pub associated fn
+ * returning Self that is not a narrowed test hook must carry a capability
+ * row — deleting a row is drift, not silence. Test-only seams must be named
+ * as such.
  */
 function validateConstructors(contracts, errors) {
   const caseId = "ARH1-constructor";
@@ -732,15 +900,78 @@ function validateConstructors(contracts, errors) {
         });
       }
     }
+    // Completeness: the constructor table of the module's primary retained
+    // type equals its derived Self-returning public constructors (narrowed
+    // test hooks excluded — their disposition is the narrowing row).
+    const base = path.basename(hotspot.path, ".rs");
+    const primary = (hotspot.minimalPublicSurface?.retainedTypes || []).find(
+      (t) => t.replace(/_/g, "").toLowerCase() === base.replace(/_/g, "").toLowerCase(),
+    );
+    if (primary) {
+      const stripped = strippedFileText(hotspot.path);
+      const narrowFns = new Set(
+        (hotspot.minimalPublicSurface.narrow || [])
+          .filter((r) => r.kind === "fn")
+          .map((r) => r.item),
+      );
+      const derived = new Set();
+      for (const m of stripped.matchAll(/\bimpl(?:<[^{]*>)?\s+([A-Za-z_][A-Za-z_0-9]*)\s*\{/g)) {
+        if (m[1] !== primary) continue;
+        const body = braceSlice(stripped, m.index + m[0].length - 1);
+        for (const fm of body.matchAll(
+          /\bpub\s+(?:const\s+)?fn\s+([a-z_][a-z_0-9]*)[^{;]*->\s*([^{;]*)/g,
+        )) {
+          if (/\bSelf\b/.test(fm[2]) && !narrowFns.has(fm[1])) derived.add(fm[1]);
+        }
+      }
+      const declared = new Set(rows.map((r) => r.constructor));
+      for (const fn of derived) {
+        if (!declared.has(fn)) {
+          errors.push({
+            caseId,
+            code: "constructor-population-drift",
+            detail: `${hotspot.path}: pub fn ${primary}::${fn} constructs ${primary} but carries no capability row`,
+          });
+        }
+      }
+      for (const row of rows) {
+        if (!derived.has(row.constructor)) {
+          errors.push({
+            caseId,
+            code: "constructor-population-drift",
+            detail: `${row.constructor} is not a derived Self-returning pub constructor of ${primary}`,
+          });
+        }
+      }
+    }
   }
+}
+
+/** Declaration forms that bind an identifier: fn/item/macro/let/field
+ * declarations. A use or mention of the name is none of these, so a file
+ * that merely names the enclosing type or mentions the state in prose
+ * never counts as the owner. */
+function declaresIdentifier(text, ident) {
+  const i = ident.replace(/[^A-Za-z_0-9]/g, "");
+  if (!i) return false;
+  return (
+    new RegExp(`\\bfn\\s+${i}\\b`).test(text) ||
+    new RegExp(`\\b(?:struct|enum|trait|type|union|mod|const|static)\\s+${i}\\b`).test(text) ||
+    new RegExp(`\\bmacro_rules!\\s+${i}\\b`).test(text) ||
+    new RegExp(`\\blet(?:\\s+mut)?\\s+${i}\\b`).test(text) ||
+    new RegExp(`(?:^|\\n)\\s*(?:pub(?:\\([a-z_]+\\))?\\s+)?${i}\\s*:\\s*[^:]`).test(text)
+  );
 }
 
 /**
  * ARH1-AC1/AC3: every state-lifetime row names an identifier that exists in
  * the live source, a lifetime inside the contract vocabulary and one sole
- * owner — and the owner target actually carries the state's declaration (a
- * file that merely exists is not ownership), so the heirs inherit a state
- * map, not poetry.
+ * owner — and the owner target DECLARES the state in code (comment-
+ * stripped): for a `Type.field` state every field identifier must be
+ * declared in the owner; for a prose state at least one non-enclosing
+ * token (the parenthesized concrete identifier is the convention) must be
+ * declared. A consumer file that constructs the type or mentions the state
+ * in a doc comment is not the sole owner.
  */
 function validateStateLifetimes(contracts, errors) {
   const caseId = "ARH1-state-lifetimes";
@@ -779,11 +1010,33 @@ function validateStateLifetimes(contracts, errors) {
           code: "state-owner-missing",
           detail: `${row.state}: sole owner ${row.soleOwner}`,
         });
-      } else if (!tokens.some((t) => ownerText.includes(t))) {
+        continue;
+      }
+      const parts = row.state
+        .split(/,| and /)
+        .map((p) => p.trim())
+        .filter(Boolean);
+      const dotted = (p) => /^[A-Z][A-Za-z0-9]*\.[a-z_][a-z_0-9]*$/.test(p);
+      const enclosing = new Set();
+      for (const p of parts) {
+        const m = p.match(/^([A-Z][A-Za-z0-9]*)\./);
+        if (m) enclosing.add(m[1]);
+      }
+      let owned;
+      if (parts.length > 0 && parts.every(dotted)) {
+        // A `Type.field[, and Type.field…]` state: the owner must declare
+        // every field identifier; the enclosing type's name alone is not
+        // ownership evidence.
+        owned = parts.every((p) => declaresIdentifier(ownerText, p.split(".")[1]));
+      } else {
+        const candidates = tokens.filter((t) => !enclosing.has(t));
+        owned = candidates.some((t) => declaresIdentifier(ownerText, t));
+      }
+      if (!owned) {
         errors.push({
           caseId,
           code: "state-owner-without-declaration",
-          detail: `${row.state}: sole owner ${row.soleOwner} declares no identifier of the state`,
+          detail: `${row.state}: sole owner ${row.soleOwner} declares no identifier of the state (comments and the enclosing type's name do not count)`,
         });
       }
     }
@@ -844,6 +1097,10 @@ export function deriveModuleConsumers(hotspot) {
         for (const p of expandUsePaths(sm[1])) {
           const idx = p.indexOf(needle);
           if (idx === -1) continue;
+          // Boundary: the needle must be a whole path segment, not a prefix
+          // (`verter_session::flow_return_audit` does not consume `flow_return`).
+          const after = p[idx + needle.length];
+          if (after !== undefined && after !== ":") continue;
           references = true;
           const tail = p.slice(idx + needle.length).replace(/^::/, "");
           const last = tail.split("::").pop();
@@ -893,27 +1150,286 @@ export function deriveHookConsumers(hotspot, referenceForms) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Struct/impl/enum parsing substrate (declaration evidence for fields,
+// assoc members and constructor populations).
+// ---------------------------------------------------------------------------
+
+/** Body of the balanced `{...}` block opened at openIdx (string/lifetime
+ * aware via matchBracket). */
+function braceSlice(text, openIdx) {
+  const close = matchBracket(text, openIdx, "{", "}");
+  return close === -1 ? "" : text.slice(openIdx + 1, close);
+}
+
+const structDeclsCache = new Map();
+
+/** Struct declarations of one text (comment-stripped): array of
+ * { name, isPub, fields: Set<every declared field identifier>,
+ *   pubFields: Set<fully-pub field identifiers> }. A `pub` field of a
+ * pub(crate)/private struct never reaches cross-crate visibility, so
+ * pubFields only count inside fully-pub structs. */
+function structFieldDecls(text) {
+  const out = [];
+  for (const m of text.matchAll(
+    /\b(pub(?:\s*\([a-z_]+\))?|)\s*struct\s+([A-Za-z_][A-Za-z_0-9]*)\s*(?:<[^>]*>)?\s*\{/g,
+  )) {
+    const body = braceSlice(text, m.index + m[0].length - 1);
+    const fields = new Set();
+    const pubFields = new Set();
+    for (const fm of body.matchAll(
+      /(?:^|\n)\s*(pub(?:\s*\([a-z_]+\))?\s+)?([a-z_][a-z_0-9]*)\s*:\s*[^\s:]/g,
+    )) {
+      fields.add(fm[2]);
+      if (fm[1] !== undefined && fm[1].trim() === "pub") pubFields.add(fm[2]);
+    }
+    out.push({ name: m[2], isPub: m[1].trim() === "pub", fields, pubFields });
+  }
+  return out;
+}
+
+function fileStructDecls(rel) {
+  let t = structDeclsCache.get(rel);
+  if (t === undefined) {
+    t = structFieldDecls(strippedFileText(rel));
+    structDeclsCache.set(rel, t);
+  }
+  return t;
+}
+
+const fieldDeclaringStructsCache = new Map();
+
+/** How many structs under crates/ declare a field with this name. A name
+ * declared by exactly one struct is unambiguous: a bare `.field` access
+ * outside the owning crate can only be that field. */
+function fieldDeclaringStructCount(field) {
+  let n = fieldDeclaringStructsCache.get(field);
+  if (n !== undefined) return n;
+  n = 0;
+  for (const file of rustFilesUnderCrates()) {
+    for (const s of fileStructDecls(file)) {
+      if (s.fields.has(field)) n++;
+    }
+  }
+  fieldDeclaringStructsCache.set(field, n);
+  return n;
+}
+
 /**
- * ARH1-AC1: minimal public surfaces bind the live tree. Module visibility
- * declarations are pinned verbatim at their declaration site, retained
- * items are real declarations, and narrowing rows target a legal visibility
- * with an EXACT consumer inventory: every recorded consumer references the
- * item in code, and every referencing file outside the owning crate is
- * recorded. Where the contract flags the importer list as the complete
- * cross-crate population, that population is derived and compared exactly,
- * every referenced name must be retained or carried by the bulk row's
- * consumer migration, and every assoc item used on a retained type must be
- * retained (a retained type alone does not retain its methods).
+ * Exact cross-crate consumer population of a narrowed FIELD: files outside
+ * the owning crate that use the field through a type-qualified form — a
+ * struct literal of the owning type naming the field, plus bare `.field`
+ * receiver accesses only when the field name is unambiguous repo-wide (a
+ * `tombstones` field of an unrelated type is never the owning type's
+ * consumer). Purely for tests: form matching on arbitrary text.
+ */
+export function fieldUseForms(text, ownerType, field, unambiguous) {
+  const literal = new RegExp(`\\b${ownerType}\\s*\\{[\\s\\S]{0,400}?\\b${field}\\s*:`).test(text);
+  const receiver = unambiguous && new RegExp(`\\.${field}\\b`).test(text);
+  return { literal, receiver, any: literal || receiver };
+}
+
+export function deriveFieldConsumers(hotspot, field) {
+  const crateDir = owningCrateDir(hotspot.path);
+  const ownerType = fileStructDecls(hotspot.path).find((s) => s.fields.has(field))?.name;
+  if (!ownerType) return { ownerType: null, consumers: new Set() };
+  const unambiguous = fieldDeclaringStructCount(field) === 1;
+  const out = new Set();
+  for (const file of rustFilesUnderCrates()) {
+    if (file.startsWith(`${crateDir}/`)) continue;
+    if (fieldUseForms(strippedFileText(file), ownerType, field, unambiguous).any) out.add(file);
+  }
+  return { ownerType, consumers: out };
+}
+
+/** Pub assoc members declared on retained types (impl-block parse of the
+ * hotspot text): Set of `T::member` for pub fns and pub consts. */
+function retainedTypeMembers(stripped, retainedTypes) {
+  const out = new Set();
+  for (const m of stripped.matchAll(/\bimpl(?:<[^{]*>)?\s*([A-Za-z_][A-Za-z_0-9]*)\s*\{/g)) {
+    if (!retainedTypes.has(m[1])) continue;
+    const body = braceSlice(stripped, m.index + m[0].length - 1);
+    for (const fm of body.matchAll(/\bpub\s+(?:const\s+)?fn\s+([a-z_][a-z_0-9]+)/g)) {
+      out.add(`${m[1]}::${fm[1]}`);
+    }
+    for (const fm of body.matchAll(/\bpub\s+const\s+([A-Z_][A-Z_0-9]+)\s*:/g)) {
+      out.add(`${m[1]}::${fm[1]}`);
+    }
+  }
+  return out;
+}
+
+/** Retained-typed enum variant payloads of the hotspot text: Map
+ * `Enum::Variant` -> payload type (the last CamelCase word of the payload),
+ * for every pub enum on a retained type whose payload is itself retained.
+ * A pattern binding `Enum::Variant(ident)` types `ident` as the payload. */
+function retainedVariantPayloads(stripped, retainedTypes) {
+  const out = new Map();
+  for (const m of stripped.matchAll(/\bpub\s+enum\s+([A-Za-z_][A-Za-z_0-9]*)\s*\{/g)) {
+    if (!retainedTypes.has(m[1])) continue;
+    const body = braceSlice(stripped, m.index + m[0].length - 1);
+    for (const vm of body.matchAll(/\b([A-Z][A-Za-z_0-9]*)\s*\(([^)]*)\)/g)) {
+      const payload = vm[2].match(/([A-Z][A-Za-z_0-9]*)\s*[),\s]*$/);
+      if (payload && retainedTypes.has(payload[1])) out.set(`${m[1]}::${vm[1]}`, payload[1]);
+    }
+  }
+  return out;
+}
+
+/**
+ * Assoc-item usage evidence on retained types from one consumer file's
+ * comment-stripped text: qualified `T::member` references, receiver calls
+ * on identifiers whose type is evidenced (an ascription `x: &T` or a
+ * pattern binding `Enum::Variant(x)` with a retained payload type), and
+ * receiver calls within a small line window of a qualified `T::assoc`
+ * reference (a chain like `if x.is_empty() { T::PROPAGATED } else { x
+ * }.iter()` types the call through the qualified reference without a
+ * binding). Members are filtered to pub assoc members declared on
+ * retained types, so a same-named method on Vec/String never manufactures
+ * an obligation.
+ */
+export function collectAssocUsage(text, retainedTypes, members, variantPayloads) {
+  const usage = new Set();
+  for (const m of text.matchAll(/\b([A-Z][A-Za-z_0-9]*)::([A-Za-z_][A-Za-z_0-9]*)/g)) {
+    if (members.has(`${m[1]}::${m[2]}`)) usage.add(`${m[1]}::${m[2]}`);
+  }
+  const typedIdents = new Map(); // ident -> Set<type>
+  const addTyped = (ident, type) => {
+    if (!typedIdents.has(ident)) typedIdents.set(ident, new Set());
+    typedIdents.get(ident).add(type);
+  };
+  for (const m of text.matchAll(
+    /\b([a-z_][a-z_0-9]*)\s*:\s*(?:&(?:\s+mut\s+)?|mut\s+)*([A-Z][A-Za-z_0-9]*)\b/g,
+  )) {
+    if (retainedTypes.has(m[2])) addTyped(m[1], m[2]);
+  }
+  for (const [variant, payload] of variantPayloads) {
+    const re = new RegExp(
+      `${variant.split("::").join("\\:\\:")}\\s*\\(\\s*(?:ref\\s+)?(?:mut\\s+)?([a-z_][a-z_0-9]*)\\s*\\)`,
+      "g",
+    );
+    for (const m of text.matchAll(re)) addTyped(m[1], payload);
+  }
+  const lines = text.split("\n");
+  const qualLines = [];
+  lines.forEach((line, i) => {
+    for (const m of line.matchAll(/\b([A-Z][A-Za-z_0-9]*)::([A-Za-z_][A-Za-z_0-9]*)/g)) {
+      if (members.has(`${m[1]}::${m[2]}`)) qualLines.push({ line: i, type: m[1] });
+    }
+  });
+  lines.forEach((line, i) => {
+    for (const m of line.matchAll(/\.([a-z_][a-z_0-9]*)\s*\(/g)) {
+      const seen = new Set();
+      for (const q of qualLines) {
+        if (Math.abs(q.line - i) <= RECEIVER_EVIDENCE_LINE_WINDOW) seen.add(q.type);
+      }
+      for (const t of seen) {
+        if (members.has(`${t}::${m[1]}`)) usage.add(`${t}::${m[1]}`);
+      }
+    }
+  });
+  for (const [ident, types] of typedIdents) {
+    for (const m of text.matchAll(
+      new RegExp(`\\b${ident}\\s*\\.\\s*([a-z_][a-z_0-9]*)\\s*\\(`, "g"),
+    )) {
+      for (const t of types) {
+        if (members.has(`${t}::${m[1]}`)) usage.add(`${t}::${m[1]}`);
+      }
+    }
+  }
+  return usage;
+}
+
+/**
+ * The parent module file that must declare the hotspot module (the dir's
+ * mod.rs, else its lib.rs) and the verbatim declaration line it carries.
+ */
+function moduleDeclarationBinding(hotspotPath) {
+  const base = hotspotPath.replace(/^.*\//, "").replace(/\.rs$/, "");
+  const dir = hotspotPath.slice(0, hotspotPath.lastIndexOf("/"));
+  for (const parent of [`${dir}/mod.rs`, `${dir}/lib.rs`]) {
+    if (!existsRel(parent)) continue;
+    const m = readRel(parent).match(
+      new RegExp(`^\\s*(?:pub(?:\\s*\\([a-z_]+\\))?\\s+)?mod\\s+${base}\\s*;`, "m"),
+    );
+    return { parent, declaration: m ? m[0].trim() : null, base };
+  }
+  return { parent: null, declaration: null, base };
+}
+
+/**
+ * ARH1-AC1: minimal public surfaces bind the live tree. The module's
+ * visibility declaration is pinned verbatim against the DERIVED parent
+ * module file (an emptied or redirected surfaceDeclarations list is
+ * drift); a fully public module's complete pub-item population must be
+ * retained, narrowed or carried by a bulk row (a deleted row is drift),
+ * while a crate-visible module carries no cross-crate retained surface at
+ * all. Retained items are real declarations, and narrowing rows target a
+ * legal visibility with an EXACT consumer inventory: fn rows by qualified
+ * reference forms, field rows by type-qualified field use (an ambiguous
+ * field name counts only through a struct literal of the owning type), and
+ * — for every hotspot — the importers list is the complete derived
+ * cross-crate consumer population compared in both directions (comment
+ * mentions never count). Where the contract flags the importer list as the
+ * complete population for the retained surface, every referenced name must
+ * be retained or carried by the bulk row's consumer migration, and every
+ * assoc item used on a retained type — qualified, receiver or
+ * binding-evidenced — must be retained (a retained type alone does not
+ * retain its methods).
  */
 function validateSurface(contracts, errors) {
   const caseId = "ARH1-surface";
   for (const hotspot of contracts.hotspots) {
     const text = readRel(hotspot.path);
-    const crossCrate = hotspot.surfaceDeclarations.some((d) => /^pub mod /.test(d.declaration));
-    // The consumed-by-consumer proof runs only where the importers list is
-    // the complete cross-crate population for the retained surface.
-    const verifyConsumed =
-      hotspot.minimalPublicSurface.crossCrateRetainedVerifiedByConsumers === true;
+    const stripped = strippedFileText(hotspot.path);
+    const surface = hotspot.minimalPublicSurface;
+    const moduleBase = path.basename(hotspot.path, ".rs");
+
+    // The surface boundary is pinned to the derived parent declaration.
+    const binding = moduleDeclarationBinding(hotspot.path);
+    if (binding.parent === null || binding.declaration === null) {
+      errors.push({
+        caseId,
+        code: "missing-surface-declaration",
+        detail: `${hotspot.path}: no parent module file declares "mod ${moduleBase};"`,
+      });
+    } else {
+      const pinned = hotspot.surfaceDeclarations.filter(
+        (d) => d.file === binding.parent && d.declaration === binding.declaration,
+      );
+      if (pinned.length !== 1) {
+        errors.push({
+          caseId,
+          code: "missing-surface-declaration",
+          detail: `${hotspot.path}: the ${binding.parent} declaration "${binding.declaration}" must be pinned exactly once (found ${pinned.length})`,
+        });
+      }
+      for (const d of hotspot.surfaceDeclarations) {
+        if (d.file !== binding.parent || d.declaration !== binding.declaration) {
+          errors.push({
+            caseId,
+            code: "surface-declaration-unpinned",
+            detail: `${hotspot.path}: "${d.declaration}" @ ${d.file} is not the derived module declaration of ${binding.parent}`,
+          });
+        }
+      }
+    }
+    const modulePublic = binding.declaration !== null && /^pub\s+mod\b/.test(binding.declaration);
+    if (!modulePublic) {
+      const leaked = [
+        ...(surface.retainedFns || []).map((f) => `fn ${f}`),
+        ...(surface.retainedTypes || []).map((t) => `type ${t}`),
+        ...(surface.retainedAssocItems || []).map((a) => `assoc ${a}`),
+      ];
+      if (leaked.length > 0) {
+        errors.push({
+          caseId,
+          code: "surface-boundary-drift",
+          detail: `${hotspot.path}: the module is crate-visible; a cross-crate retained surface (${leaked.join(", ")}) contradicts the boundary`,
+        });
+      }
+    }
+
     for (const decl of hotspot.surfaceDeclarations) {
       if (!existsRel(decl.file)) {
         errors.push({ caseId, code: "declaration-file-missing", detail: decl.file });
@@ -927,12 +1443,12 @@ function validateSurface(contracts, errors) {
         });
       }
     }
-    for (const fn of hotspot.minimalPublicSurface.retainedFns || []) {
+    for (const fn of surface.retainedFns || []) {
       if (!new RegExp(`(?:pub|pub\\(crate\\)) (?:const )?fn ${fn}\\s*[<(]`).test(text)) {
         errors.push({ caseId, code: "surface-item-missing", detail: `${hotspot.path}: fn ${fn}` });
       }
     }
-    for (const type of hotspot.minimalPublicSurface.retainedTypes || []) {
+    for (const type of surface.retainedTypes || []) {
       if (
         !new RegExp(
           `(?:pub|pub\\(crate\\)) (?:struct|enum|trait|type|const|static) ${type}\\b`,
@@ -945,11 +1461,83 @@ function validateSurface(contracts, errors) {
         });
       }
     }
-    const bulkRows = (hotspot.minimalPublicSurface.narrow || []).filter((r) => r.kind === "bulk");
-    if (crossCrate && verifyConsumed) {
-      validateExactConsumerPopulation(hotspot, text, bulkRows, errors);
+
+    // The importers list is the exact cross-crate consumer population for
+    // EVERY hotspot, both directions, comments stripped.
+    const population = deriveModuleConsumers(hotspot);
+    const importers = hotspot.allowedImportDirection.importers || [];
+    for (const file of population.keys()) {
+      if (!importers.includes(file)) {
+        errors.push({
+          caseId,
+          code: "importer-population-drift",
+          detail: `${file} references ${moduleBase} cross-crate but is not a declared importer`,
+        });
+      }
     }
-    for (const row of hotspot.minimalPublicSurface.narrow || []) {
+    for (const importer of importers) {
+      if (!population.has(importer)) {
+        errors.push({
+          caseId,
+          code: "importer-population-drift",
+          detail: `${importer} is declared an importer but references no ${moduleBase} item in code`,
+        });
+      }
+    }
+
+    const bulkRows = (surface.narrow || []).filter((r) => r.kind === "bulk");
+    if (modulePublic && bulkRows.length === 0) {
+      // Without a bulk row, every pub item of the module must be retained
+      // or narrowed explicitly: deleting a row uncovers the item.
+      const coveredFns = new Set([
+        ...(surface.retainedFns || []),
+        ...(hotspot.constructorCapabilities || []).map((c) => c.constructor),
+        ...(surface.narrow || []).filter((r) => r.kind === "fn").map((r) => r.item),
+      ]);
+      for (const m of stripped.matchAll(/(?:^|\n)\s*pub\s+(?:const\s+)?fn\s+([a-z_][a-z_0-9]+)/g)) {
+        if (!coveredFns.has(m[1])) {
+          errors.push({
+            caseId,
+            code: "surface-item-uncovered",
+            detail: `${hotspot.path}: pub fn ${m[1]} is neither retained, narrowed nor carried by a bulk row`,
+          });
+        }
+      }
+      const coveredTypes = new Set([...(surface.retainedTypes || [])]);
+      for (const m of stripped.matchAll(
+        /(?:^|\n)\s*pub\s+(?:struct|enum|trait|type|union|const|static)\s+([A-Za-z_][A-Za-z_0-9]*)/g,
+      )) {
+        if (!coveredTypes.has(m[1])) {
+          errors.push({
+            caseId,
+            code: "surface-item-uncovered",
+            detail: `${hotspot.path}: pub item ${m[1]} is neither retained nor carried by a bulk row`,
+          });
+        }
+      }
+      const retainedT = new Set([...(surface.retainedTypes || [])]);
+      const narrowFields = new Set(
+        (surface.narrow || []).filter((r) => r.kind === "field").map((r) => r.item),
+      );
+      for (const s of structFieldDecls(stripped)) {
+        if (!s.isPub) continue; // a pub(crate) struct's fields never cross the crate
+        for (const field of s.pubFields) {
+          if (!retainedT.has(s.name) && !narrowFields.has(field)) {
+            errors.push({
+              caseId,
+              code: "surface-item-uncovered",
+              detail: `${hotspot.path}: pub field ${s.name}.${field} is neither part of a retained type nor narrowed`,
+            });
+          }
+        }
+      }
+    }
+
+    const verifyConsumed = surface.crossCrateRetainedVerifiedByConsumers === true;
+    if (modulePublic && verifyConsumed) {
+      validateExactConsumerPopulation(hotspot, text, bulkRows, population, errors);
+    }
+    for (const row of surface.narrow || []) {
       if (!NARROW_TARGETS.has(row.to)) {
         errors.push({
           caseId,
@@ -1012,6 +1600,50 @@ function validateSurface(contracts, errors) {
             }
           }
         }
+      } else if (row.kind === "field") {
+        // Exact field-consumer join: type-qualified use only. An ambiguous
+        // field name (declared by more than one struct repo-wide) counts
+        // only through a struct literal of the owning type, so a same-named
+        // field of an unrelated type is never a false consumer.
+        const derived = deriveFieldConsumers(hotspot, row.item);
+        if (derived.ownerType === null) {
+          errors.push({
+            caseId,
+            code: "narrow-field-without-owner-type",
+            detail: `${hotspot.path}: no struct declares field ${row.item}; the narrowing has no owning type`,
+          });
+        } else {
+          const unambiguous = fieldDeclaringStructCount(row.item) === 1;
+          for (const consumer of consumers) {
+            if (!existsRel(consumer)) {
+              errors.push({
+                caseId,
+                code: "missing-narrow-consumer",
+                detail: `${row.item}: ${consumer}`,
+              });
+              continue;
+            }
+            if (
+              !fieldUseForms(strippedFileText(consumer), derived.ownerType, row.item, unambiguous)
+                .any
+            ) {
+              errors.push({
+                caseId,
+                code: "narrow-consumer-without-reference",
+                detail: `${row.item}: ${consumer} uses no type-qualified form of ${derived.ownerType}.${row.item}`,
+              });
+            }
+          }
+          for (const live of derived.consumers) {
+            if (!consumers.includes(live)) {
+              errors.push({
+                caseId,
+                code: "narrow-consumer-omitted",
+                detail: `${row.item}: ${live} uses ${derived.ownerType}.${row.item} outside the owning crate but is not recorded`,
+              });
+            }
+          }
+        }
       } else {
         for (const consumer of consumers) {
           if (!existsRel(consumer)) {
@@ -1028,40 +1660,24 @@ function validateSurface(contracts, errors) {
 }
 
 /**
- * The complete cross-crate population of a flagged hotspot module: derived
- * from syntax evidence and joined both directions against the declared
- * importers; every referenced name must be retained or migrate with the
- * bulk row; retained types must be imported by a real consumer; assoc items
- * used on retained types must be retained.
+ * The complete cross-crate population of a flagged hotspot module: every
+ * referenced name must be retained or migrate with the bulk row; retained
+ * types must be imported by a real consumer; assoc items used on retained
+ * types — qualified (`T::member`), receiver calls on typed bindings and
+ * calls within a line window of a qualified reference — must be retained.
+ * (The importer population join itself runs for every hotspot in
+ * validateSurface.)
  */
-function validateExactConsumerPopulation(hotspot, text, bulkRows, errors) {
+function validateExactConsumerPopulation(hotspot, text, bulkRows, population, errors) {
   const caseId = "ARH1-surface";
   const surface = hotspot.minimalPublicSurface;
   const retained = new Set(surface.retainedTypes || []);
   const assoc = new Set(surface.retainedAssocItems || []);
+  const members = retainedTypeMembers(strippedFileText(hotspot.path), retained);
+  const variantPayloads = retainedVariantPayloads(strippedFileText(hotspot.path), retained);
   const bulk = bulkRows[0];
-  const population = deriveModuleConsumers(hotspot);
-  const importers = hotspot.allowedImportDirection.importers || [];
-  for (const file of population.keys()) {
-    if (!importers.includes(file)) {
-      errors.push({
-        caseId,
-        code: "importer-population-drift",
-        detail: `${file} references ${path.basename(hotspot.path, ".rs")} cross-crate but is not a declared importer`,
-      });
-    }
-  }
-  for (const importer of importers) {
-    if (!population.has(importer)) {
-      errors.push({
-        caseId,
-        code: "importer-population-drift",
-        detail: `${importer} is declared an importer but references no ${path.basename(hotspot.path, ".rs")} item in code`,
-      });
-    }
-  }
   const bulkConsumers = new Set(bulk ? bulk.consumersAffected || [] : []);
-  for (const [file, { names, qualified }] of population) {
+  for (const [file, { names }] of population) {
     const unretained = [...names].filter((n) => !retained.has(n));
     if (unretained.length > 0 && !bulkConsumers.has(file)) {
       errors.push({
@@ -1072,18 +1688,15 @@ function validateExactConsumerPopulation(hotspot, text, bulkRows, errors) {
     }
     if (!bulkConsumers.has(file)) {
       // Assoc-item usage on retained types must stay retained for every
-      // consumer that does not migrate with the bulk row.
-      for (const usage of qualified) {
-        const [type, member] = usage.split("::");
-        if (!retained.has(type)) continue;
-        // Variants (CamelCase) belong to the retained type; assoc fns are
-        // lowercase and assoc consts SCREAMING — and only declared pub
-        // members of this module count, so trait impls never match.
-        if (!/^[a-z_][a-z_0-9]*$|^[A-Z_][A-Z_0-9]+$/.test(member)) continue;
-        const declared = new RegExp(
-          `pub(?:\\s+const)?\\s+fn ${member}\\s*[<(]|pub\\s+const\\s+${member}\\s*:`,
-        ).test(text);
-        if (declared && !assoc.has(usage)) {
+      // consumer that does not migrate with the bulk row — including
+      // receiver-syntax calls (`reasons.is_empty()`, `.iter()` chains).
+      for (const usage of collectAssocUsage(
+        strippedFileText(file),
+        retained,
+        members,
+        variantPayloads,
+      )) {
+        if (!assoc.has(usage)) {
           errors.push({
             caseId,
             code: "assoc-item-unretained",
@@ -1268,6 +1881,24 @@ function validateCutover(contracts, cutover, arh0, errors) {
       errors.push({ caseId, code: "cutover-without-disposition", detail: row.id });
     }
     resolveOwner(row.owner, errors, caseId, "malformed-disposition-owner");
+    // Every disposition binds EXACTLY ONE recognized key: a narrowing route
+    // (path#kind) or a satisfied ARH0 debt. A row with neither key rides
+    // outside every uniqueness check — the register cannot carry a second
+    // authority for a candidate by leaving the key fields unset.
+    const keyCount = (row.satisfies ? 1 : 0) + (row.route !== undefined ? 1 : 0);
+    if (keyCount === 0) {
+      errors.push({
+        caseId,
+        code: "cutover-row-unbound",
+        detail: `${row.id}: carries neither a narrowing route nor a satisfied ARH0 debt; every disposition must bind exactly one key`,
+      });
+    } else if (keyCount === 2) {
+      errors.push({
+        caseId,
+        code: "cutover-row-double-keyed",
+        detail: `${row.id}: carries both route ${row.route} and satisfies ${row.satisfies}; a disposition binds exactly one key`,
+      });
+    }
     if (row.satisfies) {
       if (satisfies.has(row.satisfies)) {
         errors.push({
