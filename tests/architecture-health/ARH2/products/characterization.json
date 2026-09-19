@@ -1,0 +1,524 @@
+{
+  "schema": "ARH2Characterization",
+  "version": 1,
+  "contractNode": "ARH2",
+  "candidate": "30012d45df4e3369728a7cc09250c5e009bfd18d",
+  "predecessorProducts": {
+    "responsibilityMap": "tests/architecture-health/ARH0/products/responsibility-map.json",
+    "dependencyContracts": "tests/architecture-health/ARH1/products/dependency-contracts.json",
+    "cutoverRegister": "tests/architecture-health/ARH1/products/cutover-register.json"
+  },
+  "basis": {
+    "platform": "win32-x64, Node 26, structural derivation over the working tree",
+    "note": "Behavioral characterization binds existing discriminating tests (cargo nextest filters) to every ARH1 hotspot responsibility and to every cutover route a successor narrows. No new test-governance framework is introduced: the pins extend the existing architecture-health harness, and the wall-clock cost of the pinned lanes is owned by the complexity-measurements product, never by this one."
+  },
+  "deletion": {
+    "satisfies": "ARH0-DEBT-1",
+    "cutoverRow": "ARH1-CUT-1",
+    "deletedPath": "packages/core",
+    "rationale": "The .gitignore-only placeholder had no package.json, no sources, no literal pnpm-workspace.yaml entry (covered only by the packages/* glob) and no importer; populating it would invent a package with no consumer. ARH1-CUT-1 decided physical deletion; ARH2 executes it.",
+    "sameChangeRefresh": [
+      "tests/architecture-health/ARH0/products/codebase-inventory.json",
+      "tests/architecture-health/ARH0/products/debt-register.json",
+      "tests/architecture-health/ARH1/products/cutover-register.json",
+      "tests/architecture-health/ARH1/products/dependency-contracts.json"
+    ],
+    "consumerPopulation": "empty by measurement: no importer of packages/core existed at deletion time (ARH1-CUT-1 evidence); an empty deletion-set consumer population, not a silent one"
+  },
+  "hotspots": [
+    {
+      "path": "crates/verter_scheduler/src/scheduler.rs",
+      "crate": "verter_scheduler",
+      "responsibilities": [
+        {
+          "responsibility": "pool submission and admission control",
+          "survivingOwner": "crates/verter_scheduler/src/dag.rs"
+        },
+        {
+          "responsibility": "batch coordination",
+          "survivingOwner": "crates/verter_scheduler/src/driver.rs"
+        },
+        {
+          "responsibility": "cancellation and retry bookkeeping",
+          "survivingOwner": "crates/verter_scheduler/src/cancellation.rs"
+        }
+      ],
+      "pins": [
+        {
+          "behavior": "submission dedup merges identity and upgrades priority; readiness order is the priority lane order; an older generation is dropped as stale",
+          "command": "cargo nextest run -p verter_scheduler dag_tests",
+          "filter": "dag_tests",
+          "witnesses": [
+            {
+              "file": "crates/verter_scheduler/src/dag_tests.rs",
+              "test": "submit_dedup_merges_identity_and_upgrades_priority"
+            },
+            {
+              "file": "crates/verter_scheduler/src/dag_tests.rs",
+              "test": "next_ready_returns_highest_priority_first"
+            },
+            {
+              "file": "crates/verter_scheduler/src/dag_tests.rs",
+              "test": "cancel_older_generation_drops_stale_node"
+            }
+          ]
+        },
+        {
+          "behavior": "the driver owns admission and ordering policy: a ready node enters its priority-class lane, and a pre-dispatch dedup that adds a dependency removes the ready token from the lane",
+          "command": "cargo nextest run -p verter_scheduler dag_lanes_tests",
+          "filter": "dag_lanes_tests",
+          "witnesses": [
+            {
+              "file": "crates/verter_scheduler/src/dag_lanes_tests.rs",
+              "test": "submit_ready_node_enters_priority_class_lane"
+            },
+            {
+              "file": "crates/verter_scheduler/src/dag_lanes_tests.rs",
+              "test": "pre_dispatch_dedup_adding_dep_removes_ready_token_from_lane"
+            }
+          ]
+        },
+        {
+          "behavior": "cancellation latches are one-shot and idempotent across clones",
+          "command": "cargo nextest run -p verter_scheduler cancellation_token",
+          "filter": "cancellation_token",
+          "witnesses": [
+            {
+              "file": "crates/verter_scheduler/tests/cases/cancellation_token.rs",
+              "test": "cancel_sets_the_flag"
+            },
+            {
+              "file": "crates/verter_scheduler/tests/cases/cancellation_token.rs",
+              "test": "cancel_is_idempotent"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
+      "crate": "verter_session",
+      "responsibilities": [
+        {
+          "responsibility": "flow-return semantic dispatch",
+          "survivingOwner": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs"
+        },
+        {
+          "responsibility": "flow product assembly",
+          "survivingOwner": "crates/verter_session/src/project_semantic_dispatch/flow_products.rs"
+        }
+      ],
+      "pins": [
+        {
+          "behavior": "symbolic flow-return calls resolve complete; this-calls fail closed; an empty cycle stays return-only",
+          "command": "cargo nextest run -p verter_session flow_return_tests",
+          "filter": "flow_return_tests",
+          "witnesses": [
+            {
+              "file": "crates/verter_session/src/project_semantic_dispatch/flow_return_tests.rs",
+              "test": "flow_return_symbolic_call_resolves_complete"
+            },
+            {
+              "file": "crates/verter_session/src/project_semantic_dispatch/flow_return_tests.rs",
+              "test": "flow_return_this_call_fails_closed"
+            },
+            {
+              "file": "crates/verter_session/src/project_semantic_dispatch/flow_return_tests.rs",
+              "test": "flow_return_empty_cycle_is_return_only_and_never_never"
+            }
+          ]
+        },
+        {
+          "behavior": "flow products are selected and scoped: script-setup functions serve under the instance owner only, Svelte script functions under the instance owner, not the module owner",
+          "command": "cargo nextest run -p verter_session flow_return_coverage_tests",
+          "filter": "flow_return_coverage_tests",
+          "witnesses": [
+            {
+              "file": "crates/verter_session/src/project_semantic_dispatch/flow_return_coverage_tests.rs",
+              "test": "vue_script_setup_functions_serve_under_the_instance_owner_only"
+            },
+            {
+              "file": "crates/verter_session/src/project_semantic_dispatch/flow_return_coverage_tests.rs",
+              "test": "svelte_script_functions_serve_under_the_instance_owner_not_the_module_owner"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "crates/verter_session/src/project_semantic_dispatch/build.rs",
+      "crate": "verter_session",
+      "responsibilities": [
+        {
+          "responsibility": "dispatch build/admission",
+          "survivingOwner": "crates/verter_session/src/project_semantic_dispatch/build.rs"
+        },
+        {
+          "responsibility": "project semantic store assembly",
+          "survivingOwner": "crates/verter_session/src/project_semantic_dispatch/mod.rs"
+        }
+      ],
+      "pins": [
+        {
+          "behavior": "build/admission cycle-gates recursion: productive tree recursion continues, generic mutual recursion stops",
+          "command": "cargo nextest run -p verter_session cycle_gate_tests",
+          "filter": "cycle_gate_tests",
+          "witnesses": [
+            {
+              "file": "crates/verter_session/src/project_semantic_dispatch/cycle_gate_tests.rs",
+              "test": "cycle_gate_decided_continue_on_productive_tree_recursion"
+            },
+            {
+              "file": "crates/verter_session/src/project_semantic_dispatch/cycle_gate_tests.rs",
+              "test": "cycle_gate_decided_stop_on_generic_mutual_recursion"
+            }
+          ]
+        },
+        {
+          "behavior": "the store assembles through dispatch transactions: a staged session is deposit-inactive and commits exactly once; abandonment respects the commit boundary",
+          "command": "cargo nextest run -p verter_session dispatch_txn_tests",
+          "filter": "dispatch_txn_tests",
+          "witnesses": [
+            {
+              "file": "crates/verter_session/src/project_semantic_dispatch/dispatch_txn_tests.rs",
+              "test": "staged_session_is_deposit_inactive_and_commits_exactly_once"
+            },
+            {
+              "file": "crates/verter_session/src/project_semantic_dispatch/dispatch_txn_tests.rs",
+              "test": "abandonment_respects_the_commit_boundary"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "crates/verter_session/src/semantic_query.rs",
+      "crate": "verter_session",
+      "responsibilities": [
+        {
+          "responsibility": "semantic query envelope assembly",
+          "survivingOwner": "crates/verter_session/src/semantic_query.rs"
+        },
+        {
+          "responsibility": "query key/env binding",
+          "survivingOwner": "crates/verter_session/src/semantic_query/query_key_spec.rs"
+        }
+      ],
+      "pins": [
+        {
+          "behavior": "the memo table interns stable identities: interning returns unique stable ids, dedups structural values across contexts, and resolve-decl memo keys discriminate the top-level owner",
+          "command": "cargo nextest run -p verter_session semantic_query_memo::tests",
+          "filter": "semantic_query_memo::tests",
+          "witnesses": [
+            {
+              "file": "crates/verter_session/src/semantic_query_memo/tests.rs",
+              "test": "interning_returns_unique_stable_ids"
+            },
+            {
+              "file": "crates/verter_session/src/semantic_query_memo/tests.rs",
+              "test": "intern_dedups_structural_values_across_contexts"
+            },
+            {
+              "file": "crates/verter_session/src/semantic_query_memo/tests.rs",
+              "test": "resolve_decl_memo_key_discriminates_top_level_owner"
+            }
+          ]
+        },
+        {
+          "behavior": "query keys bind deterministically: equal-prefix literals order by exact key and primitive tags are fixed independent of intern order",
+          "command": "cargo nextest run -p verter_session stable_key_tests",
+          "filter": "stable_key_tests",
+          "witnesses": [
+            {
+              "file": "crates/verter_session/src/semantic_query/stable_key_tests.rs",
+              "test": "equal_prefix_literals_order_by_exact_key"
+            },
+            {
+              "file": "crates/verter_session/src/semantic_query/stable_key_tests.rs",
+              "test": "primitives_use_fixed_tags_independent_of_intern_order"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "crates/verter_session/src/flow_slice_content.rs",
+      "crate": "verter_session",
+      "responsibilities": [
+        {
+          "responsibility": "flow slice content projection",
+          "survivingOwner": "crates/verter_session/src/flow_slice_content.rs"
+        },
+        {
+          "responsibility": "slice publication admission",
+          "survivingOwner": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs"
+        }
+      ],
+      "pins": [
+        {
+          "behavior": "slice content lowers without rescans: nested descriptors defer mutable capture annotation content and occurrence classification never rescans hoisted alias groups",
+          "command": "cargo nextest run -p verter_session flow_slice_content_tests",
+          "filter": "flow_slice_content_tests",
+          "witnesses": [
+            {
+              "file": "crates/verter_session/src/flow_slice_content_tests.rs",
+              "test": "nested_descriptor_defers_mutable_capture_annotation_content"
+            },
+            {
+              "file": "crates/verter_session/src/flow_slice_content_tests.rs",
+              "test": "runtime_occurrence_classification_does_not_rescan_hoisted_alias_groups"
+            }
+          ]
+        },
+        {
+          "behavior": "slice publication admission gates on the budget: the flow product budget boundary is exact and never warm",
+          "command": "cargo nextest run -p verter_session flow_return_frame_seal_tests",
+          "filter": "flow_return_frame_seal_tests",
+          "witnesses": [
+            {
+              "file": "crates/verter_session/src/project_semantic_dispatch/flow_return_frame_seal_tests.rs",
+              "test": "flow_product_budget_boundary_is_exact_and_never_warm"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "cutoverRow": "ARH1-CUT-2",
+      "path": "crates/verter_scheduler/src/scheduler.rs",
+      "narrowingOwner": { "id": "ARH4", "kind": "node" },
+      "surface": {
+        "kind": "fields",
+        "items": ["tombstones", "generation_floors", "deferred_blocker_ids"]
+      },
+      "pins": [
+        {
+          "behavior": "the three bookkeeping fields' current behavior: a tombstone rejects pre-remove source submission, reset seeds generation floors for cleared nodes, deferred blockers are replaced, not appended",
+          "command": "cargo nextest run -p verter_scheduler scheduler::tests",
+          "filter": "scheduler::tests",
+          "witnesses": [
+            {
+              "file": "crates/verter_scheduler/src/scheduler.rs",
+              "test": "tombstone_rejects_pre_remove_source_submission"
+            },
+            {
+              "file": "crates/verter_scheduler/src/scheduler.rs",
+              "test": "reset_seeds_generation_floors_for_cleared_nodes"
+            },
+            {
+              "file": "crates/verter_scheduler/src/scheduler.rs",
+              "test": "deferred_blockers_are_replaced_not_appended"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "cutoverRow": "ARH1-CUT-3",
+      "path": "crates/verter_scheduler/src/scheduler.rs",
+      "narrowingOwner": { "id": "ARH4", "kind": "node" },
+      "surface": {
+        "kind": "pub-test-hooks",
+        "derivedLive": "the verifier counts the pub fn test_* population of scheduler.rs and joins it to the ARH1 test-configuration narrowing rows"
+      },
+      "pins": [
+        {
+          "behavior": "the hooks' current behavior through the seams they expose: atomic batch admission is not partially observable by the pump, and a single-worker-pool wait_or_drive executes a cpu dependency inline",
+          "command": "cargo nextest run -p verter_scheduler scheduler::tests",
+          "filter": "scheduler::tests",
+          "witnesses": [
+            {
+              "file": "crates/verter_scheduler/src/scheduler.rs",
+              "test": "atomic_batch_admission_not_partially_observable_by_pump"
+            },
+            {
+              "file": "crates/verter_scheduler/src/scheduler.rs",
+              "test": "single_worker_pool_wait_or_drive_executes_cpu_dependency_inline"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "cutoverRow": "ARH1-CUT-4",
+      "path": "crates/verter_session/src/semantic_query.rs",
+      "narrowingOwner": { "id": "ARH3", "kind": "node" },
+      "surface": {
+        "kind": "bulk",
+        "derivedLive": "the verifier joins the ARH1 minimalPublicSurface bulk row: retainedTypes, retainedAssocItems, and consumersAffected must equal the ARH1 populations exactly",
+        "retainedTypes": [
+          "HashValue",
+          "SemanticNodeId",
+          "ScopeId",
+          "ResolveDeclKey",
+          "SemanticQueryKey",
+          "ResultCompleteness",
+          "PartialReason",
+          "PartialReasonSet",
+          "ProjectionMode",
+          "OriginEdgeKind"
+        ],
+        "retainedAssocItems": [
+          "PartialReasonSet::PROPAGATED",
+          "PartialReasonSet::SEMANTIC_QUERY_FAULT",
+          "PartialReasonSet::empty",
+          "PartialReasonSet::is_empty",
+          "PartialReasonSet::iter",
+          "ResultCompleteness::partial",
+          "ScopeId::file"
+        ],
+        "consumersAffected": [
+          "crates/verter_session/benches/projection_safety_bench.rs",
+          "crates/verter_session/tests/allocation_cases/flow_literal_provenance.rs",
+          "crates/verter_session/tests/allocation_cases/flow_products.rs",
+          "crates/verter_session/tests/cases/compile-fail/composite_mint_unforgeable.rs",
+          "crates/verter_session/tests/cases/compile-fail/composite_replay_cross_kind.rs",
+          "crates/verter_session/tests/cases/compile-fail/composite_struct_literal_forge.rs",
+          "crates/verter_session/tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs",
+          "crates/verter_session/tests/cases/compile-fail/dto_names_session_hot_handle.rs",
+          "crates/verter_session/tests/cases/compile-fail/instantiate_body_source_sealed_to_dispatch_factory.rs",
+          "crates/verter_session/tests/cases/compile-fail/instantiate_key_context_not_extractable.rs",
+          "crates/verter_session/tests/cases/compile-fail/instantiate_key_seal_no_features.rs",
+          "crates/verter_session/tests/cases/compile-fail/locator_shape_ctx_no_prc_conversion.rs",
+          "crates/verter_session/tests/cases/compile-fail/member_role_stamps_not_mintable_without_witness.rs",
+          "crates/verter_session/tests/cases/compile-fail/object_projection_witness_not_forgeable.rs",
+          "crates/verter_session/tests/cases/compile-fail/object_projection_witness_only.rs",
+          "crates/verter_session/tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs",
+          "crates/verter_session/tests/cases/compile-fail/semantic_operand_force_projection_not_importable.rs",
+          "crates/verter_session/tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs",
+          "crates/verter_session/tests/cases/family_warm_read_releases_mutex_before_validate.rs",
+          "crates/verter_session/tests/cases/flow_product_lattice.rs",
+          "crates/verter_session/tests/cases/flow_solve_completeness.rs",
+          "crates/verter_session/tests/cases/g_binder/binder_identity_facts.rs",
+          "crates/verter_session/tests/cases/g_block/block_1_i_discriminators.rs",
+          "crates/verter_session/tests/cases/g_block/block_6i_leak_option_a_discriminator.rs",
+          "crates/verter_session/tests/cases/g_block/block_6i_mapped_source_declref_enum.rs",
+          "crates/verter_session/tests/cases/g_block/block_6i_round7_selected_key_callable_realization.rs",
+          "crates/verter_session/tests/cases/g_block/r6_query_identity_keys_content_free.rs",
+          "crates/verter_session/tests/cases/g_block/semantic_determinism_matrix.rs",
+          "crates/verter_session/tests/cases/g_block/u2_demand_lattice_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2_display_projection_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2_spec_table_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b5_class_ns_enum_overload_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b6_apparent_template_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b7_flow_contextual_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b8_relate_upgrade_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b9_awaited_relation_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u6_call_resolve_guards.rs",
+          "crates/verter_session/tests/cases/g_cache/r6_r21_query_identity_keys.rs",
+          "crates/verter_session/tests/cases/g_family/family_slots_multi_candidate.rs",
+          "crates/verter_session/tests/cases/g_misc0/capture_token_smoke.rs",
+          "crates/verter_session/tests/cases/g_misc0/declaration_merge_guards.rs",
+          "crates/verter_session/tests/cases/g_misc0/dep_signature_to_fact_signature.rs",
+          "crates/verter_session/tests/cases/g_misc0/dispatch_bridges_convert_project_generation.rs",
+          "crates/verter_session/tests/cases/g_misc0/flow_return_audit_tls_propagation.rs",
+          "crates/verter_session/tests/cases/g_misc0/synthetic_carrier_explicit_deepen_proof.rs",
+          "crates/verter_session/tests/cases/g_misc1/memo_traced_parse_fact_survives_warm_hit.rs",
+          "crates/verter_session/tests/cases/g_misc1/merged_symbol_identity.rs",
+          "crates/verter_session/tests/cases/g_misc1/path_precision_navigate_then_terminal.rs",
+          "crates/verter_session/tests/cases/g_misc1/pe4_evaluate_deferred_memo.rs",
+          "crates/verter_session/tests/cases/g_misc2/generic_instantiation_identity_and_bounded_work.rs",
+          "crates/verter_session/tests/cases/g_misc2/mapped_remap_dead_key_value_forcing.rs",
+          "crates/verter_session/tests/cases/g_misc2/pe4_evaluate_depth_budget.rs",
+          "crates/verter_session/tests/cases/g_misc2/pe4_mapped_type_k_independent_hoist.rs",
+          "crates/verter_session/tests/cases/g_misc2/pe4_substitute_hash_cons.rs",
+          "crates/verter_session/tests/cases/g_misc2/per_macro_projector_decomposition_tests.rs",
+          "crates/verter_session/tests/cases/g_misc2/recursive_substitute_memo.rs",
+          "crates/verter_session/tests/cases/g_misc3/slot_binding_graph_matrix_member_presence.rs",
+          "crates/verter_session/tests/cases/g_type/flow_return_audit_contract.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_cache_reuse_across_entrypoints.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_diamond_repeated_prop.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_intermediate_navigate_terminal_caller_mode.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_long_chain_stack_safe.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_no_unrelated_imports.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_pathological_recursion.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_read_once.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_tls_propagation.rs",
+          "crates/verter_session/tests/cases/relation_nominal_authority.rs",
+          "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs"
+        ]
+      },
+      "pins": [
+        {
+          "behavior": "the envelope surface's identity behavior the narrowing must preserve: intern identity discriminates the top-level owner",
+          "command": "cargo nextest run -p verter_session semantic_query_memo::tests",
+          "filter": "semantic_query_memo::tests",
+          "witnesses": [
+            {
+              "file": "crates/verter_session/src/semantic_query_memo/tests.rs",
+              "test": "intern_identity_discriminates_top_level_owner"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "ac3": {
+    "note": "ARH2 touches no production state/query/map boundary: the only production mutation is deleting the packages/core placeholder, which holds no state, and the delivered code is the characterization/measurement harness itself. The concerns below therefore bind the EXISTING evidence that already pins each concern for the characterized boundaries, so a later narrowing that regresses one fails a named test today.",
+    "concerns": [
+      {
+        "concern": "fresh-versus-incremental equivalence",
+        "evidence": [
+          {
+            "file": "crates/verter_scheduler/src/dag_supersede_index_tests.rs",
+            "test": "supersede_cancels_stale_dag_nodes_and_blocks_dispatch"
+          }
+        ],
+        "note": "generation supersession is the incremental/fresh seam of scheduler admission"
+      },
+      {
+        "concern": "edit/revert",
+        "evidence": [
+          {
+            "file": "crates/verter_scheduler/src/scheduler.rs",
+            "test": "remove_and_readd_uses_higher_generation"
+          }
+        ],
+        "note": "remove-and-readd is the edit/revert seam of the scheduler bookkeeping"
+      },
+      {
+        "concern": "cancellation",
+        "evidence": [
+          {
+            "file": "crates/verter_session/src/semantic_query_memo/cancellation_tests.rs",
+            "test": "cancelled_joiner_detaches_without_aborting_live_winner"
+          },
+          {
+            "file": "crates/verter_session/src/semantic_query_memo/wait_cycle_tests.rs",
+            "test": "two_owner_wait_cycle_is_detected_before_parking"
+          }
+        ],
+        "note": "query-memo cancellation and wait-cycle detection, not scheduler latches alone"
+      },
+      {
+        "concern": "stale/partial rejection",
+        "evidence": [
+          {
+            "file": "crates/verter_session/src/flow_slice_content_tests.rs",
+            "test": "selected_capture_authority_rejects_a_different_outer_source_snapshot"
+          }
+        ],
+        "note": "a different outer source snapshot is rejected at selection time"
+      },
+      {
+        "concern": "deterministic ordering under perturbed discovery or scheduling",
+        "evidence": [
+          {
+            "file": "crates/verter_session/src/semantic_query/stable_key_tests.rs",
+            "test": "primitives_use_fixed_tags_independent_of_intern_order"
+          },
+          {
+            "file": "crates/verter_session/src/semantic_query/stable_key_tests.rs",
+            "test": "injected_fingerprint_collision_orders_by_exact_key"
+          }
+        ],
+        "note": "key order is exact-key-determined regardless of interning order"
+      }
+    ]
+  },
+  "ac4Rationale": "ARH2's public delivery is the architecture-health harness itself: the pinned lanes are runnable with the exact recorded commands, and this product is the reference a contributor uses to reproduce them. The VIM/DX capability mapping and host/profile evidence table for the RETAINED surfaces are DOC2's obligation and the executable examples/reference performance recipe belongs to the web performance node; ARH2 claims neither.",
+  "ac5Rationale": "No new latency/work/allocation/RSS budget is created here. The complexity-measurements product binds the four measurement dimensions to the existing ratified performance methodology (performance-gates.toml) and records only deterministically re-derivable structural counts; wall-clock numbers stay in gate receipts, never in committed products.",
+  "emptyDeletionSetRationale": "not-applicable-non-empty: the deletion set is packages/core (ARH0-DEBT-1 decided by ARH1-CUT-1, executed here with the same-change ARH0 population refresh)"
+}

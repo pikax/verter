@@ -19,7 +19,7 @@
     "generatedLoc": 12926
   },
   "typescriptPackages": {
-    "packages": 26,
+    "packages": 25,
     "productionLoc": 121543,
     "testLoc": 178326,
     "generatedLoc": 20397,
@@ -536,13 +536,6 @@
       "module": "packages/component-meta",
       "productionLoc": 14555,
       "testLoc": 17138,
-      "generatedLoc": 0,
-      "otherLoc": 0
-    },
-    {
-      "module": "packages/core",
-      "productionLoc": 0,
-      "testLoc": 0,
       "generatedLoc": 0,
       "otherLoc": 0
     },
