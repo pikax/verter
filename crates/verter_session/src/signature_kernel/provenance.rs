@@ -78,19 +78,22 @@ pub struct SignatureProvenance {
 }
 
 impl SignatureProvenance {
+    /// Authored provenance. The caller supplies the authored source
+    /// locator; provenance never substitutes a placeholder for it.
     #[must_use]
     pub fn authored(
         group: DeclarationGroupId,
         parent: DeclarationParentId,
         source_ordinal: u32,
         overload_ordinal: u32,
+        source_locator: SourceLocatorId,
     ) -> Self {
         Self {
             declaration_group: group,
             declaration_parent: parent,
             source_ordinal,
             overload_ordinal,
-            source_locator: SourceLocatorId::from_raw(0),
+            source_locator,
             origin: OriginRelation::Authored,
             effective_overload_order: OverloadOrder {
                 group,

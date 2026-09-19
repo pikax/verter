@@ -567,6 +567,25 @@ pub trait WorkspaceRead: Send + Sync {
         Vec::new()
     }
 
+    /// Cheap revision of injected snapshot content and membership. Advances
+    /// on any actual content replacement, insertion or removal, but not on
+    /// overlay edits or no-op writes. None means callers cannot skip scans.
+    fn snapshot_revision(&self) -> Option<u64> {
+        None
+    }
+
+    /// Injected/published snapshot members, not overlay buffers.
+    /// Population completeness for never-upserted ambient roots uses this
+    /// listing; it must not increment [`crate::known_canonicals_calls`].
+    fn snapshot_canonicals(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Open overlay buffers, not snapshot members. Uncounted.
+    fn overlay_canonicals(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// R22 contract: transitive importers of `edited`. The reverse
     /// import graph serves reachability GC + LSP affected-files
     /// reporting + diagnostics; it is **never** wired to cache

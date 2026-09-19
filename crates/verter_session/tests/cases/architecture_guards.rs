@@ -4631,6 +4631,9 @@ pub(crate) mod foundations_guards {
         // Consumed by tests/fact_*.rs + tests/cases/g_misc2/module_augmentation.rs +
         // tests/cases/g_misc2/shallow_walk_invariant.rs + future host paths.
         "pub mod fact_emission",
+        // Complete global contributor snapshots published at artifact
+        // ingestion. Cited by tests/cases/g_block/semantic_determinism_matrix.rs.
+        "pub mod global_contributors",
         // Lazy member-body fact stores (R13, R28) — semantic and
         // display fingerprint stores keyed differently so cosmetic
         // edits invalidate display-bearing materialisations only.

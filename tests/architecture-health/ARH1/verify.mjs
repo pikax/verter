@@ -732,6 +732,10 @@ export function measureProductionImports(text) {
 function validateImportDirection(contracts, errors) {
   const caseId = "ARH1-import-direction";
   for (const hotspot of contracts.hotspots) {
+    // A hotspot the tree no longer carries is recorded once as
+    // missing-hotspot by validateHotspotCoverage; reading it here would
+    // throw before the recorded errors are returned.
+    if (!existsRel(hotspot.path)) continue;
     const declared = hotspot.allowedImportDirection;
     const measured = measureProductionImports(readRel(hotspot.path));
     const full = measureImports(readRel(hotspot.path));
@@ -900,6 +904,10 @@ function validateImportDirection(contracts, errors) {
 function validateConstructors(contracts, errors) {
   const caseId = "ARH1-constructor";
   for (const hotspot of contracts.hotspots) {
+    // A hotspot the tree no longer carries is recorded once as
+    // missing-hotspot by validateHotspotCoverage; reading it here would
+    // throw before the recorded errors are returned.
+    if (!existsRel(hotspot.path)) continue;
     const rows = hotspot.constructorCapabilities || [];
     if (rows.length === 0) {
       if (
@@ -1036,6 +1044,10 @@ function declaresIdentifier(text, ident) {
 function validateStateLifetimes(contracts, errors) {
   const caseId = "ARH1-state-lifetimes";
   for (const hotspot of contracts.hotspots) {
+    // A hotspot the tree no longer carries is recorded once as
+    // missing-hotspot by validateHotspotCoverage; reading it here would
+    // throw before the recorded errors are returned.
+    if (!existsRel(hotspot.path)) continue;
     const text = readRel(hotspot.path);
     for (const row of hotspot.stateLifetimes) {
       if (!LIFETIMES.has(row.lifetime)) {
@@ -1472,6 +1484,10 @@ function deriveSnapshotCounts(stripped) {
 function validateSurface(contracts, errors) {
   const caseId = "ARH1-surface";
   for (const hotspot of contracts.hotspots) {
+    // A hotspot the tree no longer carries is recorded once as
+    // missing-hotspot by validateHotspotCoverage; reading it here would
+    // throw before the recorded errors are returned.
+    if (!existsRel(hotspot.path)) continue;
     const text = readRel(hotspot.path);
     const stripped = strippedFileText(hotspot.path);
     const surface = hotspot.minimalPublicSurface;

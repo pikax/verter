@@ -957,15 +957,25 @@ impl VerterHost {
         // stopped between stages (a withdrawn/cancelled cooperative
         // drive) leaves Source published with no Analysis, and
         // reporting loaded from that leftover would expose a
-        // half-committed snapshot (BWH2-AC3). Source-without-Analysis
+        // half-committed snapshot. Source-without-Analysis
         // falls through to the submit/drive seam, which resumes the
         // load through Analysis + integrate before answering.
+        //
+        // Committed scheduler snapshots alone are not "loaded" either:
+        // a cancelled drive skips `integrate_scheduler_snapshot`, and
+        // the driver (or a resumed drive) can still commit Analysis
+        // afterwards. The host-side marker of an integrated load is
+        // the `DependencyState` entry, written only by the integrate
+        // step and by `upsert`; without it the compile, dependency,
+        // alias and edge state was never materialized, so the load
+        // must go through the submit/drive/integrate seam again.
         let evicted_flag = self
             .derived_raw_cache()
             .get(canonical_id)
             .map(|d| d.evicted)
             .unwrap_or(false);
         if !evicted_flag
+            && self.dependency_cache().contains_key(canonical_id)
             && self.scheduler.try_get_source(canonical_id).is_some()
             && self.scheduler.try_get_analysis(canonical_id).is_some()
         {

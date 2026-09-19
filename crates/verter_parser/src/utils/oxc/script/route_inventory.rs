@@ -109,6 +109,10 @@ pub struct ScriptRouteCounts {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ScriptRouteInventory {
+    /// Top-level module syntax, including empty exports with no route rows.
+    /// Computed from the retained AST, never from raw-source token guesses.
+    #[serde(default)]
+    pub has_module_syntax: bool,
     pub imports: Vec<ScriptImportRoute>,
     pub bindingless_imports: Vec<ScriptSideEffectImport>,
     pub reexports: Vec<ScriptReexportRoute>,
@@ -196,6 +200,16 @@ where
     inventory.counts.top_level_statement_count = program.body.len();
 
     for (statement, owner) in program.body.iter().zip(owners) {
+        inventory.has_module_syntax |= matches!(
+            statement,
+            Statement::ImportDeclaration(_)
+                | Statement::ExportNamedDeclaration(_)
+                | Statement::ExportDefaultDeclaration(_)
+                | Statement::ExportAllDeclaration(_)
+                | Statement::TSExportAssignment(_)
+        ) || matches!(statement, Statement::TSImportEqualsDeclaration(declaration)
+            if matches!(declaration.module_reference,
+                oxc_ast::ast::TSModuleReference::ExternalModuleReference(_)));
         match statement {
             Statement::ImportDeclaration(declaration) => {
                 let Some(specifiers) = &declaration.specifiers else {

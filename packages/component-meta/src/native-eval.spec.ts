@@ -1809,6 +1809,17 @@ const emit = defineEmits<{
     const toggle = events.find((event) => event.name === "toggle");
     expect(toggle?.payload).toBeDefined();
     expect(JSON.stringify(toggle!.payload)).toContain("boolean");
+    // The payload descriptor drops tuple-element optionality, so a required
+    // boolean would satisfy the check above; optionality is preserved on the
+    // public contract's call-signature parameters and is asserted there.
+    const contract = meta._verter!.componentPublicContract;
+    expect(contract.kind).toBe("supported");
+    if (contract.kind !== "supported") throw new Error("unreachable");
+    const toggleContract = contract.contract.events.find((event) => event.name === "toggle");
+    expect(toggleContract).toBeDefined();
+    expect(toggleContract!.overloads).toHaveLength(1);
+    expect(toggleContract!.overloads[0].parameters).toHaveLength(1);
+    expect(toggleContract!.overloads[0].parameters[0].optional).toBe(true);
     const click = events.find((event) => event.name === "item-click");
     expect(JSON.stringify(click?.payload)).toContain("shift");
   });

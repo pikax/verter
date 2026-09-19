@@ -45,11 +45,17 @@ fn mark_parent_dir_dirty(engine: &Engine, canonical_id: &str) {
 #[derive(Debug, Default)]
 pub struct MemorySnapshot {
     entries: FxHashMap<String, Arc<str>>,
+    revision: u64,
 }
 
 impl MemorySnapshot {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Monotonic revision of snapshot contents and membership.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Read file content from the snapshot.
@@ -63,6 +69,10 @@ impl MemorySnapshot {
             Some(existing) if Arc::ptr_eq(existing, &source) || **existing == *source => false,
             _ => {
                 self.entries.insert(canonical_id, source);
+                self.revision = self
+                    .revision
+                    .checked_add(1)
+                    .expect("snapshot revision exhausted");
                 true
             }
         }
@@ -70,7 +80,14 @@ impl MemorySnapshot {
 
     /// Remove a file from the snapshot. Returns `true` if the file existed.
     pub fn remove(&mut self, canonical_id: &str) -> bool {
-        self.entries.remove(canonical_id).is_some()
+        let removed = self.entries.remove(canonical_id).is_some();
+        if removed {
+            self.revision = self
+                .revision
+                .checked_add(1)
+                .expect("snapshot revision exhausted");
+        }
+        removed
     }
 
     /// Remove all snapshot entries under a directory prefix. Returns the removed IDs.
@@ -82,7 +99,7 @@ impl MemorySnapshot {
             .cloned()
             .collect();
         for canonical_id in &removed {
-            self.entries.remove(canonical_id);
+            self.remove(canonical_id);
         }
         removed
     }
@@ -613,6 +630,18 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
 
     fn known_canonicals(&self) -> Vec<String> {
         self.engine.known_canonicals()
+    }
+
+    fn snapshot_revision(&self) -> Option<u64> {
+        Some(self.engine.snapshot_revision())
+    }
+
+    fn snapshot_canonicals(&self) -> Vec<String> {
+        self.engine.snapshot_canonicals()
+    }
+
+    fn overlay_canonicals(&self) -> Vec<String> {
+        self.engine.overlay_canonicals()
     }
 
     fn dependency_snapshot(

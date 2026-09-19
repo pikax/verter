@@ -806,7 +806,9 @@ impl RetentionEpochs {
 ///
 /// **Lock rank: LEAF.** It is acquired with no `artifacts` /
 /// `canonical_keys` / `retired_*` shard guard held, and no shard guard is
-/// ever taken while it is held.
+/// ever taken while it is held. Contributor publication may take its
+/// grouped/snapshot locks under this lock; it never accesses artifact shards
+/// or re-enters the root registry.
 #[derive(Debug, Default)]
 struct LiveRootRegistry {
     state: parking_lot::Mutex<RootRegistryState>,
@@ -1204,6 +1206,10 @@ pub struct FileArtifactStore {
     /// inverse lookup for a target.
     /// See `/type-cache-architecture` skill for the populator semantics.
     augmentation_index: DashMap<AugmentationTargetKey, AugmenterVersion>,
+    /// Global contributor reverse index, published atomically at
+    /// artifact ingestion. Lookup of a global symbol reads the
+    /// snapshot rather than scanning program membership.
+    global_contributors: crate::global_contributors::GlobalContributorIndex,
     /// Test-only host-level audit hook.
     #[cfg(test)]
     test_audit_hook: parking_lot::Mutex<Option<Arc<crate::host_test_audit::HostTestAuditState>>>,
@@ -1214,6 +1220,7 @@ impl std::fmt::Debug for FileArtifactStore {
         f.debug_struct("FileArtifactStore")
             .field("artifacts_len", &self.artifacts.len())
             .field("augmentation_index_len", &self.augmentation_index.len())
+            .field("global_contributors", &self.global_contributors)
             .field("schema_version", &self.schema_version)
             .finish_non_exhaustive()
     }
@@ -1273,6 +1280,7 @@ impl FileArtifactStore {
             route_surface_generation: BracketedGeneration::default(),
             schema_version,
             augmentation_index: DashMap::new(),
+            global_contributors: crate::global_contributors::GlobalContributorIndex::new(),
             #[cfg(test)]
             test_audit_hook: parking_lot::Mutex::new(None),
         }
@@ -1313,6 +1321,20 @@ impl FileArtifactStore {
             registry: &self.live_roots,
             epoch,
         }
+    }
+
+    /// Publish only a fully applied membership state. The registry lock also
+    /// prevents a new epoch reservation until publication finishes. Every
+    /// membership mutation calls this after releasing its reservation, so the
+    /// last completing mutation flushes dirty contributors even when it only
+    /// changed the augmentation index. No retry or unvalidated fallback.
+    fn publish_global_contributors(&self) {
+        let state = self.live_roots.state.lock();
+        if !state.in_flight.is_empty() {
+            return;
+        }
+        self.global_contributors
+            .publish(self.membership_epoch(), || self.membership_epoch());
     }
 
     /// Capture an immutable, LEASED root of the store's current
@@ -1941,6 +1963,7 @@ impl FileArtifactStore {
                 version.span.retirement = Some(epoch);
             }
         }
+        self.global_contributors.note_live(key.clone(), &payload);
         self.artifacts
             .insert(key.clone(), StoredArtifact::new(payload, tick, epoch));
         slot.push(CanonicalKeyVersion {
@@ -1951,6 +1974,7 @@ impl FileArtifactStore {
         // The transition has landed: release the epoch so captures may
         // name it, BEFORE the (possibly reclaiming) retirement accounting.
         drop(reservation);
+        self.publish_global_contributors();
         if displaced_payload.is_some() {
             self.note_retirements(1);
         }
@@ -2088,6 +2112,7 @@ impl FileArtifactStore {
                     return;
                 };
                 self.artifacts.remove(key);
+                self.global_contributors.note_gone(key);
                 removed_augmentations.extend(payload.augmentations.iter().cloned());
                 removed.push((key.clone(), payload));
             };
@@ -2126,6 +2151,7 @@ impl FileArtifactStore {
         // transition, not two.
         self.invalidate_augmentation_index_at_epoch(&removed_augmentations, epoch);
         drop(reservation);
+        self.publish_global_contributors();
         self.note_retirements(removed.len());
         removed
     }
@@ -2609,6 +2635,12 @@ impl FileArtifactStore {
     // Later layers (upsert no-op, fact emission, multi-version
     // 6c augmentation stitching, etc.) write through these methods.
     // ──────────────────────────────────────────────────────────────────
+
+    /// The ingestion-time global contributor population.
+    #[must_use]
+    pub fn global_contributor_index(&self) -> &crate::global_contributors::GlobalContributorIndex {
+        &self.global_contributors
+    }
 
     /// Strict lookup by full content-addressed key.
     #[must_use]
@@ -3215,6 +3247,7 @@ impl FileArtifactStore {
             }
         };
         drop(reservation);
+        self.publish_global_contributors();
         if retired.is_some() {
             self.note_retirements(1);
         }
@@ -3552,6 +3585,7 @@ impl FileArtifactStore {
         let epoch = reservation.epoch();
         let retired = self.invalidate_augmentation_index_at_epoch(augmenter_facts, epoch);
         drop(reservation);
+        self.publish_global_contributors();
         retired
     }
 
@@ -3604,6 +3638,7 @@ impl FileArtifactStore {
             .collect();
         self.retire_augmenter_keys(&all_keys, reservation.epoch());
         drop(reservation);
+        self.publish_global_contributors();
         self.bump_artifact_generation();
     }
 
@@ -3693,6 +3728,7 @@ impl crate::cache_schema::CacheSchemaVersioned for FileArtifactStore {
         let count = all_keys.len();
         let _retired = self.retire_artifact_keys(&all_keys);
         self.clear_augmentation_index();
+        self.global_contributors.clear();
         if count > 0 {
             self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(count as u64, Ordering::Relaxed);
@@ -3726,7 +3762,7 @@ impl crate::invalidation_domain::InvalidationByCanonical for FileArtifactStore {
 /// Special marker the parse-domain emission uses for `declare global
 /// { ... }` blocks (see `fact_emission::GLOBAL_AUGMENTATION_TAG`).
 /// Duplicated here to keep the matcher free-standing of fact_emission.
-const GLOBAL_AUGMENTATION_TAG: &str = "$global";
+pub(crate) const GLOBAL_AUGMENTATION_TAG: &str = "$global";
 
 /// Does `fact` (emitted by `augmenter_canonical`) contribute to the
 /// queried `target_key`?

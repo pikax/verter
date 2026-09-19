@@ -139,6 +139,7 @@ type WasmHostObserveInputSnapshotFn = (
   basisId: string,
   canonical: string,
 ) => HostInputSnapshotObservation;
+type WasmHostReleaseInputSnapshotFn = (basisId: string) => boolean;
 interface WasmHostBinding {
   resolve: WasmHostResolveFn;
   upsert: WasmHostUpsertFn;
@@ -159,6 +160,7 @@ interface WasmHostBinding {
   resolveTypeWithAudit: WasmHostResolveTypeWithAuditFn;
   commitInputSnapshot: WasmHostCommitInputSnapshotFn;
   observeInputSnapshot: WasmHostObserveInputSnapshotFn;
+  releaseInputSnapshot: WasmHostReleaseInputSnapshotFn;
 }
 type WasmHostCtor = new (config?: HostConfig) => WasmHostBinding;
 
@@ -422,6 +424,16 @@ export class Host {
    */
   observeInputSnapshot(basisId: string, canonical: string): HostInputSnapshotObservation {
     return this.inner.observeInputSnapshot(basisId, canonical);
+  }
+
+  /**
+   * Release one committed input snapshot, dropping the file contents it
+   * owns. Every basis stays addressable until released, so callers that
+   * commit repeated acquisition waves release the bases they no longer
+   * observe. Returns whether a snapshot was stored under `basisId`.
+   */
+  releaseInputSnapshot(basisId: string): boolean {
+    return this.inner.releaseInputSnapshot(basisId);
   }
 }
 
