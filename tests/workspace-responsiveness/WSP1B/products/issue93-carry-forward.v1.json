@@ -20,6 +20,10 @@
     "navigate",
     "type",
     "complete",
+    "type",
+    "complete",
+    "type",
+    "complete",
     "close",
     "open"
   ],
@@ -28,20 +32,24 @@
     { "kind": "open", "requestEpoch": 1, "role": "helper" },
     { "kind": "open", "requestEpoch": 2, "role": "fixture", "line": 4, "column": 20 },
     { "kind": "navigate", "requestEpoch": 3, "role": "definition" },
-    { "kind": "type", "requestEpoch": 4, "text": " " },
-    { "kind": "complete", "requestEpoch": 5 },
-    { "kind": "close", "requestEpoch": 6 },
-    { "kind": "open", "requestEpoch": 7, "role": "reopen-corpus-sfc", "line": 1, "column": 1 }
+    { "kind": "type", "requestEpoch": 4, "role": "churn-1", "text": " " },
+    { "kind": "complete", "requestEpoch": 5, "role": "churn-1" },
+    { "kind": "type", "requestEpoch": 6, "role": "churn-2", "text": " " },
+    { "kind": "complete", "requestEpoch": 7, "role": "churn-2" },
+    { "kind": "type", "requestEpoch": 8, "role": "churn-3", "text": " " },
+    { "kind": "complete", "requestEpoch": 9, "role": "churn-3" },
+    { "kind": "close", "requestEpoch": 10, "role": "fixture" },
+    { "kind": "open", "requestEpoch": 11, "role": "reopen-fixture", "line": 4, "column": 20 }
   ],
-  "diagnostics": "observed via textDocument/publishDiagnostics on the capture; not a separate drive kind",
+  "diagnostics": "final textDocument/publishDiagnostics per opened URI against ISSUE93_ORACLE_EXPECTATION",
   "teardown": "driveLapceSession kills the client tree after the last ack",
-  "reopenNote": "a second open of Fixture.vue after close does not emit a paint ack on Lapce 0.4.6+WSP1L; reopen drives a not-yet-opened corpus SFC instead",
+  "reopenNote": "same-document close/reopen of Fixture.vue is required; Lapce 0.4.6+WSP1L does not emit a paint ack for a second open of the same path, so missing paint leaves qualification unverified (WSP1B.3)",
   "historicalIssue93": {
     "id": 93,
     "state": "unreproduced",
     "notAFix": true,
     "retirement": "operator-approved unreproduced / not planned (WSP1A cancelled ledger); this node never claims the historical hang was repaired"
   },
-  "qualificationStatus": "qualified",
+  "qualificationStatus": "unverified",
   "invalidation": "source/project/configuration/engine/host identity change"
 }

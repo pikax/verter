@@ -9,6 +9,7 @@
 // plus Issue93EarlyVerification / Issue93CarryForwardCase products.
 // Reference-machine tooling only — never part of hermetic CI.
 
+import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,21 +18,26 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 import {
+  ISSUE93_ORACLE_EXPECTATION,
   ISSUE93_RETIREMENT,
   PRIMEVUE_EQUIVALENT_VUE_FILES,
   REAL_LAPCE_AUTOMATION_PATH,
   RealLapceHost,
   LapceInteractionDriver,
   buildDrivenCaptureArtifact,
+  carriesRealClientEvidence,
   correlateServerTraces,
   driveLapceSession,
   extractCapturedSemanticOracle,
+  isProviderEnginePin,
+  isSha256BuildPin,
   issue93CarryForwardCase,
   issue93EarlyVerification,
   loadRecordedLapceCapture,
   paintMetricFromRun,
   stallOnImmediateServer,
   typedAnswersFromOracle,
+  versionsMatchPinnedManifest,
   writeDrivenCaptureArtifact,
   measuredMetric,
   unknownMetric,
@@ -109,10 +115,10 @@ try {
 
   const fixture = path.join(workspaceDir, "Fixture.vue");
   const helper = path.join(workspaceDir, "Helper.vue");
-  // Reopen after close must be a not-yet-opened corpus file: a second open of
-  // Fixture.vue after close does not emit a paint ack on this client (180s
-  // timeout observed). Opening a fresh large-project SFC still exercises
-  // close/reopen on the real UI event loop.
+  // Same-URI reopen of Fixture.vue after close does not emit a paint ack on
+  // this client (180s timeout). The live drive therefore reopens a not-yet-
+  // opened corpus SFC so recapture can finish; sameDocumentReopen stays false
+  // and qualification stays unverified until that paint exists (WSP1B.3).
   const reopen = path.join(workspaceDir, "corpus", "kernel", "k0000", "Comp0000_000.vue");
   const script = [
     { kind: "open", requestEpoch: 1, sourceEpoch: null, uri: helper },
@@ -120,9 +126,14 @@ try {
     { kind: "navigate", requestEpoch: 3, sourceEpoch: null },
     { kind: "type", requestEpoch: 4, sourceEpoch: null, text: " " },
     { kind: "complete", requestEpoch: 5, sourceEpoch: null },
-    { kind: "close", requestEpoch: 6, sourceEpoch: null },
-    { kind: "open", requestEpoch: 7, sourceEpoch: null, uri: reopen, line: 1, column: 1 },
+    { kind: "type", requestEpoch: 6, sourceEpoch: null, text: " " },
+    { kind: "complete", requestEpoch: 7, sourceEpoch: null },
+    { kind: "type", requestEpoch: 8, sourceEpoch: null, text: " " },
+    { kind: "complete", requestEpoch: 9, sourceEpoch: null },
+    { kind: "close", requestEpoch: 10, sourceEpoch: null },
+    { kind: "open", requestEpoch: 11, sourceEpoch: null, uri: reopen, line: 1, column: 1 },
   ];
+  const sameDocumentReopen = path.resolve(reopen) === path.resolve(fixture);
 
   const session = await driveLapceSession({
     lapceBin,
@@ -167,12 +178,17 @@ try {
   driver.teardown();
   const stall = stallOnImmediateServer(run);
   const capturedOracle = extractCapturedSemanticOracle(session.capturedLines);
-  const typedAnswers = typedAnswersFromOracle(capturedOracle, {
-    completionLabels: ["greeting", "user", "message"],
-    definitionNeedle: "Fixture.vue",
-  });
+  const typedAnswers = typedAnswersFromOracle(capturedOracle, ISSUE93_ORACLE_EXPECTATION);
   const lastStamp = Math.max(...recorded.session.uiStamps.map((stamp) => stamp.atUnixMs));
   const durationMs = lastStamp - session.startedUnixMs;
+  const serverBuildPin = `sha256:${createHash("sha256").update(readFileSync(serverBin)).digest("hex")}`;
+  const providerEnginePin = capturedOracle.providerVersion ?? "";
+  const versionsPinned =
+    versionsMatchPinnedManifest(recorded.versions).ok &&
+    isSha256BuildPin(serverBuildPin) &&
+    isProviderEnginePin(providerEnginePin);
+  const realClientEvidence = carriesRealClientEvidence(run);
+  const completenessState = "partial";
 
   const verification = issue93EarlyVerification({
     smallSmoke: {
@@ -185,13 +201,16 @@ try {
       protocolSmokeOnly: false,
       uiStallDetected: stall.uiStallDetected,
       serverImmediate: stall.serverImmediate,
-      realClientEvidence: true,
-      completenessState: "partial",
+      realClientEvidence,
+      completenessState,
       usedSleepForReadiness: false,
-      versionsPinned: true,
+      versionsPinned,
+      serverBuildPin,
+      providerEnginePin,
       interactionKinds: recorded.steps.map((step) => step.kind),
       reopenAfterClose: true,
-      diagnosticsObserved: capturedOracle.diagnosticUris.length > 0,
+      sameDocumentReopen,
+      diagnosticsObserved: capturedOracle.diagnosticsByUri.some((set) => set.count > 0),
       duration: measuredMetric(durationMs, "ms"),
       workload: {
         id: "wsp-equal-work-synthetic-sfc-slice",
@@ -221,13 +240,15 @@ try {
       claimsIssue93Fixed: false,
       finalOwner: "expansion.workspace-responsiveness",
       duplicatedAuthority: false,
+      captureProvenance: recorded.provenance,
+      observedUiStamps: recorded.session.uiStamps,
     },
     receiptBasis: {
       sourceRevisions: `recorded-capture:${recorded.provenance.sessionId}`,
       projectConfiguration: "wsp-equal-work-synthetic-sfc-slice count=2615",
-      engineIdentity: "verter-lsp 0.0.1-beta.5 / tsgo",
+      engineIdentity: `verter-lsp ${serverBuildPin} / ${providerEnginePin || "provider-unpinned"}`,
       hostIdentity: `real-lapce:${recorded.provenance.lapceClientVersion}`,
-      completenessState: "partial",
+      completenessState,
     },
   });
   const carry = issue93CarryForwardCase(verification);

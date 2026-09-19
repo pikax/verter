@@ -95,10 +95,14 @@ test("WSP1B large-project capture is a real driven Lapce session, not a protocol
   }
   assert.equal(capture.correlated.steps.length, capture.correlated.serverTraces.length);
   const rec = load("issue93-early-verification.v1.json");
-  assert.equal(rec.status, "qualified");
+  assert.notEqual(rec.status, "qualified");
+  assert.equal(rec.status, "unverified");
   assert.equal(rec.largeRun.realClientEvidence, true);
   assert.equal(rec.largeRun.hostKind, "real-lapce");
   assert.equal(rec.historicalIssue93.notAFix, true);
+  assert.equal(rec.largeRun.sameDocumentReopen, false);
+  assert.equal(rec.operatorManualProbe.lapce, "0.4.6");
+  assert.equal(rec.smallSmoke.surface.includes("WSP1L"), true);
 });
 
 test("WSP1B carry-forward case is the retained scenario for WSP8", () => {
@@ -106,9 +110,13 @@ test("WSP1B carry-forward case is the retained scenario for WSP8", () => {
   assert.equal(carry.id, "Issue93CarryForwardCase");
   assert.deepEqual(carry.reusedAfter, ["WSP8", "ED1"]);
   assert.equal(carry.reopenAfterClose, true);
+  assert.notEqual(carry.qualificationStatus, "qualified");
   const kinds = carry.script.map((step) => step.kind);
   for (const kind of ["open", "type", "complete", "navigate", "close"]) {
     assert.ok(kinds.includes(kind), `script drives '${kind}'`);
   }
+  assert.ok(carry.script.filter((step) => step.kind === "type").length >= 3);
   assert.ok(carry.script.some((step) => String(step.role).startsWith("reopen-")));
+  assert.ok(typeof carry.diagnostics === "string" && carry.diagnostics.length > 0);
+  assert.ok(typeof carry.teardown === "string" && carry.teardown.length > 0);
 });

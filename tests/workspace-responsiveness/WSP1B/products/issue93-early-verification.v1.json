@@ -1,9 +1,9 @@
 {
   "schema": "issue93-early-verification.v1",
   "node": "WSP1B",
-  "status": "qualified",
-  "rule": "qualified",
-  "reason": "current large-workspace Lapce behavior is independently measured; historical issue 93 stays unreproduced and is not claimed fixed",
+  "status": "unverified",
+  "rule": "WSP1B-AC-BASIS",
+  "reason": "largeRun completeness is partial; only a complete current basis can qualify",
   "historicalIssue93": {
     "id": 93,
     "state": "unreproduced",
@@ -37,7 +37,9 @@
     "realClientEvidence": true,
     "completenessState": "partial",
     "usedSleepForReadiness": false,
-    "versionsPinned": true,
+    "versionsPinned": false,
+    "serverBuildPin": "",
+    "providerEnginePin": "",
     "interactionKinds": [
       "open",
       "open",
@@ -48,6 +50,7 @@
       "open"
     ],
     "reopenAfterClose": true,
+    "sameDocumentReopen": false,
     "diagnosticsObserved": true,
     "duration": {
       "status": "measured",

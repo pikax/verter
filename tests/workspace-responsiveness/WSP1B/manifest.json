@@ -39,7 +39,7 @@
     {
       "id": "WSP1B-AC-RESOURCE",
       "disposition": "accept",
-      "binding": "unavailable provider CPU and retained-memory stay { status: unknown } with reasons; client paint is required for a real-client claim; no guessed zeros"
+      "binding": "unavailable provider CPU and retained-memory stay { status: unknown } with reasons and leave qualification unverified (WSP1B.3); client paint is required on every interaction for a qualified claim; no guessed zeros"
     },
     {
       "id": "WSP1B-AC-EXPOSURE",
