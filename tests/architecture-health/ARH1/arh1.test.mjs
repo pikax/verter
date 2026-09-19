@@ -9,6 +9,7 @@ import {
   loadProducts,
   mandatoryCases,
   measureImports,
+  measureProductionImports,
   selectedCaseIds,
   validate,
 } from "./verify.mjs";
@@ -543,6 +544,251 @@ test("ARH1-ratification dirty twin: a producer obligation with a malformed owner
     result.errors.some(
       (e) => e.caseId === "ARH1-ratification" && e.code === "obligation-producer-malformed",
     ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-state-lifetimes dirty twin: an unrelated existing file as sole owner is rejected (AC1)", () => {
+  const dirty = cloneProducts();
+  const row = hotspot(dirty, SCHEDULER).stateLifetimes.find((s) => s.state === "Scheduler.nodes");
+  // Exists on disk, declares nothing of the scheduler state: existence is
+  // not ownership.
+  row.soleOwner = "crates/verter_span/src/lib.rs";
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH1-state-lifetimes" && e.code === "state-owner-without-declaration",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-import-direction: test configuration is stripped before measuring, so crateInternal equality is two-way", () => {
+  const synth = [
+    "use crate::dag::Thing;",
+    "#[cfg(test)]",
+    "mod t1 { use crate::VerterHost; fn f() -> VerterHost { todo!() } }",
+    '#[cfg(all(test, not(target_arch = "wasm32")))]',
+    "mod t2 { use crate::pool::Pool; }",
+    '#[cfg(any(test, feature = "test-support"))]',
+    "mod t3 { use crate::stage::S; }",
+  ].join("\n");
+  const prod = measureProductionImports(synth);
+  assert.deepEqual([...prod.internal].sort(), ["dag", "stage"]);
+  const full = measureImports(synth);
+  assert.ok(full.internal.has("VerterHost"), "full measurement still sees the test-only root");
+  assert.ok(full.internal.has("pool"));
+});
+
+test("ARH1-import-direction dirty twin: an undeclared live crate-internal root is rejected both ways", () => {
+  const undeclared = cloneProducts();
+  const aid = hotspot(undeclared, SCHEDULER).allowedImportDirection;
+  aid.crateInternal = aid.crateInternal.filter((v) => v !== "dag");
+  let result = validate(undeclared, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-import-direction" &&
+        e.code === "import-drift" &&
+        e.detail.includes("crate-internal import dag is not declared"),
+    ),
+    JSON.stringify(result.errors),
+  );
+
+  const declaredOnlyInTests = cloneProducts();
+  const aid2 = hotspot(declaredOnlyInTests, SCHEDULER).allowedImportDirection;
+  aid2.crateInternal.push("cache_id"); // imported only by scheduler.rs cfg(test) code
+  result = validate(declaredOnlyInTests, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-import-direction" &&
+        e.code === "import-drift" &&
+        e.detail.includes("crate-internal import cache_id is not measured"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-surface dirty twin: a hook consumer that references nothing and an omitted live consumer are both rejected", () => {
+  const stale = cloneProducts();
+  const row = hotspot(stale, SCHEDULER).minimalPublicSurface.narrow.find(
+    (n) => n.item === "test_new",
+  );
+  // Exists and is a real hook consumer file — of a different hook.
+  row.consumersAffected.push("crates/verter_session/src/host_construction.rs");
+  let result = validate(stale, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH1-surface" && e.code === "narrow-consumer-without-reference",
+    ),
+    JSON.stringify(result.errors),
+  );
+
+  const omitted = cloneProducts();
+  const row2 = hotspot(omitted, SCHEDULER).minimalPublicSurface.narrow.find(
+    (n) => n.item === "test_new",
+  );
+  row2.consumersAffected = row2.consumersAffected.filter(
+    (c) => !c.endsWith("host_batch_coordinator.rs"),
+  );
+  result = validate(omitted, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-surface" &&
+        e.code === "narrow-consumer-omitted" &&
+        e.detail.includes("host_batch_coordinator.rs"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-surface dirty twin: importer population drift in both directions is rejected (comments are not consumers)", () => {
+  const missing = cloneProducts();
+  const aid = hotspot(missing, SEMANTIC_QUERY).allowedImportDirection;
+  aid.importers = aid.importers.filter((i) => i !== "crates/verter_ffi/src/convert/typeinfo.rs");
+  let result = validate(missing, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-surface" &&
+        e.code === "importer-population-drift" &&
+        e.detail.includes("typeinfo.rs references"),
+    ),
+    JSON.stringify(result.errors),
+  );
+
+  const mirror = cloneProducts();
+  // Only mentions semantic_query in mirror documentation; imports nothing.
+  hotspot(mirror, SEMANTIC_QUERY).allowedImportDirection.importers.push(
+    "crates/verter_audit/src/payloads/tags.rs",
+  );
+  result = validate(mirror, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-surface" &&
+        e.code === "importer-population-drift" &&
+        e.detail.includes("tags.rs is declared an importer but references no"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-surface dirty twin: a used assoc item or a narrowed-name consumer missing from the contract is rejected", () => {
+  const unretainedOp = cloneProducts();
+  const surface = hotspot(unretainedOp, SEMANTIC_QUERY).minimalPublicSurface;
+  surface.retainedAssocItems = surface.retainedAssocItems.filter(
+    (i) => i !== "PartialReasonSet::PROPAGATED",
+  );
+  let result = validate(unretainedOp, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-surface" &&
+        e.code === "assoc-item-unretained" &&
+        e.detail.includes("PartialReasonSet::PROPAGATED"),
+    ),
+    JSON.stringify(result.errors),
+  );
+
+  const unrecorded = cloneProducts();
+  const bulk = hotspot(unrecorded, SEMANTIC_QUERY).minimalPublicSurface.narrow.find(
+    (n) => n.kind === "bulk",
+  );
+  bulk.consumersAffected = bulk.consumersAffected.filter(
+    (c) => !c.endsWith("flow_literal_provenance.rs"),
+  );
+  result = validate(unrecorded, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-surface" &&
+        e.code === "narrowed-item-consumer-unrecorded" &&
+        e.detail.includes("flow_literal_provenance.rs"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-ratification dirty twin: obligations and rationale naming no AC4 surface are rejected (AC4)", () => {
+  const dirty = cloneProducts();
+  const c = dirty["dependency-contracts"];
+  for (const obligation of c.ac4Obligations) obligation.obligation = "dirty twin";
+  c.ac4Rationale = "dirty twin";
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-ratification" &&
+        e.code === "ac4-surface-uncovered" &&
+        e.detail.includes("VIM/DX"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-cutover dirty twin: a duplicate disposition for one route is rejected", () => {
+  const dirty = cloneProducts();
+  const rows = dirty["cutover-register"].rows;
+  const cut4 = rows.find((r) => r.id === "ARH1-CUT-4");
+  rows.push({
+    ...cut4,
+    id: "ARH1-CUT-5",
+    disposition: "competing disposition",
+    satisfies: undefined,
+  });
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.caseId === "ARH1-cutover" && e.code === "duplicate-cutover-route"),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-cutover dirty twin: one scheduler route vanishing while its sibling stays is rejected", () => {
+  const dirty = cloneProducts();
+  const rows = dirty["cutover-register"].rows;
+  const idx = rows.findIndex((r) => r.id === "ARH1-CUT-2");
+  rows.splice(idx, 1); // CUT-3 (fn route) remains on the same file
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-cutover" &&
+        e.code === "cutover-route-missing" &&
+        e.detail.includes("#field"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-cutover dirty twin: a competing owner deciding the same ARH0 debt twice is rejected", () => {
+  const dirty = cloneProducts();
+  const rows = dirty["cutover-register"].rows;
+  const cut1 = rows.find((r) => r.id === "ARH1-CUT-1");
+  rows.push({
+    ...cut1,
+    id: "ARH1-CUT-6",
+    decision: "retain the placeholder",
+    owner: { id: "ARH11", kind: "node" },
+  });
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.caseId === "ARH1-cutover" && e.code === "duplicate-satisfies"),
     JSON.stringify(result.errors),
   );
 });

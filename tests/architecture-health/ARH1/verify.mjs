@@ -7,20 +7,28 @@
  * and the working tree: every ARH0 god-module candidate carries exactly one
  * hotspot contract (and vice versa) with no dropped or invented
  * responsibility, each surviving authority/cohesive module exists, the
- * declared import direction equals the import tree actually measured in the
- * live source (and the forbidden directions are absent from the source and
- * the owning crate's Cargo.toml), layer rules match the live crate
- * dependency manifests, constructors and their capability anchors are real
- * declarations, state-lifetime rows name live identifiers and one sole
- * owner, surface declarations and retained/narrowed items bind the live
- * source, no cohesive split retains shared unrestricted state (ARH1-AC2),
- * and every route ARH0 assigned to this node (plus every narrowing route
- * declared here) has exactly one cutover disposition. The program DAG is
- * database-owned by the TAMA controller, so owner/heir ids are checked
- * structurally only and no DAG file is read; the ARH0 products are joined as
- * shipped predecessor evidence, never re-derived here. ARH1-ratification
- * fails when the manifest and the verifier disagree about the case contract,
- * so the manifest cannot claim checks that do not run.
+ * declared import direction equals the production import tree actually
+ * measured in the live source (cfg(test)/cfg(all(test, ..)) items are
+ * stripped before measuring, so the equality claim covers every direction
+ * and never counts test configuration as production direction; the
+ * forbidden directions are absent from the full source — including its test
+ * configuration — and the owning crate's Cargo.toml), layer rules match the
+ * live crate dependency manifests, constructors and their capability
+ * anchors are real declarations, state-lifetime rows name live identifiers
+ * and one sole owner whose declaration actually lives in the named owner,
+ * surface declarations and retained/narrowed items bind the live source,
+ * every narrowing consumer is a live referencing file and every live
+ * referencing file is a recorded consumer (exact populations, comment
+ * mentions never count), no cohesive split retains shared unrestricted
+ * state (ARH1-AC2), every route ARH0 assigned to this node (plus every
+ * narrowing route declared here, keyed per narrow kind so two routes on one
+ * file cannot merge or vanish) has exactly one cutover disposition, and the
+ * AC4 surface obligations name every charter-mandated surface. The program
+ * DAG is database-owned by the TAMA controller, so owner/heir ids are
+ * checked structurally only and no DAG file is read; the ARH0 products are
+ * joined as shipped predecessor evidence, never re-derived here.
+ * ARH1-ratification fails when the manifest and the verifier disagree about
+ * the case contract, so the manifest cannot claim checks that do not run.
  */
 
 import fs from "node:fs";
@@ -45,6 +53,15 @@ const LIFETIMES = new Set([
 ]);
 const NARROW_TARGETS = new Set(["pub(crate)", "test-configuration", "feature-gated"]);
 const OWNERSHIP_MODES = new Set(["sole", "readonly", "none"]);
+// Charter ARH1-AC4 surfaces a contract-only node must specify for its
+// producers (obligation or explicit N/A rationale naming the surface).
+const AC4_SURFACES = Object.freeze([
+  "VIM/DX",
+  "host/profile",
+  "permissions",
+  "uncertainty",
+  "migration",
+]);
 // State-name tokens that name the concept, never a live identifier.
 const STATE_TOKEN_STOPWORDS = new Set([
   "state",
@@ -96,8 +113,78 @@ function existsRel(rel) {
   return fs.existsSync(resolved);
 }
 
+const readTextCache = new Map();
+
 function readRel(rel) {
-  return fs.readFileSync(path.join(REPO_ROOT, rel), "utf8");
+  let t = readTextCache.get(rel);
+  if (t === undefined) {
+    t = fs.readFileSync(path.join(REPO_ROOT, rel), "utf8");
+    readTextCache.set(rel, t);
+  }
+  return t;
+}
+
+// ---------------------------------------------------------------------------
+// Live-tree scanning substrate (shared, cached for the process lifetime —
+// the tree does not change under one validate() run or one test process).
+// ---------------------------------------------------------------------------
+
+/** Every .rs file under crates/ (repo-relative, forward slashes). */
+let _rustFiles;
+function rustFilesUnderCrates() {
+  if (_rustFiles) return _rustFiles;
+  const out = [];
+  const rec = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) rec(p);
+      else if (e.name.endsWith(".rs"))
+        out.push(path.relative(REPO_ROOT, p).split(path.sep).join("/"));
+    }
+  };
+  rec(path.join(REPO_ROOT, "crates"));
+  _rustFiles = out;
+  return out;
+}
+
+const strippedTextCache = new Map();
+/** File text with line and block comments stripped (doc mentions never
+ * count as references). */
+function strippedFileText(rel) {
+  let t = strippedTextCache.get(rel);
+  if (t === undefined) {
+    t = stripComments(readRel(rel));
+    strippedTextCache.set(rel, t);
+  }
+  return t;
+}
+
+const ownerTextCache = new Map();
+/** Text of a sole-owner target: the file itself, or every .rs under a
+ * module directory (recursive). */
+function soleOwnerText(rel) {
+  let t = ownerTextCache.get(rel);
+  if (t !== undefined) return t;
+  const abs = path.resolve(REPO_ROOT, rel);
+  let out = null;
+  if (fs.existsSync(abs)) {
+    const stat = fs.statSync(abs);
+    if (stat.isFile()) {
+      out = readRel(rel);
+    } else if (stat.isDirectory()) {
+      out = "";
+      const rec = (dir) => {
+        for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+          const p = path.join(dir, e.name);
+          if (e.isDirectory()) rec(p);
+          else if (e.name.endsWith(".rs")) out += fs.readFileSync(p, "utf8");
+        }
+      };
+      rec(abs);
+    }
+  }
+  ownerTextCache.set(rel, out);
+  return out;
 }
 
 function resolveOwner(owner, errors, caseId, code = "malformed-owner") {
@@ -239,16 +326,6 @@ function owningCrateDir(hotspotPath) {
 }
 
 /**
- * Measures the import tree of one source file the way the contract declares
- * it: `use`/`pub use` statements (statement text from the keyword to the
- * terminating semicolon, brace groups split into path fragments), first path
- * segment per fragment. Fragments without `::` are brace-list items (they
- * inherit their prefix), not import roots, so they are never classified;
- * `crate::` roots become the crate-internal set; module names declared
- * inside the file (its inline `mod` items) are internal re-exports, not
- * external crates; `super::`/`self::` stay internal without naming a root.
- */
-/**
  * Splits a `use` statement body into full import paths: comma-separated at
  * brace depth zero, with each nested group inheriting the path prefix in
  * front of its brace (`a::{b::c, d}` -> `a::b::c`, `a::d`). Renames
@@ -283,16 +360,20 @@ export function expandUsePaths(text) {
         const next = segment ? (prefix ? `${prefix}::${segment}` : segment) : prefix;
         out.push(...walk(m[2], next));
       } else {
-        const path = part
+        const p = part
           .trim()
           .replace(/\s+as\s+\w+$/, "")
           .replace(/::$/, "");
-        if (path) out.push(prefix ? `${prefix}::${path}` : path);
+        if (p) out.push(prefix ? `${prefix}::${p}` : p);
       }
     }
     return out;
   };
   return walk(text, "");
+}
+
+function stripComments(text) {
+  return text.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
 }
 
 /**
@@ -301,14 +382,16 @@ export function expandUsePaths(text) {
  * inherit their prefix), classified by first path segment. `crate::` roots
  * become the crate-internal set; module names declared inside the file (its
  * inline `mod` items) are internal re-exports, not external crates;
- * `super::`/`self::` stay internal without naming a root.
+ * `super::`/`self::` stay internal without naming a root. This is the FULL
+ * measurement (test configuration included); the import-direction equality
+ * runs on measureProductionImports below.
  */
 export function measureImports(text) {
-  // Doc and line comments regularly contain the word "use" followed by a
-  // semicolon later in the paragraph ("...use a cache id whose value type
-  // is stable..."); they are prose, not import statements, so they are
-  // stripped before measuring. Block comments are stripped non-nested.
-  const source = text.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  const source = stripComments(text);
+  return measureStrippedImports(source);
+}
+
+function measureStrippedImports(source) {
   const fileMods = new Set();
   for (const m of source.matchAll(/\b(?:pub(?:\(crate\))? )?mod\s+([a-z_0-9]+)\s*;/g)) {
     fileMods.add(m[1]);
@@ -339,18 +422,153 @@ export function measureImports(text) {
 }
 
 /**
- * ARH1-AC1: the declared import direction is the measured one — drift in
- * either direction fails, the forbidden directions are absent from the live
- * source and the owning crate's manifest, and the layer rules equal the live
- * crate dependency manifests. A compile-time boundary is the preferred
- * enforcement (ARH12's obligation); this verifier is the contract's
- * owning interface until then.
+ * True when the cfg predicate makes an item test-only: exactly `test`, or
+ * `all(test, ..)` — `any(test, feature = "test-support")` also compiles in
+ * production test-support builds and stays measured.
+ */
+function isTestOnlyCfgPredicate(pred) {
+  const p = pred.trim();
+  if (p === "test") return true;
+  if (!p.startsWith("all(")) return false;
+  // First top-level comma of the all(..) argument list.
+  let depth = 0;
+  for (let i = 4; i < p.length; i++) {
+    const ch = p[i];
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      if (depth === 0) return false;
+      depth--;
+    } else if (ch === "," && depth === 0) {
+      return p.slice(4, i).trim() === "test";
+    }
+  }
+  return false;
+}
+
+function matchBracket(s, openIdx, open, close) {
+  let depth = 0;
+  for (let i = openIdx; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '"') {
+      // Escape-aware string skip so braces inside literals never unbalance
+      // the item span.
+      i++;
+      while (i < s.length && s[i] !== '"') {
+        if (s[i] === "\\") i++;
+        i++;
+      }
+      continue;
+    }
+    if (ch === "'") {
+      // A char literal is `'x'` / `'\n'` / `'\u{7}'`; a bare `'a` that does
+      // not close within a few chars is a lifetime, not a literal.
+      const n = s.indexOf("'", i + 1);
+      const span = n === -1 ? Infinity : n - i;
+      const isEscapedLiteral = s[i + 1] === "\\" && span <= 4;
+      const isPlainLiteral = span <= 2;
+      if (n !== -1 && (isEscapedLiteral || isPlainLiteral)) {
+        i = n;
+        continue;
+      }
+      continue; // lifetime tick: an ordinary character
+    }
+    if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Removes every item attributed with a test-only cfg predicate (comment
+ * text is stripped first, so prose attributes never match). The item span
+ * runs from the attribute to its terminating `;` (statement item) or to
+ * the balanced `{...}` block (mod/impl/fn item); removed spans keep their
+ * line count so diagnostics stay addressable.
+ */
+export function stripCfgTestItems(text) {
+  const src = stripComments(text);
+  let out = "";
+  let i = 0;
+  for (;;) {
+    const at = src.indexOf("#[", i);
+    if (at === -1) {
+      out += src.slice(i);
+      break;
+    }
+    const close = matchBracket(src, at + 1, "[", "]");
+    if (close === -1) {
+      out += src.slice(i);
+      break;
+    }
+    const attr = src.slice(at, close + 1);
+    const cfg = attr.match(/^#\[cfg\(([\s\S]*)\)\]$/);
+    if (!cfg || !isTestOnlyCfgPredicate(cfg[1])) {
+      out += src.slice(i, close + 1);
+      i = close + 1;
+      continue;
+    }
+    out += src.slice(i, at);
+    // Skip whitespace and any further attributes stacked on the same item.
+    let p = close + 1;
+    for (;;) {
+      while (p < src.length && /\s/.test(src[p])) p++;
+      if (src.startsWith("#[", p)) {
+        const c2 = matchBracket(src, p + 1, "[", "]");
+        if (c2 === -1) break;
+        p = c2 + 1;
+        continue;
+      }
+      break;
+    }
+    let end = -1;
+    for (let j = p; j < src.length; j++) {
+      const ch = src[j];
+      if (ch === ";") {
+        end = j + 1;
+        break;
+      }
+      if (ch === "{") {
+        const c3 = matchBracket(src, j, "{", "}");
+        end = c3 === -1 ? src.length : c3 + 1;
+        break;
+      }
+    }
+    if (end === -1) end = src.length;
+    out += "\n".repeat((src.slice(at, end).match(/\n/g) || []).length);
+    i = end;
+  }
+  return out;
+}
+
+/**
+ * Measures the PRODUCTION import tree: the full measurement minus cfg(test)
+ * and cfg(all(test, ..)) items. The declared import direction equals this
+ * tree, in every direction, so a live undeclared crate-internal root (test
+ * configuration or not) is drift, and a declared root that only test
+ * configuration imports is drift too.
+ */
+export function measureProductionImports(text) {
+  return measureStrippedImports(stripCfgTestItems(text));
+}
+
+/**
+ * ARH1-AC1: the declared import direction is the measured production one —
+ * drift in either direction fails for verter, external and crate-internal
+ * roots alike, the forbidden directions are absent from the live source and
+ * the owning crate's manifest, and the layer rules equal the live crate
+ * dependency manifests. A compile-time boundary is the preferred
+ * enforcement (ARH12's obligation); this verifier is the contract's owning
+ * interface until then.
  */
 function validateImportDirection(contracts, errors) {
   const caseId = "ARH1-import-direction";
   for (const hotspot of contracts.hotspots) {
     const declared = hotspot.allowedImportDirection;
-    const measured = measureImports(readRel(hotspot.path));
+    const measured = measureProductionImports(readRel(hotspot.path));
+    const full = measureImports(readRel(hotspot.path));
     const cmp = (label, declaredArr, measuredSet) => {
       for (const v of declaredArr) {
         if (!measuredSet.has(v)) {
@@ -373,17 +591,9 @@ function validateImportDirection(contracts, errors) {
     };
     cmp("verter", declared.verter, measured.verter);
     cmp("external", declared.external, measured.external);
-    for (const root of declared.crateInternal) {
-      if (!measured.internal.has(root)) {
-        errors.push({
-          caseId,
-          code: "import-drift",
-          detail: `${hotspot.path}: declared crate-internal import ${root} is not measured in the source`,
-        });
-      }
-    }
+    cmp("crate-internal", declared.crateInternal, measured.internal);
     for (const forbidden of declared.mustNotImport) {
-      if (measured.verter.has(forbidden) || measured.external.has(forbidden)) {
+      if (full.verter.has(forbidden) || full.external.has(forbidden)) {
         errors.push({
           caseId,
           code: "forbidden-import",
@@ -393,7 +603,7 @@ function validateImportDirection(contracts, errors) {
     }
     const crateDir = owningCrateDir(hotspot.path);
     const crateDeps = crateVerterDeps(crateDir);
-    for (const v of measured.verter) {
+    for (const v of full.verter) {
       // A verter root imported by the file must be reachable through the
       // owning crate's manifest: an undeclared dependency would not compile,
       // so this catches a stale contract rather than a broken build.
@@ -528,7 +738,9 @@ function validateConstructors(contracts, errors) {
 /**
  * ARH1-AC1/AC3: every state-lifetime row names an identifier that exists in
  * the live source, a lifetime inside the contract vocabulary and one sole
- * owner, so the heirs inherit a state map, not poetry.
+ * owner — and the owner target actually carries the state's declaration (a
+ * file that merely exists is not ownership), so the heirs inherit a state
+ * map, not poetry.
  */
 function validateStateLifetimes(contracts, errors) {
   const caseId = "ARH1-state-lifetimes";
@@ -542,19 +754,6 @@ function validateStateLifetimes(contracts, errors) {
           detail: `${hotspot.path}: ${row.state} lifetime ${row.lifetime}`,
         });
       }
-      if (typeof row.soleOwner !== "string" || row.soleOwner.length === 0) {
-        errors.push({
-          caseId,
-          code: "state-without-owner",
-          detail: `${hotspot.path}: ${row.state}`,
-        });
-      } else if (row.soleOwner.endsWith(".rs") && !existsRel(row.soleOwner)) {
-        errors.push({
-          caseId,
-          code: "state-owner-missing",
-          detail: `${row.state}: sole owner ${row.soleOwner}`,
-        });
-      }
       const tokens = row.state
         .split(/[^A-Za-z_0-9]+/)
         .filter((t) => t.length >= 4 && !STATE_TOKEN_STOPWORDS.has(t.toLowerCase()));
@@ -565,16 +764,146 @@ function validateStateLifetimes(contracts, errors) {
           detail: `${hotspot.path}: no identifier of "${row.state}" appears in the source`,
         });
       }
+      if (typeof row.soleOwner !== "string" || row.soleOwner.length === 0) {
+        errors.push({
+          caseId,
+          code: "state-without-owner",
+          detail: `${hotspot.path}: ${row.state}`,
+        });
+        continue;
+      }
+      const ownerText = soleOwnerText(row.soleOwner);
+      if (ownerText === null || ownerText.length === 0) {
+        errors.push({
+          caseId,
+          code: "state-owner-missing",
+          detail: `${row.state}: sole owner ${row.soleOwner}`,
+        });
+      } else if (!tokens.some((t) => ownerText.includes(t))) {
+        errors.push({
+          caseId,
+          code: "state-owner-without-declaration",
+          detail: `${row.state}: sole owner ${row.soleOwner} declares no identifier of the state`,
+        });
+      }
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-crate consumer derivation (syntax evidence, comments stripped).
+// ---------------------------------------------------------------------------
+
+const consumersCache = new Map();
+
+/**
+ * Derives the complete cross-crate consumer population of one hotspot
+ * module: every .rs file under crates/ outside the owning crate's src/
+ * tree whose code (never its comments) references the module through its
+ * owning crate's path — directly (`verter_x::module::..`), through an alias
+ * (`use verter_x as h; h::module::..`), or by importing the module itself
+ * (`use verter_x::module;` + local `module::..` refs).
+ *
+ * Returns a Map file -> { names: Set<string>, qualified: Set<string> }
+ * where names are the referenced item identifiers (use-statement terminals
+ * and inline path terminals alike) and qualified are `Type::member` pairs
+ * referencing retained types (assoc-item usage evidence).
+ */
+export function deriveModuleConsumers(hotspot) {
+  const cached = consumersCache.get(hotspot.path);
+  if (cached) return cached;
+  const crateDir = owningCrateDir(hotspot.path); // crates/<crate>
+  const crateName = crateDir.split("/")[1];
+  const moduleToken = path.basename(hotspot.path).replace(/\.rs$/, "");
+  const srcPrefix = `${crateDir}/src/`;
+  const result = new Map();
+  for (const file of rustFilesUnderCrates()) {
+    if (file.startsWith(srcPrefix)) continue; // crate-internal paths never cross crates
+    const text = strippedFileText(file);
+    const roots = [crateName];
+    for (const m of text.matchAll(
+      new RegExp(`\\b(?:pub\\s+)?use\\s+${crateName}\\s+as\\s+([A-Za-z_][A-Za-z_0-9]*)\\s*;`, "g"),
+    )) {
+      roots.push(m[1]);
+    }
+    const names = new Set();
+    let references = false;
+    for (const root of roots) {
+      const needle = `${root}::${moduleToken}`;
+      // Inline and single-target path references: <root>::<module>::Item.
+      const pathRe = new RegExp(
+        `(?<![A-Za-z_0-9:])${root}::${moduleToken}::([A-Za-z_][A-Za-z_0-9]*)`,
+        "g",
+      );
+      for (const m of text.matchAll(pathRe)) {
+        names.add(m[1]);
+        references = true;
+      }
+      // Use statements (brace groups included) naming any item under the module.
+      for (const sm of text.matchAll(/\b(?:pub\s+)?use\s([^;]*);/g)) {
+        for (const p of expandUsePaths(sm[1])) {
+          const idx = p.indexOf(needle);
+          if (idx === -1) continue;
+          references = true;
+          const tail = p.slice(idx + needle.length).replace(/^::/, "");
+          const last = tail.split("::").pop();
+          if (last && /^[A-Za-z_][A-Za-z_0-9]*$/.test(last)) names.add(last);
+        }
+      }
+      // Module-import form: use <root>::<module>; + local module::Item refs.
+      if (new RegExp(`\\buse\\s+${root}::${moduleToken}\\s*;`).test(text)) {
+        references = true;
+        const localRe = new RegExp(`[^A-Za-z_0-9:]${moduleToken}::([A-Za-z_][A-Za-z_0-9]*)`, "g");
+        for (const m of text.matchAll(localRe)) {
+          if (m[1] !== moduleToken) names.add(m[1]);
+        }
+        names.delete(moduleToken);
+      }
+    }
+    if (references) result.set(file, { names, qualified: collectQualifiedUsages(text) });
+  }
+  consumersCache.set(hotspot.path, result);
+  return result;
+}
+
+/** `Type::member` usages in a text (assoc-item/variant usage evidence). */
+function collectQualifiedUsages(text) {
+  const out = new Set();
+  for (const m of text.matchAll(/\b([A-Z][A-Za-z_0-9]*)::([A-Za-z_][A-Za-z_0-9]*)/g)) {
+    out.add(`${m[1]}::${m[2]}`);
+  }
+  return out;
+}
+
+/**
+ * Derives the exact population of files referencing a narrowed test hook
+ * outside its owning crate: files whose comment-stripped text matches at
+ * least one recorded reference form (`Scheduler::test_x`,
+ * `.test_x(` — qualified references, so a same-named local fn in an
+ * unrelated crate is never a false consumer).
+ */
+export function deriveHookConsumers(hotspot, referenceForms) {
+  const crateDir = owningCrateDir(hotspot.path);
+  const out = new Set();
+  for (const file of rustFilesUnderCrates()) {
+    if (file.startsWith(`${crateDir}/`)) continue; // owning crate stays on cfg(test)/test-support
+    const text = strippedFileText(file);
+    if (referenceForms.some((form) => text.includes(form))) out.add(file);
+  }
+  return out;
 }
 
 /**
  * ARH1-AC1: minimal public surfaces bind the live tree. Module visibility
  * declarations are pinned verbatim at their declaration site, retained
- * items are real declarations, cross-crate retained types are actually
- * imported by a declared consumer, and narrowing rows target a legal
- * visibility with real consumers.
+ * items are real declarations, and narrowing rows target a legal visibility
+ * with an EXACT consumer inventory: every recorded consumer references the
+ * item in code, and every referencing file outside the owning crate is
+ * recorded. Where the contract flags the importer list as the complete
+ * cross-crate population, that population is derived and compared exactly,
+ * every referenced name must be retained or carried by the bulk row's
+ * consumer migration, and every assoc item used on a retained type must be
+ * retained (a retained type alone does not retain its methods).
  */
 function validateSurface(contracts, errors) {
   const caseId = "ARH1-surface";
@@ -616,22 +945,9 @@ function validateSurface(contracts, errors) {
         });
       }
     }
-    if (
-      crossCrate &&
-      verifyConsumed &&
-      (hotspot.minimalPublicSurface.retainedTypes || []).length > 0
-    ) {
-      const importers = hotspot.allowedImportDirection.importers || [];
-      for (const type of hotspot.minimalPublicSurface.retainedTypes) {
-        const consumed = importers.some((imp) => existsRel(imp) && readRel(imp).includes(type));
-        if (!consumed) {
-          errors.push({
-            caseId,
-            code: "retained-item-unconsumed",
-            detail: `${hotspot.path}: retained type ${type} is imported by no declared consumer`,
-          });
-        }
-      }
+    const bulkRows = (hotspot.minimalPublicSurface.narrow || []).filter((r) => r.kind === "bulk");
+    if (crossCrate && verifyConsumed) {
+      validateExactConsumerPopulation(hotspot, text, bulkRows, errors);
     }
     for (const row of hotspot.minimalPublicSurface.narrow || []) {
       if (!NARROW_TARGETS.has(row.to)) {
@@ -655,15 +971,173 @@ function validateSurface(contracts, errors) {
           detail: `${hotspot.path}: field ${row.item}`,
         });
       }
-      for (const consumer of row.consumersAffected || []) {
-        if (!existsRel(consumer)) {
+      const consumers = row.consumersAffected || [];
+      if (row.kind === "fn") {
+        const forms = row.referenceForms;
+        if (
+          !Array.isArray(forms) ||
+          forms.length === 0 ||
+          forms.some((f) => typeof f !== "string" || f.length === 0)
+        ) {
           errors.push({
             caseId,
-            code: "missing-narrow-consumer",
-            detail: `${row.item}: ${consumer}`,
+            code: "narrow-hook-without-reference-forms",
+            detail: `${hotspot.path}: ${row.item} records no qualified reference forms`,
+          });
+        } else {
+          for (const consumer of consumers) {
+            if (!existsRel(consumer)) {
+              errors.push({
+                caseId,
+                code: "missing-narrow-consumer",
+                detail: `${row.item}: ${consumer}`,
+              });
+              continue;
+            }
+            if (!forms.some((form) => strippedFileText(consumer).includes(form))) {
+              errors.push({
+                caseId,
+                code: "narrow-consumer-without-reference",
+                detail: `${row.item}: ${consumer} references no recorded form of the hook`,
+              });
+            }
+          }
+          for (const live of deriveHookConsumers(hotspot, forms)) {
+            if (!consumers.includes(live)) {
+              errors.push({
+                caseId,
+                code: "narrow-consumer-omitted",
+                detail: `${row.item}: ${live} references the hook outside the owning crate but is not recorded`,
+              });
+            }
+          }
+        }
+      } else {
+        for (const consumer of consumers) {
+          if (!existsRel(consumer)) {
+            errors.push({
+              caseId,
+              code: "missing-narrow-consumer",
+              detail: `${row.item}: ${consumer}`,
+            });
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * The complete cross-crate population of a flagged hotspot module: derived
+ * from syntax evidence and joined both directions against the declared
+ * importers; every referenced name must be retained or migrate with the
+ * bulk row; retained types must be imported by a real consumer; assoc items
+ * used on retained types must be retained.
+ */
+function validateExactConsumerPopulation(hotspot, text, bulkRows, errors) {
+  const caseId = "ARH1-surface";
+  const surface = hotspot.minimalPublicSurface;
+  const retained = new Set(surface.retainedTypes || []);
+  const assoc = new Set(surface.retainedAssocItems || []);
+  const bulk = bulkRows[0];
+  const population = deriveModuleConsumers(hotspot);
+  const importers = hotspot.allowedImportDirection.importers || [];
+  for (const file of population.keys()) {
+    if (!importers.includes(file)) {
+      errors.push({
+        caseId,
+        code: "importer-population-drift",
+        detail: `${file} references ${path.basename(hotspot.path, ".rs")} cross-crate but is not a declared importer`,
+      });
+    }
+  }
+  for (const importer of importers) {
+    if (!population.has(importer)) {
+      errors.push({
+        caseId,
+        code: "importer-population-drift",
+        detail: `${importer} is declared an importer but references no ${path.basename(hotspot.path, ".rs")} item in code`,
+      });
+    }
+  }
+  const bulkConsumers = new Set(bulk ? bulk.consumersAffected || [] : []);
+  for (const [file, { names, qualified }] of population) {
+    const unretained = [...names].filter((n) => !retained.has(n));
+    if (unretained.length > 0 && !bulkConsumers.has(file)) {
+      errors.push({
+        caseId,
+        code: "narrowed-item-consumer-unrecorded",
+        detail: `${file} imports narrowed item(s) ${unretained.join(", ")} but no bulk row records its migration`,
+      });
+    }
+    if (!bulkConsumers.has(file)) {
+      // Assoc-item usage on retained types must stay retained for every
+      // consumer that does not migrate with the bulk row.
+      for (const usage of qualified) {
+        const [type, member] = usage.split("::");
+        if (!retained.has(type)) continue;
+        // Variants (CamelCase) belong to the retained type; assoc fns are
+        // lowercase and assoc consts SCREAMING — and only declared pub
+        // members of this module count, so trait impls never match.
+        if (!/^[a-z_][a-z_0-9]*$|^[A-Z_][A-Z_0-9]+$/.test(member)) continue;
+        const declared = new RegExp(
+          `pub(?:\\s+const)?\\s+fn ${member}\\s*[<(]|pub\\s+const\\s+${member}\\s*:`,
+        ).test(text);
+        if (declared && !assoc.has(usage)) {
+          errors.push({
+            caseId,
+            code: "assoc-item-unretained",
+            detail: `${file} uses ${usage} on a retained type; the assoc item is neither retained nor migrated`,
           });
         }
       }
+    }
+  }
+  for (const consumer of bulkConsumers) {
+    const info = population.get(consumer);
+    if (!info || ![...info.names].some((n) => !retained.has(n))) {
+      errors.push({
+        caseId,
+        code: "narrow-consumer-without-reference",
+        detail: `${consumer} is recorded as a bulk-narrowing consumer but imports no narrowed item`,
+      });
+    }
+  }
+  for (const type of retained) {
+    let consumed = false;
+    for (const { names } of population.values()) {
+      if (names.has(type)) {
+        consumed = true;
+        break;
+      }
+    }
+    if (!consumed) {
+      errors.push({
+        caseId,
+        code: "retained-item-unconsumed",
+        detail: `${hotspot.path}: retained type ${type} is imported by no cross-crate consumer`,
+      });
+    }
+  }
+  for (const item of assoc) {
+    const [type, member] = item.split("::");
+    if (!retained.has(type)) {
+      errors.push({
+        caseId,
+        code: "assoc-item-unretained-type",
+        detail: `${item} is retained but its type is not a retained type`,
+      });
+      continue;
+    }
+    const declared = new RegExp(
+      `pub(?:\\s+const)?\\s+fn ${member}\\s*[<(]|pub\\s+const\\s+${member}\\s*:`,
+    ).test(text);
+    if (!declared) {
+      errors.push({
+        caseId,
+        code: "assoc-item-missing",
+        detail: `${hotspot.path}: ${item} is not a declared pub member`,
+      });
     }
   }
 }
@@ -749,9 +1223,13 @@ function validateSplit(contracts, arh0, errors) {
 
 /**
  * ARH1-AC1: every route has exactly one surviving owner and a concrete
- * disposition. This includes the decisions ARH0 explicitly assigned to this
- * node (its debt rows name ARH1 as decision owner) and every narrowing
- * route the contracts declare for the heirs.
+ * disposition. Routes are keyed — an ARH0 debt decision by its debt id, a
+ * narrowing decision by (candidatePath, narrow kind) — so two decisions on
+ * one route (duplicate dispositions, competing owners) fail, a route whose
+ * only row lost the executing heir fails, and a hotspot that declares two
+ * narrowing kinds (field narrowing vs test-hook gating vs bulk) needs one
+ * register row per kind: deleting one row must uncover its own route, not
+ * hide behind a sibling that shares the file.
  */
 function validateCutover(contracts, cutover, arh0, errors) {
   const caseId = "ARH1-cutover";
@@ -765,7 +1243,18 @@ function validateCutover(contracts, cutover, arh0, errors) {
       detail: "empty deletion set without rationale",
     });
   }
+  // Every narrowing kind a hotspot declares is a route key; register rows
+  // for narrowing decisions must name one.
+  const routeKindsByPath = new Map();
+  for (const hotspot of contracts.hotspots) {
+    const kinds = [
+      ...new Set((hotspot.minimalPublicSurface.narrow || []).map((r) => r.kind)),
+    ].sort();
+    routeKindsByPath.set(hotspot.path, kinds);
+  }
   const ids = new Set();
+  const routes = new Set();
+  const satisfies = new Set();
   for (const row of cutover.rows) {
     if (ids.has(row.id)) errors.push({ caseId, code: "duplicate-id", detail: row.id });
     ids.add(row.id);
@@ -779,11 +1268,42 @@ function validateCutover(contracts, cutover, arh0, errors) {
       errors.push({ caseId, code: "cutover-without-disposition", detail: row.id });
     }
     resolveOwner(row.owner, errors, caseId, "malformed-disposition-owner");
+    if (row.satisfies) {
+      if (satisfies.has(row.satisfies)) {
+        errors.push({
+          caseId,
+          code: "duplicate-satisfies",
+          detail: `${row.id}: ARH0 debt ${row.satisfies} is decided twice`,
+        });
+      }
+      satisfies.add(row.satisfies);
+    }
+    if (row.route !== undefined) {
+      if (routes.has(row.route)) {
+        errors.push({
+          caseId,
+          code: "duplicate-cutover-route",
+          detail: `${row.id}: route ${row.route} already carries a disposition`,
+        });
+      }
+      routes.add(row.route);
+      const hashIdx = row.route.lastIndexOf("#");
+      const routePath = hashIdx === -1 ? row.route : row.route.slice(0, hashIdx);
+      const routeKind = hashIdx === -1 ? undefined : row.route.slice(hashIdx + 1);
+      const kinds = routeKindsByPath.get(routePath);
+      if (!kinds || routeKind === undefined || !kinds.includes(routeKind)) {
+        errors.push({
+          caseId,
+          code: "cutover-route-invented",
+          detail: `${row.id}: route ${row.route} matches no declared narrowing kind`,
+        });
+      }
+    }
   }
-  // ARH0 debt rows that name ARH1 as decision owner must be decided here.
-  const satisfied = new Set(cutover.rows.map((r) => r.satisfies).filter(Boolean));
+  // ARH0 debt rows that name ARH1 as decision owner must be decided here —
+  // exactly once (duplicate-satisfies above pins the cardinality).
   for (const debt of arh0["debt-register"].rows) {
-    if (debt.owner?.kind === "node" && debt.owner?.id === "ARH1" && !satisfied.has(debt.id)) {
+    if (debt.owner?.kind === "node" && debt.owner?.id === "ARH1" && !satisfies.has(debt.id)) {
       errors.push({
         caseId,
         code: "arh0-debt-undecided",
@@ -791,25 +1311,22 @@ function validateCutover(contracts, cutover, arh0, errors) {
       });
     }
   }
-  // Every narrowing route declared in the contracts has a register row with
-  // the same candidate and executing heir.
+  // Every narrowing route declared in the contracts has exactly one
+  // register row binding it to the executing heir.
   for (const hotspot of contracts.hotspots) {
-    const narrow = hotspot.minimalPublicSurface.narrow || [];
-    if (narrow.length === 0) continue;
     const heir = hotspot.heirs?.narrowing;
-    const covered = cutover.rows.some(
-      (r) =>
-        r.candidatePath === hotspot.path &&
-        heir &&
-        r.owner.id === heir.id &&
-        r.owner.kind === "node",
-    );
-    if (!covered) {
-      errors.push({
-        caseId,
-        code: "cutover-route-missing",
-        detail: `${hotspot.path} declares narrowing rows but no register row binds the route to heir ${heir ? heir.id : "(none)"}`,
-      });
+    for (const kind of routeKindsByPath.get(hotspot.path)) {
+      const route = `${hotspot.path}#${kind}`;
+      const binding = cutover.rows.filter(
+        (r) => r.route === route && heir && r.owner.id === heir.id && r.owner.kind === "node",
+      );
+      if (binding.length !== 1) {
+        errors.push({
+          caseId,
+          code: "cutover-route-missing",
+          detail: `${hotspot.path} declares ${kind} narrowing but ${binding.length} register rows bind route ${route} to heir ${heir ? heir.id : "(none)"}`,
+        });
+      }
     }
   }
 }
@@ -817,7 +1334,9 @@ function validateCutover(contracts, cutover, arh0, errors) {
 /**
  * ARH1-AC1/AC4: the manifest documents this node's case contract, products,
  * commands and producer obligations; the verifier is the sole owning
- * interface that runs them, so prose cannot outlive the checks.
+ * interface that runs them, so prose cannot outlive the checks. The AC4
+ * obligations (or their explicit N/A rationale) must name every surface the
+ * charter lists for a contract-only node.
  */
 function validateRatification(products, manifest, errors) {
   const caseId = "ARH1-ratification";
@@ -898,13 +1417,27 @@ function validateRatification(products, manifest, errors) {
     }
   }
 
-  for (const obligation of products["dependency-contracts"].ac4Obligations || []) {
+  const contracts = products["dependency-contracts"];
+  for (const obligation of contracts.ac4Obligations || []) {
     resolveOwner(obligation.producer, errors, caseId, "obligation-producer-malformed");
     if (typeof obligation.obligation !== "string" || obligation.obligation.length === 0) {
       errors.push({
         caseId,
         code: "obligation-without-text",
         detail: `producer ${obligation.producer?.id ?? "(no id)"} records no obligation`,
+      });
+    }
+  }
+  const ac4Text = [
+    ...(contracts.ac4Obligations || []).map((o) => o.obligation || ""),
+    typeof contracts.ac4Rationale === "string" ? contracts.ac4Rationale : "",
+  ].join("\n");
+  for (const surface of AC4_SURFACES) {
+    if (!ac4Text.includes(surface)) {
+      errors.push({
+        caseId,
+        code: "ac4-surface-uncovered",
+        detail: `AC4 surface "${surface}" is named by no producer obligation and no N/A rationale`,
       });
     }
   }

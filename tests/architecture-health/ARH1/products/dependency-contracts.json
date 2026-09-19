@@ -1,6 +1,6 @@
 {
   "schema": "ARH1DependencyContracts",
-  "version": 1,
+  "version": 2,
   "contractNode": "ARH1",
   "candidate": "00b6f2ae00701e2d611e82446f4d74809624509f",
   "predecessorProducts": {
@@ -14,7 +14,7 @@
         "id": "DOC2",
         "kind": "node"
       },
-      "obligation": "document the per-hotspot import direction, constructor capabilities, state lifetimes and minimal public surfaces in the architecture/contributor documentation; the contract rows are the source of truth, the docs are delivery."
+      "obligation": "document the per-hotspot import direction, constructor capabilities, state lifetimes and minimal public surfaces in the architecture/contributor documentation, including the VIM/DX capability mapping for each retained surface and the exact host/profile evidence every measured population was taken on; the contract rows are the source of truth, the docs are delivery."
     },
     {
       "producer": {
@@ -28,7 +28,7 @@
         "id": "ARH2",
         "kind": "node"
       },
-      "obligation": "characterize current surfaces before any narrowing lands and re-derive the ARH0 inventory populations (the recorded snapshot counts are ratification evidence, not live invariants)."
+      "obligation": "characterize current surfaces before any narrowing lands and re-derive the ARH0 inventory populations and this node's importer/consumer populations on the then-current candidate (the recorded snapshot counts and populations are ratification evidence, not live invariants); record any drift in host/profile basis alongside the re-derived counts."
     },
     {
       "producer": {
@@ -36,6 +36,20 @@
         "kind": "node"
       },
       "obligation": "any examples/reference addition that consumes these hotspots uses only the retained public surfaces listed here (DOC1-tested examples stay inside the contract)."
+    },
+    {
+      "producer": {
+        "id": "ARH3",
+        "kind": "node"
+      },
+      "obligation": "the semantic_query narrowing lands together with the recorded migration notes: the 68 consumer files on the bulk row move to the test-support re-export surface in the same change, and the seven retained assoc items stay pub for the ffi/napi/wasm production consumers; no unrecorded consumer may appear between ratification and the narrowing."
+    },
+    {
+      "producer": {
+        "id": "ARH4",
+        "kind": "node"
+      },
+      "obligation": "the scheduler field and test-hook narrowings land together with their recorded per-hook consumer migrations (same-change, per the cutover register dispositions); the exact-consumer invariant is re-derived on the executing candidate so no unrecorded consumer breaks."
     }
   ],
   "ac5Rationale": "No new latency, work, allocation or RSS budget is created or measured at this node; the ratified performance methodology is untouched. Visibility narrowing (pub -> pub(crate), test hooks to test configuration) shrinks compile surfaces only via the heirs and is not claimed as a performance win. No obsolete path is retired here: ARH1 supersedes nothing with a second authority, so there is no capability to narrow in-tree at this node.",
@@ -44,12 +58,7 @@
       "id": "ARH1-LAYER-1",
       "crate": "crates/verter_scheduler",
       "rule": "scheduler-runtime stays below every orchestration crate: it may depend only on the leaf utility crates",
-      "mayImport": [
-        "verter_audit",
-        "verter_debug_assert",
-        "verter_language",
-        "verter_span"
-      ],
+      "mayImport": ["verter_audit", "verter_debug_assert", "verter_language", "verter_span"],
       "mustNotImport": [
         "verter_session",
         "verter_compiler",
@@ -118,12 +127,7 @@
         "verter_type_runtime",
         "verter_workspace"
       ],
-      "mustNotImport": [
-        "verter_lsp",
-        "verter_napi",
-        "verter_ffi",
-        "verter_wasm"
-      ],
+      "mustNotImport": ["verter_lsp", "verter_napi", "verter_ffi", "verter_wasm"],
       "evidence": "crates/verter_session/Cargo.toml [dependencies] contains no editor/transport crate",
       "heir": {
         "id": "ARH12",
@@ -165,17 +169,9 @@
         }
       ],
       "allowedImportDirection": {
-        "verter": [
-          "verter_audit",
-          "verter_language"
-        ],
-        "external": [
-          "dashmap",
-          "parking_lot",
-          "web_time"
-        ],
+        "verter": ["verter_language"],
+        "external": ["dashmap", "parking_lot", "web_time"],
         "crateInternal": [
-          "cache_id",
           "caller_kind",
           "cancellation",
           "dag",
@@ -185,8 +181,6 @@
           "job",
           "node",
           "overlay",
-          "pool",
-          "request_context",
           "source_loader",
           "stage"
         ],
@@ -205,16 +199,13 @@
           "crates/verter_dx_baseline/src/materialize.rs",
           "crates/verter_napi/src/lib.rs"
         ],
-        "ownerCratePopulation": "42 verter_session files reference verter_scheduler::scheduler at ratification; population re-derivation is ARH2's recorded obligation"
+        "ownerCratePopulation": "42 verter_session files reference verter_scheduler::scheduler at ratification; population re-derivation is ARH2's recorded obligation",
+        "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring, so the declared sets equal the production direction both ways; verter_audit, cache_id, request_context and pool are imported only by the file's test configuration at ratification and are therefore not declared here"
       },
       "constructorCapabilities": [
         {
           "constructor": "new",
-          "signatureAnchors": [
-            "Arc<dyn SourceLoader>",
-            "SchedulerCpuPool",
-            "SchedulerIoPool"
-          ],
+          "signatureAnchors": ["Arc<dyn SourceLoader>", "SchedulerCpuPool", "SchedulerIoPool"],
           "rules": [
             "pools and the source loader are host-injected Arc handles: the scheduler constructs no pool and performs no file I/O in the constructor",
             "spawns exactly one driver thread on native targets and none on wasm32",
@@ -236,10 +227,7 @@
         },
         {
           "constructor": "new_sync",
-          "signatureAnchors": [
-            "Arc<dyn SourceLoader>",
-            "SchedulerCpuPool"
-          ],
+          "signatureAnchors": ["Arc<dyn SourceLoader>", "SchedulerCpuPool"],
           "rules": [
             "synchronous-driver variant of new with the same injected-pool capability; wasm32 target carries no native pool parameter"
           ]
@@ -400,196 +388,160 @@
             "item": "test_worker_pool_ids",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": [
-              "crates/verter_session/src/host_construction.rs",
-              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs",
-              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
-              "crates/verter_session/tests/cases/corpus_audit_layout.rs",
-              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
-            ],
-            "note": "test-only seams (cfg(test)/test-support feature) with the listed session test consumers migrated in the same change"
+            "consumersAffected": ["crates/verter_session/src/host_construction.rs"],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": ["Scheduler::test_worker_pool_ids", "scheduler.test_worker_pool_ids("]
           },
           {
             "item": "test_new",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": [
-              "crates/verter_session/src/host_construction.rs",
-              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs",
-              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
-              "crates/verter_session/tests/cases/corpus_audit_layout.rs",
-              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
-            ],
-            "note": "test-only seams (cfg(test)/test-support feature) with the listed session test consumers migrated in the same change"
+            "consumersAffected": ["crates/verter_session/src/host_batch_coordinator.rs"],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": ["Scheduler::test_new", ".test_new("]
           },
           {
             "item": "test_with_executor",
             "kind": "fn",
             "to": "test-configuration",
             "consumersAffected": [
-              "crates/verter_session/src/host_construction.rs",
-              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs",
-              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
-              "crates/verter_session/tests/cases/corpus_audit_layout.rs",
-              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
+              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_attributes_worker.rs",
+              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs",
+              "crates/verter_session/tests/cases/g_misc2/scheduler_worker_tls_propagation.rs",
+              "crates/verter_session/tests/cases/g_session/inline_execute_clears_all_install_tls_slots.rs"
             ],
-            "note": "test-only seams (cfg(test)/test-support feature) with the listed session test consumers migrated in the same change"
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": ["Scheduler::test_with_executor", ".test_with_executor("]
           },
           {
             "item": "test_new_sync",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": [
-              "crates/verter_session/src/host_construction.rs",
-              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs",
-              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
-              "crates/verter_session/tests/cases/corpus_audit_layout.rs",
-              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
-            ],
-            "note": "test-only seams (cfg(test)/test-support feature) with the listed session test consumers migrated in the same change"
+            "consumersAffected": [],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": ["Scheduler::test_new_sync", ".test_new_sync("]
           },
           {
             "item": "test_new_sync_with_executor",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": [
-              "crates/verter_session/src/host_construction.rs",
-              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs",
-              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
-              "crates/verter_session/tests/cases/corpus_audit_layout.rs",
-              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
-            ],
-            "note": "test-only seams (cfg(test)/test-support feature) with the listed session test consumers migrated in the same change"
+            "consumersAffected": [],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_new_sync_with_executor",
+              ".test_new_sync_with_executor("
+            ]
           },
           {
             "item": "test_scoped_cache_owner_count",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": [
-              "crates/verter_session/src/host_construction.rs",
-              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs",
-              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
-              "crates/verter_session/tests/cases/corpus_audit_layout.rs",
-              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
-            ],
-            "note": "test-only seams (cfg(test)/test-support feature) with the listed session test consumers migrated in the same change"
+            "consumersAffected": [],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_scoped_cache_owner_count",
+              ".test_scoped_cache_owner_count("
+            ]
           },
           {
             "item": "test_arm_dispatch_pause",
             "kind": "fn",
             "to": "test-configuration",
             "consumersAffected": [
-              "crates/verter_session/src/host_construction.rs",
-              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs",
-              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
-              "crates/verter_session/tests/cases/corpus_audit_layout.rs",
               "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
             ],
-            "note": "test-only seams (cfg(test)/test-support feature) with the listed session test consumers migrated in the same change"
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": ["Scheduler::test_arm_dispatch_pause", ".test_arm_dispatch_pause("]
           },
           {
             "item": "test_wait_until_dispatch_paused",
             "kind": "fn",
             "to": "test-configuration",
             "consumersAffected": [
-              "crates/verter_session/src/host_construction.rs",
-              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs",
-              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
-              "crates/verter_session/tests/cases/corpus_audit_layout.rs",
               "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
             ],
-            "note": "test-only seams (cfg(test)/test-support feature) with the listed session test consumers migrated in the same change"
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_wait_until_dispatch_paused",
+              ".test_wait_until_dispatch_paused("
+            ]
           },
           {
             "item": "test_job_queue_depth",
             "kind": "fn",
             "to": "test-configuration",
             "consumersAffected": [
-              "crates/verter_session/src/host_construction.rs",
-              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs",
-              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
-              "crates/verter_session/tests/cases/corpus_audit_layout.rs",
               "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
             ],
-            "note": "test-only seams (cfg(test)/test-support feature) with the listed session test consumers migrated in the same change"
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": ["Scheduler::test_job_queue_depth", ".test_job_queue_depth("]
           },
           {
             "item": "test_release_dispatch_pause",
             "kind": "fn",
             "to": "test-configuration",
             "consumersAffected": [
-              "crates/verter_session/src/host_construction.rs",
-              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs",
-              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
-              "crates/verter_session/tests/cases/corpus_audit_layout.rs",
               "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
             ],
-            "note": "test-only seams (cfg(test)/test-support feature) with the listed session test consumers migrated in the same change"
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_release_dispatch_pause",
+              ".test_release_dispatch_pause("
+            ]
           },
           {
             "item": "test_install_batch_admit_seam",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": [
-              "crates/verter_session/src/host_construction.rs",
-              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs",
-              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
-              "crates/verter_session/tests/cases/corpus_audit_layout.rs",
-              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
-            ],
-            "note": "test-only seams (cfg(test)/test-support feature) with the listed session test consumers migrated in the same change"
+            "consumersAffected": [],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_install_batch_admit_seam",
+              ".test_install_batch_admit_seam("
+            ]
           },
           {
             "item": "test_install_batch_admit_epoch_trace",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": [
-              "crates/verter_session/src/host_construction.rs",
-              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs",
-              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
-              "crates/verter_session/tests/cases/corpus_audit_layout.rs",
-              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
-            ],
-            "note": "test-only seams (cfg(test)/test-support feature) with the listed session test consumers migrated in the same change"
+            "consumersAffected": ["crates/verter_session/src/host_compile_atomic_upsert_tests.rs"],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_install_batch_admit_epoch_trace",
+              ".test_install_batch_admit_epoch_trace("
+            ]
           },
           {
             "item": "test_peek_batch_admit_epoch_count",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": [
-              "crates/verter_session/src/host_construction.rs",
-              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs",
-              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
-              "crates/verter_session/tests/cases/corpus_audit_layout.rs",
-              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
-            ],
-            "note": "test-only seams (cfg(test)/test-support feature) with the listed session test consumers migrated in the same change"
+            "consumersAffected": [],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_peek_batch_admit_epoch_count",
+              ".test_peek_batch_admit_epoch_count("
+            ]
           },
           {
             "item": "test_take_batch_admit_epochs",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": [
-              "crates/verter_session/src/host_construction.rs",
-              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs",
-              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
-              "crates/verter_session/tests/cases/corpus_audit_layout.rs",
-              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
-            ],
-            "note": "test-only seams (cfg(test)/test-support feature) with the listed session test consumers migrated in the same change"
+            "consumersAffected": ["crates/verter_session/src/host_compile_atomic_upsert_tests.rs"],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": [
+              "Scheduler::test_take_batch_admit_epochs",
+              ".test_take_batch_admit_epochs("
+            ]
           },
           {
             "item": "test_clear_analysis",
             "kind": "fn",
             "to": "test-configuration",
             "consumersAffected": [
-              "crates/verter_session/src/host_construction.rs",
-              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs",
-              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs",
-              "crates/verter_session/tests/cases/corpus_audit_layout.rs",
-              "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
+              "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs"
             ],
-            "note": "test-only seams (cfg(test)/test-support feature) with the listed session test consumers migrated in the same change"
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
+            "referenceForms": ["Scheduler::test_clear_analysis", ".test_clear_analysis("]
           }
         ],
         "crossCrateRetainedVerifiedByConsumers": false,
@@ -693,10 +645,7 @@
         }
       ],
       "allowedImportDirection": {
-        "verter": [
-          "verter_semantic",
-          "verter_type_expr"
-        ],
+        "verter": ["verter_semantic", "verter_type_expr"],
         "external": [],
         "crateInternal": [
           "flow_completion_inventory",
@@ -848,20 +797,13 @@
         }
       ],
       "allowedImportDirection": {
-        "verter": [
-          "verter_semantic",
-          "verter_type_expr",
-          "verter_audit"
-        ],
-        "external": [
-          "rustc_hash"
-        ],
+        "verter": ["verter_semantic", "verter_type_expr", "verter_audit"],
+        "external": ["rustc_hash"],
         "crateInternal": [
-          "resolver_core",
-          "semantic_query",
           "file_artifact_store",
           "project_semantic_dispatch",
-          "types"
+          "resolver_core",
+          "semantic_query"
         ],
         "mustNotImport": [
           "verter_compiler",
@@ -872,7 +814,8 @@
           "verter_wasm"
         ],
         "importers": [],
-        "ownerCratePopulation": "referenced only inside project_semantic_dispatch (build_* impl block on ProjectSemanticDispatch); no cross-crate importer"
+        "ownerCratePopulation": "referenced only inside project_semantic_dispatch (build_* impl block on ProjectSemanticDispatch); no cross-crate importer",
+        "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring, so the declared sets equal the production direction both ways; types and VerterHost (carrier_type_param_descent_tests) are imported only by the file's test configuration at ratification and are therefore not declared here"
       },
       "constructorCapabilities": [],
       "constructorRationale": "no constructors: dispatch-layer builders kept on ProjectSemanticDispatch via impl blocks so inner helpers stay pub(super) without widening visibility",
@@ -976,18 +919,9 @@
         }
       ],
       "allowedImportDirection": {
-        "verter": [
-          "verter_identity",
-          "verter_semantic",
-          "verter_type_expr"
-        ],
-        "external": [
-          "static_assertions"
-        ],
-        "crateInternal": [
-          "locator_identity",
-          "resolver_core"
-        ],
+        "verter": ["verter_identity", "verter_semantic", "verter_type_expr"],
+        "external": ["static_assertions"],
+        "crateInternal": ["locator_identity", "resolver_core"],
         "mustNotImport": [
           "verter_compiler",
           "verter_parser",
@@ -997,20 +931,93 @@
           "verter_wasm"
         ],
         "importers": [
-          "crates/verter_audit/src/payloads/tags.rs",
-          "crates/verter_audit/src/origin_graph.rs",
           "crates/verter_bench/benches/fact_validation_hot_path.rs",
           "crates/verter_ffi/src/convert/component_meta.rs",
-          "crates/verter_ffi/src/convert/typeinfo.rs",
           "crates/verter_ffi/src/convert/tests.rs",
-          "crates/verter_napi/src/typeinfo.rs",
+          "crates/verter_ffi/src/convert/typeinfo.rs",
           "crates/verter_napi/src/lib.rs",
+          "crates/verter_napi/src/typeinfo.rs",
+          "crates/verter_session/benches/projection_safety_bench.rs",
+          "crates/verter_session/tests/allocation_cases/flow_literal_provenance.rs",
+          "crates/verter_session/tests/allocation_cases/flow_products.rs",
+          "crates/verter_session/tests/allocator_canaries.rs",
+          "crates/verter_session/tests/cases/compile-fail/composite_mint_unforgeable.rs",
+          "crates/verter_session/tests/cases/compile-fail/composite_replay_cross_kind.rs",
+          "crates/verter_session/tests/cases/compile-fail/composite_struct_literal_forge.rs",
+          "crates/verter_session/tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs",
+          "crates/verter_session/tests/cases/compile-fail/dto_names_session_hot_handle.rs",
+          "crates/verter_session/tests/cases/compile-fail/instantiate_body_source_sealed_to_dispatch_factory.rs",
+          "crates/verter_session/tests/cases/compile-fail/instantiate_key_context_not_extractable.rs",
+          "crates/verter_session/tests/cases/compile-fail/instantiate_key_seal_no_features.rs",
+          "crates/verter_session/tests/cases/compile-fail/locator_shape_ctx_no_prc_conversion.rs",
+          "crates/verter_session/tests/cases/compile-fail/member_role_stamps_not_mintable_without_witness.rs",
+          "crates/verter_session/tests/cases/compile-fail/object_projection_witness_not_forgeable.rs",
+          "crates/verter_session/tests/cases/compile-fail/object_projection_witness_only.rs",
+          "crates/verter_session/tests/cases/compile-fail/r6_key_forbidden_dimension.rs",
+          "crates/verter_session/tests/cases/compile-fail/r6_key_nested_forbidden_dimension.rs",
+          "crates/verter_session/tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs",
+          "crates/verter_session/tests/cases/compile-fail/semantic_operand_force_projection_not_importable.rs",
+          "crates/verter_session/tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs",
+          "crates/verter_session/tests/cases/compile-fail/surface_resolution_reason_mint_is_sealed.rs",
+          "crates/verter_session/tests/cases/family_warm_read_releases_mutex_before_validate.rs",
+          "crates/verter_session/tests/cases/flow_product_lattice.rs",
+          "crates/verter_session/tests/cases/flow_solve_completeness.rs",
+          "crates/verter_session/tests/cases/g_binder/binder_identity_facts.rs",
+          "crates/verter_session/tests/cases/g_block/block_1_i_discriminators.rs",
+          "crates/verter_session/tests/cases/g_block/block_6i_leak_option_a_discriminator.rs",
+          "crates/verter_session/tests/cases/g_block/block_6i_mapped_source_declref_enum.rs",
+          "crates/verter_session/tests/cases/g_block/block_6i_round7_selected_key_callable_realization.rs",
+          "crates/verter_session/tests/cases/g_block/r6_query_identity_keys_content_free.rs",
+          "crates/verter_session/tests/cases/g_block/semantic_determinism_matrix.rs",
+          "crates/verter_session/tests/cases/g_block/typeinfo_graph_contract_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2_demand_lattice_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2_display_projection_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2_spec_table_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b5_class_ns_enum_overload_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b6_apparent_template_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b7_flow_contextual_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b8_relate_upgrade_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b9_awaited_relation_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u6_call_resolve_guards.rs",
+          "crates/verter_session/tests/cases/g_cache/r6_r21_query_identity_keys.rs",
+          "crates/verter_session/tests/cases/g_family/family_slots_multi_candidate.rs",
+          "crates/verter_session/tests/cases/g_misc0/capture_token_smoke.rs",
+          "crates/verter_session/tests/cases/g_misc0/closure_boundary_invalidation.rs",
+          "crates/verter_session/tests/cases/g_misc0/declaration_merge_guards.rs",
+          "crates/verter_session/tests/cases/g_misc0/dep_signature_to_fact_signature.rs",
+          "crates/verter_session/tests/cases/g_misc0/dispatch_bridges_convert_project_generation.rs",
+          "crates/verter_session/tests/cases/g_misc0/flow_return_audit_tls_propagation.rs",
+          "crates/verter_session/tests/cases/g_misc0/synthetic_carrier_explicit_deepen_proof.rs",
+          "crates/verter_session/tests/cases/g_misc1/memo_traced_parse_fact_survives_warm_hit.rs",
+          "crates/verter_session/tests/cases/g_misc1/merged_symbol_identity.rs",
+          "crates/verter_session/tests/cases/g_misc1/path_precision_navigate_then_terminal.rs",
+          "crates/verter_session/tests/cases/g_misc1/pe4_evaluate_deferred_memo.rs",
+          "crates/verter_session/tests/cases/g_misc2/generic_instantiation_identity_and_bounded_work.rs",
+          "crates/verter_session/tests/cases/g_misc2/mapped_remap_dead_key_value_forcing.rs",
+          "crates/verter_session/tests/cases/g_misc2/pe4_evaluate_depth_budget.rs",
+          "crates/verter_session/tests/cases/g_misc2/pe4_mapped_type_k_independent_hoist.rs",
+          "crates/verter_session/tests/cases/g_misc2/pe4_substitute_hash_cons.rs",
+          "crates/verter_session/tests/cases/g_misc2/per_macro_projector_decomposition_tests.rs",
+          "crates/verter_session/tests/cases/g_misc2/recursive_substitute_memo.rs",
+          "crates/verter_session/tests/cases/g_misc3/slot_binding_graph_matrix_member_presence.rs",
+          "crates/verter_session/tests/cases/g_misc3/typeinfo_public_api.rs",
+          "crates/verter_session/tests/cases/g_type/flow_return_audit_contract.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_cache_reuse_across_entrypoints.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_diamond_repeated_prop.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_intermediate_navigate_terminal_caller_mode.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_long_chain_stack_safe.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_no_unrelated_imports.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_pathological_recursion.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_read_once.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_tls_propagation.rs",
+          "crates/verter_session/tests/cases/relation_nominal_authority.rs",
+          "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs",
           "crates/verter_source_policy_gate/tests/cases/semantic_capability_witnesses.rs",
-          "crates/verter_wasm/src/typeinfo.rs",
           "crates/verter_wasm/src/feasibility_probe_tests.rs",
-          "crates/verter_wasm/src/lib.rs"
+          "crates/verter_wasm/src/lib.rs",
+          "crates/verter_wasm/src/typeinfo.rs"
         ],
-        "ownerCratePopulation": "78 verter_session files use verter_session::semantic_query paths at ratification; population re-derivation is ARH2's recorded obligation",
+        "ownerCratePopulation": "78 verter_session src files use crate-internal semantic_query paths at ratification; the importers array is the complete cross-crate population (85 files: ffi/napi/wasm sources through direct and aliased verter_session paths, plus verter_session benches and integration tests, which compile as separate crates) and the verifier enforces it exactly in both directions; population re-derivation is ARH2's recorded obligation",
         "internalNote": [
           "locator_identity",
           "resolver_core",
@@ -1061,12 +1068,91 @@
             "item": "all other pub items beyond retainedTypes",
             "kind": "bulk",
             "to": "pub(crate)",
-            "consumersAffected": [],
-            "note": "at ratification 246 pub types and 170 pub fns are pub while the twelve cross-crate consumers import only the retained ten types; the bulk narrowing migrates no external consumer because none references the narrowed names"
+            "consumersAffected": [
+              "crates/verter_session/benches/projection_safety_bench.rs",
+              "crates/verter_session/tests/allocation_cases/flow_literal_provenance.rs",
+              "crates/verter_session/tests/allocation_cases/flow_products.rs",
+              "crates/verter_session/tests/cases/compile-fail/composite_mint_unforgeable.rs",
+              "crates/verter_session/tests/cases/compile-fail/composite_replay_cross_kind.rs",
+              "crates/verter_session/tests/cases/compile-fail/composite_struct_literal_forge.rs",
+              "crates/verter_session/tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs",
+              "crates/verter_session/tests/cases/compile-fail/dto_names_session_hot_handle.rs",
+              "crates/verter_session/tests/cases/compile-fail/instantiate_body_source_sealed_to_dispatch_factory.rs",
+              "crates/verter_session/tests/cases/compile-fail/instantiate_key_context_not_extractable.rs",
+              "crates/verter_session/tests/cases/compile-fail/instantiate_key_seal_no_features.rs",
+              "crates/verter_session/tests/cases/compile-fail/locator_shape_ctx_no_prc_conversion.rs",
+              "crates/verter_session/tests/cases/compile-fail/member_role_stamps_not_mintable_without_witness.rs",
+              "crates/verter_session/tests/cases/compile-fail/object_projection_witness_not_forgeable.rs",
+              "crates/verter_session/tests/cases/compile-fail/object_projection_witness_only.rs",
+              "crates/verter_session/tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs",
+              "crates/verter_session/tests/cases/compile-fail/semantic_operand_force_projection_not_importable.rs",
+              "crates/verter_session/tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs",
+              "crates/verter_session/tests/cases/family_warm_read_releases_mutex_before_validate.rs",
+              "crates/verter_session/tests/cases/flow_product_lattice.rs",
+              "crates/verter_session/tests/cases/flow_solve_completeness.rs",
+              "crates/verter_session/tests/cases/g_binder/binder_identity_facts.rs",
+              "crates/verter_session/tests/cases/g_block/block_1_i_discriminators.rs",
+              "crates/verter_session/tests/cases/g_block/block_6i_leak_option_a_discriminator.rs",
+              "crates/verter_session/tests/cases/g_block/block_6i_mapped_source_declref_enum.rs",
+              "crates/verter_session/tests/cases/g_block/block_6i_round7_selected_key_callable_realization.rs",
+              "crates/verter_session/tests/cases/g_block/r6_query_identity_keys_content_free.rs",
+              "crates/verter_session/tests/cases/g_block/semantic_determinism_matrix.rs",
+              "crates/verter_session/tests/cases/g_block/u2_demand_lattice_guards.rs",
+              "crates/verter_session/tests/cases/g_block/u2_display_projection_guards.rs",
+              "crates/verter_session/tests/cases/g_block/u2_spec_table_guards.rs",
+              "crates/verter_session/tests/cases/g_block/u2b5_class_ns_enum_overload_guards.rs",
+              "crates/verter_session/tests/cases/g_block/u2b6_apparent_template_guards.rs",
+              "crates/verter_session/tests/cases/g_block/u2b7_flow_contextual_guards.rs",
+              "crates/verter_session/tests/cases/g_block/u2b8_relate_upgrade_guards.rs",
+              "crates/verter_session/tests/cases/g_block/u2b9_awaited_relation_guards.rs",
+              "crates/verter_session/tests/cases/g_block/u6_call_resolve_guards.rs",
+              "crates/verter_session/tests/cases/g_cache/r6_r21_query_identity_keys.rs",
+              "crates/verter_session/tests/cases/g_family/family_slots_multi_candidate.rs",
+              "crates/verter_session/tests/cases/g_misc0/capture_token_smoke.rs",
+              "crates/verter_session/tests/cases/g_misc0/declaration_merge_guards.rs",
+              "crates/verter_session/tests/cases/g_misc0/dep_signature_to_fact_signature.rs",
+              "crates/verter_session/tests/cases/g_misc0/dispatch_bridges_convert_project_generation.rs",
+              "crates/verter_session/tests/cases/g_misc0/flow_return_audit_tls_propagation.rs",
+              "crates/verter_session/tests/cases/g_misc0/synthetic_carrier_explicit_deepen_proof.rs",
+              "crates/verter_session/tests/cases/g_misc1/memo_traced_parse_fact_survives_warm_hit.rs",
+              "crates/verter_session/tests/cases/g_misc1/merged_symbol_identity.rs",
+              "crates/verter_session/tests/cases/g_misc1/path_precision_navigate_then_terminal.rs",
+              "crates/verter_session/tests/cases/g_misc1/pe4_evaluate_deferred_memo.rs",
+              "crates/verter_session/tests/cases/g_misc2/generic_instantiation_identity_and_bounded_work.rs",
+              "crates/verter_session/tests/cases/g_misc2/mapped_remap_dead_key_value_forcing.rs",
+              "crates/verter_session/tests/cases/g_misc2/pe4_evaluate_depth_budget.rs",
+              "crates/verter_session/tests/cases/g_misc2/pe4_mapped_type_k_independent_hoist.rs",
+              "crates/verter_session/tests/cases/g_misc2/pe4_substitute_hash_cons.rs",
+              "crates/verter_session/tests/cases/g_misc2/per_macro_projector_decomposition_tests.rs",
+              "crates/verter_session/tests/cases/g_misc2/recursive_substitute_memo.rs",
+              "crates/verter_session/tests/cases/g_misc3/slot_binding_graph_matrix_member_presence.rs",
+              "crates/verter_session/tests/cases/g_type/flow_return_audit_contract.rs",
+              "crates/verter_session/tests/cases/g_type/type_resolution_audit_cache_reuse_across_entrypoints.rs",
+              "crates/verter_session/tests/cases/g_type/type_resolution_audit_diamond_repeated_prop.rs",
+              "crates/verter_session/tests/cases/g_type/type_resolution_audit_intermediate_navigate_terminal_caller_mode.rs",
+              "crates/verter_session/tests/cases/g_type/type_resolution_audit_long_chain_stack_safe.rs",
+              "crates/verter_session/tests/cases/g_type/type_resolution_audit_no_unrelated_imports.rs",
+              "crates/verter_session/tests/cases/g_type/type_resolution_audit_pathological_recursion.rs",
+              "crates/verter_session/tests/cases/g_type/type_resolution_audit_read_once.rs",
+              "crates/verter_session/tests/cases/g_type/type_resolution_audit_tls_propagation.rs",
+              "crates/verter_session/tests/cases/relation_nominal_authority.rs",
+              "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs"
+            ],
+            "note": "at ratification 246 pub types and 170 pub fns are pub while the cross-crate population imports only the retained ten types (plus the seven retained assoc items below); retaining a type alone does not retain its methods, so PartialReasonSet::{empty,is_empty,iter,PROPAGATED,SEMANTIC_QUERY_FAULT}, ResultCompleteness::partial and ScopeId::file stay pub for the ffi/napi/wasm production consumers; the 68 recorded consumer files each import at least one narrowed name (integration tests and benches of verter_session compile as separate crates) and migrate to the existing for_tests test-support surface pattern in the same change as the narrowing"
           }
         ],
-        "rationale": "one authority (semantic_query.rs) with the cross-crate surface cut to exactly the imported envelope types; the inline pub mods stay pub inside the module",
-        "crossCrateRetainedVerifiedByConsumers": true
+        "rationale": "one authority (semantic_query.rs) with the cross-crate surface cut to exactly the imported envelope types and their used assoc items; the inline pub mods stay pub inside the module",
+        "crossCrateRetainedVerifiedByConsumers": true,
+        "retainedAssocItems": [
+          "PartialReasonSet::PROPAGATED",
+          "PartialReasonSet::SEMANTIC_QUERY_FAULT",
+          "PartialReasonSet::empty",
+          "PartialReasonSet::is_empty",
+          "PartialReasonSet::iter",
+          "ResultCompleteness::partial",
+          "ScopeId::file"
+        ],
+        "consumerProofNote": "the importers list is the complete cross-crate population, derived from use-statement and inline-path syntax (direct verter_session::semantic_query paths, aliased crate roots, module imports) with comments stripped, so mirror-documentation mentions are never consumers; every referenced name is either retained or carried by the bulk row's consumer migration, every retained type is imported by a real consumer, and assoc items used on retained types are retained"
       },
       "cohesiveModules": [
         {
@@ -1156,20 +1242,9 @@
         }
       ],
       "allowedImportDirection": {
-        "verter": [
-          "verter_semantic",
-          "verter_type_expr",
-          "verter_type_expr_oxc"
-        ],
-        "external": [
-          "oxc_ast",
-          "oxc_ast_visit",
-          "oxc_span",
-          "rustc_hash"
-        ],
-        "crateInternal": [
-          "flow_completion_inventory"
-        ],
+        "verter": ["verter_semantic", "verter_type_expr", "verter_type_expr_oxc"],
+        "external": ["oxc_ast", "oxc_ast_visit", "oxc_span", "rustc_hash"],
+        "crateInternal": ["flow_completion_inventory"],
         "mustNotImport": [
           "verter_compiler",
           "verter_parser",
@@ -1244,5 +1319,6 @@
         }
       }
     }
-  ]
+  ],
+  "ac4Rationale": "AC4 surfaces a contract-only node cannot discharge with artifacts are specified for its producers instead: the VIM/DX capability mapping and the exact host/profile evidence are DOC2/ARH2 obligations above; migration notes are each narrowing row's exact consumersAffected inventory plus the cutover dispositions; permissions are not applicable (no capability, filesystem, network or editor-permission surface is created or widened at this node, so there is no permission note to publish); uncertainty is recorded as population and snapshot counts pinned to the ratification candidate with re-derivation owed by ARH2 — never presented as live invariants, and no partial or conditional runtime result is claimed anywhere in these bytes."
 }

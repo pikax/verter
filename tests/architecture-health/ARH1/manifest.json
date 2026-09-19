@@ -1,10 +1,7 @@
 {
   "node": "ARH1",
   "kind": "constitution",
-  "products": [
-    "ARH1DependencyContracts",
-    "ARH1CutoverRegister"
-  ],
+  "products": ["ARH1DependencyContracts", "ARH1CutoverRegister"],
   "cases": [
     {
       "id": "ARH1-hotspot-coverage",
@@ -24,7 +21,8 @@
       "disposition": "reject",
       "twins": [
         "clean products",
-        "import-drift (declared vs measured, both directions)",
+        "import-drift (declared vs measured, both directions, for verter, external and crate-internal roots)",
+        "import-drift (test configuration stripped: cfg(test)/cfg(all(test, ..)) items never count as production direction)",
         "forbidden-import (source and Cargo.toml)",
         "layer-violation",
         "layer-rule-contradiction",
@@ -51,7 +49,8 @@
         "bad-lifetime",
         "state-without-owner",
         "state-owner-missing",
-        "state-not-in-source"
+        "state-not-in-source",
+        "state-owner-without-declaration"
       ]
     },
     {
@@ -63,7 +62,14 @@
         "surface-item-missing",
         "retained-item-unconsumed",
         "bad-narrow-target",
-        "missing-narrow-consumer"
+        "missing-narrow-consumer",
+        "narrow-hook-without-reference-forms",
+        "narrow-consumer-without-reference",
+        "narrow-consumer-omitted",
+        "importer-population-drift",
+        "narrowed-item-consumer-unrecorded",
+        "assoc-item-unretained",
+        "assoc-item-missing"
       ]
     },
     {
@@ -86,6 +92,9 @@
         "clean products",
         "arh0-debt-undecided",
         "cutover-route-missing",
+        "cutover-route-invented",
+        "duplicate-cutover-route",
+        "duplicate-satisfies",
         "cutover-without-disposition",
         "missing-candidate-path",
         "deletion-rationale-missing"
@@ -99,12 +108,13 @@
         "manifest-case-drift",
         "manifest-product-drift",
         "manifest-command-drift",
-        "obligation-producer-malformed"
+        "obligation-producer-malformed",
+        "ac4-surface-uncovered"
       ]
     }
   ],
   "verify": "node tests/architecture-health/ARH1/verify.mjs",
   "test": "node --test tests/architecture-health/ARH1/arh1.test.mjs",
   "runtimeCorrectness": false,
-  "notes": "Contract-only constitution (0 production LOC). The verifier (the sole owning interface, wired as the verify/test commands below) joins the shipped ARH0 predecessor products (responsibility map, debt register) and the live tree: hotspot coverage is exactly the ARH0 god-module population with no dropped or invented responsibility, the declared import direction equals the measured import tree of each hotspot source (forbidden directions absent from source and manifest, layer rules equal to the live Cargo manifests), constructor capability anchors and retained/narrowed surface items bind real declarations, state-lifetime rows name live identifiers with one sole owner, cohesive splits cannot retain shared unrestricted state (ARH1-AC2), and every route (including ARH0 debt rows naming ARH1 and every declared narrowing route) has exactly one cutover disposition. Owner/heir ids are structural references into the TAMA-controller-owned program DAG; this tree resolves them structurally only. Implementation of the contracts is bound to the named successors: ARH2 characterizes and re-derives populations, ARH3/ARH4 narrow, ARH11 removes residue, ARH12 adds the compile-time enforcement, DOC2 documents. Snapshot counts are ratification evidence, not live invariants. Retained evidence spec: tests/architecture-health/evidence/ARH1/cases.md."
+  "notes": "Contract-only constitution (0 production LOC). The verifier (the sole owning interface, wired as the verify/test commands below) joins the shipped ARH0 predecessor products (responsibility map, debt register) and the live tree: hotspot coverage is exactly the ARH0 god-module population with no dropped or invented responsibility, the declared import direction equals the production import tree measured from each hotspot source (cfg(test) and cfg(all(test, ..)) items stripped before measuring; comments stripped; nested use groups expanded with prefix inheritance so brace-list items never classify as roots; verter, external and crate-internal roots all compared two-way; forbidden directions absent from the full source — test configuration included — and the layer rules equal the live Cargo manifests), constructor capability anchors and retained/narrowed surface items bind real declarations, state-lifetime rows name live identifiers with one sole owner whose declaration lives in the named owner target, narrowing rows carry an exact consumer inventory (every recorded consumer references the item through a recorded qualified form in comment-stripped code, and every referencing file outside the owning crate is recorded), the semantic_query importer list is the complete derived cross-crate population (direct, aliased and module-import path syntax; mirror-documentation mentions are never consumers) with every referenced name retained or migrated by the bulk row and every assoc item used on a retained type retained, cohesive splits cannot retain shared unrestricted state (ARH1-AC2), and every route (ARH0 debt rows naming ARH1, plus every declared narrowing route keyed per (candidate, narrow kind)) has exactly one cutover disposition with no duplicate route or debt decision. Owner/heir ids are structural references into the TAMA-controller-owned program DAG; this tree resolves them structurally only. Implementation of the contracts is bound to the named successors: ARH2 characterizes and re-derives populations, ARH3/ARH4 narrow, ARH11 removes residue, ARH12 adds the compile-time enforcement, DOC2 documents. Snapshot counts are ratification evidence, not live invariants. Retained evidence spec: tests/architecture-health/evidence/ARH1/cases.md."
 }
