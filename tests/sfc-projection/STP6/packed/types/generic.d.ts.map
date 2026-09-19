@@ -1,0 +1,8 @@
+{
+  "version": 3,
+  "file": "generic.d.ts",
+  "sourceRoot": "",
+  "sources": ["../src/Generic.vue"],
+  "names": [],
+  "mappings": "AAAA"
+}

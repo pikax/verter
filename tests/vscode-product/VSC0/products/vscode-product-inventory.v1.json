@@ -1,0 +1,412 @@
+{
+  "id": "VsCodeProductInventory",
+  "schema": 1,
+  "status": "ratified",
+  "ratifiedBy": "VSC0",
+  "package": "verter-vscode",
+  "sourceOfTruth": "packages/vue-vscode/package.json and packages/vue-vscode/src, re-derived from the live repository by tests/vscode-product/VSC0/verify.mjs",
+  "profile": "editor",
+  "obligation": "RequiredCurrent",
+  "obligationNote": "every shipped valid feature is RequiredCurrent, inherited from DX0 section 2",
+  "manifest": {
+    "version": "0.0.2",
+    "main": "dist/extension.js",
+    "browserField": "absent",
+    "extensionKind": "absent",
+    "hostToday": "desktop-only Node extension host: a single Node bundle with no browser entrypoint and no extensionKind declaration"
+  },
+  "activationEvents": [
+    "onCommand:verter.restartLanguageServer",
+    "onCommand:verter.setupMcpForClaudeCode",
+    "onCommand:verter.showStatistics",
+    "onLanguage:javascript",
+    "onLanguage:javascriptreact",
+    "onLanguage:svelte",
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "onLanguage:vue",
+    "onView:verterAnalysis",
+    "onView:verterVirtualFiles"
+  ],
+  "commands": [
+    {
+      "id": "verter.showOutputChannel",
+      "title": "Verter: Show Output Channel",
+      "implementation": "packages/vue-vscode/src/extension.ts",
+      "evidence": ["packages/vue-vscode/src/extension.ts"]
+    },
+    {
+      "id": "verter.restartLanguageServer",
+      "title": "Verter: Restart Language Server",
+      "implementation": "packages/vue-vscode/src/extension.ts",
+      "evidence": ["packages/vue-vscode/src/extension.ts", "packages/vue-vscode/src/restart.ts"]
+    },
+    {
+      "id": "verter.selectTypeProvider",
+      "title": "Select TypeScript Type Provider",
+      "implementation": "packages/vue-vscode/src/extension.ts",
+      "evidence": [
+        "packages/vue-vscode/src/extension.ts",
+        "packages/vue-vscode/src/statusBar.ts",
+        "packages/vue-vscode/src/carrierProviderSupport.ts"
+      ]
+    },
+    {
+      "id": "verter.showCompiledCodeToSide",
+      "title": "Verter: Show compiled Code to Side",
+      "implementation": "packages/vue-vscode/src/extension.ts",
+      "evidence": [
+        "packages/vue-vscode/src/extension.ts",
+        "packages/vue-vscode/src/CompiledCodeContentProvider.ts"
+      ]
+    },
+    {
+      "id": "verter.writeVirtualFiles",
+      "title": "Verter: Write Virtual Files for File",
+      "implementation": "packages/vue-vscode/src/extension.ts",
+      "evidence": [
+        "packages/vue-vscode/src/extension.ts",
+        "packages/vue-vscode/src/CompiledCodeContentProvider.ts"
+      ],
+      "note": "aliases the compiled-code preview route: the contributed title says write-to-disk but the handler opens the same virtual preview"
+    },
+    {
+      "id": "verter.showStatistics",
+      "title": "Verter: Show Processing Statistics",
+      "implementation": "packages/vue-vscode/src/extension.ts",
+      "evidence": ["packages/vue-vscode/src/extension.ts"]
+    },
+    {
+      "id": "verter.showRecentAuditRecords",
+      "title": "Verter: Show Recent Audit Records",
+      "implementation": "packages/vue-vscode/src/audit.ts",
+      "evidence": [
+        "packages/vue-vscode/src/audit.ts",
+        "packages/vue-vscode/src/audit.transforms.ts"
+      ]
+    },
+    {
+      "id": "verter.openVirtualFile",
+      "title": "Verter: Open in Editor",
+      "implementation": "packages/vue-vscode/src/extension.ts",
+      "evidence": [
+        "packages/vue-vscode/src/extension.ts",
+        "packages/vue-vscode/src/UnifiedVirtualFilesProvider.ts",
+        "packages/vue-vscode/src/VirtualFileManager.ts"
+      ]
+    },
+    {
+      "id": "verter.showSourceMapForFile",
+      "title": "Verter: Show Source Map",
+      "implementation": "packages/vue-vscode/src/extension.ts",
+      "evidence": [
+        "packages/vue-vscode/src/extension.ts",
+        "packages/vue-vscode/src/SourceMapWebviewPanel.ts",
+        "packages/vue-vscode/src/sourcemap.ts"
+      ]
+    },
+    {
+      "id": "verter.refreshVirtualFiles",
+      "title": "Verter: Refresh Virtual Files",
+      "implementation": "packages/vue-vscode/src/extension.ts",
+      "evidence": ["packages/vue-vscode/src/extension.ts", "packages/vue-vscode/src/UnifiedVirtualFilesProvider.ts"]
+    },
+    {
+      "id": "verter.refreshAnalysis",
+      "title": "Verter: Refresh Analysis",
+      "implementation": "packages/vue-vscode/src/extension.ts",
+      "evidence": [
+        "packages/vue-vscode/src/extension.ts",
+        "packages/vue-vscode/src/AnalysisTreeProvider.ts",
+        "packages/vue-vscode/src/ComponentTreeProvider.ts"
+      ]
+    },
+    {
+      "id": "verter.refreshRoutes",
+      "title": "Verter: Refresh Routes",
+      "implementation": "packages/vue-vscode/src/extension.ts",
+      "evidence": ["packages/vue-vscode/src/extension.ts", "packages/vue-vscode/src/RouteTreeProvider.ts"]
+    },
+    {
+      "id": "verter.showSourceMapVisualization",
+      "title": "Verter: Show Source Map Visualization",
+      "implementation": "packages/vue-vscode/src/extension.ts",
+      "evidence": [
+        "packages/vue-vscode/src/extension.ts",
+        "packages/vue-vscode/src/SourceMapWebviewPanel.ts",
+        "packages/vue-vscode/src/sourcemap.ts"
+      ]
+    },
+    {
+      "id": "verter.goToComponent",
+      "title": "Verter: Go to Component Definition",
+      "implementation": "packages/vue-vscode/src/extension.ts",
+      "evidence": ["packages/vue-vscode/src/extension.ts", "packages/vue-vscode/src/ComponentTreeProvider.ts"]
+    },
+    {
+      "id": "verter.goToParentFile",
+      "title": "Verter: Go to Parent File",
+      "implementation": "packages/vue-vscode/src/extension.ts",
+      "evidence": ["packages/vue-vscode/src/extension.ts", "packages/vue-vscode/src/ComponentTreeProvider.ts"]
+    },
+    {
+      "id": "verter.setupMcpForClaudeCode",
+      "title": "Verter: Setup MCP for Claude Code",
+      "implementation": "packages/vue-vscode/src/extension.ts",
+      "evidence": [
+        "packages/vue-vscode/src/extension.ts",
+        "packages/vue-vscode/src/mcpServer.ts",
+        "packages/vue-vscode/src/claudeCodeDetection.ts"
+      ]
+    }
+  ],
+  "internalCommands": {
+    "policy": "Registered in code but not contributed: internal callbacks and E2E-only bridges are not product surface and never appear in the manifest.",
+    "rows": [
+      {
+        "id": "verter.openRouteComponent",
+        "kind": "tree-item-callback",
+        "implementation": "packages/vue-vscode/src/extension.ts"
+      },
+      {
+        "id": "verter._getDecorationState",
+        "kind": "e2e-only",
+        "gate": "VERTER_E2E_TEST",
+        "implementation": "packages/vue-vscode/src/extension.ts"
+      },
+      {
+        "id": "verter._getComponentMeta",
+        "kind": "e2e-only",
+        "gate": "VERTER_E2E_TEST",
+        "implementation": "packages/vue-vscode/src/extension.ts"
+      },
+      {
+        "id": "verter._getComponentMetaSurface",
+        "kind": "e2e-only",
+        "gate": "VERTER_E2E_TEST",
+        "implementation": "packages/vue-vscode/src/extension.ts"
+      },
+      {
+        "id": "verter._getComponentMetaTypeExpansion",
+        "kind": "e2e-only",
+        "gate": "VERTER_E2E_TEST",
+        "implementation": "packages/vue-vscode/src/extension.ts"
+      }
+    ]
+  },
+  "views": {
+    "containers": [
+      {
+        "id": "verter-analysis",
+        "title": "Verter Analysis",
+        "location": "activitybar"
+      }
+    ],
+    "views": [
+      {
+        "id": "verterVirtualFiles",
+        "container": "verter-analysis",
+        "provider": "packages/vue-vscode/src/UnifiedVirtualFilesProvider.ts",
+        "scheme": "verter-virtual://"
+      },
+      {
+        "id": "verterComponentTree",
+        "container": "verter-analysis",
+        "provider": "packages/vue-vscode/src/ComponentTreeProvider.ts"
+      },
+      {
+        "id": "verterAnalysis",
+        "container": "verter-analysis",
+        "provider": "packages/vue-vscode/src/AnalysisTreeProvider.ts",
+        "demandGatedBy": "verter.analysis.enabled"
+      },
+      {
+        "id": "verterRoutes",
+        "container": "verter-analysis",
+        "provider": "packages/vue-vscode/src/RouteTreeProvider.ts"
+      }
+    ],
+    "contentProviders": [
+      { "scheme": "verter-compiled://", "provider": "packages/vue-vscode/src/CompiledCodeContentProvider.ts" },
+      { "scheme": "verter-virtual://", "provider": "packages/vue-vscode/src/VirtualFileManager.ts" }
+    ]
+  },
+  "menus": [
+    { "menu": "view/item/context", "command": "verter.openVirtualFile", "when": "view == verterVirtualFiles && viewItem == virtual-file" },
+    { "menu": "view/title", "command": "verter.showSourceMapVisualization", "when": "view == verterVirtualFiles" },
+    { "menu": "view/title", "command": "verter.refreshVirtualFiles", "when": "view == verterVirtualFiles" },
+    { "menu": "view/title", "command": "verter.refreshAnalysis", "when": "view == verterAnalysis" },
+    { "menu": "view/title", "command": "verter.refreshRoutes", "when": "view == verterRoutes" }
+  ],
+  "settings": {
+    "policy": "Every contributed configuration key is inventoried by id; defaults and semantics stay owned by their feature rows in the FeatureOwnershipMatrix.",
+    "keys": [
+      "verter.enable",
+      "verter.lspBinaryPath",
+      "verter.statistics.enabled",
+      "verter.statistics.persistToFile",
+      "verter.statistics.filePath",
+      "verter.statistics.maxSessionEntries",
+      "verter.statistics.maxPersistedEntries",
+      "verter.analysis.enabled",
+      "verter.decorations.vueApiCalls",
+      "verter.decorations.bindingColors",
+      "verter.decorations.bindingColorsScope",
+      "verter.decorations.bindingColorsStyle",
+      "verter.decorations.propConstness",
+      "verter.trace.server",
+      "verter.server.logLevel",
+      "verter.lint.enabled",
+      "verter.lint.preset",
+      "verter.inlayHints.enabled",
+      "verter.viteConfig.enabled",
+      "verter.viteConfig.trustedFiles",
+      "verter.mcp.enabled",
+      "verter.mcp.port",
+      "verter.mcp.lintPreset",
+      "verter.mcp.claudeCodeNotification",
+      "verter.typeProvider",
+      "verter.typescript.tsdk",
+      "verter.providerRecommendations",
+      "verter.experimental.conditionalRootNarrowing",
+      "verter.experimental.exposeBindingsTesting",
+      "verter.experimental.strictSlots",
+      "verter.hover.nativeSemantics",
+      "verter.hover.provenance"
+    ]
+  },
+  "providerModes": {
+    "setting": "verter.typeProvider",
+    "enum": ["auto", "shared-tsgo", "tsgo", "tsserver", "editor-tsserver", "extension", "off"],
+    "restartRequired": true,
+    "note": "the DX0 provider-mode matrix at the desktop boundary; mode changes the serving engine, never the semantic authority"
+  },
+  "languages": [
+    { "id": "vue", "configuration": "languages/vue-language-configuration.json", "configOnDisk": true },
+    { "id": "svelte", "configuration": "languages/svelte-language-configuration.json", "configOnDisk": true },
+    { "id": "vue-html", "configuration": "languages/vue-html-language-configuration.json", "configOnDisk": true },
+    {
+      "id": "vue-postcss",
+      "configuration": "languages/vue-postcss-language-configuration.json",
+      "configOnDisk": false,
+      "gap": "referenced by contributes.languages but the file is missing on disk; VS Code silently drops the language configuration while the grammar still loads; repair owned by VSC7"
+    },
+    {
+      "id": "vue-sugarss",
+      "configuration": "languages/vue-sugarss-language-configuration.json",
+      "configOnDisk": false,
+      "gap": "referenced by contributes.languages but the file is missing on disk; VS Code silently drops the language configuration while the grammar still loads; repair owned by VSC7"
+    }
+  ],
+  "grammars": [
+    { "language": "vue", "scopeName": "source.vue", "path": "syntaxes/vue-generated.json" },
+    { "language": "svelte", "scopeName": "source.svelte", "path": "syntaxes/svelte.tmLanguage.json" },
+    { "language": "vue-postcss", "scopeName": "source.css.postcss", "path": "syntaxes/vue-postcss.json" },
+    { "language": "vue-sugarss", "scopeName": "source.css.sugarss", "path": "syntaxes/vue-sugarss.json" },
+    { "language": "vue-html", "scopeName": "text.html.vue-html", "path": "syntaxes/vue-html.tmLanguage.json" },
+    { "scopeName": "vue.pug.directives", "path": "syntaxes/pug/directives.tmLanguage.json" },
+    { "scopeName": "vue.pug.interpolations", "path": "syntaxes/pug/interpolations.tmLanguage.json" },
+    { "scopeName": "markdown.vue.codeblock", "path": "syntaxes/markdown-vue.json" }
+  ],
+  "colors": [
+    "verter.binding.ref",
+    "verter.binding.computed",
+    "verter.binding.reactive",
+    "verter.binding.prop",
+    "verter.binding.composable",
+    "verter.binding.mutable",
+    "verter.binding.function",
+    "verter.propConstness.const",
+    "verter.propConstness.dynamic"
+  ],
+  "snippets": {
+    "status": "absent",
+    "reason": "no contributes.snippets entries ship today; absence is recorded so a later snippet surface is a new owner decision, not an undocumented removal"
+  },
+  "keybindings": { "status": "absent" },
+  "lifecycle": {
+    "policy": "Activation, recovery and teardown behavior captured in actual code; the owning implementation node is VSC1.",
+    "rows": [
+      {
+        "id": "activation-gate",
+        "behavior": "single-run activation gate: activate() runs the activation exactly once and deactivation resets it",
+        "evidence": ["packages/vue-vscode/src/activationGate.ts"]
+      },
+      {
+        "id": "deferred-features",
+        "behavior": "analysis sidebar, watchers and Claude Code check register only on the server's $/verter/ready notification, never at activation",
+        "evidence": ["packages/vue-vscode/src/extension.ts"]
+      },
+      {
+        "id": "start-attempt-scope",
+        "behavior": "one StartAttemptScope per language-server start attempt: failure disposes its own registrations; a spent attempt cannot hand the workspace an ownerless server",
+        "evidence": ["packages/vue-vscode/src/extension.ts", "packages/vue-vscode/src/extensionStartAttemptLifetime.spec.ts"]
+      },
+      {
+        "id": "heartbeat-watchdog",
+        "behavior": "$/verter/heartbeat watchdog: 30s window after first heartbeat, 60s initial grace, auto-restart only over a server that actually started",
+        "evidence": ["packages/vue-vscode/src/extension.ts"]
+      },
+      {
+        "id": "restart-supervisor",
+        "behavior": "bounded manual/automatic restart with give-up UX and orphaned type-provider pid cleanup",
+        "evidence": ["packages/vue-vscode/src/restart.ts", "packages/vue-vscode/src/extension.ts"]
+      },
+      {
+        "id": "mcp-child-lifetime",
+        "behavior": "standalone verter-mcp HTTP child owned by the start attempt, --client-pid bound to the extension host, bounded crash respawn, port learned from the child's readiness record",
+        "evidence": ["packages/vue-vscode/src/mcpServer.ts"]
+      },
+      {
+        "id": "client-process-lifetime",
+        "behavior": "LSP launch carries the extension-host pid so a hard host kill cannot orphan the server",
+        "evidence": ["packages/vue-vscode/src/clientProcessLifetime.ts"]
+      },
+      {
+        "id": "binary-discovery",
+        "behavior": "findLspBinary precedence: e2e copy > verter.lspBinaryPath > newest cargo target (artifact-dev/debug/release, triple-qualified first) > bundled > PATH",
+        "evidence": ["packages/vue-vscode/src/extension.ts", "packages/vue-vscode/src/rustHostTriple.ts"]
+      },
+      {
+        "id": "startup-probe",
+        "behavior": "VERTER_STARTUP_PROBE config drives timing markers and readiness/diagnostics tracking to a file",
+        "evidence": ["packages/vue-vscode/src/startupProbe.ts"]
+      },
+      {
+        "id": "plain-script-sync",
+        "behavior": "plain TS/JS documents are synchronized to the LSP without registering competing editor features; plain-script LSP diagnostics are suppressed in the editor",
+        "evidence": ["packages/vue-vscode/src/plainScriptDocumentSync.ts"]
+      },
+      {
+        "id": "ts-plugin-carrier-store",
+        "behavior": "$/verter/carrierStoreReady forwards the LSP-resolved carrier store dir to VS Code's own TypeScript server via _typescript.configurePlugin so plain .ts importing .vue reads the same store; refresh tokens advance only after a durable publication pass",
+        "evidence": ["packages/vue-vscode/src/extension.ts", "packages/vue-vscode/src/typescriptPluginRefreshScheduler.ts"]
+      }
+    ]
+  },
+  "sourceModules": {
+    "policy": "Per-module tier classification lives in DesktopWebSharedBoundary (desktop-web-shared-boundary.v1.json) and is re-derived from the live tree; this inventory pins only the population counts.",
+    "counts": {
+      "productionModules": 47,
+      "desktop": 20,
+      "presentation": 6,
+      "pure": 21,
+      "specFiles": 46,
+      "testSupportFiles": 1,
+      "totalSourceFiles": 94
+    }
+  },
+  "e2eSurface": {
+    "policy": "Existing coverage this inventory preserves and later nodes extend, never duplicate.",
+    "directories": [
+      "packages/vue-vscode/e2e/suite",
+      "packages/vue-vscode/e2e/acceptance",
+      "packages/vue-vscode/e2e/dx",
+      "packages/vue-vscode/e2e/lib"
+    ],
+    "entryPoints": [
+      "packages/vue-vscode/e2e/runTests.ts",
+      "packages/vue-vscode/e2e/acceptance/launch.ts"
+    ]
+  }
+}

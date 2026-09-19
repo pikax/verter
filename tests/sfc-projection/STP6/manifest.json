@@ -1,0 +1,83 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP6",
+  "kind": "proof",
+  "products": ["PackedConsumerFeasibility", "PublicDependencyClosurePolicy"],
+  "mandatoryCases": [
+    "STP6-package-instance",
+    "STP6-package-generics",
+    "STP6-hidden-metadata",
+    "STP6-closure",
+    "STP6-decl-map",
+    "STP6-resolution"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP6/probes/accept-package-instance.ts",
+    "negative": "tests/sfc-projection/STP6/probes/reject-hidden-metadata.ts",
+    "cleanTwin": "tests/sfc-projection/STP6/probes/accept-package-instance.ts",
+    "tsconfig": "tests/sfc-projection/STP6/probes/tsconfig.json",
+    "hoverNeedle": "stp6HoverTarget",
+    "definitionNeedle": "stp6DefinitionTarget",
+    "expectedNegativeCode": 2307,
+    "expectedHoverType": "() => void",
+    "expectedInstanceType": "Comp"
+  },
+  "cases": [
+    {
+      "id": "STP6-package-instance",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP6/probes/accept-package-instance.ts",
+      "expectedInstanceType": "Comp",
+      "hoverNeedle": "stp6HoverTarget",
+      "expectedHoverType": "() => void",
+      "twins": ["direct-import", "alias", "barrel", "namespace", "project-references", "package-exports"]
+    },
+    {
+      "id": "STP6-package-generics",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP6/probes/accept-package-generics.ts",
+      "hoverNeedle": "stp6HoverTarget",
+      "expectedHoverType": "string",
+      "twins": ["source-consumer", "packed-consumer", "callback", "slot", "model", "ref"]
+    },
+    {
+      "id": "STP6-hidden-metadata",
+      "disposition": "reject",
+      "file": "tests/sfc-projection/STP6/probes/reject-hidden-metadata.ts",
+      "dirtyTwin": "tests/sfc-projection/STP6/probes/accept-package-instance.ts",
+      "expectedCode": 2307,
+      "twins": ["packed-public-exports", "producer-unpublished-sidecar"]
+    },
+    {
+      "id": "STP6-closure",
+      "disposition": "reject",
+      "file": "tests/sfc-projection/STP6/probes/reject-closure.ts",
+      "dirtyTwin": "tests/sfc-projection/STP6/probes/reject-closure-clean.ts",
+      "expectedCode": 2307,
+      "twins": ["closed-declaration", "private-virtual-path"]
+    },
+    {
+      "id": "STP6-decl-map",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP6/probes/accept-decl-map.ts",
+      "expectedInstanceType": "Comp",
+      "hoverNeedle": "stp6HoverTarget",
+      "expectedHoverType": "() => void",
+      "twins": ["shipped-authored-source", "virtual-map-source"]
+    },
+    {
+      "id": "STP6-resolution",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP6/probes/accept-resolution.ts",
+      "expectedInstanceType": "Comp",
+      "hoverNeedle": "stp6HoverTarget",
+      "expectedHoverType": "() => void",
+      "twins": ["bundler", "node16", "nodenext", "package-subpaths"]
+    }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP6 --engine all --require-all --json",
+  "test": "node --test tests/sfc-projection/STP6/packed.spec.ts",
+  "runtimeCorrectness": true,
+  "notes": "Proof of declaration closure and fresh-package feasibility. Does not implement production declaration emit. Expected reject-twin failures are harness data."
+}

@@ -1,0 +1,27 @@
+{
+  "id": "reference-harness.v1",
+  "harness": "docs-reference-harness",
+  "owner": "DOC1",
+  "interface": "docs/scripts/reference-harness.mjs",
+  "commands": {
+    "check": "pnpm --filter docs check",
+    "build": "pnpm docs:build",
+    "direct": "node docs/scripts/reference-harness.mjs",
+    "generatedFreshness": "pnpm gen:typeinfo-manifest:check"
+  },
+  "home": "examples/reference",
+  "capabilitySource": "tests/documentation/DOC0/products/generated-reference-plan.v1.json",
+  "capabilityRule": "examples may only cite surface ids from the existing catalog pin; this product is not a second matrix",
+  "hostProfile": {
+    "host": "node",
+    "profile": "docs-domain",
+    "executionClasses": ["static-proof", "NativeOnly", "ExternalOwner"]
+  },
+  "receiptBasis": ["sourceRevisions", "projectConfiguration", "engineIdentity", "hostIdentity", "completenessState"],
+  "proofClass": "static-proof",
+  "runtimeClaim": "none",
+  "uncertaintyNotes": "Native compile, verter-tsc typecheck and WASM playground execution are not claimed at this node. Examples are publishable as static-proof of public exports and shipped bins. Runtime observation stays with later terminals. Contributor sandboxes examples/ and packages/example remain unpublished as executed evidence.",
+  "permissions": "the harness reads the repository and spawns the existing typeinfo freshness command; it writes no generated pages and installs no packages",
+  "migrationNotes": "additive. No dual authority: published user examples live only under examples/reference. Hand-written API pages remain DOC3 generation input.",
+  "resourceRationale": "synchronous static validation over a small authored tree plus an optional existing generator --check; no new latency, allocation or RSS budget is bound to the ratified performance methodology"
+}

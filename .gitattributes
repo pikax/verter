@@ -38,6 +38,14 @@ tests/fixtures/**           text eol=lf
 crates/*/tests/fixtures/**  text eol=lf
 packages/*/tests/fixtures/** text eol=lf
 .integration-tests/**       text eol=lf
+
+# Gradle (extensions/jetbrains): `gradlew` must stay LF or the Linux CI lane
+# cannot execute it; the wrapper jar and distribution zips are binary.
+gradlew                     text eol=lf
+gradlew.bat                 text eol=crlf
+*.kts                       text eol=lf
+*.properties                text eol=lf
+*.jar                       binary
 # The Svelte oracle corpus lives outside `tests/fixtures/` (under
 # `svelte_oracle_corpus/fixtures/` + `…/goldens/`); its fixtures embed
 # INTENTIONAL control chars (a literal LF / CR inside a `class="…"`), so a

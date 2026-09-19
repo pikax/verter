@@ -1,0 +1,57 @@
+{
+  "id": "web-product-guides-model.v1",
+  "harness": "docs-reference-harness",
+  "owner": "DOC5",
+  "interface": "docs/scripts/reference-harness.mjs (recipes manifest section, journeys manifest section, receipt.recipes, receipt.journeys, recipesGate and runJourneys options)",
+  "commands": {
+    "check": "pnpm --filter docs check",
+    "direct": "node docs/scripts/reference-harness.mjs",
+    "recipesGate": "node docs/scripts/reference-harness.mjs --recipes-gate",
+    "journeys": "node docs/scripts/reference-harness.mjs --run-journeys",
+    "tests": "node --test tests/documentation/DOC5/doc5.test.mjs"
+  },
+  "home": "examples/reference",
+  "guideIndex": "examples/reference/guides/README.md",
+  "topics": [
+    { "id": "accessibility", "page": "examples/reference/guides/accessibility.md", "producingNode": "AX0" },
+    { "id": "compatibility", "page": "examples/reference/guides/compatibility.md", "producingNode": "WBC0" },
+    { "id": "css", "page": "examples/reference/guides/css.md", "producingNode": "CSS0" },
+    { "id": "debug", "page": "examples/reference/guides/debug.md", "producingNode": "DBG0" },
+    { "id": "performance", "page": "examples/reference/guides/performance.md", "producingNode": "WPF0" },
+    { "id": "runtime", "page": "examples/reference/guides/runtime.md", "producingNode": "RTI0" },
+    { "id": "security", "page": "examples/reference/guides/security.md", "producingNode": "SEC0" },
+    { "id": "tests", "page": "examples/reference/guides/tests.md", "producingNode": "TST0" }
+  ],
+  "gate": {
+    "id": "recipes-docs-gate",
+    "commandFlag": "--recipes-gate",
+    "enforced": false,
+    "enforcedWhen": "the release lane turns the gate on when the first producing feature node (CSS0, WBC0, DBG0, TST0, RTI0, AX0, WPF0 or SEC0) supplies an executable recipe example with a capability link; until then every slot stays pending and the standard docs check runs without the gate",
+    "rule": "every topic must be supplied by a manifest example whose files include a file with an executable source extension (.ts/.mts/.cts/.js/.mjs/.cjs), whose entry is a shipped-bin command or a public import, and which cites at least one capability surface from the existing catalog; a static sample without an executable extension, an example without a capability link, a pending topic, or an unbound slot fails the gate"
+  },
+  "journeys": {
+    "model": "manifest journeys are ordered step programs over manifest examples; a step runs either an executable example file (NodeOnly) or a shipped-bin command declared by the bound example (NativeOnly), with declared args and expected exit codes",
+    "executionFlag": "--run-journeys",
+    "executionClasses": ["NodeOnly", "NativeOnly"],
+    "stepTimeoutMs": 60000,
+    "receiptBasis": "executed journeys record per-step exit codes and stdout digests with engine and host identity under the WDX0 runtime-observation class; journeys that are not run are recorded not-run, never presented as executed",
+    "declared": [
+      {
+        "id": "cli-version-smoke",
+        "executionClass": "NativeOnly",
+        "steps": [{ "exampleId": "shipped-cli", "command": "verter-tsc", "args": ["--version"], "expectExit": 0 }]
+      }
+    ]
+  },
+  "hostProfile": {
+    "host": "node",
+    "profile": "docs-domain",
+    "executionClasses": ["static-proof", "NodeOnly", "NativeOnly", "ExternalOwner"]
+  },
+  "proofClass": "static-proof",
+  "runtimeClaim": "none by default",
+  "uncertaintyNotes": "The recipe model requires real feature examples when the producing nodes land; today all eight slots are pending and no recipe page claims a working example. The journey executor is proven by real NodeOnly execution over the committed fixture home in tests/documentation/DOC5/fixtures; the declared cli-version-smoke journey needs the platform binary and is executed only on artifact-present lanes via --run-journeys, never faked as passed elsewhere.",
+  "permissions": "the harness reads the repository and spawns the existing typeinfo freshness command; --run-journeys additionally spawns node child processes for journey steps (example files or shipped bin launchers) with a bounded per-step runtime, and installs no packages, writes no files and opens no network",
+  "migrationNotes": "additive to the DOC1 harness and the examples/reference manifest; the DOC0 executable-examples plan deferral of runtime example execution to DOC5 is discharged by the journeys model. SDK guides keep their own sdkGuides section and --sdk-gate; recipe topics never restate them. Producing nodes migrate slots from pending to supplied by binding example ids with capability surfaces and turning on --recipes-gate in the release lane.",
+  "resourceRationale": "synchronous static validation over a small authored tree; journey execution is opt-in, sequential and bounded at 60000 ms per step, so no unbounded latency, allocation or RSS budget is introduced and no ratified performance methodology measurement is claimed"
+}

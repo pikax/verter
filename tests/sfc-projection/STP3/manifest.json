@@ -1,0 +1,84 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP3",
+  "kind": "proof",
+  "products": ["CoupledInferenceEvidence", "InferenceWitnessSelection"],
+  "mandatoryCases": [
+    "STP3-coupled",
+    "STP3-wrong-channel",
+    "STP3-inference-only-channel",
+    "STP3-order-independent",
+    "STP3-ordered-merge",
+    "STP3-fresh-uses"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP3/probes/accept-coupled.ts",
+    "negative": "tests/sfc-projection/STP3/probes/reject-wrong-channel.ts",
+    "cleanTwin": "tests/sfc-projection/STP3/probes/accept-coupled.ts",
+    "tsconfig": "tests/sfc-projection/STP3/probes/tsconfig.json",
+    "hoverNeedle": "stp3HoverTarget",
+    "definitionNeedle": "stp3DefinitionTarget",
+    "expectedNegativeCode": 2551,
+    "expectedHoverType": "string",
+    "expectedInstanceType": "Comp"
+  },
+  "cases": [
+    {
+      "id": "STP3-coupled",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP3/probes/accept-coupled.ts",
+      "hoverNeedle": "stp3HoverTarget",
+      "expectedHoverType": "string",
+      "twins": ["rows-project", "callback-only", "default-const-variadic-dependent", "higher-rank-slot", "generic-parent"]
+    },
+    {
+      "id": "STP3-wrong-channel",
+      "disposition": "reject",
+      "file": "tests/sfc-projection/STP3/probes/reject-wrong-channel.ts",
+      "dirtyTwin": "tests/sfc-projection/STP3/probes/reject-wrong-channel-any.ts",
+      "expectedCode": 2551,
+      "files": ["tests/sfc-projection/STP3/probes/reject-wrong-channel-model.ts"],
+      "fileExpectedCodes": {
+        "tests/sfc-projection/STP3/probes/reject-wrong-channel-model.ts": 2322
+      },
+      "twins": ["toFixed-on-string-U", "number-model-write", "broad-any"]
+    },
+    {
+      "id": "STP3-inference-only-channel",
+      "disposition": "reject",
+      "file": "tests/sfc-projection/STP3/probes/reject-inference-only-split.ts",
+      "dirtyTwin": "tests/sfc-projection/STP3/probes/reject-inference-only-clean.ts",
+      "expectedCode": 2322,
+      "twins": ["callback-in-transaction", "post-check-deferral"]
+    },
+    {
+      "id": "STP3-order-independent",
+      "disposition": "reject",
+      "file": "tests/sfc-projection/STP3/probes/reject-order-independent.ts",
+      "dirtyTwin": "tests/sfc-projection/STP3/probes/accept-order-independent.ts",
+      "expectedCode": 18046,
+      "twins": ["whole-signature-permutation", "sequential-first-channel"]
+    },
+    {
+      "id": "STP3-ordered-merge",
+      "disposition": "reject",
+      "file": "tests/sfc-projection/STP3/probes/reject-ordered-merge.ts",
+      "dirtyTwin": "tests/sfc-projection/STP3/probes/reject-ordered-merge-lww.ts",
+      "expectedCode": 2322,
+      "twins": ["accumulate-listeners", "last-write-wins"]
+    },
+    {
+      "id": "STP3-fresh-uses",
+      "disposition": "reject",
+      "file": "tests/sfc-projection/STP3/probes/reject-fresh-uses.ts",
+      "dirtyTwin": "tests/sfc-projection/STP3/probes/reject-fresh-uses-clean.ts",
+      "expectedCode": 2322,
+      "twins": ["independent-siblings", "shared-specialization"]
+    }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP3 --engine all --require-all --json",
+  "test": "node --test scripts/sfc-projection/verify-node.test.mjs",
+  "runtimeCorrectness": true,
+  "notes": "Proof of coupled generic inference and ordered-operation feasibility using constructor-shaped Vue types. Does not implement STP18 production use-site inference. Expected failures are harness data."
+}

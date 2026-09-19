@@ -1,0 +1,10 @@
+{
+  "name": "verter-reference-examples",
+  "version": "0.0.1-beta.1",
+  "private": true,
+  "type": "module",
+  "description": "Public executable examples. Validated by the docs reference harness against published package exports and shipped CLI bins.",
+  "engines": {
+    "node": ">=22"
+  }
+}

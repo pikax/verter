@@ -1,0 +1,101 @@
+{
+  "node": "DOC0",
+  "kind": "constitution",
+  "products": [
+    "DocumentationInventory v1",
+    "Information architecture v1 (doc types, audiences, versioning, deprecation)",
+    "Audience/surface map v1",
+    "GeneratedReferencePlan v1",
+    "Executable examples plan v1",
+    "Ownership map (receiving amendments, empty deletion population)",
+    "contracts/web-product-expansion-v1.md",
+    "plans/expansion-documentation.md"
+  ],
+  "cases": [
+    {
+      "id": "DOC0-AC1",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "missing-asset-row",
+        "phantom-asset-row",
+        "duplicate-asset-row",
+        "unknown-owner",
+        "missing-package-row",
+        "nav-disposition-drift",
+        "broken-nav-link",
+        "doc-type-owner-mismatch",
+        "doc-type-mismatch",
+        "dual-doc-type",
+        "unassigned-doc-type",
+        "phantom-ia-asset"
+      ]
+    },
+    {
+      "id": "DOC0-AC2",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "roadmap-feature-claimed-documented",
+        "roadmap-claim-unmentioned",
+        "unowned-public-api-page",
+        "private-package-api-page",
+        "package-version-drift",
+        "api-page-version-drift",
+        "site-version-drift",
+        "catalog-surface-drift",
+        "premature-example-promotion"
+      ]
+    },
+    {
+      "id": "DOC0-AC3",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "missing-na-rationale"
+      ]
+    },
+    {
+      "id": "DOC0-AC4",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "missing-producer-obligation",
+        "missing-version-policy",
+        "gate-profile-drift"
+      ]
+    },
+    {
+      "id": "DOC0-AC5",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "unexplained-empty-deletion",
+        "premature-retirement"
+      ]
+    },
+    {
+      "id": "DOC0-ratification",
+      "disposition": "accept",
+      "twins": [
+        "clean products",
+        "missing-contract-marker",
+        "missing-plan",
+        "missing-owner",
+        "missing-charter",
+        "domain-collision-recorded",
+        "missing-predecessor-lineage",
+        "missing-evidence-file",
+        "lint-count-drift",
+        "inventory-count-drift",
+        "missing-amendment",
+        "docs-only-production-capable",
+        "src-exclude-drift",
+        "examples-home-drift",
+        "reference-owner-drift"
+      ]
+    }
+  ],
+  "runtimeCorrectness": false,
+  "notes": "Contract/inventory node: 0 production LOC. DOC0-AC3 is recorded as not applicable with a precise rationale (no state, query, map or runtime boundary touched); fresh-versus-incremental, cancellation and ordering evidence is bound to DOC1 (harness) and DOC3 (generation) through the contract's receiving amendments. DOC0-AC5 introduces no latency/work/allocation/RSS budget, so none is measured against the ratified performance methodology. The harness grounds itself in the live repository (docs tree, published page bytes, VitePress nav, package manifests, capability catalog, lint registry, gate-profile catalog, authority DAG, conflict-domain catalog, ledger, evidence files), so drift in any of them is a failing case, not a stale pass. The inventory is the sole per-asset owner/type authority: IA doc types are joined to it after glob expansion, so an unassigned, doubly assigned, owner-mismatched or phantom page assignment fails DOC0-AC1. Pinned roadmap-only mentions (the unpublished VS Code Marketplace listing) are re-read from published user-page and user-audience repository-document bytes, so an unlabelled, unrowed or working-install-step mention fails DOC0-AC2. The documentation estate leases its own documentation_estate conflict domain, split from the formatter `doc` lease by the architecture-3 review; the split is recorded in the charter and enforced by the domain-collision-recorded and missing-owner checks."
+}

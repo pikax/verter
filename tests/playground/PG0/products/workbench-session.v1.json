@@ -1,0 +1,77 @@
+{
+  "id": "workbench-session.v1",
+  "schema": 1,
+  "contractNode": "PG0",
+  "law": "A WorkbenchSession is the single state bundle every workbench view operates on: sources, project, engine/profile, operation and view state. It is a client-side session model over the existing semantic authorities — it introduces no second semantic, type, project or format engine, and it mints no parallel identity vocabulary: every result binds the DX0 product-receipt-basis field set.",
+  "model": {
+    "sources": {
+      "binding": "sourceRevisions (DX0 product-receipt-basis): the input basis and file revisions a result was computed from, under the existing input-basis and source-identity authority.",
+      "obligations": [
+        "Multifile edits are authored, version-checked and atomic through the existing edit-transaction authority; cross-file and browser/native edits never bypass it.",
+        "A result computed from old source revisions is stale and is rejected, not published as current.",
+        "Engine-profile or framework switches re-key the session basis; results from the previous basis are invalidated, not reinterpreted."
+      ],
+      "evidence": [
+        "packages/playground/src/core/store.ts",
+        "packages/playground/src/core/projectStorage.ts"
+      ]
+    },
+    "project": {
+      "binding": "projectConfiguration (DX0 product-receipt-basis): project identity plus configuration facts — tsconfig/paths, .verterrc.json, lint preset, vite-config trust state, framework profile.",
+      "obligations": [
+        "Project-model derivation stays with its existing producing owner (PM0 line); the session records, never derives, project truth.",
+        "An old-project result on a changed project configuration is stale and rejected.",
+        "Browser sessions hold the project snapshot through the BWH platform-host io service (host-provided virtual workspace); no hidden source upload leaves the session."
+      ],
+      "evidence": [
+        "packages/playground/src/components/ProjectManager.vue",
+        "packages/playground/src/core/importMap.ts"
+      ]
+    },
+    "engineProfile": {
+      "binding": "engineIdentity and hostIdentity (DX0 product-receipt-basis): engineIdentity is the engine kind and exact version — playground typescript@6.0.3 pin, verter-tsc tsgo pin, or the resolved provider engine; hostIdentity is the executing host — the browser runtime and WASM build selector, or the explicitly selected native companion binary and version.",
+      "obligations": [
+        "Execution class follows DX0 host-execution-class.v1: Portable runs in the browser sandbox; NativeOnly runs only through explicitly selected local-native execution (DX4/DX5 companion); ExternalOwner engines are pinned, provisioned and bound, never embedded.",
+        "Version selection is explicit and disclosed on every result; a result must not be presented under an engine it did not run on.",
+        "No hidden replacement engine: substituting a different engine never makes an execution class true."
+      ],
+      "evidence": [
+        "packages/playground/src/core/versions.ts",
+        "packages/playground/src/core/wasmLoader.ts",
+        "packages/playground/src/core/frameworks.ts"
+      ]
+    },
+    "operation": {
+      "binding": "completenessState (DX0 product-receipt-basis): complete, complete-empty, partial, pending, unsupported, ambiguous, failed, cancelled, stale. Every workbench operation result carries one, and complete-empty (a successful empty answer) stays distinct from every non-complete state.",
+      "obligations": [
+        "Every operation result is source-linked and carries its answer-rail label; inspection-rail evidence never substitutes a semantic-rail answer.",
+        "Future capabilities return the distinct future/unsupported state with their named producing node — never successful empty output.",
+        "Cancellation stops additional irrelevant work, releases retained handles, and reports cancelled — not failed, not complete-empty.",
+        "Partial and pending are reported truthfully; dropped diagnostics or weakened typing to meet timing are forbidden."
+      ],
+      "evidence": [
+        "packages/playground/src/core/compiler.ts",
+        "packages/playground/src/editor/lspProviders.ts"
+      ]
+    },
+    "view": {
+      "binding": "View state selects the presented matrix row (feature family, operation, output mode); it is presentation only and never becomes semantic truth.",
+      "obligations": [
+        "Closed or disabled views create no background semantic work; rich information is fetched on demand under reduced client capabilities.",
+        "A view never presents stale-basis results as current; wrong-result-handle outputs are rejected.",
+        "The view layer may not invent feature rows: the presented feature set is generated from the feature matrix, not a hand-written tab list (PG2 owns the cutover).",
+        "Reduced-client rendering preserves semantic meaning: the same result and explanation are available, possibly with reduced presentation."
+      ],
+      "evidence": [
+        "packages/playground/src/output/Output.vue",
+        "packages/playground/src/output/PreviewUnsupported.vue"
+      ]
+    }
+  },
+  "sessionRules": [
+    "The session is the unit of sharing and reproduction: a shared or exported session (PG12) carries its full receipt basis — source revisions, project configuration, engine and host identity, and the operation/view state needed to replay it.",
+    "Snapshot basis is canonical and immutable: an observation names the exact basis it was computed on, and replay compares incremental and fresh execution on the same basis (owned downstream, not fabricated here).",
+    "The session model adds no orchestration system: scheduling, batching and host services stay with their existing owners (scheduler, BWH platform-host services).",
+    "Theme, layout and other presentation state ride the session but never gate semantic availability."
+  ]
+}

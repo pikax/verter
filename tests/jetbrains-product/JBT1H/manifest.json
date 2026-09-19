@@ -1,0 +1,76 @@
+{
+  "node": "JBT1H",
+  "kind": "implementation",
+  "products": [
+    "Real-IDE comparison harness and fixture driver",
+    "Paired-run recorder with randomised order, cold/warm state and outlier retention",
+    "Process-tree and UI application/paint measurement capture",
+    "packages/dx-harness/jetbrains",
+    "extensions/jetbrains Platform-test-framework capture hooks"
+  ],
+  "cases": [
+    {
+      "id": "JBT1H-AC1",
+      "disposition": "reject",
+      "binding": "packages/dx-harness/jetbrains/evidence.ts classifyUiEvidence + ingestCapture; packages/dx-harness/test/jetbrainsHarness.test.ts; extensions/jetbrains RealIdeCaptureTest hostKind pin",
+      "twins": [
+        "real-jetbrains-ide capture with measured ui-apply-paint",
+        "mock LSP client counted as UI evidence",
+        "raw-LSP host counted as UI evidence",
+        "screenshot host counted as UI evidence",
+        "protocol-smoke host counted as UI evidence",
+        "RPC-only duration as paint",
+        "sleep-as-readiness"
+      ]
+    },
+    {
+      "id": "JBT1H-AC2",
+      "disposition": "reject",
+      "binding": "packages/dx-harness/jetbrains/process-tree.ts evaluateMemoryRow; packages/dx-harness/test/jetbrainsHarness.test.ts",
+      "twins": [
+        "provider pid inside the tree and memory measured",
+        "provider excluded with a numeric retained-memory claim",
+        "advertised provider pid outside the tree",
+        "unknown provider guessed as measured zero"
+      ]
+    },
+    {
+      "id": "JBT1H-AC3",
+      "disposition": "reject",
+      "binding": "packages/dx-harness/jetbrains/paired-run.ts compareSwappedPairs + runPairedCampaign; packages/dx-harness/test/jetbrainsHarness.test.ts",
+      "twins": [
+        "swapped-order pairs within the recorded noise bound",
+        "swapped-order pairs exceeding the recorded noise bound",
+        "same-order pairs presented as swapped",
+        "outliers dropped instead of labelled"
+      ]
+    },
+    {
+      "id": "JBT1H-AC-OWNER",
+      "disposition": "accept",
+      "binding": "final owner expansion.jetbrains-product recorded by the JBT0 baseline ownership map (JBT1H receiving amendment); JBT0 adapterState packages/dx-harness/jetbrains moves from absent to harness-present; retirement: the harness is the durable measurement surface consumed by JBT9/JBT10, not scaffolding deleted when JBT2 owns the plugin lifecycle",
+      "twins": [
+        "clean evidence",
+        "stale adapterState row (absent)",
+        "second semantic engine inside the client"
+      ]
+    },
+    {
+      "id": "JBT1H-AC-BASIS",
+      "disposition": "accept",
+      "binding": "fresh vs incremental captures compare only on the same ProductReceiptBasis (sameReceiptBasis); old-source / mismatched host or engine identity is rejected. Installed-product pending-capture pins are not filled from the platform test IDE."
+    },
+    {
+      "id": "JBT1H-AC-RESOURCE",
+      "disposition": "accept",
+      "binding": "required metric set ui-apply-paint, rpc-duration, provider-cpu, provider-wall, outbound-bytes, retained-memory; unavailable metrics labelled unknown with a reason; equal-work corpus pinned to packages/dx-harness/fixtures/hermetic with WSP0 SLO catalog binding and diagnostics/required-features attested; no superiority claim from this node"
+    },
+    {
+      "id": "JBT1H-AC-EXPOSURE",
+      "disposition": "accept",
+      "binding": "tests/jetbrains-product/JBT1H/products/exposure-registration.v1.json registers the comparison operations as NativeOnly comparison-rail, promotionBlocked until DX1 executable playground exposure exists; no semantic operation is exposed"
+    }
+  ],
+  "runtimeCorrectness": true,
+  "notes": "The runtime harness is packages/dx-harness/jetbrains driven by the pinned WebStorm Platform test-framework hooks in extensions/jetbrains tests. Node unit tests prove AC1/AC2/AC3 without a JVM. The jetbrains-product gate already runs the JVM tests via Gradle test. Installed-product About-dialog pins remain pending-capture: the test IDE is not that capture route."
+}

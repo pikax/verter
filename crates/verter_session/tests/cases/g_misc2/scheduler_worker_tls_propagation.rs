@@ -37,6 +37,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use verter_scheduler::owner_command::OwnerCommand;
 use verter_scheduler::pool::SchedulerIoPool;
 use verter_scheduler::request_context::{
     CacheEventKind, OpaqueContextGuard, OpaqueRequestContext, RequestContextLike, TlsUninstall,
@@ -60,12 +61,12 @@ fn run_on_io_worker_with_context(
 ) {
     let pool = SchedulerIoPool::new(1, 8);
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(1);
-    pool.try_submit(Box::new(move || {
+    pool.try_submit(OwnerCommand::io(Box::new(move || {
         let _guard: Option<Box<dyn TlsUninstall + Send>> =
             context.map(|opaque| Arc::clone(&opaque.0).install_tls());
         f();
         let _ = done_tx.send(());
-    }))
+    })))
     .expect("single-worker IO pool accepts one task under capacity");
     done_rx
         .recv()

@@ -1,0 +1,287 @@
+{
+  "id": "FeatureOwnershipMatrix",
+  "schema": 1,
+  "status": "ratified",
+  "ratifiedBy": "VSC0",
+  "sourceOfTruth": "packages/vue-vscode source, re-derived by tests/vscode-product/VSC0/verify.mjs",
+  "vocabulary": {
+    "hostExecutionClass": "DX0 HostExecutionClass: NativeOnly | ExternalOwner | Portable",
+    "receiptBasis": "DX0 ProductReceiptBasis: sourceRevisions, projectConfiguration, engineIdentity, hostIdentity, completenessState",
+    "obligation": "RequiredCurrent for every shipped valid feature (DX0 section 2)"
+  },
+  "finalOwner": "expansion.vscode-product",
+  "finalOwnerStatement": "expansion.vscode-product owns this product outcome; semantic algorithms, project resolution, format/lint logic, TypeScript projection and edit transactions stay with their existing producing owners.",
+  "deletionPopulationThisNode": [],
+  "verterProducers": [
+    {
+      "id": "verter-lsp",
+      "owner": "crates/verter_lsp",
+      "hostExecutionClass": "NativeOnly",
+      "produces": "virtual-file artifacts, source maps, component/routes analysis snapshots, decoration facts, statistics, audit-record edges, carrier store, heartbeat, provider-status notifications",
+      "consumedBy": "every desktop feature row below over stdio LSP"
+    },
+    {
+      "id": "verter-mcp",
+      "owner": "crates/verter_mcp",
+      "hostExecutionClass": "NativeOnly",
+      "produces": "standalone HTTP MCP agent server (spawned as an attempt-owned child)",
+      "consumedBy": "mcp-spawn feature row; VS Code lm provider API; Claude Code CLI"
+    },
+    {
+      "id": "language-shared",
+      "owner": "packages/language-shared",
+      "hostExecutionClass": "Portable",
+      "produces": "shared wire vocabulary (RequestType/NotificationType, PatchClient) used by the extension and the TypeScript plugin",
+      "consumedBy": "extension src, typescript-plugin, e2e harnesses"
+    },
+    {
+      "id": "typescript-plugin",
+      "owner": "packages/typescript-plugin",
+      "hostExecutionClass": "ExternalOwner",
+      "produces": "carrier-store reader injected into an editor-owned TypeScript engine through _typescript.configurePlugin",
+      "consumedBy": "plain-tsjs-integration and editor-tsserver-tier rows"
+    }
+  ],
+  "installedExtensions": [
+    {
+      "id": "vscode.typescript-language-features",
+      "kind": "VS Code built-in TypeScript extension",
+      "hostExecutionClass": "ExternalOwner",
+      "integration": "_typescript.configurePlugin configures the Verter plugin; the editor-tsserver mode bootstraps through a configured-project attestation before the LSP arms; plain .ts/.js stay served by VS Code's own TS service reading the LSP-published carrier store",
+      "evidence": [
+        "packages/vue-vscode/src/editorTsserverBootstrap.ts",
+        "packages/vue-vscode/src/extension.ts",
+        "packages/vue-vscode/src/plainScriptDocumentSync.ts"
+      ]
+    },
+    {
+      "id": "TypeScriptTeam.native-preview",
+      "kind": "installed extension",
+      "hostExecutionClass": "ExternalOwner",
+      "integration": "shared-tsgo mode stages an npm-shaped tsdk with the relay bytes, requires a live advertisement plus a public-API Program attestation, and restores the user's tsdk afterwards; re-attach after background errors goes through the public restart command",
+      "evidence": [
+        "packages/vue-vscode/src/sharedTsgoLaunch.ts",
+        "packages/vue-vscode/src/nativePreviewRelayController.ts",
+        "packages/vue-vscode/src/extension.ts"
+      ]
+    },
+    {
+      "id": "vscode.lm-mcp-provider",
+      "kind": "VS Code language-model API (lm.registerMcpServerDefinitionProvider)",
+      "hostExecutionClass": "ExternalOwner",
+      "integration": "the spawned verter-mcp endpoint is registered as an MCP server definition so Copilot Chat discovers it; registration is disposed whenever the child stops serving",
+      "evidence": ["packages/vue-vscode/src/extension.ts", "packages/vue-vscode/src/mcpServer.ts"]
+    },
+    {
+      "id": "claude-code-cli",
+      "kind": "external tool",
+      "hostExecutionClass": "ExternalOwner",
+      "integration": "detection notice with setup instructions and the verter.setupMcpForClaudeCode command mirroring the live port into .mcp.json; setup refuses to write a known-dead placeholder",
+      "evidence": ["packages/vue-vscode/src/claudeCodeDetection.ts", "packages/vue-vscode/src/mcpServer.ts"]
+    }
+  ],
+  "features": [
+    {
+      "id": "virtual-files-view",
+      "surface": ["verter.openVirtualFile", "verter.refreshVirtualFiles", "verterVirtualFiles view", "verter-virtual:// provider"],
+      "producerOwner": "verter-lsp",
+      "hostExecutionClass": "NativeOnly",
+      "boundaryTier": "desktop (provider) over presentation/pure helpers",
+      "evidence": [
+        "packages/vue-vscode/src/UnifiedVirtualFilesProvider.ts",
+        "packages/vue-vscode/src/VirtualFileManager.ts"
+      ]
+    },
+    {
+      "id": "source-map-visualization",
+      "surface": ["verter.showSourceMapVisualization", "verter.showSourceMapForFile"],
+      "producerOwner": "verter-lsp",
+      "hostExecutionClass": "NativeOnly",
+      "dx0Row": "vscode.source-map",
+      "boundaryTier": "presentation webview + pure decode model",
+      "evidence": ["packages/vue-vscode/src/SourceMapWebviewPanel.ts", "packages/vue-vscode/src/sourcemap.ts"]
+    },
+    {
+      "id": "component-tree",
+      "surface": ["verterComponentTree view", "verter.goToComponent", "verter.goToParentFile", "internal verter.openRouteComponent"],
+      "producerOwner": "verter-lsp",
+      "hostExecutionClass": "NativeOnly",
+      "boundaryTier": "desktop provider (portable-path-only)",
+      "evidence": ["packages/vue-vscode/src/ComponentTreeProvider.ts"]
+    },
+    {
+      "id": "routes-analysis",
+      "surface": ["verterRoutes view", "verter.refreshRoutes"],
+      "producerOwner": "verter-lsp",
+      "hostExecutionClass": "NativeOnly",
+      "boundaryTier": "desktop provider",
+      "evidence": ["packages/vue-vscode/src/RouteTreeProvider.ts"]
+    },
+    {
+      "id": "analysis-tree",
+      "surface": ["verterAnalysis view", "verter.refreshAnalysis"],
+      "producerOwner": "verter-lsp",
+      "hostExecutionClass": "NativeOnly",
+      "boundaryTier": "desktop provider (portable-path-only); demand-gated by verter.analysis.enabled, default off",
+      "evidence": ["packages/vue-vscode/src/AnalysisTreeProvider.ts"]
+    },
+    {
+      "id": "decorations",
+      "surface": [
+        "verter.decorations.vueApiCalls",
+        "verter.decorations.bindingColors",
+        "verter.decorations.bindingColorsScope",
+        "verter.decorations.bindingColorsStyle",
+        "verter.decorations.propConstness",
+        "9 theme colors (verter.binding.*, verter.propConstness.*)"
+      ],
+      "producerOwner": "verter-lsp",
+      "hostExecutionClass": "NativeOnly",
+      "boundaryTier": "desktop providers + pure display mapping",
+      "evidence": [
+        "packages/vue-vscode/src/VueApiDecorationProvider.ts",
+        "packages/vue-vscode/src/BindingColorDecorationProvider.ts",
+        "packages/vue-vscode/src/PropConstnessDecorationProvider.ts",
+        "packages/vue-vscode/src/bindingTypeDisplay.ts"
+      ],
+      "retirement": "decoration retirement at the VSC4V semantic visual cutover is the only sanctioned route; VSC0 retires nothing"
+    },
+    {
+      "id": "provider-selection",
+      "surface": [
+        "verter.selectTypeProvider",
+        "verter.typeProvider",
+        "verter.typescript.tsdk",
+        "verter.providerRecommendations",
+        "type-provider status bar"
+      ],
+      "producerOwner": "expansion.vscode-product (UX) over the DX0 provider-mode matrix",
+      "hostExecutionClass": "ExternalOwner",
+      "boundaryTier": "pure decision logic + desktop status bar binding",
+      "evidence": [
+        "packages/vue-vscode/src/statusBar.ts",
+        "packages/vue-vscode/src/carrierProviderSupport.ts",
+        "packages/vue-vscode/src/languageServerConfig.ts"
+      ]
+    },
+    {
+      "id": "statistics",
+      "surface": [
+        "verter.showStatistics",
+        "verter.statistics.enabled",
+        "verter.statistics.persistToFile",
+        "verter.statistics.filePath",
+        "verter.statistics.maxSessionEntries",
+        "verter.statistics.maxPersistedEntries"
+      ],
+      "producerOwner": "verter-lsp",
+      "hostExecutionClass": "NativeOnly",
+      "boundaryTier": "desktop command + rendering over the GetStatistics request",
+      "evidence": ["packages/vue-vscode/src/extension.ts"]
+    },
+    {
+      "id": "audit-records",
+      "surface": ["verter.showRecentAuditRecords"],
+      "producerOwner": "verter-lsp over verter_audit records",
+      "hostExecutionClass": "NativeOnly",
+      "boundaryTier": "presentation channel + pure transforms",
+      "evidence": ["packages/vue-vscode/src/audit.ts", "packages/vue-vscode/src/audit.transforms.ts"]
+    },
+    {
+      "id": "mcp-spawn",
+      "surface": [
+        "verter.mcp.enabled",
+        "verter.mcp.port",
+        "verter.mcp.lintPreset",
+        "verter.mcp.claudeCodeNotification",
+        "verter.setupMcpForClaudeCode"
+      ],
+      "producerOwner": "verter-mcp (child) + expansion.vscode-product (lifecycle)",
+      "hostExecutionClass": "NativeOnly",
+      "boundaryTier": "desktop child lifecycle; ExternalOwner lm registration and Claude Code mirror",
+      "evidence": ["packages/vue-vscode/src/mcpServer.ts", "packages/vue-vscode/src/claudeCodeDetection.ts"]
+    },
+    {
+      "id": "plain-tsjs-integration",
+      "surface": [
+        "onLanguage:typescript/javascript activation",
+        "plain-script document sync",
+        "plain-script diagnostic suppression",
+        "carrier-store forwarding to VS Code's TypeScript server"
+      ],
+      "producerOwner": "vscode.typescript-language-features (engine) + typescript-plugin (carrier reader) + verter-lsp (store publisher)",
+      "hostExecutionClass": "ExternalOwner",
+      "boundaryTier": "pure sync policy + desktop plugin forwarding",
+      "evidence": [
+        "packages/vue-vscode/src/plainScriptDocumentSync.ts",
+        "packages/vue-vscode/src/extension.ts",
+        "packages/vue-vscode/src/typescriptPluginRefreshScheduler.ts"
+      ],
+      "preservation": "VSC0.3 preservation row: plain .ts/.js keep VS Code's own TypeScript service with the Verter plugin; the extension never registers competing editor features for them"
+    },
+    {
+      "id": "css-intellisense",
+      "surface": ["CSS completion/hover/colors/highlights merged into carrier editors", "verter-css diagnostics collection"],
+      "producerOwner": "expansion.vscode-product (service) over verter-lsp structure requests",
+      "hostExecutionClass": "NativeOnly",
+      "boundaryTier": "presentation service + pure transpile/style modules; preprocessor resolution is desktop by design",
+      "evidence": [
+        "packages/vue-vscode/src/css/cssService.ts",
+        "packages/vue-vscode/src/css/cssDiagnosticsPublisher.ts",
+        "packages/vue-vscode/src/css/transpiler.ts",
+        "packages/vue-vscode/src/css/preprocessorResolver.ts"
+      ]
+    },
+    {
+      "id": "grammars-languages",
+      "surface": ["5 language contributions", "8 grammars", "language configuration files"],
+      "producerOwner": "expansion.vscode-product (static contributions)",
+      "hostExecutionClass": "Portable",
+      "boundaryTier": "static assets, host-neutral",
+      "evidence": [
+        "packages/vue-vscode/syntaxes",
+        "packages/vue-vscode/languages",
+        "packages/vue-vscode/package.json"
+      ],
+      "gaps": ["vue-postcss", "vue-sugarss"]
+    },
+    {
+      "id": "engine-tiers",
+      "surface": ["editor-tsserver bootstrap", "shared-tsgo relay staging", "extension-hosted TypeScript service ($/verter/tsQuery)"],
+      "producerOwner": "installed TypeScript engines (ExternalOwner) reached through expansion.vscode-product tier modules",
+      "hostExecutionClass": "ExternalOwner",
+      "boundaryTier": "desktop provisioning and attestation only",
+      "evidence": [
+        "packages/vue-vscode/src/editorTsserverBootstrap.ts",
+        "packages/vue-vscode/src/sharedTsgoLaunch.ts",
+        "packages/vue-vscode/src/nativePreviewRelayController.ts",
+        "packages/vue-vscode/src/extensionTsService.ts",
+        "packages/vue-vscode/src/extensionTsServiceRegistry.ts"
+      ]
+    },
+    {
+      "id": "snippets",
+      "status": "absent",
+      "reason": "not shipped today; recorded so a future snippet surface is an explicit owner decision, not an undocumented removal",
+      "producerOwner": "none",
+      "hostExecutionClass": "Portable"
+    }
+  ],
+  "receivingAmendments": [
+    { "receiver": "VSC1", "productionCapable": true },
+    { "receiver": "VSC2", "productionCapable": true },
+    { "receiver": "VSC3", "productionCapable": true },
+    { "receiver": "VSC4", "productionCapable": true },
+    { "receiver": "VSC4V", "productionCapable": true },
+    { "receiver": "VSC5", "productionCapable": true },
+    { "receiver": "VSC6", "productionCapable": true },
+    { "receiver": "VSC6R", "productionCapable": true },
+    { "receiver": "VSC7", "productionCapable": true },
+    { "receiver": "VSC8", "productionCapable": true },
+    { "receiver": "VSW0", "productionCapable": false },
+    { "receiver": "VSW1", "productionCapable": true },
+    { "receiver": "DBG9V", "productionCapable": true },
+    { "receiver": "TST10V", "productionCapable": true }
+  ],
+  "docsOnlyReceivers": ["VSW0"]
+}

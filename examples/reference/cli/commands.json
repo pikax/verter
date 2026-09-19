@@ -1,0 +1,3 @@
+{
+  "commands": ["verter-tsc", "verter-lsp", "verter-mcp"]
+}

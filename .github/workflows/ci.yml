@@ -30,6 +30,7 @@ jobs:
       svelte_client_smokes: ${{ steps.filter.outputs.svelte_client_smokes }}
       svelte_perf: ${{ steps.filter.outputs.svelte_perf }}
       editors: ${{ steps.filter.outputs.editors }}
+      jetbrains: ${{ steps.filter.outputs.jetbrains }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v4
@@ -97,6 +98,8 @@ jobs:
               - 'scripts/compiler-ci-lane-selftest.mjs'
               - 'scripts/provider-ci*.mjs'
               - 'scripts/svelte-golden-lib.mjs'
+              - 'scripts/browser-host-gate.mjs'
+              - 'scripts/browser-host-gate.test.mjs'
               - 'crates/verter_compiler/tests/svelte_oracle_corpus/**'
               # test:scripts validates the required BF2 dependencies in the
               # release graph; release-only changes must execute that guard.
@@ -126,6 +129,10 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - 'packages/wasm/**'
+              - 'packages/browser-host/**'
+              - 'scripts/browser-host-gate.mjs'
+              - 'scripts/browser-host-gate.test.mjs'
+              - 'tests/browser-host/**'
               - '.cargo/**'
               - '.github/workflows/ci.yml'
             playground:
@@ -260,6 +267,15 @@ jobs:
               - 'packages/lsp-test-client/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            # JetBrains plugin lane (JBT1+): the pinned Gradle build resolves
+            # its own WebStorm SDK; only the plugin tree, its gate and the
+            # supported-IDE declaration feed it.
+            jetbrains:
+              - 'extensions/jetbrains/**'
+              - 'scripts/jetbrains-gate.mjs'
+              - 'scripts/jetbrains-gate.test.mjs'
+              - 'tests/jetbrains-product/**'
               - '.github/workflows/ci.yml'
             svelte_perf:
               - 'crates/verter_compiler/**'
@@ -459,6 +475,10 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
+          # This job never pnpm-installs. setup-node@v5 otherwise auto-caches
+          # from package.json#packageManager and the post-step save fails with
+          # "Path(s) specified in the action for caching do(es) not exist".
+          package-manager-cache: false
       - name: Anti-binary-growth integration-test layout
         run: node scripts/check-integration-test-layout.mjs
       - name: Install cargo-nextest
@@ -1104,6 +1124,42 @@ jobs:
         run: pnpm run build:ts
       - name: Test @verter/wasm
         run: pnpm --filter @verter/wasm test
+
+  # ---------------------------------------------------------------------------
+  # Browser-host-domain gate (BWH1). Builds nothing itself: wasm-build already
+  # produced the session artifact. This lane re-runs the wasm32 census, the
+  # native same-fixture probe, and Chromium/Firefox/WebKit workers over that
+  # artifact. Missing browsers, exports, tests or empty operation arrays fail.
+  # ---------------------------------------------------------------------------
+  browser-host:
+    name: Browser host (feasibility gate)
+    needs: [detect-changes, wasm-build]
+    if: needs.detect-changes.outputs.wasm == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: browser-host
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: wasm-build
+          path: packages/wasm
+      - name: Install Playwright browsers (Chromium, Firefox, WebKit)
+        run: pnpm --filter @verter/playground exec playwright install chromium firefox webkit --with-deps
+      - name: Run the browser-host-domain gate
+        run: node scripts/browser-host-gate.mjs --skip-build
 
   # ---------------------------------------------------------------------------
   # The ONE debug build of the Rust binaries every editor/DX integration job
@@ -1932,6 +1988,40 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # JetBrains plugin lane (JBT1): the pinned extensions/jetbrains Gradle
+  # build. The jetbrains-product gate profile starts here — it runs the real
+  # JVM tests against the pinned WebStorm SDK, the plugin verifier (failure on
+  # every level, pinned build only) and installable packaging, and fails
+  # closed on a missing JDK/SDK, missing build output or missing test
+  # evidence. No Rust toolchain and no pnpm install are needed: the gate is a
+  # plain Node script driving the pinned Gradle wrapper.
+  # ---------------------------------------------------------------------------
+  jetbrains-plugin:
+    name: JetBrains plugin (pinned WebStorm SDK)
+    needs: [detect-changes]
+    if: needs.detect-changes.outputs.jetbrains == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      # This lane never installs the JS workspace. setup-node@v5 otherwise
+      # auto-caches from package.json#packageManager and fails looking up
+      # `pnpm` (the rust-test-build job documents the same gotcha).
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Run the jetbrains-product gate (JVM tests, verifier, packaging)
+        run: node scripts/jetbrains-gate.mjs
+
+  # ---------------------------------------------------------------------------
   # Aggregate gate. The ruleset must require the check named "CI Required"
   # (this job's `name:`) and nothing else. `scripts/check-ci-aggregate.mjs`
   # statically enforces that every job in this workflow is listed in its
@@ -1981,6 +2071,8 @@ jobs:
       - editor-lapce
       - editor-zed
       - editor-neovim
+      - jetbrains-plugin
+      - browser-host
     steps:
       - name: Verify no dependency failed
         env:

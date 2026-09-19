@@ -1,0 +1,78 @@
+{
+  "home": "examples/reference",
+  "pin": {
+    "node": ">=22",
+    "typescript": "7.0.2",
+    "vue": "3.6.0-rc.5"
+  },
+  "examples": [
+    {
+      "id": "unplugin-vite",
+      "files": ["unplugin-vite/vite.config.ts"],
+      "imports": ["vite", "@verter/unplugin/vite"],
+      "peers": ["vite"],
+      "surfaces": ["vue.managed.compile.raw"],
+      "executionClass": "NativeOnly",
+      "proofClass": "static-proof"
+    },
+    {
+      "id": "types-helpers",
+      "files": ["types-helpers/example.ts"],
+      "imports": ["@verter/types"],
+      "surfaces": ["vue.language_service.typing"],
+      "executionClass": "ExternalOwner",
+      "proofClass": "static-proof"
+    },
+    {
+      "id": "component-meta-session",
+      "files": ["component-meta/session.ts"],
+      "imports": ["@verter/component-meta"],
+      "surfaces": ["vue.component_meta.scalar"],
+      "executionClass": "NativeOnly",
+      "proofClass": "static-proof"
+    },
+    {
+      "id": "shipped-cli",
+      "files": ["cli/commands.json"],
+      "commands": ["verter-tsc", "verter-lsp", "verter-mcp"],
+      "surfaces": ["vue.tsc.project_check"],
+      "executionClass": "NativeOnly",
+      "proofClass": "static-proof"
+    }
+  ],
+  "sdkGuides": {
+    "index": "sdk/README.md",
+    "topics": [
+      { "id": "contribution", "page": "sdk/contribution.md", "status": "pending", "producingNode": "XSDK9" },
+      { "id": "isolation", "page": "sdk/isolation.md", "status": "pending", "producingNode": "XSDK9" },
+      { "id": "permissions", "page": "sdk/permissions.md", "status": "pending", "producingNode": "XSDK9" },
+      { "id": "packaging", "page": "sdk/packaging.md", "status": "pending", "producingNode": "XSDK9" },
+      { "id": "debugging", "page": "sdk/debugging.md", "status": "pending", "producingNode": "XSDK9" },
+      { "id": "compatibility", "page": "sdk/compatibility.md", "status": "pending", "producingNode": "XSDK9" }
+    ]
+  },
+  "recipes": {
+    "index": "guides/README.md",
+    "topics": [
+      { "id": "accessibility", "page": "guides/accessibility.md", "status": "pending", "producingNode": "AX0" },
+      { "id": "compatibility", "page": "guides/compatibility.md", "status": "pending", "producingNode": "WBC0" },
+      { "id": "css", "page": "guides/css.md", "status": "pending", "producingNode": "CSS0" },
+      { "id": "debug", "page": "guides/debug.md", "status": "pending", "producingNode": "DBG0" },
+      { "id": "performance", "page": "guides/performance.md", "status": "pending", "producingNode": "WPF0" },
+      { "id": "runtime", "page": "guides/runtime.md", "status": "pending", "producingNode": "RTI0" },
+      { "id": "security", "page": "guides/security.md", "status": "pending", "producingNode": "SEC0" },
+      { "id": "tests", "page": "guides/tests.md", "status": "pending", "producingNode": "TST0" }
+    ]
+  },
+  "journeys": [
+    {
+      "id": "cli-version-smoke",
+      "description": "run the shipped verter-tsc bin and observe its version banner",
+      "executionClass": "NativeOnly",
+      "pins": { "node": ">=22" },
+      "steps": [
+        { "exampleId": "shipped-cli", "command": "verter-tsc", "args": ["--version"], "expectExit": 0 }
+      ]
+    }
+  ]
+}

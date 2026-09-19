@@ -1,0 +1,91 @@
+{
+  "id": "dependency-closure-inventory.v1",
+  "schema": 1,
+  "target": "wasm32-unknown-unknown",
+  "entryCrate": "verter_wasm",
+  "census": {
+    "command": "cargo tree --target wasm32-unknown-unknown -p verter_wasm -e normal",
+    "resolvedCratesOnCandidate": 181,
+    "note": "Recorded 2026-09-18 on the ratification candidate. The count is not a pinned contract fact: drift is caught by the declared-edge facts below, which the harness re-reads live; the census command is how the count is reproduced."
+  },
+  "nativeProcessImport": {
+    "definition": "Runtime reachability of process spawning, filesystem, thread spawning or socket syscalls from the browser dependency closure.",
+    "blocking": "A native process import blocks that browser build (BWH0-AC1): the build must fail or the operation must be excluded before any browser artifact ships.",
+    "recurringProofOwner": "BWH1 (browser semantic-host feasibility and build proof)"
+  },
+  "forbiddenNativeCrates": [
+    { "crate": "tokio", "status": "absent", "ground": "optional (oracle-gen) in crates/verter_session/Cargo.toml; never a default or wasm32 edge" },
+    { "crate": "rayon", "status": "absent", "ground": "cfg(not(target_arch = \"wasm32\"))-gated in crates/verter_session/Cargo.toml (native batch compile only)" },
+    { "crate": "mio", "status": "absent", "ground": "no declared edge reachable from the wasm32 build" },
+    { "crate": "nix", "status": "absent", "ground": "no declared edge reachable from the wasm32 build" },
+    { "crate": "tempfile", "status": "absent", "ground": "no declared edge reachable from the wasm32 build" },
+    { "crate": "socket2", "status": "absent", "ground": "no declared edge reachable from the wasm32 build" }
+  ],
+  "inertOsMetadata": [
+    {
+      "crate": "windows-sys (windows-link)",
+      "provenance": "ts-rs -> termcolor -> winapi-util -> windows-sys",
+      "classification": "inert-metadata",
+      "runtimeProcessRoute": false,
+      "note": "Declaration-only metadata pulled unconditionally by ts-rs's termcolor; it compiles on wasm32 and executes nothing. Misclassifying this chain as a process import, or citing it as proof the closure is native-free without the census, are both rejected."
+    }
+  ],
+  "seams": [
+    {
+      "id": "time-instant",
+      "native": "std::time::Instant",
+      "wasm": "web_time::Instant",
+      "evidence": ["crates/verter_session/src/instant.rs"]
+    },
+    {
+      "id": "randomness",
+      "native": "getrandom OS backend; uuid rng-getrandom",
+      "wasm": "getrandom wasm_js backend (.cargo/config.toml getrandom_backend=\"wasm_js\"; verter_wasm declares the wasm_js feature) plus uuid js feature (WebCrypto)",
+      "evidence": [".cargo/config.toml", "crates/verter_wasm/Cargo.toml", "crates/verter_session/Cargo.toml"]
+    },
+    {
+      "id": "scheduling-sync",
+      "native": "scheduler driver thread, CPU/IO pools, blocking semaphore, rayon batch compile",
+      "wasm": "sync inline drive (wait_or_drive); native-only primitives compiled out",
+      "evidence": [
+        "crates/verter_session/src/host_construction.rs",
+        "crates/verter_scheduler/src/lib.rs"
+      ]
+    },
+    {
+      "id": "ambient-lib-io",
+      "native": "ambient-library reads through parse_ambient_virtual_canonical_id/read_ambient_lib",
+      "wasm": "compiled out; only the host-provided in-memory virtual workspace is readable",
+      "evidence": ["crates/verter_session/src/host_construction.rs"]
+    }
+  ],
+  "allocator": {
+    "kind": "default Rust global allocator",
+    "panicHook": "console_error_panic_hook (verter_wasm default feature)",
+    "customAllocator": "none"
+  },
+  "exports": {
+    "compilerSessionSurface": [
+      "VerterHost.new/resolve/upsert/remove/listVirtualFiles",
+      "VerterHost.getDocumentStructure/getAnalysis/compileRequest/getPublicApi",
+      "VerterHost.computeCrossFileOptimizations/setImportDependencies",
+      "host_compile_request_from_wire/host_compile_request_from_js",
+      "typeinfo bindings",
+      "audit bindings"
+    ],
+    "semanticHostExports": "none; semantic-rail TypeScript answers come only from the pinned typescript@6.0.3 worker (ExternalOwner)",
+    "engineCapabilityModel": "fail-closed: tsgo: false for every TypeScript major (capabilityForWasm); no WASM tsgo exists or is attempted",
+    "evidence": [
+      "crates/verter_wasm/src/lib.rs",
+      "crates/verter_wasm/src/typeinfo.rs",
+      "crates/verter_wasm/src/audit.rs",
+      "packages/playground/src/editor/inContextLs.ts",
+      "packages/playground/src/editor/wasmTsgoFailClosed.spec.ts"
+    ]
+  },
+  "rules": [
+    "Adding any forbidden crate (or any process/fs/thread/socket syscall route) to the wasm32-reachable declared edges is a failing fact, not a silent degradation (BWH0-AC1).",
+    "The inert windows-sys chain stays classified inert-metadata; reclassifying it as a blocking import without a runtime process route is rejected.",
+    "A new wasm32 seam is a PlatformHostServices row first (receiving-owner amendment), then code."
+  ]
+}

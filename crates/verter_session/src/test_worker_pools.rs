@@ -112,12 +112,13 @@ impl TestHostWorkerPools {
         config: &HostConfig,
         scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
     ) -> Arc<Self> {
-        let scheduler_cpu_pool =
-            verter_scheduler::SchedulerCpuPool::new(scheduler_config.cpu_threads);
-        let scheduler_io_pool = verter_scheduler::SchedulerIoPool::new(
-            scheduler_config.io_threads,
-            scheduler_config.resolved_dag_budget().io as usize,
+        let budget = scheduler_config.resolved_dag_budget();
+        let scheduler_cpu_pool = verter_scheduler::SchedulerCpuPool::new(
+            scheduler_config.cpu_threads,
+            budget.cpu as usize,
         );
+        let scheduler_io_pool =
+            verter_scheduler::SchedulerIoPool::new(scheduler_config.io_threads, budget.io as usize);
         let host_policy = config.resolved_host_cpu_pool_policy();
         let host_pool_threads = host_policy.size.resolve();
         let host_cpu_pool = match host_policy.spawn {

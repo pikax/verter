@@ -90,6 +90,18 @@ packages/vue-vscode/.vscode-test/
 .vscode-test/
 *.vsix
 
+# JetBrains plugin Gradle build state (extensions/jetbrains): the pinned
+# wrapper JAR under extensions/jetbrains/gradle/wrapper is committed
+# deliberately; everything Gradle generates on top of it is local.
+extensions/jetbrains/.gradle/
+extensions/jetbrains/build/
+extensions/jetbrains/.kotlin/
+extensions/jetbrains/.intellijPlatform/
+extensions/jetbrains/local.properties
+
+# JetBrains gate install-rehearsal output (scripts/jetbrains-gate.mjs)
+/.jetbrains-gate-install/
+
 # Scratch files
 cargo_errors.txt
 cargo_test_errors.txt

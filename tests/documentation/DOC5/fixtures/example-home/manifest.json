@@ -1,0 +1,33 @@
+{
+  "home": "tests/documentation/DOC5/fixtures/example-home",
+  "pin": {
+    "node": ">=22"
+  },
+  "examples": [
+    {
+      "id": "echo",
+      "files": ["echo/run.mjs", "echo/fail.mjs", "echo/slow.mjs"],
+      "surfaces": [],
+      "executionClass": "NodeOnly",
+      "proofClass": "static-proof"
+    }
+  ],
+  "journeys": [
+    {
+      "id": "echo-ok",
+      "description": "runs the echo entry and observes its deterministic output",
+      "executionClass": "NodeOnly",
+      "pins": { "node": ">=22" },
+      "steps": [
+        { "exampleId": "echo", "file": "echo/run.mjs", "args": ["--token", "alpha"], "expectExit": 0 }
+      ]
+    },
+    {
+      "id": "echo-expect-fail",
+      "description": "observes a declared nonzero exit code",
+      "executionClass": "NodeOnly",
+      "pins": { "node": ">=22" },
+      "steps": [{ "exampleId": "echo", "file": "echo/fail.mjs", "expectExit": 7 }]
+    }
+  ]
+}

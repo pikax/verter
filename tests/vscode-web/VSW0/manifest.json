@@ -1,0 +1,81 @@
+{
+  "node": "VSW0",
+  "kind": "constitution",
+  "products": [
+    "WebExtensionFeatureContract v1",
+    "MainBrowserEntrypointPolicy v1",
+    "HostStatusVocabulary v1",
+    "WebProductOwnershipMap v1",
+    "charters/expansion-vscode-web/VSW0.md",
+    "contracts/product-experience.md",
+    "plans/expansion-vscode-web.md"
+  ],
+  "cases": [
+    {
+      "id": "VSW0-AC1",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "web-admission-without-policy",
+        "browser-only-entry",
+        "browser-entry-node-platform",
+        "node-import-in-browser-entry",
+        "dual-entry-admitted",
+        "missing-platform-fact-fails-closed",
+        "live-state-drift"
+      ]
+    },
+    {
+      "id": "VSW0-AC2",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "remote-native-claimed-browser-local",
+        "missing-hostidentity-binding",
+        "hidden-host-status",
+        "status-term-drift"
+      ]
+    },
+    {
+      "id": "VSW0-AC-OWNER",
+      "disposition": "reject",
+      "twins": [
+        "one final owner pinned on the ownership map and every delivered product",
+        "owner-flipped twin fails the single-owner predicate",
+        "split-authority (a delivered product under a second owner) fails",
+        "missing-final-owner twin fails",
+        "premature-deletion twin fails the empty deletion population"
+      ]
+    },
+    {
+      "id": "VSW0-ratification",
+      "disposition": "accept",
+      "twins": [
+        "clean products",
+        "feature-row-missing",
+        "feature-disposition-drift",
+        "nativeonly-claimed-browser-local",
+        "gap-disposition-on-non-native-row",
+        "dx0-browser-executable-drift",
+        "semantic-host-evidence-drift",
+        "bwh0-semantic-host-requirement-drift",
+        "boundary-rule-missing",
+        "boundary-rule-unknown",
+        "desktop-tier-module-unconverted",
+        "host-neutral-claim-on-desktop-tier",
+        "receipt-field-missing",
+        "remote-row-without-host-override",
+        "unknown-bwh-service",
+        "contribution-category-missing",
+        "contribution-compat-drift",
+        "counts-drift",
+        "dx0-receiver-row-missing",
+        "vsc0-receiver-drift",
+        "downstream-owner-unknown",
+        "missing-evidence-file"
+      ]
+    }
+  ],
+  "runtimeCorrectness": false,
+  "notes": "Contract/inventory node: 0 production LOC. VSW0-AC1's admission predicate is re-derived live from packages/vue-vscode/package.json (main declared, browser absent) and esbuild.config.mjs (production entry src/extension.ts, desktop build platform node parsed from the config text, no browser bundle): the live verdict is not-admitted node-main-only, the facts fail closed when a build config declares no platform, the same predicate admits a compliant dual-entry manifest (main kept, browser entry declared, browser-targeted browser bundle, node-free browser entry graph) and rejects a node-platform browser bundle or a browser entry whose real import graph reaches vscode-languageclient/node, so rejection is discrimination, not vacuity. VSW0-AC2's vocabulary binds the DX0 hostIdentity receipt field and the non-parity law (a remote Node service serving a browser client is remote-native); runtime visibility tests bind to VSW1 (browser entrypoint, worker transport, shared-code module-load) and VSW5 (packaging, offline, browser matrix) as downstream owners per VSW0-AC-BASIS. VSW0-AC-OWNER pins finalOwner expansion.vscode-web on the ownership map and every delivered product with an empty deletion population and the retirement obligation stated; flipped, split, missing-owner and premature-deletion twins fail. VSW0-AC-RESOURCE: no hot paths or UI touched; the WSP equal-work obligation binds to VSW5 for real-client claims. VSW0-AC-EXPOSURE: DX1 owns the registration schema; no new operation is promoted by this node. The harness grounds itself in the live repository (extension manifest and build config, VSC0 feature matrix and DesktopWebSharedBoundary rule/module tiers, BWH0 platform-host services and browser-execution-manifest NativeOnly/semantic-host law, DX0 receipt-basis/host-class/exposure-contract browserExecutable/ownership products) and joins every feature row to VSC0 ids, every NativeOnly row to the gap-disposition law, every semantic row to the BWH0 semantic-host proof owners, every cited service to the BWH0 inventory, every receipt field to the DX0 basis and every contribution row to the live manifest counts, so drift in any of them is a failing case, not a stale pass."
+}

@@ -1,0 +1,37 @@
+{
+  "id": "WDX1-FIX-configuration-001",
+  "domain": "configuration",
+  "title": "Project configuration provenance across tsconfig, verterrc and vite",
+  "sources": ["project/tsconfig.json", "project/verterrc.json", "project/vite.config.ts"],
+  "profileIdentity": {
+    "profile": "verter-project-configuration",
+    "typescript": "5.9.0",
+    "vite": "6.3.0"
+  },
+  "buildIdentity": {
+    "target": "static-conformance-fixture",
+    "harness": "web-product-scenario-harness",
+    "schema": 1
+  },
+  "expectedResults": [
+    {
+      "dimension": "semantic-facts",
+      "source": "project/tsconfig.json",
+      "expectation": "the @ui/* tsconfig paths mapping and the vite @ui alias resolve to one shared src/ui provenance fact, not two unrelated facts",
+      "terminalProofClass": "runtime-observation"
+    },
+    {
+      "dimension": "diagnostics",
+      "source": "project/verterrc.json",
+      "expectation": "the viteConfig trust state pinned is carried into the project configuration identity; an unpinned config surfaces as an explicit completeness state, never silent execution",
+      "terminalProofClass": "static-proof"
+    },
+    {
+      "dimension": "build-interop",
+      "source": "project/vite.config.ts",
+      "expectation": "the alias set consumed for build interoperability equals the union of tsconfig paths and vite aliases with conflicts between them flagged",
+      "terminalProofClass": "runtime-observation"
+    }
+  ],
+  "producers": ["expansion.config-env"]
+}
