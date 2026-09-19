@@ -1336,7 +1336,7 @@ jobs:
         with:
           name: clean-room-published-artifact
           path: ${{ runner.temp }}/clean-room-${{ github.run_id }}-${{ github.run_attempt }}/report.json
-          if-no-files-found: warn
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # Publish npm packages

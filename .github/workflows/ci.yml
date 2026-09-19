@@ -847,6 +847,9 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          # The verifiers execute repository-controlled code and only read
+          # local history (cat-file, merge-base); no step needs the token.
+          persist-credentials: false
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc

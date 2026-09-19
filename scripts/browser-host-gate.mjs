@@ -235,6 +235,12 @@ function log(line) {
   process.stdout.write(`browser-host-gate: ${line}\n`);
 }
 
+/** Whether `candidate` resolves inside `root` (separator-bounded, never a sibling prefix). */
+export function isInsideDir(root, candidate) {
+  const between = path.relative(path.resolve(root), path.resolve(candidate));
+  return between !== "" && !between.startsWith("..") && !path.isAbsolute(between);
+}
+
 function serveHarness({ hostSrc, wasmDir }) {
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -244,8 +250,7 @@ function serveHarness({ hostSrc, wasmDir }) {
       ? path.join(wasmDir, rel.slice("/wasm/".length))
       : path.join(hostSrc, rel.slice(1));
     const resolved = path.resolve(rooted);
-    const allowed =
-      resolved.startsWith(path.resolve(hostSrc)) || resolved.startsWith(path.resolve(wasmDir));
+    const allowed = isInsideDir(hostSrc, resolved) || isInsideDir(wasmDir, resolved);
     if (!allowed || !existsSync(resolved) || statSync(resolved).isDirectory()) {
       response.writeHead(404);
       response.end("not found");

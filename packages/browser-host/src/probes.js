@@ -79,6 +79,11 @@ export function runProbes(host, { tsSource, vueSource }) {
   const style = host.matchCssSelectors(CANONICAL_VUE);
   const mapping = mappingFromCompile(compile);
   const query = parseMaybeJson(host.resolveTypeWithAudit(CANONICAL_TS, TYPEINFO_SYMBOL));
+  // The audit-enabled query must derive a stored record; a null result, an
+  // error-shaped object or `hasRecord: false` is not a successful operation.
+  if (query == null || typeof query !== "object" || query.hasRecord !== true) {
+    throw new Error("query audit record is absent from resolveTypeWithAudit");
+  }
 
   return {
     operations: {
@@ -86,7 +91,7 @@ export function runProbes(host, { tsSource, vueSource }) {
       typeinfo: symbols,
       style: Array.isArray(style) ? style : [],
       mapping,
-      query: query == null ? null : [query],
+      query: [query],
     },
     identities: {
       symbols: normalizeSymbolIdentities(symbols),
