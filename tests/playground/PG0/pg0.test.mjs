@@ -83,6 +83,17 @@ function assertNativeOnlyClauseHolds(rule) {
   );
 }
 
+// The DX0 receipt-basis field loop, factored so the session twin re-runs the
+// exact discriminator the ratified session passes instead of asserting the
+// mutation.
+function assertSessionBindsReceiptBasis(s) {
+  const bindings = Object.values(s.model).map((g) => g.binding);
+  const bindsField = (field) => bindings.some((b) => new RegExp(`\\b${field}\\b`).test(b));
+  for (const field of dxReceiptBasis.fields) {
+    assert.ok(bindsField(field), `session model must bind receipt-basis field ${field}`);
+  }
+}
+
 // The core PG0-AC1 join, factored so the twins reuse the exact discriminator.
 function assertMatrixJoinsDX(m) {
   const dxIds = dxContract.operations.map((o) => o.id);
@@ -385,11 +396,7 @@ test("PG0-AC-OWNER: one final owner, vocabulary reuse, no parallel namespaces", 
 });
 
 test("PG0 session model binds the receipt basis verbatim and adds no engine", () => {
-  const bindings = Object.values(session.model).map((g) => g.binding);
-  const bindsField = (field) => bindings.some((b) => new RegExp(`\\b${field}\\b`).test(b));
-  for (const field of dxReceiptBasis.fields) {
-    assert.ok(bindsField(field), `session model must bind receipt-basis field ${field}`);
-  }
+  assertSessionBindsReceiptBasis(session);
   assert.ok(session.law.includes("no second semantic"), "session law forbids a second engine");
 
   // Browser session project access rides the BWH platform-host io service.
@@ -400,16 +407,15 @@ test("PG0 session model binds the receipt basis verbatim and adds no engine", ()
     "project obligations bind the BWH io service, not a new VFS authority",
   );
 
-  // Twin: a session model dropping engineIdentity binding must fail the field check.
+  // Twin: a session model dropping the engineIdentity/hostIdentity binding
+  // fails the same field loop the ratified session passes.
   const dropped = perturb(session, (c) => {
     c.model.engineProfile.binding = "presentation only";
   });
-  const droppedBindings = Object.values(dropped.model).map((g) => g.binding);
-  assert.ok(
-    !dxReceiptBasis.fields.every((rb) =>
-      droppedBindings.some((b) => new RegExp(`\\b${rb}\\b`).test(b)),
-    ),
-    "twin loses receipt-basis binding",
+  assert.throws(
+    () => assertSessionBindsReceiptBasis(dropped),
+    /receipt-basis field/,
+    "twin must fail the receipt-basis field discriminator",
   );
 });
 
@@ -500,6 +506,51 @@ function assertDisplacedTabsOwned(m, outputVue) {
   }
 }
 
+// Every live App.vue output-nav control (Output | Why?) must map to a
+// family-owned panel — or, for the Output shell, to the displacedRoute.tabs
+// surface whose modes are owned one-for-one — so the Why?/AuditTree
+// provenance view keeps a surviving producer at the PG2 cutover.
+function assertDisplacedAppNavOwned(m, appVue) {
+  const navControls = [...appVue.matchAll(/<button[^>]*class="output-tab"[\s\S]*?<\/button>/g)].map(
+    (mt) => mt[0].replace(/<[^>]*>/g, " ").trim(),
+  );
+  assert.ok(navControls.length >= 2, "the App.vue Output|Why? nav is where it lives in App.vue");
+  assert.deepEqual(
+    m.displacedRoute.appNav.controls.map((c) => c.control).sort(),
+    [...navControls].sort(),
+    "displacedRoute.appNav.controls must cover exactly the live App.vue nav controls (no control without an owner)",
+  );
+  const byFamily = Object.fromEntries(m.featureFamilies.map((f) => [f.id, f.preservationEvidence]));
+  for (const c of m.displacedRoute.appNav.controls) {
+    assert.ok(
+      fs.existsSync(path.join(REPO_ROOT, c.panel)),
+      `control ${c.control}: panel missing in live tree: ${c.panel}`,
+    );
+    if (c.routesTo) {
+      assert.equal(
+        c.routesTo,
+        "displacedRoute.tabs",
+        `control ${c.control}: routesTo must name the displaced tabs surface`,
+      );
+      assert.match(
+        c.panel,
+        /Output\.vue$/,
+        `control ${c.control}: routes through the Output.vue tab strip characterized by displacedRoute.tabs`,
+      );
+    } else {
+      assert.ok(
+        c.family,
+        `control ${c.control}: must name a family or route through displacedRoute.tabs`,
+      );
+      assert.ok(byFamily[c.family], `control ${c.control}: unknown family ${c.family}`);
+      assert.ok(
+        byFamily[c.family].includes(c.panel),
+        `control ${c.control}: panel ${c.panel} is not preservation evidence of family ${c.family}`,
+      );
+    }
+  }
+}
+
 test("PG0 displaced tabs: every Output.vue allTabs mode plus the ssr insert has an owning family", () => {
   const outputVue = fs.readFileSync(
     path.join(REPO_ROOT, "packages/playground/src/output/Output.vue"),
@@ -527,4 +578,46 @@ test("PG0 displaced tabs: every Output.vue allTabs mode plus the ssr insert has 
     () => assertDisplacedTabsOwned(m2, outputVue),
     /is not preservation evidence of family/,
   );
+});
+
+test("PG0 displaced nav: the App.vue Output|Why? controls keep an owning family", () => {
+  const appVue = fs.readFileSync(path.join(REPO_ROOT, "packages/playground/src/App.vue"), "utf8");
+  assertDisplacedAppNavOwned(matrix, appVue);
+
+  // Twin 1: dropping the Why? control from the matrix fails (unexplained UI
+  // feature removal: the live nav still renders Why?).
+  const m1 = perturb(matrix, (c) => {
+    c.displacedRoute.appNav.controls = c.displacedRoute.appNav.controls.filter(
+      (ctl) => ctl.control !== "Why?",
+    );
+  });
+  assert.throws(
+    () => assertDisplacedAppNavOwned(m1, appVue),
+    /displacedRoute\.appNav\.controls must cover exactly/,
+  );
+
+  // Twin 2: AuditTree.vue dropped from its owning family's evidence fails.
+  const m2 = perturb(matrix, (c) => {
+    const fam = c.featureFamilies.find((f) => f.id === "workbench.family.audit-provenance");
+    fam.preservationEvidence = fam.preservationEvidence.filter(
+      (p) => p !== "packages/playground/src/components/AuditTree.vue",
+    );
+  });
+  assert.throws(
+    () => assertDisplacedAppNavOwned(m2, appVue),
+    /is not preservation evidence of family/,
+  );
+
+  // Twin 3: parking Why?/AuditTree.vue on a missing family fails the family
+  // consistency rule (a missing family cites only DX0 gap evidence for its
+  // own operations), so the preserved live surface cannot be presented as
+  // the missing producer's coverage.
+  const m3 = perturb(matrix, (c) => {
+    c.displacedRoute.appNav.controls.find((ctl) => ctl.control === "Why?").family =
+      "workbench.family.metadata";
+    c.featureFamilies
+      .find((f) => f.id === "workbench.family.metadata")
+      .preservationEvidence.push("packages/playground/src/components/AuditTree.vue");
+  });
+  assert.throws(() => assertFamiliesConsistent(m3), /is not DX0 gap evidence/);
 });

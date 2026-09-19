@@ -59,9 +59,9 @@
     ]
   },
   "displacedRoute": {
-    "description": "The hand-written allTabs list in packages/playground/src/output/Output.vue (preview, files, analysis, lint, outline, cssMatch, map, diagnostics, templateAst, cssVarFlow, depGraph, plus the ssr insert) is a manually curated compiler-demo feature list; displacedRoute.tabs maps every live tab mode to its owning feature family and panel so no user-visible surface loses its surviving producer at the cutover.",
+    "description": "Two hand-written output navs are displaced at the cutover: the allTabs list in packages/playground/src/output/Output.vue (preview, files, analysis, lint, outline, cssMatch, map, diagnostics, templateAst, cssVarFlow, depGraph, plus the ssr insert), a manually curated compiler-demo feature list, and the sibling Output|Why? nav in packages/playground/src/App.vue whose always-rendered Why? control mounts AuditTree.vue. displacedRoute.tabs maps every live tab mode to its owning feature family and panel, and displacedRoute.appNav maps every live App.vue nav control, so no user-visible surface loses its surviving producer at the cutover.",
     "cutoverOwner": "PG2",
-    "cutoverRule": "Characterize the existing user-visible tabs first (displacedRoute.tabs binds each tab mode to its owning family and panel), route each through its surviving producer (this matrix's featureFamilies rows), verify consumers, then remove the literal list. The harness fails when an Output.vue tab mode lacks a family-owned panel. Inert generated-matrix adapters may land before PG2 activates; after activation no two active feature-coverage authorities may coexist.",
+    "cutoverRule": "Characterize the existing user-visible surfaces first (displacedRoute.tabs binds each tab mode and displacedRoute.appNav binds each App.vue nav control to its owning family and panel), route each through its surviving producer (this matrix's featureFamilies rows), verify consumers, then remove the literal lists. The harness fails when an Output.vue tab mode or an App.vue nav control lacks a family-owned panel. Inert generated-matrix adapters may land before PG2 activates; after activation no two active feature-coverage authorities may coexist.",
     "deletionPopulationThisNode": "empty: PG0 is contract-only and deletes nothing; the cutover executes in PG2 with this matrix as the generated obligation source.",
     "tabs": [
       {
@@ -124,7 +124,22 @@
         "panel": "packages/playground/src/output/CodeOutput.vue",
         "family": "workbench.family.compiler-ir-mappings"
       }
-    ]
+    ],
+    "appNav": {
+      "description": "packages/playground/src/App.vue renders a sibling output nav above the workbench output surface. The Output control hosts the Output.vue tab strip, whose live modes are owned one-for-one by displacedRoute.tabs; the Why? control mounts AuditTree.vue, the provenance-chain view over the component-meta audit pipeline (ProvenanceChain from getComponentMetaWithAudit whyLoaded/whyInstantiated; provenanceChain is null until the playground wires the WASM session, so the control currently renders AuditTree.vue's enable-footprint empty state).",
+      "controls": [
+        {
+          "control": "Output",
+          "panel": "packages/playground/src/output/Output.vue",
+          "routesTo": "displacedRoute.tabs"
+        },
+        {
+          "control": "Why?",
+          "panel": "packages/playground/src/components/AuditTree.vue",
+          "family": "workbench.family.audit-provenance"
+        }
+      ]
+    }
   },
   "operationCoverage": [
     {
@@ -611,6 +626,18 @@
       "preservationEvidence": [
         "packages/playground/src/output/ComponentMetaPanel.spec.ts"
       ]
+    },
+    {
+      "id": "workbench.family.audit-provenance",
+      "family": "audit provenance",
+      "dxOperations": [],
+      "familyState": "partial",
+      "workbenchOwner": "PG3",
+      "preservationEvidence": [
+        "packages/playground/src/App.vue",
+        "packages/playground/src/components/AuditTree.vue"
+      ],
+      "descriptorGap": "DX0 registers no why/audit operation id; the App.vue Why? control (displacedRoute.appNav) mounts AuditTree.vue, the view over the component-meta provenance chain (ProvenanceChain from getComponentMetaWithAudit whyLoaded/whyInstantiated), and renders the enable-footprint empty state while the chain is unwired. The metadata family cannot hold it: DX0's lsp.component-meta gap evidence does not cite AuditTree.vue or App.vue, so this preserved live surface rides a descriptor-gap family; PG3's semantic and TypeInfo explorer registers the why/audit operation through DX1 as it exposes it"
     },
     {
       "id": "workbench.family.runtime-ssr-hmr",

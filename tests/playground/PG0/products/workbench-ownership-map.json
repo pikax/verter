@@ -26,8 +26,8 @@
   "receivingAmendments": "See producer-promotion-rule.v1.receivingAmendments for the per-node product handoffs (DX1, PG1–PG17); PG0 itself is a contract-only receiver of DX0 exposure law and BWH0 browser-execution law.",
   "displacedRoutes": [
     {
-      "route": "manually curated compiler-demo feature list (Output.vue allTabs: preview, files, analysis, lint, outline, cssMatch, map, diagnostics, templateAst, cssVarFlow, depGraph, ssr insert)",
-      "characterisation": "The current user-visible tab set is characterized by packages/playground/e2e/output-tabs.spec.ts, analysis-tab.spec.ts and compilation.spec.ts before any cutover.",
+      "route": "manually curated compiler-demo feature list (Output.vue allTabs: preview, files, analysis, lint, outline, cssMatch, map, diagnostics, templateAst, cssVarFlow, depGraph, ssr insert) plus the sibling App.vue Output|Why? nav (the Why? control mounts AuditTree.vue)",
+      "characterisation": "The current user-visible tab set is characterized by packages/playground/e2e/output-tabs.spec.ts, analysis-tab.spec.ts and compilation.spec.ts, and the App.vue Output|Why? nav (provenance chain via AuditTree.vue) is characterized in playground-feature-matrix.v1 displacedRoute.appNav, before any cutover.",
       "cutoverOwner": "PG2",
       "rule": "Do not remove useful existing behavior merely because the generated explorer is not ready; inert adapters may land first; after cutover no two active feature-coverage authorities coexist."
     }
