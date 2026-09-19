@@ -497,17 +497,9 @@ export function assertCertified(run: LapceUiRun): LapceUiRun {
  * AC-RESOURCE).
  */
 export function carriesRealClientEvidence(run: LapceUiRun): boolean {
-  if (run.hostKind !== LAPCE_REAL_HOST) return false;
-  if (run.automationPath.kind !== REAL_LAPCE_AUTOMATION_PATH.kind) return false;
-  const provenance = run.captureProvenance;
-  if (provenance === undefined || provenance.schema !== "driven-lapce-capture.v1") return false;
-  const lapceClient = run.versions.items.find((item) => item.item === "lapce-client");
-  if (lapceClient?.status !== "pinned" || lapceClient.version !== provenance.lapceClientVersion) {
-    return false;
-  }
-  if (run.observedUiStamps === undefined) return false;
-  if (uiStampDigest(run.observedUiStamps) !== provenance.captureSha256) return false;
-  return run.timelines.some((timeline) => timeline.inputToPaintMs.status === "measured");
+  // One gate implementation: the product-claim verdict is the single place the
+  // real-client requirements are spelled out, and this boolean is its shadow.
+  return assertRealLapceProductClaim(run).admissible;
 }
 
 /**

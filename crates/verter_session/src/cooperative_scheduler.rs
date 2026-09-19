@@ -251,9 +251,13 @@ impl CooperativeSchedulerAdapter {
             if let Some(state) = handle.try_get() {
                 return CooperativeDrive::Driven(state);
             }
+            // No stage of this drive was pumped by this adapter: a
+            // cancellation observed here is still a before-drive stop
+            // (the handle stays pending with the scheduler), not a
+            // between-stages one.
             if self.cancellation.is_cancelled() {
                 return CooperativeDrive::Cancelled(CooperativeStop {
-                    point: CooperativePoint::BetweenStages,
+                    point: CooperativePoint::BeforeDrive,
                 });
             }
             return CooperativeDrive::Driven(scheduler.wait_or_drive(handle));

@@ -1,0 +1,50 @@
+{
+  "schema": "wsp1b-exposure-registration.v1",
+  "node": "WSP1B",
+  "dx1SchemaOwner": "DX1",
+  "rule": "register the schema/case before the explorer exists; keep product promotion blocked on executable exposure",
+  "operations": [
+    {
+      "id": "lapce.issue93_early_verification",
+      "operation": "Issue93EarlyVerification: pinned large-project Lapce run with UI timeline and complete semantic oracle",
+      "profile": "inspection",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "exposure": {
+        "state": "registered",
+        "route": "packages/dx-harness/lapce/earlyVerification.ts exported as @verter/dx-harness/lapce",
+        "replayCase": "packages/dx-harness/test/earlyVerification.test.ts",
+        "test": "pnpm --filter @verter/dx-harness exec vitest --run test/earlyVerification.test.ts"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "DX1 descriptor plus an executable playground adapter; native execution must be explicitly selected",
+          "replayCase": "DX1 registration plus this node's earlyVerification tests"
+        }
+      }
+    },
+    {
+      "id": "lapce.issue93_carry_forward",
+      "operation": "Issue93CarryForwardCase: retained large-project regression scenario for WSP8/ED1 requalification",
+      "profile": "inspection",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "exposure": {
+        "state": "registered",
+        "route": "packages/dx-harness/lapce/earlyVerification.ts issue93CarryForwardCase",
+        "replayCase": "packages/dx-harness/test/earlyVerification.test.ts WSP1B qualified current behavior",
+        "test": "pnpm --filter @verter/dx-harness exec vitest --run test/earlyVerification.test.ts"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "DX1 descriptor; the carry-forward case is a retained scenario identity, not a user-facing operation",
+          "replayCase": "DX1 registration plus this node's earlyVerification tests"
+        }
+      }
+    }
+  ]
+}

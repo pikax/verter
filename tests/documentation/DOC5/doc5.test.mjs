@@ -6,7 +6,11 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { canonicalizeReceipt, validate } from "../../../docs/scripts/reference-harness.mjs";
+import {
+  canonicalizeReceipt,
+  classifyJourneyOutcome,
+  validate,
+} from "../../../docs/scripts/reference-harness.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const manifestRel = "examples/reference/manifest.json";
@@ -18,7 +22,10 @@ const topics = manifest.recipes?.topics ?? [];
 const topicIds = topics.map((topic) => topic.id).sort();
 const journeys = manifest.journeys ?? [];
 const product = JSON.parse(
-  readFileSync(join(repoRoot, "tests/documentation/DOC5/products/web-product-guides-model.v1.json"), "utf8"),
+  readFileSync(
+    join(repoRoot, "tests/documentation/DOC5/products/web-product-guides-model.v1.json"),
+    "utf8",
+  ),
 );
 
 function opts(extra = {}) {
@@ -301,7 +308,9 @@ test("journey structural validation rejects unknown examples, unshipped commands
             id: "broken",
             description: "declares NativeOnly but runs a file",
             executionClass: "NativeOnly",
-            steps: [{ exampleId: "types-helpers", file: "types-helpers/example.ts", expectExit: 0 }],
+            steps: [
+              { exampleId: "types-helpers", file: "types-helpers/example.ts", expectExit: 0 },
+            ],
           });
         }),
       },
@@ -348,9 +357,7 @@ test("node journeys execute for real and record runtime observation", async () =
 });
 
 test("an executed step that misses its expected exit code fails the journey lane", async () => {
-  const fixtureManifest = JSON.parse(
-    readFileSync(join(fixtureRoot, "manifest.json"), "utf8"),
-  );
+  const fixtureManifest = JSON.parse(readFileSync(join(fixtureRoot, "manifest.json"), "utf8"));
   const receipt = await validate({
     repoRoot,
     examplesRoot: fixtureRoot,
@@ -378,9 +385,7 @@ test("an executed step that misses its expected exit code fails the journey lane
 });
 
 test("a step that exceeds its bounded runtime times out and fails", async () => {
-  const fixtureManifest = JSON.parse(
-    readFileSync(join(fixtureRoot, "manifest.json"), "utf8"),
-  );
+  const fixtureManifest = JSON.parse(readFileSync(join(fixtureRoot, "manifest.json"), "utf8"));
   const receipt = await validate({
     repoRoot,
     examplesRoot: fixtureRoot,
@@ -406,9 +411,7 @@ test("a step that exceeds its bounded runtime times out and fails", async () => 
 });
 
 test("aborting during a step cancels the journey lane and kills the child", async () => {
-  const fixtureManifest = JSON.parse(
-    readFileSync(join(fixtureRoot, "manifest.json"), "utf8"),
-  );
+  const fixtureManifest = JSON.parse(readFileSync(join(fixtureRoot, "manifest.json"), "utf8"));
   const controller = new AbortController();
   const pending = validate({
     repoRoot,
@@ -520,4 +523,56 @@ test("the recipe home and product record the delivery contract", () => {
   assert.ok(product.uncertaintyNotes.length > 0);
   assert.ok(product.migrationNotes.length > 0);
   assert.ok(product.permissions.length > 0);
+});
+
+test("a duplicate recipe topic id fails", async () => {
+  const receipt = await validate(
+    opts({
+      overlays: {
+        [manifestRel]: mutatedManifest((m) => {
+          m.recipes.topics.push(structuredClone(m.recipes.topics[0]));
+        }),
+      },
+    }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  const dup = receipt.errors.find((item) => item.code === "recipes-duplicate-topic");
+  assert.ok(dup);
+  assert.equal(dup.id, manifest.recipes.topics[0].id);
+});
+
+test("an overlaid journey entry is refused instead of executing the on-disk file", async () => {
+  const runRel = "tests/documentation/DOC5/fixtures/example-home/echo/run.mjs";
+  const receipt = await validate({
+    repoRoot,
+    examplesRoot: fixtureRoot,
+    skipTypeinfoCheck: true,
+    runJourneys: true,
+    overlays: {
+      [runRel]: `${readFileSync(join(repoRoot, runRel), "utf8")}\n// edited through an overlay\n`,
+    },
+  });
+  assert.notEqual(receipt.completenessState, "complete");
+  const refused = receipt.errors.find((item) => item.code === "journey-step-overlaid");
+  assert.ok(refused);
+  assert.equal(refused.journey, "echo-ok");
+  assert.equal(refused.overlay, runRel);
+  const row = receipt.journeys.find((journey) => journey.id === "echo-ok");
+  assert.equal(row.ok, false);
+  assert.equal(row.execution.state, "executed");
+  assert.equal(row.execution.steps[0].stdoutDigest, null);
+});
+
+test("a child terminated by a signal is a failed step unless the caller aborted", () => {
+  const bySignal = { exitCode: null, signal: "SIGKILL", timedOut: false };
+  assert.equal(classifyJourneyOutcome(bySignal, false), "signalled");
+  assert.equal(classifyJourneyOutcome(bySignal, true), "cancelled");
+  assert.equal(
+    classifyJourneyOutcome({ exitCode: 0, signal: null, timedOut: false }, false),
+    "exited",
+  );
+  assert.equal(
+    classifyJourneyOutcome({ exitCode: null, signal: null, timedOut: true }, true),
+    "timed-out",
+  );
 });

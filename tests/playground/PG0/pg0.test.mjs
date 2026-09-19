@@ -136,6 +136,16 @@ function assertMatrixJoinsDX(m) {
         dx.playground.blockedUntil.replayCase,
         `${row.dxOperationId}: blockedUntil replayCase drift`,
       );
+    } else {
+      // The join is symmetric: a blockedUntil pin on an operation DX0 does
+      // not block is a fabricated route, not a joined one.
+      for (const field of ["blockedUntilRoute", "blockedUntilReplayCase"]) {
+        assert.equal(
+          row[field],
+          undefined,
+          `${row.dxOperationId}: ${field} declared for an operation DX0 does not block`,
+        );
+      }
     }
     const dxMerge = dx.playground.unlabelledAnalysisMerge;
     if (dxMerge) {
@@ -167,6 +177,12 @@ function assertMatrixJoinsDX(m) {
         row.routeObligation,
         /comparisonRail/,
         `${row.dxOperationId}: routeObligation must name the comparisonRail selection`,
+      );
+    } else {
+      assert.equal(
+        row.unlabelledAnalysisMerge,
+        undefined,
+        `${row.dxOperationId}: unlabelledAnalysisMerge declared without a DX0 pin`,
       );
     }
     assert.match(
@@ -297,6 +313,29 @@ test("PG0-AC1 twin: dropping the unlabelledAnalysisMerge pin from a live-merge r
       .unlabelledAnalysisMerge;
   });
   assert.throws(() => assertMatrixJoinsDX(m), /unlabelledAnalysisMerge/);
+});
+
+test("PG0-AC1 twin: a blockedUntil pin declared on an operation DX0 does not block fails", () => {
+  const m = perturb(matrix, (c) => {
+    const row = c.operationCoverage.find((r) => r.dxOperationId === "playground.rename");
+    row.blockedUntilRoute = "PG3";
+    row.blockedUntilReplayCase = "replay:playground.rename";
+  });
+  assert.throws(
+    () => assertMatrixJoinsDX(m),
+    /blockedUntilRoute declared for an operation DX0 does not block/,
+  );
+});
+
+test("PG0-AC1 twin: an unlabelledAnalysisMerge pin declared without a DX0 pin fails", () => {
+  const m = perturb(matrix, (c) => {
+    const row = c.operationCoverage.find((r) => r.dxOperationId === "lsp.hover");
+    row.unlabelledAnalysisMerge = structuredClone(
+      c.operationCoverage.find((r) => r.dxOperationId === "playground.hover")
+        .unlabelledAnalysisMerge,
+    );
+  });
+  assert.throws(() => assertMatrixJoinsDX(m), /unlabelledAnalysisMerge declared without a DX0 pin/);
 });
 
 test("PG0-AC1 twin: a single TS-worker authority routeObligation over a live merge fails", () => {

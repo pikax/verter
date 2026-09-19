@@ -155,8 +155,12 @@ function parseVersions(raw: unknown): VersionSet {
 function parsePaint(raw: unknown): PaintSample {
   if (raw === null || typeof raw !== "object") throw new Error("paint missing");
   const record = raw as Record<string, unknown>;
+  const uiApplyPaintMs = parseMetric(record.uiApplyPaintMs, "paint.uiApplyPaintMs");
+  if (uiApplyPaintMs.status === "measured" && uiApplyPaintMs.value < 0) {
+    throw new Error("paint.uiApplyPaintMs.value must not be negative");
+  }
   return {
-    uiApplyPaintMs: parseMetric(record.uiApplyPaintMs, "paint.uiApplyPaintMs"),
+    uiApplyPaintMs,
     rpcDurationMs: parseMetric(record.rpcDurationMs, "paint.rpcDurationMs"),
   };
 }
@@ -228,7 +232,7 @@ function parseMember(raw: unknown, index: number): ProcessTreeSnapshot["members"
 
 function parseWorkflows(raw: unknown, side: Side): readonly CorrectnessRow[] {
   if (!Array.isArray(raw)) throw new Error("workflows must be an array");
-  return raw.map((row, index) => {
+  const rows = raw.map((row, index) => {
     if (row === null || typeof row !== "object") throw new Error(`workflows[${index}] invalid`);
     const record = row as Record<string, unknown>;
     if (!(COMPARISON_WORKFLOWS as readonly string[]).includes(record.workflow as string)) {
@@ -246,6 +250,20 @@ function parseWorkflows(raw: unknown, side: Side): readonly CorrectnessRow[] {
       reason: record.reason,
     };
   });
+  // One result per comparison workflow: a missing row is not an implicit
+  // pass and a duplicate row could carry two conflicting results.
+  const seen = new Set<ComparisonWorkflowId>();
+  for (const row of rows) {
+    if (seen.has(row.workflow)) throw new Error(`duplicate workflow row '${row.workflow}'`);
+    seen.add(row.workflow);
+  }
+  const missing = COMPARISON_WORKFLOWS.filter((workflow) => !seen.has(workflow));
+  if (missing.length > 0) {
+    throw new Error(
+      `workflows must carry one result for every comparison workflow; missing ${missing.join(", ")}`,
+    );
+  }
+  return rows;
 }
 
 function parseBasis(raw: unknown): ProductReceiptBasis {
@@ -294,6 +312,22 @@ function parseOptionalAggregates(
   return out;
 }
 
+/**
+ * Units a measured metric must carry, keyed by the last path segment. Timings
+ * are consumed as milliseconds and sizes summed as bytes, so any other unit
+ * would silently skew a comparison. `versions.engine` is engine identity, not
+ * a quantity, and unknown metric names are left unconstrained.
+ */
+const REQUIRED_METRIC_UNITS: Readonly<Record<string, string>> = {
+  uiApplyPaintMs: "ms",
+  rpcDurationMs: "ms",
+  providerCpu: "ms",
+  providerWall: "ms",
+  rssBytes: "bytes",
+  retainedMemory: "bytes",
+  outboundBytes: "bytes",
+};
+
 function parseMetric(raw: unknown, path: string): PaintSample["uiApplyPaintMs"] {
   if (raw === null || typeof raw !== "object") throw new Error(`${path} missing`);
   const record = raw as Record<string, unknown>;
@@ -314,6 +348,10 @@ function parseMetric(raw: unknown, path: string): PaintSample["uiApplyPaintMs"] 
   }
   if (typeof record.unit !== "string" || record.unit.length === 0) {
     throw new Error(`${path}.unit required`);
+  }
+  const required = REQUIRED_METRIC_UNITS[path.slice(path.lastIndexOf(".") + 1)];
+  if (required !== undefined && record.unit !== required) {
+    throw new Error(`${path}.unit must be ${required}, got '${record.unit}'`);
   }
   return { status: "measured", value: record.value, unit: record.unit };
 }

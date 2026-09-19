@@ -5,5 +5,5 @@
     "moduleResolution": "Bundler",
     "strict": true
   },
-  "include": ["Fixture.vue"]
+  "include": ["Fixture.vue", "Helper.vue"]
 }

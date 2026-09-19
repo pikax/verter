@@ -1386,7 +1386,7 @@ function fire() {
             panic!("emits-multi-payload failed output materialization: {error}")
         })
         .expect("component resolves");
-    let (analysis, _, types) = output.into_parts();
+    let (analysis, _, types, contract, _) = output.into_parts_with_contract();
     let lanes = types.into_lanes();
 
     let move_idx = analysis
@@ -1408,22 +1408,45 @@ function fire() {
         .expect("toggle");
     match lanes.events[toggle_idx].payload.materialized_type() {
         Some(verter_type_expr::TypeExpr::Tuple { elements, .. }) => {
-            assert_eq!(elements.len(), 1);
-            assert!(
-                elements[0].optional
-                    || matches!(
-                        &elements[0].ty,
-                        verter_type_expr::TypeExpr::Union(_)
-                            | verter_type_expr::TypeExpr::Primitive(
-                                verter_type_expr::PrimitiveName::Boolean
-                            )
-                    ),
-                "toggle optional boolean payload lost optionality/type, got {:?}",
-                elements[0]
-            );
+            assert_eq!(elements.len(), 1, "toggle payload arity, got {elements:?}");
         }
-        other => panic!("toggle must retain an optional boolean payload, got {other:?}"),
+        other => panic!("toggle must retain a one-element payload tuple, got {other:?}"),
     }
+    // Optionality is asserted where it is preserved: the public contract's
+    // call-signature parameters. The materialized payload descriptor drops
+    // tuple-element optionality, so a required boolean would pass there.
+    let verter_session::framework::ComponentContractAvailability::Supported(contract) = contract
+    else {
+        panic!("emits-multi-payload must project a supported public contract, got {contract:?}");
+    };
+    let toggle = contract
+        .events
+        .iter()
+        .find(|event| event.name.as_ref() == "toggle")
+        .expect("toggle event on the public contract");
+    let overload = toggle
+        .overloads
+        .first()
+        .expect("toggle declares one call signature");
+    assert_eq!(
+        overload.parameters.len(),
+        1,
+        "toggle contract parameters, got {:?}",
+        overload.parameters
+    );
+    assert!(
+        overload.parameters[0].optional,
+        "toggle's `value?: boolean` parameter must stay optional on the public contract, got {:?}",
+        overload.parameters[0]
+    );
+    assert!(
+        matches!(
+            &overload.parameters[0].ty,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
+        ),
+        "toggle's parameter type must stay boolean, got {:?}",
+        overload.parameters[0].ty
+    );
 
     let click_idx = analysis
         .events

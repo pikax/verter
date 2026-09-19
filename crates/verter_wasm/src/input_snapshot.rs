@@ -126,8 +126,10 @@ pub(crate) fn commit_input_snapshot_core(
 
 /// The host-side snapshot registry: basis id → committed snapshot.
 /// Latest commit wins nothing — every basis id stays addressable until
-/// the host is dropped, so a browser tab holding an old id can never
-/// observe another tab's newer basis through it.
+/// the host releases it or is dropped, so a browser tab holding an old
+/// id can never observe another tab's newer basis through it. Each
+/// stored snapshot owns its committed file contents, so a host that
+/// keeps committing waves must release the bases it no longer reads.
 pub(crate) struct InputSnapshotStore {
     by_basis_id: HashMap<String, StoredInputSnapshot>,
 }
@@ -149,6 +151,13 @@ impl InputSnapshotStore {
         self.by_basis_id
             .insert(stored.basis_id_hex(), stored.clone());
         Ok(stored)
+    }
+
+    /// Release the snapshot committed under `basis_id_hex`, dropping its
+    /// file contents. Returns whether a snapshot was stored under that id;
+    /// releasing an unknown or already released id is a no-op.
+    pub(crate) fn release(&mut self, basis_id_hex: &str) -> bool {
+        self.by_basis_id.remove(basis_id_hex).is_some()
     }
 
     /// Observe `canonical` under the committed basis `basis_id_hex`.
@@ -203,6 +212,43 @@ mod tests {
         assert_eq!(
             store.observe(&basis_id, "/never-acquired.ts"),
             Ok(InputSnapshotObservationCore::NeedInputs)
+        );
+    }
+
+    /// A released basis is no longer addressable: observing through it
+    /// answers the unknown-basis error, a second release is a no-op, and
+    /// an identical wave committed later mints the same id afresh.
+    #[test]
+    fn released_basis_is_no_longer_observable_until_recommitted() {
+        let mut store = InputSnapshotStore::new();
+        let wave = || {
+            (
+                vec![("/probe.ts".to_string(), "export const a = 1;".to_string())],
+                vec!["/gone.ts".to_string()],
+            )
+        };
+        let (files, missing) = wave();
+        let stored = store.commit(files, missing).expect("coherent wave");
+        let basis_id = stored.basis_id_hex();
+
+        assert!(
+            store.release(&basis_id),
+            "the committed basis is released once"
+        );
+        assert!(!store.release(&basis_id), "a second release is a no-op");
+        assert_eq!(
+            store.observe(&basis_id, "/probe.ts"),
+            Err(InputSnapshotError::UnknownBasisId)
+        );
+
+        let (files, missing) = wave();
+        let again = store.commit(files, missing).expect("coherent wave");
+        assert_eq!(again.basis_id_hex(), basis_id);
+        assert_eq!(
+            store.observe(&basis_id, "/probe.ts"),
+            Ok(InputSnapshotObservationCore::File {
+                content: "export const a = 1;".to_string()
+            })
         );
     }
 

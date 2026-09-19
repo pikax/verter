@@ -119,18 +119,33 @@ function countObservedCancellations(wire: readonly ProtocolWireEvent[]): number 
  * failed request keeps the whole replay distinct from complete (the run-level
  * mirror of the per-trace TraceStatus terminals).
  */
+/**
+ * The replay's terminal state is derived from request terminal evidence: an
+ * empty wire is `complete-empty`, request epochs without a response are
+ * `pending` (all of them) or `partial` (some of them), and an observed
+ * cancellation or failure response wins over both. A wire that merely lacks
+ * error responses is never read as complete.
+ */
 function observedCompletenessState(
   wire: readonly ProtocolWireEvent[],
 ): RecordedLspReplay["completenessState"] {
+  if (wire.length === 0) return "complete-empty";
   let cancelled = false;
   let failed = false;
+  const requestEpochs = new Set<number>();
+  const answeredEpochs = new Set<number>();
   for (const event of wire) {
-    if (event.kind !== "response" || event.errorCode === undefined) continue;
+    if (event.kind === "request") requestEpochs.add(event.requestEpoch);
+    if (event.kind !== "response") continue;
+    answeredEpochs.add(event.requestEpoch);
+    if (event.errorCode === undefined) continue;
     if (event.errorCode === REQUEST_CANCELLED_CODE) cancelled = true;
     else failed = true;
   }
   if (cancelled) return "cancelled";
   if (failed) return "failed";
+  const unanswered = [...requestEpochs].filter((epoch) => !answeredEpochs.has(epoch)).length;
+  if (unanswered > 0) return unanswered === requestEpochs.size ? "pending" : "partial";
   return "complete";
 }
 

@@ -106,7 +106,9 @@ packed_id!(BodyLocatorId);
 packed_id!(SpellingId);
 packed_id!(ConstituentSequenceId);
 
-/// Interned type-shape token. Not a source span.
+/// Interned type-shape token. Not a source span, and not a
+/// `SemanticNodeId`: the raw value lives in the kernel's own token
+/// space and must never be reinterpreted as a semantic node ordinal.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[repr(transparent)]
 pub struct TypeToken(u64);

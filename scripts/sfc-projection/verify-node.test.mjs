@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -25,12 +26,16 @@ import {
   assertStp3Products,
   assertStp4Products,
   assertStp6Products,
+  cleanTwinTarget,
   cloneJson,
+  harnessProbeFiles,
+  isVacuousType,
   loadNodeManifest,
   loadObligation,
   loadRootManifest,
   parseArgs,
   probeMapperHost,
+  probesAreRunnable,
   readJson,
   repoPath,
   resolveDefinitionName,
@@ -142,8 +147,68 @@ test("STP1-types dirty twin: any cannot satisfy a type equality", () => {
 });
 
 test("STP1-types dirty twin: vacuous never cannot satisfy a type equality", () => {
-  const errors = assertExactType({ actual: "never", expected: "Comp", flags: 262144 });
-  assert.ok(errors.some((error) => error.caseId === "STP1-types" && error.code === "vacuous-type"));
+  const printed = assertExactType({ actual: "never", expected: "Comp" });
+  assert.ok(
+    printed.some((error) => error.caseId === "STP1-types" && error.code === "vacuous-type"),
+  );
+  // The flag branch alone: TypeFlags.Never (1 << 17) on a non-never spelling.
+  const flagged = assertExactType({ actual: "Comp", expected: "Comp", flags: 1 << 17 });
+  assert.ok(
+    flagged.some((error) => error.caseId === "STP1-types" && error.code === "vacuous-type"),
+    JSON.stringify(flagged),
+  );
+});
+
+test("STP1-types clean twin: a type parameter is not a vacuous type", () => {
+  // TypeFlags.TypeParameter is 1 << 18, adjacent to Never; it must not read as vacuous.
+  assert.equal(isVacuousType("T", 1 << 18), false);
+  assert.equal(isVacuousType("T", 1 << 17), true);
+  assert.equal(isVacuousType("T", 1), true);
+  const errors = assertExactType({ actual: "T", expected: "T", flags: 1 << 18 });
+  assert.equal(errors.length, 0, JSON.stringify(errors));
+});
+
+test("STP1-zero-selection: a missing or malformed product file is a structured rejection", async () => {
+  const products = loadProducts();
+  const missingInventory = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP1",
+    engine: "all",
+    rootManifest: { ...products.root, inventory: "tests/sfc-projection/absent-inventory.json" },
+  });
+  assert.equal(missingInventory.ok, false);
+  assert.ok(
+    missingInventory.errors.some(
+      (error) =>
+        error.caseId === "STP1-zero-selection" &&
+        error.code === "absent-manifest" &&
+        String(error.message).includes("absent-inventory.json"),
+    ),
+    JSON.stringify(missingInventory.errors),
+  );
+  const malformed = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "stp1-matrix-")), "m.json");
+  fs.writeFileSync(malformed, "{ not json");
+  try {
+    const malformedMatrix = await verifyNode({
+      repoRoot: REPO_ROOT,
+      node: "STP1",
+      engine: "all",
+      rootManifest: { ...products.root, engineMatrix: malformed },
+    });
+    assert.equal(malformedMatrix.ok, false);
+    assert.ok(
+      malformedMatrix.errors.some(
+        (error) =>
+          error.caseId === "STP1-zero-selection" &&
+          error.code === "absent-manifest" &&
+          String(error.message).startsWith("malformed engine matrix"),
+      ),
+      JSON.stringify(malformedMatrix.errors),
+    );
+    assert.equal(malformedMatrix.engines.length, 0);
+  } finally {
+    fs.rmSync(path.dirname(malformed), { recursive: true, force: true });
+  }
 });
 
 test("STP1-types dirty twin: non-primitive expected types must match exactly", () => {
@@ -159,6 +224,50 @@ test("STP1-types dirty twin: non-primitive expected types must match exactly", (
   );
   const exact = assertExactType({ actual: "Comp", expected: "Comp" });
   assert.equal(exact.length, 0, JSON.stringify(exact));
+});
+
+function posixPath(p) {
+  return String(p).split(path.sep).join("/");
+}
+
+test("STP1-clean-twin: the configured clean twin is executed, not the positive probe", async () => {
+  const products = loadProducts();
+  assert.deepEqual(cleanTwinTarget(products.node.probes), {
+    rel: "tests/sfc-projection/STP1/probes/positive.ts",
+    sharedWith: "positive",
+  });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "stp1-clean-twin-"));
+  const twin = path.join(dir, "clean-twin.ts");
+  fs.writeFileSync(twin, "export const stray: string = 1;\n");
+  try {
+    const node = cloneJson(products.node);
+    node.probes.cleanTwin = twin;
+    assert.deepEqual(cleanTwinTarget(node.probes), { rel: posixPath(twin), sharedWith: null });
+    assert.equal(harnessProbeFiles(node.probes).length, 3);
+    const result = await verifyNode({
+      repoRoot: REPO_ROOT,
+      node: "STP1",
+      engine: "ts-js",
+      nodeManifest: node,
+      json: true,
+    });
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.errors.some(
+        (error) =>
+          error.caseId === "STP1-clean-twin" &&
+          error.code === "unrelated-generated-error" &&
+          String(error.message).includes("2322"),
+      ),
+      JSON.stringify(result.errors),
+    );
+    const run = result.harnessRuns[0];
+    assert.equal(run.positiveDiagnostics.length, 0, JSON.stringify(run));
+    assert.ok(run.cleanTwinDiagnostics.some((diag) => diag.code === 2322));
+    assert.equal(run.checkCounts[posixPath(twin)], 1, JSON.stringify(run.checkCounts));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("STP1-clean-twin dirty twin: unrelated generated error is rejected", () => {
@@ -220,6 +329,22 @@ test("STP1-harness: one positive and one anchored negative execute on each admit
     }
   }
   assert.equal(result.incremental, "fresh");
+  assert.equal(result.probesSkipped, false);
+  assert.equal(result.qualified, true);
+});
+
+test("STP1-harness: a probes-skipped run validates products but never qualifies", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP1",
+    engine: "all",
+    requireAll: true,
+    skipProbes: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.equal(result.harnessRuns.length, 0);
+  assert.equal(result.probesSkipped, true);
+  assert.equal(result.qualified, false);
 });
 
 test("STP1-harness: omitted probes is a zero-test pass rejection", async () => {
@@ -305,6 +430,44 @@ test("engine filter all admits both pins", () => {
     pins.map((pin) => pin.id),
     ["ts-js", "ts-native"],
   );
+});
+
+test("manifest schema probes contract matches the runner and every node manifest", () => {
+  const schema = readJson(repoPath(REPO_ROOT, "scripts/sfc-projection/manifest.schema.json"));
+  const probesSchema = schema.properties.probes;
+  const known = new Set(Object.keys(probesSchema.properties));
+  assert.deepEqual([...probesSchema.required].sort(), [
+    "cleanTwin",
+    "definitionNeedle",
+    "expectedHoverType",
+    "expectedInstanceType",
+    "expectedNegativeCode",
+    "hoverNeedle",
+    "negative",
+    "positive",
+    "tsconfig",
+  ]);
+  const root = loadRootManifest(REPO_ROOT);
+  assert.equal(root.errors.length, 0, JSON.stringify(root.errors));
+  for (const entry of root.manifest.nodes) {
+    const node = loadNodeManifest(REPO_ROOT, entry.manifest);
+    const probes = node.manifest?.probes;
+    assert.ok(probes && typeof probes === "object", `${entry.id} has no probes`);
+    for (const key of probesSchema.required) {
+      const expected = probesSchema.properties[key].type;
+      assert.equal(
+        typeof probes[key],
+        expected === "integer" ? "number" : expected,
+        `${entry.id} probes.${key}`,
+      );
+    }
+    for (const key of Object.keys(probes)) {
+      assert.ok(known.has(key), `${entry.id} probes.${key} is outside the schema`);
+    }
+    assert.equal(probesAreRunnable(probes), true, `${entry.id} probes are not runnable`);
+  }
+  // A manifest the schema rejects (empty probes) is one the runner rejects too.
+  assert.equal(probesAreRunnable({}), false);
 });
 
 test("STP2 node manifest is schema-valid and lists every mandatory case", () => {
@@ -558,6 +721,75 @@ test("STP4 products name every mandatory case, dialect, and topology decision", 
   const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP4/manifest.json");
   const errors = assertStp4Products(REPO_ROOT, node.manifest);
   assert.equal(errors.length, 0, JSON.stringify(errors));
+});
+
+test("STP4 products dirty twins: dialect, checkJs and external-script values are compared", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP4/manifest.json");
+  const evidence = readJson(
+    repoPath(REPO_ROOT, "tests/sfc-projection/STP4/products/dialect-topology-evidence.json"),
+  );
+  const inputs = readJson(
+    repoPath(
+      REPO_ROOT,
+      "tests/sfc-projection/STP4/products/projection-topology-decision-inputs.json",
+    ),
+  );
+  assert.equal(assertStp4Products(REPO_ROOT, node.manifest, { evidence, inputs }).length, 0);
+
+  const dialect = cloneJson(evidence);
+  dialect.dialects.find((row) => row.id === "tsx").lang = "js";
+  const dialectErrors = assertStp4Products(REPO_ROOT, node.manifest, { evidence: dialect, inputs });
+  assert.ok(
+    dialectErrors.some(
+      (error) => error.caseId === "STP4-tsx-authored" && error.code === "dialect-drift",
+    ),
+    JSON.stringify(dialectErrors),
+  );
+
+  const policy = cloneJson(evidence);
+  policy.checkJs.find((row) => row.id === "off").policy = "@ts-check";
+  const policyErrors = assertStp4Products(REPO_ROOT, node.manifest, { evidence: policy, inputs });
+  assert.ok(
+    policyErrors.some(
+      (error) => error.caseId === "STP4-js-unchecked" && error.code === "policy-drift",
+    ),
+    JSON.stringify(policyErrors),
+  );
+
+  const suppressed = cloneJson(evidence);
+  suppressed.checkJs.find((row) => row.id === "on").scriptDiagnostics = "suppressed";
+  const suppressedErrors = assertStp4Products(REPO_ROOT, node.manifest, {
+    evidence: suppressed,
+    inputs,
+  });
+  assert.ok(
+    suppressedErrors.some(
+      (error) => error.caseId === "STP4-js-checked" && error.code === "policy-drift",
+    ),
+    JSON.stringify(suppressedErrors),
+  );
+
+  for (const [field, value] of [
+    ["ownership", "importer"],
+    ["importersDoNotDuplicateBody", false],
+  ]) {
+    const external = cloneJson(inputs);
+    external.externalScripts[field] = value;
+    const errors = assertStp4Products(REPO_ROOT, node.manifest, { evidence, inputs: external });
+    assert.ok(
+      errors.some((error) => error.caseId === "STP4-external-owner"),
+      `${field}: ${JSON.stringify(errors)}`,
+    );
+  }
+});
+
+test("STP4-tsx-authored: the angle-assertion fixture is a valid conversion", () => {
+  const fixture = fs.readFileSync(
+    repoPath(REPO_ROOT, "tests/sfc-projection/STP4/probes/angle-assertion.ts"),
+    "utf8",
+  );
+  assert.match(fixture, /<number>/);
+  assert.doesNotMatch(fixture, /<number>"/);
 });
 
 test("STP4-supplemental-import dirty twin is the public SFC module", () => {

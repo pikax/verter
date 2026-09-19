@@ -163,7 +163,7 @@ export function compareSwappedPairs(
         return {
           comparable: false,
           reason:
-            "receipt basis mismatch (sourceRevisions/projectConfiguration/engineIdentity/hostIdentity differ; old-source outcomes are not comparable)",
+            "receipt basis mismatch (sourceRevisions/projectConfiguration/engineIdentity/hostIdentity/completenessState differ; old-source outcomes are not comparable)",
           deltasMs: [],
         };
       }
@@ -204,7 +204,8 @@ export function sameReceiptBasis(a: ProductReceiptBasis, b: ProductReceiptBasis)
     a.sourceRevisions === b.sourceRevisions &&
     a.projectConfiguration === b.projectConfiguration &&
     a.engineIdentity === b.engineIdentity &&
-    a.hostIdentity === b.hostIdentity
+    a.hostIdentity === b.hostIdentity &&
+    a.completenessState === b.completenessState
   );
 }
 

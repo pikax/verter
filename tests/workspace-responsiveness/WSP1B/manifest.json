@@ -1,0 +1,52 @@
+{
+  "node": "WSP1B",
+  "kind": "verification",
+  "products": [
+    "Issue93EarlyVerification (pinned large-project workload, UI trace, semantic oracle, explicit issue-93 unreproduced status)",
+    "Issue93CarryForwardCase (regression scenario reused after WSP8/ED1 cutovers)",
+    "ownership-map.json",
+    "exposure-registration.v1 (DX1 schema/case; promotion blocked)"
+  ],
+  "cases": [
+    {
+      "id": "WSP1B-AC1",
+      "disposition": "reject",
+      "binding": "packages/dx-harness/test/earlyVerification.test.ts WSP1B-AC1 describes: UI stall + immediate server fails even when the two-file smoke is green",
+      "twins": ["server-complete-ui-frozen-accepted", "small-smoke-hides-large-stall"]
+    },
+    {
+      "id": "WSP1B-AC2",
+      "disposition": "reject",
+      "binding": "packages/dx-harness/test/earlyVerification.test.ts WSP1B-AC2 describes: oracle typed-answer / disabled-feature / missing diagnostic-count refusals",
+      "twins": ["dropped-diagnostics-accepted", "required-features-disabled"]
+    },
+    {
+      "id": "WSP1B-AC3",
+      "disposition": "reject",
+      "binding": "packages/dx-harness/test/earlyVerification.test.ts WSP1B-AC3 describes: two-file smoke cannot qualify the large-project scenario; incomplete open/type/complete/navigate/close/reopen stays unverified",
+      "twins": ["small-smoke-certified-as-large", "protocol-smoke-certified"]
+    },
+    {
+      "id": "WSP1B-AC-OWNER",
+      "disposition": "accept",
+      "binding": "tests/workspace-responsiveness/WSP1B/products/ownership-map.json; final owner expansion.workspace-responsiveness; WSP1A retirement is unreproduced / not planned, not a repair"
+    },
+    {
+      "id": "WSP1B-AC-BASIS",
+      "disposition": "accept",
+      "binding": "this node does not change caching, mapping, snapshots or result handles; stale runs are refused; incremental-vs-fresh stays bound to equal-work corpus runs"
+    },
+    {
+      "id": "WSP1B-AC-RESOURCE",
+      "disposition": "accept",
+      "binding": "unavailable provider CPU and retained-memory stay { status: unknown } with reasons and leave qualification unverified (WSP1B.3); client paint is required on every interaction for a qualified claim; no guessed zeros"
+    },
+    {
+      "id": "WSP1B-AC-EXPOSURE",
+      "disposition": "accept",
+      "binding": "tests/workspace-responsiveness/WSP1B/products/exposure-registration.v1.json; promotionBlocked until DX1 executable explorer"
+    }
+  ],
+  "runtimeCorrectness": true,
+  "notes": "Verification node: WSP1/WSP1L instrumentation reused. Historical issue 93 stays unreproduced. A protocol smoke cannot certify. The large-project scenario is the WSP equal-work synthetic SFC slice (2615 Vue files), the maintainer-approved equivalent of the operator's unlabeled PrimeVue corpus."
+}

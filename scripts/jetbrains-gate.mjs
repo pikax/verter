@@ -378,6 +378,15 @@ export function defaultGradleInvocation(repoRoot, args) {
   return { command: wrapper, args, shell: false };
 }
 
+/** The build outputs the gate validates after Gradle: JUnit XML, distributions, verifier reports. */
+export function evidenceDirs(projectDir) {
+  return [
+    path.join(projectDir, "build", "test-results", "test"),
+    path.join(projectDir, "build", "distributions"),
+    path.join(projectDir, "build", "reports", "pluginVerifier"),
+  ];
+}
+
 export function runGate({
   repoRoot = defaultRepoRoot,
   javaHomeArg,
@@ -428,6 +437,12 @@ export function runGate({
     `jetbrains-gate: ${command}${args.length ? ` ${args.join(" ")}` : ""} (JAVA_HOME=${jdk.home})`,
   );
   const gradleEnv = { ...env, JAVA_HOME: jdk.home };
+  // Gradle reports success for an up-to-date task without regenerating its
+  // outputs, so evidence from an earlier run is removed first: every artifact
+  // the post-build validation reads must come from THIS invocation.
+  for (const evidenceDir of evidenceDirs(path.join(repoRoot, GRADLE_PROJECT_DIR))) {
+    rmSync(evidenceDir, { recursive: true, force: true });
+  }
   const result = spawnFn(command, args, {
     cwd: path.join(repoRoot, GRADLE_PROJECT_DIR),
     env: gradleEnv,

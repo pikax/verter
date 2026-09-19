@@ -9,11 +9,14 @@
 // header), and the publish loop's one-time-password re-prompt.
 
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 import {
   classifyCargoPublishOutcome,
+  invokedAsEntrypoint,
   classifyNpmPublishOutcome,
   distTagForVersion,
   listTarModes,
@@ -467,4 +470,29 @@ test("publishSequentially fails a target when no OTP can be obtained or the code
   assert.match(summary.failed[0].output, /none was provided/);
   assert.match(summary.failed[1].output, /rejected 4 times/);
   assert.match(summary.failed[2].output, /E401/);
+});
+
+// ---------------------------------------------------------------------------
+// Entry-point guard
+// ---------------------------------------------------------------------------
+
+test("invokedAsEntrypoint recognises the script through a symlinked argv path", () => {
+  const modulePath = resolve(process.cwd(), "scripts", "release-publish.mjs");
+  const moduleUrl = pathToFileURL(modulePath).href;
+  const linkPath = resolve(process.cwd(), "bin", "release-publish");
+  const realpath = (candidate) => (candidate === linkPath ? modulePath : candidate);
+
+  assert.equal(invokedAsEntrypoint(linkPath, moduleUrl, { realpath }), true);
+  assert.equal(invokedAsEntrypoint(modulePath, moduleUrl, { realpath }), true);
+  assert.equal(
+    invokedAsEntrypoint(resolve(process.cwd(), "other.mjs"), moduleUrl, { realpath }),
+    false,
+  );
+  assert.equal(invokedAsEntrypoint(undefined, moduleUrl, { realpath }), false);
+  // A path the filesystem cannot resolve falls back to plain path resolution.
+  const throwing = () => {
+    throw new Error("ENOENT");
+  };
+  assert.equal(invokedAsEntrypoint(modulePath, moduleUrl, { realpath: throwing }), true);
+  assert.equal(invokedAsEntrypoint(linkPath, moduleUrl, { realpath: throwing }), false);
 });
