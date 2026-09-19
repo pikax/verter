@@ -1,0 +1,110 @@
+{
+  "node": "ARH1",
+  "kind": "constitution",
+  "products": [
+    "ARH1DependencyContracts",
+    "ARH1CutoverRegister"
+  ],
+  "cases": [
+    {
+      "id": "ARH1-hotspot-coverage",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "hotspot-without-contract",
+        "contract-without-inventory-row",
+        "responsibility-dropped",
+        "responsibility-invented",
+        "authority-double-claimed",
+        "missing-authority-owner"
+      ]
+    },
+    {
+      "id": "ARH1-import-direction",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "import-drift (declared vs measured, both directions)",
+        "forbidden-import (source and Cargo.toml)",
+        "layer-violation",
+        "layer-rule-contradiction",
+        "missing-importer",
+        "importer-without-reference"
+      ]
+    },
+    {
+      "id": "ARH1-constructor",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "missing-constructor",
+        "constructor-anchor-missing",
+        "constructor-without-rules",
+        "constructor-rationale-missing"
+      ]
+    },
+    {
+      "id": "ARH1-state-lifetimes",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "bad-lifetime",
+        "state-without-owner",
+        "state-owner-missing",
+        "state-not-in-source"
+      ]
+    },
+    {
+      "id": "ARH1-surface",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "surface-declaration-drift",
+        "surface-item-missing",
+        "retained-item-unconsumed",
+        "bad-narrow-target",
+        "missing-narrow-consumer"
+      ]
+    },
+    {
+      "id": "ARH1-split",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "split-retains-shared-state",
+        "state-double-owner",
+        "state-ownership-undeclared",
+        "cohesive-responsibility-invented",
+        "missing-cohesive-module",
+        "split-rationale-missing"
+      ]
+    },
+    {
+      "id": "ARH1-cutover",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "arh0-debt-undecided",
+        "cutover-route-missing",
+        "cutover-without-disposition",
+        "missing-candidate-path",
+        "deletion-rationale-missing"
+      ]
+    },
+    {
+      "id": "ARH1-ratification",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "manifest-case-drift",
+        "manifest-product-drift",
+        "manifest-command-drift",
+        "obligation-producer-malformed"
+      ]
+    }
+  ],
+  "verify": "node tests/architecture-health/ARH1/verify.mjs",
+  "test": "node --test tests/architecture-health/ARH1/arh1.test.mjs",
+  "runtimeCorrectness": false,
+  "notes": "Contract-only constitution (0 production LOC). The verifier (the sole owning interface, wired as the verify/test commands below) joins the shipped ARH0 predecessor products (responsibility map, debt register) and the live tree: hotspot coverage is exactly the ARH0 god-module population with no dropped or invented responsibility, the declared import direction equals the measured import tree of each hotspot source (forbidden directions absent from source and manifest, layer rules equal to the live Cargo manifests), constructor capability anchors and retained/narrowed surface items bind real declarations, state-lifetime rows name live identifiers with one sole owner, cohesive splits cannot retain shared unrestricted state (ARH1-AC2), and every route (including ARH0 debt rows naming ARH1 and every declared narrowing route) has exactly one cutover disposition. Owner/heir ids are structural references into the TAMA-controller-owned program DAG; this tree resolves them structurally only. Implementation of the contracts is bound to the named successors: ARH2 characterizes and re-derives populations, ARH3/ARH4 narrow, ARH11 removes residue, ARH12 adds the compile-time enforcement, DOC2 documents. Snapshot counts are ratification evidence, not live invariants. Retained evidence spec: tests/architecture-health/evidence/ARH1/cases.md."
+}
