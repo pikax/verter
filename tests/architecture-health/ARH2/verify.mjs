@@ -16,7 +16,9 @@
  * witnesses under nextest substring semantics over the compiled module path
  * (`mod` / `#[path]` plus the enclosing inline `mod` of each function, never
  * a filesystem `src::` fragment or a cross-product of sibling inline modules),
- * and every witness is a real #[test] function in a real file. Every cutover route a successor
+ * and every witness is a real executable #[test] function in a real file
+ * (#[ignore] and an unsatisfiable #[cfg], including #[cfg(any())], are
+ * rejected). Every cutover route a successor
  * narrows (ARH1 register rows owned by ARH3/ARH4, plus the ARH2-executed
  * deletion) is characterized exactly once, with the narrowed surface
  * derived live (the scheduler pub bookkeeping fields, the pub fn test_*
@@ -28,7 +30,8 @@
  * complexity product separates the four charter measurement dimensions
  * exactly once each, binds production behavior and test cost to the pinned
  * nextest lanes, clean/warm build time to cargo --timings recipes with both
- * cache states, and application latency to a host/session gate cell,
+ * cache states and an executable prepare (cargo clean vs a first cargo
+ * build of the same packages), and application latency to a host/session gate cell,
  * commits only deterministically re-derivable structural counts
  * (re-derived here on every run), and ratifies the god-module threshold
  * basis ARH0-DEBT-5 requires before ARH12 may extend the existing guard.
@@ -287,6 +290,26 @@ function enclosingInlineModules(blanked, pos) {
   return containing.map((m) => m.name);
 }
 
+function cargoInvocationPackages(command) {
+  const tokens = String(command || "")
+    .trim()
+    .split(/\s+/);
+  const packages = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] === "-p" || tokens[i] === "--package") {
+      if (i + 1 < tokens.length) packages.push(tokens[++i]);
+    }
+  }
+  return packages.slice().sort();
+}
+
+function cargoSubcommand(command) {
+  const tokens = String(command || "")
+    .trim()
+    .split(/\s+/);
+  return tokens[0] === "cargo" && tokens.length >= 2 ? tokens[1] : null;
+}
+
 function cargoBuildRecipeIdentity(command) {
   const tokens = command.trim().split(/\s+/);
   const packages = [];
@@ -300,6 +323,119 @@ function cargoBuildRecipeIdentity(command) {
   }
   packages.sort();
   return `${packages.join(",")}::${rest.join(" ")}`;
+}
+
+function samePackageSet(a, b) {
+  return Array.isArray(a) && Array.isArray(b) && a.length > 0 && a.join("\0") === b.join("\0");
+}
+
+function splitCfgArgs(inner) {
+  const args = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < inner.length; i++) {
+    const c = inner[i];
+    if (c === "(") depth++;
+    else if (c === ")") depth--;
+    else if (c === "," && depth === 0) {
+      args.push(inner.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  const last = inner.slice(start).trim();
+  if (last) args.push(last);
+  return args;
+}
+
+/** Tiny cfg-predicate evaluator: only `any`/`all`/`not` with empty-arity
+ *  identities. Unknown predicates stay `null` (not proven disabled). */
+function cfgPredicateValue(expr) {
+  const src = String(expr || "").trim();
+  if (!src) return null;
+  const call = src.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*$/s);
+  if (!call) return null;
+  const name = call[1];
+  const args = splitCfgArgs(call[2]);
+  if (name === "any") {
+    if (args.length === 0) return false;
+    const vals = args.map(cfgPredicateValue);
+    if (vals.some((v) => v === true)) return true;
+    if (vals.every((v) => v === false)) return false;
+    return null;
+  }
+  if (name === "all") {
+    if (args.length === 0) return true;
+    const vals = args.map(cfgPredicateValue);
+    if (vals.some((v) => v === false)) return false;
+    if (vals.every((v) => v === true)) return true;
+    return null;
+  }
+  if (name === "not") {
+    if (args.length !== 1) return null;
+    const v = cfgPredicateValue(args[0]);
+    return v === null ? null : !v;
+  }
+  return null;
+}
+
+function isIgnoreAttribute(attr) {
+  return /^ignore(?:\s*=|\s*\(|$)/.test(String(attr || "").trim());
+}
+
+function rustInnerAttributes(window) {
+  const attrs = [];
+  for (let i = 0; i < window.length; i++) {
+    if (window[i] === "#" && window[i + 1] === "[") {
+      let depth = 1;
+      let j = i + 2;
+      for (; j < window.length; j++) {
+        if (window[j] === "[") depth++;
+        else if (window[j] === "]") {
+          depth--;
+          if (depth === 0) break;
+        }
+      }
+      if (depth === 0) attrs.push(window.slice(i + 2, j).trim());
+      i = j;
+    }
+  }
+  return attrs;
+}
+
+/** Same-line prefix plus preceding attribute / doc / blank lines. */
+function precedingAttributeWindow(text, fnIndex) {
+  const lines = text.slice(0, fnIndex).split("\n");
+  const kept = [lines.pop() ?? ""];
+  while (lines.length) {
+    const line = lines.pop();
+    const trimmed = line.trim();
+    if (
+      trimmed === "" ||
+      trimmed.startsWith("//") ||
+      trimmed.startsWith("#[") ||
+      trimmed.startsWith("#!")
+    ) {
+      kept.unshift(line);
+      continue;
+    }
+    break;
+  }
+  return kept.join("\n");
+}
+
+function witnessDisablement(attr) {
+  const src = String(attr || "").trim();
+  if (isIgnoreAttribute(src)) return "ignore";
+  const cfg = src.match(/^cfg\s*\((.*)\)\s*$/s);
+  if (cfg && cfgPredicateValue(cfg[1]) === false) return "cfg-disabled";
+  const cfgAttr = src.match(/^cfg_attr\s*\((.*)\)\s*$/s);
+  if (cfgAttr) {
+    const args = splitCfgArgs(cfgAttr[1]);
+    if (args.length >= 2 && cfgPredicateValue(args[0]) !== false && isIgnoreAttribute(args[1])) {
+      return "ignore";
+    }
+  }
+  return null;
 }
 
 function executedDeletionPath(debt) {
@@ -397,8 +533,9 @@ function compiledWitnessId(crate, file, testName) {
 
 /**
  * A witness is real when its file exists, the named function is declared
- * there, and a #[test] / #[tokio::test] attribute sits within the few lines
- * above the declaration (cfg attributes and doc comments may intervene).
+ * there, a #[test] / #[tokio::test] attribute sits on the declaration, and
+ * the function is eligible to execute (not #[ignore], not behind an
+ * unsatisfiable #[cfg] such as #[cfg(any())]).
  */
 function checkWitness(witness, errors, caseId) {
   if (!existsRel(witness.file)) {
@@ -415,8 +552,7 @@ function checkWitness(witness, errors, caseId) {
     });
     return false;
   }
-  const before = text.slice(0, fnMatch.index).split("\n");
-  const window = before.slice(-4).join("\n");
+  const window = precedingAttributeWindow(text, fnMatch.index);
   if (!/#\[(?:test|tokio::test)/.test(window)) {
     errors.push({
       caseId,
@@ -424,6 +560,25 @@ function checkWitness(witness, errors, caseId) {
       detail: `${witness.test} in ${witness.file} has no #[test] attribute`,
     });
     return false;
+  }
+  for (const attr of rustInnerAttributes(window)) {
+    const kind = witnessDisablement(attr);
+    if (kind === "ignore") {
+      errors.push({
+        caseId,
+        code: "witness-ignored",
+        detail: `${witness.test} in ${witness.file} is #[ignore] and is not an executable behavioral witness`,
+      });
+      return false;
+    }
+    if (kind === "cfg-disabled") {
+      errors.push({
+        caseId,
+        code: "witness-cfg-disabled",
+        detail: `${witness.test} in ${witness.file} is behind an unsatisfiable #[cfg] and is not compiled`,
+      });
+      return false;
+    }
   }
   return true;
 }
@@ -1043,6 +1198,42 @@ function validateSeparation(products, predecessors, errors) {
         }
         states.add(recipe.cacheState);
         identities.push(cargoBuildRecipeIdentity(recipe.command));
+        const packages = cargoInvocationPackages(recipe.command);
+        if (typeof recipe.prepare !== "string" || recipe.prepare.trim().length === 0) {
+          errors.push({
+            caseId,
+            code:
+              recipe.cacheState === "clean"
+                ? "cargo-build-clean-prepare-missing"
+                : "cargo-build-warm-prepare-missing",
+            detail: `${dimension.id} ${recipe.cacheState} recipe must declare an executable prepare that establishes that cache state`,
+          });
+          continue;
+        }
+        const prepare = recipe.prepare.trim();
+        const preparePackages = cargoInvocationPackages(prepare);
+        const sub = cargoSubcommand(prepare);
+        if (!samePackageSet(packages, preparePackages)) {
+          errors.push({
+            caseId,
+            code: "cargo-build-prepare-identity-mismatch",
+            detail: `${dimension.id} ${recipe.cacheState} prepare must name the same cargo packages as the timed command`,
+          });
+        }
+        if (recipe.cacheState === "clean" && sub !== "clean") {
+          errors.push({
+            caseId,
+            code: "cargo-build-clean-prepare-not-clean",
+            detail: `${dimension.id} clean prepare ${JSON.stringify(prepare)} does not establish a clean target`,
+          });
+        }
+        if (recipe.cacheState === "warm" && sub !== "build") {
+          errors.push({
+            caseId,
+            code: "cargo-build-warm-prepare-not-build",
+            detail: `${dimension.id} warm prepare must be a first cargo build of the same target`,
+          });
+        }
       }
       if (!states.has("clean") || !states.has("warm")) {
         errors.push({

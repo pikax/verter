@@ -11,7 +11,7 @@ Clean products validate: both products pin the same 40-hex candidate basis, the 
 ## ARH2-ratification (reject)
 
 - `manifest-case-drift` / `manifest-product-drift` / `manifest-command-drift`: dirty twins add `ARH2-phantom`, drop `ARH2-separation`, and point verify at `scripts/affected-tests.mjs` (an existing script that is not this verifier).
-- `candidate-basis-drift`: both products must pin the same 40-hex commit (dirty twin pins `0000…`); the CI lane's `--provenance` run additionally proves the pinned commit is an ancestor of HEAD.
+- `candidate-basis-drift`: both products must pin the same 40-hex commit (dirty twin pins `0000…`); the architecture-health lane's `--provenance` run (fetch-depth: 0) additionally proves the pinned commit is an ancestor of HEAD. The js-build-test `test:scripts` job is a shallow checkout: ARH2 tests skip `--provenance` when the pin object is absent, matching ARH1.
 - CI `arch` filter: `performance-gates.toml` and `scripts/validate-performance-gates.mjs` must select the architecture-health lane (ARH2 reads both as measurement-methodology inputs).
 
 ## ARH2-population (reject) — AC1 live re-derivation
@@ -35,6 +35,7 @@ Clean products validate: both products pin the same 40-hex candidate basis, the 
 - `hotspot-missing` / `hotspot-crate-unknown` / `hotspot-without-pins`: every characterized hotspot exists, names a live workspace member crate (glob members expanded against `Cargo.toml`-carrying directories) and carries at least one pin.
 - `pin-command-not-canonical` / `pin-filter-malformed` / `pin-without-witnesses`: a pin's command is exactly `cargo nextest run -p <crate> <filter>` with a non-flag filter (dirty twin drops `run`).
 - `witness-file-missing` / `witness-test-missing` / `witness-not-a-test`: a witness file exists, declares the named function, and a `#[test]`/`#[tokio::test]` attribute sits within the few lines above the declaration (dirty twins name a phantom test and a non-test function).
+- `witness-ignored` / `witness-cfg-disabled`: a pinned witness must be eligible to execute under the retained nextest recipe. Same-line `#[ignore]` and `#[cfg(any())]` overlays on `vue_script_setup_functions_serve_under_the_instance_owner_only` are the discriminating twins; the canonical recipe has no `--run-ignored`.
 - `pin-filter-selects-nothing`: the filter is a substring of the compiled nextest id from the file's `mod`/`#[path]` path plus the witness function's enclosing inline module (dirty twins swap the filter to `unrelated_module`, to filesystem `src::dag_tests`, to sibling inline `scheduler::pool_topology`, and to file-level `scheduler::tombstone_rejects_pre_remove_source_submission` which omits `tests`).
 - `route-characterization-cardinality` / `route-characterization-invented`: every ARH1 cutover row owned by a narrowing heir (ARH3/ARH4) is characterized exactly once before its heir narrows it, and no invented route rides along (dirty twins drop `ARH1-CUT-3` and duplicate `ARH1-CUT-4`).
 - `route-path-mismatch` / `route-owner-mismatch` / `route-without-pins`: a route row binds its register row's candidate path and heir.
@@ -49,6 +50,8 @@ Clean products validate: both products pin the same 40-hex candidate basis, the 
 - `gate-cell-unknown` / `gate-cell-wrong-operation`: every gate-cell mechanism is a locked cell of `performance-gates.toml`, and application-latency must cite a host/session cell (dirty twins cite `B6_INVENTED_CELL` and `B6_COMPILER_ROUTE_OVERHEAD`).
 - `cargo-build-recipe-identity-mismatch`: clean and warm recipes measure the same cargo build targets (dirty twin retargets only the warm command at `verter_debug_assert`).
 - `dimension-cache-state-incomplete`: clean/warm build time binds cargo `--timings` recipes for both cache states (dirty twin drops the warm leg).
+- `cargo-build-clean-prepare-missing` / `cargo-build-clean-prepare-not-clean`: the clean leg must `cargo clean` the timed packages before the `--timings` build. A missing prepare, or a prepare that is itself a `cargo build` (prewarming the target), leaves the alleged clean leg measuring a warm target.
+- `cargo-build-warm-prepare-missing` / `cargo-build-warm-prepare-not-build` / `cargo-build-prepare-identity-mismatch`: the warm leg's prepare is a first `cargo build` of those same packages so the timed command is the second build.
 - `behavior-lane-unbound` / `behavior-lane-invented` / `test-cost-lane-unbound` / `test-cost-lane-invented`: the behavior and test-cost lane lists are exactly the characterization product's pinned command set, both directions (dirty twins splice out `stable_key_tests` and append a phantom lane).
 - `runner-class-unbound`: the number policy equals the locked `[runner]` class of `performance-gates.toml` (dirty twins delete it or suffix-forge it).
 - `threshold-block-missing` / `threshold-guard-missing` / `threshold-guard-unknown` / `threshold-ceiling-mismatch`: the ratified god-module threshold binds the existing `god_module_size_budget` guard and its live `DEFAULT_MAX_LINES` ceiling (ARH0-DEBT-5's precondition for ARH12; dirty twin detaches the ceiling).

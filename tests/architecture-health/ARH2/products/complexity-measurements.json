@@ -70,15 +70,17 @@
       "mechanisms": [
         {
           "command": "cargo build -p verter_scheduler -p verter_session --timings",
-          "cacheState": "clean"
+          "cacheState": "clean",
+          "prepare": "cargo clean -p verter_scheduler -p verter_session"
         },
         {
           "command": "cargo build -p verter_scheduler -p verter_session --timings",
-          "cacheState": "warm"
+          "cacheState": "warm",
+          "prepare": "cargo build -p verter_scheduler -p verter_session"
         }
       ],
-      "measures": "repository compilation of the characterized crates (verter_scheduler, verter_session) under cargo --timings telemetry already used by the gate runner: a clean target versus a warm target; receipts are not committed",
-      "separates": "clean and warm repository-build time are measured on distinct cache states of the same cargo build recipe; test execution and host/session application latency never enter this dimension"
+      "measures": "repository compilation of the characterized crates (verter_scheduler, verter_session) under cargo --timings telemetry already used by the gate runner: a clean target (prepare cargo clean of those packages, then the timed build) versus a warm target (prepare a first cargo build of those packages, then the timed second build); receipts are not committed",
+      "separates": "clean and warm repository-build time are measured on distinct established cache states of the same cargo build recipe; a label alone is not a cache state; test execution and host/session application latency never enter this dimension"
     },
     {
       "id": "test-cost",
