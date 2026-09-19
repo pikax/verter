@@ -158,7 +158,7 @@ catalog, fails `pnpm --filter docs check`.
 
 Population and snapshot counts (importers, retained surfaces, test-hook
 consumers) were ratified on contract `candidate`
-`260be884014110ffd3b72850509e765c8752b011`. Each hotspot's
+`30012d45df4e3369728a7cc09250c5e009bfd18d`. Each hotspot's
 `importDirection.measurementBasis` records the measurement *method*
 (production import tree, `cfg(test)` stripped, use-statements and inline
 paths). The original host/profile of that measurement is unrecorded in ARH1 contract products;
