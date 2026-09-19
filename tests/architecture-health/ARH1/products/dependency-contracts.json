@@ -2,7 +2,7 @@
   "schema": "ARH1DependencyContracts",
   "version": 2,
   "contractNode": "ARH1",
-  "candidate": "30012d45df4e3369728a7cc09250c5e009bfd18d",
+  "sourceReference": {"title":"docs(arch): ratify responsibility, visibility and dependency contracts (#636)","date":"2026-09-19"},
   "predecessorProducts": {
     "responsibilityMap": "../ARH0/products/responsibility-map.json",
     "debtRegister": "../ARH0/products/debt-register.json"
@@ -1460,5 +1460,5 @@
       }
     }
   ],
-  "ac4Rationale": "AC4 surfaces a contract-only node cannot discharge with artifacts are specified for its producers instead: the VIM/DX capability mapping and the exact host/profile evidence are DOC2/ARH2 obligations above; migration notes are each narrowing row's exact consumersAffected inventory plus the cutover dispositions; permissions are not applicable (no capability, filesystem, network or editor-permission surface is created or widened at this node, so there is no permission note to publish); uncertainty is recorded as population and snapshot counts enforced by the verifier against the live tree on every run, with the pinned candidate naming the last ratification basis (the CI architecture-health lane runs verify.mjs --provenance, proving the pinned commit is a real ancestor of the checked-out head) — never a fabricated source-revision claim, and no partial or conditional runtime result is claimed anywhere in these bytes."
+  "ac4Rationale": "AC4 surfaces a contract-only node cannot discharge with artifacts are specified for its producers instead: the VIM/DX capability mapping and the exact host/profile evidence are DOC2/ARH2 obligations above; migration notes are each narrowing row's exact consumersAffected inventory plus the cutover dispositions; permissions are not applicable (no capability, filesystem, network or editor-permission surface is created or widened at this node, so there is no permission note to publish); uncertainty is recorded as population and snapshot counts enforced by the verifier against the live tree on every run, with the source title and date retained as descriptive context only, and no partial or conditional runtime result is claimed anywhere in these bytes."
 }

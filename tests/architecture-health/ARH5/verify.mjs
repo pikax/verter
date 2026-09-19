@@ -11,7 +11,6 @@
  */
 
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,7 +29,6 @@ const AC3_CONCERNS = Object.freeze([
   "stale/partial rejection",
   "deterministic ordering under perturbed discovery or scheduling",
 ]);
-const HEX40 = /^[0-9a-f]{40}$/;
 
 function readRel(rel) {
   return fs.readFileSync(path.join(REPO_ROOT, rel), "utf8");
@@ -180,14 +178,6 @@ export function validate(products, manifest = loadManifest()) {
       "ARH5-ratification",
       "product-schema-drift",
       `schema=${cut?.schema} node=${cut?.contractNode}`,
-    );
-  }
-  if (!HEX40.test(cut?.candidate ?? "")) {
-    err(
-      errors,
-      "ARH5-ratification",
-      "candidate-basis-drift",
-      `candidate ${JSON.stringify(cut?.candidate)} is not a 40-hex git commit`,
     );
   }
 
@@ -472,48 +462,11 @@ export function validate(products, manifest = loadManifest()) {
   return { ok: errors.length === 0, errors };
 }
 
-export function validateProvenance(candidate) {
-  if (!HEX40.test(candidate ?? "")) {
-    return {
-      ok: false,
-      reason: `candidate ${JSON.stringify(candidate)} is not a 40-hex git commit`,
-    };
-  }
-  const git = (args) => {
-    try {
-      execFileSync("git", ["-C", REPO_ROOT, ...args], {
-        stdio: ["ignore", "ignore", "ignore"],
-      });
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  if (!git(["cat-file", "-e", `${candidate}^{commit}`])) {
-    return { ok: false, reason: `candidate ${candidate} is not a commit of this repository` };
-  }
-  if (!git(["merge-base", "--is-ancestor", candidate, "HEAD"])) {
-    return { ok: false, reason: `candidate ${candidate} is not an ancestor of HEAD` };
-  }
-  return { ok: true };
-}
-
 const isMain =
   process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 if (isMain) {
   const products = loadProducts();
   const result = validate(products);
-  if (process.argv.includes("--provenance")) {
-    const provenance = validateProvenance(products["facade-cutover"].candidate);
-    if (!provenance.ok) {
-      result.errors.push({
-        caseId: "ARH5-ratification",
-        code: "candidate-basis-drift",
-        detail: provenance.reason,
-      });
-      result.ok = false;
-    }
-  }
   if (!result.ok) {
     console.error(result.errors.map((e) => `${e.caseId}/${e.code}: ${e.detail}`).join("\n"));
     process.exit(1);

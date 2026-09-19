@@ -10,7 +10,6 @@ import {
   mandatoryCases,
   selectedCaseIds,
   validate,
-  validateProvenance,
 } from "./verify.mjs";
 
 const clean = loadProducts();
@@ -166,17 +165,20 @@ test("ARH5-ratification dirty twin: invented case is rejected", () => {
   assert.ok(selectedCaseIds(result).includes("ARH5-ratification"));
 });
 
-test("ARH5-ratification dirty twin: candidate pin drift is rejected", () => {
-  const dirty = cloneProducts();
-  dirty["facade-cutover"].candidate = "not-a-commit";
-  const result = validate(dirty);
-  assert.equal(result.ok, false);
-  assert.ok(
-    result.errors.some(
-      (e) => e.caseId === "ARH5-ratification" && e.code === "candidate-basis-drift",
-    ),
-    JSON.stringify(result.errors),
-  );
+test("source references are optional context, independent of commit identity", () => {
+  const products = cloneProducts();
+  for (const product of Object.values(products)) {
+    delete product.candidate;
+    delete product.sourceReference;
+  }
+  const withoutHistory = validate(products);
+  assert.equal(withoutHistory.ok, true, JSON.stringify(withoutHistory.errors));
+  // Different landing titles and dates describe history; they prove no invariant.
+  Object.values(products).forEach((product, index) => {
+    product.sourceReference = { title: "Historical landing " + index, date: "2026-09-19" };
+  });
+  const withContext = validate(products);
+  assert.equal(withContext.ok, true, JSON.stringify(withContext.errors));
 });
 
 test("ARH5 CI: architecture-health filter still selects the train home", () => {
@@ -199,19 +201,12 @@ test("ARH5 CI: architecture-health filter still selects the train home", () => {
 
 test("ARH5-verify CLI: the manifest verify command runs validate() and exits 0", () => {
   const verifyPath = fileURLToPath(new URL("./verify.mjs", import.meta.url));
-  const stdout = execFileSync(process.execPath, [verifyPath], { encoding: "utf8" });
-  assert.match(stdout, /ARH5 verify: PASS/);
-});
-
-test("ARH5-verify CLI: --provenance accepts on the clean tree (CI lane shape)", () => {
-  const verifyPath = fileURLToPath(new URL("./verify.mjs", import.meta.url));
-  const candidate = clean["facade-cutover"].candidate;
-  const real = validateProvenance(candidate);
-  const carriesCommit = real.ok || !/not a commit/.test(real.reason);
-  if (carriesCommit) {
-    assert.deepEqual(real, { ok: true }, real.reason);
-  }
-  const args = carriesCommit ? [verifyPath, "--provenance"] : [verifyPath];
-  const stdout = execFileSync(process.execPath, args, { encoding: "utf8" });
+  const stdout = execFileSync(process.execPath, [verifyPath], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_DIR: fileURLToPath(new URL("./missing-git-history", import.meta.url)),
+    },
+  });
   assert.match(stdout, /ARH5 verify: PASS/);
 });

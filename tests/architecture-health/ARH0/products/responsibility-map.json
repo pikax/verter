@@ -2,7 +2,7 @@
   "schema": "ARH0ResponsibilityMap",
   "version": 1,
   "contractNode": "ARH0",
-  "candidate": "f69c7eee7aba2b1a260cc4d85a282bbedbbde349",
+  "sourceReference": {"title":"test(compiler): qualify content-mapper diagnostics and (#606)","date":"2026-09-18"},
   "charterRef": "charters/expansion-architecture-health/ARH0.md",
   "ac3Rationale": "ARH0 is a zero-production-mutation constitution: no state, query, map, cache or scheduling boundary is touched, so fresh-vs-incremental equivalence, edit/revert, cancellation, stale/partial rejection and deterministic ordering remain owned and proven by their untouched owners (B4R0 source lineage, LSO0 snapshot publication, rev11.scheduler-runtime admission, rev11.flow dispatch).",
   "ac4Rationale": "ARH0 adds no editor surface; VIM/DX capability evidence is the capability matrix product with exact host/profile pins, and the examples/reference obligations are specified for DOC1 in the contract.",

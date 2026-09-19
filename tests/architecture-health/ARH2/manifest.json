@@ -109,8 +109,7 @@
         "clean products",
         "manifest-case-drift",
         "manifest-product-drift",
-        "manifest-command-drift",
-        "candidate-basis-drift (both products pin the same 40-hex commit; verify.mjs --provenance, run by the CI architecture-health lane, additionally proves the pinned commit is a real ancestor of the checked-out head)"
+        "manifest-command-drift"
       ]
     }
   ],

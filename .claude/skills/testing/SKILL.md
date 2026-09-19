@@ -21,6 +21,16 @@ lane: the program DAG and its decision records are owned by the TAMA
 controller database, and routine CI is the only executable evidence lane.
 Do not add a test that loads a repository DAG, ledger or charter tree.
 
+Never use commit SHAs, hashes or commit URLs as durable proof in source, tests,
+CI, documentation or charters. Squash merges and rebases replace those identities.
+If historical context is useful, record only the commit or PR landing title
+(first line) and ISO date. These references are descriptive, not acceptance
+evidence: check current code and behavior without requiring a historical Git
+object, ancestry or matching history text. Remove such checks rather than
+refreshing their pins. Carry this rule into all new or revised charters; it
+supersedes older requirements. Runtime checkout identities and real dependency
+integrity pins retain their operational purpose.
+
 ## Server Cleanup
 
 Always kill dev/preview servers or other long-running test processes when done — stale servers interfere with subsequent runs (e.g., Playwright's `reuseExistingServer: true` uses old builds).

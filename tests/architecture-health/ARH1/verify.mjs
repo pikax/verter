@@ -50,9 +50,8 @@
  * key — a `satisfies` value must be a real ARH0 debt whose decision owner is
  * ARH1, so the register can neither invent a debt nor decide another
  * owner's — and the AC4 surface obligations name every charter-mandated
- * surface. Both products must pin one candidate basis (same 40-hex commit;
- * `verify.mjs --provenance` additionally proves the pinned commit is a real
- * ancestor of HEAD).
+ * surface. Historical source titles and dates are optional context;
+ * validation depends on the current tree, never Git history.
  * The program DAG is database-owned by the TAMA controller, so owner/heir
  * ids are checked structurally only and no DAG file is read; the ARH0
  * products are joined as shipped predecessor evidence, never re-derived
@@ -62,7 +61,6 @@
  */
 
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -2125,30 +2123,6 @@ function validateRatification(products, manifest, errors) {
     errors.push({ caseId, code: "manifest-case-drift", detail: "manifest missing" });
     return;
   }
-  // One candidate basis for both products: a 40-hex git commit, identical in
-  // the contracts and the register, so the products cannot pin two source
-  // revisions under one inventory. `verify.mjs --provenance` additionally
-  // proves the pinned commit is a real ancestor of HEAD.
-  const pinnedCandidates = [
-    ["dependency-contracts", products["dependency-contracts"].candidate],
-    ["cutover-register", products["cutover-register"].candidate],
-  ];
-  for (const [label, value] of pinnedCandidates) {
-    if (!/^[0-9a-f]{40}$/.test(value ?? "")) {
-      errors.push({
-        caseId,
-        code: "candidate-basis-drift",
-        detail: `${label} pins candidate ${JSON.stringify(value)}, which is not a 40-hex git commit`,
-      });
-    }
-  }
-  if (pinnedCandidates[0][1] !== pinnedCandidates[1][1]) {
-    errors.push({
-      caseId,
-      code: "candidate-basis-drift",
-      detail: `dependency-contracts pins ${pinnedCandidates[0][1]} while cutover-register pins ${pinnedCandidates[1][1]}; the inventory binds exactly one source revision`,
-    });
-  }
   const recorded = new Set(manifest.products || []);
   const actual = new Set(
     PRODUCT_FILES.map((file) => products[file.replace(/\.json$/, "")]?.schema).filter(Boolean),
@@ -2261,42 +2235,6 @@ export function mandatoryCases() {
   ];
 }
 
-/**
- * Provenance of the pinned candidate basis, checked against a git checkout
- * that carries the commit: the pinned revision must be a real commit of
- * this repository and an ancestor of HEAD, so the products cannot pin a
- * fabricated source revision or one the ratified tree never contained. A
- * checkout without the object (shallow clone) reports unknown-commit — it
- * never silently passes. Runs only behind `verify.mjs --provenance` (the
- * CI architecture-health lane), because plain validate() stays independent
- * of git.
- */
-export function validateProvenance(candidate) {
-  if (!/^[0-9a-f]{40}$/.test(candidate ?? "")) {
-    return {
-      ok: false,
-      reason: `candidate ${JSON.stringify(candidate)} is not a 40-hex git commit`,
-    };
-  }
-  const git = (args) => {
-    try {
-      execFileSync("git", ["-C", REPO_ROOT, ...args], {
-        stdio: ["ignore", "ignore", "ignore"],
-      });
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  if (!git(["cat-file", "-e", `${candidate}^{commit}`])) {
-    return { ok: false, reason: `candidate ${candidate} is not a commit of this repository` };
-  }
-  if (!git(["merge-base", "--is-ancestor", candidate, "HEAD"])) {
-    return { ok: false, reason: `candidate ${candidate} is not an ancestor of HEAD` };
-  }
-  return { ok: true };
-}
-
 /** Case ids with at least one recorded error (dirty-twin selection helper). */
 export function selectedCaseIds(result) {
   return [...new Set(result.errors.map((e) => e.caseId))];
@@ -2309,17 +2247,6 @@ const isMain =
 if (isMain) {
   const products = loadProducts();
   const result = validate(products);
-  if (process.argv.includes("--provenance")) {
-    const provenance = validateProvenance(products["dependency-contracts"].candidate);
-    if (!provenance.ok) {
-      result.errors.push({
-        caseId: "ARH1-ratification",
-        code: "candidate-basis-drift",
-        detail: provenance.reason,
-      });
-      result.ok = false;
-    }
-  }
   if (!result.ok) {
     console.error(result.errors.map((e) => `${e.caseId}/${e.code}: ${e.detail}`).join("\n"));
     process.exit(1);

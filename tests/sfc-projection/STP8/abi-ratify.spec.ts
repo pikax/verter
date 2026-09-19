@@ -397,6 +397,20 @@ test("STP8 products, manifest pin, and reject twins all hold together", () => {
   assert.equal(manifest.probes.expectedNegativeCode, 2345);
 });
 
+test("evidence checks engine inputs without requiring historical commit references", () => {
+  const enginePins = "Engine pins: ts-js 6.0.3 and ts-native 7.0.2.";
+  for (const evidenceText of [
+    enginePins,
+    enginePins + "\nLanding: Ratify constructor ABI (2026-09-19).",
+  ])
+    assert.deepEqual(validateStp8Products({ evidenceText }), []);
+  assert.ok(
+    validateStp8Products({ evidenceText: "Landing: Ratify constructor ABI (2026-09-19)." }).some(
+      (error) => error.code === "missing-engine-pins",
+    ),
+  );
+});
+
 test("STP8 live ts-js: coupled T+U inference, merged interface print, Vue utility recipe", () => {
   const tsPath = path.join(REPO_ROOT, "packages", "playground", "node_modules", "typescript");
   const require = createRequire(path.join(tsPath, "package.json"));

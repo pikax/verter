@@ -2,7 +2,7 @@
   "schema": "ARH0CapabilityMatrix",
   "version": 2,
   "contractNode": "ARH0",
-  "candidate": "f69c7eee7aba2b1a260cc4d85a282bbedbbde349",
+  "sourceReference": {"title":"test(compiler): qualify content-mapper diagnostics and (#606)","date":"2026-09-18"},
   "rule": "implemented rows record an exact manifest pin or a pnpm-lock resolved version, bound to the named source property (versionProperty) and compared exactly by the verifier; executable names and compilation targets are build identity (buildIdentity), never tool revisions; required-planned rows name the repo authority that requires them",
   "rows": [
     {

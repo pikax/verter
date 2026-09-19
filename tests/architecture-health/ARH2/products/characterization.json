@@ -2,7 +2,7 @@
   "schema": "ARH2Characterization",
   "version": 1,
   "contractNode": "ARH2",
-  "candidate": "30012d45df4e3369728a7cc09250c5e009bfd18d",
+  "sourceReference": {"title":"docs(arch): ratify responsibility, visibility and dependency contracts (#636)","date":"2026-09-19"},
   "predecessorProducts": {
     "responsibilityMap": "tests/architecture-health/ARH0/products/responsibility-map.json",
     "dependencyContracts": "tests/architecture-health/ARH1/products/dependency-contracts.json",
