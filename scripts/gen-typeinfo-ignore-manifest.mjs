@@ -579,7 +579,7 @@ const BLOCK_TO_REQUIRED_GUARDS = new Map([
       "no_landed_typeinfo_block_has_live_ignored_rows",
       "no_vacuous_parent_u_block_landing",
       "zero_row_blocks_land_exactly_once",
-      "typeinfo_block_landing_transactions_are_atomic_and_trailer_backed",
+      "typeinfo_block_landing_transactions_are_atomic_and_status_coupled",
       "row_registry_matches_discovered_tests",
       "row_registry_is_append_only_against_head",
       "row_registry_contains_pinned_baseline_cohort",
@@ -948,7 +948,7 @@ const GUARD_REGISTRY_DATA = [
   ["no_vacuous_parent_u_block_landing", "U0ManifestSubstrate", "integration"],
   ["zero_row_blocks_land_exactly_once", "U0ManifestSubstrate", "integration"],
   [
-    "typeinfo_block_landing_transactions_are_atomic_and_trailer_backed",
+    "typeinfo_block_landing_transactions_are_atomic_and_status_coupled",
     "U0ManifestSubstrate",
     "integration",
   ],
@@ -3934,8 +3934,9 @@ function parseReconciliation(text) {
     const blockVar = BLOCK_TEXT_TO_VARIANT.get(tx?.block);
     if (
       blockVar === undefined ||
-      typeof tx?.commit !== "string" ||
-      !/^[0-9a-f]{7,40}$/.test(tx.commit)
+      Object.hasOwn(tx, "commit") ||
+      (tx.title !== undefined && typeof tx.title !== "string") ||
+      (tx.date !== undefined && typeof tx.date !== "string")
     ) {
       throw new SystemExit(1, `malformed landing transaction: ${JSON.stringify(tx)}`);
     }
@@ -4208,8 +4209,8 @@ function emitGuardRegistry(counts, recon) {
     "/// `LandingUnverified` = a historically recorded landing awaiting",
     "/// retrospective ratification; `ImplementedUnlandedRebaseRequired` =",
     "/// implemented on an unlanded branch (never landed); `Landed` requires a",
-    "/// recorded landing transaction whose commit carries the",
-    "/// `Typeinfo-Block:` trailer.",
+    "/// recorded landing transaction; historical title/date references are",
+    "/// descriptive metadata only.",
     "#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]",
     "#[allow(dead_code)]",
     "enum BlockLandingStatus {",
@@ -4257,16 +4258,14 @@ function emitGuardRegistry(counts, recon) {
   out.push(
     "];",
     "",
-    "/// One recorded landing transaction per `Landed` block: the single",
-    "/// squash-merge commit whose message carries the",
-    "/// `Typeinfo-Block: <block-id>` trailer. Enforced prospectively — no",
-    "/// historical landing has a transaction, which is exactly why no block",
-    "/// currently holds `BlockLandingStatus::Landed`.",
+    "/// One recorded landing transaction per ratified block. Optional landing",
+    "/// title and ISO date are descriptive context, never acceptance evidence.",
     "#[derive(Clone, Copy, Debug)]",
     "#[allow(dead_code)]",
     "struct LandingTransaction {",
     "    block_id: TypeInfoParityBlockId,",
-    "    commit: &'static str,",
+    "    title: &'static str,",
+    "    date: &'static str,",
     "}",
     "",
     "#[rustfmt::skip]",
@@ -4276,14 +4275,14 @@ function emitGuardRegistry(counts, recon) {
     const blockVar = BLOCK_TEXT_TO_VARIANT.get(tx.block);
     out.push(
       `    LandingTransaction { block_id: TypeInfoParityBlockId::${blockVar}, ` +
-        `commit: "${escapeRustStringLiteral(tx.commit)}" },`,
+        `title: "${escapeRustStringLiteral(tx.title ?? "")}", date: "${escapeRustStringLiteral(tx.date ?? "")}" },`,
     );
   }
   out.push(
     "];",
     "",
     "/// Reconciliation evidence references for every block whose status is",
-    "/// `Landed` or `LandingUnverified` (verifiable commits / doc records /",
+    "/// `Landed` or `LandingUnverified` (descriptive landing references / doc records /",
     "/// row-state facts; recorded in the reconciliation JSON).",
     "#[derive(Clone, Copy, Debug)]",
     "#[allow(dead_code)]",

@@ -2,7 +2,7 @@
   "schema": "ARH0CodebaseInventory",
   "version": 1,
   "contractNode": "ARH0",
-  "candidate": "f69c7eee7aba2b1a260cc4d85a282bbedbbde349",
+  "sourceReference": {"title":"test(compiler): qualify content-mapper diagnostics and (#606)","date":"2026-09-18"},
   "measuredAt": "2026-09-18",
   "platform": "win32-x64, Node 26, cargo metadata --no-deps",
   "method": {

@@ -6,7 +6,7 @@ Production `VueCarrierCompiler` is parse plus identity/downcast only, matching `
 
 ## ARH5-ratification (accept)
 
-Clean products validate. Manifest cases, products and verify/test commands match the verifier. The candidate is a 40-hex commit; `--provenance` (full-history architecture-health lane) proves it is an ancestor of HEAD. Shallow `test:scripts` checkouts skip `--provenance` when the pin object is absent.
+Clean products validate. Manifest cases, products and verify/test commands match the verifier. Historical source titles and ISO dates are optional descriptive context. Tests exercise the verifier without commit metadata and run its CLI with Git history unavailable. Code, manifest and behavioral obligations remain enforced.
 
 ## ARH5-cutover (reject) — AC1
 

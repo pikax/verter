@@ -501,6 +501,15 @@ A test that references `.integration-tests/repos/<third-party>/...` from a non-g
 
 ### No roadmap archaeology in source or tests (MANDATORY)
 
+Never use commit SHAs, hashes or commit URLs as durable proof in source, tests,
+CI, documentation or charters. If historical context matters, use the commit or
+PR landing title (first line) and ISO date only. References are descriptive;
+acceptance checks must validate current code and behavior without requiring old
+Git objects, ancestry or matching history text. This rule supersedes older
+charters and must be carried into new or revised charters. See `/testing` for the
+evidence policy. Runtime checkout identities and genuine dependency pins remain
+operational inputs.
+
 Production file/module names and comments, plus every test artifact—file/module/test names, comments, fixtures, snapshots, assertion messages, and guard diagnostics—must not reference an architecture program or revision, roadmap/DAG, node/block/train identifier, plan phase/stage, implementation sequence, cutover stage, or deletion history. Examples include `CCA1`, `FMT1D`, `phase 5d`, `post-cutover`, `implemented for block X`, and `deleted in 5g`. These identifiers are transient coordination state. Once work lands, code and tests read only as final-state behavior.
 
 Name the durable invariant or regression boundary instead: what input fails, what behavior is required, which authority owns the answer, or which compatibility/performance contract is protected. Durable architecture insights belong in `.claude/skills/*` or `docs/arch/`, not in code/test archaeology. The roadmap's own document tree and policy files are exempt.

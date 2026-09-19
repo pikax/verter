@@ -960,7 +960,7 @@ mod manifest_tests {
     }
 
     #[test]
-    fn top_level_id_and_schema_version_present() {
+    fn top_level_metadata_matches_editor_release() {
         let manifest = manifest();
         assert_eq!(
             manifest.get("id").and_then(toml::Value::as_str),
@@ -974,10 +974,19 @@ mod manifest_tests {
             Some(1),
             "schema_version must be 1"
         );
+        // Editor manifests share the Marketplace release version; the standalone
+        // Rust crate's version is independent of that distribution version.
+        let editor_package: serde_json::Value =
+            serde_json::from_str(include_str!("../../../packages/vue-vscode/package.json"))
+                .expect("editor release package must be valid JSON");
+        let editor_version = editor_package
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .expect("editor release package must declare a version string");
         assert_eq!(
             manifest.get("version").and_then(toml::Value::as_str),
-            Some("0.0.2"),
-            "version must be 0.0.2"
+            Some(editor_version),
+            "Zed manifest version must match the shared editor release"
         );
     }
 

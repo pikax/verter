@@ -28,7 +28,6 @@ const VUE_CASE: &str = "vue/fixtures/App.vue";
 const SVELTE_CASE: &str = "svelte/fixtures/App.svelte";
 const VUE_REV: &str = "0123456789abcdef0123456789abcdef01234567";
 const SVELTE_REV: &str = "89abcdef0123456789abcdef0123456789abcdef";
-const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const STARTED: &str = "2026-09-13T12:00:00Z";
 
 fn manifest(framework: &str, case: &str, comparison: &str, revision: &str) -> ProbeStateManifest {
@@ -232,8 +231,8 @@ fn header_fields(rows: Vec<ObservationRow>) -> ObservationArtifact {
     let corpus_revisions = revisions();
     let corpus_digest = observe::corpus_digest(&corpus_revisions);
     ObservationArtifact {
-        artifact_id: observe::compose_artifact_id(COMMIT, &corpus_digest, "1", 1),
-        verter_commit: COMMIT.to_string(),
+        artifact_id: observe::compose_artifact_id(&corpus_digest, "1", 1),
+        corpus_manifests: manifests(),
         corpus_revisions,
         corpus_digest,
         workflow_run_id: "1".to_string(),
@@ -1079,7 +1078,6 @@ struct MockSource {
     runs: BTreeMap<u64, WorkflowRun>,
     repo: RepoInfo,
     zips: BTreeMap<u64, Vec<u8>>,
-    git: BTreeMap<(String, String), String>,
     page_failures: Cell<u8>,
 }
 
@@ -1122,13 +1120,6 @@ impl ArtifactSource for MockSource {
             .ok_or_else(|| FetchError::Aborted(format!("no zip {artifact_id}")))
     }
 
-    fn git_show(&self, head_sha: &str, path: &str) -> Result<String, FetchError> {
-        self.git
-            .get(&(head_sha.to_string(), path.to_string()))
-            .cloned()
-            .ok_or_else(|| FetchError::Aborted(format!("no git {head_sha}:{path}")))
-    }
-
     fn started_at(&self) -> String {
         self.started_at.clone()
     }
@@ -1145,7 +1136,6 @@ fn trusted_run() -> WorkflowRun {
         event: "push".to_string(),
         conclusion: "success".to_string(),
         head_branch: "main".to_string(),
-        head_sha: COMMIT.to_string(),
         run_attempt: 1,
     }
 }
@@ -1159,141 +1149,6 @@ fn listed(id: u64, name: &str, created: &str, run: u64, size: u64) -> ListedArti
         expires_at: "2026-10-13T12:00:00Z".to_string(),
         workflow_run_id: run,
     }
-}
-
-fn git_map() -> BTreeMap<(String, String), String> {
-    let mut git = BTreeMap::new();
-    git.insert(
-        (
-            COMMIT.to_string(),
-            "crates/verter_validation_probe/manifest/vue.toml".to_string(),
-        ),
-        fixture_toml("vue", "fixtures/App.vue", "structural", VUE_REV),
-    );
-    git.insert(
-        (
-            COMMIT.to_string(),
-            "crates/verter_validation_probe/manifest/svelte.toml".to_string(),
-        ),
-        fixture_toml("svelte", "fixtures/App.svelte", "none", SVELTE_REV),
-    );
-    git
-}
-
-fn fixture_toml(framework: &str, case: &str, comparison: &str, revision: &str) -> String {
-    let probe_id = format!("{framework}/{case}");
-    let product = format!("{framework}.runtime-client-product");
-    let (structural, comparator) = if comparison == "structural" {
-        (
-            format!(
-                r#"
-[[entries]]
-probe_id = "{probe_id}"
-framework = "{framework}"
-case = "{case}"
-dimension = "Structural"
-expected_state = "canary"
-expected_class = "pass"
-authority = "{product}"
-atom = "product-identity"
-"#
-            ),
-            r#"
-[comparator]
-crate = "verter_vue_conformance"
-path = "src/compare.rs"
-function = "compare_modules"
-atom = "product-identity"
-"#,
-        )
-    } else {
-        (
-            format!(
-                r#"
-[[entries]]
-probe_id = "{probe_id}"
-framework = "{framework}"
-case = "{case}"
-dimension = "Structural"
-expected_state = "skip"
-authority = "{product}"
-atom = "product-identity"
-reason = "comparator_absent"
-"#
-            ),
-            "",
-        )
-    };
-    format!(
-        r#"
-framework = "{framework}"
-comparison = "{comparison}"
-external_revision = "{revision}"
-smoke = ["{probe_id}"]
-{comparator}
-[applicability]
-runtime = "inapplicable"
-map = "inapplicable"
-
-[[strata]]
-id = "app"
-pattern = "App*"
-min_cases = 1
-
-[[inventory]]
-case_id = "{probe_id}"
-
-[[entries]]
-probe_id = "{probe_id}"
-framework = "{framework}"
-case = "{case}"
-dimension = "Route"
-expected_state = "gate"
-expected_class = "pass"
-authority = "compiler.public-request-route"
-atom = "route-callable"
-
-[[entries]]
-probe_id = "{probe_id}"
-framework = "{framework}"
-case = "{case}"
-dimension = "Compile"
-expected_state = "canary"
-expected_class = "pass"
-authority = "{product}"
-atom = "product-shape"
-{structural}
-[[entries]]
-probe_id = "{probe_id}"
-framework = "{framework}"
-case = "{case}"
-dimension = "Runtime"
-expected_state = "skip"
-authority = "{product}"
-atom = "runtime-behavior"
-reason = "runtime_executor_absent"
-
-[[entries]]
-probe_id = "{probe_id}"
-framework = "{framework}"
-case = "{case}"
-dimension = "Map"
-expected_state = "skip"
-authority = "{product}"
-atom = "source-map"
-reason = "map_validator_absent"
-
-[[entries]]
-probe_id = "{probe_id}"
-framework = "{framework}"
-case = "{case}"
-dimension = "Performance"
-expected_state = "canary"
-expected_class = "pass"
-authority = "compiler.equivalent-work-ledger"
-atom = "equivalent-work-ledger"
-"#
-    )
 }
 
 fn fetch_dir() -> tempfile::TempDir {
@@ -1323,9 +1178,25 @@ fn base_mock() -> MockSource {
             default_branch: "main".to_string(),
         },
         zips,
-        git: git_map(),
         page_failures: Cell::new(0),
     }
+}
+
+#[test]
+fn fetch_validates_retained_manifests_without_commit_history() {
+    let mut source = base_mock();
+    let mut document = serde_json::to_value(valid_artifact()).expect("artifact JSON");
+    document.as_object_mut().unwrap().remove("verter_commit");
+    document["artifact_id"] = format!("{}/1/1", observe::corpus_digest(&revisions())).into();
+    document["corpus_manifests"] = serde_json::to_value(manifests()).expect("manifest JSON");
+    source
+        .zips
+        .insert(10, zip_observations(&document.to_string()));
+    let dir = fetch_dir();
+    let inventory = ObservationInventory::fetch_with(&source, dir.path())
+        .expect("retained validation inputs survive squash merges and missing Git objects");
+    assert_eq!(inventory.artifacts.len(), 1);
+    assert_eq!(inventory.artifacts[0].artifact.rows, valid_artifact().rows);
 }
 
 #[test]
@@ -1346,15 +1217,32 @@ fn fetch_keeps_a_trusted_artifact_and_excludes_a_concurrent_upload() {
 }
 
 #[test]
-fn fetch_rejects_a_verter_commit_that_differs_from_head_sha() {
-    let mut source = base_mock();
-    source.runs.get_mut(&1).unwrap().head_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into();
-    let dir = fetch_dir();
-    let error = ObservationInventory::fetch_with(&source, dir.path()).expect_err("mismatch");
-    assert!(
-        error.to_string().contains("differs from run head_sha"),
-        "{error}"
-    );
+fn fetch_rejects_missing_or_mismatched_retained_manifests() {
+    for defect in ["missing", "mismatched", "duplicate"] {
+        let mut artifact = valid_artifact();
+        match defect {
+            "missing" => artifact.corpus_manifests.clear(),
+            "duplicate" => artifact.corpus_manifests[1] = artifact.corpus_manifests[0].clone(),
+            _ => {
+                artifact.corpus_manifests[0] =
+                    manifest("vue", "fixtures/AppOther.vue", "structural", VUE_REV);
+            }
+        }
+        artifact
+            .validate(&manifests())
+            .expect_err("capture must retain the exact validation inputs");
+        let mut source = base_mock();
+        source
+            .zips
+            .insert(10, zip_observations(&artifact.to_json()));
+        let dir = fetch_dir();
+        let error = ObservationInventory::fetch_with(&source, dir.path())
+            .expect_err("absent or mismatched validation inputs cannot certify observations");
+        assert!(
+            error.to_string().contains("manifest") || error.to_string().contains("inventory"),
+            "{error}"
+        );
+    }
 }
 
 #[test]

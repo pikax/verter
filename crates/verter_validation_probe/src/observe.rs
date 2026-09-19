@@ -52,8 +52,6 @@ pub const MAX_UNCOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
 const PAGE_SIZE: u32 = 100;
 const LISTING_RETRIES: u8 = 3;
 const MAX_SCAN_MISMATCHES: u8 = 3;
-const MANIFEST_VUE: &str = "crates/verter_validation_probe/manifest/vue.toml";
-const MANIFEST_SVELTE: &str = "crates/verter_validation_probe/manifest/svelte.toml";
 const WORKFLOW_PATH: &str = ".github/workflows/validation-probe.yml";
 
 /// Cold or warm execution.
@@ -217,15 +215,15 @@ pub struct ObservationRow {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactHeader {
-    /// `<verter_commit>/<corpus_digest>/<workflow_run_id>/<run_attempt>`.
+    /// `<corpus_digest>/<workflow_run_id>/<run_attempt>`.
     pub artifact_id: String,
-    /// The producing Verter commit.
-    pub verter_commit: String,
+    /// Complete manifests retained with the observations; no Git history required.
+    pub corpus_manifests: Vec<ProbeStateManifest>,
     /// Full `{ vue, svelte }` revision map.
     pub corpus_revisions: BTreeMap<String, String>,
     /// Digest of the canonical corpus-revision encoding.
     pub corpus_digest: String,
-    /// GitHub Actions run id, or `"0"` for a local capture.
+    /// GitHub Actions run id, or a timestamp-based local capture identity.
     pub workflow_run_id: String,
     /// GitHub Actions run attempt.
     pub run_attempt: u32,
@@ -255,15 +253,15 @@ pub struct ArtifactHeader {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObservationArtifact {
-    /// `<verter_commit>/<corpus_digest>/<workflow_run_id>/<run_attempt>`.
+    /// `<corpus_digest>/<workflow_run_id>/<run_attempt>`.
     pub artifact_id: String,
-    /// The producing Verter commit.
-    pub verter_commit: String,
+    /// Complete manifests retained with the observations; no Git history required.
+    pub corpus_manifests: Vec<ProbeStateManifest>,
     /// Full `{ vue, svelte }` revision map.
     pub corpus_revisions: BTreeMap<String, String>,
     /// Digest of the canonical corpus-revision encoding.
     pub corpus_digest: String,
-    /// GitHub Actions run id, or `"0"` for a local capture.
+    /// GitHub Actions run id, or a timestamp-based local capture identity.
     pub workflow_run_id: String,
     /// GitHub Actions run attempt.
     pub run_attempt: u32,
@@ -332,25 +330,19 @@ pub fn corpus_digest(revisions: &BTreeMap<String, String>) -> String {
     request::sha256_hex(encode_corpus_revisions(revisions).as_bytes())
 }
 
-/// `<verter_commit>/<corpus_digest>/<workflow_run_id>/<run_attempt>`.
-pub fn compose_artifact_id(
-    verter_commit: &str,
-    digest: &str,
-    workflow_run_id: &str,
-    run_attempt: u32,
-) -> String {
-    format!("{verter_commit}/{digest}/{workflow_run_id}/{run_attempt}")
+/// `<corpus_digest>/<workflow_run_id>/<run_attempt>`.
+pub fn compose_artifact_id(digest: &str, workflow_run_id: &str, run_attempt: u32) -> String {
+    format!("{digest}/{workflow_run_id}/{run_attempt}")
 }
 
 /// Filesystem-safe single-component encoding of the identity.
 pub fn artifact_key(
-    verter_commit: &str,
     digest: &str,
     workflow_run_id: &str,
     run_attempt: u32,
 ) -> Result<String, ObserveError> {
     let prefix: String = digest.chars().take(16).collect();
-    let key = format!("{verter_commit}-{prefix}-{workflow_run_id}-{run_attempt}");
+    let key = format!("{prefix}-{workflow_run_id}-{run_attempt}");
     if key.contains('/') || key.contains('\\') || key.contains("..") {
         return Err(invalid(format!(
             "artifact key `{key}` is not a single path component"
@@ -472,6 +464,27 @@ impl ObservationArtifact {
     pub fn validate(&self, manifests: &[ProbeStateManifest]) -> Result<(), ObserveError> {
         self.validate_header(manifests)?;
         self.validate_grid(manifests)?;
+        if self.corpus_manifests.len() != manifests.len() {
+            return Err(invalid(
+                "corpus_manifests must retain every framework manifest",
+            ));
+        }
+        for manifest in manifests {
+            manifest.validate().map_err(|errors| {
+                invalid(format!("invalid retained corpus manifest: {errors:?}"))
+            })?;
+            if self
+                .corpus_manifests
+                .iter()
+                .filter(|expected| *expected == manifest)
+                .count()
+                != 1
+            {
+                return Err(invalid(
+                    "retained corpus_manifests differ from the validation manifests",
+                ));
+            }
+        }
         for row in &self.rows {
             validate_row(self, manifests, row)?;
         }
@@ -479,8 +492,7 @@ impl ObservationArtifact {
     }
 
     fn validate_header(&self, manifests: &[ProbeStateManifest]) -> Result<(), ObserveError> {
-        if self.verter_commit.is_empty()
-            || self.workflow_run_id.is_empty()
+        if self.workflow_run_id.is_empty()
             || self.rust_version.is_empty()
             || self.node_version.is_empty()
             || self.addon_version.is_empty()
@@ -510,15 +522,11 @@ impl ObservationArtifact {
                 "corpus_digest does not match the canonical encoding of corpus_revisions",
             ));
         }
-        let expected_id = compose_artifact_id(
-            &self.verter_commit,
-            &self.corpus_digest,
-            &self.workflow_run_id,
-            self.run_attempt,
-        );
+        let expected_id =
+            compose_artifact_id(&self.corpus_digest, &self.workflow_run_id, self.run_attempt);
         if expected_id != self.artifact_id {
             return Err(invalid(
-                "artifact_id does not match verter_commit/corpus_digest/workflow_run_id/run_attempt",
+                "artifact_id does not match corpus_digest/workflow_run_id/run_attempt",
             ));
         }
         if request::template_digest_of(&self.request_vue) != self.template_digests.vue {
@@ -641,7 +649,7 @@ impl ObservationArtifact {
     pub fn header(&self) -> ArtifactHeader {
         ArtifactHeader {
             artifact_id: self.artifact_id.clone(),
-            verter_commit: self.verter_commit.clone(),
+            corpus_manifests: self.corpus_manifests.clone(),
             corpus_revisions: self.corpus_revisions.clone(),
             corpus_digest: self.corpus_digest.clone(),
             workflow_run_id: self.workflow_run_id.clone(),
@@ -1149,8 +1157,6 @@ pub struct WorkflowRun {
     pub conclusion: String,
     /// Head branch.
     pub head_branch: String,
-    /// Head SHA.
-    pub head_sha: String,
     /// Attempt number.
     pub run_attempt: u32,
 }
@@ -1162,7 +1168,7 @@ pub struct RepoInfo {
     pub default_branch: String,
 }
 
-/// Injected GitHub/git/clock so tests can plant listings and archives.
+/// Injected GitHub/clock so tests can plant listings and archives.
 pub trait ArtifactSource {
     /// One listing page (`per_page=100`).
     fn list_page(&self, page: u32) -> Result<ArtifactListPage, FetchError>;
@@ -1172,8 +1178,6 @@ pub trait ArtifactSource {
     fn repo(&self) -> Result<RepoInfo, FetchError>;
     /// Compressed archive bytes.
     fn download(&self, artifact_id: u64) -> Result<Vec<u8>, FetchError>;
-    /// `git show <head_sha>:<path>`.
-    fn git_show(&self, head_sha: &str, path: &str) -> Result<String, FetchError>;
     /// Fetch start, UTC RFC3339.
     fn started_at(&self) -> String;
     /// Backoff between transient page retries.
@@ -1182,7 +1186,7 @@ pub trait ArtifactSource {
     }
 }
 
-/// Live `gh api` / `git show` transport.
+/// Live `gh api` transport.
 pub struct GhCli {
     /// Owner.
     pub owner: String,
@@ -1221,21 +1225,6 @@ impl ArtifactSource for GhCli {
             self.owner, self.repo
         );
         gh_bytes(&path)
-    }
-
-    fn git_show(&self, head_sha: &str, path: &str) -> Result<String, FetchError> {
-        let spec = format!("{head_sha}:{path}");
-        let output = Command::new("git")
-            .args(["show", &spec])
-            .output()
-            .map_err(|error| FetchError::Aborted(error.to_string()))?;
-        if !output.status.success() {
-            return Err(FetchError::Aborted(format!(
-                "git show {spec}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-        String::from_utf8(output.stdout).map_err(|error| FetchError::Aborted(error.to_string()))
     }
 
     fn started_at(&self) -> String {
@@ -1326,7 +1315,6 @@ fn parse_workflow_run(value: &serde_json::Value) -> Result<WorkflowRun, FetchErr
         event: required_str(value, "event")?,
         conclusion: required_str(value, "conclusion")?,
         head_branch: required_str(value, "head_branch")?,
-        head_sha: required_str(value, "head_sha")?,
         run_attempt: required_u64(value, "run_attempt")? as u32,
     })
 }
@@ -1577,12 +1565,6 @@ impl ObservationInventory {
             let text = extract_observations_json(&bytes)?;
             let artifact = ObservationArtifact::from_json_str(&text)
                 .map_err(|error| FetchError::Aborted(error.to_string()))?;
-            if artifact.verter_commit != run.head_sha {
-                return Err(FetchError::Aborted(format!(
-                    "artifact verter_commit {} differs from run head_sha {}",
-                    artifact.verter_commit, run.head_sha
-                )));
-            }
             if artifact.workflow_run_id != run.id.to_string()
                 || artifact.run_attempt != run.run_attempt
             {
@@ -1590,37 +1572,10 @@ impl ObservationInventory {
                     "embedded workflow_run_id/run_attempt do not match the trusted run".into(),
                 ));
             }
-            let vue_text = source.git_show(&run.head_sha, MANIFEST_VUE)?;
-            let svelte_text = source.git_show(&run.head_sha, MANIFEST_SVELTE)?;
-            let vue = ProbeStateManifest::from_manifest_file("vue.toml", &vue_text)
-                .map_err(|error| FetchError::Aborted(error.to_string()))?;
-            let svelte = ProbeStateManifest::from_manifest_file("svelte.toml", &svelte_text)
-                .map_err(|error| FetchError::Aborted(error.to_string()))?;
-            let mut historical_revisions = BTreeMap::new();
-            historical_revisions.insert(
-                Framework::Vue.as_str().to_string(),
-                vue.external_revision.as_str().to_string(),
-            );
-            historical_revisions.insert(
-                Framework::Svelte.as_str().to_string(),
-                svelte.external_revision.as_str().to_string(),
-            );
-            if artifact.corpus_revisions != historical_revisions {
-                return Err(FetchError::Aborted(
-                    "header corpus_revisions do not equal the historical manifest pins".into(),
-                ));
-            }
-            let digest = corpus_digest(&historical_revisions);
-            let expected_id =
-                compose_artifact_id(&run.head_sha, &digest, &run.id.to_string(), run.run_attempt);
-            if expected_id != artifact.artifact_id {
-                return Err(FetchError::Aborted(
-                    "recomputed artifact_id does not equal the embedded id".into(),
-                ));
-            }
             artifact
-                .validate(&[vue, svelte])
+                .validate(&artifact.corpus_manifests)
                 .map_err(|error| FetchError::Aborted(error.to_string()))?;
+            let digest = corpus_digest(&artifact.corpus_revisions);
             for row in &artifact.rows {
                 if !identities.insert((artifact.artifact_id.clone(), row.row_id.clone())) {
                     return Err(FetchError::Aborted(format!(
@@ -1629,13 +1584,8 @@ impl ObservationInventory {
                     )));
                 }
             }
-            let key = artifact_key(
-                &artifact.verter_commit,
-                &digest,
-                &artifact.workflow_run_id,
-                artifact.run_attempt,
-            )
-            .map_err(|error| FetchError::Aborted(error.to_string()))?;
+            let key = artifact_key(&digest, &artifact.workflow_run_id, artifact.run_attempt)
+                .map_err(|error| FetchError::Aborted(error.to_string()))?;
             let dest = dir.join(&key).join("observations.json");
             disk::write_text(&dest, &text)
                 .map_err(|error| FetchError::Aborted(error.to_string()))?;
@@ -1742,8 +1692,13 @@ pub fn capture(
         manifests.push(manifest);
     }
     let digest = corpus_digest(&revisions);
-    let verter_commit = git_head()?;
-    let workflow_run_id = std::env::var("GITHUB_RUN_ID").unwrap_or_else(|_| "0".to_string());
+    let workflow_run_id = std::env::var("GITHUB_RUN_ID").unwrap_or_else(|_| {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!("local-{timestamp}")
+    });
     let run_attempt = std::env::var("GITHUB_RUN_ATTEMPT")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -1754,8 +1709,8 @@ pub fn capture(
         "local"
     };
     let artifact = ObservationArtifact {
-        artifact_id: compose_artifact_id(&verter_commit, &digest, &workflow_run_id, run_attempt),
-        verter_commit,
+        artifact_id: compose_artifact_id(&digest, &workflow_run_id, run_attempt),
+        corpus_manifests: manifests.clone(),
         corpus_revisions: revisions,
         corpus_digest: digest,
         workflow_run_id,
@@ -1780,19 +1735,6 @@ pub fn capture(
     };
     artifact.validate(&manifests)?;
     Ok(artifact)
-}
-
-#[cfg(feature = "external-corpus")]
-fn git_head() -> Result<String, ObserveError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(crate::corpus::workspace_root())
-        .output()
-        .map_err(|error| invalid(error.to_string()))?;
-    if !output.status.success() {
-        return Err(invalid("git rev-parse HEAD failed"));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 #[cfg(feature = "external-corpus")]

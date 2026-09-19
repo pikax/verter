@@ -16,7 +16,7 @@ When the node has a controller-mapped GitHub issue, open the draft PR after the 
 When the user or maintainer directs a non-PR landing, put one `Closes #<n>` line per controller-mapped issue in the final squash commit body. The closing lines are required before review so pushing or merging that commit to the origin default branch closes the issues; they must not appear in source or tests.
 Rebase as needed and squash once to `<type>(<scope>): <description>` with the required non-PR closing body when applicable.
 STOP on missing authority, ambiguity, unexpected dependency, or scope expansion.
-Report the node, commit locator hints, evidence/results, limitations, handoff, and cleanup state.
+Report the node, evidence/results, limitations, handoff, and cleanup state. If a historical reference is useful, use only the commit or PR landing title (first line) and ISO date. Never use commit SHAs or commit URLs as durable proof or make acceptance depend on Git history. Carry this rule into new or revised charters.
 ```
 
 ## Fix agent

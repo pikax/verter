@@ -32,12 +32,6 @@ const contracts = readFileSync(
   join(repoRoot, ...model.contractSources.dependencyContracts.split("/")),
   "utf8",
 );
-const contractCandidate = JSON.parse(
-  readFileSync(
-    join(repoRoot, "tests/architecture-health/ARH1/products/dependency-contracts.json"),
-    "utf8",
-  ),
-).candidate;
 
 function opts(extra = {}) {
   return { repoRoot, skipTypeinfoCheck: true, ...extra };
@@ -151,16 +145,33 @@ test("architecture contracts distinguish sync constructors from the native drive
     architecturePage.includes("unrecorded in ARH1 contract products"),
     "the page resolves the original host/profile as unrecorded",
   );
-  assert.ok(
-    architecturePage.includes(contractCandidate),
-    "the page names the contract candidate SHA",
-  );
-  assert.ok(
-    !/whose `--provenance` mode\s+proves the pinned candidate is a real ancestor/.test(
-      architecturePage,
-    ),
-    "the page must not claim --provenance currently proves ancestry",
-  );
+});
+
+test("measurement context stays required without a historical commit pin", async () => {
+  const source = JSON.parse(contracts);
+  delete source.candidate;
+  delete source.sourceReference;
+  const overlays = { [model.contractSources.dependencyContracts]: JSON.stringify(source) };
+  assert.equal((await validate(opts({ overlays }))).completenessState, "complete");
+  for (const token of [
+    model.populationEvidenceBasis.originalHostProfileNote,
+    model.populationEvidenceBasis.liveRederivationHost,
+    model.populationEvidenceBasis.liveRederivationNode,
+    model.populationEvidenceBasis.liveRederivationCommand,
+  ]) {
+    const receipt = await validate(
+      opts({
+        overlays: {
+          ...overlays,
+          [architecturePageRel]: architecturePage.replaceAll(token, "omitted measurement context"),
+        },
+      }),
+    );
+    assert.ok(
+      receipt.errors.some((item) => item.code === "population-basis-missing"),
+      token,
+    );
+  }
 });
 
 test("source identity names the live PositionMapper APIs", () => {

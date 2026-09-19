@@ -75,8 +75,7 @@
         "clean products",
         "manifest-case-drift",
         "manifest-product-drift",
-        "manifest-command-drift",
-        "candidate-basis-drift (both the product pin and verify.mjs --provenance; js-build-test shallow clones skip --provenance when the pin object is absent)"
+        "manifest-command-drift"
       ]
     }
   ],
