@@ -475,6 +475,10 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
+          # This job never pnpm-installs. setup-node@v5 otherwise auto-caches
+          # from package.json#packageManager and the post-step save fails with
+          # "Path(s) specified in the action for caching do(es) not exist".
+          package-manager-cache: false
       - name: Anti-binary-growth integration-test layout
         run: node scripts/check-integration-test-layout.mjs
       - name: Install cargo-nextest
@@ -1151,6 +1155,7 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           name: wasm-build
+          path: packages/wasm
       - name: Install Playwright browsers (Chromium, Firefox, WebKit)
         run: pnpm --filter @verter/playground exec playwright install chromium firefox webkit --with-deps
       - name: Run the browser-host-domain gate

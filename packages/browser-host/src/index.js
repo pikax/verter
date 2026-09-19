@@ -7,6 +7,15 @@ export const CANONICAL_TS = "/probe.ts";
 export const CANONICAL_VUE = "/probe.vue";
 export const TYPEINFO_SYMBOL = "ProbeAlias";
 
+/** UTF-16 code-unit order; matches Rust `str::cmp` on the ASCII fixture (BWH1-AC1). */
+export function compareCodeUnits(left, right) {
+  const a = String(left ?? "");
+  const b = String(right ?? "");
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
 /** Identity compared native↔browser (BWH1-AC1). Spans dropped: UTF-8 host vs UTF-16 CSS. */
 export function normalizeSymbolIdentities(symbols) {
   if (!Array.isArray(symbols)) return [];
@@ -17,7 +26,8 @@ export function normalizeSymbolIdentities(symbols) {
       isExported: Boolean(entry.isExported ?? entry.is_exported),
     }))
     .sort(
-      (left, right) => left.name.localeCompare(right.name) || left.kind.localeCompare(right.kind),
+      (left, right) =>
+        compareCodeUnits(left.name, right.name) || compareCodeUnits(left.kind, right.kind),
     );
 }
 

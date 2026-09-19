@@ -20,6 +20,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   REQUIRED_OPERATIONS,
+  compareCodeUnits,
   emptyOperationFailures,
   nodeGlobalsPresent,
   canonicalizeTypeInfo,
@@ -119,17 +120,34 @@ export function missingArtifactExports(jsText) {
   return missing;
 }
 
+/** Recursively sort object keys so serde_json BTreeMap order matches JS insertion order. */
+export function stableSerialize(value) {
+  return JSON.stringify(sortKeys(value));
+}
+
+function sortKeys(value) {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value != null && typeof value === "object") {
+    const sorted = {};
+    for (const key of Object.keys(value).sort(compareCodeUnits)) {
+      sorted[key] = sortKeys(value[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
 export function compareIdentities(native, browser) {
   const failures = [];
-  const nativeSymbols = JSON.stringify(native?.identities?.symbols ?? null);
-  const browserSymbols = JSON.stringify(browser?.identities?.symbols ?? null);
+  const nativeSymbols = stableSerialize(native?.identities?.symbols ?? null);
+  const browserSymbols = stableSerialize(browser?.identities?.symbols ?? null);
   if (nativeSymbols !== browserSymbols) {
     failures.push(
       `native/browser symbol identities diverge after normalization (BWH1-AC1): native=${nativeSymbols} browser=${browserSymbols}`,
     );
   }
-  const nativeType = JSON.stringify(canonicalizeTypeInfo(native?.identities?.typeinfo));
-  const browserType = JSON.stringify(canonicalizeTypeInfo(browser?.identities?.typeinfo));
+  const nativeType = stableSerialize(canonicalizeTypeInfo(native?.identities?.typeinfo));
+  const browserType = stableSerialize(canonicalizeTypeInfo(browser?.identities?.typeinfo));
   if (nativeType !== browserType) {
     failures.push(
       `native/browser TypeInfo observations diverge (BWH1-AC1): native=${nativeType} browser=${browserType}`,
@@ -147,7 +165,10 @@ export function evaluateBrowserResult(engine, result) {
   if (result.ok !== true) {
     failures.push(`${engine}: ${result.error ?? "worker failed"}`);
   }
-  if (nodeGlobalsPresent(result.nodeGlobals)) {
+  const nodeGlobalsReported = result.nodeGlobals != null && typeof result.nodeGlobals === "object";
+  // Success without a census is fail-closed (the field is expected). A worker
+  // error with no nodeGlobals must not be relabelled as BWH1-AC3.
+  if (nodeGlobalsReported ? nodeGlobalsPresent(result.nodeGlobals) : result.ok === true) {
     failures.push(`${engine}: Node globals available in worker (BWH1-AC3)`);
   }
   failures.push(

@@ -16,11 +16,13 @@ import {
   missingArtifactExports,
   parseNativeReceipt,
   runGate,
+  stableSerialize,
 } from "./browser-host-gate.mjs";
 import {
   REQUIRED_OPERATIONS,
   emptyOperationFailures,
   nodeGlobalsPresent,
+  normalizeSymbolIdentities,
 } from "../packages/browser-host/src/index.js";
 
 const SYMBOLS = [
@@ -145,6 +147,41 @@ test("compareIdentities fails on native/browser divergence (BWH1-AC1)", () => {
   assert.deepEqual(compareIdentities(native, native), []);
 });
 
+test("compareIdentities ignores serde-sorted vs JS-insertion key order (BWH1-AC1)", () => {
+  const native = receipt({
+    identities: {
+      symbols: SYMBOLS.map(({ name, kind, isExported }) => ({ isExported, kind, name })),
+      typeinfo: { name: "string", kind: "primitive" },
+    },
+  });
+  const browser = receipt({
+    identities: {
+      symbols: SYMBOLS.map(({ name, kind, isExported }) => ({ name, kind, isExported })),
+      typeinfo: { kind: "primitive", name: "string" },
+    },
+  });
+  assert.deepEqual(compareIdentities(native, browser), []);
+  assert.notEqual(
+    JSON.stringify(native.identities.symbols),
+    JSON.stringify(browser.identities.symbols),
+  );
+  assert.equal(
+    stableSerialize(native.identities.symbols),
+    stableSerialize(browser.identities.symbols),
+  );
+});
+
+test("normalizeSymbolIdentities sorts by code-unit order, not localeCompare", () => {
+  const rows = normalizeSymbolIdentities([
+    { name: "aValue", kind: "const", isExported: true },
+    { name: "BValue", kind: "const", isExported: true },
+  ]);
+  assert.deepEqual(
+    rows.map((row) => row.name),
+    ["BValue", "aValue"],
+  );
+});
+
 test("evaluateBrowserResult fails Node globals and empty operations", () => {
   const empty = evaluateBrowserResult(
     "chromium",
@@ -155,6 +192,23 @@ test("evaluateBrowserResult fails Node globals and empty operations", () => {
   );
   assert.ok(empty.some((row) => /BWH1-AC3/.test(row)));
   assert.ok(empty.some((row) => /empty array/.test(row)));
+});
+
+test("evaluateBrowserResult does not relabel a worker error as BWH1-AC3", () => {
+  const failed = evaluateBrowserResult("chromium", {
+    ok: false,
+    error: "WebAssembly.instantiate failed",
+  });
+  assert.ok(failed.some((row) => /WebAssembly\.instantiate failed/.test(row)));
+  assert.ok(!failed.some((row) => /BWH1-AC3/.test(row)));
+});
+
+test("evaluateBrowserResult fail-closes AC3 when a successful worker omits nodeGlobals", () => {
+  const leaked = evaluateBrowserResult("chromium", {
+    ok: true,
+    operations: operations(),
+  });
+  assert.ok(leaked.some((row) => /BWH1-AC3/.test(row)));
 });
 
 test("censusForbiddenHits catches a wasm32 tokio edge and ignores inert noise", () => {

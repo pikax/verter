@@ -8,7 +8,7 @@
   "fixture": {
     "ts": "packages/browser-host/src/fixtures/probe.ts",
     "vue": "packages/browser-host/src/fixtures/probe.vue",
-    "normalization": "symbol identity is {name, kind, isExported} sorted by name then kind; TypeInfo observation is JSON-canonicalized typeExpr from resolveSymbolWithAudit/project_node_to_type_expr_json_bytes. Spans are not identity keys (host listSymbols is SFC-absolute UTF-8; CSS matches are UTF-16)."
+    "normalization": "symbol identity is {name, kind, isExported} sorted by name then kind using code-unit/byte order (JS <, Rust str::cmp), then compared with recursively key-sorted JSON so serde_json BTreeMap order matches JS insertion order; TypeInfo observation is JSON-canonicalized typeExpr from resolveSymbolWithAudit/project_node_to_type_expr_json_bytes. Spans are not identity keys (host listSymbols is SFC-absolute UTF-8; CSS matches are UTF-16)."
   },
   "operations": [
     {
