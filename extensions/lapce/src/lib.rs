@@ -305,9 +305,10 @@ const NO_WORKSPACE_ROOT_ERROR: &str =
 /// A WASI launch REQUIRES a resolved workspace root: the volt's cwd is the volt
 /// directory (not the workspace), so [`build_server_args`] forwards the workspace
 /// root as the trailing positional and the server cannot infer it. A `None`
-/// `workspace_root` therefore FAILS LOUD here — it surfaces
-/// [`NO_WORKSPACE_ROOT_ERROR`] and returns `false` WITHOUT launching, rather
-/// than spawning a rootless server that would root at the volt dir.
+/// `workspace_root` therefore FAILS LOUD here — it records a `launch_refused`
+/// stamp, surfaces [`NO_WORKSPACE_ROOT_ERROR`] and returns `false` WITHOUT
+/// launching, rather than spawning a rootless server that would root at the volt
+/// dir.
 pub fn handle_initialize(
     launcher: &mut dyn LspLauncher,
     workspace_root: Option<&str>,
@@ -330,8 +331,15 @@ pub fn handle_initialize_at(
 ) -> bool {
     // Enforce the launch-entry invariant: a launch is only valid with a resolved
     // workspace root. Fail loud on `None` before discovery so a missing root can
-    // never produce a rootless launch.
+    // never produce a rootless launch. This is also a refused launch, so it
+    // stamps `launch_refused` (the correlated timeline sees a refused epoch, not
+    // a gap) before the loud error.
     if workspace_root.is_none() {
+        launcher.record_launch_stamp(&refused_launch_stamp(
+            at_unix_ms,
+            "",
+            NO_WORKSPACE_ROOT_ERROR.to_string(),
+        ));
         launcher.show_error(NO_WORKSPACE_ROOT_ERROR);
         return false;
     }
@@ -350,20 +358,31 @@ pub fn handle_initialize_at(
             true
         }
         Err(err) => {
-            launcher.record_launch_stamp(&LaunchStamp {
-                phase: "launch_refused",
+            launcher.record_launch_stamp(&refused_launch_stamp(
                 at_unix_ms,
-                server_uri: String::new(),
-                workspace_root: workspace_root.to_string(),
-                document_languages: document_selector()
-                    .into_iter()
-                    .map(|entry| entry.language)
-                    .collect(),
-                refusal: Some(err.to_string()),
-            });
+                workspace_root,
+                err.to_string(),
+            ));
             launcher.show_error(&err.to_string());
             false
         }
+    }
+}
+
+/// The refused-launch stamp: every refused initialize (no workspace root, no
+/// resolvable server source) records one so the correlated timeline sees a
+/// refused epoch instead of a hole.
+fn refused_launch_stamp(at_unix_ms: u64, workspace_root: &str, refusal: String) -> LaunchStamp {
+    LaunchStamp {
+        phase: "launch_refused",
+        at_unix_ms,
+        server_uri: String::new(),
+        workspace_root: workspace_root.to_string(),
+        document_languages: document_selector()
+            .into_iter()
+            .map(|entry| entry.language)
+            .collect(),
+        refusal: Some(refusal),
     }
 }
 
@@ -447,10 +466,12 @@ mod wasi_volt {
             if !self.ui_trace_enabled {
                 return;
             }
-            let _ = PLUGIN_RPC.window_show_message(
-                MessageType::INFO,
-                format!("verter launch-stamp {}", stamp.to_json()),
-            );
+            // Instrumentation sink: host stderr, never a UI notification. A
+            // window message would both perturb the event loop being measured
+            // and never reach the harness; the capture session reads
+            // `verter launch-stamp <json>` lines from the driven client's
+            // stderr and `@verter/dx-harness/lapce` parses them.
+            PLUGIN_RPC.stderr(&format!("verter launch-stamp {}", stamp.to_json()));
         }
     }
 
@@ -467,7 +488,12 @@ mod wasi_volt {
             let params: InitializeParams = match serde_json::from_value(params) {
                 Ok(parsed) => parsed,
                 Err(parse_err) => {
-                    let mut launcher = PluginRpcLauncher;
+                    // The params could not be parsed, so the `uiTrace.enabled`
+                    // opt-in is unreadable; the least-perturbation choice is a
+                    // non-instrumented launcher (no stamp on this error path).
+                    let mut launcher = PluginRpcLauncher {
+                        ui_trace_enabled: false,
+                    };
                     launcher
                         .show_error(&format!("Verter: malformed initialize params: {parse_err}"));
                     return;
@@ -615,6 +641,42 @@ mod tests {
             "refusal keeps the actionable guidance; got: {refusal}"
         );
         assert_eq!(stamp.document_languages, vec!["vue", "svelte"]);
+        assert!(stamp.to_json()["refusal"].is_string());
+    }
+
+    #[test]
+    fn missing_workspace_root_records_a_refused_stamp_not_a_gap() {
+        // A rootless initialize is also a refused launch: it must record exactly
+        // one `launch_refused` stamp (carrying the no-workspace-root reason) so
+        // the correlated timeline sees a refused epoch instead of a hole, and it
+        // must never reach start_lsp — even when discovery would otherwise
+        // succeed (a valid serverPath is supplied to isolate the root rule).
+        let cfg = json!({ "lsp": { "serverPath": "/opt/verter/verter-lsp" } });
+        let mut launcher = RecordingLauncher::default();
+        let launched = handle_initialize_at(&mut launcher, None, &cfg, "linux", "x86_64", 99);
+        assert!(!launched, "a rootless initialize must not launch");
+        assert!(
+            launcher.launched.is_none(),
+            "start_lsp must not be called without a workspace root"
+        );
+        assert_eq!(
+            launcher.stamps.len(),
+            1,
+            "a rootless initialize must stamp exactly once"
+        );
+        let stamp = &launcher.stamps[0];
+        assert_eq!(stamp.phase, "launch_refused");
+        assert_eq!(stamp.at_unix_ms, 99);
+        assert_eq!(stamp.workspace_root, "", "no root resolved to stamp");
+        let refusal = stamp.refusal.as_ref().expect("refusal reason present");
+        assert!(
+            refusal.contains("workspace root"),
+            "refusal names the missing workspace root; got: {refusal}"
+        );
+        assert!(
+            refusal.contains("root_uri"),
+            "refusal names root_uri; got: {refusal}"
+        );
         assert!(stamp.to_json()["refusal"].is_string());
     }
 

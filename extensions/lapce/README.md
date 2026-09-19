@@ -189,9 +189,17 @@ every Verter editor client ships). All are optional; defaults shown:
 ### Instrumentation (WSP1L)
 
 `uiTrace.enabled = false` (default) keeps the volt silent. When set, the volt
-emits **one** launch stamp at `initialize` — the epoch marker the
-`@verter/dx-harness/lapce` driver correlates with the WSP1 server timeline to
-attribute Lapce UI decode/apply/paint timings. It is a one-time message; the
+writes **one** `verter launch-stamp {json}` line to the host's stderr at
+`initialize` — never a UI notification, so the measured event loop is not
+perturbed and the harness can capture the line from the driven client's stderr.
+`@verter/dx-harness/lapce` parses these lines (`parseLaunchStampMessage`) and
+joins their Unix-ms clock to the WSP1 server timeline only through a
+capture-recorded clock anchor (`stampUnixMsToTimelineMs`). An instrumented
+Lapce client build emits `verter ui-stamp {json}` lines for
+input-dispatch/decode/apply/paint observations on the same request/source epoch
+basis (`parseUiStampMessage`); until a reference-client capture exists that
+channel stays recorded unavailable — the driver never synthesizes it, and the
+launch stamp alone never attributes UI decode/apply/paint timings. The
 per-message LSP path is never touched, and no semantic logic lives in the volt.
 
 ## How to verify it works

@@ -144,7 +144,16 @@ export interface LapceUiRun {
 }
 
 export type Certification =
-  | { readonly certified: true; readonly run: LapceUiRun }
+  | {
+      readonly certified: true;
+      readonly run: LapceUiRun;
+      /**
+       * False for hermetic (fixture) certifications: a certified run is not
+       * real-client paint evidence unless it came from the real host on the
+       * real automation path (see `carriesRealClientEvidence`).
+       */
+      readonly realClientEvidence: boolean;
+    }
   | { readonly certified: false; readonly rule: string; readonly reason: string };
 
 export interface RealClientClaimVerdict {

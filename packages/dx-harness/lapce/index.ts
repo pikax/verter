@@ -62,15 +62,35 @@ export {
 } from "./manifest.js";
 
 export {
+  LAUNCH_STAMP_MESSAGE_PREFIX,
+  UI_STAMP_MESSAGE_PREFIX,
+  collectStampMessages,
+  isStampMessage,
+  parseLaunchStampMessage,
+  parseLaunchStampValue,
+  parseUiStampMessage,
+  parseUiStampValue,
+  stampUnixMsToTimelineMs,
+  type LaunchStampPayload,
+  type LaunchStampPhase,
+  type StampClockAnchor,
+  type StampMessages,
+  type UiStampPayload,
+} from "./stamp.js";
+
+export {
   FIXTURE_AUTOMATION_PATH,
   GUI_INSTRUMENTATION_UNAVAILABLE_REASON,
   REAL_LAPCE_AUTOMATION_PATH,
   FixtureLapceHost,
   LapceInteractionDriver,
+  RealLapceHost,
   assertCertified,
   assertRealLapceProductClaim,
+  carriesRealClientEvidence,
   certifyRun,
   type FixtureLapceHostOptions,
   type LapceHost,
   type LapceInteractionDriverOptions,
+  type RealLapceCaptureSession,
 } from "./driver.js";

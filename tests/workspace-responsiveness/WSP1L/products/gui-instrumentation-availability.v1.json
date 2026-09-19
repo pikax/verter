@@ -15,11 +15,12 @@
       "a deliberately stalled UI thread is detected while the server timeline shows immediate completion, and the first blocked stage is named (WSP1L-AC1; packages/dx-harness/test/lapceDriver.test.ts)",
       "two runs of the same scripted interaction compare within a recorded noise bound, and unknowns never become zeros (WSP1L-AC2)",
       "the driver refuses to certify a run whose protocol smoke passed with no UI timeline (WSP1L-AC3)",
-      "the volt emits a one-time initialize launch stamp behind uiTrace.enabled (default off) so a real capture session can correlate epochs without touching the per-message path (WSP1L.1)"
+      "the volt writes a one-time initialize launch-stamp line to host stderr behind uiTrace.enabled (default off, no UI notification) and dx-harness parses `verter launch-stamp`/`verter ui-stamp` lines, joining their Unix-ms clock to the timeline clock only through a capture-recorded anchor (WSP1L.1/WSP1L.2)",
+      "RealLapceHost constructs only from a provenance-complete capture (pinned lapce-client, issued launch stamp, UI observations, clock anchor) and fails closed otherwise; fixture timestamps relabeled with the real hostKind are refused as real-client claims"
     ],
     "automationPathRecorded": {
       "fixture": "instrumented-fixture-host: deterministic scripted UI event emission; no GUI, no sleeps, no real Lapce process",
-      "realHost": "volt-launch-stamp + Lapce UI instrumentation: one-time initialize stamp behind uiTrace.enabled; per-message LSP path untouched"
+      "realHost": "volt-launch-stamp + Lapce UI instrumentation: one-time initialize launch-stamp stderr line behind uiTrace.enabled (no UI notification); per-message LSP path untouched"
     }
   },
   "nextOwners": ["WSP1A", "expansion.workspace-responsiveness"]

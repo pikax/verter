@@ -23,14 +23,22 @@ import {
   LAPCE_REAL_HOST,
   PINNED_LAPCE_VERSION_MANIFEST,
   LapceInteractionDriver,
+  REAL_LAPCE_AUTOMATION_PATH,
+  RealLapceHost,
   assertCertified,
   assertRealLapceProductClaim,
   buildUiTimeline,
+  carriesRealClientEvidence,
   certifyRun,
   compareScriptedTimelines,
   detectUiStallWithImmediateServer,
   versionsMatchPinnedManifest,
+  collectStampMessages,
+  parseLaunchStampValue,
+  type LapceHost,
   type LapceUiRun,
+  type LapceVersionManifest,
+  type RealLapceCaptureSession,
   type ScriptedStep,
   type StallThreshold,
 } from "../lapce/index.js";
@@ -47,9 +55,14 @@ const NOISE_BOUND = { maxAbsMs: 5, recordedAs: "test-recorded noise bound" };
 
 /**
  * Immediate server trace: sub-millisecond stage gaps (the WSP1 blocked-stage
- * detector treats >= 1 ms gaps as blocked), nothing blocked.
+ * detector treats >= 1 ms gaps as blocked), nothing blocked. `sourceEpoch`
+ * defaults to the request epoch; pass null to model a source-less trace.
  */
-function immediateServerTrace(epoch: number, method = "textDocument/completion"): InteractionTrace {
+function immediateServerTrace(
+  epoch: number,
+  method = "textDocument/completion",
+  sourceEpoch: number | null = epoch,
+): InteractionTrace {
   const stamps: StageStamp[] = [
     { stage: "request_received", atMs: 1_000 },
     { stage: "admitted", atMs: 1_000.2 },
@@ -61,7 +74,7 @@ function immediateServerTrace(epoch: number, method = "textDocument/completion")
   ];
   return {
     requestEpoch: epoch,
-    sourceEpoch: epoch,
+    sourceEpoch,
     method,
     status: "complete",
     stamps,
@@ -133,6 +146,77 @@ function sequenceClock(startMs: number, stepMs = 100): () => number {
     current += stepMs;
     return value;
   };
+}
+
+/**
+ * Capture-contract fixture for the REAL path: the exact stderr line shapes a
+ * driven Lapce session emits (`verter launch-stamp` / `verter ui-stamp`) plus
+ * the capture-recorded clock anchor. It exercises the parsers, the
+ * fail-closed RealLapceHost and the claim gate wiring end to end; it is a
+ * CONTRACT fixture, not a recorded real capture — the pinned manifest keeps
+ * lapce-client unrecorded until a reference-client capture exists.
+ */
+const REAL_CAPTURE_ANCHOR = {
+  stampUnixMs: 1_758_000_000_000,
+  timelineMs: 1_000,
+  recordedAs: "test capture-contract clock anchor",
+};
+
+const REAL_CAPTURE_STDERR_LINES = [
+  "lapce 0.5.0-test-reference: plugin volt loaded",
+  'verter launch-stamp {"phase":"server_launch_issued","atUnixMs":1758000000000,' +
+    '"serverUri":"urn:/opt/verter/verter-lsp","workspaceRoot":"/home/dev/proj",' +
+    '"documentLanguages":["vue","svelte"]}',
+  'verter ui-stamp {"kind":"type","requestEpoch":10,"sourceEpoch":null,' +
+    '"stage":"input_dispatched","atUnixMs":1758000000012}',
+  'verter ui-stamp {"kind":"type","requestEpoch":10,"sourceEpoch":null,' +
+    '"stage":"decoded","atUnixMs":1758000000037}',
+  'verter ui-stamp {"kind":"type","requestEpoch":10,"sourceEpoch":null,' +
+    '"stage":"applied","atUnixMs":1758000000052}',
+  'verter ui-stamp {"kind":"type","requestEpoch":10,"sourceEpoch":null,' +
+    '"stage":"painted","atUnixMs":1758000000070}',
+] as const;
+
+const REAL_CAPTURE_VERSIONS: LapceVersionManifest = {
+  ...PINNED_LAPCE_VERSION_MANIFEST,
+  items: PINNED_LAPCE_VERSION_MANIFEST.items.map((item) =>
+    item.item === "lapce-client"
+      ? { item: "lapce-client", version: "0.5.0-test-reference", status: "pinned" }
+      : item,
+  ),
+};
+
+function realCaptureSession() {
+  const { launchStamps, uiStamps } = collectStampMessages([...REAL_CAPTURE_STDERR_LINES]);
+  return {
+    lapceClientVersion: "0.5.0-test-reference",
+    launchStamps,
+    uiStamps,
+    clockAnchor: REAL_CAPTURE_ANCHOR,
+  };
+}
+
+function realCaptureRun(overrides: Partial<LapceUiRun> = {}): LapceUiRun {
+  const host = new RealLapceHost(realCaptureSession());
+  const driver = new LapceInteractionDriver({
+    host,
+    serverTraces: [immediateServerTrace(10, "textDocument/completion", null)],
+    versions: REAL_CAPTURE_VERSIONS,
+    stallThreshold: STALL_THRESHOLD,
+    immediacyBound: IMMEDIACY_BOUND,
+    protocolSmokePassed: true,
+    receiptBasis: {
+      sourceRevisions: "capture-contract:reference",
+      projectConfiguration: "/home/dev/proj",
+      engineIdentity: "unknown: capture contract carries no engine",
+      hostIdentity: `real-lapce:${host.lapceClientVersion}`,
+      completenessState: "partial",
+    },
+  });
+  const run = driver.runScriptedInteraction([
+    { kind: "type", requestEpoch: 10, sourceEpoch: null },
+  ]);
+  return { ...run, ...overrides };
 }
 
 describe("WSP1L-AC1 — stalled UI thread detected while the server timeline is immediate", () => {
@@ -360,15 +444,109 @@ describe("LapceInteractionDriver — scripted open/type/complete/navigate/close/
     expect(() => driver.type("after teardown")).toThrow(/torn down/);
   });
 
+  it("honors the script's request/source epochs when joining WSP1 traces (WSP1L.2)", () => {
+    // A WSP1 replay whose epochs are not 1..n in drive order: the script's
+    // epochs are the correlation keys and must reach the trace lookup verbatim.
+    const driver = makeFixtureDriver([immediateServerTrace(10, "textDocument/hover", null)]);
+    const run = driver.runScriptedInteraction([
+      { kind: "type", label: "epoch-10", requestEpoch: 10, sourceEpoch: null },
+    ]);
+    expect(run.timelines).toHaveLength(1);
+    const timeline = run.timelines[0]!;
+    expect(timeline.step.requestEpoch).toBe(10);
+    expect(timeline.step.sourceEpoch).toBeNull();
+    expect(timeline.server.requestEpoch).toBe(10);
+    expect(timeline.server.sourceEpoch).toBeNull();
+    expect(timeline.server.method).toBe("textDocument/hover");
+  });
+
+  it("joins a step whose source epoch differs from its request epoch", () => {
+    const driver = makeFixtureDriver([immediateServerTrace(10, "textDocument/completion", 7)]);
+    const run = driver.runScriptedInteraction([{ kind: "open", requestEpoch: 10, sourceEpoch: 7 }]);
+    const timeline = run.timelines[0]!;
+    expect(timeline.step.requestEpoch).toBe(10);
+    expect(timeline.step.sourceEpoch).toBe(7);
+    expect(timeline.server.requestEpoch).toBe(10);
+    expect(timeline.server.sourceEpoch).toBe(7);
+  });
+
+  it("refuses to bind a trace whose source epoch contradicts the step", () => {
+    const driver = makeFixtureDriver([immediateServerTrace(10, "textDocument/hover", 8)]);
+    expect(() =>
+      driver.runScriptedInteraction([{ kind: "type", requestEpoch: 10, sourceEpoch: 7 }]),
+    ).toThrow(/sourceEpoch .* refusing to bind the wrong trace/);
+  });
+
+  it("drives a request epoch at most once", () => {
+    const driver = makeFixtureDriver();
+    expect(() =>
+      driver.runScriptedInteraction([
+        { kind: "open", requestEpoch: 1, sourceEpoch: 1 },
+        { kind: "type", requestEpoch: 1, sourceEpoch: 1 },
+      ]),
+    ).toThrow(/request epoch 1 was already driven/);
+  });
+
+  it("rejects invalid scripted epochs loud instead of guessing", () => {
+    const driver = makeFixtureDriver();
+    expect(() =>
+      driver.runScriptedInteraction([{ kind: "type", requestEpoch: 0.5, sourceEpoch: 1 }]),
+    ).toThrow(/requestEpoch must be a positive integer/);
+    expect(() =>
+      driver.runScriptedInteraction([{ kind: "type", requestEpoch: 2, sourceEpoch: 0 }]),
+    ).toThrow(/sourceEpoch must be a positive integer or null/);
+  });
+
+  it("synthesizes only unused epochs for bare steps after scripted ones", () => {
+    const driver = makeFixtureDriver([immediateServerTrace(10), immediateServerTrace(1)]);
+    driver.runScriptedInteraction([{ kind: "open", requestEpoch: 10, sourceEpoch: 10 }]);
+    const synthesized = driver.type("bare");
+    expect(synthesized.step.requestEpoch).toBe(1);
+    expect(synthesized.server.requestEpoch).toBe(1);
+  });
+
   it("fails loud when a step has no correlatable server trace epoch", () => {
     const driver = makeFixtureDriver([immediateServerTrace(1)]);
     driver.open();
     expect(() => driver.type()).toThrow(/no WSP1 server InteractionTrace/);
   });
 
-  function makeFixtureDriver(traces?: readonly InteractionTrace[]) {
+  it("teardown releases the host exactly once and the released host refuses steps", () => {
+    const inner = new FixtureLapceHost({ clockMs: sequenceClock(0) });
+    let releases = 0;
+    const countingHost: LapceHost = {
+      hostKind: inner.hostKind,
+      automationPath: inner.automationPath,
+      usedSleepForReadiness: inner.usedSleepForReadiness,
+      runScriptedStep: (step) => inner.runScriptedStep(step),
+      release: () => {
+        releases += 1;
+        inner.release();
+      },
+    };
+    const driver = makeFixtureDriver([immediateServerTrace(1)], countingHost);
+    driver.type();
+    driver.teardown();
+    driver.teardown(); // idempotent: the host releases exactly once
+    expect(releases).toBe(1);
+    expect(() =>
+      countingHost.runScriptedStep({ kind: "type", requestEpoch: 99, sourceEpoch: 99 }),
+    ).toThrow(/released/);
+    expect(() => driver.type()).toThrow(/torn down/);
+  });
+
+  it("a released FixtureLapceHost refuses further steps loud (idempotent release)", () => {
+    const host = new FixtureLapceHost({ clockMs: sequenceClock(0) });
+    host.release();
+    host.release();
+    expect(() => host.runScriptedStep({ kind: "type", requestEpoch: 1, sourceEpoch: 1 })).toThrow(
+      /released/,
+    );
+  });
+
+  function makeFixtureDriver(traces?: readonly InteractionTrace[], host?: LapceHost) {
     return new LapceInteractionDriver({
-      host: new FixtureLapceHost({ clockMs: sequenceClock(0) }),
+      host: host ?? new FixtureLapceHost({ clockMs: sequenceClock(0) }),
       serverTraces: traces ?? [1, 2, 3, 4, 5].map((epoch) => immediateServerTrace(epoch)),
       versions: PINNED_LAPCE_VERSION_MANIFEST,
       stallThreshold: STALL_THRESHOLD,
@@ -379,6 +557,81 @@ describe("LapceInteractionDriver — scripted open/type/complete/navigate/close/
   }
 });
 
+describe("RealLapceHost — fail-closed real path (WSP1L.1/WSP1L.3)", () => {
+  it("constructs only from a provenance-complete capture session", () => {
+    expect(() => new RealLapceHost(realCaptureSession())).not.toThrow();
+    const valid = realCaptureSession();
+    const broken: Partial<RealLapceCaptureSession>[] = [
+      { lapceClientVersion: "   " },
+      { launchStamps: [] },
+      {
+        launchStamps: [
+          parseLaunchStampValue({
+            phase: "launch_refused",
+            atUnixMs: 1,
+            serverUri: "",
+            workspaceRoot: "",
+            documentLanguages: ["vue"],
+            refusal: "no discovery source",
+          }),
+        ],
+      },
+      { uiStamps: [] },
+      { clockAnchor: undefined },
+    ];
+    const reasons = [
+      /pinned lapce-client identity/,
+      /launch stamp/,
+      /server_launch_issued/,
+      /UI stage observations/,
+      /clock anchor/,
+    ];
+    broken.forEach((override, index) => {
+      expect(() => new RealLapceHost({ ...valid, ...override })).toThrow(reasons[index]);
+    });
+  });
+
+  it("replays only observed stamps through the recorded clock anchor", () => {
+    const host = new RealLapceHost(realCaptureSession());
+    const record = host.runScriptedStep({ kind: "type", requestEpoch: 10, sourceEpoch: null });
+    expect(record.stamps.map((stamp) => stamp.stage)).toEqual([
+      "input_dispatched",
+      "decoded",
+      "applied",
+      "painted",
+    ]);
+    // Anchor-mapped, never synthesized: stamp Unix 1758000000012 with the anchor
+    // (1758000000000 -> timeline 1000) lands at timeline 1012.
+    expect(record.stamps[0]!.atMs).toBe(1_012);
+    expect(record.stamps[3]!.atMs).toBe(1_070);
+    expect(host.launchStamps[0]!.phase).toBe("server_launch_issued");
+  });
+
+  it("refuses a scripted step the capture does not cover", () => {
+    const host = new RealLapceHost(realCaptureSession());
+    expect(() =>
+      host.runScriptedStep({ kind: "navigate", requestEpoch: 11, sourceEpoch: null }),
+    ).toThrow(/no UI stamps for step 'navigate'/);
+  });
+
+  it("release drops the retained capture and refuses further steps", () => {
+    const host = new RealLapceHost(realCaptureSession());
+    host.release();
+    host.release(); // idempotent
+    expect(() =>
+      host.runScriptedStep({ kind: "type", requestEpoch: 10, sourceEpoch: null }),
+    ).toThrow(/released/);
+  });
+
+  it("records the real host kind and real automation path on its runs", () => {
+    const run = realCaptureRun();
+    expect(run.hostKind).toBe(LAPCE_REAL_HOST);
+    expect(run.automationPath).toEqual(REAL_LAPCE_AUTOMATION_PATH);
+    expect(run.usedSleepForReadiness).toBe(false);
+    expect(run.timelines[0]!.inputToPaintMs).toEqual({ status: "measured", value: 58, unit: "ms" });
+  });
+});
+
 describe("real-client claims, pinned manifest and package surface", () => {
   it("never counts the fixture host as a real-client paint claim", () => {
     const verdict = assertRealLapceProductClaim(fixtureRun());
@@ -387,16 +640,51 @@ describe("real-client claims, pinned manifest and package surface", () => {
     expect(verdict.reason).toMatch(GUI_INSTRUMENTATION_UNAVAILABLE_REASON);
   });
 
-  it("admits only the real-Lapce host with a measured input-to-paint", () => {
-    const real = fixtureRun({ hostKind: LAPCE_REAL_HOST });
-    expect(assertRealLapceProductClaim(real).admissible).toBe(true);
-    const realNoPaint = fixtureRun({
-      hostKind: LAPCE_REAL_HOST,
-      timelines: [],
-    });
-    const noTimeline = assertRealLapceProductClaim(realNoPaint);
+  it("refuses fixture timestamps relabeled with the real hostKind (WSP1L.3, AC-OWNER)", () => {
+    // The wrong-complete trap: flipping hostKind alone promotes fixture-synthesized
+    // stamps to a real-client paint claim. The gate must refuse it — a real-client
+    // claim requires the real automation path, not a relabeled fixture record.
+    const relabeled = fixtureRun({ hostKind: LAPCE_REAL_HOST });
+    const verdict = assertRealLapceProductClaim(relabeled);
+    expect(verdict.admissible).toBe(false);
+    expect(verdict.reason).toMatch(/relabeled/);
+    expect(verdict.reason).toMatch(/instrumented-fixture-host/);
+    // The same defense on the certification surface: a certified fixture run is
+    // explicit that it carries no real-client evidence.
+    const certified = certifyRun(fixtureRun({ hostKind: LAPCE_REAL_HOST }));
+    expect(certified.certified).toBe(true);
+    if (certified.certified) {
+      expect(certified.realClientEvidence).toBe(false);
+    }
+    expect(carriesRealClientEvidence(fixtureRun({ hostKind: LAPCE_REAL_HOST }))).toBe(false);
+  });
+
+  it("admits a real-client claim only from the real host path with a pinned lapce-client", () => {
+    const run = realCaptureRun();
+    const verdict = assertRealLapceProductClaim(run);
+    expect(verdict.admissible).toBe(true);
+    expect(verdict.reason).toMatch(/lapce-client 0.5.0-test-reference/);
+
+    // Same run, but the lapce-client identity is unrecorded in its manifest.
+    const unpinnedClient = realCaptureRun({ versions: PINNED_LAPCE_VERSION_MANIFEST });
+    const unpinned = assertRealLapceProductClaim(unpinnedClient);
+    expect(unpinned.admissible).toBe(false);
+    expect(unpinned.reason).toMatch(/pinned lapce-client identity/);
+
+    // Same run with the real path, but no measured input-to-paint anywhere.
+    const noPaint = realCaptureRun({ timelines: [] });
+    const noTimeline = assertRealLapceProductClaim(noPaint);
     expect(noTimeline.admissible).toBe(false);
     expect(noTimeline.reason).toMatch(/none were captured/);
+  });
+
+  it("certifies hermetic runs as non-real-client evidence only (WSP1L-AC-RESOURCE)", () => {
+    const verdict = certifyRun(fixtureRun());
+    expect(verdict.certified).toBe(true);
+    if (verdict.certified) {
+      expect(verdict.realClientEvidence).toBe(false);
+    }
+    expect(carriesRealClientEvidence(realCaptureRun())).toBe(true);
   });
 
   it("pins the shipped volt/server/provider versions and records lapce-client unavailable", () => {
