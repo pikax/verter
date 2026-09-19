@@ -319,11 +319,13 @@ export async function defaultRunBrowsers({ origin, engines = ENGINES, playwright
       browser = await launcher.launch({ headless: true });
       const page = await browser.newPage();
       await page.goto(`${origin}/harness.html?engine=${engine}`, { waitUntil: "load" });
+      // Playwright resolves the handle to the predicate's return value.
+      // A boolean predicate would make jsonValue() === true and discard the
+      // worker result. Options are the third argument, not `arg`.
       const result = await page.waitForFunction(
-        () => window.__bwh1 && window.__bwh1.pending === false,
-        {
-          timeout: 120_000,
-        },
+        () => (window.__bwh1 && window.__bwh1.pending === false ? window.__bwh1 : null),
+        undefined,
+        { timeout: 120_000 },
       );
       results[engine] = await result.jsonValue();
     } catch (error) {

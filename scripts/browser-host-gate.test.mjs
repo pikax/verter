@@ -224,6 +224,12 @@ test("evaluateBrowserResult fail-closes AC3 when a successful worker omits nodeG
   assert.ok(leaked.some((row) => /BWH1-AC3/.test(row)));
 });
 
+test("evaluateBrowserResult rejects a waitForFunction boolean handle", () => {
+  const failed = evaluateBrowserResult("chromium", true);
+  assert.ok(failed.some((row) => /worker failed/.test(row)));
+  assert.ok(failed.some((row) => /operations object missing/.test(row)));
+});
+
 test("censusForbiddenHits catches a wasm32 tokio edge and ignores inert noise", () => {
   assert.deepEqual(censusForbiddenHits("serde v1\nwasm-bindgen v0.2\n"), []);
   assert.deepEqual(censusForbiddenHits("tokio v1.40.0\nserde v1\n"), ["tokio"]);
@@ -386,15 +392,26 @@ test("playwrightEngine reads CJS namespace default when named exports are absent
 
 test("defaultRunBrowsers launches off CJS default instead of reporting launcher missing", async () => {
   const launched = [];
+  const waitCalls = [];
+  const payload = browserResult();
   const fakeEngine = {
     launch: async () => {
       launched.push("ok");
       return {
         newPage: async () => ({
           goto: async () => {},
-          waitForFunction: async () => ({
-            jsonValue: async () => browserResult(),
-          }),
+          waitForFunction: async (fn, arg, options) => {
+            waitCalls.push({ arg, options });
+            const prev = globalThis.window;
+            globalThis.window = { __bwh1: { ...payload, pending: false } };
+            try {
+              const value = fn(arg);
+              return { jsonValue: async () => value };
+            } finally {
+              if (prev === undefined) delete globalThis.window;
+              else globalThis.window = prev;
+            }
+          },
         }),
         close: async () => {},
       };
@@ -406,8 +423,12 @@ test("defaultRunBrowsers launches off CJS default instead of reporting launcher 
     playwrightModule: { default: { chromium: fakeEngine }, "module.exports": {} },
   });
   assert.deepEqual(launched, ["ok"]);
+  assert.equal(waitCalls.length, 1);
+  assert.equal(waitCalls[0].arg, undefined);
+  assert.equal(waitCalls[0].options?.timeout, 120_000);
   assert.equal(outcome.ok, true, JSON.stringify(outcome.failures));
   assert.equal(outcome.results.chromium.ok, true);
+  assert.equal(outcome.results.chromium.pending, false);
 });
 
 test("runGate passes only with matching native/browser evidence", async () => {
