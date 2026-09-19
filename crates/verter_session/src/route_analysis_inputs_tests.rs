@@ -4,6 +4,8 @@
 //! two-step pipeline production callers — `verter_lsp`'s `get_route_tree`,
 //! `verter_mcp`'s `build_route_snapshot` — actually run).
 
+use std::sync::Arc;
+
 use crate::route_analysis_inputs::build_route_analysis_inputs;
 
 fn fs_workspace() -> verter_workspace::FilesystemWorkspace {
@@ -114,4 +116,132 @@ fn does_not_fabricate_router_config_candidates_that_do_not_exist() {
     }
 
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+fn memory_workspace() -> verter_workspace::MemoryWorkspace {
+    verter_workspace::MemoryWorkspace::new(verter_workspace::MemoryOptions::default())
+}
+
+const ROUTER_PACKAGE: &str = r#"{ "dependencies": { "vue-router": "^4.2.0" } }"#;
+
+/// Projection reads the committed rows only: a workspace write after the
+/// commit must not leak into a projection of the ORIGINAL basis. The
+/// end-to-end tests recapture after mutating, which cannot tell a
+/// re-reading projection from a frozen one.
+#[test]
+fn projecting_the_original_basis_after_mutation_keeps_the_committed_content() {
+    let ws = memory_workspace();
+    let root = "/proj";
+    ws.inject_file(format!("{root}/package.json"), Arc::from(ROUTER_PACKAGE));
+    ws.inject_file(
+        format!("{root}/src/router/index.ts"),
+        Arc::from("export default { routes: [] }"),
+    );
+    let basis = crate::route_analysis_inputs::commit_route_analysis_basis(&ws, root);
+
+    ws.inject_file(
+        format!("{root}/package.json"),
+        Arc::from(r#"{ "dependencies": {} }"#),
+    );
+    ws.inject_file(
+        format!("{root}/src/router/index.ts"),
+        Arc::from("export default { routes: [{ path: '/late' }] }"),
+    );
+
+    let projected = crate::route_analysis_inputs::project_route_analysis_inputs(&basis);
+    assert_eq!(
+        projected
+            .read_file(&format!("{root}/package.json"))
+            .as_deref(),
+        Some(ROUTER_PACKAGE),
+        "projection must not re-read the mutated workspace"
+    );
+    assert_eq!(
+        projected
+            .read_file(&format!("{root}/src/router/index.ts"))
+            .as_deref(),
+        Some("export default { routes: [] }")
+    );
+}
+
+/// A regular file where a directory is expected is an observed file, not
+/// an absence: the two capture outcomes must commit distinct bases.
+#[test]
+fn a_regular_file_at_a_directory_path_commits_a_file_observation_not_absence() {
+    let root = "/proj";
+    let absent = memory_workspace();
+    absent.inject_file(format!("{root}/package.json"), Arc::from("{}"));
+    let absent_basis = crate::route_analysis_inputs::commit_route_analysis_basis(&absent, root);
+    assert!(
+        matches!(
+            absent_basis.observe(&format!("{root}/layouts")),
+            Err(crate::input_basis::ObserveError::Negative(_))
+        ),
+        "a missing layouts path is a recorded absence"
+    );
+
+    let file = memory_workspace();
+    file.inject_file(format!("{root}/package.json"), Arc::from("{}"));
+    file.inject_file(format!("{root}/layouts"), Arc::from("not a directory"));
+    let file_basis = crate::route_analysis_inputs::commit_route_analysis_basis(&file, root);
+    assert_eq!(
+        file_basis
+            .observe(&format!("{root}/layouts"))
+            .expect("an existing regular file is a positive observation")
+            .file_content(),
+        Some("not a directory")
+    );
+    assert_ne!(
+        absent_basis.id(),
+        file_basis.id(),
+        "an existing file and an absent path must not share a basis identity"
+    );
+
+    let projected = crate::route_analysis_inputs::project_route_analysis_inputs(&file_basis);
+    assert!(
+        !projected.is_dir(&format!("{root}/layouts")),
+        "the file is never projected as a directory"
+    );
+}
+
+/// Two captures on one shared request can race to bind. The loser's basis
+/// is discarded and the bound basis is projected; a workspace write
+/// between the two captures must not turn the race into a panic. The
+/// race is replayed deterministically: the request is bound first, then
+/// the second capture's basis is handed to the bind-and-project step.
+#[test]
+fn a_rejected_bind_projects_the_bound_basis_instead_of_panicking() {
+    let ws = memory_workspace();
+    let root = "/proj";
+    ws.inject_file(format!("{root}/package.json"), Arc::from(ROUTER_PACKAGE));
+    let ctx = crate::request_context::RequestContext::new(
+        7,
+        Arc::from("/proj/package.json"),
+        false,
+        None,
+    );
+    let first = crate::route_analysis_inputs::commit_route_analysis_basis(&ws, root);
+    let first_id = first.id().clone();
+    ctx.bind_committed_input(first).expect("first bind");
+
+    ws.inject_file(
+        format!("{root}/package.json"),
+        Arc::from(r#"{ "dependencies": {} }"#),
+    );
+    let second = crate::route_analysis_inputs::commit_route_analysis_basis(&ws, root);
+    assert_ne!(
+        second.id(),
+        &first_id,
+        "the mutated workspace commits a different basis"
+    );
+    let inputs = crate::route_analysis_inputs::bind_and_project_route_analysis_inputs(&ctx, second);
+    assert_eq!(
+        inputs.read_file(&format!("{root}/package.json")).as_deref(),
+        Some(ROUTER_PACKAGE),
+        "the bound basis wins over a later capture"
+    );
+    assert_eq!(
+        ctx.committed_input().expect("still bound").basis().id(),
+        &first_id
+    );
 }

@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::thread;
 
 use super::lifetime::SignatureStore;
-use super::provenance::{DeclarationGroupId, DeclarationParentId, SignatureProvenance};
+use super::provenance::{
+    DeclarationGroupId, DeclarationParentId, SignatureProvenance, SourceLocatorId,
+};
 use super::read_view::SemanticReadView;
 use super::records::{
     BinderSpace, ParameterLayout, ParameterSlotId, ReturnObligationKey, SignatureCandidate,
@@ -162,6 +164,7 @@ pub(crate) fn intern_one_call(store: &SignatureStore) -> SignatureSetRef {
                 DeclarationParentId::from_raw(1),
                 0,
                 0,
+                SourceLocatorId::from_raw(0),
             ),
             None,
         )

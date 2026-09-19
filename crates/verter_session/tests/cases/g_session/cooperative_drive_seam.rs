@@ -215,6 +215,7 @@ fn native_ensure_loaded_parks_on_the_driver_instead_of_inline_pumping() {
     scheduler.test_wait_until_dispatch_paused();
 
     let completed = Arc::new(AtomicBool::new(false));
+    let submits_before = submitted_requests(&host);
     let load_thread = {
         let completed = Arc::clone(&completed);
         std::thread::spawn(move || {
@@ -227,7 +228,18 @@ fn native_ensure_loaded_parks_on_the_driver_instead_of_inline_pumping() {
             );
         })
     };
-    std::thread::sleep(Duration::from_millis(300));
+    // Wait until the load thread has admitted its request: only then does
+    // "still not completed" say anything about who pumps the stages. A
+    // fixed sleep could expire before the thread even reached
+    // `ensure_loaded`.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while scheduler.counters().submit_count.load(Ordering::SeqCst) == submits_before {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the load thread must submit its request while the driver is parked"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert!(
         !completed.load(Ordering::SeqCst),
         "with the driver parked and the load's stages ready but \
@@ -297,5 +309,60 @@ fn source_without_analysis_never_answers_the_loaded_fast_path() {
         host.scheduler_analysis("/coop/seam/f.ts").is_some(),
         "ensure_loaded may answer true only after the Analysis snapshot \
          commits"
+    );
+}
+
+/// Committed scheduler snapshots are not a loaded file. A cancelled
+/// drive skips the integrate step while the driver can still commit
+/// Analysis afterwards; the deterministic producer of that pair is an
+/// Analysis-target request driven straight through the scheduler. The
+/// next `ensure_loaded` must not answer from those snapshots: it goes
+/// through the submit/drive/integrate seam and answers true only once
+/// the host-side dependency state exists.
+#[test]
+fn scheduler_snapshots_without_integration_never_answer_the_loaded_fast_path() {
+    use verter_scheduler::scheduler::Request;
+    use verter_scheduler::stage::{Priority, TargetStage};
+
+    let host = host_with_workspace_file(
+        HostConfig::default(),
+        "/coop/seam/g.ts",
+        "export const g = 6;\n",
+    );
+
+    let handle = host.scheduler().submit_request(Request {
+        file_id: "/coop/seam/g.ts".to_string(),
+        target: TargetStage::Analysis,
+        priority: Priority::Interactive,
+        source: None,
+        file_language: None,
+        request_context: None,
+    });
+    host.scheduler().wait_or_drive(&handle);
+    assert!(
+        host.scheduler_source("/coop/seam/g.ts").is_some()
+            && host.scheduler_analysis("/coop/seam/g.ts").is_some(),
+        "precondition: Source and Analysis both committed in the scheduler"
+    );
+    assert_eq!(
+        host.provenance_snapshot().ensure_loaded_work_ns,
+        0,
+        "precondition: the host never ran the integrate step"
+    );
+
+    let submits_before = submitted_requests(&host);
+    assert!(
+        host.ensure_loaded("/coop/seam/g.ts"),
+        "the load must complete through the seam"
+    );
+    assert_eq!(
+        submitted_requests(&host),
+        submits_before + 1,
+        "committed snapshots without host integration must go through the \
+         submit/drive/integrate seam, not answer loaded from the fast path"
+    );
+    assert!(
+        host.provenance_snapshot().ensure_loaded_work_ns > 0,
+        "ensure_loaded may answer true only after the integrate step ran"
     );
 }

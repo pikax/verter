@@ -51,25 +51,35 @@ pub fn build_route_analysis_inputs(
             return project_admitted_route_analysis_inputs(bound);
         }
         let basis = commit_route_analysis_basis(workspace, project_root);
-        return match ctx.bind_committed_input(basis) {
-            Ok(()) => project_admitted_route_analysis_inputs(
-                ctx.committed_input()
-                    .expect("request bind stored the route-analysis basis"),
-            ),
-            Err(rejected) => {
-                let bound = ctx
-                    .committed_input()
-                    .expect("failed bind implies a stored request basis");
-                bound
-                    .admit_publication(rejected.basis())
-                    .expect("route-analysis basis must match the request snapshot fence");
-                project_admitted_route_analysis_inputs(bound)
-            }
-        };
+        return bind_and_project_route_analysis_inputs(&ctx, basis);
     }
     project_admitted_route_analysis_inputs(&RequestInputBinding::from_basis(
         commit_route_analysis_basis(workspace, project_root),
     ))
+}
+
+/// Bind `basis` as the request's sole committed input and project it. A
+/// request is shared across worker threads, so two captures can race to
+/// bind: the loser's basis is discarded and the bound basis is projected —
+/// it is the request's snapshot authority even when the workspace moved
+/// between the two captures.
+fn bind_and_project_route_analysis_inputs(
+    ctx: &crate::request_context::RequestContext,
+    basis: InputBasis,
+) -> RouteAnalysisInputs {
+    match ctx.bind_committed_input(basis) {
+        Ok(()) => project_admitted_route_analysis_inputs(
+            ctx.committed_input()
+                .expect("request bind stored the route-analysis basis"),
+        ),
+        Err(rejected) => {
+            drop(rejected);
+            let bound = ctx
+                .committed_input()
+                .expect("failed bind implies a stored request basis");
+            project_admitted_route_analysis_inputs(bound)
+        }
+    }
 }
 
 fn project_admitted_route_analysis_inputs(binding: &RequestInputBinding) -> RouteAnalysisInputs {
@@ -170,15 +180,17 @@ impl RouteCapture {
     }
 
     /// Walk `dir`. Returns whether a directory listing was recorded.
-    /// Confirmed non-directories become [`NegativeFact::absent`]. A `read_dir`
-    /// error aborts capture rather than being classified as absence.
+    /// A non-directory path is probed as a file: an existing regular file
+    /// commits a file observation and only a missing path commits
+    /// [`NegativeFact::absent`], so the two answer distinct bases. A
+    /// `read_dir` error aborts capture rather than being classified as
+    /// absence.
     fn walk_dir(&mut self, workspace: &dyn verter_workspace::WorkspaceRead, dir: &str) -> bool {
         if self.directory_read_failed {
             return false;
         }
         if !workspace.is_dir(dir) {
-            self.keys.push(dir.to_string());
-            self.negatives.push(NegativeFact::absent(dir));
+            self.probe_file(workspace, dir.to_string());
             return false;
         }
         let entries = match workspace.read_dir(dir) {
