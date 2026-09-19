@@ -2287,6 +2287,18 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
         self.inner.known_canonicals()
     }
 
+    fn snapshot_revision(&self) -> Option<u64> {
+        self.inner.snapshot_revision()
+    }
+
+    fn snapshot_canonicals(&self) -> Vec<String> {
+        self.inner.snapshot_canonicals()
+    }
+
+    fn overlay_canonicals(&self) -> Vec<String> {
+        self.inner.overlay_canonicals()
+    }
+
     fn dependency_snapshot(
         &self,
         canonical_id: &str,

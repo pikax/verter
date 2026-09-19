@@ -21,14 +21,18 @@ use verter_parser::parser::types::ParsedSfc;
 use verter_parser::types::NodeProp;
 
 use crate::assembly::{assemble_vue_runtime_main, VueRuntimeMainRequest};
-use crate::compile::types::{VueExecutionInputs, VueMacroSemanticInput};
+use crate::compile::types::VueExecutionInputs;
+#[cfg(any(test, feature = "test-support"))]
+use crate::compile::types::VueMacroSemanticInput;
 use crate::compile::{compile_from_parsed, parse_sfc};
 use crate::compile_request::{
     CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest,
     IdeProductRequest, VueBackendRequest, VueCompileRequest,
 };
+#[cfg(any(test, feature = "test-support"))]
+use crate::framework_common::carrier_compiler::IdeCompileOptions;
 use crate::framework_common::carrier_compiler::{
-    CarrierCompileOutcome, CompileUnsupported, IdeCompileOptions, IdeOutput, QualifiedRuntimeStyle,
+    CarrierCompileOutcome, CompileUnsupported, IdeOutput, QualifiedRuntimeStyle,
     RuntimeCompileOptions, RuntimeCompileOutput, RuntimeDiagnostic, RuntimeOutputDescriptor,
     RuntimeScriptBlock, RuntimeTemplateBlock, SourceMapFidelity,
 };
@@ -200,14 +204,18 @@ pub fn build_vue_parse_artifact(
     ))
 }
 
-/// The Vue carrier compiler — the reference typed carrier compiler.
+/// The Vue carrier compiler: parses source into the framework-neutral
+/// artifact and exposes the shared identity/downcast surface the typed
+/// Vue backends ([`super::vue_projection_backend::VueProjectionBackend`],
+/// [`super::vue_runtime_backend::VueRuntimeBackend`], the Vue
+/// host-integration backend) and frontend row build on.
 ///
-/// Delegates call-for-call to the existing Vue pipeline (`parse_sfc` +
-/// `compile_from_parsed`): it edits NO Vue parser or codegen module and
-/// reaches the parsed SFC back out of the type-erased artifact through
+/// Reaches its parsed SFC back out of the type-erased artifact through
 /// its own inherent downcast — no capability token, since only this
 /// adapter's own inherent methods call the raw carrier downcast on its
-/// own artifacts.
+/// own artifacts. Production IDE projection and runtime-bundle emission
+/// are the typed backends; the registry `compile_ide`/`compile_bundle`
+/// shims are test-support only.
 #[derive(Default)]
 pub struct VueCarrierCompiler;
 
@@ -384,6 +392,10 @@ impl VueCarrierCompiler {
         Ok(build_vue_parse_artifact(source, parsed, opts))
     }
 
+    /// Registry IDE shim: `IdeCompileOptions` → catalog projection.
+    ///
+    /// Production callers use [`super::vue_projection_backend::VueProjectionBackend`].
+    #[cfg(any(test, feature = "test-support"))]
     pub fn compile_ide(
         &self,
         source: &str,
@@ -424,6 +436,10 @@ impl VueCarrierCompiler {
         .map(|companion| companion.ide)
     }
 
+    /// Registry bundle shim: `RuntimeCompileOptions` → [`vue_carrier_bundle`].
+    ///
+    /// Production callers use [`super::vue_host_integration::VueHostIntegrationBackend`].
+    #[cfg(any(test, feature = "test-support"))]
     pub fn compile_bundle(
         &self,
         source: &str,
@@ -449,9 +465,9 @@ impl VueCarrierCompiler {
 
 /// The one Vue bundle orchestration over an admitted parse: ordered
 /// runtime, IDE-projection, and template-fact capability calls with shared
-/// prerequisites and deduplicated diagnostics. Shared by
-/// [`VueCarrierCompiler::compile_bundle`] and the Vue host-integration
-/// backend so both drive the identical single-population pass.
+/// prerequisites and deduplicated diagnostics. Shared by the test-support
+/// registry bundle route and the Vue host-integration backend so both
+/// drive the identical single-population pass.
 ///
 /// Every product-backend leg requires — and consumes — its own
 /// [`super::capability::ProductExecutionGrant`]: the host route carves

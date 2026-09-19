@@ -3323,6 +3323,11 @@ impl crate::resolver_core::StoreView for HostStoreView {
                 resolved_relative_canonical,
                 wildcard_pattern,
             } => {
+                let population_decl = crate::global_contributors::population_fact_decl_name(
+                    *target_kind_tag,
+                    external_specifier.as_ref().map(|s| s.as_ref()),
+                    wildcard_pattern.as_ref().map(|s| s.as_ref()),
+                );
                 // Reconstruct the store's `AugmentationTargetKind` from
                 // the fact's content-free target shape. The remaining key
                 // dimensions the fact does not carry — project identity,
@@ -3330,16 +3335,51 @@ impl crate::resolver_core::StoreView for HostStoreView {
                 // root, which is strictly MORE precise than the collapsed
                 // shape-only snapshot this replaced: two projects' `"vue"`
                 // augmentations can no longer land in one slot.
+                let ext_for_target = if matches!(
+                    target_kind_tag,
+                    verter_semantic::facts::registry::AugmentationTargetKindTag::GlobalAugmentation
+                        | verter_semantic::facts::registry::AugmentationTargetKindTag::WildcardAmbient
+                ) {
+                    None
+                } else {
+                    external_specifier.as_ref().map(|s| s.as_ref())
+                };
+                let wild_for_target = if matches!(
+                    target_kind_tag,
+                    verter_semantic::facts::registry::AugmentationTargetKindTag::ExternalSpecifier
+                        | verter_semantic::facts::registry::AugmentationTargetKindTag::ResolvedRelativeCanonical
+                ) && population_decl.is_some()
+                {
+                    None
+                } else {
+                    wildcard_pattern.as_ref().map(|s| s.as_ref())
+                };
                 let Some(target) = augmentation_target_kind_from_shape(
                     *target_kind_tag,
-                    external_specifier.as_ref().map(|s| s.as_ref()),
+                    ext_for_target,
                     resolved_relative_canonical.as_ref().map(|s| s.as_ref()),
-                    wildcard_pattern.as_ref().map(|s| s.as_ref()),
+                    wild_for_target,
                 ) else {
                     // A shape whose payload does not match its tag is not a
                     // target this store can hold. Fail closed.
                     return false;
                 };
+                if let Some(decl_name) = population_decl {
+                    let overlay = if self.snapshot.session_overlay_fingerprint != 0 {
+                        Some(
+                            crate::session_view::overlay_artifact_discriminator_for_fingerprint(
+                                self.snapshot.session_overlay_fingerprint,
+                            ),
+                        )
+                    } else {
+                        None
+                    };
+                    return self
+                        .snapshot
+                        .roots
+                        .global_contributor_fingerprint(target, decl_name, overlay)
+                        == fact.expected_hash;
+                }
                 // CONTENT-ADDRESSED population: a session view validates
                 // against the `Session(overlay-set fingerprint)` augmenter
                 // set, a base view against `Base`. This is the

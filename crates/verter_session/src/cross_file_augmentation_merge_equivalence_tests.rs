@@ -1004,9 +1004,10 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
 /// answered because the per-contributor fact rail rejects on warm read. This is the
 /// end-to-end proof of that rail for the external path. The residual
 /// torn-contributor skip (`source_env_unobservable`) is unreachable on a
-/// cold external fold: the external path pre-loads EVERY `known_canonicals()`
-/// before the `ExternalSpecifier` scan, so every augmenter is servable and
-/// its artifact key fresh, and the shared folder observes its facts.
+/// cold external fold: augmenter IndexedReady is published at artifact
+/// ingestion (upsert / injected-root completeness), so every augmenter
+/// this harness upserts is servable and its artifact key fresh, and the
+/// shared folder observes its facts.
 ///
 /// Discrimination: a regression that dropped the external fold's
 /// per-contributor `FileWholeHash` observation from the parent read-set would
@@ -1259,8 +1260,8 @@ fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end
 /// `/use.ts::U` parent could WARM-PUBLISH a torn / partial merged surface.
 ///
 /// A torn/unhealable/unservable augmenter cannot be constructed through the
-/// public host API (the external path pre-loads every `known_canonicals()`
-/// before the `ExternalSpecifier` scan), so the torn state is driven
+/// public host API (this harness upserts every augmenter, and ingestion
+/// publishes IndexedReady for those files), so the torn state is driven
 /// deterministically through the `for_tests` injection knob — the same
 /// established pattern as the relation-overflow / materialize-overflow knobs.
 /// The knob taints a NON-EMPTY contribution set (both `Cfg` augmenters still
@@ -1312,8 +1313,9 @@ fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
 
     // COLD-build the `/use.ts::U` Instantiate under a fresh view and report the
     // resulting `CacheRead.cache_suppress`. No warm-up: the first cold build
-    // populates the augmentation index (the external path pre-loads every
-    // `known_canonicals()`), so `Cfg` resolves through the external fold.
+    // populates the augmentation index from artifacts already ingested
+    // (this harness upserts every augmenter), so `Cfg` resolves through
+    // the external fold.
     let suppress_of = |view: &crate::resolver_store::HostStoreView| -> bool {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
@@ -1940,5 +1942,48 @@ fn augmenter_gaining_a_declaration_invalidates_the_warm_non_contributing_result(
          result for that declaration — serving {{b}} here is the stale surface the missing \
          negative augmenter-set observation on the non-contributing arm produces; \
          got {surface:?}"
+    );
+}
+
+#[test]
+fn unrelated_file_does_not_move_global_contributor_fingerprint() {
+    use crate::file_artifact_store::AugmentationTargetKind;
+
+    let host = make_host();
+    upsert_ts(
+        host.as_ref(),
+        "/promise.d.ts",
+        "export {};\ndeclare global { interface Promise<T> { thenable: T } }\n",
+    );
+    let _ = host.ensure_indexed_ready("/promise.d.ts");
+    let before = host
+        .project_type_store()
+        .indexed()
+        .global_contributor_index()
+        .snapshot()
+        .lookup(
+            &AugmentationTargetKind::GlobalAugmentation,
+            "Promise",
+            None,
+            true,
+        )
+        .fingerprint;
+    upsert_ts(host.as_ref(), "/unrelated.ts", "export const x = 1;\n");
+    let _ = host.ensure_indexed_ready("/unrelated.ts");
+    let after = host
+        .project_type_store()
+        .indexed()
+        .global_contributor_index()
+        .snapshot()
+        .lookup(
+            &AugmentationTargetKind::GlobalAugmentation,
+            "Promise",
+            None,
+            true,
+        )
+        .fingerprint;
+    assert_eq!(
+        before, after,
+        "an unrelated file must not invalidate an augmented primitive's contributor fingerprint"
     );
 }

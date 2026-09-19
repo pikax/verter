@@ -35,7 +35,7 @@ module map + contract reference behind it.
 | `typeinfo/adapters/vue/adapter.rs` | `VueFrameworkAdapter` — plan/normalize only. |
 | `verter_compiler/src/framework_common/carrier_compiler.rs` | The trait-free framework-neutral carrier-compile I/O vocabulary: `IdeCompileOptions`, `IdeOutput`, `RuntimeCompileOptions`, `RuntimeCompileOutput`/`CarrierCompileOutcome`, `CompileUnsupported`, the `RuntimeOutputDescriptor` family, and the block-content inputs. The combined `CarrierCompiler` trait is DELETED — parse options live on `verter_language::ParseOptions`; eval-source + template facts belong to the `FrameworkSemanticAuthority` rows in `capability.rs`. NO script-fact entry — script facts go through the one `ScriptFactProvider` seam. |
 | `verter_compiler/src/framework_common/registered_carrier_projection.rs` | `project_registered_accepted` — the SOLE production entry: catalog frontend parse (`built_in_frontend_catalog`/`registered_frontend_for`), then registered geometry. The combined `CarrierCompilerRegistry` is DELETED — no runtime registry lookup remains anywhere in this path. |
-| `verter_compiler/src/framework_common/vue_bridge.rs` | `VueCarrierCompiler` — the reference typed carrier compiler (an INHERENT struct with `parse` / `compile_ide` / `compile_bundle`; no trait behind it), delegating call-for-call to `parse_sfc` + `compile_from_parsed`; ZERO edits to any Vue parser/codegen module. Also owns `open_vue_carrier`, the registered-projector opener installed on the Vue `CarrierLeg` (no capability token — the opener only ever opens a Vue-adapter artifact). |
+| `verter_compiler/src/framework_common/vue_bridge.rs` | `VueCarrierCompiler` — parse/identity/downcast only in production (an INHERENT struct, no trait behind it): `parse` builds the framework-neutral artifact via `parse_sfc`, and the inherent carrier downcasts reach the parsed SFC back out. The registry `compile_ide` / `compile_bundle` shims are `cfg(any(test, feature = "test-support"))`-gated compatibility entries; production IDE projection and runtime-bundle emission belong to the typed `VueProjectionBackend` / `VueRuntimeBackend` / host-integration backends. ZERO edits to any Vue parser/codegen module. Also owns `open_vue_carrier`, the registered-projector opener installed on the Vue `CarrierLeg` (no capability token — the opener only ever opens a Vue-adapter artifact). |
 | `verter_compiler/src/framework_common/sourcemap_e2e_helpers.rs` | Reusable (test-only) framework IDE sourcemap-correctness assertions every carrier vertical re-runs against its own `compile_ide` output. |
 
 ## Descriptor + virtual-file naming column
@@ -278,12 +278,15 @@ row keyed adapter × epoch × capability:
 
 The retained CCA1T4 option/output bucket is NOT part of these typed
 contracts: `RuntimeCompileOptions` in, `RuntimeCompileOutput` /
-`CarrierCompileOutcome` out belongs to the inherent/free compatibility
-entries — `VueCarrierCompiler::compile_ide` / `compile_bundle` (public
-inherent methods) and the crate-internal bundle orchestrations
+`CarrierCompileOutcome` out belongs to the compatibility entries — the
+`VueCarrierCompiler::compile_ide` / `compile_bundle` registry shims
+(`cfg(any(test, feature = "test-support"))`-gated, NOT production
+surface; the typed `VueProjectionBackend` /
+`VueHostIntegrationBackend` own the production routes) and the
+crate-internal bundle orchestrations
 (`vue_carrier_bundle` / `svelte_carrier_bundle`) shared with the
-host-integration backends. There is no registry left to serve: these
-routes carry no host-issued admission, so they mint their leg grants
+host-integration backends. No registry route serves production: these
+shim routes carry no host-issued admission, so they mint their leg grants
 crate-privately at the route boundary (`ProductExecutionGrant`'s
 crate-private mint) and drive the SAME catalog backends. The neutral
 bundle is an `Option<StagedCompileArtifacts>` main handoff + neutral
@@ -356,8 +359,8 @@ carrier parse routes through the immutable frontend catalog
 row, Svelte through `svelte/carrier_frontend.rs`) — a single dispatch
 path, no `is_vue` branch, no dual Vue direct-parse path. A carrier row
 whose adapter has no registered catalog frontend is the typed
-unsupported-language state. `VueCarrierCompiler` delegates call-for-call
-to `parse_sfc` + `compile_from_parsed` with ZERO edits to any Vue
+unsupported-language state. `VueCarrierCompiler::parse` delegates
+call-for-call to `parse_sfc` with ZERO edits to any Vue
 parser/codegen module, so Vue compile output stays byte-identical
 pre/post the rehousing (pinned by
 `rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile`

@@ -39,6 +39,18 @@ use verter_semantic::resolver_core::{
 };
 
 static NEXT_STRICT_SELF_ROOT_AUTHORITY_ID: AtomicU64 = AtomicU64::new(1);
+static KNOWN_CANONICALS_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Times `known_canonicals` has been invoked process-wide. Lookup of a
+/// global symbol must not increment this.
+#[must_use]
+pub fn known_canonicals_calls() -> u64 {
+    KNOWN_CANONICALS_CALLS.load(Ordering::Relaxed)
+}
+
+pub fn reset_known_canonicals_calls() {
+    KNOWN_CANONICALS_CALLS.store(0, Ordering::Relaxed);
+}
 
 fn next_strict_self_root_authority_id() -> u64 {
     NEXT_STRICT_SELF_ROOT_AUTHORITY_ID
@@ -4929,10 +4941,23 @@ impl Engine {
     /// augmentation, where the declarer may be a root `.d.ts` that nothing
     /// imports). Deduplicated; order is unspecified.
     pub(crate) fn known_canonicals(&self) -> Vec<String> {
+        KNOWN_CANONICALS_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         seen.extend(self.overlay.read().ids().map(str::to_owned));
         seen.extend(self.snapshot.read().ids().map(str::to_owned));
         seen.into_iter().collect()
+    }
+
+    pub(crate) fn snapshot_revision(&self) -> u64 {
+        self.snapshot.read().revision()
+    }
+
+    pub(crate) fn snapshot_canonicals(&self) -> Vec<String> {
+        self.snapshot.read().ids().map(str::to_owned).collect()
+    }
+
+    pub(crate) fn overlay_canonicals(&self) -> Vec<String> {
+        self.overlay.read().ids().map(str::to_owned).collect()
     }
 
     // ── Ambient lib registration ──

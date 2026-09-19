@@ -943,6 +943,27 @@ impl StoreViewRoots {
             .augmenter_set_at_root(root, &key)
             .map(|set| set.fingerprint)
     }
+
+    /// Per-symbol global-contributor fingerprint, including a proved-empty
+    /// set. Read from the live published snapshot: a membership edit that
+    /// does not rebuild this view fails closed against a moved fingerprint.
+    pub(crate) fn global_contributor_fingerprint(
+        &self,
+        target: crate::file_artifact_store::AugmentationTargetKind,
+        decl_name: &str,
+        overlay_discriminator: Option<Hash16>,
+    ) -> Hash16 {
+        note_owner_visit();
+        let Some(reader) = self.artifact_reader.as_ref() else {
+            return crate::file_artifact_store::compute_augmenter_set_fingerprint(&[]);
+        };
+        reader
+            .indexed()
+            .global_contributor_index()
+            .snapshot()
+            .lookup(&target, decl_name, overlay_discriminator, true)
+            .fingerprint
+    }
 }
 
 /// Per-view memo of resolved canonicals.

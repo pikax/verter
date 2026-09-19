@@ -33,6 +33,31 @@ fn set_fallback_projects(ws: &MemoryWorkspace, roots: &[&str]) {
 // ── MemorySnapshot tests ──
 
 #[test]
+fn snapshot_revision_tracks_changes_and_ignores_no_op_writes() {
+    let mut snapshot = MemorySnapshot::new();
+    let empty = snapshot.revision();
+    snapshot.inject("/dir/a.ts".into(), Arc::from("first"));
+    let inserted = snapshot.revision();
+    assert_ne!(inserted, empty);
+    snapshot.inject("/dir/a.ts".into(), Arc::from("first"));
+    snapshot.remove("/missing.ts");
+    snapshot.remove_under("/missing");
+    assert_eq!(snapshot.revision(), inserted);
+    snapshot.inject("/dir/a.ts".into(), Arc::from("changed"));
+    let replaced = snapshot.revision();
+    assert_ne!(replaced, inserted);
+    snapshot.remove_under("/dir");
+    let removed = snapshot.revision();
+    assert_ne!(removed, replaced);
+    snapshot.inject("/dir/a.ts".into(), Arc::from("changed"));
+    assert_ne!(
+        snapshot.revision(),
+        removed,
+        "reinsertion must not reuse a revision"
+    );
+}
+
+#[test]
 fn read_returns_none_for_unknown() {
     let snapshot = MemorySnapshot::new();
     assert!(snapshot.read("src/foo.vue").is_none());

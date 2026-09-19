@@ -106,7 +106,7 @@ jobs:
               # release graph; release-only changes must execute that guard.
               - '.github/workflows/release.yml'
               - '.github/workflows/ci.yml'
-            # Gates the `architecture-health` lane (ARH0/ARH1/ARH2 constitution
+            # Gates the `architecture-health` lane (ARH0/ARH1/ARH2/ARH5
             # verifiers). Their products join the live Rust tree — hotspot
             # sources, crate Cargo manifests and the cross-crate consumer
             # population derived from EVERY crate — so a product/verifier-only
@@ -120,6 +120,10 @@ jobs:
             # contracts.
             arch:
               - 'tests/architecture-health/**'
+              # ARH5's public-example guard scans examples/reference for the
+              # displaced VueCarrierCompiler compile_ide/compile_bundle routes,
+              # so example-only edits must still schedule this lane.
+              - 'examples/reference/**'
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -833,14 +837,15 @@ jobs:
       - name: Verify package tarballs
         run: node scripts/verify-packages.mjs
 
-  # The ARH0/ARH1 constitution verifiers join their products to the live Rust
+  # The ARH0/ARH1/ARH2/ARH5 verifiers join their products to the live Rust
   # tree (hotspot sources, crate manifests, the cross-crate consumer
-  # population derived from every crate), so this lane — not the js-filtered
-  # test:scripts job — is what runs the guards when a Rust dependency or
-  # surface change moves a ratified population, and when the products or the
-  # verifier themselves change. Node builtins only: no pnpm install, no
-  # build. Full history (fetch-depth: 0) so --provenance can prove the
-  # products' pinned candidate is a real ancestor of the checked-out head.
+  # population derived from every crate, and the compiler-facade cutover),
+  # so this lane — not the js-filtered test:scripts job — is what runs the
+  # guards when a Rust dependency or surface change moves a ratified
+  # population, and when the products or the verifier themselves change.
+  # Node builtins only: no pnpm install, no build. Full history
+  # (fetch-depth: 0) so --provenance can prove the products' pinned
+  # candidate is a real ancestor of the checked-out head.
   architecture-health:
     name: Architecture health contracts
     needs: detect-changes
@@ -874,6 +879,12 @@ jobs:
         run: node --test tests/architecture-health/ARH2/arh2.test.mjs
       - name: ARH2 pinned-candidate provenance
         run: node tests/architecture-health/ARH2/verify.mjs --provenance
+      - name: ARH5 verify (compiler facade cutover)
+        run: node tests/architecture-health/ARH5/verify.mjs
+      - name: ARH5 dirty twins
+        run: node --test tests/architecture-health/ARH5/arh5.test.mjs
+      - name: ARH5 pinned-candidate provenance
+        run: node tests/architecture-health/ARH5/verify.mjs --provenance
 
   svelte-oracle:
     name: Svelte Oracle (live, feature-gated)

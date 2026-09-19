@@ -15,6 +15,29 @@ fn parse(source: &str) -> oxc_parser::ParserReturn<'_> {
 }
 
 #[test]
+fn module_identity_comes_from_top_level_syntax_even_without_route_rows() {
+    for (source, expected) in [
+        ("export {};", true),
+        ("export = 42;", true),
+        ("import x = require('x');", true),
+        ("import X = N.X;", false),
+        ("export import X = N.X;", true),
+        ("namespace N { export interface X {} }", false),
+        ("import('x');", false),
+        ("if (ok) /; export {}/.test(x);", false),
+        ("if (ok) /; export {}/.test(x); export {};", true),
+    ] {
+        let parsed = parse(source);
+        assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+        assert_eq!(
+            build_script_route_inventory(&parsed.program).has_module_syntax,
+            expected,
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn script_route_inventory_captures_only_closed_route_facts() {
     let source = r#"
 import type DefaultType from './default'
