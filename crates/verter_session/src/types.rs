@@ -730,6 +730,24 @@ pub struct HostConfig {
     /// lazy-on-first-use so a one-shot batch host does not pay the cold
     /// thread-spawn cost it never amortises.
     pub resource_policy: HostResourcePolicy,
+    /// Cooperative yield hook installed on the host-owned
+    /// [`crate::cooperative_scheduler::CooperativeSchedulerAdapter`]
+    /// that the `ensure_loaded` drive seam pumps through.
+    ///
+    /// `None` (the default) selects [`crate::cooperative_scheduler::InlineYield`]:
+    /// every cooperative point continues, so an uncancellable host is
+    /// behaviourally identical to driving the scheduler directly. An
+    /// embedding runtime with a single-threaded worker (the browser
+    /// closure) passes its own hook so the drive offers a yield point
+    /// before the first driven stage and between stages — the worker
+    /// can withdraw mid-request and a later drive resumes the same
+    /// handle, so query outcomes are never rewritten.
+    ///
+    /// Constructor-time per §0.6.5: callers may NOT mutate this on an
+    /// existing host; cancel an installed drive through
+    /// [`crate::VerterHost::cooperative_drive`].
+    pub cooperative_yield:
+        Option<std::sync::Arc<dyn crate::cooperative_scheduler::CooperativeYield>>,
 }
 
 /// Test / advanced-tuning hooks for resolver budgets. Each field is
@@ -1279,6 +1297,7 @@ impl Default for HostConfig {
             // `batch_typecheck()`.
             query_profile: verter_semantic::profile::QueryProfile::LspInteractive,
             resource_policy: HostResourcePolicy::default(),
+            cooperative_yield: None,
         }
     }
 }
@@ -4979,6 +4998,7 @@ mod tests {
             host_cpu_threads: _,
             query_profile: _,
             resource_policy: _,
+            cooperative_yield: _,
         } = HostConfig::default();
     }
 

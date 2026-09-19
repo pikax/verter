@@ -1,0 +1,61 @@
+{
+  "schema": "ARH1CutoverRegister",
+  "version": 2,
+  "contractNode": "ARH1",
+  "candidate": "260be884014110ffd3b72850509e765c8752b011",
+  "emptyDeletionSetRationale": "ARH1 changes contract bytes only: it introduces the dependency/visibility contracts and decides routes; implementation and deletion are bound to the named successors (ARH2 re-derives populations, ARH3/ARH4 narrow, ARH11 removes residue, ARH12 enforces). No existing API is superseded by a second authority at this node, so ARH1's own deletion set is empty; every row below binds a route to exactly one executing owner.",
+  "rows": [
+    {
+      "id": "ARH1-CUT-1",
+      "candidatePath": "packages/core",
+      "decision": "delete the placeholder",
+      "disposition": "physical deletion of the .gitignore-only placeholder lands together with the ARH0 inventory population refresh in the same change (the ARH0 verifier binds inventory rows to on-disk paths, so deletion and refresh cannot be separated); re-derivation of populations is ARH2's recorded obligation",
+      "owner": {
+        "id": "ARH2",
+        "kind": "node"
+      },
+      "class": "arh0-debt-decision",
+      "satisfies": "ARH0-DEBT-1",
+      "evidence": "packages/core contains only a .gitignore reading 'generated' (no package.json, no sources, zero-LOC inventory row); it has no literal pnpm-workspace.yaml entry (covered only by the packages/* glob) and no importer; populating it would invent a package with no consumer"
+    },
+    {
+      "id": "ARH1-CUT-2",
+      "candidatePath": "crates/verter_scheduler/src/scheduler.rs",
+      "decision": "narrow the three public Scheduler bookkeeping fields (tombstones, generation_floors, deferred_blocker_ids) to pub(crate)",
+      "disposition": "visibility narrowing with zero external consumers; lands under the host/session lifecycle reduction heir after ARH2 characterization",
+      "owner": {
+        "id": "ARH4",
+        "kind": "node"
+      },
+      "class": "visibility-narrowing",
+      "evidence": "generation_floors and deferred_blocker_ids appear only inside crates/verter_scheduler; the tombstones hits in verter_session belong to SessionOverlayRoot (store_view_roots.rs), not Scheduler",
+      "route": "crates/verter_scheduler/src/scheduler.rs#field"
+    },
+    {
+      "id": "ARH1-CUT-3",
+      "candidatePath": "crates/verter_scheduler/src/scheduler.rs",
+      "decision": "move the fifteen test_* Scheduler hooks to test configuration (cfg(any(test, feature = \"test-support\")))",
+      "disposition": "test-seam gating with the exact per-hook consumer inventory recorded on the narrowing rows (nine verter_session files reference the hooks outside crates/verter_scheduler at ratification: host_construction.rs for test_worker_pool_ids, host_batch_coordinator.rs for test_new, four test-case files for test_with_executor, scheduler_audit_queue_dwell_under_load.rs for the pause/depth hooks, host_compile_atomic_upsert_tests.rs for the admit-epoch hooks, compile_style_vbind_source_snapshot_tests.rs for test_clear_analysis; six hooks have no consumer outside the owning crate); every recorded consumer migrates in the same change; lands under the host/session lifecycle reduction heir",
+      "owner": {
+        "id": "ARH4",
+        "kind": "node"
+      },
+      "class": "visibility-narrowing",
+      "evidence": "per-hook consumer populations derived from qualified reference forms (Scheduler::hook / .hook( receiver calls) in comment-stripped source; the owning crate's own cfg(test) modules (scheduler.rs, source_root_tests.rs) stay on cfg(test) and need no migration; corpus_audit_layout.rs calls the VerterHost wrapper, not the Scheduler hook",
+      "route": "crates/verter_scheduler/src/scheduler.rs#fn"
+    },
+    {
+      "id": "ARH1-CUT-4",
+      "candidatePath": "crates/verter_session/src/semantic_query.rs",
+      "decision": "narrow every semantic_query pub item beyond the ten retained cross-crate envelope types and their seven used assoc items to pub(crate)",
+      "disposition": "bulk visibility narrowing; the cross-crate population (85 files: ffi/napi/wasm sources plus verter_session benches and integration tests, which compile as separate crates) is the exact importer inventory enforced by the verifier; the 68 files importing at least one narrowed name migrate to the existing for_tests test-support surface pattern in the same change, and PartialReasonSet::{empty,is_empty,iter,PROPAGATED,SEMANTIC_QUERY_FAULT}, ResultCompleteness::partial and ScopeId::file stay pub for the ffi/napi/wasm production consumers; lands under the semantic-dispatch narrowing heir after ARH2 characterization",
+      "owner": {
+        "id": "ARH3",
+        "kind": "node"
+      },
+      "class": "visibility-narrowing",
+      "evidence": "cross-crate references measured per consumer file from use-statement and inline-path syntax (aliases included, comments stripped): HashValue, SemanticNodeId, ScopeId, ResolveDeclKey, SemanticQueryKey, ResultCompleteness, PartialReason, PartialReasonSet, ProjectionMode, OriginEdgeKind are the only retained types imported, with the seven assoc items used on them; everything else referenced cross-crate is carried by a recorded bulk consumer",
+      "route": "crates/verter_session/src/semantic_query.rs#bulk"
+    }
+  ]
+}

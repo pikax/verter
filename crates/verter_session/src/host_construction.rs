@@ -224,6 +224,30 @@ impl VerterHost {
         &self.language_classifier
     }
 
+    /// The platform-services profile bound at construction: which
+    /// io/time/scheduling/persistence/process routes this host
+    /// received, its execution-host kind, and the engine version every
+    /// exposed product of this host carries. Browser exports bind
+    /// their execution host and engine version through this accessor.
+    #[must_use]
+    pub fn platform_services(&self) -> &crate::platform_services::PortableHostServices {
+        &self.platform_services
+    }
+
+    /// The cooperative drive adapter threading cancellation and yield
+    /// points through the scheduler execution contract that the
+    /// `ensure_loaded` seam submits and pumps through. The hook is a
+    /// constructor-time choice: an embedding runtime with a
+    /// single-threaded worker installs its yield hook through
+    /// [`HostConfig::cooperative_yield`](crate::types::HostConfig::cooperative_yield)
+    /// and cancels through this accessor; a host constructed without
+    /// one drives with [`InlineYield`](crate::cooperative_scheduler::InlineYield),
+    /// behaviourally identical to driving the scheduler directly.
+    #[must_use]
+    pub fn cooperative_drive(&self) -> &crate::cooperative_scheduler::CooperativeSchedulerAdapter {
+        &self.cooperative_drive
+    }
+
     /// Create a new host backed by the given workspace.
     ///
     /// The workspace provides file reads, import resolution, and edge
@@ -382,6 +406,18 @@ impl VerterHost {
             crate::framework::ProjectCapabilitySnapshot::empty(),
         );
 
+        // The platform-services profile this target requires. Bound
+        // before the scheduler seam so the seam's compiled transport
+        // choice is verified against the recorded inventory — a seam
+        // edit that diverges from the profile fails host construction
+        // on the affected target instead of drifting silently.
+        let platform_services = crate::platform_services::PortableHostServices::current();
+        if cfg!(target_arch = "wasm32") {
+            platform_services
+                .verify_browser_closure()
+                .expect("wasm32 host must bind a browser-admissible route set");
+        }
+
         // The framework adapter registry, built ONCE here.
         let framework_registry =
             std::sync::Arc::new(crate::framework::FrameworkAdapterRegistry::built_in());
@@ -446,6 +482,11 @@ impl VerterHost {
                     scheduler_cpu_pool,
                     scheduler_io_pool,
                 );
+                platform_services
+                    .verify_scheduling_route(
+                        crate::platform_services::ServiceRoute::ThreadedSchedulerPools,
+                    )
+                    .expect("native scheduler seam must match the bound platform profile");
                 #[cfg(any(test, feature = "test-support"))]
                 if let HostWorkerPoolSource::Shared(worker_pools) = &worker_pool_source {
                     worker_pools.record_scheduler_shell_created();
@@ -454,11 +495,17 @@ impl VerterHost {
             }
             #[cfg(target_arch = "wasm32")]
             {
-                verter_scheduler::scheduler::Scheduler::new_sync_with_executor(
+                let scheduler = verter_scheduler::scheduler::Scheduler::new_sync_with_executor(
                     scheduler_config,
                     loader,
                     executor,
-                )
+                );
+                platform_services
+                    .verify_scheduling_route(
+                        crate::platform_services::ServiceRoute::InlineDriveScheduler,
+                    )
+                    .expect("wasm scheduler seam must match the bound platform profile");
+                scheduler
             }
         };
 
@@ -528,6 +575,16 @@ impl VerterHost {
             #[cfg(any(test, feature = "test-support"))]
             HostWorkerPoolSource::Shared(worker_pools) => Arc::clone(&worker_pools.host_cpu_pool),
         };
+        // The cooperative drive adapter the load seam uses. Built from
+        // the constructor-time yield hook: `None` selects the inline
+        // hook, so a host constructed without an embedding-runtime
+        // hook drives behaviourally identically to the scheduler's own
+        // contracts.
+        let cooperative_drive = config
+            .cooperative_yield
+            .clone()
+            .map(crate::cooperative_scheduler::CooperativeSchedulerAdapter::with_yield_hook)
+            .unwrap_or_default();
         let host = Self {
             instance_id,
             config,
@@ -548,6 +605,8 @@ impl VerterHost {
             last_const_prop_overrides: default_shared(rustc_hash::FxHashMap::default()),
             metrics: HostMetrics::default(),
             scheduler,
+            platform_services,
+            cooperative_drive,
             provenance,
             resolver: HostResolverState::new(routes_handle, imported_roots_handle),
             query_profile: parking_lot::Mutex::new(query_profile),

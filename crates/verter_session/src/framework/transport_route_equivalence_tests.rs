@@ -1422,6 +1422,12 @@ const WASM_OUT_OF_SCOPE: &[(&str, &str)] = &[
         "dependency-resolution input",
     ),
     (
+        "commitInputSnapshot",
+        "browser input-acquisition bridge (BWH2.2): registers acquired \
+         bytes for staging, not a framework product route; compilation \
+         registration stays on `upsert`",
+    ),
+    (
         "computeCrossFileOptimizations",
         "cross-file optimizer, not a product route",
     ),
@@ -1437,6 +1443,12 @@ const WASM_OUT_OF_SCOPE: &[(&str, &str)] = &[
     ("lint", "lint product"),
     ("listSymbols", "type-resolution product"),
     ("matchCssSelectors", "CSS analysis product"),
+    (
+        "observeInputSnapshot",
+        "browser input-acquisition bridge (BWH2.2): committed-snapshot \
+         observation, never fetches to fill a gap; not a framework \
+         product route",
+    ),
     ("remove", "lifecycle"),
     ("resolve", "id resolution"),
     (
