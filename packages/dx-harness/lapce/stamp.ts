@@ -11,6 +11,19 @@
  * These parsers are the dx-harness side of that contract. They validate every
  * field and throw loud on a malformed stamp line; a missing or unparsable
  * observation stays missing — timestamps, epochs and stages are never guessed.
+ *
+ * Real-client rendering (verified against Lapce 0.4.6): the client does not
+ * forward plugin stderr verbatim. `lapce-proxy` routes every plugin stderr
+ * write through its `tracing` log (target
+ * `lapce_proxy::plugin::wasi::<author>::<name>`, DEBUG level), so a stamp
+ * reaches a consumable channel only as the TRAILING message field of a
+ * formatted host log line — on the daily `data/logs/lapce.*.log` (always on)
+ * or on the client process's own stderr when it runs with
+ * `LAPCE_LOG=lapce_proxy=debug` (that rendering interleaves ANSI escapes,
+ * thread ids and source line numbers before the message). The message body is
+ * verbatim, so `collectStampMessages`/`isStampMessage` accept a stamp both as a
+ * whole line and embedded as a host log line's trailing field; extraction never
+ * repairs a malformed body — that still fails loud.
  */
 
 import {
@@ -163,22 +176,47 @@ export function parseUiStampMessage(raw: string): UiStampPayload {
 }
 
 export function isStampMessage(raw: string): boolean {
-  return raw.startsWith(LAUNCH_STAMP_MESSAGE_PREFIX) || raw.startsWith(UI_STAMP_MESSAGE_PREFIX);
+  return stampMessageInLine(raw) !== null;
 }
 
 /**
- * Scan the driven client's captured stderr lines: non-verter lines are ordinary
- * stderr noise and are skipped; a verter-prefixed line that does not parse
- * throws loud instead of being guessed into the capture.
+ * The stamp message carried by one captured line: either the whole line (a raw
+ * stamp channel) or the trailing message field of a host log line (the real
+ * client's tracing rendering). Returns `null` for lines carrying no stamp
+ * marker; a marker whose body does not parse still fails loud in the parsers.
+ */
+function stampMessageInLine(raw: string): string | null {
+  if (raw.startsWith(LAUNCH_STAMP_MESSAGE_PREFIX) || raw.startsWith(UI_STAMP_MESSAGE_PREFIX)) {
+    return raw;
+  }
+  for (const prefix of [LAUNCH_STAMP_MESSAGE_PREFIX, UI_STAMP_MESSAGE_PREFIX]) {
+    // The space delimiter keeps `xverter launch-stamp`-style prose from matching;
+    // the LAST occurrence is the message body (any earlier one would be inside a
+    // host log prefix, never inside the stamp's own controlled-vocabulary JSON).
+    const at = raw.lastIndexOf(` ${prefix.trim()}`);
+    if (at !== -1) {
+      return raw.slice(at + 1);
+    }
+  }
+  return null;
+}
+
+/**
+ * Scan the driven client's captured stderr/log lines: lines without a stamp
+ * marker are ordinary host noise and are skipped; a verter stamp — raw or
+ * embedded in a host log line — that does not parse throws loud instead of
+ * being guessed into the capture.
  */
 export function collectStampMessages(lines: readonly string[]): StampMessages {
   const launchStamps: LaunchStampPayload[] = [];
   const uiStamps: UiStampPayload[] = [];
   for (const raw of lines) {
-    if (raw.startsWith(LAUNCH_STAMP_MESSAGE_PREFIX)) {
-      launchStamps.push(parseLaunchStampMessage(raw));
-    } else if (raw.startsWith(UI_STAMP_MESSAGE_PREFIX)) {
-      uiStamps.push(parseUiStampMessage(raw));
+    const message = stampMessageInLine(raw);
+    if (message === null) continue;
+    if (message.startsWith(LAUNCH_STAMP_MESSAGE_PREFIX)) {
+      launchStamps.push(parseLaunchStampMessage(message));
+    } else {
+      uiStamps.push(parseUiStampMessage(message));
     }
   }
   return { launchStamps, uiStamps };

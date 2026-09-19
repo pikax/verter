@@ -7,20 +7,34 @@
     "notASimulation": true,
     "reasons": [
       "reference-machine-manifests.v1 population is empty-at-ratification: no recorded reference-client machine exists to bind a real-Lapce run",
-      "the pinned lapce-client version is unrecorded for the same reason; a supported build identity is not guessed",
-      "this environment has no Lapce GUI session to drive; a protocol smoke, mock LSP client, screenshot or raw-LSP session is refused as UI evidence by the driver itself (WSP1L-AC3)",
+      "the pinned lapce-client version is unrecorded for the same reason; a supported build identity is not guessed (Lapce 0.4.6 is channel-verified locally, see realClientChannelVerification, but the pin belongs to the reference capture)",
+      "UI event-loop observations (input-dispatch/decode/apply/paint) require an instrumented Lapce client build, which does not exist; a protocol smoke, mock LSP client, screenshot or raw-LSP session is refused as UI evidence by the driver itself (WSP1L-AC3)",
       "Issue 93 therefore remains unreproduced: locating its first blocked stage needs the real-client timeline this record marks unavailable"
     ],
     "whatIsProvenHermetically": [
       "a deliberately stalled UI thread is detected while the server timeline shows immediate completion, and the first blocked stage is named (WSP1L-AC1; packages/dx-harness/test/lapceDriver.test.ts)",
       "two runs of the same scripted interaction compare within a recorded noise bound, and unknowns never become zeros (WSP1L-AC2)",
       "the driver refuses to certify a run whose protocol smoke passed with no UI timeline (WSP1L-AC3)",
-      "the volt writes a one-time initialize launch-stamp line to host stderr behind uiTrace.enabled (default off, no UI notification) and dx-harness parses `verter launch-stamp`/`verter ui-stamp` lines, joining their Unix-ms clock to the timeline clock only through a capture-recorded anchor (WSP1L.1/WSP1L.2)",
+      "the volt writes a one-time initialize launch-stamp line to host stderr behind uiTrace.enabled (default off, no UI notification) and dx-harness parses `verter launch-stamp`/`verter ui-stamp` lines both raw and embedded as host-log trailing fields (the real client's tracing rendering), joining their Unix-ms clock to the timeline clock only through a capture-recorded anchor (WSP1L.1/WSP1L.2)",
       "RealLapceHost constructs only from a provenance-complete capture (pinned lapce-client, issued launch stamp, UI observations, clock anchor) and fails closed otherwise; fixture timestamps relabeled with the real hostKind are refused as real-client claims"
     ],
     "automationPathRecorded": {
       "fixture": "instrumented-fixture-host: deterministic scripted UI event emission; no GUI, no sleeps, no real Lapce process",
-      "realHost": "volt-launch-stamp + Lapce UI instrumentation: one-time initialize launch-stamp stderr line behind uiTrace.enabled (no UI notification); per-message LSP path untouched"
+      "realHost": "volt-launch-stamp + Lapce UI instrumentation: one-time initialize launch-stamp on plugin host stderr behind uiTrace.enabled (no UI notification); the client renders it through its tracing log, so the capture reads it from data/logs/lapce.*.log or the client process stdout under LAPCE_LOG=lapce_proxy=debug; per-message LSP path untouched"
+    },
+    "realClientChannelVerification": {
+      "observedClient": "Lapce 0.4.6 (windows-x64, local interactive machine — not a manifested reference-client basis)",
+      "verified": [
+        "the built volt wasm loads and runs in the real client via `lapce --plugin-path <volt-dir>` (the supported plugin-development path)",
+        "`uiTrace.enabled = true` is delivered to the plugin when set in the workspace's .lapce/settings.toml [verter-volt] table",
+        "initialize emitted exactly one `verter launch-stamp` line (phase launch_refused: no resolvable server source in the verification session)",
+        "the client routes plugin stderr through lapce-proxy's tracing log (target lapce_proxy::plugin::wasi::<author>::<name>, DEBUG): the stamp was captured verbatim-as-message-body from the client process output under LAPCE_LOG=lapce_proxy=debug, and dx-harness parses that embedded rendering",
+        "the per-message LSP path stayed untouched (the stamp is the only emission)"
+      ],
+      "stillUnavailable": [
+        "UI stage stamps (`verter ui-stamp`) need an instrumented client event loop; no such build exists",
+        "no manifested reference-client machine and no pinned lapce-client identity for a certified real-client run"
+      ]
     }
   },
   "nextOwners": ["WSP1A", "expansion.workspace-responsiveness"]

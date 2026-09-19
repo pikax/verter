@@ -31,6 +31,18 @@ const UI_LINE =
   `${UI_STAMP_MESSAGE_PREFIX}` +
   `{"kind":"type","requestEpoch":10,"sourceEpoch":null,"stage":"decoded","atUnixMs":1758000000037}`;
 
+// Captured from a real Lapce 0.4.6 session (2026-09-19, uiTrace.enabled via
+// workspace settings, no resolvable server source → the honest refused phase).
+// The client renders plugin stderr through its tracing log, so the stamp is the
+// trailing message field: the console rendering (client run with
+// `LAPCE_LOG=lapce_proxy=debug`) interleaves ANSI escapes, a thread id and the
+// host source line number before the verbatim message body.
+const REAL_LAPCE_CONSOLE_PREFIX =
+  "\u001b[2m2026-09-19T09:03:45.282687Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(71) \u001b[2mlapce_proxy::plugin::wasi::pikax::verter-volt\u001b[0m\u001b[2m:\u001b[0m \u001b[2m520:\u001b[0m ";
+
+const REAL_LAPCE_REFUSED_BODY =
+  'verter launch-stamp {"atUnixMs":1789808625282,"documentLanguages":["vue","svelte"],"phase":"launch_refused","refusal":"could not resolve a verter-lsp server source: no override, no managed binary, and nothing usable on PATH. Set `lsp.serverPath` to the absolute path of a verter-lsp binary, or install verter-lsp on your PATH and opt in with `lsp.serverSource = \\"path\\"` (see the Lapce README or https://verterjs.dev/editor/other-editors).","serverUri":"","workspaceRoot":"/C:/Users/david/AppData/Local/Temp/verter-lapce-channel-test/ws/"}';
+
 describe("launch-stamp parsing (the volt's initialize epoch marker)", () => {
   it("parses an issued launch stamp verbatim", () => {
     const stamp = parseLaunchStampMessage(ISSUED_LINE);
@@ -180,5 +192,57 @@ describe("capture scanning and the clock-domain anchor (WSP1L.2)", () => {
     expect(() => stampUnixMsToTimelineMs(5, { ...anchor, stampUnixMs: 0.5 })).toThrow(
       /clock anchor/,
     );
+  });
+});
+
+describe("real-client host-log rendering (Lapce 0.4.6 verified)", () => {
+  it("extracts a stamp embedded as a host log line's trailing message field", () => {
+    const scanned = collectStampMessages([
+      "some unrelated host noise",
+      REAL_LAPCE_CONSOLE_PREFIX + REAL_LAPCE_REFUSED_BODY,
+    ]);
+    expect(scanned.uiStamps).toHaveLength(0);
+    expect(scanned.launchStamps).toHaveLength(1);
+    const stamp = scanned.launchStamps[0];
+    expect(stamp.phase).toBe("launch_refused");
+    expect(stamp.atUnixMs).toBe(1_789_808_625_282);
+    expect(stamp.serverUri).toBe("");
+    expect(stamp.documentLanguages).toEqual(["vue", "svelte"]);
+    expect(stamp.workspaceRoot).toBe(
+      "/C:/Users/david/AppData/Local/Temp/verter-lapce-channel-test/ws/",
+    );
+    expect(stamp.refusal).toContain("lsp.serverPath");
+    expect(isStampMessage(REAL_LAPCE_CONSOLE_PREFIX + REAL_LAPCE_REFUSED_BODY)).toBe(true);
+  });
+
+  it("extracts stamps from the ansi-free daily-log rendering and embedded ui-stamps", () => {
+    const fileLayerLine =
+      "2026-09-19T09:03:45.282687Z DEBUG lapce_proxy::plugin::wasi::pikax::verter-volt: " +
+      REAL_LAPCE_REFUSED_BODY;
+    const uiHostLine =
+      "2026-09-19T09:04:01.000000Z DEBUG lapce_proxy::plugin::wasi::pikax::verter-volt: " + UI_LINE;
+    const scanned = collectStampMessages([fileLayerLine, uiHostLine]);
+    expect(scanned.launchStamps).toHaveLength(1);
+    expect(scanned.uiStamps).toHaveLength(1);
+    expect(scanned.uiStamps[0]).toEqual({
+      kind: "type",
+      requestEpoch: 10,
+      sourceEpoch: null,
+      stage: "decoded",
+      atUnixMs: 1_758_000_000_037,
+    });
+  });
+
+  it("fails loud when an embedded marker's body does not parse — never silently dropped", () => {
+    const truncated = REAL_LAPCE_CONSOLE_PREFIX + 'verter launch-stamp {"phase":"launch_refused"';
+    expect(() => collectStampMessages([truncated])).toThrow(/malformed verter launch-stamp JSON/);
+  });
+
+  it("does not match prose without a delimited marker", () => {
+    expect(isStampMessage("discussed the xverter launch-stamp channel today")).toBe(false);
+    expect(collectStampMessages(["discussed the xverter launch-stamp channel today"])).toEqual({
+      launchStamps: [],
+      uiStamps: [],
+    });
   });
 });
