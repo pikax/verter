@@ -415,16 +415,6 @@ pub enum DepKey {
 }
 
 impl DepKey {
-    /// Closed classification of a gating edge. Exhaustiveness is the
-    /// structural rejection of a resource-capacity predecessor.
-    pub fn kind_name(&self) -> &'static str {
-        match self {
-            DepKey::FileStage { .. } => "file_stage",
-            DepKey::Artifact { .. } => "artifact",
-            DepKey::CacheNode { .. } => "cache_node",
-        }
-    }
-
     /// Build a dep key from a work-node identity. The reverse
     /// conversion is intentionally lossy — identities carry the same
     /// data as dep keys today, but having a separate type makes the

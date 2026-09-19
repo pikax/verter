@@ -19,7 +19,8 @@ pub enum Cpu {}
 pub enum Io {}
 
 /// Host/provider coordinator-pool owner. Commands of this owner are
-/// not accepted by scheduler CPU or I/O pools.
+/// not accepted by scheduler CPU or I/O pools. There is no constructor:
+/// a provider pool is a successor surface this charter does not include.
 pub enum Provider {}
 
 /// Fire-and-forget work that may be submitted only to pool `O`.
@@ -43,18 +44,6 @@ impl OwnerCommand<Io> {
     /// Wrap I/O-owned work.
     #[must_use]
     pub fn io(task: SchedulerPoolTask) -> Self {
-        Self {
-            task,
-            _owner: PhantomData,
-        }
-    }
-}
-
-impl OwnerCommand<Provider> {
-    /// Wrap provider/host-coordinator work. Scheduler CPU/I/O pools
-    /// have no `try_submit(OwnerCommand<Provider>)` method.
-    #[must_use]
-    pub fn provider(task: SchedulerPoolTask) -> Self {
         Self {
             task,
             _owner: PhantomData,

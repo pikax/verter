@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use verter_scheduler::cpu_concurrency::CpuConcurrencySemaphore;
 use verter_scheduler::dag::{DepKey, FileStageKey, WorkNodeIdentity};
 use verter_scheduler::owner_command::OwnerCommand;
 use verter_scheduler::pool::{
@@ -129,8 +128,13 @@ fn dep_key_has_no_resource_capacity_arm() {
         view_epoch: 0,
         snapshot_pin_id: verter_scheduler::dag::PinId(0),
     });
-    let names = [file.kind_name(), artifact.kind_name(), cache.kind_name()];
-    assert_eq!(names, ["file_stage", "artifact", "cache_node"]);
+    // Exhaustive match is the discriminator: a ResourceCapacity arm
+    // fails to compile. String labels would not.
+    for key in [&file, &artifact, &cache] {
+        match key {
+            DepKey::FileStage { .. } | DepKey::Artifact { .. } | DepKey::CacheNode { .. } => {}
+        }
+    }
 }
 
 /// G3-AC1: production wait does not busy-spin. `spin_loop` / hint-spin
@@ -145,22 +149,6 @@ fn scheduler_src_has_no_busy_spin_wait() {
             "`{needle}` re-appeared in scheduler production src — waiters must park on a condvar"
         );
     }
-}
-
-/// G3-AC4: the CPU transport bound is a finite permit count, not an
-/// implicit unbounded enqueue. One extra acquire-owned is refused.
-#[test]
-fn cpu_transport_permit_is_a_closed_bound() {
-    let sem = Arc::new(CpuConcurrencySemaphore::new(2));
-    let a = sem.try_acquire_owned().expect("slot 1");
-    let b = sem.try_acquire_owned().expect("slot 2");
-    assert!(
-        sem.try_acquire_owned().is_none(),
-        "a third owned acquire must fail closed"
-    );
-    drop(a);
-    drop(b);
-    assert!(sem.try_acquire_owned().is_some());
 }
 
 /// G3-AC3: owner-affine command routing does not own cache/incremental

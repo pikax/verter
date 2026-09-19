@@ -34,17 +34,20 @@
 //!     -> Result<SchedulerPoolSubmitResult, SchedulerPoolSubmitError>;
 //! ```
 //!
-//! The driver dispatch loop NEVER blocks on a full pool. Under the DAG
-//! capacity-ledger invariant the pool is not genuinely full at the
-//! dispatch site (the ledger reserves the CPU/IO permit in
-//! `next_ready_for_pump` BEFORE a `ReadyJob` exists). A `Full`/`Closed`
-//! result during scheduler dispatch is therefore an INVARIANT VIOLATION,
+//! The driver dispatch loop NEVER blocks on a full pool. The DAG
+//! capacity ledger reserves the CPU/IO permit in `next_ready_for_pump`
+//! BEFORE a `ReadyJob` exists, and each transport is sized to dominate
+//! the matching `dag_budget` (CPU → `cpu`, IO → `io`). A `Full`/`Closed`
+//! result during scheduler dispatch is treated as an INVARIANT VIOLATION,
 //! not backpressure — the caller `debug_assert!`s and terminalizes the
-//! job through the normal DAG cancel path.
+//! job through the normal DAG cancel path. Ledger release and transport
+//! permit drop are not atomic: `Dag::complete` can free a ledger permit
+//! before the worker drops the matching transport permit, so a genuine
+//! `Full` remains possible in that window and is still fail-closed.
 //!
 //! To keep the invariant true for an explicit `dag_budget`, the host
-//! sizes the [`SchedulerIoPool`] transport capacity to dominate the
-//! resolved `dag_budget.io` (see [`SchedulerIoPool::new`]).
+//! sizes each pool's transport capacity to dominate the matching budget
+//! (see [`SchedulerCpuPool::new`] / [`SchedulerIoPool::new`]).
 
 use crossbeam_channel::{bounded, Sender, TrySendError};
 
@@ -74,8 +77,8 @@ pub enum SchedulerPoolSubmitResult {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg(not(target_arch = "wasm32"))]
 pub enum SchedulerPoolSubmitError {
-    /// The pool's transport is at capacity. Under the ledger invariant
-    /// this is unreachable at the dispatch site.
+    /// The pool's transport is at capacity. Dispatch fail-closes this as
+    /// an invariant violation; it is not a backpressure signal.
     Full,
     /// The pool is shutting down (all workers gone / receiver dropped).
     Closed,
@@ -200,8 +203,15 @@ impl SchedulerCpuPool {
     /// Nonblocking owner-affine submit. Takes a CPU-owned command and
     /// reserves one transport slot before `rayon::spawn`. Returns
     /// [`SchedulerPoolSubmitError::Full`] when the bound is saturated
-    /// rather than enqueueing unbounded work. Under the DAG ledger
-    /// invariant `Full` is unreachable at the dispatch site.
+    /// rather than enqueueing unbounded work.
+    ///
+    /// Dispatch treats `Full` as an invariant violation (fail-closed
+    /// terminalization) because transport capacity is sized to dominate
+    /// `dag_budget.cpu`. That sizing does not cover the window between
+    /// `Dag::complete` releasing the ledger permit on the driver and the
+    /// worker dropping this transport permit: a waiter admitted in that
+    /// window can observe `Full`. The site still fail-closes rather than
+    /// growing an unbounded queue.
     pub fn try_submit(
         &self,
         command: crate::owner_command::OwnerCommand<crate::owner_command::Cpu>,

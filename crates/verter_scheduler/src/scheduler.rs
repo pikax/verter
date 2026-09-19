@@ -5821,9 +5821,10 @@ impl Scheduler {
             test_injected,
             "scheduler pool submit returned {err:?} at the dispatch site: the DAG \
              capacity ledger reserves the {task_kind:?} permit in next_ready_for_pump \
-             before producing the ReadyJob, and the IO transport is sized to dominate \
-             dag_budget.io, so the pool is never genuinely full here — a Full/Closed \
-             result is an invariant violation, not backpressure"
+             before producing the ReadyJob, and each transport is sized to dominate \
+             its matching dag_budget (CPU dominates dag_budget.cpu, IO dominates \
+             dag_budget.io). Full/Closed is an invariant violation (fail-closed), \
+             not backpressure"
         );
         let error = crate::job::SchedulerError::StageFailed {
             file_id: canonical.to_string(),
