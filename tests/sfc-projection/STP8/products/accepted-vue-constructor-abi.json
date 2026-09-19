@@ -1,0 +1,129 @@
+{
+  "schema": "AcceptedVueConstructorABI",
+  "version": 1,
+  "product": "AcceptedVueConstructorABI",
+  "node": "STP8",
+  "kind": "lock",
+  "selectedCandidate": {
+    "id": "single-public-constructor-plus-merged-instance-interface",
+    "constructorFirst": true,
+    "spelling": "export declare class Comp<T = unknown> { constructor(props?: Props<T>) } + export interface Comp<T = unknown> extends ComponentPublicInstance<Props, Exposed, {}, {}, {}, Emits> {} + export default Comp",
+    "fixture": "tests/sfc-projection/STP8/probes/components/Ratified.vue.d.ts",
+    "postSpecializationConsumerChecks": [
+      "excess-key-and-fallthrough-validation",
+      "hover-definition-references"
+    ],
+    "rejectedCandidates": [
+      { "id": "callable-sfc-default-export", "case": "STP2-not-callable" },
+      { "id": "broad-construct-overload", "case": "STP2-constructor-escape" },
+      { "id": "split-inference-plus-post-specialization", "case": "STP3-inference-only-channel" },
+      { "id": "fixed-n-overload-claim", "case": "STP3-ordered-merge" }
+    ]
+  },
+  "engines": [
+    { "id": "ts-js", "package": "typescript", "version": "6.0.3", "role": "selected-evidence" },
+    { "id": "ts-native", "package": "typescript", "version": "7.0.2", "role": "selected-evidence" }
+  ],
+  "vue": { "package": "vue", "version": "3.6.0-rc.5", "source": "package.json" },
+  "toyEvidenceAdmitted": false,
+  "publicSurface": {
+    "defaultExport": "constructor-shaped-declare-class",
+    "instanceTypeSpelling": "InstanceType<typeof Comp>",
+    "instanceTypePreserved": true,
+    "surfaces": [
+      { "id": "checker-projection", "instanceType": "InstanceType<typeof Comp>", "utilitiesUntouched": true },
+      { "id": "packed-consumer", "instanceType": "InstanceType<typeof Comp>", "utilitiesUntouched": true },
+      { "id": "fresh-consumer", "instanceType": "InstanceType<typeof Comp>", "utilitiesUntouched": true }
+    ],
+    "surfacesIdentical": true,
+    "checkerOnlyPublicShape": false
+  },
+  "inference": {
+    "selectedWitness": "single-public-constructor-whole-signature",
+    "rule": "every-inference-contributing-channel-stays-in-the-inference-transaction",
+    "inferenceTransaction": [
+      "props-items",
+      "props-label",
+      "emit-change",
+      "slot-default",
+      "expose-first",
+      "expose-reset"
+    ],
+    "contributingChannels": ["props-items", "emit-change", "slot-default", "expose-first"],
+    "postSpecializationOnly": [
+      "excess-key-and-fallthrough-validation",
+      "hover-definition-references"
+    ]
+  },
+  "richerInferenceWitness": {
+    "admitted": true,
+    "channel": "instance-side ComponentPublicInstance projection (slot/emit variance and Vue utility assignability) not representable faithfully by the public constructor parameter list alone",
+    "spelling": "export interface Comp<T = unknown> extends ComponentPublicInstance<...>",
+    "typeOnly": true,
+    "nonRuntime": true,
+    "declarationClosed": "ships-in-published-d.ts (STP6 PublicDependencyClosurePolicy)",
+    "aliasSafe": "no-rename-codec (STP5 ObservationRolePolicy)",
+    "secondCheckerAbi": false,
+    "perCaseFallback": false
+  },
+  "feasibilityRows": [
+    { "node": "STP2", "case": "STP2-instance-concrete", "source": "tests/sfc-projection/STP2/products/instance-type-compatibility-table.json" },
+    { "node": "STP2", "case": "STP2-instance-generic", "source": "tests/sfc-projection/STP2/products/instance-type-compatibility-table.json" },
+    { "node": "STP2", "case": "STP2-instance-explicit", "source": "tests/sfc-projection/STP2/products/instance-type-compatibility-table.json" },
+    { "node": "STP2", "case": "STP2-constructor-escape", "source": "tests/sfc-projection/STP2/products/instance-type-compatibility-table.json" },
+    { "node": "STP2", "case": "STP2-vue-utilities", "source": "tests/sfc-projection/STP2/products/instance-type-compatibility-table.json" },
+    { "node": "STP2", "case": "STP2-not-callable", "source": "tests/sfc-projection/STP2/products/instance-type-compatibility-table.json" },
+    { "node": "STP2", "case": "STP2-constructor-inferred", "source": "tests/sfc-projection/STP2/products/instance-type-compatibility-table.json" },
+    { "node": "STP2", "case": "STP2-explicit-input-mismatch", "source": "tests/sfc-projection/STP2/products/instance-type-compatibility-table.json" },
+    { "node": "STP3", "case": "STP3-coupled", "source": "tests/sfc-projection/STP3/products/coupled-inference-evidence.json" },
+    { "node": "STP3", "case": "STP3-wrong-channel", "source": "tests/sfc-projection/STP3/products/coupled-inference-evidence.json" },
+    { "node": "STP3", "case": "STP3-inference-only-channel", "source": "tests/sfc-projection/STP3/products/coupled-inference-evidence.json" },
+    { "node": "STP3", "case": "STP3-order-independent", "source": "tests/sfc-projection/STP3/products/coupled-inference-evidence.json" },
+    { "node": "STP3", "case": "STP3-ordered-merge", "source": "tests/sfc-projection/STP3/products/coupled-inference-evidence.json" },
+    { "node": "STP3", "case": "STP3-fresh-uses", "source": "tests/sfc-projection/STP3/products/coupled-inference-evidence.json" },
+    { "node": "STP4", "case": "STP4-js-unchecked", "source": "tests/sfc-projection/STP4/products/dialect-topology-evidence.json" },
+    { "node": "STP4", "case": "STP4-js-checked", "source": "tests/sfc-projection/STP4/products/dialect-topology-evidence.json" },
+    { "node": "STP4", "case": "STP4-tsx-authored", "source": "tests/sfc-projection/STP4/products/dialect-topology-evidence.json" },
+    { "node": "STP4", "case": "STP4-supplemental-import", "source": "tests/sfc-projection/STP4/products/dialect-topology-evidence.json" },
+    { "node": "STP4", "case": "STP4-external-owner", "source": "tests/sfc-projection/STP4/products/dialect-topology-evidence.json" },
+    { "node": "STP4", "case": "STP4-illegal-vue", "source": "tests/sfc-projection/STP4/products/dialect-topology-evidence.json" },
+    { "node": "STP5", "case": "STP5-encoding", "source": "tests/sfc-projection/STP5/manifest.json" },
+    { "node": "STP5", "case": "STP5-guard-duplicate", "source": "tests/sfc-projection/STP5/manifest.json" },
+    { "node": "STP5", "case": "STP5-alias-edit", "source": "tests/sfc-projection/STP5/manifest.json" },
+    { "node": "STP5", "case": "STP5-stale-target", "source": "tests/sfc-projection/STP5/manifest.json" },
+    { "node": "STP5", "case": "STP5-raw-cli", "source": "tests/sfc-projection/STP5/manifest.json" },
+    { "node": "STP5", "case": "STP5-capability", "source": "tests/sfc-projection/STP5/manifest.json" },
+    { "node": "STP6", "case": "STP6-package-instance", "source": "tests/sfc-projection/STP6/products/packed-consumer-feasibility.json" },
+    { "node": "STP6", "case": "STP6-package-generics", "source": "tests/sfc-projection/STP6/products/packed-consumer-feasibility.json" },
+    { "node": "STP6", "case": "STP6-hidden-metadata", "source": "tests/sfc-projection/STP6/products/packed-consumer-feasibility.json" },
+    { "node": "STP6", "case": "STP6-closure", "source": "tests/sfc-projection/STP6/products/packed-consumer-feasibility.json" },
+    { "node": "STP6", "case": "STP6-decl-map", "source": "tests/sfc-projection/STP6/products/packed-consumer-feasibility.json" },
+    { "node": "STP6", "case": "STP6-resolution", "source": "tests/sfc-projection/STP6/products/packed-consumer-feasibility.json" },
+    { "node": "STP7", "case": "STP7-svelte-shape", "source": "tests/sfc-projection/STP7/products/second-framework-boundary-evidence.json" },
+    { "node": "STP7", "case": "STP7-holes", "source": "tests/sfc-projection/STP7/products/second-framework-boundary-evidence.json" },
+    { "node": "STP7", "case": "STP7-realm", "source": "tests/sfc-projection/STP7/products/second-framework-boundary-evidence.json" },
+    { "node": "STP7", "case": "STP7-reuse", "source": "tests/sfc-projection/STP7/products/second-framework-boundary-evidence.json" },
+    { "node": "STP7", "case": "STP7-scope-claim", "source": "tests/sfc-projection/STP7/products/second-framework-boundary-evidence.json" }
+  ],
+  "forbidden": [
+    "native-type-answer-substitution",
+    "callable-vue-sfc-replacement",
+    "broad-any-constructor",
+    "vacuous-never-success",
+    "duplicate-script-body-checker",
+    "fixed-n-overload-claim",
+    "invented-source-location",
+    "feature-mask-diagnostic-suppression",
+    "incomplete-rename-application",
+    "per-fixture-options",
+    "hidden-old-route-answer",
+    "complete-capability-claim-backed-only-by-dormant-product"
+  ],
+  "productionOwner": "STP16",
+  "fullTypingOwner": "STP59",
+  "ac3UntouchedOwners": ["B4R0", "LSO0", "CCA1J", "TCM0R"],
+  "ac3Rationale": "STP8 ratifies contract artifacts only. Incremental=fresh and stale/cancelled publication for production projection remain with B4R0 lineage, LSO snapshot publication, CCA1J projection route, and TCM0R observation identity. A ComponentUseId input change still invalidates the associated specialization; unchanged checking text cannot justify stale source mappings.",
+  "ac4UntouchedOwners": ["CCA1J", "CCA1H"],
+  "ac4Rationale": "STP8 changes no production projection hot path and emits no runtime helper. Bounded parse/check/emit stays with the existing VueProjectionBackend route (crates/verter_compiler/src/framework_common/vue_projection_backend.rs), whose PublicApi/Declarations remain uninhabited until STP16/STP59.",
+  "timingClaim": "none"
+}

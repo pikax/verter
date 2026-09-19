@@ -82,6 +82,12 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP7-reuse",
     "STP7-scope-claim",
   ]),
+  STP8: Object.freeze([
+    "STP8-complete-evidence",
+    "STP8-partial-ratify",
+    "STP8-abi-contamination",
+    "STP8-inference-contract",
+  ]),
 });
 
 export const MANDATORY_CASES = NODE_MANDATORY_CASES.STP1;
@@ -95,6 +101,7 @@ export const STP4_MANDATORY_CASES = NODE_MANDATORY_CASES.STP4;
 export const STP5_MANDATORY_CASES = NODE_MANDATORY_CASES.STP5;
 export const STP6_MANDATORY_CASES = NODE_MANDATORY_CASES.STP6;
 export const STP7_MANDATORY_CASES = NODE_MANDATORY_CASES.STP7;
+export const STP8_MANDATORY_CASES = NODE_MANDATORY_CASES.STP8;
 
 function usesCaseFileRunner(nodeId) {
   return nodeId === "STP2" || nodeId === "STP3" || nodeId === "STP4" || nodeId === "STP6";
@@ -1752,6 +1759,11 @@ export async function verifyNode(options) {
     errors.push(...stp7.errors);
   }
 
+  if (nodeId === "STP8") {
+    const stp8 = await evaluateStp8Node({ repoRoot });
+    errors.push(...stp8.errors);
+  }
+
   return summarize({
     options,
     errors,
@@ -1856,6 +1868,15 @@ async function evaluateStp7Node({ repoRoot, resolvedEngines, skipProbes, runnabl
   const stp7 = await protocol.evaluateStp7({ ts });
   errors.push(...stp7.errors);
   return { errors };
+}
+
+async function evaluateStp8Node({ repoRoot }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STP8/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  const stp8 = await protocol.evaluateStp8();
+  return { errors: stp8.errors };
 }
 
 async function evaluateStp5Node({ repoRoot, resolvedEngines, harnessRuns, skipProbes, runnable }) {
@@ -1979,6 +2000,8 @@ function summarize({
     "tests/sfc-projection/STP6/probes/reject-closure.ts",
     "tests/sfc-projection/STP7/probes/positive.ts",
     "tests/sfc-projection/STP7/probes/negative.ts",
+    "tests/sfc-projection/STP8/probes/positive.ts",
+    "tests/sfc-projection/STP8/probes/negative.ts",
   ].filter(Boolean);
   for (const rel of probeFiles) {
     const abs = repoPath(repoRoot, rel);
@@ -2027,10 +2050,10 @@ export function selectedCaseIds(result) {
   return [...(result.selectedCaseIds || [])];
 }
 
-const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary)
+const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary, STP8 ABI ratification)
 
 USAGE
-  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7 [--engine all|ts-js|ts-native] [--require-all] [--json]
+  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7|STP8 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
 vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted
@@ -2042,7 +2065,11 @@ rejects unpublished-metadata precision and private virtual declaration paths.
 STP7 rejects Vue-constructor shims on Svelte Component, Vue-only shared records,
 one-way hole maps, same-program ambient-isolation claims, and full Astro/MDX/Lit
 support advertisements; its live realm check requires a javascript-kind engine,
-so a native-only --engine selection is rejected rather than skipped.
+so a native-only --engine selection is rejected rather than skipped. STP8
+rejects unmatched, fabricated, or uncited feasibility rows; TypeScript 5.8-only
+toy evidence or a shrunken engine denominator; checker-only public shapes that
+respell InstanceType or remap Vue utilities; and event/slot inference
+contributors postponed until after specialization.
 `;
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
