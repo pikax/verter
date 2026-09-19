@@ -400,6 +400,15 @@ async function activateExtension(context: ExtensionContext, session: ActivationS
       },
     })
       .then((runtime) => {
+        // client.start() and the attempt's post-start disposal check both
+        // complete before this continuation. Deactivation in that window
+        // cannot see `server` yet, so refuse to publish into a dead session
+        // and stop the process here instead of leaving it ownerless.
+        if (lifetime.isDisposed) {
+          runtime.stopHeartbeatTimer();
+          void runtime.getClient().stop();
+          return runtime;
+        }
         server = runtime;
         return runtime;
       })

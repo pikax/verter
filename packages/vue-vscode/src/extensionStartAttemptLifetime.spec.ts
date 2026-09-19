@@ -266,7 +266,8 @@ vi.mock("vscode-languageclient/node", () => ({
   RevealOutputChannelOn: { Info: 1, Warn: 2, Error: 3, Never: 4 },
 }));
 
-import { activateVueLanguageServer } from "./extension";
+import { workspace } from "vscode";
+import { activate, activateVueLanguageServer, deactivate } from "./extension";
 import { DEFAULT_RESTART_POLICY } from "./restart";
 
 type ActivateParams = Parameters<typeof activateVueLanguageServer>;
@@ -304,6 +305,9 @@ describe("language server start attempt lifetime", () => {
     mocks.errorMessages.length = 0;
     mocks.state.startShouldFail = true;
     mocks.state.startCalls = 0;
+    mocks.state.stopCalls = 0;
+    mocks.state.holdStart = false;
+    mocks.state.releaseStart = undefined;
     mocks.state.createdClientOptions.length = 0;
     for (const key of Object.keys(mocks.configurationValues)) {
       delete mocks.configurationValues[key];
@@ -554,6 +558,130 @@ describe("disposal during an in-flight recovery", () => {
     // The orphan is shut down exactly once, and no watchdog is armed over it.
     expect(mocks.state.stopCalls).toBe(1);
     expect(mocks.state.startCalls).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("language server ownership through runtime publication", () => {
+  const vueDocument = {
+    languageId: "vue",
+    version: 1,
+    getText: () => "",
+    uri: {
+      scheme: "file",
+      fsPath: "/proj/App.vue",
+      toString: () => "file:///proj/App.vue",
+    },
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval"],
+    });
+    mocks.statusBarItems.length = 0;
+    mocks.diagnosticCollections.length = 0;
+    mocks.errorMessages.length = 0;
+    mocks.state.startShouldFail = false;
+    mocks.state.startCalls = 0;
+    mocks.state.stopCalls = 0;
+    mocks.state.holdStart = false;
+    mocks.state.releaseStart = undefined;
+    mocks.state.createdClientOptions.length = 0;
+    for (const key of Object.keys(mocks.configurationValues)) {
+      delete mocks.configurationValues[key];
+    }
+    mocks.configurationValues["verter.mcp.enabled"] = false;
+    (workspace as { textDocuments: unknown[] }).textDocuments.length = 0;
+    (workspace as { textDocuments: unknown[] }).textDocuments.push(vueDocument);
+  });
+
+  afterEach(() => {
+    try {
+      deactivate();
+    } catch {
+      // Root may already be empty.
+    }
+    (workspace as { textDocuments: unknown[] }).textDocuments.length = 0;
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  async function waitForHeldStart(): Promise<void> {
+    for (let i = 0; i < 10_000 && !mocks.state.releaseStart; i += 1) {
+      await Promise.resolve();
+    }
+    expect(mocks.state.releaseStart).toBeDefined();
+  }
+
+  it("stops a started client that deactivates before runtime publication", async () => {
+    const context = makeContext();
+    mocks.state.holdStart = true;
+
+    const activating = activate(context);
+    await waitForHeldStart();
+    await activating;
+    expect(mocks.state.startCalls).toBe(1);
+    expect(mocks.state.stopCalls).toBe(0);
+
+    mocks.state.releaseStart?.();
+    let watchdogArmed = false;
+    for (let i = 0; i < 20; i += 1) {
+      await Promise.resolve();
+      if (vi.getTimerCount() > 0) {
+        watchdogArmed = true;
+        break;
+      }
+    }
+    expect(watchdogArmed).toBe(true);
+    expect(mocks.state.stopCalls).toBe(0);
+
+    deactivate();
+    for (let i = 0; i < 20; i += 1) {
+      await Promise.resolve();
+    }
+
+    expect(mocks.state.stopCalls).toBe(1);
+    expect(mocks.state.startCalls).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+
+    mocks.state.holdStart = false;
+    mocks.state.releaseStart = undefined;
+    await activate(context);
+    expect(mocks.state.startCalls).toBe(2);
+    expect(mocks.state.stopCalls).toBe(1);
+
+    deactivate();
+    for (let i = 0; i < 20; i += 1) {
+      await Promise.resolve();
+    }
+    expect(mocks.state.stopCalls).toBe(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("stops a started client when deactivate is queued from client.start", async () => {
+    const context = makeContext();
+    mocks.state.holdStart = true;
+
+    const activating = activate(context);
+    await waitForHeldStart();
+    await activating;
+
+    const originalRelease = mocks.state.releaseStart;
+    mocks.state.releaseStart = () => {
+      originalRelease?.();
+      queueMicrotask(() => {
+        queueMicrotask(() => {
+          deactivate();
+        });
+      });
+    };
+    mocks.state.releaseStart();
+    for (let i = 0; i < 20; i += 1) {
+      await Promise.resolve();
+    }
+
+    expect(mocks.state.startCalls).toBe(1);
+    expect(mocks.state.stopCalls).toBe(1);
     expect(vi.getTimerCount()).toBe(0);
   });
 });
