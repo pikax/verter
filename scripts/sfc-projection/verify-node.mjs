@@ -51,6 +51,14 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP3-ordered-merge",
     "STP3-fresh-uses",
   ]),
+  STP4: Object.freeze([
+    "STP4-js-unchecked",
+    "STP4-js-checked",
+    "STP4-tsx-authored",
+    "STP4-supplemental-import",
+    "STP4-external-owner",
+    "STP4-illegal-vue",
+  ]),
   STP5: Object.freeze([
     "STP5-encoding",
     "STP5-guard-duplicate",
@@ -68,10 +76,11 @@ export function canonicalMandatoryCases(nodeId) {
 }
 
 export const STP3_MANDATORY_CASES = NODE_MANDATORY_CASES.STP3;
+export const STP4_MANDATORY_CASES = NODE_MANDATORY_CASES.STP4;
 export const STP5_MANDATORY_CASES = NODE_MANDATORY_CASES.STP5;
 
 function usesCaseFileRunner(nodeId) {
-  return nodeId === "STP2" || nodeId === "STP3";
+  return nodeId === "STP2" || nodeId === "STP3" || nodeId === "STP4";
 }
 
 export function mandatoryCasesFor(nodeManifest) {
@@ -500,6 +509,120 @@ export function assertStp3Products(repoRoot, nodeManifest) {
         "removed-fixture",
         "ordered operations must forbid last-write-wins",
       ),
+    );
+  }
+  return errors;
+}
+
+const STP4_DIALECTS = Object.freeze(["ts", "tsx", "js", "jsx"]);
+
+export function assertStp4Products(repoRoot, nodeManifest) {
+  const errors = [];
+  const declared = new Set(nodeManifest?.products || []);
+  for (const product of ["DialectTopologyEvidence", "ProjectionTopologyDecisionInputs"]) {
+    if (!declared.has(product)) {
+      errors.push(err("STP4-js-unchecked", "removed-fixture", `missing product ${product}`));
+    }
+  }
+  const evidenceRel = "tests/sfc-projection/STP4/products/dialect-topology-evidence.json";
+  const inputsRel = "tests/sfc-projection/STP4/products/projection-topology-decision-inputs.json";
+  const evidenceAbs = repoPath(repoRoot, evidenceRel);
+  const inputsAbs = repoPath(repoRoot, inputsRel);
+  if (!fs.existsSync(evidenceAbs)) {
+    errors.push(err("STP4-js-unchecked", "removed-fixture", `missing ${evidenceRel}`));
+    return errors;
+  }
+  if (!fs.existsSync(inputsAbs)) {
+    errors.push(err("STP4-js-unchecked", "removed-fixture", `missing ${inputsRel}`));
+    return errors;
+  }
+  const evidence = readJson(evidenceAbs);
+  const inputs = readJson(inputsAbs);
+  if (evidence.schema !== "DialectTopologyEvidence") {
+    errors.push(err("STP4-js-unchecked", "removed-fixture", "DialectTopologyEvidence schema"));
+  }
+  if (inputs.schema !== "ProjectionTopologyDecisionInputs") {
+    errors.push(
+      err("STP4-js-unchecked", "removed-fixture", "ProjectionTopologyDecisionInputs schema"),
+    );
+  }
+  const dialects = new Set((evidence.dialects || []).map((row) => row.id));
+  for (const dialect of STP4_DIALECTS) {
+    if (!dialects.has(dialect)) {
+      errors.push(err("STP4-tsx-authored", "removed-fixture", `missing dialect ${dialect}`));
+    }
+  }
+  const checkJs = new Set((evidence.checkJs || []).map((row) => row.id));
+  if (!checkJs.has("off")) {
+    errors.push(err("STP4-js-unchecked", "removed-fixture", "missing checkJs off policy"));
+  }
+  if (!checkJs.has("on")) {
+    errors.push(err("STP4-js-checked", "removed-fixture", "missing checkJs on policy"));
+  }
+  const evidenceIds = new Set((evidence.cases || []).map((row) => row.id));
+  for (const id of NODE_MANDATORY_CASES.STP4) {
+    if (!evidenceIds.has(id)) {
+      errors.push(err("STP4-js-unchecked", "removed-fixture", `dialect evidence missing ${id}`));
+    }
+  }
+  if (!String(evidence.constructorSpelling || "").includes("declare class Comp")) {
+    errors.push(
+      err("STP4-js-unchecked", "removed-fixture", "missing dialect constructor spelling"),
+    );
+  }
+  if (!String(evidence.ac3Rationale || "").trim()) {
+    errors.push(
+      err("STP4-js-unchecked", "removed-fixture", "missing AC3 untouched-owner rationale"),
+    );
+  }
+  if (!String(evidence.ac4Rationale || "").trim()) {
+    errors.push(
+      err("STP4-js-unchecked", "removed-fixture", "missing AC4 untouched-owner rationale"),
+    );
+  }
+  if (inputs.supplementalFiles?.namedImportTarget !== false) {
+    errors.push(
+      err(
+        "STP4-supplemental-import",
+        "removed-fixture",
+        "supplemental files must not be named import targets",
+      ),
+    );
+  }
+  if (inputs.supplementalFiles?.sharedLexicalScope !== false) {
+    errors.push(
+      err(
+        "STP4-supplemental-import",
+        "removed-fixture",
+        "supplemental files must not share a lexical scope",
+      ),
+    );
+  }
+  if (inputs.externalScripts?.checkedOncePerIdentity !== true) {
+    errors.push(
+      err("STP4-external-owner", "removed-fixture", "external scripts must be checked once"),
+    );
+  }
+  if (inputs.vueLegality?.scriptSetupSrc !== "reject") {
+    errors.push(err("STP4-illegal-vue", "removed-fixture", "script-setup src must stay rejected"));
+  }
+  if (inputs.vueLegality?.authority !== "framework-legality") {
+    errors.push(
+      err("STP4-illegal-vue", "removed-fixture", "script-setup src must be framework legality"),
+    );
+  }
+  if (inputs.vueLegality?.typescriptAcceptsGenerated !== "not-sufficient") {
+    errors.push(
+      err(
+        "STP4-illegal-vue",
+        "removed-fixture",
+        "TypeScript accepting generated code is not Vue legality",
+      ),
+    );
+  }
+  if (inputs.jsxRewrite?.tsAngleAssertion !== "no-jsx-rewrite") {
+    errors.push(
+      err("STP4-tsx-authored", "removed-fixture", "TS angle assertions must not be JSX-rewritten"),
     );
   }
   return errors;
@@ -1370,6 +1493,9 @@ export async function verifyNode(options) {
   if (nodeId === "STP3") {
     errors.push(...assertStp3Products(repoRoot, nodeLoad.manifest));
   }
+  if (nodeId === "STP4") {
+    errors.push(...assertStp4Products(repoRoot, nodeLoad.manifest));
+  }
 
   const matrix =
     options.engineMatrix || readJson(repoPath(repoRoot, rootLoad.manifest.engineMatrix));
@@ -1606,6 +1732,12 @@ function summarize({
     "tests/sfc-projection/STP3/probes/reject-order-independent.ts",
     "tests/sfc-projection/STP3/probes/reject-ordered-merge.ts",
     "tests/sfc-projection/STP3/probes/reject-fresh-uses.ts",
+    "tests/sfc-projection/STP4/probes/accept-js-unchecked.ts",
+    "tests/sfc-projection/STP4/probes/accept-js-checked.ts",
+    "tests/sfc-projection/STP4/probes/accept-tsx-authored.tsx",
+    "tests/sfc-projection/STP4/probes/reject-supplemental-import.ts",
+    "tests/sfc-projection/STP4/probes/accept-external-owner.ts",
+    "tests/sfc-projection/STP4/probes/reject-illegal-vue.ts",
   ].filter(Boolean);
   for (const rel of probeFiles) {
     const abs = repoPath(repoRoot, rel);
@@ -1654,10 +1786,10 @@ export function selectedCaseIds(result) {
   return [...(result.selectedCaseIds || [])];
 }
 
-const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP5 mapper)
+const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper)
 
 USAGE
-  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP5 [--engine all|ts-js|ts-native] [--require-all] [--json]
+  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
 vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted

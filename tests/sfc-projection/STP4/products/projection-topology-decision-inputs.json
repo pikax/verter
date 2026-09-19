@@ -1,0 +1,45 @@
+{
+  "schema": "ProjectionTopologyDecisionInputs",
+  "version": 1,
+  "product": "ProjectionTopologyDecisionInputs",
+  "node": "STP4",
+  "supplementalFiles": {
+    "role": "checked-output",
+    "namedImportTarget": false,
+    "sharedLexicalScope": false,
+    "hostAdmittedVirtualUnit": true,
+    "canonicalImportIdentity": "sfc-public-module",
+    "compilerNamedSpecifier": "JsUnchecked.vue.__template",
+    "rejectCase": "STP4-supplemental-import"
+  },
+  "externalScripts": {
+    "ownership": "source-identity",
+    "checkedOncePerIdentity": true,
+    "importersDoNotDuplicateBody": true,
+    "path": "tests/sfc-projection/STP4/probes/shared/logic.ts",
+    "importers": [
+      "tests/sfc-projection/STP4/probes/components/OwnerA.vue",
+      "tests/sfc-projection/STP4/probes/components/OwnerB.vue"
+    ],
+    "acceptCase": "STP4-external-owner"
+  },
+  "vueLegality": {
+    "scriptSetupSrc": "reject",
+    "authority": "framework-legality",
+    "typescriptAcceptsGenerated": "not-sufficient",
+    "rejectCase": "STP4-illegal-vue"
+  },
+  "jsxRewrite": {
+    "tsx": "preserve-as-jsx",
+    "tsAngleAssertion": "no-jsx-rewrite",
+    "acceptCase": "STP4-tsx-authored"
+  },
+  "checkJs": {
+    "off": "script-diagnostics-suppressed-template-still-checked",
+    "on": "script-and-template-checked-with-source-anchors",
+    "projectAllowJs": true,
+    "perFilePolicy": "@ts-check/@ts-nocheck"
+  },
+  "normalScriptPlusSetup": "separate-modules",
+  "abiOwner": "STP8"
+}
