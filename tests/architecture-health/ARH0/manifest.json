@@ -1,0 +1,80 @@
+{
+  "node": "ARH0",
+  "kind": "constitution",
+  "products": [
+    "ARH0CodebaseInventory",
+    "ARH0ResponsibilityMap",
+    "ARH0CapabilityMatrix",
+    "ARH0DebtRegister"
+  ],
+  "cases": [
+    {
+      "id": "ARH0-inventory",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "totals-mismatch",
+        "missing-module"
+      ]
+    },
+    {
+      "id": "ARH0-ownership",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "malformed-owner",
+        "duplicate-module",
+        "owner-without-responsibility",
+        "inventory-module-unowned",
+        "workspace-package-unowned",
+        "module-double-disposition"
+      ]
+    },
+    {
+      "id": "ARH0-god-evidence",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "god-without-responsibility-evidence",
+        "split-module-reclassified-without-new-evidence"
+      ]
+    },
+    {
+      "id": "ARH0-capability",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "version-not-pinned-in-source",
+        "implemented-without-consumers",
+        "planned-without-uncertainty",
+        "missing-version-source (null without tama-dag provenance)",
+        "version-without-property",
+        "build-identity-not-in-source"
+      ]
+    },
+    {
+      "id": "ARH0-debt",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "malformed-disposition-owner",
+        "debt-without-disposition",
+        "missing-candidate-path (null without tama-dag provenance)"
+      ]
+    },
+    {
+      "id": "ARH0-ratification",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "manifest-case-drift",
+        "manifest-product-drift",
+        "manifest-command-drift"
+      ]
+    }
+  ],
+  "verify": "node tests/architecture-health/ARH0/verify.mjs",
+  "test": "node --test tests/architecture-health/ARH0/arh0.test.mjs",
+  "runtimeCorrectness": false,
+  "notes": "Contract-only constitution (0 production LOC). Products are measured evidence of candidate f69c7eee7; the verifier (the sole owning interface, wired as the verify/test commands below) re-checks internal consistency, on-disk path existence (path fields bind repo tree paths, or the row declares provenance \"tama-dag\" for a TAMA-database DAG record), verbatim implemented version pins, the inventory-to-ownership coverage join (every inventoried module and every pnpm workspace package outside the inventoried packages/ globs has exactly one owner row or debt-row disposition) and god-module evidence discipline (multi-responsibility plus fan-in/shared-commit coupling; a touch count is churn, not coupling). Owner ids are structural references into the TAMA-controller-owned program DAG and the co-owned contract text lives in the same database, so this tree resolves neither against a local copy; ratification here is the manifest case contract itself — the recorded cases, products and commands must match the verifier exactly, so the manifest cannot claim checks that do not run. It does not re-walk the tree: re-derivation of populations is ARH2's obligation with the recorded classification rules. Retained evidence spec: tests/architecture-health/evidence/ARH0/cases.md."
+}
