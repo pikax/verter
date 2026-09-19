@@ -26,11 +26,6 @@ export const PROTOCOL_VERSION = 1;
 export const CANONICAL_INSTANCE_TYPE = "InstanceType<typeof Comp>";
 export const DEFAULT_INSTANCE_PRINT = "Comp<unknown, unknown>";
 
-/** The job baseline (STP7 merge) this node's branch started from. */
-export const BASELINE_INPUT_SNAPSHOT = "6e777f11e3db1d8615d813d36d161aaa986c6dc8";
-/** The commit that introduced the ratified STP8 products. */
-export const RATIFICATION_CANDIDATE = "95175044e97296c6d07045e5e4d4fdc562904e50";
-
 export const STP8_MANDATORY_CASES = Object.freeze([
   "STP8-complete-evidence",
   "STP8-partial-ratify",
@@ -934,41 +929,6 @@ export function validateStp8Products({
   if (!String(abi?.ac3Rationale || "").trim() || !String(abi?.ac4Rationale || "").trim()) {
     errors.push(
       err("STP8-complete-evidence", "removed-fixture", "missing AC3/AC4 untouched-owner rationale"),
-    );
-  }
-  // Completion evidence must label the baseline input snapshot and the
-  // ratification candidate separately; the baseline SHA is never the candidate.
-  const baselineMatch = /Input snapshot \(job baseline[^`\n]*`([0-9a-f]{40})`/.exec(evidenceText);
-  const candidateMatch = /Ratification candidate: `([0-9a-f]{40})`/.exec(evidenceText);
-  if (!baselineMatch || baselineMatch[1] !== BASELINE_INPUT_SNAPSHOT) {
-    errors.push(
-      err(
-        "STP8-complete-evidence",
-        "baseline-mislabel",
-        `evidence index must record the job baseline input snapshot ${BASELINE_INPUT_SNAPSHOT} under its own label`,
-      ),
-    );
-  }
-  if (
-    !candidateMatch ||
-    candidateMatch[1] === BASELINE_INPUT_SNAPSHOT ||
-    !/^[0-9a-f]{40}$/.test(candidateMatch[1])
-  ) {
-    errors.push(
-      err(
-        "STP8-complete-evidence",
-        "candidate-mislabel",
-        `evidence index must record a ratification candidate revision distinct from the baseline (found ${candidateMatch?.[1] ?? "none"})`,
-      ),
-    );
-  }
-  if (/Input snapshot[^)\n]*\(captured STP8 candidate\)/.test(evidenceText)) {
-    errors.push(
-      err(
-        "STP8-complete-evidence",
-        "candidate-mislabel",
-        "evidence index still labels the baseline input snapshot as the STP8 candidate",
-      ),
     );
   }
   if (!/6\.0\.3/.test(evidenceText) || !/7\.0\.2/.test(evidenceText)) {

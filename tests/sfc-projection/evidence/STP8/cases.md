@@ -1,8 +1,8 @@
 # STP8 evidence index
 
-Input snapshot (job baseline, STP7 merge base of this branch): `6e777f11e3db1d8615d813d36d161aaa986c6dc8` on `tama_dag/0.1.0-tama/STP8`.
+Input context: "test(compiler): prove early Svelte and heterogeneous-context boundary (#628)" (2026-09-19).
 
-Ratification candidate: `95175044e97296c6d07045e5e4d4fdc562904e50` (the commit that introduced the STP8 products; review repairs land as later commits on the same branch and are not a new input snapshot).
+Ratification context: "test(compiler): ratify Vue constructor ABI and topology matrix (STP8)" (2026-09-19). Titles and dates are descriptive references only; validation checks the current products and engine inputs without requiring historical commit identities.
 
 Engine pins: `tests/sfc-projection/STP1/products/engine-matrix.json` — ts-js `typescript@6.0.3` (`packages/playground/node_modules/typescript`), ts-native `typescript@7.0.2` (`typescript/unstable/sync`). Vue pin: `vue@3.6.0-rc.5` (root `package.json` devDependencies, matrix-admitted lane `vue-3.6`).
 
@@ -16,7 +16,7 @@ Commands (run on the candidate; do not treat this file as an execution transcrip
 
 Products: `AcceptedProjectionArchitecture`, `AcceptedVueConstructorABI`, `AcceptedTopologyMatrix`, `HelperABI` v1.
 
-Charter home divergence: the charter's planned contract home `roadmap/0.1.0-tama/contracts/sfc-typescript-projection.md` was not recreated because `b940abc1e` removed the repository roadmap as database-owned. The ratified source contract lives in `tests/sfc-projection/STP8/` (`contract.ts`, `products/`, `protocol.mjs`); the receiving-amendment list the charter expects in that file's section 13 is recorded in `products/accepted-projection-architecture.json` (`receivingAmendments`).
+Charter home divergence: the charter's planned contract home `roadmap/0.1.0-tama/contracts/sfc-typescript-projection.md` was not recreated because "chore(ci): remove the repository roadmap; the program DAG is database-owned" (2026-09-18) removed the repository roadmap. The ratified source contract lives in `tests/sfc-projection/STP8/` (`contract.ts`, `products/`, `protocol.mjs`); the receiving-amendment list the charter expects in that file's section 13 is recorded in `products/accepted-projection-architecture.json` (`receivingAmendments`).
 
 Deletion population this node: empty (no standalone legacy route is retired by STP8). Displaced call sites/helpers are recorded as they migrate; final removal stays with STP58 (Vue) and STS15 (Svelte). Production constructor emit: STP16. Specialization runtime: STP18. Full Vue typing/public declarations/IDE: STP59.
 

@@ -69,7 +69,7 @@
 //! (`landed_typeinfo_blocks_have_required_guards`,
 //! `no_landed_typeinfo_block_has_live_ignored_rows`,
 //! `no_vacuous_parent_u_block_landing`, `zero_row_blocks_land_exactly_once`,
-//! `typeinfo_block_landing_transactions_are_atomic_and_trailer_backed`)
+//! `typeinfo_block_landing_transactions_are_atomic_and_status_coupled`)
 //! plus the Q4 independence rails
 //! (`row_registry_matches_discovered_tests`,
 //! `row_registry_contains_pinned_baseline_cohort` — the append-only rail,
@@ -4345,51 +4345,6 @@ fn known_blocks_for_amendments() -> BTreeSet<TypeInfoParityBlockId> {
     TYPEINFO_PARITY_BLOCKS.iter().map(|b| b.block_id).collect()
 }
 
-/// The wire token a block's `Typeinfo-Block:` trailer carries. Exhaustive:
-/// adding a block variant forces an arm here.
-fn block_trailer_token(block: TypeInfoParityBlockId) -> &'static str {
-    use TypeInfoParityBlockId::*;
-    match block {
-        U0ManifestSubstrate => "U0.MANIFEST_SUBSTRATE",
-        U2QueryValueDomain => "U2.QUERY_VALUE_DOMAIN",
-        U2CanonicalTypeAlgebra => "U2.CANONICAL_TYPE_ALGEBRA",
-        U2BinderIdentityFacts => "U2.BINDER_IDENTITY_FACTS",
-        U8WireSurfaceClosure => "U8.WIRE_SURFACE_CLOSURE",
-        U12Exporter => "U12.EXPORTER",
-        U13Projection => "U13.PROJECTION",
-        U2RelationInfer => "U2.RELATION_INFER",
-        U2Utilities => "U2.UTILITIES",
-        U2IndexedAccess => "U2.INDEXED_ACCESS",
-        U2MappedTemplate => "U2.MAPPED_TEMPLATE",
-        U2ClassSurfaces => "U2.CLASS_SURFACES",
-        U2Enums => "U2.ENUMS",
-        U2ModuleAugmentation => "U2.MODULE_AUGMENTATION",
-        U2JsxFoundations => "U2.JSX_FOUNDATIONS",
-        U6FlowReturnSubstrate => "U6.FLOW_RETURN_SUBSTRATE",
-        U6NarrowTypeof => "U6.NARROW_TYPEOF",
-        U6NarrowEquality => "U6.NARROW_EQUALITY",
-        U6NarrowTruthiness => "U6.NARROW_TRUTHINESS",
-        U6NarrowIn => "U6.NARROW_IN",
-        U6NarrowInstanceof => "U6.NARROW_INSTANCEOF",
-        U6NarrowDiscriminated => "U6.NARROW_DISCRIMINATED",
-        U6NarrowSubstitution => "U6.NARROW_SUBSTITUTION",
-        U6NarrowInvalidation => "U6.NARROW_INVALIDATION",
-        U6PredicateAssertion => "U6.PREDICATE_ASSERTION",
-        U6CallResolve => "U6.CALL_RESOLVE",
-        U6ContextualCallback => "U6.CONTEXTUAL_CALLBACK",
-        U6ValueInference => "U6.VALUE_INFERENCE",
-        U6AsyncGenerator => "U6.ASYNC_GENERATOR",
-        U6CrossFile => "U6.CROSS_FILE",
-        U6LoopClosure => "U6.LOOP_CLOSURE",
-        U3CacheFactModel => "U3.CACHE_FACT_MODEL",
-        U3AdaptiveFamilyRetention => "U3.ADAPTIVE_FAMILY_RETENTION",
-        U10ResultDb => "U10.RESULT_DB",
-        U11PublicRelationSession => "U11.PUBLIC_RELATION_SESSION",
-        U14MacroAdapter => "U14.MACRO_ADAPTER",
-        U15FinalLift => "U15.FINAL_LIFT",
-    }
-}
-
 /// ENGINE (§11.5 done-predicate part 3): a `Landed` block's required
 /// guards must all be `Live` in the executable registry — an `Owed` or
 /// unregistered required guard on a `Landed` block is a violation.
@@ -4662,12 +4617,6 @@ fn landing_transaction_violations(
                 tx.block_id,
             ));
         }
-        if tx.commit.len() < 7 || !tx.commit.chars().all(|c| c.is_ascii_hexdigit()) {
-            failures.push(format!(
-                "landing transaction for {:?} carries malformed commit {:?}",
-                tx.block_id, tx.commit,
-            ));
-        }
     }
     for block in blocks {
         let tx_count = transactions
@@ -4679,8 +4628,7 @@ fn landing_transaction_violations(
                 if tx_count != 1 {
                     failures.push(format!(
                         "{:?} is Landed but has {tx_count} landing transaction(s) \
-                         (exactly one squash-merge commit with the \
-                         `Typeinfo-Block:` trailer is required)",
+                         (exactly one recorded ratified landing is required)",
                         block.block_id,
                     ));
                 }
@@ -4738,14 +4686,10 @@ fn locate_git() -> Option<PathBuf> {
     None
 }
 
-/// The landing-transaction check: transactions are atomic, unique,
-/// status-coupled (engine above) AND — when git is available — each
-/// recorded transaction commit exists in history, is an ancestor of
-/// `HEAD`, and its message carries the block's `Typeinfo-Block:` trailer.
-/// Trailers are enforced prospectively: no historical landing has one,
-/// which is exactly why no block may currently hold `Landed`.
+/// Recorded landings are atomic, unique and status-coupled. Historical
+/// commit identities and Git history are not acceptance evidence.
 #[test]
-fn typeinfo_block_landing_transactions_are_atomic_and_trailer_backed() {
+fn typeinfo_block_landing_transactions_are_atomic_and_status_coupled() {
     let failures = landing_transaction_violations(TYPEINFO_PARITY_BLOCKS, LANDING_TRANSACTIONS);
     assert!(
         failures.is_empty(),
@@ -4753,51 +4697,6 @@ fn typeinfo_block_landing_transactions_are_atomic_and_trailer_backed() {
         failures.len(),
         failures.join("\n  "),
     );
-
-    if LANDING_TRANSACTIONS.is_empty() {
-        return;
-    }
-    let Some(git) = locate_git() else {
-        eprintln!("skipping trailer verification: no `git` on PATH");
-        return;
-    };
-    let root = workspace_root();
-    for tx in LANDING_TRANSACTIONS {
-        let message = std::process::Command::new(&git)
-            .args(["log", "-1", "--format=%B", tx.commit])
-            .current_dir(&root)
-            .output();
-        let Ok(out) = message else {
-            eprintln!("skipping trailer verification: git invocation failed");
-            return;
-        };
-        assert!(
-            out.status.success(),
-            "landing transaction for {:?} names commit {} which git cannot resolve",
-            tx.block_id,
-            tx.commit,
-        );
-        let body = String::from_utf8_lossy(&out.stdout);
-        let trailer = format!("Typeinfo-Block: {}", block_trailer_token(tx.block_id));
-        assert!(
-            body.lines().any(|l| l.trim() == trailer),
-            "commit {} for {:?} lacks the `{trailer}` trailer",
-            tx.commit,
-            tx.block_id,
-        );
-        let ancestor = std::process::Command::new(&git)
-            .args(["merge-base", "--is-ancestor", tx.commit, "HEAD"])
-            .current_dir(&root)
-            .status();
-        if let Ok(status) = ancestor {
-            assert!(
-                status.success(),
-                "landing-transaction commit {} for {:?} is not an ancestor of HEAD",
-                tx.commit,
-                tx.block_id,
-            );
-        }
-    }
 }
 
 /// Discrimination: the transaction engine fails a `Landed` block without
@@ -4806,10 +4705,19 @@ fn typeinfo_block_landing_transactions_are_atomic_and_trailer_backed() {
 fn landing_transaction_engine_is_discriminating() {
     let mut landed = TYPEINFO_PARITY_BLOCKS[0];
     landed.status = BlockLandingStatus::Landed;
+    let recorded = LandingTransaction {
+        block_id: landed.block_id,
+        title: "",
+        date: "",
+    };
+    assert!(
+        landing_transaction_violations(&[landed], &[recorded]).is_empty(),
+        "a recorded landing must not require a historical commit identity",
+    );
     let f = landing_transaction_violations(&[landed], &[]);
     assert!(
         f.iter()
-            .any(|m| m.contains("exactly one squash-merge commit")),
+            .any(|m| m.contains("exactly one recorded ratified landing")),
         "Landed without a transaction MUST fail; got {f:?}",
     );
 
@@ -4817,7 +4725,8 @@ fn landing_transaction_engine_is_discriminating() {
     pending.status = BlockLandingStatus::Pending;
     let tx = LandingTransaction {
         block_id: pending.block_id,
-        commit: "0123456789abcdef",
+        title: "Implement the recorded capability",
+        date: "2026-09-19",
     };
     let f = landing_transaction_violations(&[pending], &[tx]);
     assert!(
@@ -4858,8 +4767,8 @@ fn zero_row_landing_violations(
             failures.push(format!(
                 "zero-row block {:?} (status {:?}) has {tx_count} landing \
                  transaction(s); exactly {expected} required — a zero-row \
-                 block lands exactly once, through one trailer-carrying \
-                 squash commit, and is never re-selected",
+                 block lands exactly once, through one recorded ratification, \
+                 and is never re-selected",
                 block.block_id, block.status,
             ));
         }
@@ -4906,12 +4815,12 @@ fn zero_row_engine_is_discriminating() {
     );
     let tx = LandingTransaction {
         block_id: landed.block_id,
-        commit: "0123456789abcdef",
+        title: "Implement the recorded capability",
+        date: "2026-09-19",
     };
     assert!(
         zero_row_landing_violations(&[landed], EXPECTED_IGNORE_MANIFEST, &[tx]).is_empty(),
-        "zero-row Landed with exactly one transaction passes this engine \
-         (trailer existence is the transaction guard's arm)",
+        "zero-row Landed with exactly one transaction passes this engine",
     );
     let f = landing_transaction_violations(&[landed], &[tx, tx]);
     assert!(
@@ -5338,7 +5247,7 @@ static INTEGRATION_LIVE_GUARD_BINDINGS: &[LiveGuardBinding] = &[
     live_guard!(NoLandedTypeinfoBlockHasLiveIgnoredRows => crate::cases::typeinfo_ignored_test_manifest::no_landed_typeinfo_block_has_live_ignored_rows),
     live_guard!(NoVacuousParentUBlockLanding => crate::cases::typeinfo_ignored_test_manifest::no_vacuous_parent_u_block_landing),
     live_guard!(ZeroRowBlocksLandExactlyOnce => crate::cases::typeinfo_ignored_test_manifest::zero_row_blocks_land_exactly_once),
-    live_guard!(TypeinfoBlockLandingTransactionsAreAtomicAndTrailerBacked => crate::cases::typeinfo_ignored_test_manifest::typeinfo_block_landing_transactions_are_atomic_and_trailer_backed),
+    live_guard!(TypeinfoBlockLandingTransactionsAreAtomicAndStatusCoupled => crate::cases::typeinfo_ignored_test_manifest::typeinfo_block_landing_transactions_are_atomic_and_status_coupled),
     live_guard!(GuardRegistryLiveIntegrationBindingsAreComplete => crate::cases::typeinfo_ignored_test_manifest::guard_registry_live_integration_bindings_are_complete),
     live_guard!(LiveIntegrationGuardsAreHarnessRegisteredAndNotIgnored => crate::cases::typeinfo_ignored_test_manifest::live_integration_guards_are_harness_registered_and_not_ignored),
     live_guard!(EverySemanticQueryKeyMapsToExactlyOneValueDomain => crate::cases::g_block::u2b7_flow_contextual_guards::every_semantic_query_key_maps_to_exactly_one_value_domain),

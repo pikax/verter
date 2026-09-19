@@ -48,7 +48,7 @@ AC4: pages are public delivery under the DOC0 information architecture
 (inventory rows appended, owner DOC2, audience contributor), linked from
 `docs/contributing/index.md`. Each retained hotspot surface is mapped to
 DOC0 catalog ids and listed on the architecture page; host/profile basis
-names the ARH1 `candidate` SHA, records the original measurement host as
+uses the contract landing title and ISO date as descriptive context, records the original measurement host as
 unrecorded in the contract products, and names the live `ubuntu-latest` /
 `.nvmrc` architecture-health re-derivation. `examples/reference` is
 consumed, not duplicated. Permissions N/A (no capability surface created).

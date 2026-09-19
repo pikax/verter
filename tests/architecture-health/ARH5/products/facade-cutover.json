@@ -2,7 +2,7 @@
   "schema": "ARH5FacadeCutover",
   "version": 1,
   "contractNode": "ARH5",
-  "candidate": "ee362804d3e85c0ee67fbb0b6f4038c7cfe7553c",
+  "sourceReference": {"title":"test(arch): characterize hotspot boundaries and ratify complexity (#641)","date":"2026-09-19"},
   "predecessorProducts": {
     "characterization": "tests/architecture-health/ARH2/products/characterization.json"
   },
