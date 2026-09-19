@@ -976,8 +976,8 @@ mod manifest_tests {
         );
         assert_eq!(
             manifest.get("version").and_then(toml::Value::as_str),
-            Some("0.1.0"),
-            "version must be 0.1.0"
+            Some("0.0.2"),
+            "version must be 0.0.2"
         );
     }
 
