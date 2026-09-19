@@ -20,6 +20,11 @@
       "types": "./dist/startup-gate.d.ts",
       "import": "./dist/startup-gate.js",
       "default": "./dist/startup-gate.js"
+    },
+    "./jetbrains": {
+      "types": "./jetbrains/index.ts",
+      "import": "./jetbrains/index.ts",
+      "default": "./jetbrains/index.ts"
     }
   },
   "scripts": {
