@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vitepress dev",
-    "build": "vitepress build",
+    "check": "node ./scripts/reference-harness.mjs",
+    "build": "node ./scripts/reference-harness.mjs && vitepress build",
     "preview": "vitepress preview"
   },
   "devDependencies": {

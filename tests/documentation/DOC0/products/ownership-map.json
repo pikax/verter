@@ -21,7 +21,7 @@
   "outcomes": [
     { "id": "versioned-information-architecture", "currentOwner": "DOC0", "finalOwner": "DOC9", "receivingAcceptance": "DOC0-AC4" },
     { "id": "generated-capability-api-config-reference", "currentOwner": "DOC0", "finalOwner": "DOC3", "receivingAcceptance": "DOC0-AC2" },
-    { "id": "executable-examples-and-release-selected-checks", "currentOwner": "DOC0", "finalOwner": "DOC1", "receivingAcceptance": "DOC0-AC4" }
+    { "id": "executable-examples-and-release-selected-checks", "currentOwner": "DOC1", "finalOwner": "DOC1", "receivingAcceptance": "DOC1-AC1" }
   ],
   "displacedRoutes": [],
   "deletionPopulationThisNode": [],

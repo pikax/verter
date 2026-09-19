@@ -106,7 +106,7 @@
   "examples": [
     { "path": "examples", "kind": "sandbox-app", "audience": "contributor", "status": "current", "owner": "DOC1", "evidence": ["examples/package.json", "examples/src"] },
     { "path": "packages/example", "kind": "compiler-fixture", "audience": "contributor", "status": "current", "owner": "DOC1", "evidence": ["packages/example/package.json"] },
-    { "path": "examples/reference", "kind": "public-reference-home", "audience": "user", "status": "unbuilt", "owner": "DOC1", "evidence": ["TAMA controller DAG asset contracts/web-product-expansion-v1.md"] }
+    { "path": "examples/reference", "kind": "public-reference-home", "audience": "user", "status": "current", "owner": "DOC1", "evidence": ["examples/reference/manifest.json", "examples/reference/package.json", "docs/scripts/reference-harness.mjs"] }
   ],
   "roadmapClaims": [
     {
