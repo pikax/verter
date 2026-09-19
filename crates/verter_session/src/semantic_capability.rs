@@ -57,7 +57,7 @@ use verter_identity::identity::{
     InputBasisId, ProviderContractId, QueryIdentity, ResultContractId, SemanticFlightKey,
 };
 
-use crate::external_ts::{BoundProject, QueryFeature};
+use crate::external_ts::{BoundProject, EngineIdentity, QueryFeature, ServeMode};
 
 /// One closed capability row: the capability, and the canonical query-kind
 /// domain tag that composes its [`QueryIdentity`]. The row IS the closure
@@ -65,11 +65,33 @@ use crate::external_ts::{BoundProject, QueryFeature};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SemanticCapabilityRow {
     /// The engine-plane capability this row closes.
-    pub feature: QueryFeature,
+    feature: QueryFeature,
     /// The domain tag composing the query-kind component of the row's
     /// [`QueryIdentity`]. Unique across the catalog; the catalog's canonical
     /// order is the strictly ascending order of these tags.
-    pub query_kind_domain_tag: &'static str,
+    ///
+    /// Private, with no constructor outside this module: identity composition
+    /// resolves a [`QueryFeature`] through [`capability_row`], so a caller
+    /// cannot copy a canonical row, retag it, and mint a second certified
+    /// query/result contract for the same capability. The catalog's
+    /// exhaustiveness and canonical order are compile-time properties, not
+    /// runtime validations a forged row could bypass.
+    query_kind_domain_tag: &'static str,
+}
+
+impl SemanticCapabilityRow {
+    /// The engine-plane capability this row closes.
+    #[must_use]
+    pub fn feature(&self) -> QueryFeature {
+        self.feature
+    }
+
+    /// The domain tag composing the query-kind component of the row's
+    /// [`QueryIdentity`].
+    #[must_use]
+    pub fn query_kind_domain_tag(&self) -> &'static str {
+        self.query_kind_domain_tag
+    }
 }
 
 const COMPLETION: SemanticCapabilityRow = SemanticCapabilityRow {
@@ -228,12 +250,36 @@ impl SemanticCapabilityRow {
     }
 }
 
+/// The serving-mode discriminant the observed profile hashes through.
+/// Exhaustive over [`ServeMode`], so a new mode cannot silently alias an old
+/// one: it fails to compile here first.
+const fn serve_mode_discriminant(mode: ServeMode) -> u32 {
+    match mode {
+        ServeMode::Owned => 1,
+        ServeMode::Shared => 2,
+    }
+}
+
 /// Descriptor the observed engine profile hashes through. Every input is a
-/// fact the backend negotiated — never a default someone assumed.
+/// fact the backend negotiated or the serving session reported — never a
+/// default someone assumed. The serving identity (mode, wire pin, session
+/// generation) is a first-class dimension: an OWNED and a SHARED identity
+/// over the same project and version never compose the same profile, so one
+/// engine's facts cannot launder into the other's question identities. The
+/// bound project and its env dimensions pin whose facts these are.
 struct ObservedEngineProfile<'a> {
     reported_version: &'a str,
     static_module_resolution_map: bool,
     async_cancellable_queries: bool,
+    serve_mode: ServeMode,
+    serving_version: &'a str,
+    wire_pin: u64,
+    editor_session_generation: u64,
+    project: &'a str,
+    parse_env_hash: [u8; 16],
+    resolve_env_hash: [u8; 16],
+    lib_env_hash: [u8; 16],
+    project_identity: [u8; 16],
 }
 
 impl CanonicalEncode for ObservedEngineProfile<'_> {
@@ -244,6 +290,15 @@ impl CanonicalEncode for ObservedEngineProfile<'_> {
         encoder.field_str(1, self.reported_version);
         encoder.field_bool(2, self.static_module_resolution_map);
         encoder.field_bool(3, self.async_cancellable_queries);
+        encoder.field_enum_discriminant(4, serve_mode_discriminant(self.serve_mode));
+        encoder.field_str(5, self.serving_version);
+        encoder.field_u64(6, self.wire_pin);
+        encoder.field_u64(7, self.editor_session_generation);
+        encoder.field_str(8, self.project);
+        encoder.field_bytes(9, &self.parse_env_hash);
+        encoder.field_bytes(10, &self.resolve_env_hash);
+        encoder.field_bytes(11, &self.lib_env_hash);
+        encoder.field_bytes(12, &self.project_identity);
     }
 }
 
@@ -261,9 +316,10 @@ pub enum CertificationRefusal {
 /// The sole route by which a TypeScript engine's answer enters the semantic
 /// plane. A witness, not a handle: holding one means a project binding was
 /// resolved (the [`BoundProject`] it was certified over), the engine's
-/// capability interpretation was observed and recorded in the profile that
-/// composes every [`QueryIdentity`] minted under it, and the basis the answer
-/// will be attributed to is the one named at certification.
+/// capability interpretation was observed, the serving session (mode, wire
+/// pin, generation) was identified and recorded in the profile that composes
+/// every [`QueryIdentity`] minted under it, and the basis the answer will be
+/// attributed to is the one named at certification.
 ///
 /// It mints no engine, holds no callback, and reaches no backend: a caller
 /// cannot ask it a question, only compose the identities a certified flight
@@ -277,23 +333,35 @@ pub struct CertifiedTypeEngineBinding {
 
 impl CertifiedTypeEngineBinding {
     /// Certify the binding: project binding resolved, capability
-    /// interpretation observed, basis named. The only constructor — the
-    /// fields are private and no struct-literal path exists outside this
-    /// module, so a binding cannot be fabricated from parts.
+    /// interpretation observed, serving session identified, basis named. The
+    /// only constructor — the fields are private and no struct-literal path
+    /// exists outside this module, so a binding cannot be fabricated from
+    /// parts.
     pub fn certify(
         bound: &BoundProject,
+        serving: &EngineIdentity,
         input_basis: InputBasisId,
     ) -> Result<Self, CertificationRefusal> {
         let capabilities = bound.capabilities();
         let Some(reported_version) = capabilities.reported_version.as_deref() else {
             return Err(CertificationRefusal::UnobservedEngineCapabilities);
         };
+        let env_dims = bound.env_dims();
         Ok(Self {
             project: bound.project_arc(),
             observed_profile: ProviderContractId::from_canonical(&ObservedEngineProfile {
                 reported_version,
                 static_module_resolution_map: capabilities.static_module_resolution_map,
                 async_cancellable_queries: capabilities.async_cancellable_queries,
+                serve_mode: serving.mode,
+                serving_version: &serving.observed_version,
+                wire_pin: serving.wire_pin,
+                editor_session_generation: serving.editor_session_generation,
+                project: bound.project(),
+                parse_env_hash: env_dims.parse_env_hash,
+                resolve_env_hash: env_dims.resolve_env_hash,
+                lib_env_hash: env_dims.lib_env_hash,
+                project_identity: env_dims.project_identity.0,
             }),
             input_basis,
         })
@@ -324,15 +392,19 @@ impl CertifiedTypeEngineBinding {
     }
 
     /// Compose the snapshot-independent question identity for one capability:
-    /// the row's query kind, the semantic arguments, this binding's observed
-    /// profile, and the row's result contract. No basis enters it, which is
-    /// exactly what makes it a cross-snapshot cache-candidate key.
+    /// the capability's canonical query kind, the semantic arguments, this
+    /// binding's observed profile, and the capability's result contract. The
+    /// row is resolved through [`capability_row`] — the sole canonical row —
+    /// never accepted from the caller, so a forged or retagged row cannot
+    /// enter a certified identity. No basis enters it, which is exactly what
+    /// makes it a cross-snapshot cache-candidate key.
     #[must_use]
     pub fn query_identity<Q>(
         &self,
-        row: &SemanticCapabilityRow,
+        feature: QueryFeature,
         semantic_arguments: CanonicalDigest,
     ) -> QueryIdentity<Q> {
+        let row = capability_row(feature);
         QueryIdentity::compose(
             row.query_kind_domain_tag,
             semantic_arguments,
@@ -347,11 +419,11 @@ impl CertifiedTypeEngineBinding {
     #[must_use]
     pub fn flight_key<Q>(
         &self,
-        row: &SemanticCapabilityRow,
+        feature: QueryFeature,
         semantic_arguments: CanonicalDigest,
     ) -> SemanticFlightKey<Q> {
         SemanticFlightKey {
-            query_identity: self.query_identity(row, semantic_arguments),
+            query_identity: self.query_identity(feature, semantic_arguments),
             input_basis: self.input_basis.clone(),
         }
     }
