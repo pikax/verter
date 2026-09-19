@@ -16,11 +16,12 @@ export const PINNED_LAPCE_VERSION_MANIFEST: LapceVersionManifest = {
   items: [
     {
       item: "lapce-client",
-      version: null,
-      status: "unrecorded",
+      version: "0.4.6+Nightly.126d356",
+      status: "pinned",
       reason:
-        "no supported Lapce build captured on a reference-client machine yet " +
-        "(reference-machine-manifests.v1 population is empty-at-ratification); unavailable, not guessed",
+        "the recorded WSP1L reference build: Lapce v0.4.6 with the WSP1L instrumentation patch " +
+        "(packages/dx-harness/lapce/instrumented-client/lapce-0.4.6-wsp1l.patch), sealed in " +
+        "tests/workspace-responsiveness/WSP1L/products/real-client-capture.v1.json",
     },
     {
       item: "verter-plugin-adapter",

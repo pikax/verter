@@ -1,0 +1,521 @@
+diff --git a/lapce-app/src/app.rs b/lapce-app/src/app.rs
+index d3cbc52..5243884 100644
+--- a/lapce-app/src/app.rs
++++ b/lapce-app/src/app.rs
+@@ -4002,6 +4002,27 @@ pub fn launch() {
+             .unwrap();
+     }
+ 
++    // WSP1L: the external drive channel (inactive without
++    // VERTER_WSP1L_DRIVE_ADDR). Steps arrive on this thread's channel and are
++    // actuated on the UI event loop by the reactive dispatch below.
++    {
++        let (tx, rx) = std::sync::mpsc::channel::<(
++            crate::wsp1l::StepSpec,
++            std::sync::mpsc::Sender<serde_json::Value>,
++        )>();
++        let notification = create_signal_from_channel(rx);
++        let app_data = app_data.clone();
++        create_effect(move |_| {
++            if let Some((spec, ack)) = notification.get() {
++                crate::wsp1l::dispatch_step(&app_data, &spec, ack);
++            }
++        });
++        std::thread::Builder::new()
++            .name("Wsp1lDrive".to_owned())
++            .spawn(move || crate::wsp1l::run_drive_channel(tx))
++            .unwrap();
++    }
++
+     {
+         let app_data = app_data.clone();
+         app_data.app_command.listen(move |command| {
+diff --git a/lapce-app/src/completion.rs b/lapce-app/src/completion.rs
+index 2016126..9312b6b 100644
+--- a/lapce-app/src/completion.rs
++++ b/lapce-app/src/completion.rs
+@@ -116,8 +116,12 @@ pub fn receive(
+                 indices: Vec::new(),
+             })
+             .collect();
++        // WSP1L: the completion response items were received and decoded.
++        crate::wsp1l::emit_stage("decoded");
+         self.input_items.insert(input.to_string(), items);
+         self.filter_items();
++        // WSP1L: the decoded items were applied to the completion data.
++        crate::wsp1l::emit_stage("applied");
+     }
+ 
+     /// Request for completion items wit the current request id.
+diff --git a/lapce-app/src/doc.rs b/lapce-app/src/doc.rs
+index b20d13a..530f8c4 100644
+--- a/lapce-app/src/doc.rs
++++ b/lapce-app/src/doc.rs
+@@ -449,12 +449,16 @@ pub fn init_content(&self, content: Rope) {
+                     });
+                 });
+             });
++            // WSP1L: the opened file's content was decoded into the buffer.
++            crate::wsp1l::emit_stage("decoded");
+             self.loaded.set(true);
+             self.on_update(None);
+             self.init_parser();
+             self.init_diagnostics();
+             self.retrieve_head();
+         });
++        // WSP1L: the decoded content was applied to the document state.
++        crate::wsp1l::emit_stage("applied");
+     }
+ 
+     fn init_parser(&self) {
+@@ -485,7 +489,11 @@ pub fn reload(&self, content: Rope, set_pristine: bool) {
+             .buffer
+             .try_update(|buffer| buffer.reload(content, set_pristine))
+             .unwrap();
++        // WSP1L: the loaded content was decoded into the buffer.
++        crate::wsp1l::emit_stage("decoded");
+         self.apply_deltas(&[delta]);
++        // WSP1L: the reloaded content was applied to the document state.
++        crate::wsp1l::emit_stage("applied");
+     }
+ 
+     pub fn handle_file_changed(&self, content: Rope) {
+diff --git a/lapce-app/src/editor.rs b/lapce-app/src/editor.rs
+index d878e72..bb4d307 100644
+--- a/lapce-app/src/editor.rs
++++ b/lapce-app/src/editor.rs
+@@ -1286,6 +1286,8 @@ enum DefinitionOrReferece {
+                     });
+                 }
+             }
++            // WSP1L: the resolved jump was applied to the editor.
++            crate::wsp1l::emit_stage("applied");
+         });
+         let proxy = self.common.proxy.clone();
+         self.common.proxy.get_definition(
+@@ -1293,6 +1295,8 @@ enum DefinitionOrReferece {
+             path.clone(),
+             position,
+             move |result| {
++                // WSP1L: the definition response was received and decoded.
++                crate::wsp1l::emit_stage("decoded");
+                 if let Ok(ProxyResponse::GetDefinitionResponse {
+                     definition, ..
+                 }) = result
+@@ -3389,6 +3393,8 @@ fn receive_char(&self, c: &str) {
+                     c,
+                     &self.common.config.get_untracked(),
+                 );
++                // WSP1L: the keystroke's buffer deltas were decoded.
++                crate::wsp1l::emit_stage("decoded");
+                 self.cursor().set(cursor);
+ 
+                 if !c
+@@ -3405,6 +3411,8 @@ fn receive_char(&self, c: &str) {
+                 );
+ 
+                 self.apply_deltas(&deltas);
++                // WSP1L: the edit was applied to the editor state and views.
++                crate::wsp1l::emit_stage("applied");
+             } else if let Some(direction) = self.inline_find.get_untracked() {
+                 self.inline_find(direction.clone(), c);
+                 self.last_inline_find.set(Some((direction, c.to_string())));
+@@ -3420,6 +3428,30 @@ fn receive_char(&self, c: &str) {
+     }
+ }
+ 
++impl EditorData {
++    /// WSP1L drive actuation for a `type` step: enter insert mode when
++    /// needed, then deliver the keystroke through the real `receive_char`
++    /// path on the UI event loop.
++    pub fn wsp1l_drive_type(&self, text: &str) {
++        if self.get_mode() != Mode::Insert {
++            self.run_edit_command(&EditCommand::InsertMode);
++        }
++        self.receive_char(text);
++    }
++
++    /// WSP1L drive actuation for a `complete` step: run the editor's real
++    /// completion update (request + popup) on the UI event loop.
++    pub fn wsp1l_drive_complete(&self) {
++        self.update_completion(true);
++    }
++
++    /// WSP1L drive actuation for a `navigate` step: run the real
++    /// go-to-definition flow on the UI event loop.
++    pub fn wsp1l_drive_goto(&self) {
++        self.go_to_definition();
++    }
++}
++
+ /// Custom signal wrapper for [`Doc`], because [`Editor`] only knows it as a
+ /// `Rc<dyn Document>`, and there is currently no way to have an `RwSignal<Rc<Doc>>` and
+ /// an `RwSignal<Rc<dyn Document>>`.  
+diff --git a/lapce-app/src/editor/view.rs b/lapce-app/src/editor/view.rs
+index 5a119e0..b78acfb 100644
+--- a/lapce-app/src/editor/view.rs
++++ b/lapce-app/src/editor/view.rs
+@@ -1158,6 +1158,9 @@ fn paint(&mut self, cx: &mut PaintCx) {
+         let screen_lines = ed.screen_lines.get_untracked();
+         self.paint_sticky_headers(cx, viewport, &screen_lines);
+         self.paint_scroll_bar(cx, viewport, is_local, config);
++        // WSP1L: this editor view presented a frame; for a driven step whose
++        // state was already applied, this is the observed paint stage.
++        crate::wsp1l::on_editor_paint();
+     }
+ }
+ 
+diff --git a/lapce-app/src/lib.rs b/lapce-app/src/lib.rs
+index 43a55ce..3565931 100644
+--- a/lapce-app/src/lib.rs
++++ b/lapce-app/src/lib.rs
+@@ -45,6 +45,7 @@
+ pub mod window;
+ pub mod window_tab;
+ pub mod workspace;
++pub mod wsp1l;
+ 
+ #[cfg(windows)]
+ extern crate windows_sys as windows;
+diff --git a/lapce-app/src/main_split.rs b/lapce-app/src/main_split.rs
+index d698754..4fc1af4 100644
+--- a/lapce-app/src/main_split.rs
++++ b/lapce-app/src/main_split.rs
+@@ -2159,6 +2159,8 @@ pub fn editor_tab_child_close(
+         if editor_tab_children_len == 0 {
+             self.editor_tab_remove(editor_tab_id);
+         }
++        // WSP1L: the editor-tab child close was applied to the tab state.
++        crate::wsp1l::emit_stage("applied");
+ 
+         Some(())
+     }
+diff --git a/lapce-app/src/wsp1l.rs b/lapce-app/src/wsp1l.rs
+new file mode 100644
+index 0000000..0f9e88b
+--- /dev/null
++++ b/lapce-app/src/wsp1l.rs
+@@ -0,0 +1,323 @@
++//! WSP1L instrumentation for Lapce (reference instrumented-client build).
++//!
++//! This module is the instrumentation half of the Verter WSP1L "instrumented
++//! client build" automation path (charter WSP1L.1): it adds (a) an external
++//! drive channel that performs the scripted `open`/`type`/`complete`/
++//! `navigate`/`close` interactions on the real UI event loop, and (b) UI
++//! stage stamps — `verter ui-stamp {json}` lines on stderr — observed at the
++//! real pipeline seams of each interaction:
++//!
++//! - `input_dispatched` — the drive command was accepted on the UI thread and
++//!   the interaction's actuation began.
++//! - `decoded` — the interaction's payload was decoded into an editor
++//!   mutation: `Doc::do_insert`'s buffer deltas for `type`, the completion
++//!   response items for `complete`, the definition response for `navigate`,
++//!   the loaded file content for `open`.
++//! - `applied` — the mutation was applied to editor state (cursor/buffer for
++//!   `type`, filtered completion data for `complete`, the dispatched jump for
++//!   `navigate`, the reloaded buffer for `open`).
++//! - `painted` — the first `EditorView` paint after `applied` (Lapce's
++//!   invalidation and cursor-blink frames drive `EditorView` repaints, so an
++//!   applied interaction is presented in a real observed frame).
++//!
++//! The channel is INACTIVE unless `VERTER_WSP1L_DRIVE_ADDR` is set at
++//! startup: stock runs are untouched, and stamps are emitted only for steps
++//! the external driver explicitly began. Nothing here guesses a timestamp —
++//! a stage that was not observed is simply not stamped, and the driver treats
++//! the hole as a hole.
++
++use std::io::{BufRead, BufReader, Write};
++use std::net::TcpStream;
++use std::path::PathBuf;
++use std::sync::Mutex;
++use std::sync::mpsc::Sender;
++use std::time::Duration;
++
++use floem::reactive::{SignalGet, SignalWith};
++use serde_json::{Value, json};
++
++use crate::app::AppData;
++use crate::editor::EditorData;
++use lapce_rpc::file::PathObject;
++
++const UI_STAGE_ORDER: [&str; 4] = ["input_dispatched", "decoded", "applied", "painted"];
++
++/// How long the drive thread waits for a step's `painted` ack before
++/// reporting a hole to the driver (the driver bounds its own wait too).
++const STEP_ACK_TIMEOUT: Duration = Duration::from_secs(120);
++
++struct ActiveStep {
++    kind: String,
++    request_epoch: u64,
++    source_epoch: Option<u64>,
++    next_stage: usize,
++    stamps: Vec<Value>,
++    ack: Option<Sender<Value>>,
++}
++
++static ACTIVE_STEP: Mutex<Option<ActiveStep>> = Mutex::new(None);
++
++pub fn unix_now_ms() -> u64 {
++    std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map(|d| d.as_millis() as u64)
++        .unwrap_or(0)
++}
++
++fn emit_stage_locked(step: &mut ActiveStep, stage: &str) {
++    let Some(index) = UI_STAGE_ORDER.iter().position(|s| *s == stage) else {
++        return;
++    };
++    if index < step.next_stage {
++        // Already emitted, or a pipeline event that does not belong to this
++        // step's progression. Never guess.
++        return;
++    }
++    // A skipped-over stage stays an honest hole (unobserved, never zero).
++    step.next_stage = index + 1;
++    let at_unix_ms = unix_now_ms();
++    let payload = json!({
++        "kind": step.kind,
++        "requestEpoch": step.request_epoch,
++        "sourceEpoch": step.source_epoch,
++        "stage": stage,
++        "atUnixMs": at_unix_ms,
++    });
++    eprintln!("verter ui-stamp {payload}");
++    step.stamps.push(payload);
++}
++
++/// Record one UI stage observation for the step the external driver began.
++/// No-ops when no step is active (stock runs and interleaved background
++/// work never stamp).
++pub fn emit_stage(stage: &str) {
++    let mut guard = ACTIVE_STEP.lock().unwrap();
++    if let Some(step) = guard.as_mut() {
++        emit_stage_locked(step, stage);
++    }
++}
++
++/// The first `EditorView` paint after `applied` completes the step: stamps
++/// `painted` and hands the collected observations to the drive thread.
++pub fn on_editor_paint() {
++    let mut guard = ACTIVE_STEP.lock().unwrap();
++    if !guard
++        .as_ref()
++        .is_some_and(|step| UI_STAGE_ORDER[step.next_stage] == "painted")
++    {
++        return;
++    }
++    if let Some(step) = guard.as_mut() {
++        emit_stage_locked(step, "painted");
++    }
++    if let Some(finished) = guard.take() {
++        if let Some(ack) = finished.ack {
++            let _ = ack.send(json!({
++                "kind": finished.kind,
++                "requestEpoch": finished.request_epoch,
++                "sourceEpoch": finished.source_epoch,
++                "stamps": finished.stamps,
++            }));
++        }
++    }
++}
++
++/// One scripted interaction received over the drive channel.
++#[derive(Debug, Clone)]
++pub struct StepSpec {
++    pub kind: String,
++    pub request_epoch: u64,
++    pub source_epoch: Option<u64>,
++    pub text: Option<String>,
++    pub path: Option<String>,
++    /// 1-based open position (Lapce `path:line:column` semantics).
++    pub line: Option<usize>,
++    pub column: Option<usize>,
++}
++
++fn parse_step(line: &str) -> Option<StepSpec> {
++    let value: Value = serde_json::from_str(line.trim()).ok()?;
++    let kind = value.get("kind")?.as_str()?.to_string();
++    if !["open", "type", "complete", "navigate", "close"].contains(&kind.as_str()) {
++        return None;
++    }
++    let request_epoch = value.get("requestEpoch")?.as_u64()?;
++    let source_epoch = value
++        .get("sourceEpoch")
++        .and_then(|v| v.as_u64());
++    let text = value.get("text").and_then(|v| v.as_str()).map(String::from);
++    if kind == "type" && text.as_deref().map(str::chars).map(Iterator::count) != Some(1) {
++        // One keystroke per step: the stage stamps measure a single real
++        // dispatch→decode→apply→paint pipeline, not a batch.
++        return None;
++    }
++    if kind == "open" && value.get("path").and_then(|v| v.as_str()).is_none() {
++        return None;
++    }
++    Some(StepSpec {
++        kind,
++        request_epoch,
++        source_epoch,
++        text,
++        path: value.get("path").and_then(|v| v.as_str()).map(String::from),
++        line: value.get("line").and_then(|v| v.as_u64()).map(|l| l as usize),
++        column: value
++            .get("column")
++            .and_then(|v| v.as_u64())
++            .map(|c| c as usize),
++    })
++}
++
++/// Drive-channel thread body: connect to the external driver, announce
++/// readiness, then serve one command line at a time. Each step's ack carries
++/// exactly the stamps the UI loop observed; a hole is reported as an error
++/// ack, never filled in.
++pub fn run_drive_channel(ui_dispatch: Sender<(StepSpec, Sender<Value>)>) {
++    let Ok(addr) = std::env::var("VERTER_WSP1L_DRIVE_ADDR") else {
++        return; // instrumentation inactive in stock runs
++    };
++    let mut stream = match TcpStream::connect(&addr) {
++        Ok(stream) => stream,
++        Err(err) => {
++            eprintln!("verter drive: could not connect to {addr}: {err}");
++            return;
++        }
++    };
++    let ready = json!({
++        "event": "ready",
++        "lapceVersion": lapce_core::meta::VERSION,
++    });
++    if let Err(err) = writeln!(stream, "{ready}") {
++        eprintln!("verter drive: could not send ready: {err}");
++        return;
++    }
++    let _ = stream.flush();
++    let reader = BufReader::new(match stream.try_clone() {
++        Ok(reader) => reader,
++        Err(err) => {
++            eprintln!("verter drive: could not clone stream: {err}");
++            return;
++        }
++    });
++    for line in reader.lines() {
++        let Ok(line) = line else { break };
++        let Some(spec) = parse_step(&line) else {
++            let _ = writeln!(stream, r#"{{"error":"unparsable-step"}}"#);
++            let _ = stream.flush();
++            continue;
++        };
++        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
++        if ui_dispatch.send((spec, ack_tx)).is_err() {
++            break;
++        }
++        let reply = match ack_rx.recv_timeout(STEP_ACK_TIMEOUT) {
++            Ok(ack) => ack.to_string(),
++            Err(_) => r#"{"error":"step-paint-not-observed"}"#.to_string(),
++        };
++        if writeln!(stream, "{reply}").is_err() {
++            break;
++        }
++        let _ = stream.flush();
++    }
++}
++
++/// Begin a step on the UI thread (stamps `input_dispatched`) and actuate it
++/// against the real editor. Called from the app's reactive dispatch, i.e. on
++/// the UI event loop.
++pub fn dispatch_step(app_data: &AppData, spec: &StepSpec, ack: Sender<Value>) {
++    {
++        let mut guard = ACTIVE_STEP.lock().unwrap();
++        *guard = Some(ActiveStep {
++            kind: spec.kind.clone(),
++            request_epoch: spec.request_epoch,
++            source_epoch: spec.source_epoch,
++            next_stage: 0,
++            stamps: Vec::new(),
++            ack: Some(ack),
++        });
++    }
++    emit_stage("input_dispatched");
++    match spec.kind.as_str() {
++        "open" => {
++            if let Some(window_tab) = app_data.active_window_tab() {
++                if let Some(path) = &spec.path {
++                    let path_object = match (spec.line, spec.column) {
++                        (Some(line), Some(column)) => {
++                            PathObject::new(PathBuf::from(path), false, line, column)
++                        }
++                        _ => PathObject::from_path(PathBuf::from(path), false),
++                    };
++                    window_tab.open_paths(&[path_object]);
++                    return;
++                }
++            }
++            eprintln!(
++                "verter drive: open step '{}' found no window tab to act on",
++                spec.request_epoch
++            );
++        }
++        "type" => {
++            if let Some(editor) = active_editor(app_data) {
++                editor.wsp1l_drive_type(spec.text.as_deref().unwrap_or_default());
++                return;
++            }
++            eprintln!(
++                "verter drive: type step '{}' found no active editor",
++                spec.request_epoch
++            );
++        }
++        "complete" => {
++            if let Some(editor) = active_editor(app_data) {
++                editor.wsp1l_drive_complete();
++                return;
++            }
++            eprintln!(
++                "verter drive: complete step '{}' found no active editor",
++                spec.request_epoch
++            );
++        }
++        "navigate" => {
++            if let Some(editor) = active_editor(app_data) {
++                editor.wsp1l_drive_goto();
++                return;
++            }
++            eprintln!(
++                "verter drive: navigate step '{}' found no active editor",
++                spec.request_epoch
++            );
++        }
++        "close" => {
++            if let Some(window_tab) = app_data.active_window_tab() {
++                let main_split = &window_tab.main_split;
++                if let Some(editor_tab_id) =
++                    main_split.active_editor_tab.get_untracked()
++                {
++                    if let Some(editor_tab) = main_split
++                        .editor_tabs
++                        .with_untracked(|tabs| tabs.get(&editor_tab_id).copied())
++                    {
++                        if let Some((_, _, child)) = editor_tab.with_untracked(|tab| {
++                            tab.children.get(tab.active).cloned()
++                        }) {
++                            main_split.editor_tab_child_close(editor_tab_id, child, true);
++                            return;
++                        }
++                    }
++                }
++            }
++            eprintln!(
++                "verter drive: close step '{}' found no active editor tab",
++                spec.request_epoch
++            );
++        }
++        _ => {}
++    }
++}
++
++fn active_editor(app_data: &AppData) -> Option<EditorData> {
++    app_data
++        .active_window_tab()?
++        .main_split
++        .active_editor
++        .get_untracked()
++}

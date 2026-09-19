@@ -7,7 +7,8 @@
  * noise bound (AC2); a protocol-smoke-only run is never certified (AC3). The
  * fixture host is deterministic and is never counted as a real Lapce client.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -32,6 +33,7 @@ import {
   certifyRun,
   compareScriptedTimelines,
   detectUiStallWithImmediateServer,
+  loadRecordedLapceCapture,
   versionsMatchPinnedManifest,
   collectStampMessages,
   parseLaunchStampValue,
@@ -153,8 +155,9 @@ function sequenceClock(startMs: number, stepMs = 100): () => number {
  * driven Lapce session emits (`verter launch-stamp` / `verter ui-stamp`) plus
  * the capture-recorded clock anchor. It exercises the parsers, the
  * fail-closed RealLapceHost and the claim gate wiring end to end; it is a
- * CONTRACT fixture, not a recorded real capture — the pinned manifest keeps
- * lapce-client unrecorded until a reference-client capture exists.
+ * CONTRACT fixture, not a recorded real capture — no recorded driven-client
+ * capture stands behind it, so its runs stay inadmissible as real-client
+ * paint evidence (only the committed recorded artifact is admissible).
  */
 const REAL_CAPTURE_ANCHOR = {
   stampUnixMs: 1_758_000_000_000,
@@ -163,7 +166,7 @@ const REAL_CAPTURE_ANCHOR = {
 };
 
 const REAL_CAPTURE_STDERR_LINES = [
-  "lapce 0.5.0-test-reference: plugin volt loaded",
+  "lapce 0.4.6-test-reference: plugin volt loaded",
   'verter launch-stamp {"phase":"server_launch_issued","atUnixMs":1758000000000,' +
     '"serverUri":"urn:/opt/verter/verter-lsp","workspaceRoot":"/home/dev/proj",' +
     '"documentLanguages":["vue","svelte"]}',
@@ -177,11 +180,20 @@ const REAL_CAPTURE_STDERR_LINES = [
     '"stage":"painted","atUnixMs":1758000000070}',
 ] as const;
 
-const REAL_CAPTURE_VERSIONS: LapceVersionManifest = {
+/** The contract fixture certifies against the pinned manifest like any run. */
+const REAL_CAPTURE_VERSIONS: LapceVersionManifest = PINNED_LAPCE_VERSION_MANIFEST;
+
+/** A manifest whose lapce-client identity is unrecorded (negative case). */
+const UNPINED_CLIENT_VERSIONS: LapceVersionManifest = {
   ...PINNED_LAPCE_VERSION_MANIFEST,
   items: PINNED_LAPCE_VERSION_MANIFEST.items.map((item) =>
     item.item === "lapce-client"
-      ? { item: "lapce-client", version: "0.5.0-test-reference", status: "pinned" }
+      ? {
+          item: "lapce-client",
+          version: null,
+          status: "unrecorded" as const,
+          reason: "test: identity not recorded for this run",
+        }
       : item,
   ),
 };
@@ -189,7 +201,7 @@ const REAL_CAPTURE_VERSIONS: LapceVersionManifest = {
 function realCaptureSession() {
   const { launchStamps, uiStamps } = collectStampMessages([...REAL_CAPTURE_STDERR_LINES]);
   return {
-    lapceClientVersion: "0.5.0-test-reference",
+    lapceClientVersion: "0.4.6-test-reference",
     launchStamps,
     uiStamps,
     clockAnchor: REAL_CAPTURE_ANCHOR,
@@ -659,23 +671,155 @@ describe("real-client claims, pinned manifest and package surface", () => {
     expect(carriesRealClientEvidence(fixtureRun({ hostKind: LAPCE_REAL_HOST }))).toBe(false);
   });
 
-  it("admits a real-client claim only from the real host path with a pinned lapce-client", () => {
+  it("refuses the dual relabel: real hostKind AND real automation path labels on fixture stamps (F11)", () => {
+    // Matching labels are not provenance: with BOTH labels flipped the run still
+    // has no recorded driven-client capture behind it, so it carries no
+    // real-client evidence and stays inadmissible as a product claim.
+    const dual = fixtureRun({
+      hostKind: LAPCE_REAL_HOST,
+      automationPath: REAL_LAPCE_AUTOMATION_PATH,
+    });
+    const certified = certifyRun(dual);
+    expect(certified.certified).toBe(true);
+    if (certified.certified) {
+      expect(certified.realClientEvidence).toBe(false);
+    }
+    expect(carriesRealClientEvidence(dual)).toBe(false);
+    const verdict = assertRealLapceProductClaim(dual);
+    expect(verdict.admissible).toBe(false);
+    expect(verdict.reason).toMatch(/without a recorded driven-client capture provenance/);
+  });
+
+  it("refuses a capture provenance copied onto stamps that are not the recorded ones", () => {
+    const recorded = loadRecordedLapceCapture(
+      path.join(wsp1lProducts, "real-client-capture.v1.json"),
+    );
+    const forged = fixtureRun({
+      hostKind: LAPCE_REAL_HOST,
+      automationPath: REAL_LAPCE_AUTOMATION_PATH,
+      versions: recorded.versions,
+      captureProvenance: recorded.provenance,
+      // Fixture timelines, and fixture stamps pretending to be observations.
+      observedUiStamps: [
+        {
+          kind: "type",
+          requestEpoch: 2,
+          sourceEpoch: null,
+          stage: "input_dispatched",
+          atUnixMs: 1,
+        },
+        { kind: "type", requestEpoch: 2, sourceEpoch: null, stage: "painted", atUnixMs: 2 },
+      ],
+    });
+    expect(carriesRealClientEvidence(forged)).toBe(false);
+    const verdict = assertRealLapceProductClaim(forged);
+    expect(verdict.admissible).toBe(false);
+    expect(verdict.reason).toMatch(/cannot carry its provenance/);
+  });
+
+  it("hand-written capture lines never carry a real-client paint claim (WSP1L-ARCH)", () => {
+    // REAL_CAPTURE_STDERR_LINES is a CONTRACT fixture: it proves the parsers
+    // and the fail-closed host, but no recorded driven-client capture stands
+    // behind it, so it is inadmissible as client paint evidence.
     const run = realCaptureRun();
     const verdict = assertRealLapceProductClaim(run);
-    expect(verdict.admissible).toBe(true);
-    expect(verdict.reason).toMatch(/lapce-client 0.5.0-test-reference/);
+    expect(verdict.admissible).toBe(false);
+    expect(verdict.reason).toMatch(/without a recorded driven-client capture provenance/);
+    expect(carriesRealClientEvidence(run)).toBe(false);
+    const certified = certifyRun(run);
+    expect(certified.certified).toBe(true);
+    if (certified.certified) {
+      expect(certified.realClientEvidence).toBe(false);
+    }
 
-    // Same run, but the lapce-client identity is unrecorded in its manifest.
-    const unpinnedClient = realCaptureRun({ versions: PINNED_LAPCE_VERSION_MANIFEST });
-    const unpinned = assertRealLapceProductClaim(unpinnedClient);
+    // Same lines, but with the lapce-client identity pinned and a measured
+    // input-to-paint: still inadmissible — the missing piece is provenance,
+    // not labels or numbers.
+    const relabeledLines = realCaptureRun({
+      versions: REAL_CAPTURE_VERSIONS,
+      automationPath: REAL_LAPCE_AUTOMATION_PATH,
+    });
+    const pinned = assertRealLapceProductClaim(relabeledLines);
+    expect(pinned.admissible).toBe(false);
+    expect(pinned.reason).toMatch(/without a recorded driven-client capture provenance/);
+  });
+
+  it("admits a real-client claim only from a digest-verified recorded driven capture", () => {
+    const recorded = loadRecordedLapceCapture(
+      path.join(wsp1lProducts, "real-client-capture.v1.json"),
+    );
+    const host = new RealLapceHost(recorded.session);
+    const driver = new LapceInteractionDriver({
+      host,
+      serverTraces: recorded.serverTraces,
+      versions: recorded.versions,
+      stallThreshold: STALL_THRESHOLD,
+      immediacyBound: IMMEDIACY_BOUND,
+      protocolSmokePassed: true,
+      receiptBasis: {
+        sourceRevisions: `recorded-capture:${recorded.provenance.sessionId}`,
+        projectConfiguration: "tests/workspace-responsiveness/WSP1L/fixtures/ws",
+        engineIdentity: "verter-lsp (pinned manifest)",
+        hostIdentity: `real-lapce:${recorded.provenance.lapceClientVersion}`,
+        completenessState: "partial",
+      },
+      capture: { provenance: recorded.provenance, uiStamps: recorded.session.uiStamps },
+    });
+    const run = driver.runScriptedInteraction(recorded.steps);
+    expect(run.hostKind).toBe(LAPCE_REAL_HOST);
+    expect(run.captureProvenance).toEqual(recorded.provenance);
+
+    const verdict = assertRealLapceProductClaim(run);
+    expect(verdict.admissible).toBe(true);
+    expect(verdict.reason).toMatch(/recorded driven-client capture/);
+    expect(verdict.reason).toContain(recorded.provenance.lapceClientVersion);
+
+    const certified = certifyRun(run);
+    expect(certified.certified).toBe(true);
+    if (certified.certified) {
+      expect(certified.realClientEvidence).toBe(true);
+    }
+
+    // The recorded run is a real driven capture: every step timeline is
+    // client-observed, and each of the five interaction kinds was performed.
+    expect(run.timelines.map((timeline) => timeline.step.kind)).toEqual([
+      "open",
+      "open",
+      "navigate",
+      "type",
+      "complete",
+      "close",
+    ]);
+    expect(
+      run.timelines.filter((timeline) => timeline.inputToPaintMs.status === "measured").length,
+    ).toBeGreaterThan(0);
+    driver.teardown();
+
+    // The recorded run, but with the lapce-client identity unrecorded in its
+    // manifest: provenance alone is not enough, the pin must name the build.
+    const unpinned = assertRealLapceProductClaim({ ...run, versions: UNPINED_CLIENT_VERSIONS });
     expect(unpinned.admissible).toBe(false);
     expect(unpinned.reason).toMatch(/pinned lapce-client identity/);
 
-    // Same run with the real path, but no measured input-to-paint anywhere.
-    const noPaint = realCaptureRun({ timelines: [] });
-    const noTimeline = assertRealLapceProductClaim(noPaint);
-    expect(noTimeline.admissible).toBe(false);
-    expect(noTimeline.reason).toMatch(/none were captured/);
+    // The recorded run with no measured input-to-paint anywhere: provenance
+    // and pin alone are not enough without a measured headline timeline.
+    const noPaint = assertRealLapceProductClaim({ ...run, timelines: [] });
+    expect(noPaint.admissible).toBe(false);
+    expect(noPaint.reason).toMatch(/none were captured/);
+  });
+
+  it("refuses a tampered capture artifact loud (content digest mismatch)", () => {
+    const raw = JSON.parse(
+      readFileSync(path.join(wsp1lProducts, "real-client-capture.v1.json"), "utf8"),
+    );
+    const tampered = { ...raw, capturedLines: [...raw.capturedLines, "verter ui-stamp {}"] };
+    const tamperedPath = path.join(os.tmpdir(), `wsp1l-tampered-${Date.now()}.json`);
+    writeFileSync(tamperedPath, JSON.stringify(tampered));
+    try {
+      expect(() => loadRecordedLapceCapture(tamperedPath)).toThrow(/content digest mismatch/);
+    } finally {
+      rmSync(tamperedPath, { force: true });
+    }
   });
 
   it("certifies hermetic runs as non-real-client evidence only (WSP1L-AC-RESOURCE)", () => {
@@ -684,19 +828,19 @@ describe("real-client claims, pinned manifest and package surface", () => {
     if (verdict.certified) {
       expect(verdict.realClientEvidence).toBe(false);
     }
-    expect(carriesRealClientEvidence(realCaptureRun())).toBe(true);
+    expect(carriesRealClientEvidence(realCaptureRun())).toBe(false);
   });
 
-  it("pins the shipped volt/server/provider versions and records lapce-client unavailable", () => {
+  it("pins the shipped volt/server/provider versions and the recorded lapce-client build", () => {
     const manifest = JSON.parse(
       readFileSync(path.join(wsp1lProducts, "version-manifest.v1.json"), "utf8"),
     );
     expect(manifest.items).toEqual(PINNED_LAPCE_VERSION_MANIFEST.items);
     expect(versionsMatchPinnedManifest(PINNED_LAPCE_VERSION_MANIFEST).ok).toBe(true);
     const lapce = manifest.items.find((item: { item: string }) => item.item === "lapce-client");
-    expect(lapce.version).toBeNull();
-    expect(lapce.status).toBe("unrecorded");
-    expect(lapce.reason).toMatch(/unavailable, not guessed/);
+    expect(lapce.status).toBe("pinned");
+    expect(lapce.version).toMatch(/^0\.4\.6/);
+    expect(lapce.reason).toMatch(/WSP1L instrumentation patch/);
   });
 
   it("exports ./lapce from compiled dist, not TypeScript source", () => {

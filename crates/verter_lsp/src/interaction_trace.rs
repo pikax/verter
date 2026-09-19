@@ -96,19 +96,47 @@ pub struct InteractionTraceLog {
     enabled: AtomicBool,
     next_epoch: AtomicU64,
     session_start: Instant,
+    session_start_unix_ms: u64,
     traces: Mutex<Vec<InteractionTrace>>,
     max_traces: usize,
+    /// Optional harness dump (`VERTER_LSP_INTERACTION_TRACE_DUMP`): one JSONL
+    /// line per terminal trace state, plus the session anchor written first.
+    dump_path: Option<std::path::PathBuf>,
 }
 
 impl InteractionTraceLog {
     pub fn new(max_traces: usize) -> Self {
-        Self {
-            enabled: AtomicBool::new(false),
+        let dump_path =
+            std::env::var_os("VERTER_LSP_INTERACTION_TRACE_DUMP").map(std::path::PathBuf::from);
+        let log = Self {
+            enabled: AtomicBool::new(std::env::var_os("VERTER_LSP_INTERACTION_TRACE").is_some()),
             next_epoch: AtomicU64::new(1),
             session_start: Instant::now(),
+            session_start_unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
             traces: Mutex::new(Vec::new()),
             max_traces,
+            dump_path,
+        };
+        if let Some(path) = &log.dump_path {
+            // The anchor joins this session's relative-ms stamps to the Unix
+            // clock the UI stamps use (WSP1L.2 correlation).
+            let anchor = serde_json::json!({
+                "anchor": "session",
+                "sessionStartUnixMs": log.session_start_unix_ms,
+            });
+            if let Err(err) = std::fs::write(path, format!("{anchor}\n")) {
+                tracing::warn!("interaction-trace dump anchor failed: {err}");
+            }
         }
+        log
+    }
+
+    /// The Unix-ms reading of this session's t=0 (dump correlation anchor).
+    pub fn session_start_unix_ms(&self) -> u64 {
+        self.session_start_unix_ms
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -255,8 +283,35 @@ impl TraceSpan<'_> {
                 TraceStatus::Complete => first_blocked_server_stage(&trace.stamps),
                 _ => None,
             };
+            if let Some(path) = &self.log.dump_path {
+                // Harness dump (WSP1L correlation): one JSONL line per
+                // terminal trace. Written under the traces lock so lines
+                // never interleave; a dump failure never fails the request.
+                match serde_json::to_string(trace) {
+                    Ok(line) => {
+                        if let Err(err) = append_line(path, &line) {
+                            tracing::warn!("interaction-trace dump failed: {err}");
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!("interaction-trace dump encode failed: {err}");
+                    }
+                }
+            }
         });
     }
+}
+
+/// Append one JSONL line to the dump file (creates it if the anchor write
+/// was interrupted).
+fn append_line(path: &std::path::Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(line.as_bytes())?;
+    file.write_all(b"\n")
 }
 
 impl Drop for TraceSpan<'_> {

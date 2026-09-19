@@ -1522,15 +1522,43 @@ impl LanguageServer for VerterLanguageServer {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        lifecycle::handle_did_open(self, params).await
+        // WSP1L: doc-sync notifications are part of the correlated server
+        // timeline; the trace's source epoch is the document version.
+        let version = u64::try_from(params.text_document.version).ok();
+        let span = self
+            .interaction_trace
+            .begin("textDocument/didOpen", || version);
+        span.mark(crate::interaction_trace::ProtocolStage::Admitted);
+        span.mark(crate::interaction_trace::ProtocolStage::ProviderWork);
+        lifecycle::handle_did_open(self, params).await;
+        span.mark(crate::interaction_trace::ProtocolStage::Serialize);
+        span.mark(crate::interaction_trace::ProtocolStage::OutboundEnqueued);
+        span.finish_ok();
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        lifecycle::handle_did_change(self, params).await
+        let version = u64::try_from(params.text_document.version).ok();
+        let span = self
+            .interaction_trace
+            .begin("textDocument/didChange", || version);
+        span.mark(crate::interaction_trace::ProtocolStage::Admitted);
+        span.mark(crate::interaction_trace::ProtocolStage::ProviderWork);
+        lifecycle::handle_did_change(self, params).await;
+        span.mark(crate::interaction_trace::ProtocolStage::Serialize);
+        span.mark(crate::interaction_trace::ProtocolStage::OutboundEnqueued);
+        span.finish_ok();
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        lifecycle::handle_did_close(self, params).await
+        let span = self
+            .interaction_trace
+            .begin("textDocument/didClose", || None);
+        span.mark(crate::interaction_trace::ProtocolStage::Admitted);
+        span.mark(crate::interaction_trace::ProtocolStage::ProviderWork);
+        lifecycle::handle_did_close(self, params).await;
+        span.mark(crate::interaction_trace::ProtocolStage::Serialize);
+        span.mark(crate::interaction_trace::ProtocolStage::OutboundEnqueued);
+        span.finish_ok();
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {

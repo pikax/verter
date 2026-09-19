@@ -3,39 +3,32 @@
   "node": "WSP1L",
   "rule": "missing GUI instrumentation is recorded as unavailable, never simulated (charter WSP1L.3)",
   "realClientCapture": {
-    "state": "unavailable",
+    "state": "captured",
     "notASimulation": true,
     "reasons": [
-      "reference-machine-manifests.v1 population is empty-at-ratification: no recorded reference-client machine exists to bind a real-Lapce run",
-      "the pinned lapce-client version is unrecorded for the same reason; a supported build identity is not guessed (Lapce 0.4.6 is channel-verified locally, see realClientChannelVerification, but the pin belongs to the reference capture)",
-      "UI event-loop observations (input-dispatch/decode/apply/paint) require an instrumented Lapce client build, which does not exist; a protocol smoke, mock LSP client, screenshot or raw-LSP session is refused as UI evidence by the driver itself (WSP1L-AC3)",
-      "Issue 93 therefore remains unreproduced: locating its first blocked stage needs the real-client timeline this record marks unavailable"
+      "the WSP1L instrumented client build (Lapce v0.4.6 + packages/dx-harness/lapce/instrumented-client/lapce-0.4.6-wsp1l.patch) was driven on the local interactive windows machine through the WSP1L drive channel with the production volt and the native verter-lsp server",
+      "the capture recorded client-observed UI stage stamps (input_dispatched/decoded/applied/painted) for open/type/complete/navigate/close and the server interaction-trace dump anchored to the Unix clock (WSP1L.2 correlation)",
+      "the recorded artifact is digest-sealed (driven-lapce-capture.v1) and the lapce-client pin names exactly that build; relabeled fixtures and hand-written capture lines stay inadmissible"
     ],
     "whatIsProvenHermetically": [
       "a deliberately stalled UI thread is detected while the server timeline shows immediate completion, and the first blocked stage is named (WSP1L-AC1; packages/dx-harness/test/lapceDriver.test.ts)",
       "two runs of the same scripted interaction compare within a recorded noise bound, and unknowns never become zeros (WSP1L-AC2)",
       "the driver refuses to certify a run whose protocol smoke passed with no UI timeline (WSP1L-AC3)",
       "the volt writes a one-time initialize launch-stamp line to host stderr behind uiTrace.enabled (default off, no UI notification) and dx-harness parses `verter launch-stamp`/`verter ui-stamp` lines both raw and embedded as host-log trailing fields (the real client's tracing rendering), joining their Unix-ms clock to the timeline clock only through a capture-recorded anchor (WSP1L.1/WSP1L.2)",
-      "RealLapceHost constructs only from a provenance-complete capture (pinned lapce-client, issued launch stamp, UI observations, clock anchor) and fails closed otherwise; fixture timestamps relabeled with the real hostKind are refused as real-client claims"
+      "RealLapceHost constructs only from a provenance-complete capture (pinned lapce-client, issued launch stamp, UI observations, clock anchor) and fails closed otherwise; fixture timestamps relabeled with the real hostKind are refused as real-client claims",
+      "the recorded real-client capture replays through RealLapceHost with digest-verified provenance and certifies real-client evidence; dual-relabeled fixture runs, hand-written capture lines and copied provenance are refused by the same gates (packages/dx-harness/test/lapceDriver.test.ts)"
     ],
     "automationPathRecorded": {
       "fixture": "instrumented-fixture-host: deterministic scripted UI event emission; no GUI, no sleeps, no real Lapce process",
-      "realHost": "volt-launch-stamp + Lapce UI instrumentation: one-time initialize launch-stamp on plugin host stderr behind uiTrace.enabled (no UI notification); the client renders it through its tracing log, so the capture reads it from data/logs/lapce.*.log or the client process stdout under LAPCE_LOG=lapce_proxy=debug; per-message LSP path untouched"
+      "realHost": "instrumented-client-build + volt launch-stamp + wsp1l drive channel: the reference Lapce build (WSP1L instrumentation patch) drives open/type/complete/navigate/close on its UI event loop over the external drive channel (inactive without VERTER_WSP1L_DRIVE_ADDR) and emits `verter ui-stamp` stage observations at the real pipeline seams; the volt emits its one-time initialize launch-stamp behind uiTrace.enabled; per-message LSP path untouched"
     },
-    "realClientChannelVerification": {
-      "observedClient": "Lapce 0.4.6 (windows-x64, local interactive machine — not a manifested reference-client basis)",
-      "verified": [
-        "the built volt wasm loads and runs in the real client via `lapce --plugin-path <volt-dir>` (the supported plugin-development path)",
-        "`uiTrace.enabled = true` is delivered to the plugin when set in the workspace's .lapce/settings.toml [verter-volt] table",
-        "initialize emitted exactly one `verter launch-stamp` line (phase launch_refused: no resolvable server source in the verification session)",
-        "the client routes plugin stderr through lapce-proxy's tracing log (target lapce_proxy::plugin::wasi::<author>::<name>, DEBUG): the stamp was captured verbatim-as-message-body from the client process output under LAPCE_LOG=lapce_proxy=debug, and dx-harness parses that embedded rendering",
-        "the per-message LSP path stayed untouched (the stamp is the only emission)"
-      ],
-      "stillUnavailable": [
-        "UI stage stamps (`verter ui-stamp`) need an instrumented client event loop; no such build exists",
-        "no manifested reference-client machine and no pinned lapce-client identity for a certified real-client run"
-      ]
-    }
+    "stillUnavailable": [
+      "the recorded capture is a single local interactive machine session (windows-x64), not a manifested reference-client machine: reference-machine-manifests.v1 population is still empty, so cross-machine comparability and Issue 93 reproduction claims stay unavailable",
+      "WSP1L-AC2 comparability of the real client needs a second recorded run of the same script on the same recorded basis; only one capture is committed"
+    ]
   },
-  "nextOwners": ["WSP1A", "expansion.workspace-responsiveness"]
+  "nextOwners": [
+    "WSP1A",
+    "expansion.workspace-responsiveness"
+  ]
 }

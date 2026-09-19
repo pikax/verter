@@ -26,6 +26,8 @@
  * repairs a malformed body — that still fails loud.
  */
 
+import { createHash } from "node:crypto";
+
 import {
   SCRIPTED_STEP_KINDS,
   UI_STAGE_ORDER,
@@ -248,4 +250,24 @@ export function stampUnixMsToTimelineMs(atUnixMs: number, anchor: StampClockAnch
     throw new Error("the clock anchor must carry a recorded stampUnixMs and timelineMs");
   }
   return anchor.timelineMs + (atUnixMs - anchor.stampUnixMs);
+}
+
+/**
+ * Canonical digest over one capture's UI stamps: the sorted
+ * kind/requestEpoch/sourceEpoch/stage/atUnixMs observations, JSON-encoded.
+ * The provenance of a real-client capture seals this digest, so a run that
+ * claims the capture must carry exactly the recorded stamp set — fixture
+ * timestamps or a relabeled host cannot reproduce it.
+ */
+export function uiStampDigest(stamps: readonly UiStampPayload[]): string {
+  const canonical = stamps
+    .map((stamp) => [
+      stamp.kind,
+      stamp.requestEpoch,
+      stamp.sourceEpoch === null ? "null" : stamp.sourceEpoch,
+      stamp.stage,
+      stamp.atUnixMs,
+    ])
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }

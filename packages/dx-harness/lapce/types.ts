@@ -18,6 +18,9 @@ export {
 } from "@verter/dx-harness/jetbrains";
 
 import type { CompletenessState, Metric, ProductReceiptBasis } from "@verter/dx-harness/jetbrains";
+import type { UiStampPayload } from "./stamp.js";
+
+export type { UiStampPayload };
 
 /** The only host kind that can certify a real-Lapce UI timeline (WSP1L-AC3). */
 export const LAPCE_REAL_HOST = "real-lapce" as const;
@@ -65,6 +68,20 @@ export interface ScriptedStep {
   /** Correlates this UI interaction with the WSP1 server InteractionTrace. */
   readonly requestEpoch: number;
   readonly sourceEpoch: number | null;
+  /**
+   * `type`: the single keystroke the step inserts at the editor cursor. The
+   * driven client drives one keystroke per step so the stage stamps measure
+   * one real dispatch→decode→apply→paint pipeline.
+   */
+  readonly text?: string;
+  /**
+   * `open`: the workspace file the step opens. `line`/`column` (1-based, the
+   * client's `path:line:column` open semantics) position the cursor so later
+   * steps act on a known editor location.
+   */
+  readonly uri?: string;
+  readonly line?: number;
+  readonly column?: number;
 }
 
 /** Raw per-interaction UI instrumentation captured from the host. */
@@ -141,6 +158,34 @@ export interface LapceUiRun {
   readonly timelines: readonly UiTimeline[];
   readonly receiptBasis: ProductReceiptBasis;
   readonly completenessState: CompletenessState;
+  /**
+   * Provenance of the driven-client capture the run's stamps came from.
+   * Absent on hermetic and hand-assembled runs: only a capture the producer
+   * recorded (or a loader verified against a recorded artifact) mints one,
+   * and a real-client claim without it is refused (WSP1L.3, AC-RESOURCE).
+   */
+  readonly captureProvenance?: CaptureProvenance;
+  /**
+   * The client-observed UI stamps this run's timelines were built from, in
+   * the capture's Unix-ms domain. The provenance digest binds the run to
+   * exactly these observations; a relabeled fixture cannot reproduce them.
+   */
+  readonly observedUiStamps?: readonly UiStampPayload[];
+}
+
+/**
+ * WSP1L real-client capture provenance: the digest-sealed identity of a
+ * recorded driven-client capture. `captureSha256` is the canonical digest of
+ * the capture's UI stamps (see `uiStampDigest`), so a run claiming this
+ * provenance must carry exactly the recorded observations.
+ */
+export interface CaptureProvenance {
+  readonly schema: "driven-lapce-capture.v1";
+  readonly sessionId: string;
+  /** The recorded artifact this provenance was verified against. */
+  readonly recordedAs: string;
+  readonly captureSha256: string;
+  readonly lapceClientVersion: string;
 }
 
 export type Certification =

@@ -54,12 +54,28 @@ test("WSP1L pins volt/server/provider versions against the shipped sources", () 
   assert.equal(byItem["provider-engines-and-modes"].version, "tsgo");
 });
 
-test("WSP1L records lapce-client unavailable, never guessed", () => {
+test("WSP1L pins the recorded lapce-client build, and the capture seals it", () => {
   const manifest = load("version-manifest.v1.json");
   const lapce = manifest.items.find((row) => row.item === "lapce-client");
-  assert.equal(lapce.version, null);
-  assert.equal(lapce.status, "unrecorded");
-  assert.match(lapce.reason, /unavailable, not guessed/);
+  assert.equal(lapce.status, "pinned");
+  assert.match(lapce.version, /^0\.4\.6/);
+  assert.match(lapce.reason, /WSP1L instrumentation patch/);
+
+  // The pin is not a guess: the recorded capture artifact carries the same
+  // build identity and is digest-sealed against tampering.
+  const capture = load("real-client-capture.v1.json");
+  assert.equal(capture.schema, "driven-lapce-capture.v1");
+  assert.equal(capture.lapceClient.version, lapce.version);
+  assert.match(capture.lapceClient.patch, /instrumented-client\/lapce-0\.4\.6-wsp1l\.patch$/);
+  assert.match(capture.contentSha256, /^[0-9a-f]{64}$/);
+  assert.ok(capture.capturedLines.some((line) => line.includes("verter launch-stamp")));
+  assert.ok(capture.capturedLines.some((line) => line.includes("verter ui-stamp")));
+  // Every scripted interaction kind was driven and correlates a server trace.
+  const kinds = capture.correlated.steps.map((step) => step.kind);
+  for (const kind of ["open", "type", "complete", "navigate", "close"]) {
+    assert.ok(kinds.includes(kind), `capture drives '${kind}'`);
+  }
+  assert.equal(capture.correlated.steps.length, capture.correlated.serverTraces.length);
 });
 
 test("WSP1L-AC-EXPOSURE keeps promotion blocked until DX1", () => {
@@ -73,11 +89,20 @@ test("WSP1L-AC-EXPOSURE keeps promotion blocked until DX1", () => {
   }
 });
 
-test("WSP1L.3 records missing GUI instrumentation as unavailable, not simulated", () => {
+test("WSP1L.3 records the real-client capture basis and remaining unavailability honestly", () => {
   const availability = load("gui-instrumentation-availability.v1.json");
-  assert.equal(availability.realClientCapture.state, "unavailable");
+  assert.equal(availability.realClientCapture.state, "captured");
   assert.equal(availability.realClientCapture.notASimulation, true);
   assert.ok(availability.realClientCapture.reasons.length >= 3);
   assert.ok(availability.realClientCapture.whatIsProvenHermetically.length >= 4);
   assert.match(availability.realClientCapture.automationPathRecorded.fixture, /no GUI, no sleeps/);
+  assert.match(
+    availability.realClientCapture.automationPathRecorded.realHost,
+    /instrumented-client/,
+  );
+  // What still cannot be claimed from one local capture stays recorded as
+  // unavailable — never silently upgraded to available.
+  const stillUnavailable = availability.realClientCapture.stillUnavailable;
+  assert.ok(Array.isArray(stillUnavailable) && stillUnavailable.length >= 2);
+  assert.ok(stillUnavailable.some((reason) => /reference-client machine/.test(reason)));
 });

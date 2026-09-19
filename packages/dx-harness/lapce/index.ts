@@ -14,6 +14,7 @@ export {
   VERSION_MANIFEST_SCHEMA,
   isRejectedLapceUiHost,
   type AutomationPath,
+  type CaptureProvenance,
   type LapceHostKind,
   type LapceUiRun,
   type LapceVersionManifest,
@@ -71,12 +72,28 @@ export {
   parseUiStampMessage,
   parseUiStampValue,
   stampUnixMsToTimelineMs,
+  uiStampDigest,
   type LaunchStampPayload,
   type LaunchStampPhase,
   type StampClockAnchor,
   type StampMessages,
   type UiStampPayload,
 } from "./stamp.js";
+
+export {
+  DRIVEN_STEP_SERVER_METHOD,
+  DrivenLapceHost,
+  buildDrivenCaptureArtifact,
+  correlateServerTraces,
+  driveLapceSession,
+  loadRecordedLapceCapture,
+  writeDrivenCaptureArtifact,
+  type CorrelatedCapture,
+  type DrivenCaptureArtifact,
+  type DrivenLapceSession,
+  type DrivenLapceSessionOptions,
+  type RecordedLapceCapture,
+} from "./producer.js";
 
 export {
   FIXTURE_AUTOMATION_PATH,

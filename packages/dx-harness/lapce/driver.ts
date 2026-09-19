@@ -11,6 +11,7 @@ import { buildUiTimeline, type ServerImmediacyBound, type StallThreshold } from 
 import { versionsMatchPinnedManifest } from "./manifest.js";
 import {
   stampUnixMsToTimelineMs,
+  uiStampDigest,
   type LaunchStampPayload,
   type StampClockAnchor,
   type UiStampPayload,
@@ -20,6 +21,7 @@ import {
   LAPCE_REAL_HOST,
   isRejectedLapceUiHost,
   type AutomationPath,
+  type CaptureProvenance,
   type LapceHostKind,
   type LapceUiRun,
   type LapceVersionManifest,
@@ -40,13 +42,16 @@ export const FIXTURE_AUTOMATION_PATH: AutomationPath = {
   recordedAs: "WSP1L.1 fixture path",
 };
 
-/** WSP1L.1 record for the real-host path this driver binds (volt launch stamp). */
+/** WSP1L.1 record for the real-host path this driver binds. */
 export const REAL_LAPCE_AUTOMATION_PATH: AutomationPath = {
-  kind: "volt-launch-stamp + Lapce UI instrumentation",
+  kind: "instrumented-client-build + volt launch-stamp + wsp1l drive channel",
   perturbation:
-    "one-time initialize launch-stamp line on the driven client's host stderr behind " +
-    "uiTrace.enabled (default off); no UI notification, per-message LSP path untouched",
-  recordedAs: "WSP1L.1 real-host path",
+    "the reference Lapce build carries the WSP1L instrumentation patch (external drive channel " +
+    "on the UI event loop + `verter ui-stamp` stage observations at the real pipeline seams; " +
+    "inactive without VERTER_WSP1L_DRIVE_ADDR) and the volt emits its one-time initialize " +
+    "launch-stamp behind uiTrace.enabled; the per-message LSP path is untouched",
+  recordedAs:
+    "WSP1L.1 real-host path (charter: supported automation or instrumentation path, or an instrumented client build)",
 };
 
 /** WSP1L.3: missing GUI instrumentation is recorded as unavailable, not simulated. */
@@ -225,7 +230,9 @@ export class RealLapceHost implements LapceHost {
       (stamp) =>
         stamp.kind === step.kind &&
         stamp.requestEpoch === step.requestEpoch &&
-        stamp.sourceEpoch === step.sourceEpoch,
+        // The client stamps carry no source epoch of their own (the doc
+        // version is a server-side attribution); an attributed one must match.
+        (stamp.sourceEpoch === null || stamp.sourceEpoch === step.sourceEpoch),
     );
     if (observed.length === 0) {
       throw new Error(
@@ -260,6 +267,14 @@ export interface LapceInteractionDriverOptions {
   readonly protocolSmokePassed: boolean;
   readonly completenessState?: LapceUiRun["completenessState"];
   readonly receiptBasis: LapceUiRun["receiptBasis"];
+  /**
+   * The capture binding for provenance-gated real-client claims: only a
+   * driven session (or a loader-verified recorded artifact) supplies one.
+   */
+  readonly capture?: {
+    readonly provenance: CaptureProvenance;
+    readonly uiStamps: readonly UiStampPayload[];
+  };
 }
 
 /**
@@ -307,6 +322,7 @@ export class LapceInteractionDriver {
 
   /** The run record for everything driven so far (certification is separate). */
   toRun(): LapceUiRun {
+    const capture = this.#options.capture;
     return {
       schema: "lapce-ui-run.v1",
       hostKind: this.#options.host.hostKind,
@@ -317,6 +333,9 @@ export class LapceInteractionDriver {
       timelines: [...this.#timelines],
       receiptBasis: this.#options.receiptBasis,
       completenessState: this.#options.completenessState ?? "partial",
+      ...(capture === undefined
+        ? {}
+        : { captureProvenance: capture.provenance, observedUiStamps: capture.uiStamps }),
     };
   }
 
@@ -469,23 +488,36 @@ export function assertCertified(run: LapceUiRun): LapceUiRun {
 }
 
 /**
- * A run carries real-client evidence only when BOTH the host kind and the
- * automation path are the real ones — relabeling a fixture run with the real
- * hostKind does not turn its synthesized timestamps into client observations
- * (WSP1L.3 'not simulated', AC-RESOURCE).
+ * A run carries real-client evidence only when its stamps come from a
+ * recorded driven-client capture: the real host on the real automation path,
+ * a sealed capture provenance whose digest matches the run's OWN observed UI
+ * stamps, a lapce-client pinned to exactly the recorded build, and at least
+ * one measured input-to-paint. Matching labels alone — or a provenance
+ * copied onto fixture timestamps — do not qualify (WSP1L.3 'not simulated',
+ * AC-RESOURCE).
  */
 export function carriesRealClientEvidence(run: LapceUiRun): boolean {
-  return (
-    run.hostKind === LAPCE_REAL_HOST && run.automationPath.kind === REAL_LAPCE_AUTOMATION_PATH.kind
-  );
+  if (run.hostKind !== LAPCE_REAL_HOST) return false;
+  if (run.automationPath.kind !== REAL_LAPCE_AUTOMATION_PATH.kind) return false;
+  const provenance = run.captureProvenance;
+  if (provenance === undefined || provenance.schema !== "driven-lapce-capture.v1") return false;
+  const lapceClient = run.versions.items.find((item) => item.item === "lapce-client");
+  if (lapceClient?.status !== "pinned" || lapceClient.version !== provenance.lapceClientVersion) {
+    return false;
+  }
+  if (run.observedUiStamps === undefined) return false;
+  if (uiStampDigest(run.observedUiStamps) !== provenance.captureSha256) return false;
+  return run.timelines.some((timeline) => timeline.inputToPaintMs.status === "measured");
 }
 
 /**
- * A real-client paint/product claim requires the real Lapce host produced by
- * the real automation path, a pinned lapce-client identity and a measured
- * input-to-paint; the fixture host — or fixture timestamps merely relabeled
- * with the real hostKind — stays explicitly inadmissible and carries the
- * unavailability reason (WSP1L.3, AC-RESOURCE).
+ * A real-client paint/product claim requires stamps from a recorded
+ * driven-client capture: the real host produced by the real automation path,
+ * a sealed capture provenance whose digest matches the run's observed UI
+ * stamps, a pinned lapce-client identity matching the recorded build, and a
+ * measured input-to-paint. The fixture host, fixture timestamps relabeled
+ * with the real hostKind, and hand-written capture lines without a recorded
+ * artifact all stay explicitly inadmissible (WSP1L.3, AC-RESOURCE).
  */
 export function assertRealLapceProductClaim(run: LapceUiRun): RealClientClaimVerdict {
   if (run.hostKind !== LAPCE_REAL_HOST) {
@@ -507,6 +539,17 @@ export function assertRealLapceProductClaim(run: LapceUiRun): RealClientClaimVer
         `'${REAL_LAPCE_AUTOMATION_PATH.kind}' with client-observed stamps (WSP1L.3: not simulated)`,
     };
   }
+  const provenance = run.captureProvenance;
+  if (provenance === undefined || provenance.schema !== "driven-lapce-capture.v1") {
+    return {
+      admissible: false,
+      hostKind: run.hostKind,
+      reason:
+        "stamps without a recorded driven-client capture provenance are not real-client paint " +
+        "evidence: hand-written capture lines and replayed contract fixtures never minted one " +
+        "(only a driven session or a digest-verified recorded artifact does; WSP1L.3, AC-RESOURCE)",
+    };
+  }
   const lapceClient = run.versions.items.find((item) => item.item === "lapce-client");
   if (lapceClient?.status !== "pinned" || typeof lapceClient.version !== "string") {
     return {
@@ -518,19 +561,47 @@ export function assertRealLapceProductClaim(run: LapceUiRun): RealClientClaimVer
         `client cannot back real-client paint evidence`,
     };
   }
-  const headline = run.timelines.find((timeline) => timeline.inputToPaintMs.status === "measured");
-  if (headline !== undefined) {
+  if (lapceClient.version !== provenance.lapceClientVersion) {
     return {
-      admissible: true,
+      admissible: false,
       hostKind: run.hostKind,
-      reason: `real-Lapce host on the real automation path (lapce-client ${lapceClient.version}) with measured input-to-paint evidence`,
+      reason:
+        `the run's lapce-client '${lapceClient.version}' does not match the recorded capture's ` +
+        `'${provenance.lapceClientVersion}'; stamps from a different build are not this capture's evidence`,
+    };
+  }
+  if (run.observedUiStamps === undefined) {
+    return {
+      admissible: false,
+      hostKind: run.hostKind,
+      reason:
+        "the run carries no client-observed UI stamps; its timelines cannot be bound to the recorded capture",
+    };
+  }
+  const digest = uiStampDigest(run.observedUiStamps);
+  if (digest !== provenance.captureSha256) {
+    return {
+      admissible: false,
+      hostKind: run.hostKind,
+      reason:
+        `the run's observed stamps digest to ${digest.slice(0, 12)} but the recorded capture sealed ` +
+        `${provenance.captureSha256.slice(0, 12)}; timestamps that are not the recorded client's ` +
+        "own observations cannot carry its provenance (a copied provenance does not transfer)",
+    };
+  }
+  const headline = run.timelines.find((timeline) => timeline.inputToPaintMs.status === "measured");
+  if (headline === undefined) {
+    return {
+      admissible: false,
+      hostKind: run.hostKind,
+      reason:
+        `real-client claim requires at least one measured input-to-paint timeline; ` +
+        `${run.timelines.length === 0 ? "none were captured" : `all ${run.timelines.length} timelines carry unknowns`}`,
     };
   }
   return {
-    admissible: false,
+    admissible: true,
     hostKind: run.hostKind,
-    reason:
-      `real-client claim requires at least one measured input-to-paint timeline; ` +
-      `${run.timelines.length === 0 ? "none were captured" : `all ${run.timelines.length} timelines carry unknowns`}`,
+    reason: `recorded driven-client capture (lapce-client ${lapceClient.version}, capture ${provenance.captureSha256.slice(0, 12)}) with measured input-to-paint evidence`,
   };
 }

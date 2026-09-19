@@ -164,6 +164,27 @@ fn server_source_urn(source: &ServerSource) -> String {
     format!("urn:{}", source.path())
 }
 
+/// Normalize a workspace root that a WASI `Url::to_file_path()` conversion
+/// rendered in Unix form (`/D:/path`). On the windows host OS that leading
+/// slash makes the path root-relative on the current drive, so no filesystem
+/// walk under it resolves (the server's configured-project scan finds nothing
+/// and the type provider stays `none`). Restore the native drive-absolute
+/// form; every other root passes through unchanged. `os` is the
+/// `VoltEnvironment::operating_system()` string of the host running the volt.
+pub fn normalize_workspace_root(root: &str, os: &str) -> String {
+    if os == "windows" {
+        let bytes = root.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0] == b'/'
+            && bytes[1].is_ascii_alphabetic()
+            && bytes[2] == b':'
+        {
+            return root[1..].to_string();
+        }
+    }
+    root.to_string()
+}
+
 /// Build the complete [`LspLaunchPlan`] from the resolved workspace root, the
 /// volt config, and the host platform strings.
 ///
@@ -524,6 +545,11 @@ mod wasi_volt {
             let os = VoltEnvironment::operating_system().unwrap_or_default();
             let arch = VoltEnvironment::architecture().unwrap_or_default();
 
+            // WASI `Url::to_file_path()` renders windows roots in Unix form
+            // (`/D:/path`); restore the native drive-absolute form so the
+            // server's workspace scans resolve on the windows host.
+            let root = root.map(|root| crate::normalize_workspace_root(&root, &os));
+
             // WSP1L instrumentation opt-in: `uiTrace.enabled` (default false) is
             // the only thing that turns the one-time launch stamp on.
             let ui_trace_enabled = cfg
@@ -689,6 +715,32 @@ mod tests {
         let launched = handle_initialize_at(&mut launcher, Some("/x"), &cfg, "linux", "x86_64", 7);
         assert!(launched);
         assert!(launcher.launched.is_some());
+    }
+
+    #[test]
+    fn wasi_unix_form_windows_root_is_normalized_to_drive_absolute() {
+        // WASI `Url::to_file_path()` converts with Unix rules, so a windows
+        // workspace root arrives as `/D:/...`; the server's filesystem scans
+        // under that leading-slash form find nothing on the windows host.
+        assert_eq!(
+            normalize_workspace_root("/D:/dev/personal/ws", "windows"),
+            "D:/dev/personal/ws"
+        );
+        // Only the windows host normalizes, and only the drive-letter form.
+        assert_eq!(
+            normalize_workspace_root("/D:/dev/ws", "linux"),
+            "/D:/dev/ws"
+        );
+        assert_eq!(
+            normalize_workspace_root("/home/dev/ws", "windows"),
+            "/home/dev/ws"
+        );
+        assert_eq!(
+            normalize_workspace_root("D:\\dev\\ws", "windows"),
+            "D:\\dev\\ws"
+        );
+        assert_eq!(normalize_workspace_root("/", "windows"), "/");
+        assert_eq!(normalize_workspace_root("", "windows"), "");
     }
 
     #[test]
