@@ -243,6 +243,20 @@ fn division_slash_does_not_hide_trailing_export_empty() {
 }
 
 #[test]
+fn regex_after_control_condition_does_not_make_a_module() {
+    for source in [
+        "if (ok) /; export {}/.test(x); interface W { x: 1 }",
+        "while (ok) /; import 'x'/.test(x); interface W { x: 1 }",
+        "if ((ok)) /; export {}/.test(x); interface W { x: 1 }",
+    ] {
+        assert_eq!(classify(source), FileModuleKind::Script, "{source}");
+        let store = FileArtifactStore::new();
+        publish(&store, "/script.ts", source);
+        assert_eq!(lookup_global(&store, "W").entries.len(), 1, "{source}");
+    }
+}
+
+#[test]
 fn same_canonical_replacement_keeps_one_live_version() {
     let store = FileArtifactStore::new();
     publish(

@@ -386,9 +386,8 @@ pub struct GlobalContributorIndex {
     /// Drained from contribution collection, not from upsert, so fence
     /// flights stay cold.
     pending_overlay_ambient: parking_lot::Mutex<FxHashSet<Arc<str>>>,
-    /// Fingerprint of the last snapshot-canonical set walked for ambient
-    /// / script-global ingest. Equal fingerprints skip the walk.
-    ingested_snapshot_fp: AtomicU64,
+    /// Last fully scanned workspace snapshot revision. None forces a scan.
+    ingested_snapshot_revision: parking_lot::Mutex<Option<u64>>,
     #[cfg(test)]
     publish_sorted_entries: AtomicU64,
     #[cfg(test)]
@@ -425,7 +424,7 @@ impl GlobalContributorIndex {
             mutate: parking_lot::Mutex::new(()),
             revision: AtomicU64::new(0),
             pending_overlay_ambient: parking_lot::Mutex::new(FxHashSet::default()),
-            ingested_snapshot_fp: AtomicU64::new(0),
+            ingested_snapshot_revision: parking_lot::Mutex::new(None),
             #[cfg(test)]
             publish_sorted_entries: AtomicU64::new(0),
             #[cfg(test)]
@@ -468,14 +467,12 @@ impl GlobalContributorIndex {
         self.snapshot_scan_visits.fetch_add(1, Ordering::Relaxed);
     }
 
-    #[must_use]
-    pub(crate) fn ingested_snapshot_fingerprint(&self) -> u64 {
-        self.ingested_snapshot_fp.load(Ordering::Acquire)
+    pub(crate) fn snapshot_revision_is_ingested(&self, revision: Option<u64>) -> bool {
+        revision.is_some() && *self.ingested_snapshot_revision.lock() == revision
     }
 
-    pub(crate) fn set_ingested_snapshot_fingerprint(&self, fingerprint: u64) {
-        self.ingested_snapshot_fp
-            .store(fingerprint, Ordering::Release);
+    pub(crate) fn set_ingested_snapshot_revision(&self, revision: Option<u64>) {
+        *self.ingested_snapshot_revision.lock() = revision;
     }
 
     #[cfg(test)]
@@ -540,7 +537,7 @@ impl GlobalContributorIndex {
             by_symbol: Arc::new(FxHashMap::default()),
         });
         self.revision.store(0, Ordering::Release);
-        self.ingested_snapshot_fp.store(0, Ordering::Release);
+        *self.ingested_snapshot_revision.lock() = None;
         #[cfg(test)]
         self.publish_sorted_entries.store(0, Ordering::Relaxed);
     }
@@ -554,35 +551,10 @@ impl GlobalContributorIndex {
         if pinned != expected_epoch {
             return;
         }
-        self.publish_pinned(pinned, &live_epoch, true);
+        self.publish_pinned(pinned, &live_epoch);
     }
 
-    /// Publish the current record set. Pin the live epoch, clone grouped
-    /// state, and retry if membership moved during the clone so a racing
-    /// edit is not lost inside a claimed-current snapshot. Augmentation-index
-    /// mutations advance the epoch without publishing contributors; if
-    /// every pin attempt loses, still publish under the latest epoch so
-    /// the dirty set cannot stay unpublished until another contributor
-    /// mutation.
-    pub fn publish_now(&self, live_epoch: impl Fn() -> u64) {
-        let _guard = self.publish.lock();
-        // bounded-loop: membership epoch retry
-        for _ in 0..8 {
-            let pinned = live_epoch();
-            if self.publish_pinned(pinned, &live_epoch, true) {
-                return;
-            }
-        }
-        let pinned = live_epoch();
-        let _ = self.publish_pinned(pinned, &live_epoch, false);
-    }
-
-    fn publish_pinned(
-        &self,
-        pinned: u64,
-        live_epoch: &impl Fn() -> u64,
-        require_pin: bool,
-    ) -> bool {
+    fn publish_pinned(&self, pinned: u64, live_epoch: &impl Fn() -> u64) -> bool {
         let by_symbol = {
             let mut grouped = self.grouped.lock();
             let prev = self.snapshot.read();
@@ -608,7 +580,7 @@ impl GlobalContributorIndex {
                 Arc::new(next)
             };
             drop(prev);
-            if require_pin && live_epoch() != pinned {
+            if live_epoch() != pinned {
                 return false;
             }
             grouped.dirty.clear();
@@ -774,7 +746,7 @@ pub fn classify_module_kind(indexed: &IndexedReady) -> FileModuleKind {
         || !routes.wildcard_reexports.is_empty()
         || !routes.local_exports.is_empty()
         || !routes.export_assignments.is_empty()
-        || source_has_file_module_syntax(indexed.eval_source.as_ref())
+        || routes.has_module_syntax
     {
         FileModuleKind::Module
     } else {
@@ -886,7 +858,8 @@ pub(crate) fn source_has_ambient_contribution(source: &str) -> bool {
 
 /// File-level `import`/`export` including `export {}`. Nested `export`
 /// inside `namespace`/`module` blocks and dynamic `import()` are not
-/// module syntax.
+/// module syntax. This is only an admission filter; the retained AST inventory
+/// is the authority for published module identity.
 fn source_has_file_module_syntax(source: &str) -> bool {
     let bytes = source.as_bytes();
     let mut i = 0;
@@ -897,6 +870,9 @@ fn source_has_file_module_syntax(source: &str) -> bool {
     let mut regex_class = false;
     let mut at_statement = true;
     let mut can_regex = true;
+    let mut control_paren = false;
+    let mut after_dot = false;
+    let mut parens = Vec::new();
     let mut brace_depth: u32 = 0;
     while i < bytes.len() {
         let b = bytes[i];
@@ -985,7 +961,15 @@ fn source_has_file_module_syntax(source: &str) -> bool {
                 can_regex = false;
                 i += 1;
             }
-            b'{' | b'(' | b'[' => {
+            b'(' => {
+                parens.push(control_paren);
+                control_paren = false;
+                after_dot = false;
+                at_statement = false;
+                can_regex = true;
+                i += 1;
+            }
+            b'{' | b'[' => {
                 if b == b'{' {
                     brace_depth = brace_depth.saturating_add(1);
                     at_statement = true;
@@ -1001,7 +985,16 @@ fn source_has_file_module_syntax(source: &str) -> bool {
                 can_regex = true;
                 i += 1;
             }
-            b')' | b']' => {
+            b')' => {
+                // A control-flow condition ends before a statement, which may
+                // begin with a regex. A call/group expression ends an operand.
+                can_regex = parens.pop().unwrap_or(false);
+                at_statement = can_regex;
+                control_paren = false;
+                after_dot = false;
+                i += 1;
+            }
+            b']' => {
                 at_statement = false;
                 can_regex = false;
                 i += 1;
@@ -1036,7 +1029,47 @@ fn source_has_file_module_syntax(source: &str) -> bool {
                 }
                 return true;
             }
+            b'.' => {
+                after_dot = true;
+                control_paren = false;
+                at_statement = false;
+                can_regex = false;
+                i += 1;
+            }
+            _ if b.is_ascii_alphabetic() || b == b'_' || b == b'$' => {
+                let start = i;
+                while i < bytes.len() && is_ident_continue(bytes[i]) {
+                    i += 1;
+                }
+                let word = &bytes[start..i];
+                control_paren = !after_dot
+                    && (matches!(
+                        word,
+                        b"if" | b"while" | b"for" | b"with" | b"switch" | b"catch"
+                    ) || (control_paren && word == b"await"));
+                can_regex = !after_dot
+                    && matches!(
+                        word,
+                        b"return"
+                            | b"throw"
+                            | b"case"
+                            | b"delete"
+                            | b"typeof"
+                            | b"void"
+                            | b"yield"
+                            | b"await"
+                            | b"else"
+                            | b"do"
+                            | b"in"
+                            | b"instanceof"
+                            | b"of"
+                    );
+                at_statement = !after_dot && matches!(word, b"else" | b"do");
+                after_dot = false;
+            }
             _ => {
+                control_paren = false;
+                after_dot = false;
                 at_statement = false;
                 can_regex = false;
                 i += 1;
@@ -1049,7 +1082,7 @@ fn source_has_file_module_syntax(source: &str) -> bool {
 /// File-level `interface` / `namespace` in a script (no import/export).
 /// Nested declarations and module files are not file-scope globals.
 #[must_use]
-pub(crate) fn source_has_file_scope_global_contribution(source: &str) -> bool {
+pub(crate) fn source_may_have_file_scope_global_contribution(source: &str) -> bool {
     if source_has_file_module_syntax(source) {
         return false;
     }

@@ -19,6 +19,48 @@ fn synth_artifacts(hash: u8) -> Arc<FileArtifacts> {
     Arc::new(FileArtifacts::with_indexed(synth_indexed(hash)))
 }
 
+#[test]
+fn augmentation_completion_flushes_contributors_after_in_flight_membership() {
+    let store = FileArtifactStore::new();
+    let pending = store.reserve_membership_epoch();
+    let source: Arc<str> = Arc::from("export {}; declare global { interface Window { x: 1 } }");
+    let state = crate::resolver_core::ShallowFileState::service_backed_for_test_at(
+        "/globals.d.ts",
+        &source,
+    );
+    store.insert(
+        Arc::from("/globals.d.ts"),
+        Arc::new(IndexedReady::new_for_test_with_state(
+            state.whole_hash,
+            state,
+            Arc::clone(&source),
+            source,
+        )),
+    );
+    assert_eq!(
+        store.global_contributor_index().snapshot().revision,
+        0,
+        "a different completed edit must not publish past an in-flight transition"
+    );
+    drop(pending);
+    store.clear_augmentation_index();
+    let population = store.global_contributor_index().snapshot();
+    assert_eq!(population.program_snapshot, store.membership_epoch());
+    assert_eq!(
+        population
+            .lookup(
+                &AugmentationTargetKind::GlobalAugmentation,
+                "Window",
+                None,
+                true
+            )
+            .entries
+            .len(),
+        1,
+        "augmentation-only completion must flush retained dirty contributors"
+    );
+}
+
 fn vue_key(source: &str, options: &verter_language::ParseOptions) -> FileArtifactKey {
     let language = verter_language::FileLanguage::vue();
     let syntax_profile =

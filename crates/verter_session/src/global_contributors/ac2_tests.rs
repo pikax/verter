@@ -224,11 +224,17 @@ fn note_live_window(index: &GlobalContributorIndex) {
 }
 
 #[test]
-fn publish_now_exhaustion_still_publishes_dirty_contributors() {
+fn unstable_epoch_retains_dirty_contributors_until_validated_publication() {
     let index = GlobalContributorIndex::new();
     note_live_window(&index);
-    let ticks = AtomicU64::new(0);
-    index.publish_now(|| ticks.fetch_add(1, Ordering::Relaxed) + 1);
+    let ticks = AtomicU64::new(1);
+    index.publish(1, || ticks.fetch_add(1, Ordering::Relaxed));
+    assert_eq!(
+        index.snapshot().revision,
+        0,
+        "an unstable epoch must never publish"
+    );
+    index.publish(100, || 100);
     let hit = index.snapshot().lookup(
         &AugmentationTargetKind::GlobalAugmentation,
         "Window",
@@ -237,7 +243,7 @@ fn publish_now_exhaustion_still_publishes_dirty_contributors() {
     );
     assert!(
         !hit.entries.is_empty(),
-        "retry exhaustion must still publish the dirty contributor set"
+        "a stable publication must retain every previously dirty contributor"
     );
 }
 

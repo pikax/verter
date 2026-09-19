@@ -4948,6 +4948,10 @@ impl Engine {
         seen.into_iter().collect()
     }
 
+    pub(crate) fn snapshot_revision(&self) -> u64 {
+        self.snapshot.read().revision()
+    }
+
     pub(crate) fn snapshot_canonicals(&self) -> Vec<String> {
         self.snapshot.read().ids().map(str::to_owned).collect()
     }

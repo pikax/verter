@@ -292,18 +292,32 @@ fn source_has_ambient_contribution_matches_declare_module_and_global() {
 
 #[test]
 fn ordinary_script_file_scope_globals_index_before_population_lookup() {
-    use super::source_has_file_scope_global_contribution;
-    assert!(source_has_file_scope_global_contribution(
+    use super::source_may_have_file_scope_global_contribution;
+    assert!(source_may_have_file_scope_global_contribution(
         "interface Window { x: number }\n"
     ));
-    assert!(source_has_file_scope_global_contribution(
+    assert!(source_may_have_file_scope_global_contribution(
         "namespace N { export const v = 1; }\n"
     ));
-    assert!(!source_has_file_scope_global_contribution(
+    assert!(!source_may_have_file_scope_global_contribution(
         "export {};\ninterface Window { x: number }\n"
     ));
-    assert!(!source_has_file_scope_global_contribution(
+    assert!(!source_may_have_file_scope_global_contribution(
         "export const n = 1;\n"
+    ));
+    for source in [
+        "if ((ok)) /; export {}/.test(x); interface Window {}",
+        "while (ok) /; export {}/.test(x); interface Window {}",
+        "for (; ok;) /; export {}/.test(x); interface Window {}",
+        "obj.if(ok) / n; interface Window {}",
+    ] {
+        assert!(
+            source_may_have_file_scope_global_contribution(source),
+            "{source}"
+        );
+    }
+    assert!(!source_may_have_file_scope_global_contribution(
+        "obj.if(ok) / n; export {}; interface Window {}"
     ));
 
     let workspace = std::sync::Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -311,7 +325,7 @@ fn ordinary_script_file_scope_globals_index_before_population_lookup() {
     ));
     workspace.inject_file(
         "/globals.ts".to_owned(),
-        Arc::from("interface Window { x: number }\n"),
+        Arc::from("if (ok) /; export {}/.test(x); interface Window { x: number }\n"),
     );
     workspace.inject_file("/plain.ts".to_owned(), Arc::from("export const n = 1;\n"));
     let host = VerterHost::new(HostConfig::default(), workspace);
@@ -391,4 +405,56 @@ fn upsert_does_not_rescan_snapshot_when_membership_is_unchanged() {
         0,
         "an ordinary edit must not re-walk snapshot members"
     );
+    host.ingest_program_ambient_roots();
+    host.ingest_program_ambient_roots();
+    assert_eq!(
+        index.snapshot_scan_visit_count(),
+        0,
+        "warm population lookups must also skip enumeration"
+    );
+}
+
+#[test]
+fn snapshot_replacement_discovers_new_globals_without_membership_change() {
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    workspace.inject_file("/changed.ts".into(), Arc::from("export const x = 1;"));
+    workspace.inject_file(
+        "/module.ts".into(),
+        Arc::from("export {}; interface LocalOnly { x: 1 }"),
+    );
+    let host = VerterHost::new(HostConfig::default(), workspace.clone());
+    host.ingest_program_ambient_roots();
+    workspace.inject_file(
+        "/changed.ts".into(),
+        Arc::from("interface AddedGlobal { x: 1 }"),
+    );
+    host.ingest_program_ambient_roots();
+    let population = host
+        .project_type_store()
+        .indexed()
+        .global_contributor_index()
+        .snapshot();
+    assert_eq!(
+        population
+            .lookup(
+                &AugmentationTargetKind::GlobalAugmentation,
+                "AddedGlobal",
+                None,
+                true
+            )
+            .entries
+            .len(),
+        1
+    );
+    assert!(population
+        .lookup(
+            &AugmentationTargetKind::GlobalAugmentation,
+            "LocalOnly",
+            None,
+            true
+        )
+        .entries
+        .is_empty());
 }

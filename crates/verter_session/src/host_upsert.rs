@@ -1051,9 +1051,10 @@ impl VerterHost {
                 && !canonical_id.starts_with("ambient:/"))
                 || (crate::host_construction::is_ordinary_typescript_canonical(
                     canonical_id.as_ref(),
-                ) && crate::global_contributors::source_has_file_scope_global_contribution(
-                    req.source.as_ref(),
-                ));
+                )
+                    && crate::global_contributors::source_may_have_file_scope_global_contribution(
+                        req.source.as_ref(),
+                    ));
         if pending_overlay {
             self.project_type_store()
                 .indexed()

@@ -2229,6 +2229,10 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         self.engine.known_canonicals()
     }
 
+    fn snapshot_revision(&self) -> Option<u64> {
+        Some(self.engine.snapshot_revision())
+    }
+
     fn snapshot_canonicals(&self) -> Vec<String> {
         self.engine.snapshot_canonicals()
     }

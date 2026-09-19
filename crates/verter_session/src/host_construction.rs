@@ -39,16 +39,6 @@ pub(crate) fn is_ordinary_typescript_canonical(canonical: &str) -> bool {
     canonical.ends_with(".ts") || canonical.ends_with(".tsx")
 }
 
-fn snapshot_membership_fingerprint(members: &[String]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = rustc_hash::FxHasher::default();
-    members.len().hash(&mut hasher);
-    for member in members {
-        member.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
 /// Per-host relation-engine knobs, grouped off the `VerterHost` struct body.
 ///
 /// - `force_overflow_observations`: test-injection for the cold relation
@@ -1193,23 +1183,28 @@ impl VerterHost {
     /// Ingest snapshot members that contribute globally and were never
     /// upserted. Peeks workspace bytes; does not load export-only `.d.ts`
     /// or unrelated ordinary scripts. Re-runs only when snapshot
-    /// membership changes.
+    /// content or membership changes.
     pub(crate) fn ingest_injected_ambient_roots(&self, except: Option<&str>) {
-        let members = self.workspace().snapshot_canonicals();
-        let fingerprint = snapshot_membership_fingerprint(&members);
         let index = self
             .project_type_store()
             .indexed()
             .global_contributor_index();
-        if index.ingested_snapshot_fingerprint() == fingerprint {
+        // Read the cheap owner revision before enumerating or cloning any IDs.
+        // If the snapshot changes during this scan, the next call sees a newer
+        // revision and scans again. Workspaces without a revision always scan.
+        let revision = self.workspace().snapshot_revision();
+        if index.snapshot_revision_is_ingested(revision) {
             return;
+        }
+        let members = self.workspace().snapshot_canonicals();
+        #[cfg(test)]
+        for _ in &members {
+            index.note_snapshot_scan_visit();
         }
         for member in &members {
             if except == Some(member.as_str()) {
                 continue;
             }
-            #[cfg(test)]
-            index.note_snapshot_scan_visit();
             if member.starts_with("ambient:/") {
                 let _ = self.ensure_loaded(member);
                 let _ = self.ensure_indexed_ready_serve(member);
@@ -1228,13 +1223,13 @@ impl VerterHost {
             let Some(source) = self.workspace().read_file(member) else {
                 continue;
             };
-            if crate::global_contributors::source_has_file_scope_global_contribution(
+            if crate::global_contributors::source_may_have_file_scope_global_contribution(
                 source.as_ref(),
             ) {
                 index.note_pending_overlay_ambient(member);
             }
         }
-        index.set_ingested_snapshot_fingerprint(fingerprint);
+        index.set_ingested_snapshot_revision(revision);
     }
 
     /// Host-owned scratch cache for the typeinfo

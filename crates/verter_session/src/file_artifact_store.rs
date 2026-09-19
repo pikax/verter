@@ -806,7 +806,9 @@ impl RetentionEpochs {
 ///
 /// **Lock rank: LEAF.** It is acquired with no `artifacts` /
 /// `canonical_keys` / `retired_*` shard guard held, and no shard guard is
-/// ever taken while it is held.
+/// ever taken while it is held. Contributor publication may take its
+/// grouped/snapshot locks under this lock; it never accesses artifact shards
+/// or re-enters the root registry.
 #[derive(Debug, Default)]
 struct LiveRootRegistry {
     state: parking_lot::Mutex<RootRegistryState>,
@@ -1319,6 +1321,20 @@ impl FileArtifactStore {
             registry: &self.live_roots,
             epoch,
         }
+    }
+
+    /// Publish only a fully applied membership state. The registry lock also
+    /// prevents a new epoch reservation until publication finishes. Every
+    /// membership mutation calls this after releasing its reservation, so the
+    /// last completing mutation flushes dirty contributors even when it only
+    /// changed the augmentation index. No retry or unvalidated fallback.
+    fn publish_global_contributors(&self) {
+        let state = self.live_roots.state.lock();
+        if !state.in_flight.is_empty() {
+            return;
+        }
+        self.global_contributors
+            .publish(self.membership_epoch(), || self.membership_epoch());
     }
 
     /// Capture an immutable, LEASED root of the store's current
@@ -1958,8 +1974,7 @@ impl FileArtifactStore {
         // The transition has landed: release the epoch so captures may
         // name it, BEFORE the (possibly reclaiming) retirement accounting.
         drop(reservation);
-        self.global_contributors
-            .publish_now(|| self.membership_epoch());
+        self.publish_global_contributors();
         if displaced_payload.is_some() {
             self.note_retirements(1);
         }
@@ -2136,10 +2151,7 @@ impl FileArtifactStore {
         // transition, not two.
         self.invalidate_augmentation_index_at_epoch(&removed_augmentations, epoch);
         drop(reservation);
-        if !removed.is_empty() {
-            self.global_contributors
-                .publish_now(|| self.membership_epoch());
-        }
+        self.publish_global_contributors();
         self.note_retirements(removed.len());
         removed
     }
@@ -3235,6 +3247,7 @@ impl FileArtifactStore {
             }
         };
         drop(reservation);
+        self.publish_global_contributors();
         if retired.is_some() {
             self.note_retirements(1);
         }
@@ -3572,6 +3585,7 @@ impl FileArtifactStore {
         let epoch = reservation.epoch();
         let retired = self.invalidate_augmentation_index_at_epoch(augmenter_facts, epoch);
         drop(reservation);
+        self.publish_global_contributors();
         retired
     }
 
@@ -3624,6 +3638,7 @@ impl FileArtifactStore {
             .collect();
         self.retire_augmenter_keys(&all_keys, reservation.epoch());
         drop(reservation);
+        self.publish_global_contributors();
         self.bump_artifact_generation();
     }
 
