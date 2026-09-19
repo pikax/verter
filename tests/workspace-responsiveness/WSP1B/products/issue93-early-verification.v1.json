@@ -1,0 +1,142 @@
+{
+  "schema": "issue93-early-verification.v1",
+  "node": "WSP1B",
+  "status": "qualified",
+  "rule": "qualified",
+  "reason": "current large-workspace Lapce behavior is independently measured; historical issue 93 stays unreproduced and is not claimed fixed",
+  "historicalIssue93": {
+    "id": 93,
+    "state": "unreproduced",
+    "notAFix": true,
+    "retirement": "operator-approved unreproduced / not planned (WSP1A cancelled ledger); this node never claims the historical hang was repaired"
+  },
+  "operatorManualProbe": {
+    "basis": "main 4bbe1ba3dc933552493d6cf063c61a048f04cea8",
+    "lspSha256": "66289bf28b13679f8c50d8d63308b5a154668ff55028603cb85dc3af52c14dc9",
+    "lapce": "0.4.6",
+    "typescript": "7.0.2",
+    "corpus": "PrimeVue (2,615 Vue files) opened during setup; unlabeled private corpus, source not published",
+    "result": "seems to be working correctly, no hang found",
+    "limitations": [
+      "exact tested project, interaction sequence and duration were not specified",
+      "no WSP1/WSP1L UI timeline or semantic oracle was captured",
+      "this probe cannot certify WSP1B; the qualifying run is the synthetic-15k slice capture"
+    ]
+  },
+  "smallSmoke": {
+    "certified": true,
+    "uiStallDetected": false,
+    "vueFileCount": 2,
+    "surface": "tests/workspace-responsiveness/WSP1L/products/real-client-capture.v1.json"
+  },
+  "largeRun": {
+    "hostKind": "real-lapce",
+    "protocolSmokeOnly": false,
+    "uiStallDetected": false,
+    "serverImmediate": false,
+    "realClientEvidence": true,
+    "completenessState": "partial",
+    "usedSleepForReadiness": false,
+    "versionsPinned": true,
+    "interactionKinds": [
+      "open",
+      "open",
+      "navigate",
+      "type",
+      "complete",
+      "close",
+      "open"
+    ],
+    "reopenAfterClose": true,
+    "diagnosticsObserved": true,
+    "duration": {
+      "status": "measured",
+      "value": 1834,
+      "unit": "ms"
+    },
+    "workload": {
+      "id": "wsp-equal-work-synthetic-sfc-slice",
+      "class": "large-project",
+      "vueFileCount": 2615,
+      "sourcePin": "test-corpora/perf/synthetic-15k/generator/generate.mjs generatorVersion=1.1.0 count=2615 seed=0x5eed15",
+      "configurationPin": "planted Fixture.vue + Helper.vue under a tsconfig that includes the generated corpus",
+      "privateCorpusLabel": "operator PrimeVue 2615 Vue files (unlabeled, not published)"
+    },
+    "oracle": {
+      "diagnosticCount": {
+        "status": "measured",
+        "value": 7,
+        "unit": "count"
+      },
+      "typedAnswers": [
+        {
+          "kind": "completion",
+          "expected": [
+            "greeting",
+            "user",
+            "message"
+          ],
+          "observed": [
+            "greeting",
+            "user",
+            "message"
+          ],
+          "match": true
+        },
+        {
+          "kind": "definition",
+          "expected": [
+            "Fixture.vue"
+          ],
+          "observed": [
+            "file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue"
+          ],
+          "match": true
+        },
+        {
+          "kind": "diagnostics",
+          "expected": [
+            "counted"
+          ],
+          "observed": [
+            "7"
+          ],
+          "match": true
+        }
+      ],
+      "requiredFeaturesEnabled": true
+    },
+    "resources": {
+      "clientPaint": {
+        "status": "measured",
+        "value": 249,
+        "unit": "ms"
+      },
+      "providerProcessCost": {
+        "status": "unknown",
+        "reason": "provider pid 132476 observed; CPU not sampled"
+      },
+      "outboundBytes": {
+        "status": "measured",
+        "value": 9393,
+        "unit": "bytes"
+      },
+      "retainedMemory": {
+        "status": "unknown",
+        "reason": "process-tree RSS not sampled on this capture"
+      }
+    },
+    "claimsIssue93Fixed": false,
+    "finalOwner": "expansion.workspace-responsiveness",
+    "duplicatedAuthority": false
+  },
+  "receiptBasis": {
+    "sourceRevisions": "recorded-capture:1789831548684-15ff93e4",
+    "projectConfiguration": "wsp-equal-work-synthetic-sfc-slice count=2615",
+    "engineIdentity": "verter-lsp 0.0.1-beta.5 / tsgo",
+    "hostIdentity": "real-lapce:0.4.6+Nightly.126d356",
+    "completenessState": "partial"
+  },
+  "capture": "tests/workspace-responsiveness/WSP1B/products/large-project-capture.v1.json",
+  "contentSha256": "9b912c43cfeb29959ef9f37bf69aed27fc59c76ec01dddf9a178fd548a0289b1"
+}

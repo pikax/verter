@@ -1,0 +1,468 @@
+{
+  "schema": "driven-lapce-capture.v1",
+  "node": "WSP1L",
+  "recordedAs": "tests/workspace-responsiveness/WSP1B/products/large-project-capture.v1.json",
+  "session": {
+    "sessionId": "1789831548684-15ff93e4",
+    "startedUnixMs": 1789831548684,
+    "machine": "win32/x64"
+  },
+  "lapceClient": {
+    "version": "0.4.6+Nightly.126d356",
+    "source": "Lapce v0.4.6 (github.com/lapce/lapce tag v0.4.6 source tarball) + the WSP1L instrumented-client patch",
+    "patch": "D:/dev/personal/tama-worktrees/verter/wt/workflow_job_fe35ae8c780bd018267c8b9c4cfd685c14fff46aae261deb0b885edac2aaab62/packages/dx-harness/lapce/instrumented-client/lapce-0.4.6-wsp1l.patch",
+    "patchSha256": "5f29e53b44e3825126242d91d641d67cdb9883248fc65c6a9c7bf9a8af1d9a6e"
+  },
+  "automationPath": {
+    "kind": "instrumented-client-build + volt launch-stamp + wsp1l drive channel",
+    "perturbation": "the reference Lapce build carries the WSP1L instrumentation patch (external drive channel on the UI event loop + `verter ui-stamp` stage observations at the real pipeline seams; inactive without VERTER_WSP1L_DRIVE_ADDR) and the volt emits its one-time initialize launch-stamp behind uiTrace.enabled; the per-message LSP path is untouched",
+    "recordedAs": "WSP1L.1 real-host path (charter: supported automation or instrumentation path, or an instrumented client build)"
+  },
+  "drivenScript": [
+    {
+      "kind": "open",
+      "requestEpoch": 1,
+      "sourceEpoch": null,
+      "uri": "C:\\Users\\david\\AppData\\Local\\Temp\\wsp1b-ws-HDmciL\\Helper.vue"
+    },
+    {
+      "kind": "open",
+      "requestEpoch": 2,
+      "sourceEpoch": null,
+      "uri": "C:\\Users\\david\\AppData\\Local\\Temp\\wsp1b-ws-HDmciL\\Fixture.vue",
+      "line": 4,
+      "column": 20
+    },
+    {
+      "kind": "navigate",
+      "requestEpoch": 3,
+      "sourceEpoch": null
+    },
+    {
+      "kind": "type",
+      "requestEpoch": 4,
+      "sourceEpoch": null,
+      "text": " "
+    },
+    {
+      "kind": "complete",
+      "requestEpoch": 5,
+      "sourceEpoch": null
+    },
+    {
+      "kind": "close",
+      "requestEpoch": 6,
+      "sourceEpoch": null
+    },
+    {
+      "kind": "open",
+      "requestEpoch": 7,
+      "sourceEpoch": null,
+      "uri": "C:\\Users\\david\\AppData\\Local\\Temp\\wsp1b-ws-HDmciL\\corpus\\kernel\\k0000\\Comp0000_000.vue",
+      "line": 1,
+      "column": 1
+    }
+  ],
+  "capturedLines": [
+    "{\"event\":\"ready\",\"lapceVersion\":\"0.4.6+Nightly.126d356\"}",
+    "\u001b[2m2026-09-19T15:25:49.215094Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(24) \u001b[2mlapce_proxy::plugin::catalog\u001b[0m\u001b[2m:\u001b[0m \u001b[2m480:\u001b[0m UnactivatedVolts [VoltMetadata { name: \"verter-volt\", version: \"0.1.0\", display_name: \"Verter (Vue / Svelte)\", author: \"pikax\", description: \"Vue & Svelte language support powered by the Verter LSP\", icon: None, repository: Some(\"https://github.com/pikax/verter\"), wasm: Some(\"\\\\\\\\?\\\\C:\\\\Users\\\\david\\\\AppData\\\\Local\\\\Temp\\\\wsp1b-volt\\\\bin\\\\verter-lapce.wasm\"), color_themes: None, icon_themes: None, dir: Some(\"\\\\\\\\?\\\\C:\\\\Users\\\\david\\\\AppData\\\\Local\\\\Temp\\\\wsp1b-volt\"), activation: Some(VoltActivation { language: Some([\"vue\", \"svelte\"]), workspace_contains: Some([\"**/*.vue\", \"**/*.svelte\"]) }), config: Some({\"inlayHints.enabled\": VoltConfig { default: Bool(true), description: \"Enable inlay hints.\" }, \"typeProvider\": VoltConfig { default: String(\"tsgo\"), description: \"TypeScript type provider. This client only supplies the SDK-free providers: tsgo (default) or off. tsserver / auto / any other value are clamped to tsgo (the client never supplies a TypeScript SDK).\" }, \"lint.preset\": VoltConfig { default: String(\"recommended\"), description: \"Lint preset: essential | recommended | all | performance | a11y | strict. Unknown values clamp to recommended.\" }, \"viteConfig.enabled\": VoltConfig { default: Bool(true), description: \"Read vite.config.* for resolve aliases and other build settings.\" }, \"viteConfig.trustedFiles\": VoltConfig { default: Array [], description: \"Vite config files trusted for execution.\" }, \"lsp.serverSource\": VoltConfig { default: String(\"none\"), description: \"How to find verter-lsp when no lsp.serverPath is set. \\\"none\\\" (default) selects no auto-discovery source: set lsp.serverPath to an absolute verter-lsp path, or opt into PATH discovery with \\\"path\\\". \\\"path\\\" looks up verter-lsp on your PATH. (A \\\"managed\\\" pinned-binary source is reserved for a future release and is NOT available yet; it is not auto-discovered.) With \\\"none\\\" and no lsp.serverPath, the volt fails loud with setup guidance instead of guessing.\" }, \"hover.provenance\": VoltConfig { default: Bool(false), description: \"Include type provenance (where a type came from) in hover.\" }, \"experimental.strictSlots\": VoltConfig { default: Bool(false), description: \"Experimental: stricter slot type checking.\" }, \"lint.enabled\": VoltConfig { default: Bool(false), description: \"Enable Verter lint diagnostics.\" }, \"uiTrace.enabled\": VoltConfig { default: Bool(false), description: \"WSP1L instrumentation: emit a one-time launch stamp (initialize epoch marker) that the dx-harness Lapce driver correlates with the server timeline. Off by default; the per-message LSP path is never touched.\" }, \"lsp.serverArgs\": VoltConfig { default: Array [], description: \"Extra arguments appended to the verter-lsp launch (after the type-provider flag, before the workspace root). Crate-owned arguments (--type-provider, --tsdk, bare positionals) are ignored.\" }, \"statistics.enabled\": VoltConfig { default: Bool(false), description: \"Emit server-side resolution statistics.\" }, \"experimental.conditionalRootNarrowing\": VoltConfig { default: Bool(false), description: \"Experimental: narrow fallthrough attributes through conditional template roots.\" }, \"lsp.serverPath\": VoltConfig { default: String(\"\"), description: \"Absolute path to a verter-lsp binary. When set, it overrides every other discovery source.\" }}) }]",
+    "\u001b[2m2026-09-19T15:25:49.216272Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(24) \u001b[2mlapce_proxy::plugin::catalog\u001b[0m\u001b[2m:\u001b[0m \u001b[2m210:\u001b[0m VoltID { author: \"pikax\", name: \"verter-volt\" } Some({\"uiTrace\": Object {\"enabled\": Bool(true)}, \"lsp\": Object {\"serverPath\": String(\"D:/dev/personal/tama-worktrees/verter/wt/workflow_job_fe35ae8c780bd018267c8b9c4cfd685c14fff46aae261deb0b885edac2aaab62/target/release/verter-lsp.exe\")}})",
+    "\u001b[2m2026-09-19T15:25:49.310404Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(74) \u001b[2mlapce_proxy::plugin::wasi::pikax::verter-volt\u001b[0m\u001b[2m:\u001b[0m \u001b[2m520:\u001b[0m verter launch-stamp {\"atUnixMs\":1789831549310,\"documentLanguages\":[\"vue\",\"svelte\"],\"phase\":\"server_launch_issued\",\"serverUri\":\"urn:D:/dev/personal/tama-worktrees/verter/wt/workflow_job_fe35ae8c780bd018267c8b9c4cfd685c14fff46aae261deb0b885edac2aaab62/target/release/verter-lsp.exe\",\"workspaceRoot\":\"C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/\"}",
+    "\u001b[2m2026-09-19T15:25:49.314782Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(80) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m366:\u001b[0m initialization_options Some(Object {\"experimental\": Object {\"conditionalRootNarrowing\": Bool(false), \"strictSlots\": Bool(false)}, \"hover\": Object {\"provenance\": Bool(false)}, \"inlayHints\": Object {\"enabled\": Bool(true)}, \"lint\": Object {\"enabled\": Bool(false), \"preset\": String(\"recommended\")}, \"statistics\": Object {\"enabled\": Bool(false)}, \"viteConfig\": Object {\"enabled\": Bool(true), \"trustedFiles\": Array []}})",
+    "\u001b[2m2026-09-19T15:25:49.314935Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"params\":{\"capabilities\":{\"experimental\":{\"commands\":{\"commands\":[\"rust-analyzer.runSingle\",\"rust-analyzer.debugSingle\"]},\"serverStatusNotification\":true},\"textDocument\":{\"callHierarchy\":{\"dynamicRegistration\":true},\"codeAction\":{\"codeActionLiteralSupport\":{\"codeActionKind\":{\"valueSet\":[\"\",\"quickfix\",\"refactor\",\"refactor.extract\",\"refactor.inline\",\"refactor.rewrite\",\"source\",\"source.organizeImports\",\"quickassist\",\"source.fixAll\"]}},\"dataSupport\":true,\"resolveSupport\":{\"properties\":[\"edit\"]}},\"completion\":{\"completionItem\":{\"resolveSupport\":{\"properties\":[\"additionalTextEdits\"]},\"snippetSupport\":true}},\"definition\":{},\"documentSymbol\":{\"hierarchicalDocumentSymbolSupport\":true},\"foldingRange\":{\"dynamicRegistration\":false,\"lineFoldingOnly\":false},\"hover\":{\"contentFormat\":[\"markdown\",\"plaintext\"]},\"inlayHint\":{},\"inlineCompletion\":{},\"publishDiagnostics\":{},\"semanticTokens\":{\"formats\":[],\"requests\":{},\"tokenModifiers\":[],\"tokenTypes\":[]},\"signatureHelp\":{\"signatureInformation\":{\"activeParameterSupport\":true,\"documentationFormat\":[\"markdown\",\"plaintext\"],\"parameterInformation\":{\"labelOffsetSupport\":true}}},\"synchronization\":{\"didSave\":true,\"dynamicRegistration\":true},\"typeDefinition\":{\"linkSupport\":false}},\"window\":{\"showMessage\":{\"messageActionItem\":{\"additionalPropertiesSupport\":true}},\"workDoneProgress\":true},\"workspace\":{\"configuration\":false,\"symbol\":{},\"workspaceFolders\":true}},\"clientInfo\":{\"name\":\"Lapce-Nightly\",\"version\":\"0.4.6+Nightly.126d356\"},\"initializationOptions\":{\"experimental\":{\"conditionalRootNarrowing\":false,\"strictSlots\":false},\"hover\":{\"provenance\":false},\"inlayHints\":{\"enabled\":true},\"lint\":{\"enabled\":false,\"preset\":\"recommended\"},\"statistics\":{\"enabled\":false},\"viteConfig\":{\"enabled\":true,\"trustedFiles\":[]}},\"processId\":96592,\"rootUri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/\",\"trace\":\"verbose\",\"workspaceFolders\":[{\"name\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/\",\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/\"}]},\"id\":0}",
+    "verter ui-stamp {\"atUnixMs\":1789831549937,\"kind\":\"open\",\"requestEpoch\":1,\"sourceEpoch\":null,\"stage\":\"input_dispatched\"}",
+    "verter ui-stamp {\"atUnixMs\":1789831549959,\"kind\":\"open\",\"requestEpoch\":1,\"sourceEpoch\":null,\"stage\":\"decoded\"}",
+    "verter ui-stamp {\"atUnixMs\":1789831549960,\"kind\":\"open\",\"requestEpoch\":1,\"sourceEpoch\":null,\"stage\":\"applied\"}",
+    "\u001b[2m2026-09-19T15:25:49.975861Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":{\"capabilities\":{\"callHierarchyProvider\":true,\"codeActionProvider\":{\"codeActionKinds\":[\"source.organizeImports\",\"quickfix\",\"refactor\",\"refactor.extract\"]},\"codeLensProvider\":{\"resolveProvider\":false},\"colorProvider\":true,\"completionProvider\":{\"completionItem\":{\"labelDetailsSupport\":true},\"resolveProvider\":true,\"triggerCharacters\":[\".\",\"@\",\"<\",\":\",\"#\",\" \",\"\\\"\",\"'\"]},\"definitionProvider\":true,\"documentFormattingProvider\":true,\"documentHighlightProvider\":true,\"documentLinkProvider\":{\"resolveProvider\":false},\"documentOnTypeFormattingProvider\":{\"firstTriggerCharacter\":\">\"},\"documentSymbolProvider\":true,\"experimental\":{\"verterAudit\":{\"cancellationContract\":\"finalize-with-marker\",\"kind\":\"Lsp\",\"methods\":[\"hover\",\"gotoDefinition\",\"completion\",\"references\",\"diagnostics\",\"documentSymbols\",\"semanticTokens\",\"inlayHints\",\"codeAction\",\"rename\"],\"queryMethods\":[\"$/verter/audit/getRecord\",\"$/verter/audit/getRecent\"],\"traceOutEnv\":\"VERTER_LSP_AUDIT_TRACE_OUT\",\"version\":1},\"verterInteractionTrace\":{\"clientStagesOwner\":\"WSP1L\",\"initOption\":\"interactionTrace.enabled\",\"queryMethod\":\"$/verter/getStatistics\",\"sourceLogging\":\"off-by-default\",\"stages\":[\"request_received\",\"admitted\",\"provider_work\",\"serialize\",\"outbound_enqueued\",\"outbound_written\",\"complete\"],\"version\":1}},\"foldingRangeProvider\":true,\"hoverProvider\":true,\"inlayHintProvider\":true,\"linkedEditingRangeProvider\":true,\"positionEncoding\":\"utf-16\",\"referencesProvider\":true,\"renameProvider\":{\"prepareProvider\":true},\"selectionRangeProvider\":true,\"semanticTokensProvider\":{\"full\":true,\"legend\":{\"tokenModifiers\":[\"declaration\",\"definition\",\"readonly\",\"static\",\"deprecated\",\"abstract\",\"async\",\"modification\",\"documentation\",\"defaultLibrary\",\"local\"],\"tokenTypes\":[\"namespace\",\"type\",\"class\",\"enum\",\"interface\",\"struct\",\"typeParameter\",\"parameter\",\"variable\",\"property\",\"enumMember\",\"event\",\"function\",\"method\",\"macro\",\"keyword\",\"modifier\",\"comment\",\"string\",\"number\",\"regexp\",\"operator\",\"decorator\"]}},\"signatureHelpProvider\":{\"retriggerCharacters\":[\",\"],\"triggerCharacters\":[\"(\",\",\"]},\"textDocumentSync\":2,\"typeDefinitionProvider\":true,\"workspace\":{\"fileOperations\":{\"didCreate\":{\"filters\":[{\"pattern\":{\"glob\":\"**/*.{svelte,vue}\"},\"scheme\":\"file\"}]},\"didDelete\":{\"filters\":[{\"pattern\":{\"glob\":\"**/*.{svelte,vue}\"},\"scheme\":\"file\"}]}},\"workspaceFolders\":{\"changeNotifications\":true,\"supported\":true}},\"workspaceSymbolProvider\":true},\"offsetEncoding\":\"utf-16\",\"serverInfo\":{\"name\":\"verter-lsp\",\"version\":\"0.0.1-beta.5\"}},\"id\":0}",
+    "\u001b[2m2026-09-19T15:25:49.976283Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+    "\u001b[2m2026-09-19T15:25:49.976392Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"languageId\":\"vue\",\"text\":\"<script setup>\\nexport {}\\n</script>\\n\\n<template>\\n  <p>helper</p>\\n</template>\\n\",\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Helper.vue\",\"version\":1}}}",
+    "\u001b[2m2026-09-19T15:25:49.976528Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"window/logMessage\",\"params\":{\"message\":\"verter-lsp 0.0.1-beta.5 initialized (type provider: TSGO)\",\"type\":3}}",
+    "\u001b[2m2026-09-19T15:25:49.979505Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"$/verter/typeProviderStarted\",\"params\":{\"kind\":\"tsgo\",\"pid\":132476}}",
+    "\u001b[2m2026-09-19T15:25:49.979543Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"$/verter/tsgoStarted\",\"params\":{\"pid\":132476}}",
+    "\u001b[2m2026-09-19T15:25:49.979552Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"$/verter/typeProviderStatus\",\"params\":{\"kind\":\"tsgo\",\"topology\":\"managed-tsgo\"}}",
+    "\u001b[2m2026-09-19T15:25:49.980034Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"$/verter/typeProviderSyncComplete\",\"params\":{\"gen\":0}}",
+    "\u001b[2m2026-09-19T15:25:49.980070Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"$/verter/carrierStoreReady\",\"params\":{\"carrierStoreDir\":\"C:/Users/david/AppData/Local/Temp/verter-carrier-store/0.0.1-beta.5/blake3-a39fd12f53ee7fcfb85b8068bf260045\"}}",
+    "\u001b[2m2026-09-19T15:25:49.980084Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"$/verter/heartbeat\",\"params\":{\"timestamp\":1789831549979}}",
+    "\u001b[2m2026-09-19T15:25:49.980952Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"$/verter/typeProviderSyncComplete\",\"params\":{\"gen\":0}}",
+    "\u001b[2m2026-09-19T15:25:49.981013Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"client/registerCapability\",\"params\":{\"registrations\":[{\"id\":\"verter-file-watcher\",\"method\":\"workspace/didChangeWatchedFiles\",\"registerOptions\":{\"watchers\":[{\"globPattern\":\"**/*.{svelte,vue}\",\"kind\":7},{\"globPattern\":\"**/*.{svelte.js,svelte.ts}\",\"kind\":7},{\"globPattern\":\"**/*.{ts,tsx,js,jsx,mts,mjs,cts,cjs}\",\"kind\":7},{\"globPattern\":\"**/tsconfig*.json\",\"kind\":7},{\"globPattern\":\"**/.verterrc.json\",\"kind\":7},{\"globPattern\":\"**/vite.config.{ts,js,mjs,cjs,mts,cts}\",\"kind\":7},{\"globPattern\":\"**/package.json\",\"kind\":7}]}}]},\"id\":0}",
+    "don't handle register capability for workspace/didChangeWatchedFiles",
+    "\u001b[2m2026-09-19T15:25:49.981166Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"result\":null,\"id\":0}",
+    "verter ui-stamp {\"atUnixMs\":1789831550186,\"kind\":\"open\",\"requestEpoch\":1,\"sourceEpoch\":null,\"stage\":\"painted\"}",
+    "{\"kind\":\"open\",\"requestEpoch\":1,\"sourceEpoch\":null,\"stamps\":[{\"atUnixMs\":1789831549937,\"kind\":\"open\",\"requestEpoch\":1,\"sourceEpoch\":null,\"stage\":\"input_dispatched\"},{\"atUnixMs\":1789831549959,\"kind\":\"open\",\"requestEpoch\":1,\"sourceEpoch\":null,\"stage\":\"decoded\"},{\"atUnixMs\":1789831549960,\"kind\":\"open\",\"requestEpoch\":1,\"sourceEpoch\":null,\"stage\":\"applied\"},{\"atUnixMs\":1789831550186,\"kind\":\"open\",\"requestEpoch\":1,\"sourceEpoch\":null,\"stage\":\"painted\"}]}",
+    "\u001b[2m2026-09-19T15:25:50.190021Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"diagnostics\":[],\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Helper.vue\",\"version\":1}}",
+    "\u001b[2m2026-09-19T15:25:50.190120Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"$/verter/ready\",\"params\":{\"gen\":1}}",
+    "\u001b[2m2026-09-19T15:25:50.264316Z\u001b[0m \u001b[32m INFO\u001b[0m main \u001b[2mlapce_proxy::plugin::psp::pikax::verter-volt::LogMessage\u001b[0m\u001b[2m:\u001b[0m \u001b[2m2313:\u001b[0m verter-lsp 0.0.1-beta.5 initialized (type provider: TSGO)    ",
+    "\u001b[2m2026-09-19T15:25:50.264353Z\u001b[0m \u001b[33m WARN\u001b[0m main \u001b[2mlapce_proxy::plugin::psp::pikax::verter-volt::$/verter/typeProviderStarted\u001b[0m\u001b[2m:\u001b[0m \u001b[2m2295:\u001b[0m host notification $/verter/typeProviderStarted not handled    ",
+    "\u001b[2m2026-09-19T15:25:50.264359Z\u001b[0m \u001b[33m WARN\u001b[0m main \u001b[2mlapce_proxy::plugin::psp::pikax::verter-volt::$/verter/tsgoStarted\u001b[0m\u001b[2m:\u001b[0m \u001b[2m2295:\u001b[0m host notification $/verter/tsgoStarted not handled    ",
+    "\u001b[2m2026-09-19T15:25:50.264365Z\u001b[0m \u001b[33m WARN\u001b[0m main \u001b[2mlapce_proxy::plugin::psp::pikax::verter-volt::$/verter/typeProviderStatus\u001b[0m\u001b[2m:\u001b[0m \u001b[2m2295:\u001b[0m host notification $/verter/typeProviderStatus not handled    ",
+    "\u001b[2m2026-09-19T15:25:50.264377Z\u001b[0m \u001b[33m WARN\u001b[0m main \u001b[2mlapce_proxy::plugin::psp::pikax::verter-volt::$/verter/typeProviderSyncComplete\u001b[0m\u001b[2m:\u001b[0m \u001b[2m2295:\u001b[0m host notification $/verter/typeProviderSyncComplete not handled    ",
+    "\u001b[2m2026-09-19T15:25:50.264381Z\u001b[0m \u001b[33m WARN\u001b[0m main \u001b[2mlapce_proxy::plugin::psp::pikax::verter-volt::$/verter/carrierStoreReady\u001b[0m\u001b[2m:\u001b[0m \u001b[2m2295:\u001b[0m host notification $/verter/carrierStoreReady not handled    ",
+    "\u001b[2m2026-09-19T15:25:50.264385Z\u001b[0m \u001b[33m WARN\u001b[0m main \u001b[2mlapce_proxy::plugin::psp::pikax::verter-volt::$/verter/heartbeat\u001b[0m\u001b[2m:\u001b[0m \u001b[2m2295:\u001b[0m host notification $/verter/heartbeat not handled    ",
+    "\u001b[2m2026-09-19T15:25:50.264390Z\u001b[0m \u001b[33m WARN\u001b[0m main \u001b[2mlapce_proxy::plugin::psp::pikax::verter-volt::$/verter/typeProviderSyncComplete\u001b[0m\u001b[2m:\u001b[0m \u001b[2m2295:\u001b[0m host notification $/verter/typeProviderSyncComplete not handled    ",
+    "\u001b[2m2026-09-19T15:25:50.265756Z\u001b[0m \u001b[33m WARN\u001b[0m main \u001b[2mlapce_proxy::plugin::psp::pikax::verter-volt::$/verter/ready\u001b[0m\u001b[2m:\u001b[0m \u001b[2m2295:\u001b[0m host notification $/verter/ready not handled    ",
+    "verter ui-stamp {\"atUnixMs\":1789831550265,\"kind\":\"open\",\"requestEpoch\":2,\"sourceEpoch\":null,\"stage\":\"input_dispatched\"}",
+    "\u001b[2m2026-09-19T15:25:50.266524Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"languageId\":\"vue\",\"text\":\"<script setup>\\nconst greeting = \\\"hello\\\";\\nconst user = \\\"world\\\";\\nconst message = greeting + user;\\nmessage;\\n</script>\\n\\n<template>\\n  <div>{{ greeting }}</div>\\n</template>\\n\",\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\",\"version\":1}}}",
+    "\u001b[2m2026-09-19T15:25:50.267133Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/codeLens\",\"params\":{\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\"}},\"id\":1}",
+    "\u001b[2m2026-09-19T15:25:50.267213Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/documentSymbol\",\"params\":{\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\"}},\"id\":2}",
+    "\u001b[2m2026-09-19T15:25:50.277432Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":[{\"command\":{\"command\":\"\",\"title\":\"3 bindings\"},\"range\":{\"end\":{\"character\":0,\"line\":0},\"start\":{\"character\":0,\"line\":0}}},{\"command\":{\"command\":\"\",\"title\":\"1 binding ref\"},\"range\":{\"end\":{\"character\":0,\"line\":7},\"start\":{\"character\":0,\"line\":7}}}],\"id\":1}",
+    "\u001b[2m2026-09-19T15:25:50.277768Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":[{\"children\":[{\"detail\":\"const\",\"kind\":14,\"name\":\"greeting\",\"range\":{\"end\":{\"character\":14,\"line\":1},\"start\":{\"character\":6,\"line\":1}},\"selectionRange\":{\"end\":{\"character\":14,\"line\":1},\"start\":{\"character\":6,\"line\":1}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"user\",\"range\":{\"end\":{\"character\":10,\"line\":2},\"start\":{\"character\":6,\"line\":2}},\"selectionRange\":{\"end\":{\"character\":10,\"line\":2},\"start\":{\"character\":6,\"line\":2}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"message\",\"range\":{\"end\":{\"character\":13,\"line\":3},\"start\":{\"character\":6,\"line\":3}},\"selectionRange\":{\"end\":{\"character\":13,\"line\":3},\"start\":{\"character\":6,\"line\":3}}}],\"detail\":\"script setup\",\"kind\":2,\"name\":\"script setup\",\"range\":{\"end\":{\"character\":9,\"line\":5},\"start\":{\"character\":0,\"line\":0}},\"selectionRange\":{\"end\":{\"character\":14,\"line\":0},\"start\":{\"character\":0,\"line\":0}}},{\"children\":[{\"kind\":8,\"name\":\"<div>\",\"range\":{\"end\":{\"character\":27,\"line\":8},\"start\":{\"character\":2,\"line\":8}},\"selectionRange\":{\"end\":{\"character\":27,\"line\":8},\"start\":{\"character\":2,\"line\":8}}}],\"kind\":23,\"name\":\"template\",\"range\":{\"end\":{\"character\":11,\"line\":9},\"start\":{\"character\":0,\"line\":7}},\"selectionRange\":{\"end\":{\"character\":10,\"line\":7},\"start\":{\"character\":0,\"line\":7}}}],\"id\":2}",
+    "verter ui-stamp {\"atUnixMs\":1789831550278,\"kind\":\"open\",\"requestEpoch\":2,\"sourceEpoch\":null,\"stage\":\"decoded\"}",
+    "\u001b[2m2026-09-19T15:25:50.279068Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/inlayHint\",\"params\":{\"range\":{\"end\":{\"character\":0,\"line\":10},\"start\":{\"character\":0,\"line\":0}},\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\"}},\"id\":3}",
+    "\u001b[2m2026-09-19T15:25:50.279145Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/semanticTokens/full\",\"params\":{\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\"}},\"id\":4}",
+    "\u001b[2m2026-09-19T15:25:50.279173Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/codeLens\",\"params\":{\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\"}},\"id\":5}",
+    "\u001b[2m2026-09-19T15:25:50.279197Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/documentSymbol\",\"params\":{\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\"}},\"id\":6}",
+    "\u001b[2m2026-09-19T15:25:50.279429Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":null,\"id\":3}",
+    "\u001b[2m2026-09-19T15:25:50.279493Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":null,\"id\":4}",
+    "\u001b[2m2026-09-19T15:25:50.279518Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":[{\"command\":{\"command\":\"\",\"title\":\"3 bindings\"},\"range\":{\"end\":{\"character\":0,\"line\":0},\"start\":{\"character\":0,\"line\":0}}},{\"command\":{\"command\":\"\",\"title\":\"1 binding ref\"},\"range\":{\"end\":{\"character\":0,\"line\":7},\"start\":{\"character\":0,\"line\":7}}}],\"id\":5}",
+    "\u001b[2m2026-09-19T15:25:50.279580Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":[{\"children\":[{\"detail\":\"const\",\"kind\":14,\"name\":\"greeting\",\"range\":{\"end\":{\"character\":14,\"line\":1},\"start\":{\"character\":6,\"line\":1}},\"selectionRange\":{\"end\":{\"character\":14,\"line\":1},\"start\":{\"character\":6,\"line\":1}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"user\",\"range\":{\"end\":{\"character\":10,\"line\":2},\"start\":{\"character\":6,\"line\":2}},\"selectionRange\":{\"end\":{\"character\":10,\"line\":2},\"start\":{\"character\":6,\"line\":2}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"message\",\"range\":{\"end\":{\"character\":13,\"line\":3},\"start\":{\"character\":6,\"line\":3}},\"selectionRange\":{\"end\":{\"character\":13,\"line\":3},\"start\":{\"character\":6,\"line\":3}}}],\"detail\":\"script setup\",\"kind\":2,\"name\":\"script setup\",\"range\":{\"end\":{\"character\":9,\"line\":5},\"start\":{\"character\":0,\"line\":0}},\"selectionRange\":{\"end\":{\"character\":14,\"line\":0},\"start\":{\"character\":0,\"line\":0}}},{\"children\":[{\"kind\":8,\"name\":\"<div>\",\"range\":{\"end\":{\"character\":27,\"line\":8},\"start\":{\"character\":2,\"line\":8}},\"selectionRange\":{\"end\":{\"character\":27,\"line\":8},\"start\":{\"character\":2,\"line\":8}}}],\"kind\":23,\"name\":\"template\",\"range\":{\"end\":{\"character\":11,\"line\":9},\"start\":{\"character\":0,\"line\":7}},\"selectionRange\":{\"end\":{\"character\":10,\"line\":7},\"start\":{\"character\":0,\"line\":7}}}],\"id\":6}",
+    "verter ui-stamp {\"atUnixMs\":1789831550279,\"kind\":\"open\",\"requestEpoch\":2,\"sourceEpoch\":null,\"stage\":\"applied\"}",
+    "verter ui-stamp {\"atUnixMs\":1789831550298,\"kind\":\"open\",\"requestEpoch\":2,\"sourceEpoch\":null,\"stage\":\"painted\"}",
+    "{\"kind\":\"open\",\"requestEpoch\":2,\"sourceEpoch\":null,\"stamps\":[{\"atUnixMs\":1789831550265,\"kind\":\"open\",\"requestEpoch\":2,\"sourceEpoch\":null,\"stage\":\"input_dispatched\"},{\"atUnixMs\":1789831550278,\"kind\":\"open\",\"requestEpoch\":2,\"sourceEpoch\":null,\"stage\":\"decoded\"},{\"atUnixMs\":1789831550279,\"kind\":\"open\",\"requestEpoch\":2,\"sourceEpoch\":null,\"stage\":\"applied\"},{\"atUnixMs\":1789831550298,\"kind\":\"open\",\"requestEpoch\":2,\"sourceEpoch\":null,\"stage\":\"painted\"}]}",
+    "\u001b[2m2026-09-19T15:25:50.307392Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"$/verter/typeProviderSyncComplete\",\"params\":{\"gen\":1}}",
+    "\u001b[2m2026-09-19T15:25:50.307553Z\u001b[0m \u001b[33m WARN\u001b[0m main \u001b[2mlapce_proxy::plugin::psp::pikax::verter-volt::$/verter/typeProviderSyncComplete\u001b[0m\u001b[2m:\u001b[0m \u001b[2m2295:\u001b[0m host notification $/verter/typeProviderSyncComplete not handled    ",
+    "verter ui-stamp {\"atUnixMs\":1789831550307,\"kind\":\"navigate\",\"requestEpoch\":3,\"sourceEpoch\":null,\"stage\":\"input_dispatched\"}",
+    "\u001b[2m2026-09-19T15:25:50.308069Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/definition\",\"params\":{\"position\":{\"character\":19,\"line\":3},\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\"}},\"id\":7}",
+    "\u001b[2m2026-09-19T15:25:50.349944Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":{\"range\":{\"end\":{\"character\":14,\"line\":1},\"start\":{\"character\":6,\"line\":1}},\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\"},\"id\":7}",
+    "verter ui-stamp {\"atUnixMs\":1789831550350,\"kind\":\"navigate\",\"requestEpoch\":3,\"sourceEpoch\":null,\"stage\":\"decoded\"}",
+    "verter ui-stamp {\"atUnixMs\":1789831550350,\"kind\":\"navigate\",\"requestEpoch\":3,\"sourceEpoch\":null,\"stage\":\"applied\"}",
+    "verter ui-stamp {\"atUnixMs\":1789831550353,\"kind\":\"navigate\",\"requestEpoch\":3,\"sourceEpoch\":null,\"stage\":\"painted\"}",
+    "{\"kind\":\"navigate\",\"requestEpoch\":3,\"sourceEpoch\":null,\"stamps\":[{\"atUnixMs\":1789831550307,\"kind\":\"navigate\",\"requestEpoch\":3,\"sourceEpoch\":null,\"stage\":\"input_dispatched\"},{\"atUnixMs\":1789831550350,\"kind\":\"navigate\",\"requestEpoch\":3,\"sourceEpoch\":null,\"stage\":\"decoded\"},{\"atUnixMs\":1789831550350,\"kind\":\"navigate\",\"requestEpoch\":3,\"sourceEpoch\":null,\"stage\":\"applied\"},{\"atUnixMs\":1789831550353,\"kind\":\"navigate\",\"requestEpoch\":3,\"sourceEpoch\":null,\"stage\":\"painted\"}]}",
+    "\u001b[2m2026-09-19T15:25:50.354808Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"$/verter/typeProviderSyncComplete\",\"params\":{\"gen\":1}}",
+    "\u001b[2m2026-09-19T15:25:50.355696Z\u001b[0m \u001b[33m WARN\u001b[0m main \u001b[2mlapce_proxy::plugin::psp::pikax::verter-volt::$/verter/typeProviderSyncComplete\u001b[0m\u001b[2m:\u001b[0m \u001b[2m2295:\u001b[0m host notification $/verter/typeProviderSyncComplete not handled    ",
+    "\u001b[2m2026-09-19T15:25:50.359060Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"$/verter/typeProviderSyncComplete\",\"params\":{\"gen\":2}}",
+    "\u001b[2m2026-09-19T15:25:50.359137Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"diagnostics\":[],\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Helper.vue\",\"version\":1}}",
+    "\u001b[2m2026-09-19T15:25:50.359327Z\u001b[0m \u001b[33m WARN\u001b[0m main \u001b[2mlapce_proxy::plugin::psp::pikax::verter-volt::$/verter/typeProviderSyncComplete\u001b[0m\u001b[2m:\u001b[0m \u001b[2m2295:\u001b[0m host notification $/verter/typeProviderSyncComplete not handled    ",
+    "\u001b[2m2026-09-19T15:25:50.363556Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"diagnostics\":[],\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Helper.vue\",\"version\":1}}",
+    "verter ui-stamp {\"atUnixMs\":1789831550376,\"kind\":\"type\",\"requestEpoch\":4,\"sourceEpoch\":null,\"stage\":\"input_dispatched\"}",
+    "\u001b[2m2026-09-19T15:25:50.378023Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"contentChanges\":[{\"range\":{\"end\":{\"character\":6,\"line\":1},\"start\":{\"character\":6,\"line\":1}},\"text\":\" \"}],\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\",\"version\":2}}}",
+    "\u001b[2m2026-09-19T15:25:50.378132Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/inlayHint\",\"params\":{\"range\":{\"end\":{\"character\":0,\"line\":10},\"start\":{\"character\":0,\"line\":0}},\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\"}},\"id\":8}",
+    "\u001b[2m2026-09-19T15:25:50.378159Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/semanticTokens/full\",\"params\":{\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\"}},\"id\":9}",
+    "\u001b[2m2026-09-19T15:25:50.378180Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/codeLens\",\"params\":{\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\"}},\"id\":10}",
+    "\u001b[2m2026-09-19T15:25:50.378203Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/documentSymbol\",\"params\":{\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\"}},\"id\":11}",
+    "verter ui-stamp {\"atUnixMs\":1789831550378,\"kind\":\"type\",\"requestEpoch\":4,\"sourceEpoch\":null,\"stage\":\"decoded\"}",
+    "verter ui-stamp {\"atUnixMs\":1789831550378,\"kind\":\"type\",\"requestEpoch\":4,\"sourceEpoch\":null,\"stage\":\"applied\"}",
+    "\u001b[2m2026-09-19T15:25:50.380136Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":null,\"id\":8}",
+    "\u001b[2m2026-09-19T15:25:50.380183Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":null,\"id\":9}",
+    "\u001b[2m2026-09-19T15:25:50.380230Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":[{\"command\":{\"command\":\"\",\"title\":\"3 bindings\"},\"range\":{\"end\":{\"character\":0,\"line\":0},\"start\":{\"character\":0,\"line\":0}}}],\"id\":10}",
+    "\u001b[2m2026-09-19T15:25:50.380267Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":[{\"children\":[{\"detail\":\"const\",\"kind\":14,\"name\":\"greeting\",\"range\":{\"end\":{\"character\":15,\"line\":1},\"start\":{\"character\":7,\"line\":1}},\"selectionRange\":{\"end\":{\"character\":15,\"line\":1},\"start\":{\"character\":7,\"line\":1}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"user\",\"range\":{\"end\":{\"character\":10,\"line\":2},\"start\":{\"character\":6,\"line\":2}},\"selectionRange\":{\"end\":{\"character\":10,\"line\":2},\"start\":{\"character\":6,\"line\":2}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"message\",\"range\":{\"end\":{\"character\":13,\"line\":3},\"start\":{\"character\":6,\"line\":3}},\"selectionRange\":{\"end\":{\"character\":13,\"line\":3},\"start\":{\"character\":6,\"line\":3}}}],\"detail\":\"script setup\",\"kind\":2,\"name\":\"script setup\",\"range\":{\"end\":{\"character\":9,\"line\":5},\"start\":{\"character\":0,\"line\":0}},\"selectionRange\":{\"end\":{\"character\":14,\"line\":0},\"start\":{\"character\":0,\"line\":0}}},{\"kind\":23,\"name\":\"template\",\"range\":{\"end\":{\"character\":11,\"line\":9},\"start\":{\"character\":0,\"line\":7}},\"selectionRange\":{\"end\":{\"character\":10,\"line\":7},\"start\":{\"character\":0,\"line\":7}}}],\"id\":11}",
+    "verter ui-stamp {\"atUnixMs\":1789831550386,\"kind\":\"type\",\"requestEpoch\":4,\"sourceEpoch\":null,\"stage\":\"painted\"}",
+    "{\"kind\":\"type\",\"requestEpoch\":4,\"sourceEpoch\":null,\"stamps\":[{\"atUnixMs\":1789831550376,\"kind\":\"type\",\"requestEpoch\":4,\"sourceEpoch\":null,\"stage\":\"input_dispatched\"},{\"atUnixMs\":1789831550378,\"kind\":\"type\",\"requestEpoch\":4,\"sourceEpoch\":null,\"stage\":\"decoded\"},{\"atUnixMs\":1789831550378,\"kind\":\"type\",\"requestEpoch\":4,\"sourceEpoch\":null,\"stage\":\"applied\"},{\"atUnixMs\":1789831550386,\"kind\":\"type\",\"requestEpoch\":4,\"sourceEpoch\":null,\"stage\":\"painted\"}]}",
+    "verter ui-stamp {\"atUnixMs\":1789831550408,\"kind\":\"complete\",\"requestEpoch\":5,\"sourceEpoch\":null,\"stage\":\"input_dispatched\"}",
+    "\u001b[2m2026-09-19T15:25:50.408848Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/completion\",\"params\":{\"position\":{\"character\":7,\"line\":1},\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\"}},\"id\":13}",
+    "\u001b[2m2026-09-19T15:25:50.408965Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/completion\",\"params\":{\"position\":{\"character\":7,\"line\":1},\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\"}},\"id\":14}",
+    "\u001b[2m2026-09-19T15:25:50.438466Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"$/verter/typeProviderSyncComplete\",\"params\":{\"gen\":1}}",
+    "\u001b[2m2026-09-19T15:25:50.439037Z\u001b[0m \u001b[33m WARN\u001b[0m main \u001b[2mlapce_proxy::plugin::psp::pikax::verter-volt::$/verter/typeProviderSyncComplete\u001b[0m\u001b[2m:\u001b[0m \u001b[2m2295:\u001b[0m host notification $/verter/typeProviderSyncComplete not handled    ",
+    "\u001b[2m2026-09-19T15:25:50.448712Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":{\"isIncomplete\":false,\"items\":[{\"detail\":\"const\",\"kind\":6,\"label\":\"greeting\",\"sortText\":\"0greeting\"},{\"detail\":\"const\",\"kind\":6,\"label\":\"user\",\"sortText\":\"0user\"},{\"detail\":\"const\",\"kind\":6,\"label\":\"message\",\"sortText\":\"0message\"}]},\"id\":14}",
+    "\u001b[2m2026-09-19T15:25:50.448853Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":{\"isIncomplete\":false,\"items\":[{\"detail\":\"const\",\"kind\":6,\"label\":\"greeting\",\"sortText\":\"0greeting\"},{\"detail\":\"const\",\"kind\":6,\"label\":\"user\",\"sortText\":\"0user\"},{\"detail\":\"const\",\"kind\":6,\"label\":\"message\",\"sortText\":\"0message\"}]},\"id\":13}",
+    "verter ui-stamp {\"atUnixMs\":1789831550448,\"kind\":\"complete\",\"requestEpoch\":5,\"sourceEpoch\":null,\"stage\":\"decoded\"}",
+    "verter ui-stamp {\"atUnixMs\":1789831550449,\"kind\":\"complete\",\"requestEpoch\":5,\"sourceEpoch\":null,\"stage\":\"applied\"}",
+    "verter ui-stamp {\"atUnixMs\":1789831550451,\"kind\":\"complete\",\"requestEpoch\":5,\"sourceEpoch\":null,\"stage\":\"painted\"}",
+    "{\"kind\":\"complete\",\"requestEpoch\":5,\"sourceEpoch\":null,\"stamps\":[{\"atUnixMs\":1789831550408,\"kind\":\"complete\",\"requestEpoch\":5,\"sourceEpoch\":null,\"stage\":\"input_dispatched\"},{\"atUnixMs\":1789831550448,\"kind\":\"complete\",\"requestEpoch\":5,\"sourceEpoch\":null,\"stage\":\"decoded\"},{\"atUnixMs\":1789831550449,\"kind\":\"complete\",\"requestEpoch\":5,\"sourceEpoch\":null,\"stage\":\"applied\"},{\"atUnixMs\":1789831550451,\"kind\":\"complete\",\"requestEpoch\":5,\"sourceEpoch\":null,\"stage\":\"painted\"}]}",
+    "verter ui-stamp {\"atUnixMs\":1789831550469,\"kind\":\"close\",\"requestEpoch\":6,\"sourceEpoch\":null,\"stage\":\"input_dispatched\"}",
+    "verter ui-stamp {\"atUnixMs\":1789831550470,\"kind\":\"close\",\"requestEpoch\":6,\"sourceEpoch\":null,\"stage\":\"applied\"}",
+    "verter ui-stamp {\"atUnixMs\":1789831550473,\"kind\":\"close\",\"requestEpoch\":6,\"sourceEpoch\":null,\"stage\":\"painted\"}",
+    "{\"kind\":\"close\",\"requestEpoch\":6,\"sourceEpoch\":null,\"stamps\":[{\"atUnixMs\":1789831550469,\"kind\":\"close\",\"requestEpoch\":6,\"sourceEpoch\":null,\"stage\":\"input_dispatched\"},{\"atUnixMs\":1789831550470,\"kind\":\"close\",\"requestEpoch\":6,\"sourceEpoch\":null,\"stage\":\"applied\"},{\"atUnixMs\":1789831550473,\"kind\":\"close\",\"requestEpoch\":6,\"sourceEpoch\":null,\"stage\":\"painted\"}]}",
+    "verter ui-stamp {\"atUnixMs\":1789831550500,\"kind\":\"open\",\"requestEpoch\":7,\"sourceEpoch\":null,\"stage\":\"input_dispatched\"}",
+    "\u001b[2m2026-09-19T15:25:50.501239Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"languageId\":\"vue\",\"text\":\"<script setup lang=\\\"ts\\\">\\nimport type { Props0000, Emits0000 } from \\\"./types\\\";\\nimport type { Props0001 as T0001 } from \\\"../k0001/types\\\";\\nimport type { Props0002 as T0002 } from \\\"../k0002/types\\\";\\nimport type { Props0003 as T0003 } from \\\"../k0003/types\\\";\\nimport type { Props0004 as T0004 } from \\\"../k0004/types\\\";\\nimport type { Props0005 as T0005 } from \\\"../k0005/types\\\";\\nimport type { Props0006 as T0006 } from \\\"../k0006/types\\\";\\nimport type { Props0007 as T0007 } from \\\"../k0007/types\\\";\\n\\ninterface LocalProps extends Props0000 {\\n  nested0?: T0001;\\n  nested1?: T0002;\\n  nested2?: T0003;\\n  nested3?: T0004;\\n  nested4?: T0005;\\n  nested5?: T0006;\\n  nested6?: T0007;\\n}\\n\\nconst props = defineProps<LocalProps>();\\nconst emit = defineEmits<Emits0000>();\\n\\nconst defaults0: T0001 = { id: 1, label: \\\"0001\\\", count: 0, active: false, tags: [], meta: { key: \\\"k\\\", weight: 1 } };\\nconst defaults1: T0002 = { id: 2, label: \\\"0002\\\", count: 0, active: false, tags: [], meta: { key: \\\"k\\\", weight: 1 } };\\nconst defaults2: T0003 = { id: 3, label: \\\"0003\\\", count: 0, active: false, tags: [], meta: { key: \\\"k\\\", weight: 1 } };\\nconst defaults3: T0004 = { id: 4, label: \\\"0004\\\", count: 0, active: false, tags: [], meta: { key: \\\"k\\\", weight: 1 } };\\nconst defaults4: T0005 = { id: 5, label: \\\"0005\\\", count: 0, active: false, tags: [], meta: { key: \\\"k\\\", weight: 1 } };\\nconst defaults5: T0006 = { id: 6, label: \\\"0006\\\", count: 0, active: false, tags: [], meta: { key: \\\"k\\\", weight: 1 } };\\nconst defaults6: T0007 = { id: 7, label: \\\"0007\\\", count: 0, active: false, tags: [], meta: { key: \\\"k\\\", weight: 1 } };\\n\\nfunction recompute(): number {\\n  const ref0: T0001 = props.nested0 ?? defaults0;\\n  const ref1: T0002 = props.nested1 ?? defaults1;\\n  const ref2: T0003 = props.nested2 ?? defaults2;\\n  const ref3: T0004 = props.nested3 ?? defaults3;\\n  const ref4: T0005 = props.nested4 ?? defaults4;\\n  const ref5: T0006 = props.nested5 ?? defaults5;\\n  const ref6: T0007 = props.nested6 ?? defaults6;\\n  emit(\\\"change\\\", props.count + 0);\\n  return props.id + ref0.id;\\n}\\n</script>\\n\\n<template>\\n  <div :class=\\\"{ active: props.active }\\\" :data-id=\\\"props.id\\\" @click=\\\"recompute()\\\">\\n    <span>{{ props.label }}</span>\\n    <ul>\\n      <li v-for=\\\"(t, idx) in props.tags\\\" :key=\\\"idx\\\">{{ t }}</li>\\n    </ul>\\n    <em v-if=\\\"props.count > 0\\\">{{ props.count }}</em>\\n  </div>\\n</template>\\n\",\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/corpus/kernel/k0000/Comp0000_000.vue\",\"version\":1}}}",
+    "\u001b[2m2026-09-19T15:25:50.501530Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/codeLens\",\"params\":{\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/corpus/kernel/k0000/Comp0000_000.vue\"}},\"id\":15}",
+    "\u001b[2m2026-09-19T15:25:50.501586Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/documentSymbol\",\"params\":{\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/corpus/kernel/k0000/Comp0000_000.vue\"}},\"id\":16}",
+    "verter ui-stamp {\"atUnixMs\":1789831550510,\"kind\":\"open\",\"requestEpoch\":7,\"sourceEpoch\":null,\"stage\":\"decoded\"}",
+    "\u001b[2m2026-09-19T15:25:50.510500Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/inlayHint\",\"params\":{\"range\":{\"end\":{\"character\":0,\"line\":53},\"start\":{\"character\":0,\"line\":0}},\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/corpus/kernel/k0000/Comp0000_000.vue\"}},\"id\":17}",
+    "\u001b[2m2026-09-19T15:25:50.510587Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/semanticTokens/full\",\"params\":{\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/corpus/kernel/k0000/Comp0000_000.vue\"}},\"id\":18}",
+    "\u001b[2m2026-09-19T15:25:50.510609Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/codeLens\",\"params\":{\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/corpus/kernel/k0000/Comp0000_000.vue\"}},\"id\":19}",
+    "\u001b[2m2026-09-19T15:25:50.510626Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(77) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m227:\u001b[0m write to lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/documentSymbol\",\"params\":{\"textDocument\":{\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/corpus/kernel/k0000/Comp0000_000.vue\"}},\"id\":20}",
+    "verter ui-stamp {\"atUnixMs\":1789831550511,\"kind\":\"open\",\"requestEpoch\":7,\"sourceEpoch\":null,\"stage\":\"applied\"}",
+    "verter ui-stamp {\"atUnixMs\":1789831550518,\"kind\":\"open\",\"requestEpoch\":7,\"sourceEpoch\":null,\"stage\":\"painted\"}",
+    "{\"kind\":\"open\",\"requestEpoch\":7,\"sourceEpoch\":null,\"stamps\":[{\"atUnixMs\":1789831550500,\"kind\":\"open\",\"requestEpoch\":7,\"sourceEpoch\":null,\"stage\":\"input_dispatched\"},{\"atUnixMs\":1789831550510,\"kind\":\"open\",\"requestEpoch\":7,\"sourceEpoch\":null,\"stage\":\"decoded\"},{\"atUnixMs\":1789831550511,\"kind\":\"open\",\"requestEpoch\":7,\"sourceEpoch\":null,\"stage\":\"applied\"},{\"atUnixMs\":1789831550518,\"kind\":\"open\",\"requestEpoch\":7,\"sourceEpoch\":null,\"stage\":\"painted\"}]}",
+    "\u001b[2m2026-09-19T15:25:50.628258Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":[{\"command\":{\"command\":\"\",\"title\":\"10 bindings · 8 imports · 2 macros\"},\"range\":{\"end\":{\"character\":0,\"line\":0},\"start\":{\"character\":0,\"line\":0}}},{\"command\":{\"command\":\"\",\"title\":\"7 binding refs\"},\"range\":{\"end\":{\"character\":0,\"line\":44},\"start\":{\"character\":0,\"line\":44}}}],\"id\":15}",
+    "\u001b[2m2026-09-19T15:25:50.628716Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":[{\"children\":[{\"detail\":\"defineProps\",\"kind\":12,\"name\":\"props = defineProps()\",\"range\":{\"end\":{\"character\":39,\"line\":20},\"start\":{\"character\":14,\"line\":20}},\"selectionRange\":{\"end\":{\"character\":39,\"line\":20},\"start\":{\"character\":14,\"line\":20}}},{\"detail\":\"defineEmits\",\"kind\":12,\"name\":\"emit = defineEmits()\",\"range\":{\"end\":{\"character\":37,\"line\":21},\"start\":{\"character\":13,\"line\":21}},\"selectionRange\":{\"end\":{\"character\":37,\"line\":21},\"start\":{\"character\":13,\"line\":21}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"props\",\"range\":{\"end\":{\"character\":11,\"line\":20},\"start\":{\"character\":6,\"line\":20}},\"selectionRange\":{\"end\":{\"character\":11,\"line\":20},\"start\":{\"character\":6,\"line\":20}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"emit\",\"range\":{\"end\":{\"character\":10,\"line\":21},\"start\":{\"character\":6,\"line\":21}},\"selectionRange\":{\"end\":{\"character\":10,\"line\":21},\"start\":{\"character\":6,\"line\":21}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"defaults0\",\"range\":{\"end\":{\"character\":15,\"line\":23},\"start\":{\"character\":6,\"line\":23}},\"selectionRange\":{\"end\":{\"character\":15,\"line\":23},\"start\":{\"character\":6,\"line\":23}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"defaults1\",\"range\":{\"end\":{\"character\":15,\"line\":24},\"start\":{\"character\":6,\"line\":24}},\"selectionRange\":{\"end\":{\"character\":15,\"line\":24},\"start\":{\"character\":6,\"line\":24}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"defaults2\",\"range\":{\"end\":{\"character\":15,\"line\":25},\"start\":{\"character\":6,\"line\":25}},\"selectionRange\":{\"end\":{\"character\":15,\"line\":25},\"start\":{\"character\":6,\"line\":25}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"defaults3\",\"range\":{\"end\":{\"character\":15,\"line\":26},\"start\":{\"character\":6,\"line\":26}},\"selectionRange\":{\"end\":{\"character\":15,\"line\":26},\"start\":{\"character\":6,\"line\":26}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"defaults4\",\"range\":{\"end\":{\"character\":15,\"line\":27},\"start\":{\"character\":6,\"line\":27}},\"selectionRange\":{\"end\":{\"character\":15,\"line\":27},\"start\":{\"character\":6,\"line\":27}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"defaults5\",\"range\":{\"end\":{\"character\":15,\"line\":28},\"start\":{\"character\":6,\"line\":28}},\"selectionRange\":{\"end\":{\"character\":15,\"line\":28},\"start\":{\"character\":6,\"line\":28}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"defaults6\",\"range\":{\"end\":{\"character\":15,\"line\":29},\"start\":{\"character\":6,\"line\":29}},\"selectionRange\":{\"end\":{\"character\":15,\"line\":29},\"start\":{\"character\":6,\"line\":29}}},{\"detail\":\"function\",\"kind\":12,\"name\":\"recompute\",\"range\":{\"end\":{\"character\":18,\"line\":31},\"start\":{\"character\":9,\"line\":31}},\"selectionRange\":{\"end\":{\"character\":18,\"line\":31},\"start\":{\"character\":9,\"line\":31}}},{\"detail\":\"from './types'\",\"kind\":26,\"name\":\"Props0000\",\"range\":{\"end\":{\"character\":52,\"line\":1},\"start\":{\"character\":0,\"line\":1}},\"selectionRange\":{\"end\":{\"character\":23,\"line\":1},\"start\":{\"character\":14,\"line\":1}}},{\"detail\":\"from './types'\",\"kind\":26,\"name\":\"Emits0000\",\"range\":{\"end\":{\"character\":52,\"line\":1},\"start\":{\"character\":0,\"line\":1}},\"selectionRange\":{\"end\":{\"character\":34,\"line\":1},\"start\":{\"character\":25,\"line\":1}}},{\"detail\":\"from '../k0001/types'\",\"kind\":26,\"name\":\"T0001\",\"range\":{\"end\":{\"character\":57,\"line\":2},\"start\":{\"character\":0,\"line\":2}},\"selectionRange\":{\"end\":{\"character\":32,\"line\":2},\"start\":{\"character\":27,\"line\":2}}},{\"detail\":\"from '../k0002/types'\",\"kind\":26,\"name\":\"T0002\",\"range\":{\"end\":{\"character\":57,\"line\":3},\"start\":{\"character\":0,\"line\":3}},\"selectionRange\":{\"end\":{\"character\":32,\"line\":3},\"start\":{\"character\":27,\"line\":3}}},{\"detail\":\"from '../k0003/types'\",\"kind\":26,\"name\":\"T0003\",\"range\":{\"end\":{\"character\":57,\"line\":4},\"start\":{\"character\":0,\"line\":4}},\"selectionRange\":{\"end\":{\"character\":32,\"line\":4},\"start\":{\"character\":27,\"line\":4}}},{\"detail\":\"from '../k0004/types'\",\"kind\":26,\"name\":\"T0004\",\"range\":{\"end\":{\"character\":57,\"line\":5},\"start\":{\"character\":0,\"line\":5}},\"selectionRange\":{\"end\":{\"character\":32,\"line\":5},\"start\":{\"character\":27,\"line\":5}}},{\"detail\":\"from '../k0005/types'\",\"kind\":26,\"name\":\"T0005\",\"range\":{\"end\":{\"character\":57,\"line\":6},\"start\":{\"character\":0,\"line\":6}},\"selectionRange\":{\"end\":{\"character\":32,\"line\":6},\"start\":{\"character\":27,\"line\":6}}},{\"detail\":\"from '../k0006/types'\",\"kind\":26,\"name\":\"T0006\",\"range\":{\"end\":{\"character\":57,\"line\":7},\"start\":{\"character\":0,\"line\":7}},\"selectionRange\":{\"end\":{\"character\":32,\"line\":7},\"start\":{\"character\":27,\"line\":7}}},{\"detail\":\"from '../k0007/types'\",\"kind\":26,\"name\":\"T0007\",\"range\":{\"end\":{\"character\":57,\"line\":8},\"start\":{\"character\":0,\"line\":8}},\"selectionRange\":{\"end\":{\"character\":32,\"line\":8},\"start\":{\"character\":27,\"line\":8}}}],\"detail\":\"script setup\",\"kind\":2,\"name\":\"script setup (ts)\",\"range\":{\"end\":{\"character\":9,\"line\":42},\"start\":{\"character\":0,\"line\":0}},\"selectionRange\":{\"end\":{\"character\":24,\"line\":0},\"start\":{\"character\":0,\"line\":0}}},{\"children\":[{\"detail\":\": : @\",\"kind\":8,\"name\":\"<div>\",\"range\":{\"end\":{\"character\":8,\"line\":51},\"start\":{\"character\":2,\"line\":45}},\"selectionRange\":{\"end\":{\"character\":8,\"line\":51},\"start\":{\"character\":2,\"line\":45}}}],\"kind\":23,\"name\":\"template\",\"range\":{\"end\":{\"character\":11,\"line\":52},\"start\":{\"character\":0,\"line\":44}},\"selectionRange\":{\"end\":{\"character\":10,\"line\":44},\"start\":{\"character\":0,\"line\":44}}}],\"id\":16}",
+    "\u001b[2m2026-09-19T15:25:50.629340Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":null,\"id\":17}",
+    "\u001b[2m2026-09-19T15:25:50.629384Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":null,\"id\":18}",
+    "\u001b[2m2026-09-19T15:25:50.629460Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":[{\"command\":{\"command\":\"\",\"title\":\"10 bindings · 8 imports · 2 macros\"},\"range\":{\"end\":{\"character\":0,\"line\":0},\"start\":{\"character\":0,\"line\":0}}},{\"command\":{\"command\":\"\",\"title\":\"7 binding refs\"},\"range\":{\"end\":{\"character\":0,\"line\":44},\"start\":{\"character\":0,\"line\":44}}}],\"id\":19}",
+    "\u001b[2m2026-09-19T15:25:50.629654Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"result\":[{\"children\":[{\"detail\":\"defineProps\",\"kind\":12,\"name\":\"props = defineProps()\",\"range\":{\"end\":{\"character\":39,\"line\":20},\"start\":{\"character\":14,\"line\":20}},\"selectionRange\":{\"end\":{\"character\":39,\"line\":20},\"start\":{\"character\":14,\"line\":20}}},{\"detail\":\"defineEmits\",\"kind\":12,\"name\":\"emit = defineEmits()\",\"range\":{\"end\":{\"character\":37,\"line\":21},\"start\":{\"character\":13,\"line\":21}},\"selectionRange\":{\"end\":{\"character\":37,\"line\":21},\"start\":{\"character\":13,\"line\":21}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"props\",\"range\":{\"end\":{\"character\":11,\"line\":20},\"start\":{\"character\":6,\"line\":20}},\"selectionRange\":{\"end\":{\"character\":11,\"line\":20},\"start\":{\"character\":6,\"line\":20}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"emit\",\"range\":{\"end\":{\"character\":10,\"line\":21},\"start\":{\"character\":6,\"line\":21}},\"selectionRange\":{\"end\":{\"character\":10,\"line\":21},\"start\":{\"character\":6,\"line\":21}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"defaults0\",\"range\":{\"end\":{\"character\":15,\"line\":23},\"start\":{\"character\":6,\"line\":23}},\"selectionRange\":{\"end\":{\"character\":15,\"line\":23},\"start\":{\"character\":6,\"line\":23}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"defaults1\",\"range\":{\"end\":{\"character\":15,\"line\":24},\"start\":{\"character\":6,\"line\":24}},\"selectionRange\":{\"end\":{\"character\":15,\"line\":24},\"start\":{\"character\":6,\"line\":24}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"defaults2\",\"range\":{\"end\":{\"character\":15,\"line\":25},\"start\":{\"character\":6,\"line\":25}},\"selectionRange\":{\"end\":{\"character\":15,\"line\":25},\"start\":{\"character\":6,\"line\":25}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"defaults3\",\"range\":{\"end\":{\"character\":15,\"line\":26},\"start\":{\"character\":6,\"line\":26}},\"selectionRange\":{\"end\":{\"character\":15,\"line\":26},\"start\":{\"character\":6,\"line\":26}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"defaults4\",\"range\":{\"end\":{\"character\":15,\"line\":27},\"start\":{\"character\":6,\"line\":27}},\"selectionRange\":{\"end\":{\"character\":15,\"line\":27},\"start\":{\"character\":6,\"line\":27}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"defaults5\",\"range\":{\"end\":{\"character\":15,\"line\":28},\"start\":{\"character\":6,\"line\":28}},\"selectionRange\":{\"end\":{\"character\":15,\"line\":28},\"start\":{\"character\":6,\"line\":28}}},{\"detail\":\"const\",\"kind\":14,\"name\":\"defaults6\",\"range\":{\"end\":{\"character\":15,\"line\":29},\"start\":{\"character\":6,\"line\":29}},\"selectionRange\":{\"end\":{\"character\":15,\"line\":29},\"start\":{\"character\":6,\"line\":29}}},{\"detail\":\"function\",\"kind\":12,\"name\":\"recompute\",\"range\":{\"end\":{\"character\":18,\"line\":31},\"start\":{\"character\":9,\"line\":31}},\"selectionRange\":{\"end\":{\"character\":18,\"line\":31},\"start\":{\"character\":9,\"line\":31}}},{\"detail\":\"from './types'\",\"kind\":26,\"name\":\"Props0000\",\"range\":{\"end\":{\"character\":52,\"line\":1},\"start\":{\"character\":0,\"line\":1}},\"selectionRange\":{\"end\":{\"character\":23,\"line\":1},\"start\":{\"character\":14,\"line\":1}}},{\"detail\":\"from './types'\",\"kind\":26,\"name\":\"Emits0000\",\"range\":{\"end\":{\"character\":52,\"line\":1},\"start\":{\"character\":0,\"line\":1}},\"selectionRange\":{\"end\":{\"character\":34,\"line\":1},\"start\":{\"character\":25,\"line\":1}}},{\"detail\":\"from '../k0001/types'\",\"kind\":26,\"name\":\"T0001\",\"range\":{\"end\":{\"character\":57,\"line\":2},\"start\":{\"character\":0,\"line\":2}},\"selectionRange\":{\"end\":{\"character\":32,\"line\":2},\"start\":{\"character\":27,\"line\":2}}},{\"detail\":\"from '../k0002/types'\",\"kind\":26,\"name\":\"T0002\",\"range\":{\"end\":{\"character\":57,\"line\":3},\"start\":{\"character\":0,\"line\":3}},\"selectionRange\":{\"end\":{\"character\":32,\"line\":3},\"start\":{\"character\":27,\"line\":3}}},{\"detail\":\"from '../k0003/types'\",\"kind\":26,\"name\":\"T0003\",\"range\":{\"end\":{\"character\":57,\"line\":4},\"start\":{\"character\":0,\"line\":4}},\"selectionRange\":{\"end\":{\"character\":32,\"line\":4},\"start\":{\"character\":27,\"line\":4}}},{\"detail\":\"from '../k0004/types'\",\"kind\":26,\"name\":\"T0004\",\"range\":{\"end\":{\"character\":57,\"line\":5},\"start\":{\"character\":0,\"line\":5}},\"selectionRange\":{\"end\":{\"character\":32,\"line\":5},\"start\":{\"character\":27,\"line\":5}}},{\"detail\":\"from '../k0005/types'\",\"kind\":26,\"name\":\"T0005\",\"range\":{\"end\":{\"character\":57,\"line\":6},\"start\":{\"character\":0,\"line\":6}},\"selectionRange\":{\"end\":{\"character\":32,\"line\":6},\"start\":{\"character\":27,\"line\":6}}},{\"detail\":\"from '../k0006/types'\",\"kind\":26,\"name\":\"T0006\",\"range\":{\"end\":{\"character\":57,\"line\":7},\"start\":{\"character\":0,\"line\":7}},\"selectionRange\":{\"end\":{\"character\":32,\"line\":7},\"start\":{\"character\":27,\"line\":7}}},{\"detail\":\"from '../k0007/types'\",\"kind\":26,\"name\":\"T0007\",\"range\":{\"end\":{\"character\":57,\"line\":8},\"start\":{\"character\":0,\"line\":8}},\"selectionRange\":{\"end\":{\"character\":32,\"line\":8},\"start\":{\"character\":27,\"line\":8}}}],\"detail\":\"script setup\",\"kind\":2,\"name\":\"script setup (ts)\",\"range\":{\"end\":{\"character\":9,\"line\":42},\"start\":{\"character\":0,\"line\":0}},\"selectionRange\":{\"end\":{\"character\":24,\"line\":0},\"start\":{\"character\":0,\"line\":0}}},{\"children\":[{\"detail\":\": : @\",\"kind\":8,\"name\":\"<div>\",\"range\":{\"end\":{\"character\":8,\"line\":51},\"start\":{\"character\":2,\"line\":45}},\"selectionRange\":{\"end\":{\"character\":8,\"line\":51},\"start\":{\"character\":2,\"line\":45}}}],\"kind\":23,\"name\":\"template\",\"range\":{\"end\":{\"character\":11,\"line\":52},\"start\":{\"character\":0,\"line\":44}},\"selectionRange\":{\"end\":{\"character\":10,\"line\":44},\"start\":{\"character\":0,\"line\":44}}}],\"id\":20}",
+    "\u001b[2m2026-09-19T15:25:50.659977Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"$/verter/typeProviderSyncComplete\",\"params\":{\"gen\":1}}",
+    "\u001b[2m2026-09-19T15:25:50.660196Z\u001b[0m \u001b[33m WARN\u001b[0m main \u001b[2mlapce_proxy::plugin::psp::pikax::verter-volt::$/verter/typeProviderSyncComplete\u001b[0m\u001b[2m:\u001b[0m \u001b[2m2295:\u001b[0m host notification $/verter/typeProviderSyncComplete not handled    ",
+    "\u001b[2m2026-09-19T15:25:50.737108Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"$/verter/typeProviderSyncComplete\",\"params\":{\"gen\":1}}",
+    "\u001b[2m2026-09-19T15:25:50.737352Z\u001b[0m \u001b[33m WARN\u001b[0m main \u001b[2mlapce_proxy::plugin::psp::pikax::verter-volt::$/verter/typeProviderSyncComplete\u001b[0m\u001b[2m:\u001b[0m \u001b[2m2295:\u001b[0m host notification $/verter/typeProviderSyncComplete not handled    ",
+    "\u001b[2m2026-09-19T15:25:50.739579Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"$/verter/typeProviderSyncComplete\",\"params\":{\"gen\":4}}",
+    "\u001b[2m2026-09-19T15:25:50.739950Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"diagnostics\":[],\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\",\"version\":2}}",
+    "\u001b[2m2026-09-19T15:25:50.739950Z\u001b[0m \u001b[33m WARN\u001b[0m main \u001b[2mlapce_proxy::plugin::psp::pikax::verter-volt::$/verter/typeProviderSyncComplete\u001b[0m\u001b[2m:\u001b[0m \u001b[2m2295:\u001b[0m host notification $/verter/typeProviderSyncComplete not handled    ",
+    "\u001b[2m2026-09-19T15:25:50.771257Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"diagnostics\":[],\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/Fixture.vue\",\"version\":2}}",
+    "\u001b[2m2026-09-19T15:25:51.147139Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"$/verter/typeProviderSyncComplete\",\"params\":{\"gen\":5}}",
+    "\u001b[2m2026-09-19T15:25:51.147278Z\u001b[0m \u001b[33m WARN\u001b[0m main \u001b[2mlapce_proxy::plugin::psp::pikax::verter-volt::$/verter/typeProviderSyncComplete\u001b[0m\u001b[2m:\u001b[0m \u001b[2m2295:\u001b[0m host notification $/verter/typeProviderSyncComplete not handled    ",
+    "\u001b[2m2026-09-19T15:25:51.147803Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"diagnostics\":[],\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/corpus/kernel/k0000/Comp0000_000.vue\",\"version\":1}}",
+    "\u001b[2m2026-09-19T15:25:51.148304Z\u001b[0m \u001b[34mDEBUG\u001b[0m ThreadId(78) \u001b[2mlapce_proxy::plugin::lsp\u001b[0m\u001b[2m:\u001b[0m \u001b[2m250:\u001b[0m read from lsp: {\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"diagnostics\":[{\"code\":\"2349\",\"message\":\"This expression is not callable.\\n  Type 'Emits0000' has no call signatures.\",\"range\":{\"end\":{\"character\":6,\"line\":39},\"start\":{\"character\":2,\"line\":39}},\"severity\":1,\"source\":\"ts\"},{\"code\":\"6133\",\"message\":\"'ref1' is declared but its value is never read.\",\"range\":{\"end\":{\"character\":12,\"line\":33},\"start\":{\"character\":8,\"line\":33}},\"severity\":4,\"source\":\"ts\",\"tags\":[1]},{\"code\":\"6133\",\"message\":\"'ref2' is declared but its value is never read.\",\"range\":{\"end\":{\"character\":12,\"line\":34},\"start\":{\"character\":8,\"line\":34}},\"severity\":4,\"source\":\"ts\",\"tags\":[1]},{\"code\":\"6133\",\"message\":\"'ref3' is declared but its value is never read.\",\"range\":{\"end\":{\"character\":12,\"line\":35},\"start\":{\"character\":8,\"line\":35}},\"severity\":4,\"source\":\"ts\",\"tags\":[1]},{\"code\":\"6133\",\"message\":\"'ref4' is declared but its value is never read.\",\"range\":{\"end\":{\"character\":12,\"line\":36},\"start\":{\"character\":8,\"line\":36}},\"severity\":4,\"source\":\"ts\",\"tags\":[1]},{\"code\":\"6133\",\"message\":\"'ref5' is declared but its value is never read.\",\"range\":{\"end\":{\"character\":12,\"line\":37},\"start\":{\"character\":8,\"line\":37}},\"severity\":4,\"source\":\"ts\",\"tags\":[1]},{\"code\":\"6133\",\"message\":\"'ref6' is declared but its value is never read.\",\"range\":{\"end\":{\"character\":12,\"line\":38},\"start\":{\"character\":8,\"line\":38}},\"severity\":4,\"source\":\"ts\",\"tags\":[1]}],\"uri\":\"file:///C:/Users/david/AppData/Local/Temp/wsp1b-ws-HDmciL/corpus/kernel/k0000/Comp0000_000.vue\",\"version\":1}}",
+    "verter drive: socket error after teardown boundary: Error: read ECONNRESET"
+  ],
+  "serverTraceDumpLines": [
+    "{\"anchor\":\"session\",\"sessionStartUnixMs\":1789831549974}",
+    "{\"requestEpoch\":1,\"sourceEpoch\":1,\"method\":\"textDocument/didOpen\",\"status\":\"complete\",\"stamps\":[{\"stage\":\"request_received\",\"atMs\":2.4219},{\"stage\":\"admitted\",\"atMs\":2.4251},{\"stage\":\"provider_work\",\"atMs\":2.4255},{\"stage\":\"serialize\",\"atMs\":6.3666},{\"stage\":\"outbound_enqueued\",\"atMs\":6.3668},{\"stage\":\"complete\",\"atMs\":6.3671}],\"firstBlockedStage\":\"provider_work\"}",
+    "{\"requestEpoch\":3,\"sourceEpoch\":1,\"method\":\"textDocument/definition\",\"status\":\"complete\",\"stamps\":[{\"stage\":\"request_received\",\"atMs\":334.0937},{\"stage\":\"admitted\",\"atMs\":334.0946},{\"stage\":\"provider_work\",\"atMs\":334.0952},{\"stage\":\"serialize\",\"atMs\":373.2105},{\"stage\":\"outbound_enqueued\",\"atMs\":373.21070000000003,\"byteLength\":96},{\"stage\":\"complete\",\"atMs\":373.21130000000005}],\"firstBlockedStage\":\"provider_work\"}",
+    "{\"requestEpoch\":2,\"sourceEpoch\":1,\"method\":\"textDocument/didOpen\",\"status\":\"complete\",\"stamps\":[{\"stage\":\"request_received\",\"atMs\":292.6028},{\"stage\":\"admitted\",\"atMs\":292.60360000000003},{\"stage\":\"provider_work\",\"atMs\":292.6049},{\"stage\":\"serialize\",\"atMs\":401.5505},{\"stage\":\"outbound_enqueued\",\"atMs\":401.5507},{\"stage\":\"complete\",\"atMs\":401.5519}],\"firstBlockedStage\":\"provider_work\"}",
+    "{\"requestEpoch\":4,\"sourceEpoch\":2,\"method\":\"textDocument/didChange\",\"status\":\"complete\",\"stamps\":[{\"stage\":\"request_received\",\"atMs\":404.1325},{\"stage\":\"admitted\",\"atMs\":404.1337},{\"stage\":\"provider_work\",\"atMs\":404.1343},{\"stage\":\"serialize\",\"atMs\":405.3372},{\"stage\":\"outbound_enqueued\",\"atMs\":405.3373},{\"stage\":\"complete\",\"atMs\":405.3376}],\"firstBlockedStage\":\"provider_work\"}",
+    "{\"requestEpoch\":6,\"sourceEpoch\":2,\"method\":\"textDocument/completion\",\"status\":\"complete\",\"stamps\":[{\"stage\":\"request_received\",\"atMs\":439.1107},{\"stage\":\"admitted\",\"atMs\":439.1119},{\"stage\":\"provider_work\",\"atMs\":439.11220000000003},{\"stage\":\"serialize\",\"atMs\":473.8554},{\"stage\":\"outbound_enqueued\",\"atMs\":473.856,\"byteLength\":192},{\"stage\":\"complete\",\"atMs\":473.8573}],\"firstBlockedStage\":\"provider_work\"}",
+    "{\"requestEpoch\":5,\"sourceEpoch\":2,\"method\":\"textDocument/completion\",\"status\":\"complete\",\"stamps\":[{\"stage\":\"request_received\",\"atMs\":434.946},{\"stage\":\"admitted\",\"atMs\":434.94919999999996},{\"stage\":\"provider_work\",\"atMs\":434.9499},{\"stage\":\"serialize\",\"atMs\":474.2345},{\"stage\":\"outbound_enqueued\",\"atMs\":474.2352,\"byteLength\":192},{\"stage\":\"complete\",\"atMs\":474.2359}],\"firstBlockedStage\":\"provider_work\"}",
+    "{\"requestEpoch\":7,\"sourceEpoch\":1,\"method\":\"textDocument/didOpen\",\"status\":\"complete\",\"stamps\":[{\"stage\":\"request_received\",\"atMs\":527.3243},{\"stage\":\"admitted\",\"atMs\":527.3249},{\"stage\":\"provider_work\",\"atMs\":527.3258},{\"stage\":\"serialize\",\"atMs\":799.9846},{\"stage\":\"outbound_enqueued\",\"atMs\":799.9851},{\"stage\":\"complete\",\"atMs\":799.9861999999999}],\"firstBlockedStage\":\"provider_work\"}"
+  ],
+  "correlated": {
+    "steps": [
+      {
+        "kind": "open",
+        "requestEpoch": 1,
+        "sourceEpoch": 1,
+        "uri": "C:\\Users\\david\\AppData\\Local\\Temp\\wsp1b-ws-HDmciL\\Helper.vue"
+      },
+      {
+        "kind": "open",
+        "requestEpoch": 2,
+        "sourceEpoch": 1,
+        "uri": "C:\\Users\\david\\AppData\\Local\\Temp\\wsp1b-ws-HDmciL\\Fixture.vue",
+        "line": 4,
+        "column": 20
+      },
+      {
+        "kind": "navigate",
+        "requestEpoch": 3,
+        "sourceEpoch": 1
+      },
+      {
+        "kind": "type",
+        "requestEpoch": 4,
+        "sourceEpoch": 2,
+        "text": " "
+      },
+      {
+        "kind": "complete",
+        "requestEpoch": 5,
+        "sourceEpoch": 2
+      },
+      {
+        "kind": "close",
+        "requestEpoch": 6,
+        "sourceEpoch": null
+      },
+      {
+        "kind": "open",
+        "requestEpoch": 7,
+        "sourceEpoch": 1,
+        "uri": "C:\\Users\\david\\AppData\\Local\\Temp\\wsp1b-ws-HDmciL\\corpus\\kernel\\k0000\\Comp0000_000.vue",
+        "line": 1,
+        "column": 1
+      }
+    ],
+    "serverTraces": [
+      {
+        "requestEpoch": 1,
+        "sourceEpoch": 1,
+        "method": "textDocument/didOpen",
+        "status": "complete",
+        "stamps": [
+          {
+            "stage": "request_received",
+            "atMs": 1789831549976.4219
+          },
+          {
+            "stage": "admitted",
+            "atMs": 1789831549976.425
+          },
+          {
+            "stage": "provider_work",
+            "atMs": 1789831549976.4255
+          },
+          {
+            "stage": "serialize",
+            "atMs": 1789831549980.3667
+          },
+          {
+            "stage": "outbound_enqueued",
+            "atMs": 1789831549980.3667
+          },
+          {
+            "stage": "complete",
+            "atMs": 1789831549980.3672
+          }
+        ],
+        "firstBlockedStage": "provider_work"
+      },
+      {
+        "requestEpoch": 2,
+        "sourceEpoch": 1,
+        "method": "textDocument/didOpen",
+        "status": "complete",
+        "stamps": [
+          {
+            "stage": "request_received",
+            "atMs": 1789831550266.6028
+          },
+          {
+            "stage": "admitted",
+            "atMs": 1789831550266.6035
+          },
+          {
+            "stage": "provider_work",
+            "atMs": 1789831550266.605
+          },
+          {
+            "stage": "serialize",
+            "atMs": 1789831550375.5505
+          },
+          {
+            "stage": "outbound_enqueued",
+            "atMs": 1789831550375.5508
+          },
+          {
+            "stage": "complete",
+            "atMs": 1789831550375.552
+          }
+        ],
+        "firstBlockedStage": "provider_work"
+      },
+      {
+        "requestEpoch": 3,
+        "sourceEpoch": 1,
+        "method": "textDocument/definition",
+        "status": "complete",
+        "stamps": [
+          {
+            "stage": "request_received",
+            "atMs": 1789831550308.0938
+          },
+          {
+            "stage": "admitted",
+            "atMs": 1789831550308.0945
+          },
+          {
+            "stage": "provider_work",
+            "atMs": 1789831550308.0952
+          },
+          {
+            "stage": "serialize",
+            "atMs": 1789831550347.2104
+          },
+          {
+            "stage": "outbound_enqueued",
+            "atMs": 1789831550347.2107
+          },
+          {
+            "stage": "complete",
+            "atMs": 1789831550347.2112
+          }
+        ],
+        "firstBlockedStage": "provider_work"
+      },
+      {
+        "requestEpoch": 4,
+        "sourceEpoch": 2,
+        "method": "textDocument/didChange",
+        "status": "complete",
+        "stamps": [
+          {
+            "stage": "request_received",
+            "atMs": 1789831550378.1326
+          },
+          {
+            "stage": "admitted",
+            "atMs": 1789831550378.1338
+          },
+          {
+            "stage": "provider_work",
+            "atMs": 1789831550378.1343
+          },
+          {
+            "stage": "serialize",
+            "atMs": 1789831550379.3372
+          },
+          {
+            "stage": "outbound_enqueued",
+            "atMs": 1789831550379.3374
+          },
+          {
+            "stage": "complete",
+            "atMs": 1789831550379.3376
+          }
+        ],
+        "firstBlockedStage": "provider_work"
+      },
+      {
+        "requestEpoch": 5,
+        "sourceEpoch": 2,
+        "method": "textDocument/completion",
+        "status": "complete",
+        "stamps": [
+          {
+            "stage": "request_received",
+            "atMs": 1789831550413.1106
+          },
+          {
+            "stage": "admitted",
+            "atMs": 1789831550413.1118
+          },
+          {
+            "stage": "provider_work",
+            "atMs": 1789831550413.1123
+          },
+          {
+            "stage": "serialize",
+            "atMs": 1789831550447.8555
+          },
+          {
+            "stage": "outbound_enqueued",
+            "atMs": 1789831550447.856
+          },
+          {
+            "stage": "complete",
+            "atMs": 1789831550447.8574
+          }
+        ],
+        "firstBlockedStage": "provider_work"
+      },
+      {
+        "requestEpoch": 6,
+        "sourceEpoch": null,
+        "method": "textDocument/didClose",
+        "status": "complete",
+        "stamps": [],
+        "firstBlockedStage": null
+      },
+      {
+        "requestEpoch": 7,
+        "sourceEpoch": 1,
+        "method": "textDocument/didOpen",
+        "status": "complete",
+        "stamps": [
+          {
+            "stage": "request_received",
+            "atMs": 1789831550501.3242
+          },
+          {
+            "stage": "admitted",
+            "atMs": 1789831550501.325
+          },
+          {
+            "stage": "provider_work",
+            "atMs": 1789831550501.3257
+          },
+          {
+            "stage": "serialize",
+            "atMs": 1789831550773.9846
+          },
+          {
+            "stage": "outbound_enqueued",
+            "atMs": 1789831550773.985
+          },
+          {
+            "stage": "complete",
+            "atMs": 1789831550773.986
+          }
+        ],
+        "firstBlockedStage": "provider_work"
+      }
+    ]
+  },
+  "clockAnchor": {
+    "stampUnixMs": 1789831549937,
+    "timelineMs": 1789831549937,
+    "recordedAs": "identity: the driven capture's timeline clock is the Unix-ms wall clock both the client stamps and the anchored server dump already use"
+  },
+  "contentSha256": "9b912c43cfeb29959ef9f37bf69aed27fc59c76ec01dddf9a178fd548a0289b1"
+}

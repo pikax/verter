@@ -96,6 +96,34 @@ export {
 } from "./producer.js";
 
 export {
+  LARGE_PROJECT_MIN_VUE_FILES,
+  PRIMEVUE_EQUIVALENT_VUE_FILES,
+  ISSUE93_RETIREMENT,
+  REQUIRED_DRIVE_KINDS,
+  qualifyIssue93EarlyVerification,
+  issue93EarlyVerification,
+  issue93CarryForwardCase,
+  extractLspJson,
+  extractCapturedSemanticOracle,
+  typedAnswersFromOracle,
+  paintMetricFromRun,
+  stallOnImmediateServer,
+  type QualificationStatus,
+  type QualificationRule,
+  type TypedAnswer,
+  type SemanticOracleObservation,
+  type ResourceObservation,
+  type WorkloadPin,
+  type LargeRunObservation,
+  type SmallSmokeObservation,
+  type Issue93EarlyVerificationInput,
+  type Issue93EarlyVerification,
+  type Issue93CarryForwardCase,
+  type Qualification,
+  type CapturedSemanticOracle,
+} from "./earlyVerification.js";
+
+export {
   FIXTURE_AUTOMATION_PATH,
   GUI_INSTRUMENTATION_UNAVAILABLE_REASON,
   REAL_LAPCE_AUTOMATION_PATH,
