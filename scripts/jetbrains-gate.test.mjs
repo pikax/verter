@@ -7,10 +7,12 @@
 // outside-the-repo install rehearsal dir, and verifier reports.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { deflateRawSync } from "node:zlib";
 
 import {
@@ -414,6 +416,18 @@ test("defaultGradleInvocation rejects non-allowlisted gradle arguments", () => {
   assert.match(commandLine, /test/);
   assert.match(commandLine, /verifyPlugin/);
   assert.match(commandLine, /--console=plain/);
+});
+
+test("POSIX gradle wrapper is committed executable (100755)", () => {
+  // defaultGradleInvocation on non-win32 spawns the wrapper with shell:false,
+  // so git mode 100644 yields EACCES on Linux/macOS CI even with a JDK.
+  // Working-tree execute bits are not the contract on Windows; the index is.
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const line = execFileSync("git", ["ls-files", "-s", "--", "extensions/jetbrains/gradlew"], {
+    encoding: "utf8",
+    cwd: repoRoot,
+  });
+  assert.match(line, /^100755\b/, `expected git mode 100755, got: ${line.trim()}`);
 });
 
 test("runGate passes only with complete evidence", () => {
