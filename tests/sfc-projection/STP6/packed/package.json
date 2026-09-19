@@ -1,0 +1,32 @@
+{
+  "name": "@stp6/lib",
+  "version": "0.0.0-stp6",
+  "private": true,
+  "type": "module",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.d.ts"
+    },
+    "./concrete": {
+      "types": "./dist/concrete.d.ts",
+      "default": "./dist/concrete.d.ts"
+    },
+    "./generic": {
+      "types": "./dist/generic.d.ts",
+      "default": "./dist/generic.d.ts"
+    }
+  },
+  "files": [
+    "dist/index.d.ts",
+    "dist/index.d.ts.map",
+    "dist/concrete.d.ts",
+    "dist/concrete.d.ts.map",
+    "dist/generic.d.ts",
+    "dist/generic.d.ts.map",
+    "dist/row.d.ts",
+    "src",
+    "tsconfig.json"
+  ]
+}

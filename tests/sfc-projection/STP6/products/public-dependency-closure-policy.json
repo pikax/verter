@@ -1,0 +1,59 @@
+{
+  "schema": "PublicDependencyClosurePolicy",
+  "version": 1,
+  "product": "PublicDependencyClosurePolicy",
+  "node": "STP6",
+  "kind": "proof",
+  "liftIntoPublishedDeclarations": [
+    "local-alias-capturing-generic-binders",
+    "imported-conditional-or-mapped-types",
+    "typeof-value-dependencies",
+    "exposed-functions",
+    "declaration-maps-to-shipped-authored-source"
+  ],
+  "retainWithoutSecondBodyCheck": [
+    "private-classes-not-part-of-public-surface",
+    "unique-symbols-not-exported"
+  ],
+  "forbidInPublishedDeclarations": [
+    "private-virtual-path",
+    "inaccessible-captured-type",
+    "compiler-named-supplemental",
+    "unpublished-checker-metadata"
+  ],
+  "typeOnlyCheckingContract": {
+    "required": false,
+    "ifRequiredMust": [
+      "emit-from-same-source-contract",
+      "ship-in-actual-declarations",
+      "survive-reexport",
+      "no-fabricated-runtime-property"
+    ],
+    "cannotExcuse": ["lost-vue-public-precision", "non-constructor-default-export"]
+  },
+  "declarationMaps": {
+    "requiredWhenShipped": true,
+    "sourcesMustBePackRelativeAuthoredFiles": true,
+    "rejectVirtualOrUnpublishedSources": true,
+    "case": "STP6-decl-map"
+  },
+  "hiddenMetadata": {
+    "unpublishedSidecar": "tests/sfc-projection/STP6/packed/unpublished-meta.d.ts",
+    "inExports": false,
+    "inFiles": false,
+    "rejectCase": "STP6-hidden-metadata"
+  },
+  "closureLeakTwin": {
+    "file": "tests/sfc-projection/STP6/packed/dist/leaky.d.ts",
+    "inExports": false,
+    "inFiles": false,
+    "virtualSpecifier": "./__virtual_sfc/script",
+    "rejectCase": "STP6-closure"
+  },
+  "liftedSibling": {
+    "file": "tests/sfc-projection/STP6/packed/dist/row.d.ts",
+    "importedFrom": "tests/sfc-projection/STP6/packed/dist/generic.d.ts",
+    "inFiles": true
+  },
+  "abiOwner": "STP8"
+}

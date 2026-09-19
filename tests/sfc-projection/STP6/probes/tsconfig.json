@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "jsx": "preserve",
+    "jsxImportSource": "vue",
+    "lib": ["ES2022", "DOM"],
+    "baseUrl": ".",
+    "paths": {
+      "@stp6/lib": ["../packed/dist/index.d.ts"],
+      "@stp6/lib/*": ["../packed/dist/*"]
+    }
+  },
+  "include": ["*.ts", "*.tsx", "source/**/*.ts", "source/**/*.d.ts", "../contract.ts"],
+  "references": [{ "path": "../packed" }]
+}
