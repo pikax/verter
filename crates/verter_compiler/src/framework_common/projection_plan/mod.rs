@@ -553,7 +553,7 @@ impl CanonicalEncode for SnapshotBasis<'_> {
     }
 }
 
-fn mint_snapshot(
+pub(crate) fn mint_snapshot(
     source_id: &verter_identity::identity::SourceId,
     revision: &verter_identity::identity::SourceRevision,
     template_unit: &SourceUnitId,

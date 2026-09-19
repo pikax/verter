@@ -15,7 +15,7 @@
   "implementationHome": "crates/verter_compiler/src/framework_common/projection_plan/origin.rs",
   "backendSurface": "VueProjectionBackend::projection_emission (dormant vs project_ide; STP58 owns activation)",
   "mappingOwner": "CodeTransform::MappingProduct (TCM1); minted from the same operation record as checking text",
-  "emitOpLowering": "projected_class_for_emit_op; Identity/Relocated/Rewritten/Synthesized only where EmitOp byte geometry justifies the class",
+  "emitOpLowering": "projected_class_for_emit_op; PreserveOriginal classes come from MappingProduct of the transform; other EmitOp variants lower only where local byte geometry justifies the class",
   "chainOwner": "CodeTransform::chain_source_map",
   "independentMapGenerator": false,
   "predecessors": {
@@ -41,7 +41,7 @@
   },
   "identities": {
     "ProjectionOrigin": {
-      "inputs": ["BindingOriginId", "ComponentUseId", "AdmittedExpressionId"],
+      "inputs": ["BindingOriginId", "ComponentUseId", "AdmittedExpressionId", "PlanSnapshotId", "InputBasisId"],
       "independentOfMappingGeometry": true
     },
     "ObservationRole": {

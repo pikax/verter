@@ -13,14 +13,19 @@
 
 use verter_identity::canonical::Canonical;
 use verter_identity::encoding::{CanonicalDigest, CanonicalEncoder};
+use verter_identity::identity::InputBasisId;
 
+use crate::assembly::source_unit::{carrier_revision, carrier_source_id};
 pub use crate::code_transform::MappingProduct;
 use crate::code_transform::{
     CodeTransform, MappingSpan, ProjectedClass, ProjectedRegion, SourceMapChainError,
 };
 use crate::ide::template::emit::EmitOp;
 
-use super::{AdmittedExpressionId, BindingOriginId, ComponentUseId};
+use super::{
+    mint_snapshot, AdmittedExpressionId, BindingOriginId, ComponentUseId, PlanSnapshotId,
+    ProjectionPlan,
+};
 
 const TEXT_REV_DOMAIN: &str = "verter.compiler.projection_plan.checking_text_revision.v1";
 const CORR_REV_DOMAIN: &str = "verter.compiler.projection_plan.correspondence_revision.v1";
@@ -52,11 +57,15 @@ impl ObservationRole {
 }
 
 /// Source binding/use identity independent of mapping geometry.
+/// Authored IDs are bound to the [`PlanSnapshotId`] / [`InputBasisId`] they
+/// were admitted against.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProjectionOrigin {
     binding: Option<BindingOriginId>,
     use_id: Option<ComponentUseId>,
     expression: Option<AdmittedExpressionId>,
+    snapshot: Option<PlanSnapshotId>,
+    input_basis: Option<InputBasisId>,
 }
 
 impl ProjectionOrigin {
@@ -70,7 +79,29 @@ impl ProjectionOrigin {
             binding,
             use_id,
             expression,
+            snapshot: None,
+            input_basis: None,
         }
+    }
+
+    /// Stamp durable IDs with the plan snapshot they belong to.
+    pub fn bind(
+        plan: &ProjectionPlan,
+        binding: Option<BindingOriginId>,
+        use_id: Option<ComponentUseId>,
+        expression: Option<AdmittedExpressionId>,
+    ) -> Result<Self, EmissionRefusal> {
+        let origin = Self {
+            binding,
+            use_id,
+            expression,
+            snapshot: Some(plan.snapshot.clone()),
+            input_basis: Some(plan.input_basis.clone()),
+        };
+        if origin.is_authored() && !ids_in_plan(plan, &origin) {
+            return Err(EmissionRefusal::UnboundOrigin);
+        }
+        Ok(origin)
     }
 
     #[must_use]
@@ -91,6 +122,16 @@ impl ProjectionOrigin {
     #[must_use]
     pub fn expression(&self) -> Option<&AdmittedExpressionId> {
         self.expression.as_ref()
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> Option<&PlanSnapshotId> {
+        self.snapshot.as_ref()
+    }
+
+    #[must_use]
+    pub fn input_basis(&self) -> Option<&InputBasisId> {
+        self.input_basis.as_ref()
     }
 
     /// True when this origin names an authored binding, use, or expression.
@@ -214,6 +255,10 @@ pub enum EmissionRefusal {
         generated: MappingSpan,
         role: ObservationRole,
     },
+    /// Authored origin is not a member of the emission's input snapshot.
+    UnboundOrigin,
+    /// Observation span is not on UTF-8 character boundaries.
+    ObservationNotOnCharBoundary { generated: MappingSpan },
 }
 
 /// Checking text plus correspondence from one transform operation record,
@@ -225,18 +270,38 @@ pub struct ProjectionEmission {
     correspondence_revision: CorrespondenceRevision,
     mapping: MappingProduct,
     observations: Vec<RoleQualifiedObservation>,
+    snapshot: Option<PlanSnapshotId>,
+    input_basis: Option<InputBasisId>,
 }
 
 impl ProjectionEmission {
     /// Derive checking text and correspondence from one transform. Mapping is
-    /// always [`MappingProduct::of`] the current record.
+    /// always [`MappingProduct::of`] the current record. Authored origins
+    /// require [`Self::from_plan`].
     pub fn from_operation(
         transform: &CodeTransform<'_>,
         observations: Vec<RoleQualifiedObservation>,
     ) -> Result<Self, EmissionRefusal> {
         let checking_text = transform.build_string();
         let mapping = MappingProduct::of(transform);
-        assemble(checking_text, mapping, observations)
+        assemble(checking_text, mapping, observations, None)
+    }
+
+    /// Derive an emission bound to `plan`'s snapshot. `canonical_id` must be
+    /// the lineage the plan was observed against; transform original bytes
+    /// must mint that same snapshot.
+    pub fn from_plan(
+        transform: &CodeTransform<'_>,
+        plan: &ProjectionPlan,
+        canonical_id: &str,
+        observations: Vec<RoleQualifiedObservation>,
+    ) -> Result<Self, EmissionRefusal> {
+        if !plan_matches_transform(plan, canonical_id, transform.original()) {
+            return Err(EmissionRefusal::UnboundOrigin);
+        }
+        let checking_text = transform.build_string();
+        let mapping = MappingProduct::of(transform);
+        assemble(checking_text, mapping, observations, Some(plan))
     }
 
     /// Attempt to keep a previous mapping when checking text is unchanged.
@@ -251,7 +316,7 @@ impl ProjectionEmission {
         if checking_text == previous.checking_text && current != previous.mapping {
             return Err(EmissionRefusal::StaleMap);
         }
-        assemble(checking_text, current, observations)
+        assemble(checking_text, current, observations, None)
     }
 
     #[must_use]
@@ -277,6 +342,16 @@ impl ProjectionEmission {
     #[must_use]
     pub fn observations(&self) -> &[RoleQualifiedObservation] {
         &self.observations
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> Option<&PlanSnapshotId> {
+        self.snapshot.as_ref()
+    }
+
+    #[must_use]
+    pub fn input_basis(&self) -> Option<&InputBasisId> {
+        self.input_basis.as_ref()
     }
 
     /// Identity and Relocated regions must equal the carrier slice, including
@@ -306,12 +381,23 @@ impl ProjectionEmission {
         Ok(())
     }
 
-    /// Edit origin for an observation. Only [`ObservationRole::Edits`] on
-    /// Identity/Relocated geometry with a carrier preimage.
+    /// Edit origin for an observation. Only an [`ObservationRole::Edits`]
+    /// observation admitted into this emission, on Identity/Relocated
+    /// geometry with a carrier preimage.
     pub fn edit_origin(
         &self,
         observation: &RoleQualifiedObservation,
     ) -> Result<EditOrigin, EmissionRefusal> {
+        if !self
+            .observations
+            .iter()
+            .any(|admitted| admitted == observation)
+        {
+            return Err(EmissionRefusal::EditNotVerbatim {
+                generated: observation.generated,
+                role: observation.role,
+            });
+        }
         if observation.role != ObservationRole::Edits {
             return Err(EmissionRefusal::EditNotVerbatim {
                 generated: observation.generated,
@@ -343,22 +429,28 @@ impl ProjectionEmission {
 /// Lower an [`EmitOp`] to mapper classes only where the variant's byte
 /// geometry already is those classes. Never invents a correspondence.
 ///
+/// [`EmitOp::PreserveOriginal`] is a no-op: leftover Original chunks are
+/// classified by the completed [`MappingProduct`] walk (Identity vs
+/// Relocated depends on whether an earlier move advanced the authored
+/// high-water mark). Other variants lower from local geometry alone.
+///
 /// [`EmitOp::InsertMapped`] follows the TCM1 partition: bytes before
 /// `content_offset` are [`ProjectedClass::Synthesized`]; the suffix is
 /// [`ProjectedClass::Rewritten`]. An offset equal to the text length
 /// produces only Synthesized regions.
 #[must_use]
-pub fn projected_class_for_emit_op(op: &EmitOp<'_>) -> Vec<(MappingSpan, ProjectedClass)> {
+pub fn projected_class_for_emit_op(
+    op: &EmitOp<'_>,
+    transform: &CodeTransform<'_>,
+) -> Vec<(MappingSpan, ProjectedClass)> {
     match op {
-        EmitOp::PreserveOriginal { source } => {
-            vec![(
-                MappingSpan {
-                    start: 0,
-                    end: source.len(),
-                },
-                ProjectedClass::Identity,
-            )]
-        }
+        EmitOp::PreserveOriginal { source } => preserved_classes_from_mapping(
+            &MappingProduct::of(transform),
+            MappingSpan {
+                start: source.start.0,
+                end: source.end.0,
+            },
+        ),
         EmitOp::MoveOriginal { source, .. } => {
             vec![(
                 MappingSpan {
@@ -428,6 +520,7 @@ fn assemble(
     checking_text: String,
     mapping: MappingProduct,
     mut observations: Vec<RoleQualifiedObservation>,
+    plan: Option<&ProjectionPlan>,
 ) -> Result<ProjectionEmission, EmissionRefusal> {
     for observation in &observations {
         if observation.generated.start > observation.generated.end
@@ -438,14 +531,15 @@ fn assemble(
                 generated: observation.generated,
             });
         }
-    }
-    observations.sort_by_key(|obs| (obs.generated.start, obs.generated.end));
-    for window in observations.windows(2) {
-        let first = window[0].generated;
-        let second = window[1].generated;
-        if spans_overlap(first, second) {
-            return Err(EmissionRefusal::OverlappingVirtualSpans { first, second });
+        if !span_on_char_boundaries(&checking_text, observation.generated) {
+            return Err(EmissionRefusal::ObservationNotOnCharBoundary {
+                generated: observation.generated,
+            });
         }
+    }
+    observations.sort_by_key(|obs| (obs.generated.start, obs.generated.end, obs.role.tag()));
+    if let Some((first, second)) = overlapping_virtual_spans(&observations) {
+        return Err(EmissionRefusal::OverlappingVirtualSpans { first, second });
     }
     for observation in &observations {
         if observation.origin.is_authored()
@@ -455,16 +549,107 @@ fn assemble(
                 generated: observation.generated,
             });
         }
+        if observation.origin.is_authored() {
+            let Some(plan) = plan else {
+                return Err(EmissionRefusal::UnboundOrigin);
+            };
+            if !origin_matches_plan(plan, &observation.origin) {
+                return Err(EmissionRefusal::UnboundOrigin);
+            }
+        }
     }
     let text_revision = mint_text_revision(&checking_text);
-    let correspondence_revision = mint_correspondence_revision(&mapping, &observations);
+    let correspondence_revision = mint_correspondence_revision(&mapping, &observations, plan);
     Ok(ProjectionEmission {
         checking_text,
         text_revision,
         correspondence_revision,
         mapping,
         observations,
+        snapshot: plan.map(|plan| plan.snapshot.clone()),
+        input_basis: plan.map(|plan| plan.input_basis.clone()),
     })
+}
+
+fn overlapping_virtual_spans(
+    observations: &[RoleQualifiedObservation],
+) -> Option<(MappingSpan, MappingSpan)> {
+    for (index, first) in observations.iter().enumerate() {
+        for second in observations.iter().skip(index + 1) {
+            let both_edits =
+                first.role == ObservationRole::Edits && second.role == ObservationRole::Edits;
+            let neither_edits =
+                first.role != ObservationRole::Edits && second.role != ObservationRole::Edits;
+            if (both_edits || neither_edits) && spans_overlap(first.generated, second.generated) {
+                return Some((first.generated, second.generated));
+            }
+        }
+    }
+    None
+}
+
+fn ids_in_plan(plan: &ProjectionPlan, origin: &ProjectionOrigin) -> bool {
+    if let Some(binding) = origin.binding.as_ref() {
+        if !plan.origins.iter().any(|row| row.id == *binding) {
+            return false;
+        }
+    }
+    if let Some(use_id) = origin.use_id.as_ref() {
+        if !plan.uses.iter().any(|row| row.id == *use_id) {
+            return false;
+        }
+    }
+    if let Some(expression) = origin.expression.as_ref() {
+        if plan.expression(expression).is_none() {
+            return false;
+        }
+    }
+    true
+}
+
+fn origin_matches_plan(plan: &ProjectionPlan, origin: &ProjectionOrigin) -> bool {
+    origin.snapshot.as_ref() == Some(&plan.snapshot)
+        && origin.input_basis.as_ref() == Some(&plan.input_basis)
+        && ids_in_plan(plan, origin)
+}
+
+fn plan_matches_transform(plan: &ProjectionPlan, canonical_id: &str, source: &str) -> bool {
+    let source_id = carrier_source_id(canonical_id);
+    let revision = carrier_revision(source);
+    let snapshot = mint_snapshot(&source_id, &revision, &plan.template_unit, None, None);
+    snapshot == plan.snapshot
+}
+
+fn preserved_classes_from_mapping(
+    mapping: &MappingProduct,
+    carrier: MappingSpan,
+) -> Vec<(MappingSpan, ProjectedClass)> {
+    if carrier.start >= carrier.end {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for region in mapping.projected() {
+        let Some(region_carrier) = region.carrier else {
+            continue;
+        };
+        let overlap_start = carrier.start.max(region_carrier.start);
+        let overlap_end = carrier.end.min(region_carrier.end);
+        if overlap_start >= overlap_end {
+            continue;
+        }
+        let generated = if region.generated.len() == region_carrier.len() {
+            let local = overlap_start - region_carrier.start;
+            let len = overlap_end - overlap_start;
+            MappingSpan {
+                start: region.generated.start + local,
+                end: region.generated.start + local + len,
+            }
+        } else {
+            region.generated
+        };
+        out.push((generated, region.class));
+    }
+    out
 }
 
 fn spans_overlap(a: MappingSpan, b: MappingSpan) -> bool {
@@ -621,6 +806,7 @@ fn mint_text_revision(checking_text: &str) -> CheckingTextRevision {
 fn mint_correspondence_revision(
     mapping: &MappingProduct,
     observations: &[RoleQualifiedObservation],
+    plan: Option<&ProjectionPlan>,
 ) -> CorrespondenceRevision {
     let mut encoder = CanonicalEncoder::new(CORR_REV_DOMAIN);
     encoder.field_u32(1, mapping.projected_len());
@@ -680,6 +866,16 @@ fn mint_correspondence_revision(
         encoder.field_u32(20, anchor.projected);
         encoder.field_u32(21, anchor.carrier);
     }
+    match plan {
+        Some(plan) => {
+            encoder.field_u32(22, 1);
+            encoder.field_bytes(23, plan.snapshot.canonical_bytes());
+            encoder.field_bytes(24, plan.input_basis.canonical_bytes());
+        }
+        None => {
+            encoder.field_u32(22, 0);
+        }
+    }
     CorrespondenceRevision(Canonical::from_encoder(&encoder))
 }
 
@@ -717,7 +913,9 @@ mod tests {
 
     use super::*;
     use crate::code_transform::CarrierClass;
-    use crate::framework_common::projection_plan::{plan_from_source, ExpressionKind};
+    use crate::framework_common::projection_plan::{
+        plan_from_source, BindingOriginId, ExpressionKind, ProjectionPlan,
+    };
     use crate::ide::template::emit::EmitText;
 
     const ROLE_SFC: &str = concat!(
@@ -741,9 +939,13 @@ mod tests {
     );
 
     const VIEW_PROPERTY_PREFIX: &str = "___VERTER___instance.";
+    const ROLE_CANONICAL: &str = "file:///stp10-role.vue";
 
-    fn binding_item() -> BindingOriginId {
-        let plan = plan_from_source("file:///stp10-role.vue", ROLE_SFC);
+    fn role_plan() -> ProjectionPlan {
+        plan_from_source(ROLE_CANONICAL, ROLE_SFC)
+    }
+
+    fn binding_item_in(plan: &ProjectionPlan) -> BindingOriginId {
         plan.origins
             .iter()
             .find(|origin| origin.name == "item")
@@ -752,8 +954,16 @@ mod tests {
             .clone()
     }
 
-    fn authored(binding: BindingOriginId) -> ProjectionOrigin {
-        ProjectionOrigin::new(Some(binding), None, None)
+    fn authored_in(plan: &ProjectionPlan) -> ProjectionOrigin {
+        ProjectionOrigin::bind(plan, Some(binding_item_in(plan)), None, None).expect("item in plan")
+    }
+
+    fn vfor_alias_span(source: &str) -> MappingSpan {
+        let start = source.find("item in items").expect("v-for alias") as u32;
+        MappingSpan {
+            start,
+            end: start + 4,
+        }
     }
 
     #[test]
@@ -774,13 +984,14 @@ mod tests {
     fn stp10_role_view_property_and_binding_share_origin_not_symbol() {
         let allocator = Allocator::default();
         let source = VIEW_PROP_SFC;
-        let plan = plan_from_source("file:///stp10-role.vue", source);
+        let plan = plan_from_source(ROLE_CANONICAL, source);
         let expression = plan
             .expressions()
             .iter()
             .find(|occurrence| occurrence.kind == ExpressionKind::Interpolation)
             .expect("authored count interpolation");
-        let origin = ProjectionOrigin::new(None, None, Some(expression.id.clone()));
+        let origin = ProjectionOrigin::bind(&plan, None, None, Some(expression.id.clone()))
+            .expect("interpolation in plan");
         let script_count = source.find("count").expect("original binding") as u32;
         let template_count = source.rfind("count").expect("view property ident") as u32;
         assert_ne!(script_count, template_count);
@@ -803,8 +1014,13 @@ mod tests {
             origin.clone(),
         );
         let edits = RoleQualifiedObservation::new(binding_span, ObservationRole::Edits, origin);
-        let emission = ProjectionEmission::from_operation(&ct, vec![view.clone(), original])
-            .expect("view property and original binding of one authored token");
+        let emission = ProjectionEmission::from_plan(
+            &ct,
+            &plan,
+            ROLE_CANONICAL,
+            vec![view.clone(), original, edits.clone()],
+        )
+        .expect("view property and original binding of one authored token");
         assert!(
             emission
                 .checking_text()
@@ -889,7 +1105,16 @@ mod tests {
                 emission.edit_origin(&view_edits),
                 Err(EmissionRefusal::EditNotVerbatim { .. })
             ),
-            "mixed synthesized prefix is not an edit-safe view-property span"
+            "mixed synthesized prefix is not an admitted edit-safe span"
+        );
+        let forged =
+            RoleQualifiedObservation::new(view_span, ObservationRole::Edits, view.origin().clone());
+        assert!(
+            matches!(
+                emission.edit_origin(&forged),
+                Err(EmissionRefusal::EditNotVerbatim { .. })
+            ),
+            "forged Edits role on a Feature observation is not admitted"
         );
     }
 
@@ -978,21 +1203,31 @@ mod tests {
     #[test]
     fn stp10_synthetic_rejects_authored_location_without_preimage() {
         let allocator = Allocator::default();
-        let mut ct = CodeTransform::new("foo", &allocator);
+        let plan = role_plan();
+        let origin = authored_in(&plan);
+        let mut ct = CodeTransform::new(ROLE_SFC, &allocator);
         ct.prepend("/* scaffold */");
-        let binding = binding_item();
-        let origin = authored(binding);
-        let clean = ProjectionEmission::from_operation(
+        let prefix = "/* scaffold */".len() as u32;
+        let alias = vfor_alias_span(ROLE_SFC);
+        let clean_span = MappingSpan {
+            start: alias.start + prefix,
+            end: alias.end + prefix,
+        };
+        let clean = ProjectionEmission::from_plan(
             &ct,
+            &plan,
+            ROLE_CANONICAL,
             vec![RoleQualifiedObservation::new(
-                MappingSpan { start: 14, end: 17 },
+                clean_span,
                 ObservationRole::Hover,
                 origin.clone(),
             )],
         );
         assert!(clean.is_ok(), "{clean:?}");
-        let dirty = ProjectionEmission::from_operation(
+        let dirty = ProjectionEmission::from_plan(
             &ct,
+            &plan,
+            ROLE_CANONICAL,
             vec![RoleQualifiedObservation::new(
                 MappingSpan { start: 0, end: 14 },
                 ObservationRole::Hover,
@@ -1019,6 +1254,8 @@ mod tests {
 
     #[test]
     fn emit_op_lowers_to_mapper_kinds_from_byte_geometry() {
+        let allocator = Allocator::default();
+        let identity = CodeTransform::new("abcdef", &allocator);
         let unmapped = EmitOp::InsertUnmapped {
             at: SourceByteOffset(0),
             text: EmitText::Static("__VLS_ctx."),
@@ -1051,7 +1288,7 @@ mod tests {
             anchor: None,
         };
         assert_eq!(
-            projected_class_for_emit_op(&unmapped),
+            projected_class_for_emit_op(&unmapped, &identity),
             vec![(
                 MappingSpan {
                     start: 0,
@@ -1061,19 +1298,19 @@ mod tests {
             )]
         );
         assert_eq!(
-            projected_class_for_emit_op(&mapped),
+            projected_class_for_emit_op(&mapped, &identity),
             vec![(MappingSpan { start: 0, end: 3 }, ProjectedClass::Rewritten)]
         );
         assert_eq!(
-            projected_class_for_emit_op(&preserve),
+            projected_class_for_emit_op(&preserve, &identity),
             vec![(MappingSpan { start: 0, end: 3 }, ProjectedClass::Identity)]
         );
         assert_eq!(
-            projected_class_for_emit_op(&r#move),
+            projected_class_for_emit_op(&r#move, &identity),
             vec![(MappingSpan { start: 0, end: 3 }, ProjectedClass::Relocated)]
         );
         assert_eq!(
-            projected_class_for_emit_op(&boundary),
+            projected_class_for_emit_op(&boundary, &identity),
             vec![(
                 MappingSpan { start: 0, end: 1 },
                 ProjectedClass::Synthesized
@@ -1086,7 +1323,7 @@ mod tests {
             content_offset: GeneratedByteLen(2),
         };
         assert_eq!(
-            projected_class_for_emit_op(&mixed),
+            projected_class_for_emit_op(&mixed, &identity),
             vec![
                 (
                     MappingSpan { start: 0, end: 2 },
@@ -1102,11 +1339,69 @@ mod tests {
             content_offset: GeneratedByteLen(3),
         };
         assert_eq!(
-            projected_class_for_emit_op(&wholly_unmapped),
+            projected_class_for_emit_op(&wholly_unmapped, &identity),
             vec![(
                 MappingSpan { start: 0, end: 3 },
                 ProjectedClass::Synthesized
             )]
+        );
+    }
+
+    #[test]
+    fn preserve_original_class_follows_mapping_after_adjacent_move() {
+        let allocator = Allocator::default();
+        let preserve_aa = EmitOp::PreserveOriginal {
+            source: SourceByteRange {
+                start: SourceByteOffset(0),
+                end: SourceByteOffset(2),
+            },
+        };
+        let mut moved = CodeTransform::new("aabb", &allocator);
+        moved.move_slice(2, 4, 0);
+        assert_eq!(moved.build_string(), "bbaa");
+        let mapping = MappingProduct::of(&moved);
+        assert_eq!(
+            mapping.projected_at(2).map(|region| region.class),
+            Some(ProjectedClass::Relocated),
+            "untouched aa at generated 2..4 is Relocated after bb moved ahead"
+        );
+        assert_eq!(
+            projected_class_for_emit_op(&preserve_aa, &moved),
+            vec![(MappingSpan { start: 2, end: 4 }, ProjectedClass::Relocated)]
+        );
+        let control = CodeTransform::new("aabb", &allocator);
+        assert_eq!(
+            projected_class_for_emit_op(&preserve_aa, &control),
+            vec![(MappingSpan { start: 0, end: 2 }, ProjectedClass::Identity)]
+        );
+    }
+
+    #[test]
+    fn preserve_original_class_follows_mapping_after_two_byte_swap() {
+        let allocator = Allocator::default();
+        let preserve_a = EmitOp::PreserveOriginal {
+            source: SourceByteRange {
+                start: SourceByteOffset(0),
+                end: SourceByteOffset(1),
+            },
+        };
+        let mut moved = CodeTransform::new("AB", &allocator);
+        moved.move_slice(1, 2, 0);
+        assert_eq!(moved.build_string(), "BA");
+        assert_eq!(
+            MappingProduct::of(&moved)
+                .projected_at(1)
+                .map(|region| region.class),
+            Some(ProjectedClass::Relocated)
+        );
+        assert_eq!(
+            projected_class_for_emit_op(&preserve_a, &moved),
+            vec![(MappingSpan { start: 1, end: 2 }, ProjectedClass::Relocated)]
+        );
+        let control = CodeTransform::new("AB", &allocator);
+        assert_eq!(
+            projected_class_for_emit_op(&preserve_a, &control),
+            vec![(MappingSpan { start: 0, end: 1 }, ProjectedClass::Identity)]
         );
     }
 
@@ -1126,7 +1421,7 @@ mod tests {
     fn edit_origin_is_verbatim_only() {
         let allocator = Allocator::default();
         let ct = CodeTransform::new("foo", &allocator);
-        let origin = authored(binding_item());
+        let origin = ProjectionOrigin::empty();
         let edits = RoleQualifiedObservation::new(
             MappingSpan { start: 0, end: 3 },
             ObservationRole::Edits,
@@ -1149,6 +1444,20 @@ mod tests {
             ),
             "feature participation is not edit safety"
         );
+        let forged = RoleQualifiedObservation::new(
+            feature.generated(),
+            ObservationRole::Edits,
+            feature.origin().clone(),
+        );
+        assert!(
+            matches!(
+                feature_only.edit_origin(&forged),
+                Err(EmissionRefusal::EditNotVerbatim { .. })
+            ),
+            "Feature-only emission rejects a forged Edits observation"
+        );
+        let stored = ProjectionEmission::from_operation(&ct, vec![edits.clone()]).expect("control");
+        assert!(stored.edit_origin(&edits).is_ok(), "stored Edits control");
     }
 
     fn carrier_span_class_eq(left: &MappingProduct, right: &MappingProduct) -> bool {
@@ -1252,7 +1561,7 @@ mod tests {
         let mut ct = CodeTransform::new("AABB", &allocator);
         ct.move_slice(2, 4, 0);
         assert_eq!(ct.build_string(), "BBAA");
-        let origin = authored(binding_item());
+        let origin = ProjectionOrigin::empty();
         let edits = RoleQualifiedObservation::new(
             MappingSpan { start: 0, end: 4 },
             ObservationRole::Edits,
@@ -1271,7 +1580,7 @@ mod tests {
         let allocator = Allocator::default();
         let source = "const foo = 1;";
         let ct = CodeTransform::new(source, &allocator);
-        let origin = authored(binding_item());
+        let origin = ProjectionOrigin::empty();
         let token = RoleQualifiedObservation::new(
             MappingSpan { start: 6, end: 9 },
             ObservationRole::Edits,
@@ -1396,16 +1705,8 @@ mod tests {
     fn stp10_insertion_anchor_admits_zero_width_authored_observation() {
         let allocator = Allocator::default();
         let source = ROLE_SFC;
-        let binding = {
-            let plan = plan_from_source("file:///stp10-role.vue", source);
-            plan.origins
-                .iter()
-                .find(|origin| origin.name == "item")
-                .expect("v-for alias")
-                .id
-                .clone()
-        };
-        let origin = authored(binding);
+        let plan = role_plan();
+        let origin = authored_in(&plan);
         let anchored_ct = helper_preamble_at(&allocator, source, "X", 0);
         let projected = MappingProduct::of(&anchored_ct).insertion_anchors()[0].projected;
         let anchored = RoleQualifiedObservation::new(
@@ -1416,12 +1717,15 @@ mod tests {
             ObservationRole::Diagnostic,
             origin.clone(),
         );
-        let clean = ProjectionEmission::from_operation(&anchored_ct, vec![anchored]);
+        let clean =
+            ProjectionEmission::from_plan(&anchored_ct, &plan, ROLE_CANONICAL, vec![anchored]);
         assert!(clean.is_ok(), "{clean:?}");
         let mut unanchored_ct = CodeTransform::new(source, &allocator);
         unanchored_ct.prepend("X");
-        let unanchored = ProjectionEmission::from_operation(
+        let unanchored = ProjectionEmission::from_plan(
             &unanchored_ct,
+            &plan,
+            ROLE_CANONICAL,
             vec![RoleQualifiedObservation::new(
                 MappingSpan { start: 0, end: 0 },
                 ObservationRole::Diagnostic,
@@ -1435,8 +1739,10 @@ mod tests {
             ),
             "{unanchored:?}"
         );
-        let nonempty = ProjectionEmission::from_operation(
+        let nonempty = ProjectionEmission::from_plan(
             &anchored_ct,
+            &plan,
+            ROLE_CANONICAL,
             vec![RoleQualifiedObservation::new(
                 MappingSpan { start: 0, end: 1 },
                 ObservationRole::Diagnostic,
@@ -1457,7 +1763,7 @@ mod tests {
         let allocator = Allocator::default();
         let source = "é";
         let ct = CodeTransform::new(source, &allocator);
-        let origin = authored(binding_item());
+        let origin = ProjectionOrigin::empty();
         let split = RoleQualifiedObservation::new(
             MappingSpan { start: 1, end: 2 },
             ObservationRole::Edits,
@@ -1466,7 +1772,7 @@ mod tests {
         let whole = RoleQualifiedObservation::new(
             MappingSpan { start: 0, end: 2 },
             ObservationRole::Edits,
-            origin,
+            origin.clone(),
         );
         let whole_emission =
             ProjectionEmission::from_operation(&ct, vec![whole.clone()]).expect("whole character");
@@ -1477,12 +1783,115 @@ mod tests {
                 .carrier(),
             MappingSpan { start: 0, end: 2 }
         );
-        let split_emission =
-            ProjectionEmission::from_operation(&ct, vec![split.clone()]).expect("assemble split");
-        let split_edit = split_emission.edit_origin(&split);
+        let split_emission = ProjectionEmission::from_operation(&ct, vec![split.clone()]);
         assert!(
-            matches!(split_edit, Err(EmissionRefusal::EditNotVerbatim { .. })),
-            "mid-UTF-8 [1,2) of é must not be an edit origin: {split_edit:?}"
+            matches!(
+                split_emission,
+                Err(EmissionRefusal::ObservationNotOnCharBoundary { .. })
+            ),
+            "mid-UTF-8 [1,2) of é must not assemble: {split_emission:?}"
+        );
+        let hover_split = ProjectionEmission::from_operation(
+            &ct,
+            vec![RoleQualifiedObservation::new(
+                MappingSpan { start: 1, end: 2 },
+                ObservationRole::Hover,
+                origin.clone(),
+            )],
+        );
+        assert!(
+            matches!(
+                hover_split,
+                Err(EmissionRefusal::ObservationNotOnCharBoundary { .. })
+            ),
+            "Hover [1,2) inside é is not a character-boundary source target: {hover_split:?}"
+        );
+        let hover_whole = ProjectionEmission::from_operation(
+            &ct,
+            vec![RoleQualifiedObservation::new(
+                MappingSpan { start: 0, end: 2 },
+                ObservationRole::Hover,
+                origin,
+            )],
+        );
+        assert!(hover_whole.is_ok(), "{hover_whole:?}");
+    }
+
+    #[test]
+    fn stp10_origin_requires_emission_snapshot() {
+        let allocator = Allocator::default();
+        let plan = role_plan();
+        let origin = authored_in(&plan);
+        let ct = CodeTransform::new(ROLE_SFC, &allocator);
+        let span = vfor_alias_span(ROLE_SFC);
+        let hover = RoleQualifiedObservation::new(span, ObservationRole::Hover, origin.clone());
+        let same = ProjectionEmission::from_plan(&ct, &plan, ROLE_CANONICAL, vec![hover.clone()]);
+        assert!(same.is_ok(), "{same:?}");
+        assert_eq!(same.expect("bound").snapshot(), Some(&plan.snapshot));
+
+        let other_plan = plan_from_source("file:///stp10-other.vue", ROLE_SFC);
+        let other_origin = authored_in(&other_plan);
+        assert_ne!(origin.snapshot(), other_origin.snapshot());
+        let other_file = ProjectionEmission::from_plan(
+            &ct,
+            &plan,
+            ROLE_CANONICAL,
+            vec![RoleQualifiedObservation::new(
+                span,
+                ObservationRole::Hover,
+                other_origin,
+            )],
+        );
+        assert!(
+            matches!(other_file, Err(EmissionRefusal::UnboundOrigin)),
+            "origin from another canonical file: {other_file:?}"
+        );
+
+        let mutated = format!("{ROLE_SFC} ");
+        let mutated_plan = plan_from_source(ROLE_CANONICAL, &mutated);
+        assert_ne!(plan.snapshot, mutated_plan.snapshot);
+        let mutated_origin = authored_in(&mutated_plan);
+        let other_snapshot = ProjectionEmission::from_plan(
+            &ct,
+            &plan,
+            ROLE_CANONICAL,
+            vec![RoleQualifiedObservation::new(
+                span,
+                ObservationRole::Hover,
+                mutated_origin,
+            )],
+        );
+        assert!(
+            matches!(other_snapshot, Err(EmissionRefusal::UnboundOrigin)),
+            "origin from another snapshot: {other_snapshot:?}"
+        );
+
+        let foo = CodeTransform::new("foo", &allocator);
+        let cross_file = ProjectionEmission::from_operation(
+            &foo,
+            vec![RoleQualifiedObservation::new(
+                MappingSpan { start: 0, end: 3 },
+                ObservationRole::Hover,
+                origin.clone(),
+            )],
+        );
+        assert!(
+            matches!(cross_file, Err(EmissionRefusal::UnboundOrigin)),
+            "authored origin without the emission plan: {cross_file:?}"
+        );
+        let mismatched_carrier = ProjectionEmission::from_plan(
+            &foo,
+            &plan,
+            ROLE_CANONICAL,
+            vec![RoleQualifiedObservation::new(
+                MappingSpan { start: 0, end: 3 },
+                ObservationRole::Hover,
+                origin,
+            )],
+        );
+        assert!(
+            matches!(mismatched_carrier, Err(EmissionRefusal::UnboundOrigin)),
+            "plan snapshot does not match transform original: {mismatched_carrier:?}"
         );
     }
 }
