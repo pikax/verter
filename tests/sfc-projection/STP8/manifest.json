@@ -24,13 +24,20 @@
     "definitionNeedle": "stp8DefinitionTarget",
     "expectedNegativeCode": 2345,
     "expectedHoverType": "number",
-    "expectedInstanceType": "Comp<unknown>"
+    "expectedInstanceType": "Comp<unknown, unknown>",
+    "utilityRecipe": "tests/sfc-projection/STP8/probes/utilities.tsx",
+    "utilityErrorTwin": "tests/sfc-projection/STP8/probes/utilities-error.tsx"
   },
   "cases": [
     {
       "id": "STP8-complete-evidence",
       "disposition": "accept",
-      "twins": ["full-predecessor-row-coverage", "cited-ledger-contains-case"]
+      "twins": [
+        "full-predecessor-row-coverage-derived-from-node-mandatory-cases",
+        "cited-ledger-structurally-records-case",
+        "named-predecessor-product-schema-join",
+        "frozen-topology-equals-predecessor-policy-products"
+      ]
     },
     {
       "id": "STP8-partial-ratify",
@@ -40,16 +47,27 @@
     {
       "id": "STP8-abi-contamination",
       "disposition": "reject",
-      "twins": ["checker-only-instance-type", "utility-remap"]
+      "twins": [
+        "checker-only-instance-type",
+        "utility-remap",
+        "vue-utilities-recipe-absent",
+        "vue-utilities-wrong-prop-twin-green-under-respelled-surface"
+      ]
     },
     {
       "id": "STP8-inference-contract",
       "disposition": "reject",
-      "twins": ["postponed-event-contributor", "postponed-slot-contributor", "runtime-witness"]
+      "twins": [
+        "postponed-event-contributor",
+        "postponed-slot-contributor",
+        "runtime-witness",
+        "parallel-inference-catalog",
+        "inference-witness-selection-drift"
+      ]
     }
   ],
   "verify": "node scripts/sfc-projection/verify-node.mjs --node STP8 --engine all --require-all --json",
   "test": "node --test tests/sfc-projection/STP8/abi-ratify.spec.ts",
   "runtimeCorrectness": true,
-  "notes": "Ratification lock. The positive probe exercises the accepted constructor-first ABI through the packaged .vue declaration twin on both admitted engines; protocol.mjs ratifies every predecessor feasibility row against its cited ledger and rejects toy evidence, checker-only public shapes, and postponed inference contributors. No production emit, runtime activation, or new public helper shape is authorized by this node."
+  "notes": "Ratification lock. The positive probe exercises the accepted two-binder constructor-first ABI (T and U infer together from one whole-signature construction) through the packaged .vue declaration twin on both admitted engines; the utility recipe (createApp/h/TSX plus a wrong-prop dirty twin) observes Vue utility behavior on the selected encoding. protocol.mjs derives every predecessor feasibility row from the canonical NODE_MANDATORY_CASES ledgers, joins the charter §4 named predecessor products and the STP3 InferenceWitnessSelection selection, and rejects toy evidence, checker-only public shapes, unmeasured utilitiesUntouched claims, and postponed inference contributors. No production emit, runtime activation, or new public helper shape is authorized by this node."
 }

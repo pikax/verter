@@ -24,84 +24,35 @@ const SCHEMA_PATH = "scripts/sfc-projection/manifest.schema.json";
 const TYPE_FLAGS_ANY = 1;
 const TYPE_FLAGS_NEVER = 262144;
 
-export const NODE_MANDATORY_CASES = Object.freeze({
-  STP1: Object.freeze([
-    "STP1-inventory",
-    "STP1-zero-selection",
-    "STP1-clean-twin",
-    "STP1-types",
-    "STP1-provenance",
-    "STP1-harness",
-  ]),
-  STP2: Object.freeze([
-    "STP2-instance-concrete",
-    "STP2-instance-generic",
-    "STP2-instance-explicit",
-    "STP2-constructor-escape",
-    "STP2-vue-utilities",
-    "STP2-not-callable",
-    "STP2-constructor-inferred",
-    "STP2-explicit-input-mismatch",
-  ]),
-  STP3: Object.freeze([
-    "STP3-coupled",
-    "STP3-wrong-channel",
-    "STP3-inference-only-channel",
-    "STP3-order-independent",
-    "STP3-ordered-merge",
-    "STP3-fresh-uses",
-  ]),
-  STP4: Object.freeze([
-    "STP4-js-unchecked",
-    "STP4-js-checked",
-    "STP4-tsx-authored",
-    "STP4-supplemental-import",
-    "STP4-external-owner",
-    "STP4-illegal-vue",
-  ]),
-  STP5: Object.freeze([
-    "STP5-encoding",
-    "STP5-guard-duplicate",
-    "STP5-alias-edit",
-    "STP5-stale-target",
-    "STP5-raw-cli",
-    "STP5-capability",
-  ]),
-  STP6: Object.freeze([
-    "STP6-package-instance",
-    "STP6-package-generics",
-    "STP6-hidden-metadata",
-    "STP6-closure",
-    "STP6-decl-map",
-    "STP6-resolution",
-  ]),
-  STP7: Object.freeze([
-    "STP7-svelte-shape",
-    "STP7-holes",
-    "STP7-realm",
-    "STP7-reuse",
-    "STP7-scope-claim",
-  ]),
-  STP8: Object.freeze([
-    "STP8-complete-evidence",
-    "STP8-partial-ratify",
-    "STP8-abi-contamination",
-    "STP8-inference-contract",
-  ]),
-});
+// The canonical per-node mandatory-case table lives in its own module so node
+// protocols (e.g. tests/sfc-projection/STP8/protocol.mjs) can derive required
+// rows from it without a circular import back into this CLI entry point,
+// which evaluates under a top-level await.
+import {
+  MANDATORY_CASES,
+  NODE_MANDATORY_CASES,
+  STP3_MANDATORY_CASES,
+  STP4_MANDATORY_CASES,
+  STP5_MANDATORY_CASES,
+  STP6_MANDATORY_CASES,
+  STP7_MANDATORY_CASES,
+  STP8_MANDATORY_CASES,
+} from "./node-mandatory-cases.mjs";
 
-export const MANDATORY_CASES = NODE_MANDATORY_CASES.STP1;
+export {
+  MANDATORY_CASES,
+  NODE_MANDATORY_CASES,
+  STP3_MANDATORY_CASES,
+  STP4_MANDATORY_CASES,
+  STP5_MANDATORY_CASES,
+  STP6_MANDATORY_CASES,
+  STP7_MANDATORY_CASES,
+  STP8_MANDATORY_CASES,
+};
 
 export function canonicalMandatoryCases(nodeId) {
   return NODE_MANDATORY_CASES[nodeId] || [];
 }
-
-export const STP3_MANDATORY_CASES = NODE_MANDATORY_CASES.STP3;
-export const STP4_MANDATORY_CASES = NODE_MANDATORY_CASES.STP4;
-export const STP5_MANDATORY_CASES = NODE_MANDATORY_CASES.STP5;
-export const STP6_MANDATORY_CASES = NODE_MANDATORY_CASES.STP6;
-export const STP7_MANDATORY_CASES = NODE_MANDATORY_CASES.STP7;
-export const STP8_MANDATORY_CASES = NODE_MANDATORY_CASES.STP8;
 
 function usesCaseFileRunner(nodeId) {
   return nodeId === "STP2" || nodeId === "STP3" || nodeId === "STP4" || nodeId === "STP6";

@@ -9,9 +9,10 @@
  */
 export type { Instance as RatifiedInstance } from "./probes/positive";
 export {
-  inferred as inferredConstruction,
-  inferredFirst as inferredFirstMember,
+  coupled as coupledConstruction,
+  coupledValue as coupledValueMember,
 } from "./probes/positive";
+export { inferred as inferredConstruction } from "./probes/positive";
 export { explicit as explicitConstruction } from "./probes/positive";
 
 export const acceptedProducts = [
@@ -24,10 +25,11 @@ export const acceptedProducts = [
 export type AcceptedProduct = (typeof acceptedProducts)[number];
 
 export const selectedCandidate = {
-  id: "single-public-constructor-plus-merged-instance-interface",
+  id: "single-public-two-binder-constructor-plus-merged-instance-interface",
   constructorFirst: true,
   defaultExport: "constructor-shaped-declare-class",
   instanceTypeSpelling: "InstanceType<typeof Comp>",
+  binderFamily: "Comp<T = unknown, U = unknown>",
 } as const;
 
 export const rejectedCandidates = [

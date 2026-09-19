@@ -46,10 +46,25 @@
     "synthesized": "report-with-generated-snippet-not-discard"
   },
   "editProvenance": {
-    "policy": "STP5 ObservationRolePolicy",
-    "verbatim": "length-preserving edits",
-    "atom": "diagnostics-only region-to-region",
-    "alias": "diagnostics substitute-original-text; not a rename codec",
+    "policy": "STP5 ObservationRolePolicy (joined: spanKinds must equal that product's spanKinds)",
+    "spanKinds": {
+      "verbatim": {
+        "edits": true,
+        "diagnostics": true,
+        "lengthPreserving": true
+      },
+      "atom": {
+        "edits": false,
+        "diagnostics": true,
+        "correspondence": "region-to-region"
+      },
+      "alias": {
+        "edits": false,
+        "diagnostics": "substitute-original-text",
+        "notRenameCodec": true,
+        "kebabPascalForbidden": true
+      }
+    },
     "synthesized": "fail-closed-no-carrier-preimage",
     "appliedEdits": "existing provider/LSO snapshot authority"
   },

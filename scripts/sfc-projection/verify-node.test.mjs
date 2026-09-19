@@ -793,7 +793,7 @@ test("STP8 verify: ratified ABI and topology on both engines", async () => {
       JSON.stringify(run.negativeDiagnostics),
     );
     assert.equal(run.hover, "number", JSON.stringify(run));
-    assert.equal(run.instanceType, "Comp<unknown>", JSON.stringify(run));
+    assert.equal(run.instanceType, "Comp<unknown, unknown>", JSON.stringify(run));
     assert.ok(run.definition, JSON.stringify(run));
     assert.ok(run.references >= 1, JSON.stringify(run));
     assert.ok(run.edits >= 1);

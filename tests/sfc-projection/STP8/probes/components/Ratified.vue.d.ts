@@ -1,26 +1,31 @@
 import type { ComponentPublicInstance, Slot } from "vue";
 
-type RatifiedProps<T> = { readonly items?: readonly T[]; readonly label?: string };
-type RatifiedEmit<T> = (event: "change", ...args: [value: T]) => void;
-type RatifiedSlots<T> = Readonly<{ default?: Slot<{ item: T }> }>;
-type RatifiedExposed<T> = { readonly first: T | undefined; reset(): void };
+type RatifiedProps<T, U> = {
+  readonly rows?: readonly T[];
+  readonly project?: (row: T) => U;
+  readonly modelValue?: U;
+  readonly onChange?: (value: U) => void;
+  readonly "onUpdate:modelValue"?: (value: U) => void;
+};
+type RatifiedEmit<U> = (event: "update:modelValue", value: U) => void;
+type RatifiedSlots<T, U> = Readonly<{ default?: Slot<{ row: T; value: U }> }>;
+type RatifiedExposed<U> = { readonly value: U | undefined };
 
-export declare class Comp<T = unknown> {
-  constructor(props?: RatifiedProps<T>);
-  readonly $props: RatifiedProps<T>;
-  readonly $emit: RatifiedEmit<T>;
-  readonly $slots: RatifiedSlots<T>;
-  readonly first: T | undefined;
-  reset(): void;
+export declare class Comp<T = unknown, U = unknown> {
+  constructor(props?: RatifiedProps<T, U>);
+  readonly $props: RatifiedProps<T, U>;
+  readonly $emit: RatifiedEmit<U>;
+  readonly $slots: RatifiedSlots<T, U>;
+  readonly value: U | undefined;
 }
 
-export interface Comp<T = unknown> extends ComponentPublicInstance<
-  RatifiedProps<T>,
-  RatifiedExposed<T>,
+export interface Comp<T = unknown, U = unknown> extends ComponentPublicInstance<
+  RatifiedProps<T, U>,
+  RatifiedExposed<U>,
   {},
   {},
   {},
-  { change: [value: T] }
+  { "update:modelValue": [value: U] }
 > {}
 
 export default Comp;

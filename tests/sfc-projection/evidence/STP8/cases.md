@@ -1,6 +1,8 @@
 # STP8 evidence index
 
-Input snapshot: `6e777f11e3db1d8615d813d36d161aaa986c6dc8` (captured STP8 candidate) on `tama_dag/0.1.0-tama/STP8`.
+Input snapshot (job baseline, STP7 merge base of this branch): `6e777f11e3db1d8615d813d36d161aaa986c6dc8` on `tama_dag/0.1.0-tama/STP8`.
+
+Ratification candidate: `95175044e97296c6d07045e5e4d4fdc562904e50` (the commit that introduced the STP8 products; review repairs land as later commits on the same branch and are not a new input snapshot).
 
 Engine pins: `tests/sfc-projection/STP1/products/engine-matrix.json` — ts-js `typescript@6.0.3` (`packages/playground/node_modules/typescript`), ts-native `typescript@7.0.2` (`typescript/unstable/sync`). Vue pin: `vue@3.6.0-rc.5` (root `package.json` devDependencies, matrix-admitted lane `vue-3.6`).
 
@@ -20,7 +22,7 @@ Deletion population this node: empty (no standalone legacy route is retired by S
 
 STP8-AC3/AC4 production projection state remains with the untouched owners named in `tests/sfc-projection/STP8/products/accepted-vue-constructor-abi.json`. Harness-owned probe runs are `incremental=fresh`, at most one check per file per engine, and close the native API after use.
 
-Negative twins discriminate: a TypeScript 5.8-only toy engine pin or shrunken engine denominator standing in for the selected real engines/Vue types, a checker-only public surface that respells `InstanceType<typeof Comp>` or remaps Vue utility behavior, an event/slot inference contributor postponed until after specialization, and a runtime second-checker witness. A fabricated or uncited feasibility row (a case its cited ledger does not record) is likewise rejected.
+Negative twins discriminate: a TypeScript 5.8-only toy engine pin or shrunken engine denominator standing in for the selected real engines/Vue types, a checker-only public surface that respells `InstanceType<typeof Comp>` or remaps Vue utility behavior, a `utilitiesUntouched` claim with no createApp/h/TSX recipe (or whose wrong-prop dirty twin stays green under a respelled props surface) to observe it, an event/slot inference contributor postponed until after specialization, a runtime second-checker witness, an inference transaction that restates a parallel channel catalog instead of joining the STP3 `InferenceWitnessSelection` selection, and a fabricated or uncited feasibility row (a case its cited ledger does not structurally record). A predecessor gaining a mandatory case, a charter §4 named predecessor product going missing or losing its schema, a predecessor ledger emptied of its cases, or a frozen topology field diverging from the predecessor policy product it freezes likewise fails `STP8-complete-evidence`.
 
 AC2 edit application remains with the existing provider/LSO snapshot authority. This lock records hover, definition, references and edit participation on the ratified fixture through the shared harness; it does not add a production edit applicator.
 

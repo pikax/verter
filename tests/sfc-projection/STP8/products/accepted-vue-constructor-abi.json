@@ -5,10 +5,12 @@
   "node": "STP8",
   "kind": "lock",
   "selectedCandidate": {
-    "id": "single-public-constructor-plus-merged-instance-interface",
+    "id": "single-public-two-binder-constructor-plus-merged-instance-interface",
     "constructorFirst": true,
-    "spelling": "export declare class Comp<T = unknown> { constructor(props?: Props<T>) } + export interface Comp<T = unknown> extends ComponentPublicInstance<Props, Exposed, {}, {}, {}, Emits> {} + export default Comp",
+    "spelling": "export declare class Comp<T = unknown, U = unknown> { constructor(props?: RatifiedProps<T, U>) } + export interface Comp<T = unknown, U = unknown> extends ComponentPublicInstance<RatifiedProps<T, U>, RatifiedExposed<U>, {}, {}, {}, { \"update:modelValue\": [value: U] }> {} + export default Comp",
     "fixture": "tests/sfc-projection/STP8/probes/components/Ratified.vue.d.ts",
+    "binderFamily": "the two-binder Comp<T, U> family selected from the STP3 CoupledInferenceEvidence constructorSpelling; one-binder constructions are specializations of the same family, never the successor-facing ABI",
+    "utilityRecipe": "tests/sfc-projection/STP8/probes/utilities.tsx + utilities-error.tsx (inherited STP2-vue-utilities recipe: createApp/h/TSX plus a wrong-prop dirty twin)",
     "postSpecializationConsumerChecks": [
       "excess-key-and-fallthrough-validation",
       "hover-definition-references"
@@ -40,16 +42,27 @@
   },
   "inference": {
     "selectedWitness": "single-public-constructor-whole-signature",
+    "predecessorWitness": "whole-signature-contextual-construction",
+    "predecessorProduct": "tests/sfc-projection/STP3/products/inference-witness-selection.json (InferenceWitnessSelection); the transaction below joins that selection and must not restate a parallel catalog",
     "rule": "every-inference-contributing-channel-stays-in-the-inference-transaction",
     "inferenceTransaction": [
-      "props-items",
-      "props-label",
-      "emit-change",
+      "rows",
+      "project",
+      "modelValue",
+      "onChange",
+      "onUpdate:modelValue",
       "slot-default",
-      "expose-first",
-      "expose-reset"
+      "expose-value"
     ],
-    "contributingChannels": ["props-items", "emit-change", "slot-default", "expose-first"],
+    "contributingChannels": [
+      "rows",
+      "project",
+      "modelValue",
+      "onChange",
+      "onUpdate:modelValue",
+      "slot-default",
+      "expose-value"
+    ],
     "postSpecializationOnly": [
       "excess-key-and-fallthrough-validation",
       "hover-definition-references"
@@ -58,7 +71,7 @@
   "richerInferenceWitness": {
     "admitted": true,
     "channel": "instance-side ComponentPublicInstance projection (slot/emit variance and Vue utility assignability) not representable faithfully by the public constructor parameter list alone",
-    "spelling": "export interface Comp<T = unknown> extends ComponentPublicInstance<...>",
+    "spelling": "export interface Comp<T = unknown, U = unknown> extends ComponentPublicInstance<...>",
     "typeOnly": true,
     "nonRuntime": true,
     "declarationClosed": "ships-in-published-d.ts (STP6 PublicDependencyClosurePolicy)",
