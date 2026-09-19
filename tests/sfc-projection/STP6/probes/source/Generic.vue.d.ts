@@ -1,4 +1,4 @@
-import type { ComponentPublicInstance, Slot } from "vue";
+import type { ComponentPublicInstance, ShallowUnwrapRef, Slot } from "vue";
 import type { Row } from "./row";
 
 export type { Row };
@@ -22,7 +22,9 @@ export declare class Comp<T = unknown, U = unknown> {
   readonly $props: GenericProps<T, U>;
   readonly $emit: GenericEmit<U>;
   readonly $slots: GenericSlots<T, U>;
-  readonly value: U;
+  // The exposed `value` is read through the public instance, which unwraps
+  // refs; the declared member must carry that same unwrapped type.
+  readonly value: ShallowUnwrapRef<GenericExposed<T, U>>["value"];
 }
 
 export interface Comp<T = unknown, U = unknown> extends ComponentPublicInstance<
