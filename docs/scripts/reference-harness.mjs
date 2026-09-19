@@ -2352,18 +2352,7 @@ async function validateContributorDocs({ repoRoot, read, exists, signal, fail, d
       }
     }
   }
-  if (architectureBytes != null && typeof contracts.candidate === "string") {
-    if (!architectureBytes.includes(contracts.candidate)) {
-      fail(
-        err(
-          "population-basis-missing",
-          "architecture page does not name the contract candidate SHA",
-          {
-            candidate: contracts.candidate,
-          },
-        ),
-      );
-    }
+  if (architectureBytes != null) {
     const basis = model.populationEvidenceBasis ?? {};
     for (const token of [
       basis.originalHostProfileNote,

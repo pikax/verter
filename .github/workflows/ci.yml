@@ -843,9 +843,7 @@ jobs:
   # so this lane — not the js-filtered test:scripts job — is what runs the
   # guards when a Rust dependency or surface change moves a ratified
   # population, and when the products or the verifier themselves change.
-  # Node builtins only: no pnpm install, no build. Full history
-  # (fetch-depth: 0) so --provenance can prove the products' pinned
-  # candidate is a real ancestor of the checked-out head.
+  # Node builtins only: no pnpm install, no build or Git history required.
   architecture-health:
     name: Architecture health contracts
     needs: detect-changes
@@ -855,9 +853,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 0
-          # The verifiers execute repository-controlled code and only read
-          # local history (cat-file, merge-base); no step needs the token.
+          # The verifiers read the current tree; no step needs the token.
           persist-credentials: false
       - uses: actions/setup-node@v5
         with:
@@ -871,20 +867,14 @@ jobs:
         run: node tests/architecture-health/ARH1/verify.mjs
       - name: ARH1 dirty twins
         run: node --test tests/architecture-health/ARH1/arh1.test.mjs
-      - name: ARH1 pinned-candidate provenance
-        run: node tests/architecture-health/ARH1/verify.mjs --provenance
       - name: ARH2 verify (characterization + complexity measurements)
         run: node tests/architecture-health/ARH2/verify.mjs
       - name: ARH2 dirty twins
         run: node --test tests/architecture-health/ARH2/arh2.test.mjs
-      - name: ARH2 pinned-candidate provenance
-        run: node tests/architecture-health/ARH2/verify.mjs --provenance
       - name: ARH5 verify (compiler facade cutover)
         run: node tests/architecture-health/ARH5/verify.mjs
       - name: ARH5 dirty twins
         run: node --test tests/architecture-health/ARH5/arh5.test.mjs
-      - name: ARH5 pinned-candidate provenance
-        run: node tests/architecture-health/ARH5/verify.mjs --provenance
 
   svelte-oracle:
     name: Svelte Oracle (live, feature-gated)

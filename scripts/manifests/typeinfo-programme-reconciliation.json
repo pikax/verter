@@ -1,6 +1,6 @@
 {
   "schema": "verter.typeinfo-programme-reconciliation.v1",
-  "comment": "One-time retrospective reconciliation record (arch rulings Q2/Q4, u-programme-arch-out.txt + F1/F4, u-programme-arch-followup-out.txt, 2026-08-04). Block statuses, contract amendments, landing transactions, and the restored row identities are recorded here as data; scripts/gen-typeinfo-ignore-manifest.mjs reads this file and emits the typed Rust metadata. Landing evidence commits are verifiable in git history; no Typeinfo-Block trailer exists for any historical landing, which is why no block may hold status `landed` without a landing transaction.",
+  "comment": "One-time retrospective reconciliation record (arch rulings Q2/Q4, u-programme-arch-out.txt + F1/F4, u-programme-arch-followup-out.txt, 2026-08-04). Block statuses, contract amendments, landing transactions, and the restored row identities are recorded here as data; scripts/gen-typeinfo-ignore-manifest.mjs reads this file and emits the typed Rust metadata. A landed block requires one recorded ratified landing transaction. Historical commit identities and trailers are not proof; optional transaction title and date fields are descriptive context only.",
   "blocks": [
     {
       "block": "U0.MANIFEST_SUBSTRATE",
@@ -27,8 +27,7 @@
       "block": "U2.BINDER_IDENTITY_FACTS",
       "status": "landing_unverified",
       "evidence": [
-        "commit:0a6c3bd9b",
-        "commit:29155de2c",
+        "landing context: feat(session): demand-produced binder identity facts substrate (2026-07-26)",
         "guards:crates/verter_session/tests/cases/g_binder/binder_identity_facts.rs"
       ]
     },
@@ -51,8 +50,8 @@
       "block": "U2.RELATION_INFER",
       "status": "landing_unverified",
       "evidence": [
-        "commit:2ee921b9c",
-        "rows:relation_semantics.rs::relation_optional_property_not_assignable_to_required removed from the partition at 2ee921b9c"
+        "landing context: feat(session): activate Relate as the sole relation authority (2026-07-27)",
+        "rows:relation_semantics.rs::relation_optional_property_not_assignable_to_required removed from the partition during relation authority activation (2026-07-27)"
       ]
     },
     {
@@ -96,8 +95,7 @@
       "block": "U6.FLOW_RETURN_SUBSTRATE",
       "status": "landing_unverified",
       "evidence": [
-        "commit:a8eef6202",
-        "rows:3 value_inference.rs partition identities removed at a8eef6202",
+        "rows:3 value_inference.rs partition identities removed in the historical flow-return change",
         "ruling:Q1 reclassifies the landing as PARTIAL (whole-function shape violates the locked demand-sliced contract)",
         "scc-10:share-vs-split record — the five storage-condition checks ran against the LANDED shared artifact (FunctionBodySkeleton + FunctionFlowGraph on one memoized FunctionFlowGraphStore bundle) and ALL FIVE PASS: checks 1-3 (structural detach: arena-free Send+Sync+'static NoTypeExpr skeleton/graph; build-time no-type-lowering; query-independent once-per-content-version identity) via flow_graph_is_arena_free_send_sync_static + flow_graph_build_is_deterministic_over_one_skeleton + skeleton_build_is_deterministic_per_content_version; check 4 against the production store via cache_runtime::flow_slice_node_tests::two_demands_one_function_flow_graph_build (build_count == 1 across two demands); check 5 end-to-end through the projector via component_meta_flow_return_admission_tests::return_type_member_demand_loads_only_the_walked_member (side.ts parse count 0, zero dispatch keys naming it). Recorded outcome per SCC-10: the shared implementation is SHARE-ELIGIBLE-AND-EVIDENCED — a shared artifact passing all five conditions is equally conforming; this records evidence, not a sharing preference.",
         "closed:R2-UNAPPLIED-WRITE-EFFECT-SOURCE-ORDER — closed by D13 (rev11.flow): whole-slot `=` writes at VALUE position lower as SliceExpr::Assignment and the evaluator applies them IN EVALUATION ORDER (a read before the write keeps the pre-write reaching, a read after observes it, and a DEFERRED closure read observes it through the statement capture look-ahead); the write-then-read twin `{ a: (x = \"s\"), b: x }` publishes `{ a: string; b: string }` clean + warm too. The span-comparison suppression stays rejected as unsound. Acceptance: flow_return_tests::flow_return_source_order_object_read_before_write_publishes_clean (with the deferred-read negative flow_return_source_order_deferred_read_still_observes_the_write asserting `b: () => string`). The residual unapplied shapes (compound operators, unselected right-hand sides) keep the UnappliedWriteEffect fail-close, pinned on subCompoundParamWrite.",
@@ -226,7 +224,7 @@
       "action": "replace",
       "guard": "ignored_test_row_table_holds_exactly_356_rows",
       "replacement": "row_registry_counts_derive_from_partition",
-      "authority": "Q4 (u-programme-arch-out.txt, 2026-08-04): frozen 348/356/362 count literals are stale bookkeeping states; every count derives from the append-only row registry. The 356 label named fn ignored_test_row_table_holds_exactly_356_rows, which existed at a39f95687 but was absent at the reconciliation base (E9)."
+      "authority": "Q4 (u-programme-arch-out.txt, 2026-08-04): frozen 348/356/362 count literals are stale bookkeeping states; every count derives from the append-only row registry. The 356 label named fn ignored_test_row_table_holds_exactly_356_rows, which existed with \"test(session): reconcile typeinfo ignore manifest and IndexedReadyBuilt pin with the landed lifts\" (2026-07-20) but was absent at the reconciliation base (E9)."
     },
     {
       "block": "U15.FINAL_LIFT",
@@ -274,8 +272,8 @@
     {
       "block": "U0.MANIFEST_SUBSTRATE",
       "action": "add",
-      "guard": "typeinfo_block_landing_transactions_are_atomic_and_trailer_backed",
-      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): the landing-transaction check; Typeinfo-Block trailers are enforced prospectively, never fabricated for history."
+      "guard": "typeinfo_block_landing_transactions_are_atomic_and_status_coupled",
+      "authority": "Operator evidence policy (2026-09-19): retain atomic, unique, status-coupled recorded ratification; historical commit identities, Git ancestry and trailers are not proof."
     },
     {
       "block": "U0.MANIFEST_SUBSTRATE",
@@ -331,57 +329,74 @@
     {
       "file": "cache_invalidation.rs",
       "function": "cache_invalidation_aug_patch_edit_surfaces_augmented_shape",
-      "removed_at": "fe1f59497"
+      "removalReference": {
+        "title": "chore(release): land type-macro migration, capability work, and tsgo/vue-goldens reconciliation",
+        "date": "2026-07-20"
+      }
     },
     {
       "file": "cache_invalidation.rs",
       "function": "cache_invalidation_barrel_edit_excludes_prior_leaf_from_v2_footprint",
-      "removed_at": "fe1f59497"
+      "removalReference": {
+        "title": "chore(release): land type-macro migration, capability work, and tsgo/vue-goldens reconciliation",
+        "date": "2026-07-20"
+      }
     },
     {
       "file": "cache_invalidation.rs",
       "function": "cache_invalidation_barrel_edit_redirects_route_to_new_leaf",
-      "removed_at": "fe1f59497"
+      "removalReference": {
+        "title": "chore(release): land type-macro migration, capability work, and tsgo/vue-goldens reconciliation",
+        "date": "2026-07-20"
+      }
     },
     {
       "file": "cache_invalidation.rs",
       "function": "cache_invalidation_basic_selected_leaf_edit_flips_published_surface",
-      "removed_at": "fe1f59497"
+      "removalReference": {
+        "title": "chore(release): land type-macro migration, capability work, and tsgo/vue-goldens reconciliation",
+        "date": "2026-07-20"
+      }
     },
     {
       "file": "cache_invalidation.rs",
       "function": "cache_invalidation_unselected_leaf_edit_keeps_warm_cache",
-      "removed_at": "fe1f59497"
+      "removalReference": {
+        "title": "chore(release): land type-macro migration, capability work, and tsgo/vue-goldens reconciliation",
+        "date": "2026-07-20"
+      }
     },
     {
       "file": "footprint.rs",
       "function": "typeinfo_footprint_is_attached_for_named_symbol_request",
-      "removed_at": "fe1f59497"
+      "removalReference": {
+        "title": "chore(release): land type-macro migration, capability work, and tsgo/vue-goldens reconciliation",
+        "date": "2026-07-20"
+      }
     },
     {
       "file": "relation_semantics.rs",
       "function": "relation_optional_property_not_assignable_to_required",
-      "removed_at": "2ee921b9c"
+      "removalReference": {
+        "title": "feat(session): activate Relate as the sole relation authority",
+        "date": "2026-07-27"
+      }
     },
     {
       "file": "branded_types.rs",
-      "function": "branded_symbol_key_access_projects_wrapped_value_type",
-      "removed_at": "64e6c6745"
+      "function": "branded_symbol_key_access_projects_wrapped_value_type"
     },
     {
       "file": "branded_types.rs",
-      "function": "branded_unique_symbol_wrapper_publishes_branded_surface",
-      "removed_at": "64e6c6745"
+      "function": "branded_unique_symbol_wrapper_publishes_branded_surface"
     },
     {
       "file": "unique_symbol.rs",
-      "function": "unique_symbol_indexed_access_via_typeof_returns_literal_value",
-      "removed_at": "64e6c6745"
+      "function": "unique_symbol_indexed_access_via_typeof_returns_literal_value"
     },
     {
       "file": "unique_symbol.rs",
-      "function": "unique_symbol_string_key_access_returns_sibling_value",
-      "removed_at": "64e6c6745"
+      "function": "unique_symbol_string_key_access_returns_sibling_value"
     },
     {
       "file": "value_inference.rs",

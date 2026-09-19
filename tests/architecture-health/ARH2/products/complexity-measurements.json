@@ -2,7 +2,7 @@
   "schema": "ARH2ComplexityMeasurements",
   "version": 1,
   "contractNode": "ARH2",
-  "candidate": "30012d45df4e3369728a7cc09250c5e009bfd18d",
+  "sourceReference": {"title":"docs(arch): ratify responsibility, visibility and dependency contracts (#636)","date":"2026-09-19"},
   "predecessorProducts": {
     "codebaseInventory": "tests/architecture-health/ARH0/products/codebase-inventory.json",
     "dependencyContracts": "tests/architecture-health/ARH1/products/dependency-contracts.json"
@@ -14,7 +14,7 @@
     "arh1HotspotContracts": 5,
     "arh0GodModuleCandidates": 5,
     "rederivationRule": "the ARH2 verifier runs the shipped ARH0 and ARH1 validate() implementations against the live tree on every execution (imported, not re-implemented), so every population recorded here is re-derived on the then-current candidate and any drift fails this node together with the drifted predecessor",
-    "basisDrift": "ARH1's products previously pinned 260be884014110ffd3b72850509e765c8752b011 (pre-squash ARH1 branch merge). The #636 squash-merge shipped that content as 30012d45df4e3369728a7cc09250c5e009bfd18d without branch ancestry, so the ancestor proof failed on every main-descended head. ARH2 re-ratifies both ARH1 product candidate fields onto that shipped squash (the last main-line ancestor containing the ARH1 contracts) so verify.mjs --provenance holds; the CUT-1 row refresh is this node's same-change mutation and is not a byte-identity claim against the pin. ARH2's own products pin the same shipped head."
+    "basisDrift": "Squash merging replaces branch commit identities. The source title and date are descriptive context only; the verifiers check current code and structural contracts without Git object or ancestry requirements."
   },
   "structural": [
     { "path": "crates/verter_scheduler/src/scheduler.rs", "fileLoc": 20789 },

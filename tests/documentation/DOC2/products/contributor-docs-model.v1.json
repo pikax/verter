@@ -232,7 +232,6 @@
     }
   ],
   "populationEvidenceBasis": {
-    "ratificationCandidateField": "candidate",
     "originalHostProfile": null,
     "originalHostProfileNote": "unrecorded in ARH1 contract products",
     "liveRederivationHost": "ubuntu-latest",
