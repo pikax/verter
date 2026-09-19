@@ -197,7 +197,7 @@ impl GlobalContributorPopulation {
         if matched.is_empty() {
             return SymbolContributors::empty();
         }
-        matched.sort_by(|a, b| compare_contributors(a, b));
+        matched.sort_by(compare_contributors);
         let fingerprint = fingerprint_of(&matched);
         SymbolContributors {
             entries: Arc::from(matched.into_boxed_slice()),
