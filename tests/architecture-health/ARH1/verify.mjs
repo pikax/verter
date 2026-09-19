@@ -5,8 +5,11 @@
  *
  * Validates the two products against the shipped ARH0 predecessor products
  * and the working tree: every ARH0 god-module candidate carries exactly one
- * hotspot contract (and vice versa) with no dropped or invented
- * responsibility, each surviving authority/cohesive module exists, the
+ * hotspot contract (a duplicate contract for one hotspot is rejected) with
+ * no dropped or invented responsibility, each surviving authority is a
+ * cohesive module of that responsibility (a single-module hotspot keeps it
+ * in place; an existing but unbound file is not authority) and each
+ * cohesive module exists, the
  * declared import direction equals the production import tree actually
  * measured in the live source — use statements AND inline crate paths
  * (macro paths like `verter_audit::attribute!`, feature-gated type aliases,
@@ -15,17 +18,22 @@
  * caught in use or inline form alike (cfg(test)/cfg(all(test, ..)) items
  * are stripped before measuring, so the equality claim covers every
  * direction and never counts test configuration as production direction;
+ * inline `crate::module::Item` paths in code position name their
+ * crate-internal root exactly like use statements;
  * the forbidden directions are absent from the full source — including its
  * test configuration — and the owning crate's Cargo.toml), layer rules
  * equal the live crate dependency manifests BOTH ways with a pinned rule
  * population (every hotspot crate governed exactly once, contiguous ids,
  * non-hotspot crates declared with a rationale), constructors and their
  * capability anchors are real declarations with the constructor population
- * derived from the module's primary type (a deleted constructor row is
- * drift, not silence), state-lifetime rows name live identifiers and one
+ * derived from the module's primary type (an empty constructor table with a
+ * live Self-returning pub-constructor population is drift; a deleted
+ * constructor row is drift, not silence), state-lifetime rows name live identifiers and one
  * sole owner that DECLARES the state (a comment mention or the enclosing
  * type's name in a consumer file is not ownership), surface declarations
- * are pinned against the derived parent-module declaration, public
+ * are pinned against the derived parent-module declaration, the recorded
+ * snapshot counts equal the live-derived file-wide counts exactly (a stale,
+ * zeroed or key-stripped snapshot is drift), public
  * modules' complete pub-item populations must be retained/narrowed or
  * carried by a bulk row (deleted rows are drift), every narrowing consumer
  * is a live referencing file and every live referencing file is a recorded
@@ -39,7 +47,12 @@
  * node (plus every narrowing route declared here, keyed per narrow kind so
  * two routes on one file cannot merge or vanish) has exactly one cutover
  * disposition carried by a row bound to exactly one recognized route/debt
- * key, and the AC4 surface obligations name every charter-mandated surface.
+ * key — a `satisfies` value must be a real ARH0 debt whose decision owner is
+ * ARH1, so the register can neither invent a debt nor decide another
+ * owner's — and the AC4 surface obligations name every charter-mandated
+ * surface. Both products must pin one candidate basis (same 40-hex commit;
+ * `verify.mjs --provenance` additionally proves the pinned commit is a real
+ * ancestor of HEAD).
  * The program DAG is database-owned by the TAMA controller, so owner/heir
  * ids are checked structurally only and no DAG file is read; the ARH0
  * products are joined as shipped predecessor evidence, never re-derived
@@ -49,6 +62,7 @@
  */
 
 import fs from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -296,6 +310,21 @@ function validateHotspotCoverage(contracts, arh0, errors) {
     (r) => r.classification === "god-module-candidate",
   );
   const godByPath = new Map(godRows.map((r) => [r.path, r]));
+  // Exactly one contract per hotspot: two rows for one path would let two
+  // contracts claim every inventoried responsibility of that hotspot.
+  const contractPathCounts = new Map();
+  for (const hotspot of contracts.hotspots) {
+    contractPathCounts.set(hotspot.path, (contractPathCounts.get(hotspot.path) || 0) + 1);
+  }
+  for (const [dupPath, count] of contractPathCounts) {
+    if (count > 1) {
+      errors.push({
+        caseId,
+        code: "duplicate-hotspot-contract",
+        detail: `${dupPath} carries ${count} hotspot contracts; exactly one contract may claim an inventoried hotspot`,
+      });
+    }
+  }
   const contractPaths = new Set(contracts.hotspots.map((h) => h.path));
   for (const row of godRows) {
     if (!contractPaths.has(row.path)) {
@@ -323,6 +352,15 @@ function validateHotspotCoverage(contracts, arh0, errors) {
       }
     }
     const seen = new Set();
+    // Authority binds to the cohesive map of this hotspot: the surviving
+    // owner must be a cohesive module of THE SAME responsibility (extra
+    // cohesive modules for one responsibility stay legal). A hotspot without
+    // cohesive modules is single-module and keeps authority in place — the
+    // hotspot file itself. Any other existing file is not authority.
+    const cohesivePairs = new Set(
+      (hotspot.cohesiveModules || []).map((m) => `${m.module}\u0000${m.responsibility ?? ""}`),
+    );
+    const singleModule = (hotspot.cohesiveModules || []).length === 0;
     for (const a of hotspot.authority) {
       if (seen.has(a.responsibility)) {
         errors.push({
@@ -344,6 +382,15 @@ function validateHotspotCoverage(contracts, arh0, errors) {
           caseId,
           code: "missing-authority-owner",
           detail: `${a.responsibility} -> ${a.survivingOwner}`,
+        });
+      } else if (
+        !cohesivePairs.has(`${a.survivingOwner}\u0000${a.responsibility}`) &&
+        !(singleModule && a.survivingOwner === hotspot.path)
+      ) {
+        errors.push({
+          caseId,
+          code: "authority-owner-unbound",
+          detail: `${hotspot.path}: ${a.responsibility} -> ${a.survivingOwner} is not a cohesive module of that responsibility`,
         });
       }
     }
@@ -513,8 +560,18 @@ function measureStrippedImports(source) {
   }
   // Inline crate paths in code position (macro calls, qualified types,
   // derive paths, feature-gated aliases).
-  for (const m of blankStrings(source).matchAll(/(?<![A-Za-z_0-9\]:])([a-z_][a-z_0-9]*)::(?!<)/g)) {
+  const blanked = blankStrings(source);
+  for (const m of blanked.matchAll(/(?<![A-Za-z_0-9\]:])([a-z_][a-z_0-9]*)::(?!<)/g)) {
     const first = m[1];
+    if (first === "crate") {
+      // `crate::module::Item` in code position names its crate-internal
+      // root exactly like a use statement (a crate-root item adds the
+      // item's identifier), never filtered by bound names: the path is
+      // internal regardless of what a use statement also binds.
+      const next = blanked.slice(m.index + m[0].length).match(/^[A-Za-z_][A-Za-z_0-9]*/);
+      if (next) internal.add(next[0]);
+      continue;
+    }
     if (
       SKIPPED_ROOTS.has(first) ||
       PRIMITIVE_ROOTS.has(first) ||
@@ -855,54 +912,57 @@ function validateConstructors(contracts, errors) {
           detail: `${hotspot.path}: no constructors declared without a rationale`,
         });
       }
-      continue;
-    }
-    const text = readRel(hotspot.path);
-    for (const row of rows) {
-      const decl = new RegExp(
-        `(?:pub|pub\\(crate\\)) (?:const )?fn ${row.constructor}\\s*[<(]`,
-      ).exec(text);
-      if (!decl) {
-        errors.push({
-          caseId,
-          code: "missing-constructor",
-          detail: `${hotspot.path}: constructor ${row.constructor} is not a declared fn`,
-        });
-        continue;
-      }
-      // The declaration span runs to the next item-level fn or 3000 chars,
-      // whichever first: signature text (parameters may span lines) plus the
-      // first statements, never the whole file.
-      const rest = text.slice(decl.index);
-      const nextItem = rest.slice(1).search(/\n {4}(?:pub |pub\(crate\) )?(?:const )?fn /);
-      const span = nextItem === -1 ? rest.slice(0, 3000) : rest.slice(0, nextItem + 1);
-      for (const anchor of row.signatureAnchors || []) {
-        if (!span.includes(anchor)) {
+    } else {
+      const text = readRel(hotspot.path);
+      for (const row of rows) {
+        const decl = new RegExp(
+          `(?:pub|pub\\(crate\\)) (?:const )?fn ${row.constructor}\\s*[<(]`,
+        ).exec(text);
+        if (!decl) {
           errors.push({
             caseId,
-            code: "constructor-anchor-missing",
-            detail: `${row.constructor}: anchor "${anchor}" not in the declaration span`,
+            code: "missing-constructor",
+            detail: `${hotspot.path}: constructor ${row.constructor} is not a declared fn`,
+          });
+          continue;
+        }
+        // The declaration span runs to the next item-level fn or 3000 chars,
+        // whichever first: signature text (parameters may span lines) plus the
+        // first statements, never the whole file.
+        const rest = text.slice(decl.index);
+        const nextItem = rest.slice(1).search(/\n {4}(?:pub |pub\(crate\) )?(?:const )?fn /);
+        const span = nextItem === -1 ? rest.slice(0, 3000) : rest.slice(0, nextItem + 1);
+        for (const anchor of row.signatureAnchors || []) {
+          if (!span.includes(anchor)) {
+            errors.push({
+              caseId,
+              code: "constructor-anchor-missing",
+              detail: `${row.constructor}: anchor "${anchor}" not in the declaration span`,
+            });
+          }
+        }
+        if (!Array.isArray(row.rules) || row.rules.length === 0) {
+          errors.push({
+            caseId,
+            code: "constructor-without-rules",
+            detail: `${hotspot.path}: ${row.constructor}`,
           });
         }
-      }
-      if (!Array.isArray(row.rules) || row.rules.length === 0) {
-        errors.push({
-          caseId,
-          code: "constructor-without-rules",
-          detail: `${hotspot.path}: ${row.constructor}`,
-        });
-      }
-      if (row.testOnly && !row.constructor.startsWith("test_")) {
-        errors.push({
-          caseId,
-          code: "test-hook-unmarked",
-          detail: `${row.constructor} is marked testOnly but not named as a test hook`,
-        });
+        if (row.testOnly && !row.constructor.startsWith("test_")) {
+          errors.push({
+            caseId,
+            code: "test-hook-unmarked",
+            detail: `${row.constructor} is marked testOnly but not named as a test hook`,
+          });
+        }
       }
     }
     // Completeness: the constructor table of the module's primary retained
     // type equals its derived Self-returning public constructors (narrowed
-    // test hooks excluded — their disposition is the narrowing row).
+    // test hooks excluded — their disposition is the narrowing row). This
+    // runs for EMPTY tables too: a rationale is only legal when the derived
+    // population is empty, so an emptied table over live constructors is
+    // drift, not silence.
     const base = path.basename(hotspot.path, ".rs");
     const primary = (hotspot.minimalPublicSurface?.retainedTypes || []).find(
       (t) => t.replace(/_/g, "").toLowerCase() === base.replace(/_/g, "").toLowerCase(),
@@ -1357,6 +1417,38 @@ function moduleDeclarationBinding(hotspotPath) {
   return { parent: null, declaration: null, base };
 }
 
+/** File-wide surface counts of one comment-stripped hotspot text — the
+ * snapshot vocabulary, derived identically for every hotspot: line-anchored
+ * visibility declarations (pub fn including the test-hook subset, pub(crate)
+ * fn, pub types, pub/pub(crate) mod) plus the pub fields of fully-pub
+ * structs. The recorded snapshot must equal this dict exactly, so a stale,
+ * zeroed or key-stripped snapshot is drift. */
+function deriveSnapshotCounts(stripped) {
+  let pubFn = 0;
+  let pubFnTestHooks = 0;
+  let pubCrateFn = 0;
+  let pubType = 0;
+  let pubCrateMod = 0;
+  let inlinePubMod = 0;
+  for (const line of stripped.split("\n")) {
+    if (/^\s*pub\s+(?:const\s+)?fn\s/.test(line)) {
+      pubFn++;
+      if (/^\s*pub\s+(?:const\s+)?fn\s+test_/.test(line)) pubFnTestHooks++;
+    } else if (/^\s*pub\(crate\)\s+(?:const\s+)?fn\s/.test(line)) {
+      pubCrateFn++;
+    } else if (/^\s*pub\s+(?:struct|enum|trait|type|union|const|static)\s/.test(line)) {
+      pubType++;
+    }
+    if (/^\s*pub\(crate\)\s+mod\s/.test(line)) pubCrateMod++;
+    else if (/^\s*pub\s+mod\s/.test(line)) inlinePubMod++;
+  }
+  let pubStructField = 0;
+  for (const s of structFieldDecls(stripped)) {
+    if (s.isPub) pubStructField += s.pubFields.size;
+  }
+  return { pubFn, pubFnTestHooks, pubCrateFn, pubType, pubCrateMod, inlinePubMod, pubStructField };
+}
+
 /**
  * ARH1-AC1: minimal public surfaces bind the live tree. The module's
  * visibility declaration is pinned verbatim against the DERIVED parent
@@ -1384,6 +1476,30 @@ function validateSurface(contracts, errors) {
     const stripped = strippedFileText(hotspot.path);
     const surface = hotspot.minimalPublicSurface;
     const moduleBase = path.basename(hotspot.path, ".rs");
+
+    // The recorded snapshot equals the live-derived file-wide counts exactly
+    // (every vocabulary key, both directions): the products cannot claim a
+    // measurement basis the measured tree contradicts.
+    const derivedCounts = deriveSnapshotCounts(stripped);
+    const recordedCounts = hotspot.snapshot || {};
+    for (const [key, value] of Object.entries(derivedCounts)) {
+      if (recordedCounts[key] !== value) {
+        errors.push({
+          caseId,
+          code: "snapshot-count-drift",
+          detail: `${hotspot.path}: snapshot ${key} is ${JSON.stringify(recordedCounts[key])}, the live tree carries ${value}`,
+        });
+      }
+    }
+    for (const key of Object.keys(recordedCounts)) {
+      if (!(key in derivedCounts)) {
+        errors.push({
+          caseId,
+          code: "snapshot-count-drift",
+          detail: `${hotspot.path}: snapshot key ${key} is not a derived count`,
+        });
+      }
+    }
 
     // The surface boundary is pinned to the derived parent declaration.
     const binding = moduleDeclarationBinding(hotspot.path);
@@ -1868,6 +1984,10 @@ function validateCutover(contracts, cutover, arh0, errors) {
   const ids = new Set();
   const routes = new Set();
   const satisfies = new Set();
+  // A `satisfies` value is ARH1's to decide only if the shipped ARH0 debt
+  // register carries the id AND names ARH1 as its decision owner: the
+  // register can neither invent a debt nor take another owner's route.
+  const arh0Debts = new Map(arh0["debt-register"].rows.map((d) => [d.id, d]));
   for (const row of cutover.rows) {
     if (ids.has(row.id)) errors.push({ caseId, code: "duplicate-id", detail: row.id });
     ids.add(row.id);
@@ -1908,6 +2028,20 @@ function validateCutover(contracts, cutover, arh0, errors) {
         });
       }
       satisfies.add(row.satisfies);
+      const debt = arh0Debts.get(row.satisfies);
+      if (debt === undefined) {
+        errors.push({
+          caseId,
+          code: "cutover-debt-unknown",
+          detail: `${row.id}: satisfies ${row.satisfies}, which no shipped ARH0 debt-register row carries`,
+        });
+      } else if (!(debt.owner?.kind === "node" && debt.owner?.id === "ARH1")) {
+        errors.push({
+          caseId,
+          code: "cutover-debt-foreign",
+          detail: `${row.id}: ARH0 debt ${row.satisfies} is ${debt.owner?.id ?? "unowned"}'s to decide, not ARH1's`,
+        });
+      }
     }
     if (row.route !== undefined) {
       if (routes.has(row.route)) {
@@ -1974,6 +2108,30 @@ function validateRatification(products, manifest, errors) {
   if (!manifest || typeof manifest !== "object") {
     errors.push({ caseId, code: "manifest-case-drift", detail: "manifest missing" });
     return;
+  }
+  // One candidate basis for both products: a 40-hex git commit, identical in
+  // the contracts and the register, so the products cannot pin two source
+  // revisions under one inventory. `verify.mjs --provenance` additionally
+  // proves the pinned commit is a real ancestor of HEAD.
+  const pinnedCandidates = [
+    ["dependency-contracts", products["dependency-contracts"].candidate],
+    ["cutover-register", products["cutover-register"].candidate],
+  ];
+  for (const [label, value] of pinnedCandidates) {
+    if (!/^[0-9a-f]{40}$/.test(value ?? "")) {
+      errors.push({
+        caseId,
+        code: "candidate-basis-drift",
+        detail: `${label} pins candidate ${JSON.stringify(value)}, which is not a 40-hex git commit`,
+      });
+    }
+  }
+  if (pinnedCandidates[0][1] !== pinnedCandidates[1][1]) {
+    errors.push({
+      caseId,
+      code: "candidate-basis-drift",
+      detail: `dependency-contracts pins ${pinnedCandidates[0][1]} while cutover-register pins ${pinnedCandidates[1][1]}; the inventory binds exactly one source revision`,
+    });
   }
   const recorded = new Set(manifest.products || []);
   const actual = new Set(
@@ -2087,6 +2245,42 @@ export function mandatoryCases() {
   ];
 }
 
+/**
+ * Provenance of the pinned candidate basis, checked against a git checkout
+ * that carries the commit: the pinned revision must be a real commit of
+ * this repository and an ancestor of HEAD, so the products cannot pin a
+ * fabricated source revision or one the ratified tree never contained. A
+ * checkout without the object (shallow clone) reports unknown-commit — it
+ * never silently passes. Runs only behind `verify.mjs --provenance` (the
+ * CI architecture-health lane), because plain validate() stays independent
+ * of git.
+ */
+export function validateProvenance(candidate) {
+  if (!/^[0-9a-f]{40}$/.test(candidate ?? "")) {
+    return {
+      ok: false,
+      reason: `candidate ${JSON.stringify(candidate)} is not a 40-hex git commit`,
+    };
+  }
+  const git = (args) => {
+    try {
+      execFileSync("git", ["-C", REPO_ROOT, ...args], {
+        stdio: ["ignore", "ignore", "ignore"],
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (!git(["cat-file", "-e", `${candidate}^{commit}`])) {
+    return { ok: false, reason: `candidate ${candidate} is not a commit of this repository` };
+  }
+  if (!git(["merge-base", "--is-ancestor", candidate, "HEAD"])) {
+    return { ok: false, reason: `candidate ${candidate} is not an ancestor of HEAD` };
+  }
+  return { ok: true };
+}
+
 /** Case ids with at least one recorded error (dirty-twin selection helper). */
 export function selectedCaseIds(result) {
   return [...new Set(result.errors.map((e) => e.caseId))];
@@ -2097,7 +2291,19 @@ export function selectedCaseIds(result) {
 const isMain =
   process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 if (isMain) {
-  const result = validate(loadProducts());
+  const products = loadProducts();
+  const result = validate(products);
+  if (process.argv.includes("--provenance")) {
+    const provenance = validateProvenance(products["dependency-contracts"].candidate);
+    if (!provenance.ok) {
+      result.errors.push({
+        caseId: "ARH1-ratification",
+        code: "candidate-basis-drift",
+        detail: provenance.reason,
+      });
+      result.ok = false;
+    }
+  }
   if (!result.ok) {
     console.error(result.errors.map((e) => `${e.caseId}/${e.code}: ${e.detail}`).join("\n"));
     process.exit(1);

@@ -13,6 +13,7 @@ import {
   measureProductionImports,
   selectedCaseIds,
   validate,
+  validateProvenance,
 } from "./verify.mjs";
 
 const clean = loadProducts();
@@ -603,7 +604,10 @@ test("ARH1-import-direction dirty twin: an undeclared live crate-internal root i
 
   const declaredOnlyInTests = cloneProducts();
   const aid2 = hotspot(declaredOnlyInTests, SCHEDULER).allowedImportDirection;
-  aid2.crateInternal.push("cache_id"); // imported only by scheduler.rs cfg(test) code
+  // `crate::scheduler` self-paths appear only inside scheduler.rs cfg(test)
+  // code (cache_id/pool/request_context are production inline roots and are
+  // declared for that reason).
+  aid2.crateInternal.push("scheduler");
   result = validate(declaredOnlyInTests, loadManifest(), arh0);
   assert.equal(result.ok, false);
   assert.ok(
@@ -611,7 +615,41 @@ test("ARH1-import-direction dirty twin: an undeclared live crate-internal root i
       (e) =>
         e.caseId === "ARH1-import-direction" &&
         e.code === "import-drift" &&
-        e.detail.includes("crate-internal import cache_id is not measured"),
+        e.detail.includes("crate-internal import scheduler is not measured"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-import-direction: inline crate:: paths name their crate-internal root", () => {
+  // A production inline crate path adds the following module identifier,
+  // exactly like a use statement (F7/F1: the live production internals are
+  // visible to the measurement).
+  const prod = measureProductionImports("fn f() { crate::decl_lowering::run(); }");
+  assert.ok(prod.internal.has("decl_lowering"), JSON.stringify([...prod.internal]));
+  const mixed = measureProductionImports(
+    [
+      "use crate::dag::Thing;",
+      "#[cfg(test)]",
+      "mod t { fn g() { crate::pool::SchedulerCpuPool::wrap(); } }",
+      "fn h() { crate::cache_id::SchedulerCacheId::new(); }",
+    ].join("\n"),
+  );
+  assert.deepEqual([...mixed.internal].sort(), ["cache_id", "dag"]);
+});
+
+test("ARH1-import-direction dirty twin: undeclaring a production inline crate-internal root is rejected", () => {
+  const dirty = cloneProducts();
+  const aid = hotspot(dirty, SCHEDULER).allowedImportDirection;
+  aid.crateInternal = aid.crateInternal.filter((v) => v !== "pool"); // live constructor params
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-import-direction" &&
+        e.code === "import-drift" &&
+        e.detail.includes("crate-internal import pool is not declared"),
     ),
     JSON.stringify(result.errors),
   );
@@ -1201,4 +1239,243 @@ test("ARH1-surface: field use forms are type-qualified", () => {
       .receiver,
     true,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Authority binds to the cohesive map (F6/F17): an existing but unbound file
+// is not authority, and the authority/cohesive pair cannot drift apart.
+// ---------------------------------------------------------------------------
+
+test("ARH1-hotspot-coverage dirty twin: an authority owner that is not a cohesive module of the responsibility is rejected (AC1)", () => {
+  // (1) An existing but unrelated file as surviving owner.
+  const unbound = cloneProducts();
+  const a1 = hotspot(unbound, SCHEDULER).authority.find(
+    (x) => x.responsibility === "pool submission and admission control",
+  );
+  a1.survivingOwner = "crates/verter_span/src/lib.rs";
+  let result = validate(unbound, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-hotspot-coverage" &&
+        e.code === "authority-owner-unbound" &&
+        e.detail.includes("pool submission and admission control"),
+    ),
+    JSON.stringify(result.errors),
+  );
+
+  // (2) A cohesive module of the same hotspot but a different responsibility.
+  const wrongResponsibility = cloneProducts();
+  const a2 = hotspot(wrongResponsibility, SCHEDULER).authority.find(
+    (x) => x.responsibility === "batch coordination",
+  );
+  a2.survivingOwner = "crates/verter_scheduler/src/cancellation.rs";
+  result = validate(wrongResponsibility, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-hotspot-coverage" &&
+        e.code === "authority-owner-unbound" &&
+        e.detail.includes("batch coordination"),
+    ),
+    JSON.stringify(result.errors),
+  );
+
+  // (3) The cohesive-module row deleted while the authority still names it.
+  const droppedCohesive = cloneProducts();
+  const h = hotspot(droppedCohesive, SCHEDULER);
+  h.cohesiveModules = h.cohesiveModules.filter((m) => !m.module.endsWith("driver.rs"));
+  result = validate(droppedCohesive, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-hotspot-coverage" &&
+        e.code === "authority-owner-unbound" &&
+        e.detail.includes("driver.rs"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Exactly one contract per hotspot (F29): a duplicate hotspot contract
+// cannot claim the same inventoried responsibilities twice.
+// ---------------------------------------------------------------------------
+
+test("ARH1-hotspot-coverage dirty twin: a duplicate hotspot contract is rejected (AC1)", () => {
+  const dirty = cloneProducts();
+  const hotspots = dirty["dependency-contracts"].hotspots;
+  hotspots.push(structuredClone(hotspots.find((h) => h.path === SCHEDULER)));
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-hotspot-coverage" &&
+        e.code === "duplicate-hotspot-contract" &&
+        e.detail.includes("carries 2 hotspot contracts"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Constructor completeness covers EMPTY tables (F8/F31): a rationale is only
+// legal when the derived constructor population is empty.
+// ---------------------------------------------------------------------------
+
+test("ARH1-constructor dirty twin: an emptied constructor table with a rationale is still drift, not silence", () => {
+  const dirty = cloneProducts();
+  const h = hotspot(dirty, SCHEDULER);
+  h.constructorCapabilities = [];
+  h.constructorRationale = "no capability-bearing constructors"; // any rationale
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-constructor" &&
+        e.code === "constructor-population-drift" &&
+        e.detail.includes("pub fn Scheduler::new"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Cutover debts must be real and ARH1's to decide (F18): the register can
+// neither invent a debt nor take another owner's route.
+// ---------------------------------------------------------------------------
+
+test("ARH1-cutover dirty twin: satisfying an invented or foreign ARH0 debt is rejected", () => {
+  const invented = cloneProducts();
+  const rows = invented["cutover-register"].rows;
+  const cut1 = rows.find((r) => r.id === "ARH1-CUT-1");
+  rows.push({
+    ...structuredClone(cut1),
+    id: "ARH1-CUT-7",
+    decision: "decide a debt that does not exist",
+    satisfies: "ARH0-DEBT-FAKE",
+  });
+  let result = validate(invented, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-cutover" &&
+        e.code === "cutover-debt-unknown" &&
+        e.detail.includes("ARH0-DEBT-FAKE"),
+    ),
+    JSON.stringify(result.errors),
+  );
+
+  const foreign = cloneProducts();
+  const rows2 = foreign["cutover-register"].rows;
+  const cut1b = rows2.find((r) => r.id === "ARH1-CUT-1");
+  rows2.push({
+    ...structuredClone(cut1b),
+    id: "ARH1-CUT-8",
+    decision: "decide ARH2's characterization debt here",
+    satisfies: "ARH0-DEBT-4", // ARH0 assigns this debt to ARH2, not ARH1
+  });
+  result = validate(foreign, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-cutover" &&
+        e.code === "cutover-debt-foreign" &&
+        e.detail.includes("ARH0-DEBT-4"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The products bind one measurable source basis (F4/F14): snapshot counts
+// are live invariants and the pinned candidate cannot diverge or go bogus.
+// ---------------------------------------------------------------------------
+
+test("ARH1-surface dirty twin: a stale or key-stripped snapshot is rejected", () => {
+  const stale = cloneProducts();
+  hotspot(stale, SCHEDULER).snapshot.pubFn = 54; // the pre-merge count
+  let result = validate(stale, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-surface" &&
+        e.code === "snapshot-count-drift" &&
+        e.detail.includes("pubFn"),
+    ),
+    JSON.stringify(result.errors),
+  );
+
+  const stripped = cloneProducts();
+  delete hotspot(stripped, SCHEDULER).snapshot.pubFnTestHooks;
+  result = validate(stripped, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-surface" &&
+        e.code === "snapshot-count-drift" &&
+        e.detail.includes("pubFnTestHooks"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-ratification dirty twin: diverging or malformed candidate bases are rejected", () => {
+  const diverged = cloneProducts();
+  const pinned = clean["dependency-contracts"].candidate;
+  diverged["cutover-register"].candidate = pinned.slice(0, 39) + (pinned[39] === "0" ? "1" : "0");
+  let result = validate(diverged, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH1-ratification" && e.code === "candidate-basis-drift",
+    ),
+    JSON.stringify(result.errors),
+  );
+
+  const malformed = cloneProducts();
+  malformed["dependency-contracts"].candidate = "deadbeef";
+  result = validate(malformed, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-ratification" &&
+        e.code === "candidate-basis-drift" &&
+        e.detail.includes("not a 40-hex git commit"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH1-ratification: --provenance proves the pinned candidate is a real ancestor commit", () => {
+  const bogus = validateProvenance("0".repeat(40));
+  assert.equal(bogus.ok, false, JSON.stringify(bogus));
+  assert.match(bogus.reason, /not a commit of this repository/);
+  const malformed = validateProvenance("not-a-hash");
+  assert.equal(malformed.ok, false);
+
+  // A checkout that carries the commit (any non-shallow clone, and the CI
+  // architecture-health lane with full history) must prove the pinned basis
+  // and exit 0 behind --provenance; a shallow checkout without the object
+  // cannot, so only the plain canonical command is asserted there.
+  const verifyPath = fileURLToPath(new URL("./verify.mjs", import.meta.url));
+  const pinned = clean["dependency-contracts"].candidate;
+  const real = validateProvenance(pinned);
+  const carriesCommit = real.ok || !/not a commit/.test(real.reason);
+  if (carriesCommit) {
+    assert.equal(real.ok, true, real.reason);
+  }
+  const args = carriesCommit ? [verifyPath, "--provenance"] : [verifyPath];
+  const stdout = execFileSync(process.execPath, args, { encoding: "utf8" });
+  assert.match(stdout, /ARH1 verify: PASS/);
 });

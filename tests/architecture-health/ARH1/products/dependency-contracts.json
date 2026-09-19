@@ -2,7 +2,7 @@
   "schema": "ARH1DependencyContracts",
   "version": 2,
   "contractNode": "ARH1",
-  "candidate": "00b6f2ae00701e2d611e82446f4d74809624509f",
+  "candidate": "260be884014110ffd3b72850509e765c8752b011",
   "predecessorProducts": {
     "responsibilityMap": "../ARH0/products/responsibility-map.json",
     "debtRegister": "../ARH0/products/debt-register.json"
@@ -28,7 +28,7 @@
         "id": "ARH2",
         "kind": "node"
       },
-      "obligation": "characterize current surfaces before any narrowing lands and re-derive the ARH0 inventory populations and this node's importer/consumer populations on the then-current candidate (the recorded snapshot counts and populations are ratification evidence, not live invariants); record any drift in host/profile basis alongside the re-derived counts."
+      "obligation": "characterize current surfaces before any narrowing lands and re-derive the ARH0 inventory populations and this node's importer/consumer populations on the then-current candidate (the recorded snapshot counts and populations are live invariants the verifier derives from the measured tree on every run, so a re-derivation that changes the tree must refresh them in the same change); record any drift in host/profile basis alongside the re-derived counts."
     },
     {
       "producer": {
@@ -146,11 +146,13 @@
         }
       ],
       "snapshot": {
-        "pubFn": 54,
+        "pubFn": 55,
         "pubFnTestHooks": 15,
         "pubCrateFn": 12,
         "pubType": 9,
-        "pubStructField": 3
+        "pubCrateMod": 0,
+        "inlinePubMod": 0,
+        "pubStructField": 20
       },
       "authority": [
         {
@@ -173,16 +175,23 @@
         "verter": ["verter_audit", "verter_language"],
         "external": ["crossbeam_channel", "dashmap", "hotpath", "parking_lot", "web_time"],
         "crateInternal": [
+          "audit_publish",
+          "cache_id",
           "caller_kind",
           "cancellation",
           "dag",
+          "dedupe_hook",
           "driver",
           "edges",
           "executor",
           "job",
           "node",
           "overlay",
+          "owner_command",
+          "pool",
+          "request_context",
           "source_loader",
+          "source_root",
           "stage"
         ],
         "mustNotImport": [
@@ -243,7 +252,7 @@
           "crates/verter_session/tests/cases/runtime_constructor_matrix.rs"
         ],
         "ownerCratePopulation": "the importers array is the complete cross-crate population (48 files: 26 verter_session src files, 17 verter_session integration tests, three verter_lsp audit test cases, verter_dx_baseline materialize and verter_napi lib), enforced by the verifier in both directions on comment-stripped syntax; crates/verter_lsp/src/external_ts_sync.rs references verter_scheduler::cancellation, not the scheduler module, and is deliberately absent; population re-derivation on a moving candidate is ARH2's recorded obligation",
-        "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and BOTH use statements and inline crate paths in code position (verter_audit::attribute! macros, crossbeam_channel::Sender parameter types, the feature-gated hotpath::wrap alias) are measured, so the declared sets equal the production direction both ways; verter_audit has no production use-statement in this file (its use is test configuration) but its inline attribute! paths are production references; cache_id, request_context and pool remain test-only crate-internal roots"
+        "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and BOTH use statements and inline crate paths in code position (verter_audit::attribute! macros, crossbeam_channel::Sender parameter types, the feature-gated hotpath::wrap alias, and crate::module::Item paths like crate::cache_id::SchedulerCacheId fields, crate::pool::SchedulerCpuPool constructor parameters, crate::request_context::RequestContext, crate::audit_publish, crate::dedupe_hook, crate::owner_command and crate::source_root references) are measured, so the declared sets equal the production direction both ways; verter_audit has no production use-statement in this file (its use is test configuration) but its inline attribute! paths are production references; cache_id, request_context and pool are production crate-internal roots measured through inline paths (their use-statement imports are test configuration)"
       },
       "constructorCapabilities": [
         {
@@ -678,9 +687,12 @@
       ],
       "snapshot": {
         "pubFn": 0,
+        "pubFnTestHooks": 0,
         "pubCrateFn": 14,
         "pubType": 0,
-        "pubCrateMod": 1
+        "pubCrateMod": 1,
+        "inlinePubMod": 0,
+        "pubStructField": 0
       },
       "authority": [
         {
@@ -704,10 +716,18 @@
         ],
         "external": ["rustc_hash", "smallvec", "tracing"],
         "crateInternal": [
+          "build_toolchain_fingerprint",
+          "cache_runtime",
+          "file_artifact_store",
           "flow_completion_inventory",
+          "flow_return_audit",
+          "flow_slice_content",
+          "project_semantic_dispatch",
+          "project_type_store",
+          "request_context",
           "resolver_core",
           "semantic_query",
-          "flow_slice_content"
+          "semantic_query_memo"
         ],
         "mustNotImport": [
           "verter_compiler",
@@ -719,7 +739,7 @@
         ],
         "importers": [],
         "ownerCratePopulation": "12 verter_session files plus the dispatch parent reference flow_return:: at ratification; the module is pub(crate) inside project_semantic_dispatch, so there is no cross-crate importer (the enforced cross-crate population is empty)",
-        "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and both use statements and inline crate paths (verter_audit::/verter_identity::/verter_span:: qualified items, tracing::/smallvec::/rustc_hash:: references) are measured, so the declared sets equal the production direction both ways"
+        "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and both use statements and inline crate paths (verter_audit::/verter_identity::/verter_span:: qualified items, tracing::/smallvec::/rustc_hash:: references, and crate::module::Item paths like crate::flow_slice_content::, crate::semantic_query::, crate::cache_runtime::, crate::semantic_query_memo:: and crate::request_context:: references) are measured, so the declared sets equal the production direction both ways"
       },
       "constructorCapabilities": [],
       "constructorRationale": "no public or crate constructors: pub(crate) functions on ProjectSemanticDispatch/impl blocks only; the fault-injection seam (flow_admission_fault_injection) is a pub(crate) module for host audit wiring",
@@ -838,8 +858,12 @@
       ],
       "snapshot": {
         "pubFn": 0,
+        "pubFnTestHooks": 0,
         "pubCrateFn": 6,
-        "pubType": 0
+        "pubType": 0,
+        "pubCrateMod": 0,
+        "inlinePubMod": 0,
+        "pubStructField": 0
       },
       "authority": [
         {
@@ -862,10 +886,22 @@
         ],
         "external": ["indexmap", "rustc_hash", "tracing"],
         "crateInternal": [
+          "cache_runtime",
+          "component_meta_audit",
+          "fact_emission",
+          "fact_signature_helpers",
           "file_artifact_store",
+          "host_manage",
+          "intrinsic_registry",
+          "loop5_instrumentation",
+          "meta_resolve",
           "project_semantic_dispatch",
+          "project_type_store",
+          "request_context",
           "resolver_core",
-          "semantic_query"
+          "semantic_query",
+          "semantic_query_memo",
+          "session_view"
         ],
         "mustNotImport": [
           "verter_compiler",
@@ -877,7 +913,7 @@
         ],
         "importers": [],
         "ownerCratePopulation": "referenced only inside project_semantic_dispatch (build_* impl block on ProjectSemanticDispatch); no cross-crate importer (the enforced cross-crate population is empty)",
-        "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and both use statements and inline crate paths (verter_span:: qualified items, tracing::error!/indexmap::IndexMap/rustc_hash:: references) are measured, so the declared sets equal the production direction both ways; types and VerterHost (carrier_type_param_descent_tests) are imported only by the file's test configuration at ratification and are therefore not declared here"
+        "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and both use statements and inline crate paths (verter_span:: qualified items, tracing::error!/indexmap::IndexMap/rustc_hash:: references, and crate::module::Item paths like crate::semantic_query::, crate::resolver_core::, crate::cache_runtime:: and crate::request_context:: references) are measured, so the declared sets equal the production direction both ways; types and VerterHost (carrier_type_param_descent_tests) are imported only by the file's test configuration at ratification and are therefore not declared here"
       },
       "constructorCapabilities": [],
       "constructorRationale": "no constructors: dispatch-layer builders kept on ProjectSemanticDispatch via impl blocks so inner helpers stay pub(super) without widening visibility",
@@ -964,9 +1000,12 @@
       ],
       "snapshot": {
         "pubFn": 170,
+        "pubFnTestHooks": 0,
         "pubCrateFn": 41,
-        "pubType": 246,
-        "inlinePubMod": 15
+        "pubType": 198,
+        "pubCrateMod": 2,
+        "inlinePubMod": 15,
+        "pubStructField": 287
       },
       "authority": [
         {
@@ -990,7 +1029,13 @@
           "verter_type_expr"
         ],
         "external": ["serde", "smallvec", "static_assertions", "xxhash_rust"],
-        "crateInternal": ["locator_identity", "resolver_core"],
+        "crateInternal": [
+          "locator_identity",
+          "project_semantic_dispatch",
+          "resolver_core",
+          "semantic_query",
+          "semantic_query_memo"
+        ],
         "mustNotImport": [
           "verter_compiler",
           "verter_parser",
@@ -1089,9 +1134,12 @@
         "ownerCratePopulation": "78 verter_session src files use crate-internal semantic_query paths at ratification; the importers array is the complete cross-crate population (85 files: ffi/napi/wasm sources through direct and aliased verter_session paths, plus verter_session benches and integration tests, which compile as separate crates) and the verifier enforces it exactly in both directions; population re-derivation is ARH2's recorded obligation",
         "internalNote": [
           "locator_identity",
+          "project_semantic_dispatch",
           "resolver_core",
-          "semantic_query (inline submodules: admit, carrier, compat_spelling, composite, deferred_callable, demand, display, flow_return_result, index_key, infer_binder_names, intersection_input, node_tag, object_spread_projection, operand, outcome, query_key_spec, semantic_context, stable_key)"
-        ]
+          "semantic_query_memo",
+          "semantic_query (inline crate::semantic_query:: self-paths and inline submodules: admit, carrier, compat_spelling, composite, deferred_callable, demand, display, flow_return_result, index_key, infer_binder_names, intersection_input, node_tag, object_spread_projection, operand, outcome, query_key_spec, semantic_context, stable_key)"
+        ],
+        "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and both use statements and inline crate paths (serde/xxhash_rust qualified items and crate::module::Item paths like crate::locator_identity::, crate::resolver_core::, crate::semantic_query_memo:: and crate::project_semantic_dispatch:: references) are measured, so the declared sets equal the production direction both ways"
       },
       "constructorCapabilities": [],
       "constructorRationale": "the memo engine is constructed and owned by the host session (semantic_query_memo SemanticGraphStore binding); semantic_query.rs itself declares value/type constructors for its envelope types, not state-holding services",
@@ -1294,9 +1342,12 @@
       ],
       "snapshot": {
         "pubFn": 13,
+        "pubFnTestHooks": 0,
         "pubCrateFn": 11,
         "pubType": 31,
-        "pubCrateMod": 1
+        "pubCrateMod": 1,
+        "inlinePubMod": 0,
+        "pubStructField": 44
       },
       "authority": [
         {
@@ -1325,7 +1376,7 @@
           "oxc_syntax",
           "rustc_hash"
         ],
-        "crateInternal": ["flow_completion_inventory"],
+        "crateInternal": ["decl_lowering", "flow_completion_inventory", "semantic_query"],
         "mustNotImport": [
           "verter_compiler",
           "verter_parser",
@@ -1335,7 +1386,8 @@
           "verter_wasm"
         ],
         "importers": [],
-        "ownerCratePopulation": "6 verter_session files reference flow_slice_content:: at ratification; the module is pub(crate), so there is no cross-crate importer"
+        "ownerCratePopulation": "6 verter_session files reference flow_slice_content:: at ratification; the module is pub(crate), so there is no cross-crate importer",
+        "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and both use statements and inline crate paths (oxc-qualified items and crate::module::Item paths like crate::semantic_query:: and crate::decl_lowering:: references in lowering helpers) are measured, so the declared sets equal the production direction both ways"
       },
       "constructorCapabilities": [],
       "constructorRationale": "value constructors on the owned slice IR types only; the module holds no service state, so it needs no capability-bearing constructor",
@@ -1375,6 +1427,12 @@
               "mode": "readonly"
             }
           ]
+        },
+        {
+          "module": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
+          "responsibility": "slice publication admission",
+          "stateOwnership": [],
+          "note": "the demand-side admission gate over this module's lowered slices: plans, hashes and budget-gates the slice where the budget outcome gates admission; owns no content-side state"
         }
       ],
       "heirs": {
@@ -1401,5 +1459,5 @@
       }
     }
   ],
-  "ac4Rationale": "AC4 surfaces a contract-only node cannot discharge with artifacts are specified for its producers instead: the VIM/DX capability mapping and the exact host/profile evidence are DOC2/ARH2 obligations above; migration notes are each narrowing row's exact consumersAffected inventory plus the cutover dispositions; permissions are not applicable (no capability, filesystem, network or editor-permission surface is created or widened at this node, so there is no permission note to publish); uncertainty is recorded as population and snapshot counts pinned to the ratification candidate with re-derivation owed by ARH2 — never presented as live invariants, and no partial or conditional runtime result is claimed anywhere in these bytes."
+  "ac4Rationale": "AC4 surfaces a contract-only node cannot discharge with artifacts are specified for its producers instead: the VIM/DX capability mapping and the exact host/profile evidence are DOC2/ARH2 obligations above; migration notes are each narrowing row's exact consumersAffected inventory plus the cutover dispositions; permissions are not applicable (no capability, filesystem, network or editor-permission surface is created or widened at this node, so there is no permission note to publish); uncertainty is recorded as population and snapshot counts enforced by the verifier against the live tree on every run, with the pinned candidate naming the last ratification basis (the CI architecture-health lane runs verify.mjs --provenance, proving the pinned commit is a real ancestor of the checked-out head) — never a fabricated source-revision claim, and no partial or conditional runtime result is claimed anywhere in these bytes."
 }
