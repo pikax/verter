@@ -1,0 +1,48 @@
+{
+  "schema": "CoupledInferenceEvidence",
+  "version": 1,
+  "product": "CoupledInferenceEvidence",
+  "node": "STP3",
+  "kind": "proof",
+  "vue": { "package": "vue", "version": "3.6.0-rc.5", "source": "package.json" },
+  "constructorSpelling": "declare class Comp<T = unknown, U = unknown> { constructor(props?: { rows?: readonly T[]; project?: (row: T) => U; modelValue?: U; onChange?: (value: U) => void }) }",
+  "channels": [
+    { "id": "rows", "role": "infer-T", "participation": "coupled" },
+    { "id": "project", "role": "infer-U-from-T", "participation": "coupled" },
+    { "id": "onChange", "role": "consume-U", "participation": "contextual-consumer" },
+    { "id": "modelValue", "role": "read-write-U", "participation": "coupled" },
+    { "id": "update:modelValue", "role": "consume-U", "participation": "contextual-consumer" },
+    { "id": "slot-default", "role": "project-T-and-U", "participation": "coupled" },
+    { "id": "expose-value", "role": "project-U", "participation": "coupled" }
+  ],
+  "binders": [
+    { "id": "default", "spelling": "DefaultComp<T = string, U = T>", "case": "STP3-coupled" },
+    { "id": "const", "spelling": "ConstComp<const T, U = T>", "case": "STP3-coupled" },
+    { "id": "variadic", "spelling": "VariadicComp<T extends unknown[], U>", "case": "STP3-coupled" },
+    { "id": "dependent", "spelling": "DepComp<T, K extends keyof T>", "case": "STP3-coupled" },
+    { "id": "higher-rank-slot", "spelling": "each: <R>(fn: (row: T) => R) => R", "case": "STP3-coupled" },
+    { "id": "generic-parent", "spelling": "Parent<P>(props: { value: P; child: ConstructorParameters<typeof Comp<P, string>>[0] })", "case": "STP3-coupled" }
+  ],
+  "cases": [
+    { "id": "STP3-coupled", "disposition": "accept", "observables": ["T-from-rows", "U=string-from-project", "emit", "slot", "model", "expose", "callback-only", "binders"] },
+    { "id": "STP3-wrong-channel", "disposition": "reject", "reason": "toFixed-or-number-model-under-U-string", "observables": ["onChange.toFixed", "modelValue=42", "broad-any"] },
+    { "id": "STP3-inference-only-channel", "disposition": "reject", "reason": "callback-only-T-lost-by-post-check-deferral", "observables": ["splitUse()(project)", "kept callback-only T"] },
+    { "id": "STP3-order-independent", "disposition": "reject", "reason": "permutation-changes-contextual-types", "observables": ["whole-signature permA/permB", "sequential startProject"] },
+    { "id": "STP3-ordered-merge", "disposition": "reject", "reason": "listeners-after-spread-last-write-wins", "observables": ["spread-derived accumulate H1&H2", "object-spread LWW H2"] },
+    { "id": "STP3-fresh-uses", "disposition": "reject", "reason": "sibling-uses-share-specialization", "observables": ["independent siblingA/siblingB", "SharedSpecialization"] }
+  ],
+  "forbidden": [
+    "split-inference-plus-post-specialization-for-contributing-channels",
+    "listener-last-write-wins",
+    "shared-specialization-across-uses",
+    "broad-any-constructor",
+    "vacuous-never-success"
+  ],
+  "productionOwner": "STP18",
+  "abiOwner": "STP8",
+  "ac3UntouchedOwners": ["B4R0", "LSO0", "CCA1J", "TCM0R"],
+  "ac3Rationale": "Proof fixtures and harness observations only. Incremental=fresh and stale/cancelled publication for production projection remain with B4R0 lineage, LSO snapshot publication, CCA1J projection route, and TCM0R observation identity.",
+  "ac4UntouchedOwners": ["CCA1J", "CCA1H"],
+  "ac4Rationale": "STP3 does not change production projection hot paths. Bounded parse/check/emit stays with the existing ProjectionBackend route.",
+  "timingClaim": "none"
+}

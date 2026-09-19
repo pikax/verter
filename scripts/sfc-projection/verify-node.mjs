@@ -43,6 +43,14 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP2-constructor-inferred",
     "STP2-explicit-input-mismatch",
   ]),
+  STP3: Object.freeze([
+    "STP3-coupled",
+    "STP3-wrong-channel",
+    "STP3-inference-only-channel",
+    "STP3-order-independent",
+    "STP3-ordered-merge",
+    "STP3-fresh-uses",
+  ]),
   STP5: Object.freeze([
     "STP5-encoding",
     "STP5-guard-duplicate",
@@ -59,7 +67,12 @@ export function canonicalMandatoryCases(nodeId) {
   return NODE_MANDATORY_CASES[nodeId] || [];
 }
 
+export const STP3_MANDATORY_CASES = NODE_MANDATORY_CASES.STP3;
 export const STP5_MANDATORY_CASES = NODE_MANDATORY_CASES.STP5;
+
+function usesCaseFileRunner(nodeId) {
+  return nodeId === "STP2" || nodeId === "STP3";
+}
 
 export function mandatoryCasesFor(nodeManifest) {
   const nodeId = nodeManifest?.node;
@@ -398,6 +411,98 @@ export function assertFooSyntaxControl(evidence) {
     return [err("STP2-instance-explicit", "removed-fixture", "missing Foo syntax control")];
   }
   return [];
+}
+
+const STP3_BINDERS = Object.freeze([
+  "default",
+  "const",
+  "variadic",
+  "dependent",
+  "higher-rank-slot",
+  "generic-parent",
+]);
+
+const STP3_INFERENCE_CHANNELS = Object.freeze(["rows", "project", "modelValue"]);
+
+export function assertStp3Products(repoRoot, nodeManifest) {
+  const errors = [];
+  const declared = new Set(nodeManifest?.products || []);
+  for (const product of ["CoupledInferenceEvidence", "InferenceWitnessSelection"]) {
+    if (!declared.has(product)) {
+      errors.push(err("STP3-coupled", "removed-fixture", `missing product ${product}`));
+    }
+  }
+  const evidenceRel = "tests/sfc-projection/STP3/products/coupled-inference-evidence.json";
+  const selectionRel = "tests/sfc-projection/STP3/products/inference-witness-selection.json";
+  const evidenceAbs = repoPath(repoRoot, evidenceRel);
+  const selectionAbs = repoPath(repoRoot, selectionRel);
+  if (!fs.existsSync(evidenceAbs)) {
+    errors.push(err("STP3-coupled", "removed-fixture", `missing ${evidenceRel}`));
+    return errors;
+  }
+  if (!fs.existsSync(selectionAbs)) {
+    errors.push(err("STP3-coupled", "removed-fixture", `missing ${selectionRel}`));
+    return errors;
+  }
+  const evidence = readJson(evidenceAbs);
+  const selection = readJson(selectionAbs);
+  if (evidence.schema !== "CoupledInferenceEvidence") {
+    errors.push(err("STP3-coupled", "removed-fixture", "CoupledInferenceEvidence schema"));
+  }
+  if (selection.schema !== "InferenceWitnessSelection") {
+    errors.push(err("STP3-coupled", "removed-fixture", "InferenceWitnessSelection schema"));
+  }
+  if (selection.selectedWitness !== "whole-signature-contextual-construction") {
+    errors.push(
+      err(
+        "STP3-coupled",
+        "removed-fixture",
+        "selected witness is not whole-signature construction",
+      ),
+    );
+  }
+  if (selection.rejectedWitness !== "split-inference-plus-post-specialization") {
+    errors.push(
+      err("STP3-inference-only-channel", "removed-fixture", "rejected split witness missing"),
+    );
+  }
+  const binders = new Set((evidence.binders || []).map((row) => row.id));
+  for (const binder of STP3_BINDERS) {
+    if (!binders.has(binder)) {
+      errors.push(err("STP3-coupled", "removed-fixture", `missing binder ${binder}`));
+    }
+  }
+  const channels = new Set((evidence.channels || []).map((row) => row.id));
+  for (const channel of STP3_INFERENCE_CHANNELS) {
+    if (!channels.has(channel)) {
+      errors.push(err("STP3-coupled", "removed-fixture", `missing inference channel ${channel}`));
+    }
+  }
+  const evidenceIds = new Set((evidence.cases || []).map((row) => row.id));
+  for (const id of NODE_MANDATORY_CASES.STP3) {
+    if (!evidenceIds.has(id)) {
+      errors.push(err("STP3-coupled", "removed-fixture", `coupled evidence missing ${id}`));
+    }
+  }
+  if (!String(evidence.constructorSpelling || "").includes("declare class Comp")) {
+    errors.push(err("STP3-coupled", "removed-fixture", "missing coupled constructor spelling"));
+  }
+  if (!String(evidence.ac3Rationale || "").trim()) {
+    errors.push(err("STP3-coupled", "removed-fixture", "missing AC3 untouched-owner rationale"));
+  }
+  if (!String(evidence.ac4Rationale || "").trim()) {
+    errors.push(err("STP3-coupled", "removed-fixture", "missing AC4 untouched-owner rationale"));
+  }
+  if (selection.orderedOperations?.forbiddenListenerPolicy !== "last-write-wins") {
+    errors.push(
+      err(
+        "STP3-ordered-merge",
+        "removed-fixture",
+        "ordered operations must forbid last-write-wins",
+      ),
+    );
+  }
+  return errors;
 }
 
 function pinExe(pin, pkgDir) {
@@ -1084,6 +1189,33 @@ function evaluateStp2Run(run, probes, cases, engineId, { maxChecksPerFile = 1 } 
           );
         }
       }
+      if (Array.isArray(row.files)) {
+        for (const extraRel of row.files) {
+          measured.push(extraRel);
+          const extra = fileResult(run, extraRel);
+          const extraCode = extraExpectedCode(row, extraRel);
+          if (!Number.isInteger(extraCode)) {
+            errors.push(
+              err(
+                caseId,
+                "missing-negative",
+                `${engineId} ${extraRel} has no expectedCode/fileExpectedCodes entry`,
+              ),
+            );
+            continue;
+          }
+          const extraAnchored = (extra?.diags || []).filter((diag) => diag.code === extraCode);
+          if (extraAnchored.length === 0) {
+            errors.push(
+              err(
+                caseId,
+                "missing-negative",
+                `${engineId} ${extraRel} lacked TS${extraCode}; got ${JSON.stringify(extra?.diags || [])}`,
+              ),
+            );
+          }
+        }
+      }
     }
   }
   errors.push(...assertCheckCounts(run.checkCounts, engineId, measured, maxChecksPerFile));
@@ -1235,6 +1367,9 @@ export async function verifyNode(options) {
   if (nodeId === "STP2") {
     errors.push(...assertStp2Products(repoRoot, nodeLoad.manifest));
   }
+  if (nodeId === "STP3") {
+    errors.push(...assertStp3Products(repoRoot, nodeLoad.manifest));
+  }
 
   const matrix =
     options.engineMatrix || readJson(repoPath(repoRoot, rootLoad.manifest.engineMatrix));
@@ -1280,9 +1415,9 @@ export async function verifyNode(options) {
     }
   } else if (shouldRun) {
     const maxChecksPerFile = methodology?.boundedWork?.maxChecksPerFilePerEngine ?? 1;
-    const stp2 = nodeId === "STP2";
+    const caseFiles = usesCaseFileRunner(nodeId);
     for (const engine of resolvedEngines) {
-      const run = stp2
+      const run = caseFiles
         ? engine.kind === "javascript"
           ? runJsStp2(engine, probes, repoRoot, cases)
           : await runNativeStp2(engine, probes, repoRoot, cases)
@@ -1290,7 +1425,7 @@ export async function verifyNode(options) {
           ? runJsEngine(engine, probes, repoRoot)
           : await runNativeEngine(engine, probes, repoRoot);
       harnessRuns.push(run);
-      if (stp2) {
+      if (caseFiles) {
         errors.push(...evaluateStp2Run(run, probes, cases, engine.id, { maxChecksPerFile }));
       } else {
         errors.push(...evaluateHarnessRun(run, probes, engine.id, { maxChecksPerFile }));
@@ -1465,6 +1600,12 @@ function summarize({
     "tests/sfc-projection/STP2/probes/reject-not-callable.ts",
     "tests/sfc-projection/STP2/probes/reject-constructor-escape-clean.ts",
     "tests/sfc-projection/STP2/probes/reject-explicit-input-mismatch.ts",
+    "tests/sfc-projection/STP3/probes/accept-coupled.ts",
+    "tests/sfc-projection/STP3/probes/reject-wrong-channel.ts",
+    "tests/sfc-projection/STP3/probes/reject-inference-only-split.ts",
+    "tests/sfc-projection/STP3/probes/reject-order-independent.ts",
+    "tests/sfc-projection/STP3/probes/reject-ordered-merge.ts",
+    "tests/sfc-projection/STP3/probes/reject-fresh-uses.ts",
   ].filter(Boolean);
   for (const rel of probeFiles) {
     const abs = repoPath(repoRoot, rel);
@@ -1513,10 +1654,10 @@ export function selectedCaseIds(result) {
   return [...(result.selectedCaseIds || [])];
 }
 
-const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP5 mapper)
+const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP5 mapper)
 
 USAGE
-  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP5 [--engine all|ts-js|ts-native] [--require-all] [--json]
+  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP5 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
 vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted
