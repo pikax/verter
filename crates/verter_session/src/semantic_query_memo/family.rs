@@ -274,8 +274,10 @@ pub(super) enum FamilyKey {
     NormalizeUnion {
         members: Arc<[SemanticNodeId]>,
     },
-    NormalizeIntersection {
-        members: Arc<[SemanticNodeId]>,
+    ReduceIntersection {
+        input: crate::semantic_query::IntersectionInputRef,
+        purpose: crate::semantic_query::IntersectionPurpose,
+        context: crate::semantic_query::SemanticContextId,
     },
     /// Selector-aware object-spread projection family. The payload is boxed to
     /// keep the hot `FamilyKey` enum below its size rail. Only the established
@@ -730,7 +732,7 @@ impl FamilyKey {
             FamilyKey::Conditional { .. } => "Conditional",
             FamilyKey::TypeOf { .. } => "TypeOf",
             FamilyKey::NormalizeUnion { .. } => "NormalizeUnion",
-            FamilyKey::NormalizeIntersection { .. } => "NormalizeIntersection",
+            FamilyKey::ReduceIntersection { .. } => "ReduceIntersection",
             FamilyKey::ProjectObjectSpread { .. } => "ProjectObjectSpread",
             FamilyKey::ProjectPath { .. } => "ProjectPath",
             FamilyKey::ResolveMacroPayload { .. } => "ResolveMacroPayload",
@@ -793,7 +795,7 @@ impl FamilyKey {
             FamilyKey::IndexedAccess { .. } => 4,
             FamilyKey::KeyOf { .. } => 4,
             FamilyKey::NormalizeUnion { .. } => 4,
-            FamilyKey::NormalizeIntersection { .. } => 4,
+            FamilyKey::ReduceIntersection { .. } => 4,
             FamilyKey::ProjectPath { .. } => 4,
             FamilyKey::ResolveMacroPayload { .. } => 4,
             FamilyKey::ResolveClassSurface { .. } => 4,
@@ -1739,9 +1741,15 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             },
             ModeSlot::Single,
         ),
-        SemanticQueryKey::NormalizeIntersection { members } => (
-            FamilyKey::NormalizeIntersection {
-                members: Arc::clone(members),
+        SemanticQueryKey::ReduceIntersection {
+            input,
+            purpose,
+            context,
+        } => (
+            FamilyKey::ReduceIntersection {
+                input: *input,
+                purpose: *purpose,
+                context: *context,
             },
             ModeSlot::Single,
         ),

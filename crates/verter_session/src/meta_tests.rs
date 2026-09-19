@@ -29595,13 +29595,13 @@ defineProps<{ aliased: PublishedAlias; lit: 'x' | 'y' }>()
         TypeExpr::Union(members) => {
             assert_eq!(members.len(), 2, "both literal arms render");
             assert!(
-                matches!(&members[0], TypeExpr::Literal(LiteralValue::String(v)) if v == "x"),
-                "ordered union arm 0 is 'x'; got {:?}",
+                matches!(&members[0], TypeExpr::Literal(LiteralValue::String(v)) if v == "y"),
+                "ordered union arm 0 is 'y' in VerterStableV1 order; got {:?}",
                 members[0]
             );
             assert!(
-                matches!(&members[1], TypeExpr::Literal(LiteralValue::String(v)) if v == "y"),
-                "ordered union arm 1 is 'y'"
+                matches!(&members[1], TypeExpr::Literal(LiteralValue::String(v)) if v == "x"),
+                "ordered union arm 1 is 'x'"
             );
         }
         other => panic!("a closed literal union renders directly; got {other:?}"),

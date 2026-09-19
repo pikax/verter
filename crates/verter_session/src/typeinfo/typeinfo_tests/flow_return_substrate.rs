@@ -193,8 +193,8 @@ fn flow_surface_switch_return_resolves_the_arm_join() {
     assert_eq!(
         members.as_ref(),
         &[
-            TypeExpr::Literal(LiteralValue::String("a".to_string())),
             TypeExpr::Literal(LiteralValue::String("b".to_string())),
+            TypeExpr::Literal(LiteralValue::String("a".to_string())),
         ]
     );
     assert_query_mode(&record, ProjectionModeTag::Expanded);
@@ -327,8 +327,8 @@ fn flow_return_substrate_serves_switch_arm_join() {
     assert_eq!(
         members.as_ref(),
         &[
-            TypeExpr::Literal(LiteralValue::String("a".to_string())),
             TypeExpr::Literal(LiteralValue::String("b".to_string())),
+            TypeExpr::Literal(LiteralValue::String("a".to_string())),
         ]
     );
     assert_flow_return_dispatched(&record, "SubSwitchReturn");

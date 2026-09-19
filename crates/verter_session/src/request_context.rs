@@ -821,7 +821,7 @@ pub struct RequestContext {
     /// helper, so the mask records EVERY `SemanticQueryKey` variant dispatched
     /// anywhere during the audited request — including nested reducer
     /// sub-dispatches that enter only via `execute_read` (e.g.
-    /// `NormalizeIntersection`, `ProjectPath`), not just the top-level
+    /// `ReduceIntersection`, `ProjectPath`), not just the top-level
     /// `execute`-entered subset. (This is distinct from the focused cold/warm
     /// `semantic_query_*` counters, which attribute cost for only the hot-path
     /// subset.) Surfaced verbatim on

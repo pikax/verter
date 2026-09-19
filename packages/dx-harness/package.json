@@ -21,6 +21,11 @@
       "import": "./dist/startup-gate.js",
       "default": "./dist/startup-gate.js"
     },
+    "./protocol-replay": {
+      "types": "./dist/protocol-replay/index.d.ts",
+      "import": "./dist/protocol-replay/index.js",
+      "default": "./dist/protocol-replay/index.js"
+    },
     "./jetbrains": {
       "types": "./dist/jetbrains/index.d.ts",
       "import": "./dist/jetbrains/index.js",

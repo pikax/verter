@@ -2979,7 +2979,7 @@ fn canonical_algebra_collapses_only_proven_facts() {
     assert!(!union.evidence.incomplete);
 
     // PROVEN disjoint scalar intersection collapses to `never`.
-    let disjoint = canonical_algebra::canonical_intersection(&graph, &[string, number]);
+    let disjoint = canonical_algebra::intern_ordered_intersection(&graph, &[string, number]);
     assert!(
         matches!(
             graph.node_data(disjoint.node).as_deref(),
@@ -2991,7 +2991,7 @@ fn canonical_algebra_collapses_only_proven_facts() {
     // UNDECIDED disjointness (two object surfaces) keeps the carrier.
     let obj_x = simple_object(&graph, &[("x", string)]);
     let obj_y = simple_object(&graph, &[("y", number)]);
-    let undecided = canonical_algebra::canonical_intersection(&graph, &[obj_x, obj_y]);
+    let undecided = canonical_algebra::intern_ordered_intersection(&graph, &[obj_x, obj_y]);
     assert!(
         matches!(
             graph.node_data(undecided.node).as_deref(),
@@ -3094,7 +3094,7 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
         !union.evidence.incomplete,
         "a span-only collapse is a completed comparison, never Incomplete"
     );
-    let intersection = canonical_algebra::canonical_intersection(&graph, &[at_62, at_94]);
+    let intersection = canonical_algebra::intern_ordered_intersection(&graph, &[at_62, at_94]);
     assert_eq!(
         intersection.node, at_62,
         "the intersection twin collapses under T & T = T"
@@ -3390,10 +3390,11 @@ fn negative_zero_and_zero_are_one_numeric_literal_type() {
     );
 
     // `0 & -0` is the inhabited literal `0`, never `never`.
-    let intersection = crate::project_semantic_dispatch::canonical_algebra::canonical_intersection(
-        &graph,
-        &[zero, neg_zero],
-    );
+    let intersection =
+        crate::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection(
+            &graph,
+            &[zero, neg_zero],
+        );
     assert!(
         matches!(
             graph.node_data(intersection.node).as_deref(),
@@ -3539,10 +3540,11 @@ fn singleton_extreme_normalization_returns_input_node_with_scope() {
         SemanticNodeData::Primitive(PrimitiveKind::Unknown),
         file_scope("/w/unknown_owner.ts"),
     );
-    let intersection = crate::project_semantic_dispatch::canonical_algebra::canonical_intersection(
-        &graph,
-        &[scoped_unknown],
-    );
+    let intersection =
+        crate::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection(
+            &graph,
+            &[scoped_unknown],
+        );
     assert_eq!(
         intersection.node, scoped_unknown,
         "singleton intersection of a file-scoped `unknown` returns the input node"
@@ -3551,7 +3553,7 @@ fn singleton_extreme_normalization_returns_input_node_with_scope() {
 
 /// Every multi-member normalization records its contributors on the
 /// `Normalize` origin edge — lattice-extreme and proven-disjoint folds
-/// included. `NormalizeIntersection([string, number])` folds to the shared
+/// included. `ReduceIntersection([string, number])` folds to the shared
 /// `never`, and provenance recovery must still find `string` and `number`.
 #[test]
 fn extreme_and_disjoint_folds_record_contributor_origin_edge() {
@@ -3562,7 +3564,11 @@ fn extreme_and_disjoint_folds_record_contributor_origin_edge() {
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
     let members: Arc<[SemanticNodeId]> = Arc::from(vec![string, number].into_boxed_slice());
-    let output = dispatch.build_normalize_intersection(&members);
+    let output = dispatch.build_reduce_intersection(
+        crate::semantic_query::IntersectionInputRef::from_operands(&members),
+        crate::semantic_query::IntersectionPurpose::CheckerReduction,
+        crate::semantic_query::SemanticContextId::production(),
+    );
     let QueryResult::Value(node) = output.result else {
         panic!("normalization must produce a value");
     };
@@ -8139,7 +8145,7 @@ fn mutual_alias_cycle_x_y_x_returns_opaque_with_chain_of_length_2() {
 // C5 — Normalize + KeyOf origin edges ( C5)
 // ──────────────────────────────────────────────────────────────────
 
-/// `NormalizeUnion` / `NormalizeIntersection` emit one `Normalize`
+/// `NormalizeUnion` / `ReduceIntersection` emit one `Normalize`
 /// origin edge from the result back to each pre-canonical source
 /// member. Walkers can recover the original input set even after
 /// dedup / sorting.
@@ -8180,9 +8186,9 @@ fn normalize_records_sources() {
     let obj_a = simple_object(&graph, &[("a", a)]);
     let obj_b = simple_object(&graph, &[("b", b)]);
     let int_members: Arc<[SemanticNodeId]> = Arc::from(vec![obj_a, obj_b].into_boxed_slice());
-    let int_result = match dispatch.execute_type_node(SemanticQueryKey::NormalizeIntersection {
-        members: Arc::clone(&int_members),
-    }) {
+    let int_result = match dispatch.execute_type_node(
+        SemanticQueryKey::reduce_intersection_operands(Arc::clone(&int_members)),
+    ) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -14244,6 +14250,325 @@ fn raw_relate_rejects_forged_inference_context_when_target_has_no_pattern() {
         ),
         "control: the same ordinary relation remains assignable through the \
          canonical no-session key"
+    );
+}
+
+/// V4-AC4 — `Subtype` decides graph-natively over the primitive lattice:
+/// top/bottom rules hold (`never` bottom, `unknown` / `any` targets top)
+/// and an incompatibility (`string → number`) is a DECIDED negative —
+/// never an in-scope structural `Unknown`.
+#[test]
+fn subtype_decides_primitives_without_structural_unknown() {
+    use crate::semantic_query::RelationKind;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let unknown = primitive(&graph, PrimitiveKind::Unknown);
+    let any = primitive(&graph, PrimitiveKind::Any);
+    let never = primitive(&graph, PrimitiveKind::Never);
+
+    let step = |source, target| {
+        matches!(
+            dispatch.execute_relate_pair_kind(source, target, RelationKind::Subtype),
+            RelationStep::Assignable { .. }
+        )
+    };
+    let decided_not_assignable = |source, target| {
+        matches!(
+            dispatch.execute_relate_pair_kind(source, target, RelationKind::Subtype),
+            RelationStep::NotAssignable
+        )
+    };
+
+    assert!(
+        decided_not_assignable(string, number),
+        "string → number must be a decided negative under Subtype, not Unknown"
+    );
+    assert!(
+        step(string, string),
+        "reflexive pair must stay assignable under Subtype"
+    );
+    assert!(
+        step(string, unknown),
+        "unknown target is top: assignable under Subtype"
+    );
+    assert!(
+        step(string, any),
+        "any target is top: assignable under Subtype"
+    );
+    assert!(
+        step(never, string),
+        "never source is bottom: assignable under Subtype"
+    );
+    assert!(
+        decided_not_assignable(string, never),
+        "never target is bottom: a decided negative under Subtype"
+    );
+}
+
+/// V4-AC4 mutation discriminator — no assignability-as-subtype shortcut:
+/// `any` as SOURCE rides the assignability wildcard, but `Subtype`
+/// refuses it (`any` is a subtype only of the tops). An engine that
+/// answers `Subtype` by forwarding to the assignability lattice publishes
+/// a false positive here.
+#[test]
+fn subtype_refuses_any_source_that_assignability_accepts() {
+    use crate::semantic_query::RelationKind;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let any = primitive(&graph, PrimitiveKind::Any);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let unknown = primitive(&graph, PrimitiveKind::Unknown);
+
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair(any, string),
+            RelationStep::Assignable { .. }
+        ),
+        "control: the assignability axis accepts any → string"
+    );
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_kind(any, string, RelationKind::Subtype),
+            RelationStep::NotAssignable
+        ),
+        "Subtype must refuse any → string instead of forwarding to the \
+         assignability wildcard"
+    );
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_kind(any, unknown, RelationKind::Subtype),
+            RelationStep::Assignable { .. }
+        ),
+        "the tops stay above any under Subtype: any → unknown is assignable"
+    );
+}
+
+/// V4-AC4 — `StrictSubtype` demands a PROPER subtype: the mutual pair
+/// `string ≡ string` is accepted by `Subtype` and refused by
+/// `StrictSubtype`, while a genuinely narrower literal survives both.
+#[test]
+fn strict_subtype_rejects_mutual_pair_that_subtype_accepts() {
+    use crate::semantic_query::{LiteralValue, RelationKind};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let literal = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "a".to_string(),
+    )));
+
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_kind(string, string, RelationKind::Subtype),
+            RelationStep::Assignable { .. }
+        ),
+        "control: Subtype accepts the mutual string ≡ string pair"
+    );
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_kind(string, string, RelationKind::StrictSubtype),
+            RelationStep::NotAssignable
+        ),
+        "StrictSubtype must refuse the mutual pair: no proper subtype exists"
+    );
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_kind(literal, string, RelationKind::Subtype),
+            RelationStep::Assignable { .. }
+        ),
+        "control: Subtype accepts the narrower literal"
+    );
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_kind(literal, string, RelationKind::StrictSubtype),
+            RelationStep::Assignable { .. }
+        ),
+        "StrictSubtype keeps the genuinely narrower literal: \"a\" < string"
+    );
+}
+
+/// A rest parameter absorbs extra SUPPLIED arguments; it never supplies
+/// the source's own missing required parameters. A source whose
+/// last-required-position arity exceeds the target's is uncallable at the
+/// target's arity no matter what follows its fixed prefix, so the rest
+/// flag must not exempt that rejection — rest expansion only covers
+/// extra target-side arguments.
+#[test]
+fn relate_function_rest_never_exempts_uncallable_source_arity() {
+    use crate::semantic_query::{
+        FunctionParam, RelationKind, SignatureKind, SignatureReturnCarrier, TypeParamDecl,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let any = primitive(&graph, PrimitiveKind::Any);
+    let ret = primitive(&graph, PrimitiveKind::Undefined);
+
+    let signature = |params: Vec<FunctionParam>| {
+        graph.intern_node(SemanticNodeData::Signature {
+            kind: SignatureKind::Call,
+            params: Arc::from(params.into_boxed_slice()),
+            return_type: ret,
+            occurrence: None,
+            return_carrier: SignatureReturnCarrier::Declared(ret),
+            type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            signature_span: None,
+            return_type_span: None,
+        })
+    };
+    // `(a: string, b: number, ...rest: any[])` — last required position 2.
+    let resty = signature(vec![
+        FunctionParam::synthetic(Some(Arc::from("a")), string, false, false),
+        FunctionParam::synthetic(Some(Arc::from("b")), number, false, false),
+        FunctionParam::synthetic(Some(Arc::from("rest")), any, false, true),
+    ]);
+    // `(x: string)` — last required position 1.
+    let unary = signature(vec![FunctionParam::synthetic(
+        Some(Arc::from("x")),
+        string,
+        false,
+        false,
+    )]);
+    // `(x: string, y: number)` — covers the source's fixed prefix.
+    let binary = signature(vec![
+        FunctionParam::synthetic(Some(Arc::from("x")), string, false, false),
+        FunctionParam::synthetic(Some(Arc::from("y")), number, false, false),
+    ]);
+
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair(resty, unary),
+            RelationStep::NotAssignable
+        ),
+        "Assignability must reject a source uncallable at the target's unary \
+         arity even though the source ends in a rest parameter"
+    );
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_kind(resty, unary, RelationKind::Subtype),
+            RelationStep::NotAssignable
+        ),
+        "Subtype must reject the same uncallable arity"
+    );
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair(resty, binary),
+            RelationStep::Assignable { .. }
+        ),
+        "control: a target covering the source's fixed prefix stays assignable"
+    );
+}
+
+/// V4-AC5 (parent side) — a policy-set change interns a different
+/// `SemanticContextId`, and that id rides the derived `Hash`/`Eq` of
+/// `RelationContext`: two `Relate` keys differing ONLY in
+/// `semantic_context` compare unequal and do NOT warm-hit each other, so
+/// a resident relation parent is invalidated together with its leaf when
+/// the order policy changes.
+#[test]
+fn relate_parent_key_invalidates_on_semantic_context_change() {
+    use crate::semantic_query::{RelationContext, RelationKind, SemanticContext};
+    use std::hash::{Hash, Hasher};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+
+    let mut other_policy = crate::semantic_query::SemanticPolicySet::production();
+    other_policy.compatibility_version = 2;
+    let context_a = SemanticContext::production().intern();
+    let context_b = SemanticContext {
+        policy_set: other_policy.intern(),
+        ..SemanticContext::production()
+    }
+    .intern();
+    assert_ne!(
+        context_a, context_b,
+        "a policy-set change must intern a different SemanticContextId"
+    );
+
+    let base = dispatch.relate_key_for_kind(string, number, RelationKind::Subtype);
+    let key_a = crate::semantic_query::RelateMemoKey {
+        context: RelationContext {
+            semantic_context: context_a,
+            ..base.context
+        },
+        ..base.clone()
+    };
+    let key_b = crate::semantic_query::RelateMemoKey {
+        context: RelationContext {
+            semantic_context: context_b,
+            ..base.context
+        },
+        ..base.clone()
+    };
+    assert_ne!(
+        key_a, key_b,
+        "Relate keys differing only in semantic_context must not compare equal"
+    );
+    let hash_of = |key: &crate::semantic_query::RelateMemoKey| {
+        let mut hasher = rustc_hash::FxHasher::default();
+        key.hash(&mut hasher);
+        hasher.finish()
+    };
+    assert_ne!(
+        hash_of(&key_a),
+        hash_of(&key_b),
+        "the derived Hash must ride semantic_context so the keys land in \
+         distinct memo buckets"
+    );
+
+    // Warm the parent under context A, then prove the context-B ask does
+    // not warm-hit it: the resident entry is not reused, a fresh family
+    // slot is admitted.
+    let before = graph.relation_memo_count_of_kind(RelationKind::Subtype);
+    assert!(
+        matches!(
+            dispatch.execute(key_a.to_query_key()),
+            QueryResult::Value(_)
+        ),
+        "the context-A ask must decide (string → number is a decided negative)"
+    );
+    let warmed = graph.relation_memo_count_of_kind(RelationKind::Subtype);
+    assert!(
+        warmed > before,
+        "the context-A ask must admit a relation memo entry"
+    );
+    assert!(
+        matches!(
+            dispatch.execute(key_a.to_query_key()),
+            QueryResult::Value(_)
+        ),
+        "re-asking under context A must stay a Value"
+    );
+    assert_eq!(
+        graph.relation_memo_count_of_kind(RelationKind::Subtype),
+        warmed,
+        "re-asking under context A must warm-hit the resident entry"
+    );
+    assert!(
+        matches!(
+            dispatch.execute(key_b.to_query_key()),
+            QueryResult::Value(_)
+        ),
+        "the context-B ask must also decide"
+    );
+    assert!(
+        graph.relation_memo_count_of_kind(RelationKind::Subtype) > warmed,
+        "the context-B ask must NOT warm-hit the resident context-A parent: \
+         the policy change invalidates the resident parent with its leaf"
     );
 }
 
@@ -20957,9 +21282,9 @@ fn resolve_macro_payload_define_props_single_arg_returns_arg_unchanged() {
     }
 }
 
-/// `DefineProps` with ≥2 args dispatches through `NormalizeIntersection`.
+/// `DefineProps` with ≥2 args dispatches through `ReduceIntersection`.
 /// The output node id must equal the warm intersection node, which
-/// proves the body wired through `execute_read(NormalizeIntersection)`.
+/// proves the body wired through `execute_read(ReduceIntersection)`.
 #[test]
 fn resolve_macro_payload_define_props_multi_arg_normalize_intersection() {
     let host = host();
@@ -20968,12 +21293,12 @@ fn resolve_macro_payload_define_props_multi_arg_normalize_intersection() {
     let b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let direct = dispatch.execute_type_node(SemanticQueryKey::NormalizeIntersection {
-        members: Arc::from(vec![a, b].into_boxed_slice()),
-    });
+    let direct = dispatch.execute_type_node(SemanticQueryKey::reduce_intersection_operands(
+        Arc::from(vec![a, b].into_boxed_slice()),
+    ));
     let direct_node = match direct {
         QueryResult::Value(SemanticQueryOutput { value: n, .. }) => n,
-        other => panic!("direct NormalizeIntersection failed: {other:?}"),
+        other => panic!("direct ReduceIntersection failed: {other:?}"),
     };
 
     let owner = synthetic_macro_owner(&host, "/c.vue");
@@ -20990,7 +21315,7 @@ fn resolve_macro_payload_define_props_multi_arg_normalize_intersection() {
     match via_macro {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => assert_eq!(
             node, direct_node,
-            "≥2-arg DefineProps must converge on the warm NormalizeIntersection node"
+            "≥2-arg DefineProps must converge on the warm ReduceIntersection node"
         ),
         other => panic!("expected Value, got {other:?}"),
     }
@@ -21120,15 +21445,15 @@ fn budget_early_exit_folds_partial_into_enclosing_build_local_frame_and_request_
 ///
 /// A `ResolveMacroPayload` with ≥2 args enters via the top-level `execute`
 /// path (`execute_type_node` → `execute`) and dispatches a nested
-/// `execute_read(NormalizeIntersection)` (`build.rs`). In production
-/// `NormalizeIntersection` is dispatched ONLY through `execute_read` — there
-/// is no top-level `execute(NormalizeIntersection)` call site — so it is a
+/// `execute_read(ReduceIntersection)` (`build.rs`). In production
+/// `ReduceIntersection` is dispatched ONLY through `execute_read` — there
+/// is no top-level `execute(ReduceIntersection)` call site — so it is a
 /// genuine `execute_read`-only child tag.
 ///
 /// Pre-fix (recording lived inside `execute`) the mask carried
-/// `ResolveMacroPayload` but NOT `NormalizeIntersection`. Post-fix (recording
+/// `ResolveMacroPayload` but NOT `ReduceIntersection`. Post-fix (recording
 /// at the shared helper) the mask carries BOTH. This discriminates: the
-/// assertion on `NormalizeIntersection` FAILS against the pre-fix code and
+/// assertion on `ReduceIntersection` FAILS against the pre-fix code and
 /// PASSES against the post-fix code.
 #[test]
 fn dispatch_mask_records_execute_read_only_nested_normalize_intersection() {
@@ -21172,13 +21497,13 @@ fn dispatch_mask_records_execute_read_only_nested_normalize_intersection() {
     );
 
     // The DISCRIMINATING assertion: the nested
-    // `execute_read(NormalizeIntersection)` sub-dispatch must appear in the
+    // `execute_read(ReduceIntersection)` sub-dispatch must appear in the
     // mask. Its absence means dispatch-mask recording is bound to `execute`
     // instead of the shared `execute_via_cold_build_helper` choke point — the
     // correctness hole this test pins shut.
     assert!(
-        tags.contains(&SemanticQueryKeyTag::NormalizeIntersection),
-        "the nested execute_read(NormalizeIntersection) sub-dispatch MUST be \
+        tags.contains(&SemanticQueryKeyTag::ReduceIntersection),
+        "the nested execute_read(ReduceIntersection) sub-dispatch MUST be \
          recorded in the per-request dispatch mask — it enters ONLY via \
          execute_read, never the top-level execute path. Its absence proves \
          recording is bound to `execute` rather than the shared \
@@ -22276,7 +22601,7 @@ fn semantic_query_key_variant_set_is_structurally_pinned() {
             Conditional { .. } => "Conditional",
             TypeOf { .. } => "TypeOf",
             NormalizeUnion { .. } => "NormalizeUnion",
-            NormalizeIntersection { .. } => "NormalizeIntersection",
+            ReduceIntersection { .. } => "ReduceIntersection",
             ProjectObjectSpread { .. } => "ProjectObjectSpread",
             ProjectPath { .. } => "ProjectPath",
             Relate { .. } => "Relate",
@@ -30130,23 +30455,25 @@ fn assert_shallow_surface_eq(actual: &ShallowSurface, expected: &ShallowSurface,
 /// INDEPENDENT reference for the member-value union step over this
 /// fixture domain (distinct childless primitive/literal value nodes, no
 /// lattice extremes, no literal-vs-base-primitive pairs): dedup by node
-/// id, sort ascending, singleton stays bare, multi-arm interns a raw
-/// `Union`. Deliberately NOT the production canonical builder, so the
-/// oracle keeps discriminating the production member-value union step.
+/// id, singleton stays bare, multi-arm interns through the canonical
+/// union builder — the charter-ratified semantics of the member-value
+/// union step (stable order + carrier-qualified canonical mint). The
+/// oracle still discriminates the MERGE logic around it: common-member
+/// selection, per-arm value collection, accessibility folds, synthesized
+/// neutrality.
 fn oracle_value_union(
     graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
     values: &[SemanticNodeId],
 ) -> SemanticNodeId {
     let mut ids: Vec<SemanticNodeId> = values.to_vec();
-    ids.sort_by_key(|id| id.0);
     ids.dedup();
     match ids.as_slice() {
         [only] => *only,
-        _ => graph.intern_node(SemanticNodeData::Union(
-            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
-                ids.into_boxed_slice(),
-            )),
-        )),
+        // The member-value union is the CANONICAL union by charter: the
+        // ratified VerterStableV1 order and the carrier-qualified canonical
+        // mint ARE the intended semantics of this step, so the reference
+        // delegates the intern while keeping its own dedup/singleton logic.
+        _ => crate::project_semantic_dispatch::canonical_algebra::canonical_union(graph, &ids).node,
     }
 }
 
@@ -30550,13 +30877,19 @@ fn union_surface_merge_pins_order_accessibility_and_neutrality() {
         );
     }
 
-    // Value-union arm order: zebra's merged value is Union([arm0, arm1]).
+    // Value-union arm order: zebra's merged value is the per-arm value
+    // union, rendering in VerterStableV1 order (number sorts before
+    // string), not construction order.
     let zebra_value = graph
         .node_data(common_zebra.value)
         .expect("zebra value interned");
     match &*zebra_value {
         SemanticNodeData::Union(vals) => {
-            assert_eq!(vals.as_ref(), &[s, n], "per-arm value order preserved");
+            assert_eq!(
+                vals.as_ref(),
+                &[n, s],
+                "per-arm value union keeps both arms in stable order"
+            );
         }
         other => panic!("expected Union value, got {other:?}"),
     }

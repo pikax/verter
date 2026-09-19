@@ -28,7 +28,7 @@
 //!    suppresses canonical warm admission.
 //!
 //! 2. **The canonical builders** ([`canonical_union`] /
-//!    [`canonical_intersection`]): recursive same-kind flattening, the §22
+//!    [`intern_ordered_intersection`]): recursive same-kind flattening, the §22
 //!    lattice absorption laws (`X | never = X`, `X | any = any`,
 //!    `X | unknown = unknown`, `X & never = never`, `X & any = any`,
 //!    `X & unknown = X`, error-carrier domination on both operators),
@@ -779,8 +779,8 @@ pub(crate) fn canonical_union(
     canonicalize(graph, members, /* is_union */ true)
 }
 
-/// Canonical intersection construction over `members`.
-pub(crate) fn canonical_intersection(
+/// Private ordered-intersection intern. Operand order is preserved.
+pub(crate) fn intern_ordered_intersection(
     graph: &SemanticGraphStore,
     members: &[SemanticNodeId],
 ) -> CanonicalComposite {
@@ -1107,8 +1107,23 @@ fn canonicalize(
     //    compare budget, dangling arm, undecided peek) is stamped
     //    `Canonical`; anything else is stamped `CanonicalUnproven` at rest
     //    — never skip-eligible.
-    kept.sort_by_key(|id| id.0);
-    kept.dedup();
+    if is_union {
+        crate::semantic_query::stable_key::sort_by_stable_key(graph, &mut kept);
+        // An over-deep arm cannot be proven equal to anything within the
+        // encoder's depth budget: keep every arm and refuse canonical warm
+        // admission rather than collapsing on the shared marker.
+        if kept.iter().any(|id| {
+            !crate::semantic_query::stable_key::stable_key_for_node(graph, *id).is_complete()
+        }) {
+            evidence.incomplete = true;
+        }
+        kept.dedup_by(|a, b| crate::semantic_query::stable_key::provably_equal(graph, *a, *b));
+    } else {
+        // Intersection preserves construction order. First-occurrence
+        // construction-identical dedup only.
+        let mut seen = rustc_hash::FxHashSet::default();
+        kept.retain(|id| seen.insert(*id));
+    }
     let node = match kept.as_slice() {
         [] => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
         [only] => *only,

@@ -5219,8 +5219,8 @@ fn flow_return_calls_in_composite_expressions_never_publish_the_raw_callee_retur
             assert_eq!(
                 shapes,
                 vec![
-                    NodeShape::Primitive(PrimitiveKind::String),
                     NodeShape::Primitive(PrimitiveKind::Number),
+                    NodeShape::Primitive(PrimitiveKind::String),
                 ],
                 "the ternary's arms take the same exact answer a bare call takes"
             );
@@ -5248,8 +5248,8 @@ fn flow_return_calls_in_composite_expressions_never_publish_the_raw_callee_retur
                 assert_eq!(
                     shapes,
                     vec![
-                        NodeShape::Other("Literal(Number(1.0))".to_string()),
                         NodeShape::Other("Literal(Number(2.0))".to_string()),
+                        NodeShape::Other("Literal(Number(1.0))".to_string()),
                     ],
                     "{name}: a call-free ternary keeps its literal arms unwidened"
                 );
@@ -5429,9 +5429,9 @@ fn flow_return_conditional_branches_are_planned_and_lowered_by_one_descent() {
         // were written, and source coordinates are not constituent identity.
         ("ctObjBoth", "{a:number}"),
         ("ctObjDisjoint", "{a:number}|{b:number}"),
-        ("ctObjLocalRead", "2|{a:number}"),
-        ("ctObjMethod", "2|{m():number}"),
-        ("ctObjNested", "2|{a:{b:number}}"),
+        ("ctObjLocalRead", "{a:number}|2"),
+        ("ctObjMethod", "{m():number}|2"),
+        ("ctObjNested", "{a:{b:number}}|2"),
         // A branch join reached as an object MEMBER value, through the
         // member's own path-write edge. The member slot widens the join's
         // fresh literal arm exactly like a direct literal member (the
@@ -5439,13 +5439,14 @@ fn flow_return_conditional_branches_are_planned_and_lowered_by_one_descent() {
         ("ctObjInObj", "{a:number|{b:number}}"),
         // A nested branch join FLATTENS at union construction, exactly
         // like the checker's own `2 | 3 | { a: number }`.
-        ("ctNestedTernary", "2|{a:number}|3"),
-        // CONTROLS — rows that were already green must be unchanged, so
-        // the new descent is proven not to have moved them.
-        ("ctObjEmpty", "2|{}"),
+        ("ctNestedTernary", "{a:number}|3|2"),
+        // CONTROLS — rows whose constituent SET the descent must leave
+        // alone; every row renders its members in `VerterStableV1`
+        // (fingerprint, exact) order, not authored order.
+        ("ctObjEmpty", "{}|2"),
         ("ctArray", "number[]"),
         ("ctIdent", "boolean|2"),
-        ("ctNull", "1|null"),
+        ("ctNull", "null|1"),
         ("ctArrow", "()=>number"),
     ] {
         let outcome = r5_eval(&host, name).unwrap_or_else(|| panic!("{name} must produce a value"));
@@ -5864,7 +5865,7 @@ fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
         &host,
         "tnStrTernary",
         TypeExpr::Union(Arc::from(
-            vec![string_lit("a"), string_lit("b")].into_boxed_slice(),
+            vec![string_lit("b"), string_lit("a")].into_boxed_slice(),
         )),
     );
     assert_clean_warm(
@@ -6478,7 +6479,7 @@ fn flow_return_labeled_break_drops_the_arm_assertion() {
     assert_r1_clean_warm(
         &host,
         "r1LabeledBreakNoAssertionLeak",
-        union(vec![string(), number()]),
+        union(vec![number(), string()]),
     );
 }
 
@@ -6494,7 +6495,7 @@ fn flow_return_conditional_labeled_break_joins_the_write() {
     assert_r1_clean_warm(
         &host,
         "r1ConditionalBreakWrite",
-        union(vec![boolean(), number()]),
+        union(vec![number(), boolean()]),
     );
 }
 
@@ -6548,7 +6549,7 @@ fn flow_return_exhaustive_switch_has_no_implicit_undefined() {
     assert_r1_clean_warm(
         &host,
         "r1SwitchExhaustive",
-        union(vec![string_lit("a"), string_lit("b")]),
+        union(vec![string_lit("b"), string_lit("a")]),
     );
 }
 
@@ -6561,7 +6562,7 @@ fn flow_return_switch_case_narrows_the_discriminant_root() {
     assert_r1_clean_warm(
         &host,
         "r1SwitchCaseNarrows",
-        union(vec![string(), number()]),
+        union(vec![number(), string()]),
     );
 }
 
@@ -6571,7 +6572,7 @@ fn flow_return_switch_case_narrows_the_discriminant_root() {
 #[test]
 fn flow_return_catch_entry_joins_every_throw_point() {
     let host = make_r1_host();
-    assert_r1_clean_warm(&host, "r1ThrowPointJoin", union(vec![string(), number()]));
+    assert_r1_clean_warm(&host, "r1ThrowPointJoin", union(vec![number(), string()]));
 }
 
 /// A `finally` write to an outer `let` applies on every path that reaches
@@ -6751,7 +6752,7 @@ fn flow_return_fallthrough_case_start_unions_the_chain_tests() {
     assert_r2_clean_warm(
         &host,
         "r2SwitchFallthroughChain",
-        union(vec![string_lit("a"), string_lit("b"), string_lit("z")]),
+        union(vec![string_lit("z"), string_lit("b"), string_lit("a")]),
     );
 }
 
@@ -6764,7 +6765,7 @@ fn flow_return_exhaustive_boolean_switch_drops_the_no_match_path() {
     assert_r2_clean_warm(
         &host,
         "r2SwitchExhaustiveBoolean",
-        union(vec![number_lit(1.0), number_lit(2.0)]),
+        union(vec![number_lit(2.0), number_lit(1.0)]),
     );
 }
 
@@ -6775,7 +6776,7 @@ fn flow_return_template_literal_call_is_a_throw_point() {
     assert_r2_clean_warm(
         &host,
         "r2TemplateThrowPoint",
-        union(vec![string(), number()]),
+        union(vec![number(), string()]),
     );
 }
 
@@ -6786,7 +6787,7 @@ fn flow_return_if_test_call_is_a_throw_point() {
     assert_r2_clean_warm(
         &host,
         "r2IfGuardThrowPoint",
-        union(vec![string(), number()]),
+        union(vec![number(), string()]),
     );
 }
 
@@ -6797,7 +6798,7 @@ fn flow_return_new_expression_is_a_throw_point() {
     assert_r2_clean_warm(
         &host,
         "r2NewCalleeThrowPoint",
-        union(vec![string(), number()]),
+        union(vec![number(), string()]),
     );
 }
 
@@ -6816,7 +6817,7 @@ fn flow_return_finally_entry_joins_the_template_throw_point() {
     );
     assert_eq!(
         outcome.ty,
-        union(vec![string(), number()]),
+        union(vec![number(), string()]),
         "the finally entry carries the throw-point join"
     );
     assert_eq!(outcome.candidates, 0, "a degraded success is ReturnOnly");

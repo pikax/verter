@@ -1,0 +1,36 @@
+{
+  "id": "WebProductOwnershipMap",
+  "schema": 1,
+  "status": "ratified",
+  "ratifiedBy": "VSW0",
+  "sourceOfTruth": "charters/expansion-vscode-web/VSW0.md Binding architecture and Migration sections; joined by tests/vscode-web/VSW0/vsw0.test.mjs",
+  "contractNode": "VSW0",
+  "finalOwner": "expansion.vscode-web",
+  "finalOwnerStatement": "expansion.vscode-web owns this product outcome; semantic algorithms, project resolution, format/lint logic, TypeScript projection and edit transactions stay with their existing producing owners; VSW1+ own vscode-web production under this constitution.",
+  "outcomes": [
+    {
+      "id": "WebExtensionFeatureContract",
+      "currentOwner": "VSW0",
+      "finalOwner": "VSW0 (constitution) with VSW1 (browser entrypoint, worker transport, shared-code cutovers) and VSW2..VSW6 (feature routes) owning delivery",
+      "receivingAcceptance": "VSW0-ratification joins every feature row to VSC0 ids/classes, every cited service to the BWH0 inventory, every receipt field to the DX0 basis, NativeOnly rows to the dx0ClassPortLaw gap dispositions and semantic rows to the semanticHostLaw proof owners"
+    },
+    {
+      "id": "MainBrowserEntrypointPolicy",
+      "currentOwner": "VSW0",
+      "finalOwner": "VSW0 (policy) with VSW1 owning the browser entry build and VSW5 owning the packaging gate that enforces admission on real artifacts",
+      "receivingAcceptance": "VSW0-AC1: admission is a predicate re-derived live from the manifest and build config; a node-main-only build is not-admitted, a dual-entry browser-targeted build admits, and facts fail closed when the config declares no platform"
+    },
+    {
+      "id": "HostStatusVocabulary",
+      "currentOwner": "VSW0",
+      "finalOwner": "VSW0 (vocabulary) with every VSW consumer binding its status terms to the DX0 hostIdentity receipt field",
+      "receivingAcceptance": "VSW0-AC2: the active host status is derived from the executing entry and workspace topology, surfaced on the provider status surface, and remote-native never claims browser-local parity"
+    }
+  ],
+  "retirementObligation": "Eliminate ambiguous web-support claims and duplicate browser client architecture: each obsolete route is characterized first, routed through its surviving producer, verified at its consumers and retired by its owning cutover node (VSW1+); a cutover never retains two active semantic authorities. VSW0 itself retires nothing.",
+  "deletionPopulationThisNode": [],
+  "deletionPopulationStatement": "empty: VSW0 is contract-only (0 production LOC, 0 files) and deletes nothing; a deletion or obsolete-route removal recorded under VSW0 is premature and fails the VSW0-AC-OWNER case",
+  "acBasisDownstreamTestOwner": "same as the WebExtensionFeatureContract: VSW1 (entrypoint/module-load runtime checks) and VSW5 (packaging/offline/browser-matrix) own the runtime tests",
+  "acResourceRationale": "VSW0 touches no hot paths and no UI: 0 production LOC across 0 files, so the WSP equal-work corpus and client-paint obligations do not apply to this node",
+  "acExposureRegistration": "DX1 owns the exposure-descriptor registration schema; this ownership map promotes no operation"
+}

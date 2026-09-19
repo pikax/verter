@@ -207,7 +207,7 @@ defineSlots<MissingSlots>()
 ///
 /// Per-arm error reporting (a diagnostic specifically describing
 /// PartB's failure) is a deeper integration with the
-/// `NormalizeIntersection` dispatch and is tracked as a follow-up
+/// `ReduceIntersection` dispatch and is tracked as a follow-up
 /// — this test asserts only the survival contract.
 #[test]
 fn project_props_partial_intersection_publishes_diagnostic() {

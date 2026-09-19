@@ -1,0 +1,280 @@
+{
+  "id": "WebExtensionFeatureContract",
+  "schema": 1,
+  "status": "ratified",
+  "ratifiedBy": "VSW0",
+  "finalOwner": "expansion.vscode-web",
+  "finalOwnerStatement": "expansion.vscode-web owns this product outcome; semantic algorithms, project resolution, format/lint logic, TypeScript projection and edit transactions stay with their existing producing owners; VSW1+ own vscode-web production under this constitution.",
+  "sourceOfTruth": "packages/vue-vscode live tree, joined to the VSC0 FeatureOwnershipMatrix and DesktopWebSharedBoundary, the BWH0 platform-host-services inventory and browser-execution-manifest (NativeOnly-in-browser and semantic-host law), and the DX0 feature-exposure-contract operations (hostExecutionClass/browserExecutable); re-derived by tests/vscode-web/VSW0/vsw0.test.mjs",
+  "law": "The web extension (vscode.dev / github.dev / browser-host mode) is one more consumer of the existing producers: every feature row below keeps its VSC0 owner and host-execution class, binds the DX0 receipt basis for browser-local execution, and reaches native capability only through the explicitly selected companion route. No row forks the desktop extension, gains a second semantic/type/project engine, or copies the whole extension to claim parity.",
+  "vocabulary": {
+    "hostExecutionClass": "DX0 host-execution-class.v1 enum (Portable | NativeOnly | ExternalOwner), reused verbatim",
+    "receiptBasis": "DX0 product-receipt-basis.v1 fields (sourceRevisions, projectConfiguration, engineIdentity, hostIdentity, completenessState)",
+    "webDisposition": [
+      "browser-local-route",
+      "gap-pending-class-port",
+      "gap-pending-semantic-host",
+      "remote-native-only",
+      "companion-route",
+      "static-web-asset"
+    ],
+    "webDispositionDefinitions": {
+      "browser-local-route": "the feature's web surface executes in the browser extension host over an engine that class already admits in a browser (Portable or ExternalOwner); NativeOnly features may never hold this disposition (dx0ClassPortLaw)",
+      "gap-pending-class-port": "the browser route is planned but is a labelled gap today: the DX0 operation is NativeOnly and not browser-executable, so the route requires a DX0 receiving-owner amendment (class/browserExecutable change or a separately labelled vscode-web Portable operation) before any browser-local claim; until then the surface shows the DX0 unsupported completeness state",
+      "gap-pending-semantic-host": "a labelled gap with two missing producers: the DX0 class-port amendment above and the BWH semantic-host proof (BWH1..BWH6B per the BWH0 browser-execution-manifest portabilityProof); a compiler-WASM build never proves semantic-host portability, so semantic rows may not claim browser-local-route over the wasm surface",
+      "remote-native-only": "the feature keeps executing in the desktop or remote Node extension host; a browser client viewing it is a remote-native session",
+      "companion-route": "native capability reached only through explicitly selected authenticated local-native execution (DX4/DX5) or the remote-native host; never the browser-local receipt",
+      "static-web-asset": "declarative contributions shipped unchanged from either entry"
+    },
+    "hostStatus": "HostStatusVocabulary statusEnum (browser-local | remote-native | desktop-local | companion-native)"
+  },
+  "dx0ClassPortLaw": {
+    "statement": "A NativeOnly vscode operation may appear in a browser product only as explicitly selected DX4/DX5 companion execution or as a labelled gap (BWH0 browser-execution-manifest NativeOnly-in-browser rule; DX0-AC2 lineage). A browser-local route for a NativeOnly row requires a DX0 receiving-owner amendment that changes the operation's hostExecutionClass/browserExecutable or adds a separately labelled vscode-web Portable operation; substituting a different engine (the compiler wasm host) does not change the class. No such amendment is recorded today, so every NativeOnly row below carries a gap disposition.",
+    "amendmentsRecordedToday": []
+  },
+  "semanticHostLaw": {
+    "provedByBWH0": false,
+    "statement": "BWH0's compiler-WASM build proves the compiler/session surface only and never proves semantic-host portability (BWH0 browser-execution-manifest portabilityProof; BWH0-AC3). Browser-local semantic routes require the semantic-host proof recorded as receiving-owner amendments before code; until then every semantic row is a labelled gap (gap-pending-semantic-host), never a browser-local-route claim over the compiler wasm surface.",
+    "requires": ["BWH1", "BWH2", "BWH6", "BWH6B"]
+  },
+  "consumedBoundaryRules": [
+    "browser-is-distinct-product",
+    "transport-desktop-owned",
+    "type-elided-node-client-imports",
+    "no-class-change-by-moving-code"
+  ],
+  "hostModes": [
+    {
+      "mode": "vscode-web-local",
+      "hostStatus": "browser-local",
+      "definition": "vscode.dev / github.dev with the extension's browser entry executing in the local web extension host (web workers). Semantic work rides the BWH wasm host through in-memory platform services only after the BWH semantic-host proof (semanticHostLaw); until then semantic surfaces in this mode are labelled gaps, never compiler-wasm parity claims.",
+      "existsToday": false,
+      "deliveryOwner": "VSW1 (browser entrypoint and worker transport)"
+    },
+    {
+      "mode": "desktop",
+      "hostStatus": "desktop-local",
+      "definition": "VS Code desktop with the extension's main entry executing in the local Node extension host. This is the only shipped mode today.",
+      "existsToday": true,
+      "deliveryOwner": "expansion.vscode-product (VSC train; characterized by VSC0)"
+    },
+    {
+      "mode": "remote-native",
+      "hostStatus": "remote-native",
+      "definition": "Codespaces / SSH / WSL / tunnel remote workspace: the main entry executes in the remote Node extension host. A browser client viewing this workspace is a remote-native session, never browser-local parity.",
+      "existsToday": true,
+      "deliveryOwner": "expansion.vscode-product (VSC train; the Node bundle runs unchanged remotely)"
+    }
+  ],
+  "browserLocalReceipt": {
+    "sourceRevisions": "the virtual-workspace file revisions synchronized through the web VFS (VSW2); stale or wrong-handle results are rejected before display",
+    "projectConfiguration": "the browser project profile: in-memory workspace identity, framework profile and configuration facts carried by the web host; no ambient filesystem reads exist in the browser closure",
+    "engineIdentity": "the row's webEngine: the Verter compiler WASM build, the pinned browser TypeScript worker (ExternalOwner), or the explicitly selected companion engine with its exact version",
+    "hostIdentity": "browser runtime plus WASM build selector (DX0 product-receipt-basis wasm-build-selector substrate); remote-native-only and companion-route rows override this field and may not claim it",
+    "completenessState": "DX0 completenessStates; complete-empty is a successful empty answer; partial, pending, unsupported, ambiguous, failed, cancelled and stale are distinct and never published as complete"
+  },
+  "featureRows": [
+    {
+      "id": "grammars-languages",
+      "vsc0Class": "Portable",
+      "webDisposition": "static-web-asset",
+      "routeOwner": "VSW1",
+      "note": "declarative contributions ship unchanged from the web entry; the vue-postcss / vue-sugarss grammar gaps stay recorded exactly as VSC0 has them"
+    },
+    {
+      "id": "virtual-files-view",
+      "vsc0Class": "NativeOnly",
+      "webDisposition": "gap-pending-class-port",
+      "routeOwner": "VSW2",
+      "webEngine": "Verter compiler WASM host",
+      "bwhServices": ["io"],
+      "desktopTierModules": ["UnifiedVirtualFilesProvider.ts"],
+      "desktopTierRoute": "the provider module is desktop tier today (VSC0 type-elided-node-client-imports); the VSW1 type-elided LanguageClient conversion makes it host-neutral — a producer-owned port, never a silent reclassification — and the artifact-stream route over the wasm host's in-memory virtual workspace goes live only after the DX0 class-port amendment",
+      "note": "the pure helper tier (VirtualFileManager) is host-neutral today; the provider tier is not, and the row is a labelled gap until dx0ClassPortLaw is satisfied"
+    },
+    {
+      "id": "source-map-visualization",
+      "vsc0Class": "NativeOnly",
+      "webDisposition": "gap-pending-class-port",
+      "routeOwner": "VSW2",
+      "webEngine": "Verter compiler WASM host",
+      "bwhServices": ["io"],
+      "dx0Row": "vscode.source-map",
+      "note": "the DX0 vscode.source-map operation is NativeOnly with browserExecutable false and names the browser analog as the separately labelled Portable playground.source-map-view operation; a vscode-web route requires the DX0 receiving-owner amendment (class change or a separately labelled vscode-web Portable operation), and the webview panel / sourcemap decode model stay presentation/pure tiers meanwhile"
+    },
+    {
+      "id": "component-tree",
+      "vsc0Class": "NativeOnly",
+      "webDisposition": "gap-pending-semantic-host",
+      "routeOwner": "VSW4",
+      "webEngine": "Verter compiler WASM host",
+      "bwhServices": ["io", "scheduling"],
+      "desktopTierModules": ["ComponentTreeProvider.ts"],
+      "desktopTierRoute": "the provider module is desktop tier today (portable-path-only imports; VSC0 type-elided-node-client-imports); the VSW1 type-elided conversion makes it host-neutral, never a silent reclassification",
+      "note": "tree provider renders wasm-host analysis snapshots once both missing producers exist: the DX0 class-port amendment and the BWH semantic-host proof (semanticHostLaw)"
+    },
+    {
+      "id": "routes-analysis",
+      "vsc0Class": "NativeOnly",
+      "webDisposition": "gap-pending-semantic-host",
+      "routeOwner": "VSW4",
+      "webEngine": "Verter compiler WASM host",
+      "bwhServices": ["io", "scheduling"],
+      "desktopTierModules": ["RouteTreeProvider.ts"],
+      "desktopTierRoute": "the provider module is desktop tier today (VSC0 type-elided-node-client-imports); the VSW1 type-elided conversion makes it host-neutral, never a silent reclassification"
+    },
+    {
+      "id": "analysis-tree",
+      "vsc0Class": "NativeOnly",
+      "webDisposition": "gap-pending-semantic-host",
+      "routeOwner": "VSW4",
+      "webEngine": "Verter compiler WASM host",
+      "bwhServices": ["io", "scheduling"],
+      "desktopTierModules": ["AnalysisTreeProvider.ts"],
+      "desktopTierRoute": "the provider module is desktop tier today (portable-path-only imports; VSC0 type-elided-node-client-imports); the VSW1 type-elided conversion makes it host-neutral, never a silent reclassification",
+      "note": "demand-gated exactly as on desktop (verter.analysis.enabled, default off): closed/disabled views create no background semantic work in web mode either"
+    },
+    {
+      "id": "decorations",
+      "vsc0Class": "NativeOnly",
+      "webDisposition": "gap-pending-semantic-host",
+      "routeOwner": "VSW3",
+      "webEngine": "Verter compiler WASM host",
+      "bwhServices": ["io"],
+      "desktopTierModules": [
+        "BindingColorDecorationProvider.ts",
+        "PropConstnessDecorationProvider.ts",
+        "VueApiDecorationProvider.ts"
+      ],
+      "desktopTierRoute": "the three provider modules are desktop tier today (VSC0 type-elided-node-client-imports); the VSW1 type-elided conversion makes them host-neutral, never a silent reclassification",
+      "note": "the nine theme colors are static web-compatible contributions; binding facts need the wasm semantic host (semanticHostLaw), so the row is a labelled gap; the VSC4V retirement obligation is unchanged"
+    },
+    {
+      "id": "provider-selection",
+      "vsc0Class": "ExternalOwner",
+      "webDisposition": "browser-local-route",
+      "routeOwner": "VSW4N",
+      "webEngine": "pinned browser TypeScript worker (ExternalOwner) or the explicitly selected companion engine",
+      "note": "the desktop provider list does not silently apply in web mode: web offers only browser-admissible engines, and the selection is the execution-host selector owned by VSW4N"
+    },
+    {
+      "id": "statistics",
+      "vsc0Class": "NativeOnly",
+      "webDisposition": "gap-pending-class-port",
+      "routeOwner": "VSW4",
+      "webEngine": "Verter compiler WASM host",
+      "bwhServices": ["io", "persistence"],
+      "desktopTierModules": ["extension.ts"],
+      "desktopTierRoute": "the command registration lives in the desktop activation module (extension.ts); the browser entry registers its sibling surface at the VSW1 cutover, never a fork of desktop activation",
+      "note": "in-memory statistics over the wasm host is a planned route gated on the DX0 class-port amendment; the persistence service is in-memory in the browser closure, so persistToFile / filePath settings surface the DX0 unsupported completeness state instead of being silently ignored"
+    },
+    {
+      "id": "audit-records",
+      "vsc0Class": "NativeOnly",
+      "webDisposition": "gap-pending-class-port",
+      "routeOwner": "VSW4",
+      "webEngine": "Verter compiler WASM host (audit substrate)",
+      "bwhServices": ["io"],
+      "note": "audit is a proved BWH0 substrate build surface, but the vscode operation is NativeOnly: the row is a labelled gap until the DX0 class-port amendment; the presentation channel and pure transforms are host-neutral tiers today"
+    },
+    {
+      "id": "mcp-spawn",
+      "vsc0Class": "NativeOnly",
+      "webDisposition": "companion-route",
+      "routeOwner": "VSW4N",
+      "hostIdentityOverride": "authenticated local native companion (DX4/DX5 route) or the remote-native extension host; the browser closure has no process capability (BWH0 process service), so this row may not claim the browser-local receipt",
+      "note": "no child spawn exists in the web entry; the lm MCP definition is registered only when the companion or a remote-native host is actually serving, never as a dead definition"
+    },
+    {
+      "id": "plain-tsjs-integration",
+      "vsc0Class": "ExternalOwner",
+      "webDisposition": "browser-local-route",
+      "routeOwner": "VSW3",
+      "webEngine": "the editor-owned web TypeScript service (ExternalOwner)",
+      "desktopTierModules": ["extension.ts"],
+      "desktopTierRoute": "the desktop plugin forwarding lives in the desktop activation module (extension.ts); the web entry carries its own forwarding through the web VFS (VSW2) at the VSW1/VSW3 cutover, never a fork",
+      "note": "plugin injection follows the editor's engine wherever it runs; the carrier store the plugin reads is published through the web VFS (VSW2) instead of the stdio LSP store"
+    },
+    {
+      "id": "css-intellisense",
+      "vsc0Class": "NativeOnly",
+      "webDisposition": "gap-pending-semantic-host",
+      "routeOwner": "VSW3",
+      "webEngine": "Verter compiler WASM host (style structure requests)",
+      "bwhServices": ["io"],
+      "desktopTierModules": ["css/preprocessorResolver.ts"],
+      "desktopTierRoute": "preprocessor resolution is desktop-by-design (require.resolve over the workspace) and stays native: browser-local mode surfaces the DX0 unsupported completeness state for it; the presentation/pure css modules are host-neutral tiers today",
+      "note": "completion/hover/colors/highlights need wasm-host structure requests, which are semantic-host work (semanticHostLaw): the row is a labelled gap until the DX0 class-port amendment and the BWH semantic-host proof exist"
+    },
+    {
+      "id": "engine-tiers",
+      "vsc0Class": "ExternalOwner",
+      "webDisposition": "remote-native-only",
+      "routeOwner": "VSW4N",
+      "hostIdentityOverride": "desktop or remote Node extension host (tsdk staging, relay staging and extension-hosted TypeScript service need fs/module provisioning); the browser-local engine binding is the pinned browser TypeScript worker (ExternalOwner) or the companion, selected by VSW4N",
+      "note": "the desktop provisioning tiers do not run in the web entry; no require() of project TypeScript exists in the browser closure"
+    },
+    {
+      "id": "snippets",
+      "vsc0Class": "Portable",
+      "status": "absent",
+      "webDisposition": "static-web-asset",
+      "routeOwner": null,
+      "note": "mirrors the VSC0 absent row: not shipped today, so a future snippet surface stays an explicit owner decision rather than an undocumented web gap"
+    }
+  ],
+  "startupAdaptationInventory": [
+    {
+      "id": "extension-activation",
+      "nodeAssumption": "activate() spawns the verter-lsp child through vscode-languageclient/node with stdio transport and binary discovery",
+      "webRoute": "the browser entry activates the same feature surface over the wasm host in a web worker (VSW1 worker transport); no child process exists",
+      "evidence": ["packages/vue-vscode/src/extension.ts"]
+    },
+    {
+      "id": "typescript-plugin-loading",
+      "nodeAssumption": "typescriptServerPlugins runs inside the editor-owned engine; desktop stages tsdk and drives require()-based project TypeScript (engine tiers)",
+      "webRoute": "the plugin follows the editor's web TypeScript service; the pinned browser worker is the only embedded engine (ExternalOwner), VSW3",
+      "evidence": [
+        "packages/vue-vscode/package.json",
+        "packages/vue-vscode/src/extensionTsService.ts"
+      ]
+    },
+    {
+      "id": "mcp-child",
+      "nodeAssumption": "verter-mcp is spawned as an attempt-owned child and registered through the lm provider API",
+      "webRoute": "no process capability: companion route only (VSW4N), or the remote-native host keeps owning the child",
+      "evidence": ["packages/vue-vscode/src/mcpServer.ts"]
+    },
+    {
+      "id": "tsdk-and-fs-staging",
+      "nodeAssumption": "tsdk staging, statistics persistence and claude-code detection read fs/os/process",
+      "webRoute": "in-memory platform services (BWH0 io/persistence); fs-bound settings surface unsupported in browser-local mode",
+      "evidence": [
+        "packages/vue-vscode/src/sharedTsgoLaunch.ts",
+        "packages/vue-vscode/src/claudeCodeDetection.ts",
+        "packages/vue-vscode/src/runSummaryOracle.ts"
+      ]
+    },
+    {
+      "id": "activation-gating",
+      "nodeAssumption": "activationGate and startup ordering are pure decision logic shared by both entries",
+      "webRoute": "reused as-is from src/shared; the web entry is a sibling consumer, not a fork",
+      "evidence": [
+        "packages/vue-vscode/src/activationGate.ts",
+        "packages/vue-vscode/src/startupOptimizations.ts"
+      ]
+    }
+  ],
+  "rules": [
+    "every VSC0 feature id has exactly one row here with a webDisposition from this vocabulary; a new desktop feature without a row is drift, not implicit coverage",
+    "a NativeOnly row is never browser-local-route or static-web-asset: it is gap-pending-class-port, gap-pending-semantic-host (when its engine is the wasm semantic surface), companion-route or remote-native-only, per dx0ClassPortLaw and semanticHostLaw; a gap disposition exists only on a NativeOnly row",
+    "a row that names its planned route (browser-local-route or either gap disposition) names its routeOwner in the VSW train and its webEngine; a remote-native-only or companion-route row must override hostIdentityOverride and may not claim the browserLocalReceipt hostIdentity",
+    "webDisposition changes are producer-owned ports with their own evidence, never relabels (VSC0 no-class-change-by-moving-code)",
+    "bwhServices cited by a row must exist in the BWH0 platform-host-services inventory",
+    "a row citing a live desktop-tier DesktopWebSharedBoundary module lists it in desktopTierModules and states its desktopTierRoute (VSW1 conversion or desktop-by-design); no row claims host-neutral readiness for a desktop-tier module",
+    "the web entry is placed at packages/vue-vscode/src/browser with host-neutral modules at packages/vue-vscode/src/shared and its suite at packages/vue-vscode/e2e/web (VSW1+ own those directories; VSW0 adds none of them)"
+  ],
+  "acBasisDownstreamTestOwner": "VSW1 owns the browser-entrypoint build admission and shared-code module-load runtime checks; VSW5 owns packaging, offline and browser-matrix qualification on real artifacts",
+  "acResourceRationale": "VSW0 touches no hot paths and no UI: 0 production LOC across 0 files, so the WSP equal-work corpus and client-paint obligations do not apply here; real-client claims bind to VSW5",
+  "acExposureRegistration": "DX1 owns the exposure-descriptor registration schema; no new operation is promoted by this contract node"
+}

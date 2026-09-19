@@ -143,14 +143,14 @@ pub fn indexed_access_two_levels() -> SnapshotView {
 //   order on key-of unions; alphabetic ordering would be a renderer
 //   choice). TS spec §4.5.
 pub fn keyof_intersection() -> SnapshotView {
-    shell(vec![required_prop("key", "\"foo\" | \"bar\" | \"baz\"")])
+    shell(vec![required_prop("key", "\"foo\" | \"baz\" | \"bar\"")])
 }
 
 // ── T extends string ? T : never (T = 'a'|'b') — distributive cond ──────────
 //   The conditional distributes over the union, so the result is
 //   `'a' | 'b'` (both arms are strings, both are kept). TS spec §4.6.
 pub fn conditional_distributive() -> SnapshotView {
-    shell(vec![required_prop("kind", "\"a\" | \"b\"")])
+    shell(vec![required_prop("kind", "\"b\" | \"a\"")])
 }
 
 // ── { a: string } & { b: number } — intersection of objects ─────────────────
@@ -189,7 +189,7 @@ pub fn userland_shadowing_pick() -> SnapshotView {
 //
 //   Rule citation: TS spec §4.4 (distributive conditional / Exclude).
 pub fn mapped_exclude() -> SnapshotView {
-    shell(vec![required_prop("kind", "\"a\" | \"c\"")])
+    shell(vec![required_prop("kind", "\"c\" | \"a\"")])
 }
 
 // ── Extract<'a' | 'b' | 'c', 'a' | 'b'> — distributive conditional ──────────
@@ -202,7 +202,7 @@ pub fn mapped_exclude() -> SnapshotView {
 //
 //   Rule citation: TS spec §4.4 (distributive conditional / Extract).
 pub fn mapped_extract() -> SnapshotView {
-    shell(vec![required_prop("kind", "\"a\" | \"b\"")])
+    shell(vec![required_prop("kind", "\"b\" | \"a\"")])
 }
 
 // ── IdShape<typeof sample.id> — generic substitution via value-member typeof ─

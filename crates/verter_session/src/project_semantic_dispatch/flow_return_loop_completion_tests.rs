@@ -139,8 +139,8 @@ fn primitive(name: PrimitiveName) -> TypeExpr {
 /// stays reachable alongside a single literal return.
 fn one_or_undefined() -> TypeExpr {
     TypeExpr::Union(Arc::from(vec![
-        TypeExpr::Literal(LiteralValue::Number(1.0)),
         primitive(PrimitiveName::Undefined),
+        TypeExpr::Literal(LiteralValue::Number(1.0)),
     ]))
 }
 

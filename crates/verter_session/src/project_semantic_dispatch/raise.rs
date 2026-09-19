@@ -190,13 +190,17 @@ fn canonicalise_for_digest(
             context: crate::semantic_query::ProjectionReductionContext::published(*mode),
         },
         SemanticQueryKey::NormalizeUnion { members } => SemanticQueryKey::NormalizeUnion {
-            members: super::canonicalize_node_list(members),
+            members: Arc::clone(members),
         },
-        SemanticQueryKey::NormalizeIntersection { members } => {
-            SemanticQueryKey::NormalizeIntersection {
-                members: super::canonicalize_node_list(members),
-            }
-        }
+        SemanticQueryKey::ReduceIntersection {
+            input,
+            purpose,
+            context,
+        } => SemanticQueryKey::ReduceIntersection {
+            input: *input,
+            purpose: *purpose,
+            context: *context,
+        },
         other => other.clone(),
     }
 }
@@ -277,7 +281,7 @@ fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
         SemanticQueryKey::Conditional { .. } => "Conditional",
         SemanticQueryKey::TypeOf { .. } => "TypeOf",
         SemanticQueryKey::NormalizeUnion { .. } => "NormalizeUnion",
-        SemanticQueryKey::NormalizeIntersection { .. } => "NormalizeIntersection",
+        SemanticQueryKey::ReduceIntersection { .. } => "ReduceIntersection",
         SemanticQueryKey::ProjectObjectSpread { .. } => "ProjectObjectSpread",
         SemanticQueryKey::ProjectPath { .. } => "ProjectPath",
         SemanticQueryKey::Relate { .. } => "Relate",
@@ -440,7 +444,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// can accumulate dep facts across nested dispatches and merge them into
     /// the session-layer `fact_versions`. This is the dispatch entry the
     /// cold-build subtree reducer and the operator sub-reductions
-    /// (`ProjectPath` / `NormalizeIntersection` / macro-payload
+    /// (`ProjectPath` / `ReduceIntersection` / macro-payload
     /// intersection normalisation) ride so their dependency facts are not
     /// dropped — the dep-signature-preserving peer of the `SemanticQueryApi`
     /// trait's `execute`.

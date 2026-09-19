@@ -61,7 +61,8 @@
     { "receiver": "RFX0", "product": "semantic refactor and preservation constitution keeps rail separation", "productionCapable": true },
     { "receiver": "SVI0", "product": "semantic visual vocabulary on the inspection rail", "productionCapable": true },
     { "receiver": "TIF1", "product": "TypeInfo-first ComponentInfo consumes inspection-rail labelling", "productionCapable": true },
-    { "receiver": "VSC0", "product": "desktop feature inventory and host-separation contract consumes the client inventory", "productionCapable": false }
+    { "receiver": "VSC0", "product": "desktop feature inventory and host-separation contract consumes the client inventory", "productionCapable": false },
+    { "receiver": "VSW0", "product": "web extension product and host-placement constitution consumes the host-execution-class law and the client inventory (contract-only receiver; VSW1+ own vscode-web production)", "productionCapable": false }
   ],
   "displacedRoutes": [],
   "deletionPopulationThisNode": [],

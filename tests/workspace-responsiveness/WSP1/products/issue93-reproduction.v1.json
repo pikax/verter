@@ -1,0 +1,39 @@
+{
+  "schema": "issue93-reproduction.v1",
+  "node": "WSP1",
+  "originalIssue": {
+    "id": 93,
+    "opened": "2026-07-25",
+    "reportedFacts": ["large codebase", "suspected excess LSP information"],
+    "disposition": "unverified",
+    "rootCauseStatus": "not-proved"
+  },
+  "reproduction": {
+    "state": "unreproduced",
+    "kind": "explicit-unreproduced-evidence-record",
+    "notAFix": true,
+    "reasons": [
+      "WSP0 version-capture checklist is still wholly unrecorded (lapce-client, verter-lsp-server, verter-plugin-adapter, provider engines/modes, enabled features, os-and-machine-manifest are null)",
+      "reference-machine-manifests.v1 population is empty-at-ratification; no recorded machine exists to bind a workload-matrix run",
+      "real-Lapce UI capture is owned by WSP1L; a protocol smoke or lsp-test-client replay is not real-editor hang proof",
+      "the original report named suspected excess LSP information without a proved stage; this node can separate server stages once a captured client exists, and must not guess a root cause"
+    ],
+    "protocolHarness": {
+      "status": "available",
+      "surfaces": [
+        "packages/lsp-test-client",
+        "packages/dx-harness/src/protocol-replay"
+      ],
+      "cannotCertify": "Lapce issue 93"
+    },
+    "nextOwners": ["WSP1L", "WSP1A"]
+  },
+  "versionCapture": [
+    { "item": "lapce-client", "version": null, "status": "unrecorded" },
+    { "item": "verter-lsp-server", "version": null, "status": "unrecorded" },
+    { "item": "verter-plugin-adapter", "version": null, "status": "unrecorded" },
+    { "item": "provider-engines-and-modes", "version": null, "status": "unrecorded" },
+    { "item": "enabled-features", "version": null, "status": "unrecorded" },
+    { "item": "os-and-machine-manifest", "version": null, "status": "unrecorded" }
+  ]
+}

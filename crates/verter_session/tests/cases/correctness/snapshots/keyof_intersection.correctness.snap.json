@@ -3,7 +3,7 @@
   "props": [
     {
       "name": "key",
-      "type_signature": "\"foo\" | \"bar\" | \"baz\"",
+      "type_signature": "\"foo\" | \"baz\" | \"bar\"",
       "required": true,
       "has_default": false,
       "default_signature": null,

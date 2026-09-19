@@ -506,7 +506,7 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
         | SemanticQueryKey::Conditional { .. }
         | SemanticQueryKey::TypeOf { .. }
         | SemanticQueryKey::NormalizeUnion { .. }
-        | SemanticQueryKey::NormalizeIntersection { .. }
+        | SemanticQueryKey::ReduceIntersection { .. }
         | SemanticQueryKey::Relate { .. }
         | SemanticQueryKey::ResolveEnum { .. }
         | SemanticQueryKey::ResolveOverloadSet { .. }
