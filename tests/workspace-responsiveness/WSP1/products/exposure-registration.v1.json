@@ -1,0 +1,50 @@
+{
+  "schema": "wsp1-exposure-registration.v1",
+  "node": "WSP1",
+  "dx1SchemaOwner": "DX1",
+  "rule": "register the schema/case before the explorer exists; keep product promotion blocked on executable exposure",
+  "operations": [
+    {
+      "id": "protocol.interaction_trace",
+      "operation": "server-side InteractionTrace stage timeline",
+      "profile": "inspection",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "exposure": {
+        "state": "registered",
+        "route": "crates/verter_lsp/src/interaction_trace.rs via initialize option interactionTrace.enabled and $/verter/getStatistics",
+        "replayCase": "packages/lsp-test-client/test/protocolReplay.test.ts",
+        "test": "cargo test -p verter_lsp --lib interaction_trace"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "DX1 descriptor plus a generic typed explorer view; native execution must be explicitly selected",
+          "replayCase": "DX1 registration plus this node's protocolReplay tests"
+        }
+      }
+    },
+    {
+      "id": "protocol.recorded_lsp_replay",
+      "operation": "RecordedLspReplay over lsp-test-client and dx-harness",
+      "profile": "inspection",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "exposure": {
+        "state": "registered",
+        "route": "packages/dx-harness/src/protocol-replay and packages/lsp-test-client/src/protocolReplay.ts",
+        "replayCase": "packages/dx-harness/test/protocolReplay.test.ts",
+        "test": "pnpm --filter @verter/lsp-test-client test; pnpm --filter @verter/dx-harness exec vitest --run test/protocolReplay.test.ts"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "DX1 descriptor plus executable playground adapter; a protocol smoke is not a real-client claim",
+          "replayCase": "DX1 registration plus this node's protocolReplay tests"
+        }
+      }
+    }
+  ]
+}

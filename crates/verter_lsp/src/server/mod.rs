@@ -10,6 +10,7 @@ use crate::documents::provider_projection::ProviderPositionMapper;
 use crate::documents::{uri_to_canonical_id, DocumentRegistry};
 use crate::features::cursor_context::ExpressionContext;
 use crate::features::diagnostics::map_diagnostics;
+use crate::interaction_trace::InteractionTraceLog;
 use crate::provider_sync::{
     commit_sync_transition, genuinely_stale_after_sync, non_decl_close_targets,
     open_unresolved_carrier_commit, open_unresolved_carrier_state, prepare_sync_transition,
@@ -473,6 +474,7 @@ pub struct ServerCore {
     project_sync: Option<ProjectSync>,
     workspace_roots: tokio::sync::Mutex<Vec<String>>,
     statistics: Arc<Statistics>,
+    pub(crate) interaction_trace: Arc<InteractionTraceLog>,
     /// Negotiated position encoding (LSP 3.17). Set during `initialize()`.
     /// Shared with SyncCoordinator so it can compute diagnostics with the correct encoding.
     position_encoding: Arc<parking_lot::RwLock<PositionEncodingKind>>,
@@ -1232,6 +1234,7 @@ impl VerterLanguageServer {
             project_sync,
             workspace_roots: tokio::sync::Mutex::new(Vec::new()),
             statistics: Arc::new(Statistics::new(500)),
+            interaction_trace: Arc::new(InteractionTraceLog::new(256)),
             position_encoding,
             action_engine: verter_actions::ActionEngine::default(),
             init_lint_options: tokio::sync::Mutex::new(None),

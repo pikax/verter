@@ -1,0 +1,53 @@
+{
+  "node": "WSP1",
+  "kind": "implementation",
+  "products": [
+    "InteractionTrace (request/source epoch and server-side stage timestamps)",
+    "RecordedLspReplay via packages/lsp-test-client and packages/dx-harness",
+    "issue93-reproduction.v1 (explicit unreproduced evidence record)",
+    "exposure-registration.v1 (DX1 schema/case; promotion blocked)",
+    "ownership-map.json"
+  ],
+  "cases": [
+    {
+      "id": "WSP1-AC1",
+      "disposition": "reject",
+      "binding": "packages/lsp-test-client/test/protocolReplay.test.ts stalled reader + packages/dx-harness/test/protocolReplay.test.ts outbound_enqueued",
+      "twins": ["server-complete-without-stalled-reader-detection"]
+    },
+    {
+      "id": "WSP1-AC2",
+      "disposition": "reject",
+      "binding": "packages/lsp-test-client/test/protocolReplay.test.ts discriminateThroughputVsQuery",
+      "twins": ["payload-growth-claimed-as-query", "query-dwell-claimed-as-throughput"]
+    },
+    {
+      "id": "WSP1-AC3",
+      "disposition": "reject",
+      "binding": "packages/lsp-test-client/test/protocolReplay.test.ts rejectReplay + packages/dx-harness/test/protocolReplay.test.ts live drop/missing-provider",
+      "twins": ["dropped-diagnostics-accepted", "missing-provider-accepted"]
+    },
+    {
+      "id": "WSP1-AC-OWNER",
+      "disposition": "accept",
+      "binding": "tests/workspace-responsiveness/WSP1/products/ownership-map.json; final owner expansion.workspace-responsiveness; client decode/apply/paint retire to WSP1L"
+    },
+    {
+      "id": "WSP1-AC-BASIS",
+      "disposition": "accept",
+      "binding": "this node does not change caching, mapping, snapshots or result handles; incremental-vs-fresh remains bound to equal-work corpus runs on a recorded reference machine (still empty; WSP1 records that unavailability)"
+    },
+    {
+      "id": "WSP1-AC-RESOURCE",
+      "disposition": "accept",
+      "binding": "unavailable metrics labelled on InteractionTraceSnapshot and RecordedLspReplay; no real-client paint claim; no guessed zeros"
+    },
+    {
+      "id": "WSP1-AC-EXPOSURE",
+      "disposition": "accept",
+      "binding": "tests/workspace-responsiveness/WSP1/products/exposure-registration.v1.json; promotionBlocked until DX1 executable explorer"
+    }
+  ],
+  "runtimeCorrectness": true,
+  "notes": "Server/protocol instrumentation only. WSP1L owns real-Lapce UI decode/apply/paint. Issue 93 stays unreproduced: version capture and reference-machine population are empty, and a protocol replay is not a real-client hang proof."
+}

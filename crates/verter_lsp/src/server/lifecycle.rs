@@ -122,6 +122,17 @@ pub(super) async fn handle_initialize(
                 if stats_enabled { "enabled" } else { "disabled" }
             );
         }
+        if let Some(trace_enabled) = opts
+            .get("interactionTrace")
+            .and_then(|s| s.get("enabled"))
+            .and_then(|v| v.as_bool())
+        {
+            server.interaction_trace.set_enabled(trace_enabled);
+            tracing::info!(
+                "interactionTrace: {}",
+                if trace_enabled { "enabled" } else { "disabled" }
+            );
+        }
         // Store lint options for use in initialized()
         if opts.get("lint").is_some() {
             *server.init_lint_options.lock().await = Some(opts.clone());

@@ -509,9 +509,15 @@ impl VerterLanguageServer {
             }),
         );
 
+        let interaction_trace = self
+            .interaction_trace
+            .is_enabled()
+            .then(|| self.interaction_trace.snapshot());
+
         Ok(StatisticsSnapshot {
             enabled: self.statistics.is_enabled(),
             session: StatisticsSession { by_type, by_file },
+            interaction_trace,
         })
     }
 
