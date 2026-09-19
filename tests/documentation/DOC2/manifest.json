@@ -1,0 +1,66 @@
+{
+  "node": "DOC2",
+  "kind": "implementation",
+  "products": [
+    "docs/contributing/architecture-contracts.md (owner boundaries, layer rules, hotspot surfaces, capability evidence basis)",
+    "docs/contributing/source-identity.md (canonical file identity, span types, position encodings, stable hashes, source maps)",
+    "docs/contributing/query-lifetimes.md (lifetime classes, memo identity, scheduler generations, determinism)",
+    "docs/contributing/first-contribution.md (end-to-end lint-rule walkthrough on the owning interfaces)",
+    "docs/scripts/reference-harness.mjs contributorDocs section (sole owning interface for contributor-docs checks)",
+    "contributor-docs-model.v1 machine product"
+  ],
+  "cases": [
+    {
+      "id": "DOC2-AC1",
+      "disposition": "reject",
+      "twins": [
+        "clean contributor docs pass and cover every contract hotspot",
+        "every contributor page is registered in the DOC0 docs inventory",
+        "a page unlisted by the contributing index fails",
+        "a missing contract source fails"
+      ]
+    },
+    {
+      "id": "DOC2-AC2",
+      "disposition": "reject",
+      "twins": [
+        "a tutorial that teaches a local resolver fails",
+        "a tutorial that teaches a duplicate cache fails",
+        "a tutorial that teaches a test-only scheduler hook fails",
+        "a taught interface whose symbol left its source fails",
+        "a cited source path that no longer exists fails",
+        "the walkthrough teaches the canonical owners, not local substitutes"
+      ]
+    },
+    {
+      "id": "DOC2-AC3",
+      "disposition": "reject",
+      "twins": [
+        "perturbed model order yields an identical canonical receipt",
+        "incremental receipt with the same digest matches a fresh run",
+        "edit fails and revert restores a complete receipt",
+        "pre-aborted signal yields cancelled and never complete",
+        "mid-page cancellation yields cancelled with a source digest",
+        "a missing contributor page is a partial result"
+      ]
+    },
+    {
+      "id": "DOC2-AC4",
+      "disposition": "accept",
+      "twins": [
+        "clean contributor docs pass and cover every contract hotspot",
+        "every contributor page is registered in the DOC0 docs inventory",
+        "the walkthrough cites the current contracts and real code"
+      ]
+    },
+    {
+      "id": "DOC2-AC5",
+      "disposition": "accept",
+      "twins": [
+        "clean contributor docs pass and cover every contract hotspot"
+      ]
+    }
+  ],
+  "runtimeCorrectness": false,
+  "notes": "Implementation node (documentation delivery): four contributor pages under docs/contributing plus the contributorDocs validation section of the existing docs reference harness. Static checks only (proofClass static-proof): no example execution, no runtime spawn. Production change is the harness extension (1 file); pages, model, tests and inventory rows are docs/test artifacts inventoried separately. AC3 N/A rationale: no production state, query, map or scheduling boundary is touched at this node; their fresh/incremental, edit/revert, cancellation, stale/partial and determinism proofs remain owned by their untouched owners (rev11.scheduler-runtime admission and cancellation, rev11.flow dispatch, B4R0 source lineage, LSO0 snapshot publication), and the equivalent docs-boundary properties are proven on the harness receipt itself. ARH1 ac4 obligation discharged: per-hotspot import direction, constructor capabilities, state lifetimes and minimal public surfaces are documented with the contract rows cited as source of truth; VIM/DX capability mapping cites the ARH0 capability matrix and the DOC0 catalog (no second matrix); host/profile evidence basis is the pinned candidate plus the CI architecture-health lane with provenance mode."
+}
