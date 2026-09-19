@@ -1,0 +1,26 @@
+{
+  "schema": "wsp1l-gui-instrumentation-availability.v1",
+  "node": "WSP1L",
+  "rule": "missing GUI instrumentation is recorded as unavailable, never simulated (charter WSP1L.3)",
+  "realClientCapture": {
+    "state": "unavailable",
+    "notASimulation": true,
+    "reasons": [
+      "reference-machine-manifests.v1 population is empty-at-ratification: no recorded reference-client machine exists to bind a real-Lapce run",
+      "the pinned lapce-client version is unrecorded for the same reason; a supported build identity is not guessed",
+      "this environment has no Lapce GUI session to drive; a protocol smoke, mock LSP client, screenshot or raw-LSP session is refused as UI evidence by the driver itself (WSP1L-AC3)",
+      "Issue 93 therefore remains unreproduced: locating its first blocked stage needs the real-client timeline this record marks unavailable"
+    ],
+    "whatIsProvenHermetically": [
+      "a deliberately stalled UI thread is detected while the server timeline shows immediate completion, and the first blocked stage is named (WSP1L-AC1; packages/dx-harness/test/lapceDriver.test.ts)",
+      "two runs of the same scripted interaction compare within a recorded noise bound, and unknowns never become zeros (WSP1L-AC2)",
+      "the driver refuses to certify a run whose protocol smoke passed with no UI timeline (WSP1L-AC3)",
+      "the volt emits a one-time initialize launch stamp behind uiTrace.enabled (default off) so a real capture session can correlate epochs without touching the per-message path (WSP1L.1)"
+    ],
+    "automationPathRecorded": {
+      "fixture": "instrumented-fixture-host: deterministic scripted UI event emission; no GUI, no sleeps, no real Lapce process",
+      "realHost": "volt-launch-stamp + Lapce UI instrumentation: one-time initialize stamp behind uiTrace.enabled; per-message LSP path untouched"
+    }
+  },
+  "nextOwners": ["WSP1A", "expansion.workspace-responsiveness"]
+}

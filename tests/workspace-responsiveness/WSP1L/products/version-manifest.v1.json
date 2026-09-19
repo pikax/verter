@@ -1,0 +1,16 @@
+{
+  "schema": "lapce-version-manifest.v1",
+  "node": "WSP1L",
+  "items": [
+    {
+      "item": "lapce-client",
+      "version": null,
+      "status": "unrecorded",
+      "reason": "no supported Lapce build captured on a reference-client machine yet (reference-machine-manifests.v1 population is empty-at-ratification); unavailable, not guessed"
+    },
+    { "item": "verter-plugin-adapter", "version": "0.1.0", "status": "pinned" },
+    { "item": "verter-lsp-server", "version": "0.0.1-beta.5", "status": "pinned" },
+    { "item": "provider-engines-and-modes", "version": "tsgo", "status": "pinned" }
+  ],
+  "recordedAs": "tests/workspace-responsiveness/WSP1L/products/version-manifest.v1.json"
+}

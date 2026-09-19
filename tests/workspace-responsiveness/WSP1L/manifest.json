@@ -1,0 +1,55 @@
+{
+  "node": "WSP1L",
+  "kind": "implementation",
+  "products": [
+    "LapceInteractionDriver (open/type/complete/navigate/close/teardown with certification rules)",
+    "UiTimeline (input-to-paint, event-loop stall, decode/apply/paint, correlated to request/source epochs)",
+    "Pinned Lapce/volt/server/provider version manifest (lapce-client recorded unrecorded, not guessed)",
+    "Volt launch-stamp instrumentation hook (default off behind uiTrace.enabled)",
+    "gui-instrumentation-availability.v1 (real-client capture recorded unavailable, not simulated)",
+    "ownership-map.json",
+    "exposure-registration.v1 (DX1 schema/case; promotion blocked)"
+  ],
+  "cases": [
+    {
+      "id": "WSP1L-AC1",
+      "disposition": "reject",
+      "binding": "packages/dx-harness/test/lapceDriver.test.ts WSP1L-AC1 describes: stalled-UI+immediate-server detection, server-side stall kept distinct, undecided-immediacy not certified",
+      "twins": ["server-stall-claimed-as-ui-stall", "undecided-server-timeline-certified-as-ui-stall", "no-stall-reported-as-stall"]
+    },
+    {
+      "id": "WSP1L-AC2",
+      "disposition": "reject",
+      "binding": "packages/dx-harness/test/lapceDriver.test.ts WSP1L-AC2 describes: two-run comparability within the recorded noise bound",
+      "twins": ["divergent-runs-accepted", "unknown-input-to-paint-compared-as-zero", "different-interactions-compared"]
+    },
+    {
+      "id": "WSP1L-AC3",
+      "disposition": "reject",
+      "binding": "packages/dx-harness/test/lapceDriver.test.ts WSP1L-AC3 describes: protocol-smoke-only run refused, rejected hosts refused, sleep-as-readiness refused",
+      "twins": ["protocol-smoke-certified", "mock-lsp-certified", "screenshot-certified"]
+    },
+    {
+      "id": "WSP1L-AC-OWNER",
+      "disposition": "accept",
+      "binding": "tests/workspace-responsiveness/WSP1L/products/ownership-map.json; final owner expansion.workspace-responsiveness; volt launch-stamp hook carries a retirement obligation; client decode/apply/paint attribution retired here from WSP1"
+    },
+    {
+      "id": "WSP1L-AC-BASIS",
+      "disposition": "accept",
+      "binding": "runs carry a ProductReceiptBasis (source/project/engine/host/completeness); stale runs are refused certification; this node changes no caching, mapping, snapshot or result-handle publication"
+    },
+    {
+      "id": "WSP1L-AC-RESOURCE",
+      "disposition": "accept",
+      "binding": "unavailable metrics stay { status: unknown } with reasons (never guessed zeros); real-client paint claims require the real-lapce host with measured input-to-paint; the fixture host is inadmissible and carries GUI_INSTRUMENTATION_UNAVAILABLE_REASON"
+    },
+    {
+      "id": "WSP1L-AC-EXPOSURE",
+      "disposition": "accept",
+      "binding": "tests/workspace-responsiveness/WSP1L/products/exposure-registration.v1.json; promotionBlocked until DX1 executable explorer"
+    }
+  ],
+  "runtimeCorrectness": true,
+  "notes": "Hermetic driver proof. The real-Lapce GUI run is recorded unavailable (gui-instrumentation-availability.v1): reference-machine population is empty and no Lapce GUI session exists here; the driver itself refuses protocol-smoke/mock/screenshot/raw-LSP captures, so no simulated capture can be published. Issue 93 stays unreproduced."
+}

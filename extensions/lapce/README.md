@@ -186,6 +186,14 @@ every Verter editor client ships). All are optional; defaults shown:
 "statistics.enabled" = false         # server-side resolution statistics (opt-in)
 ```
 
+### Instrumentation (WSP1L)
+
+`uiTrace.enabled = false` (default) keeps the volt silent. When set, the volt
+emits **one** launch stamp at `initialize` — the epoch marker the
+`@verter/dx-harness/lapce` driver correlates with the WSP1 server timeline to
+attribute Lapce UI decode/apply/paint timings. It is a one-time message; the
+per-message LSP path is never touched, and no semantic logic lives in the volt.
+
 ## How to verify it works
 
 1. Open a `.vue` or `.svelte` file in a project that has `typescript@7`

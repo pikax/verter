@@ -1,0 +1,71 @@
+{
+  "schema": "wsp1l-exposure-registration.v1",
+  "node": "WSP1L",
+  "dx1SchemaOwner": "DX1",
+  "rule": "register the schema/case before the explorer exists; keep product promotion blocked on executable exposure",
+  "operations": [
+    {
+      "id": "lapce.interaction_driver",
+      "operation": "LapceInteractionDriver scripted open/type/complete/navigate/close/teardown with certification rules",
+      "profile": "inspection",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "exposure": {
+        "state": "registered",
+        "route": "packages/dx-harness/lapce/driver.ts exported as @verter/dx-harness/lapce",
+        "replayCase": "packages/dx-harness/test/lapceDriver.test.ts",
+        "test": "pnpm --filter @verter/dx-harness exec vitest --run test/lapceDriver.test.ts"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "DX1 descriptor plus an executable playground adapter; a hermetic fixture run is not a real-client claim",
+          "replayCase": "DX1 registration plus this node's lapceDriver tests"
+        }
+      }
+    },
+    {
+      "id": "lapce.ui_timeline",
+      "operation": "UiTimeline input-to-paint, event-loop stall and decode/apply/paint timings correlated to request/source epochs",
+      "profile": "inspection",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "exposure": {
+        "state": "registered",
+        "route": "packages/dx-harness/lapce/timeline.ts (buildUiTimeline, detectUiStallWithImmediateServer, compareScriptedTimelines)",
+        "replayCase": "packages/dx-harness/test/lapceDriver.test.ts WSP1L-AC1/AC2 describes",
+        "test": "pnpm --filter @verter/dx-harness exec vitest --run test/lapceDriver.test.ts"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "DX1 descriptor plus a generic typed explorer view; native execution must be explicitly selected",
+          "replayCase": "DX1 registration plus this node's lapceDriver tests"
+        }
+      }
+    },
+    {
+      "id": "lapce.volt_launch_stamp",
+      "operation": "one-time initialize launch-stamp epoch marker from the volt (default off, uiTrace.enabled opt-in)",
+      "profile": "inspection",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "exposure": {
+        "state": "registered",
+        "route": "extensions/lapce/src/lib.rs LaunchStamp + LspLauncher::record_launch_stamp",
+        "replayCase": "cargo test -p verter-lapce launch_stamp (host target, no WASI runtime)",
+        "test": "cargo test -p verter-lapce"
+      },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "DX1 descriptor; the stamp is a correlation input, not a user-facing operation",
+          "replayCase": "DX1 registration plus this node's lib.rs stamp tests"
+        }
+      }
+    }
+  ]
+}
