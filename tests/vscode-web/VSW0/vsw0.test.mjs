@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * VSW0 constitution harness: web extension feature contract /
- * main-browser entrypoint policy / host-status vocabulary checks.
+ * main-browser entrypoint policy / host-status vocabulary / web product
+ * ownership checks.
  *
  * Grounds itself in the live repository (packages/vue-vscode manifest and
  * build config, the shipped VSC0 / BWH0 / DX0 machine products) only. It
@@ -19,6 +20,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../../..");
+const PKG_DIR = path.join(REPO_ROOT, "packages/vue-vscode");
 const readJson = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
 
 const dxReceiptBasis = readJson(
@@ -30,29 +32,36 @@ const dxHostClasses = readJson(
 const dxOwnership = readJson(
   path.join(REPO_ROOT, "tests/product-experience/DX0/products/exposure-ownership-map.json"),
 );
+const dxExposureContract = readJson(
+  path.join(REPO_ROOT, "tests/product-experience/DX0/products/feature-exposure-contract.v1.json"),
+);
 const vscFeatureMatrix = readJson(
   path.join(REPO_ROOT, "tests/vscode-product/VSC0/products/feature-ownership-matrix.v1.json"),
 );
+const vscBoundary = readJson(
+  path.join(REPO_ROOT, "tests/vscode-product/VSC0/products/desktop-web-shared-boundary.v1.json"),
+);
 const bwhPlatformServices = readJson(
   path.join(REPO_ROOT, "tests/browser-host/BWH0/products/platform-host-services.v1.json"),
+);
+const bwhExecManifest = readJson(
+  path.join(REPO_ROOT, "tests/browser-host/BWH0/products/browser-execution-manifest.v1.json"),
 );
 
 const contract = readJson(path.join(HERE, "products/web-extension-feature-contract.v1.json"));
 const entryPolicy = readJson(path.join(HERE, "products/entrypoint-contribution-policy.v1.json"));
 const hostVocab = readJson(path.join(HERE, "products/host-status-vocabulary.v1.json"));
+const ownershipMap = readJson(path.join(HERE, "products/web-product-ownership-map.v1.json"));
 
-const livePkg = readJson(path.join(REPO_ROOT, "packages/vue-vscode/package.json"));
-const liveEsbuildCfg = fs.readFileSync(
-  path.join(REPO_ROOT, "packages/vue-vscode/esbuild.config.mjs"),
-  "utf8",
-);
-const liveExtensionTs = fs.readFileSync(
-  path.join(REPO_ROOT, "packages/vue-vscode/src/extension.ts"),
-  "utf8",
-);
+const livePkg = readJson(path.join(PKG_DIR, "package.json"));
+const liveEsbuildCfg = fs.readFileSync(path.join(PKG_DIR, "esbuild.config.mjs"), "utf8");
+const liveExtensionTs = fs.readFileSync(path.join(PKG_DIR, "src/extension.ts"), "utf8");
 
 const bwhServiceIds = new Set(bwhPlatformServices.services.map((s) => s.id));
 const vscFeatures = Object.fromEntries(vscFeatureMatrix.features.map((f) => [f.id, f]));
+const dxOperations = Object.fromEntries(dxExposureContract.operations.map((o) => [o.id, o]));
+const bwhSemanticHostRequires = (bwh) =>
+  bwh.portabilityProof.semanticHostRequires.map((s) => s.match(/^[A-Z0-9]+/)[0]).sort();
 
 /** Structural clone with a mutation applied; used for negative twins only. */
 function perturb(obj, mutate) {
@@ -73,26 +82,134 @@ const filesExist = (rels) => {
 // ---------------------------------------------------------------------------
 // VSW0-AC1: a build with only a Node main entry cannot pass as a web
 // extension. The admission predicate is factored so every twin re-runs the
-// exact discriminator the live facts pass.
+// exact discriminator the live facts pass. Facts are derived live and fail
+// closed: a build config without a platform value is an error, never an
+// implicit browser verdict, and the browser-entry Node-import fact is
+// derived from a real entry module graph, never from package.json#browser
+// (which VS Code defines as absent-or-path, not a bundler remap map).
 // ---------------------------------------------------------------------------
 
-function webAdmissionFacts() {
+const NODE_IMPORT_RE =
+  /^(?:node:|assert|buffer|child_process|cluster|crypto|dgram|dns|events|fs|http|https|module|net|os|path|readline|stream|tls|url|util|vm|worker_threads|zlib)(?:\/|$)/;
+const IMPORT_SPEC_RE =
+  /(?:import|export)\s+(?!type\b)[^;'"]*?from\s*["']([^"']+)["']|import\s+["']([^"']+)["']|require\(\s*["']([^"']+)["']\s*\)/g;
+
+function resolveModuleFile(spec) {
+  for (const candidate of [spec, `${spec}.ts`, `${spec}.tsx`, `${spec}/index.ts`]) {
+    const abs = path.join(PKG_DIR, candidate);
+    if (fs.existsSync(abs) && fs.statSync(abs).isFile()) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Walks the real import graph of a source entry under packages/vue-vscode
+ * (relative imports only; type-only imports are erased by the bundler and
+ * skipped) and reports whether any module in the graph imports a Node
+ * builtin or the desktop-owned vscode-languageclient/node transport (VSC0
+ * transport-desktop-owned). Fail-closed: an unresolvable relative import is
+ * an error, never a silent pass.
+ */
+function entryGraphImportsNode(entryRel) {
+  const seen = new Set();
+  const stack = [entryRel.replace(/^\.?\//, "")];
+  while (stack.length > 0) {
+    const rel = stack.pop();
+    if (seen.has(rel)) continue;
+    seen.add(rel);
+    let src;
+    try {
+      src = fs.readFileSync(path.join(PKG_DIR, rel), "utf8");
+    } catch {
+      throw new Error(`browser entry source not readable: ${rel}`);
+    }
+    for (const m of src.matchAll(IMPORT_SPEC_RE)) {
+      const spec = m[1] ?? m[2] ?? m[3];
+      if (NODE_IMPORT_RE.test(spec) || spec === "vscode-languageclient/node") return true;
+      if (spec.startsWith(".")) {
+        const joined = path.posix
+          .join(path.posix.dirname(rel), spec)
+          .replace(/^\.\//, "")
+          .replace(/^\.\.\//, "");
+        const resolved = resolveModuleFile(joined);
+        if (!resolved) throw new Error(`unresolvable relative import ${spec} in ${rel}`);
+        stack.push(resolved);
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * The build configs declared in the esbuild config text, one per
+ * `entryPoints:` block: each block's platform value and raw entry
+ * expression. Fail-closed: a config without a platform value is an error,
+ * never an implicit browser verdict.
+ */
+function parseBuildConfigs(esbuildText) {
+  const chunks = esbuildText.split("entryPoints:").slice(1);
+  if (chunks.length === 0) {
+    throw new Error("no build config found in esbuild config: admission facts fail closed");
+  }
+  return chunks.map((chunk, i) => {
+    const platform = chunk.match(/platform:\s*["']([^"']+)["']/);
+    if (!platform) {
+      throw new Error(`build config #${i + 1} declares no platform: admission facts fail closed`);
+    }
+    const entry = chunk.match(/\[([^\]]*)\]/);
+    return { platform: platform[1], entryRaw: entry ? entry[1].trim() : "" };
+  });
+}
+
+/** Resolves a build entry expression to a source path under the package. */
+function resolveEntrySource(entryRaw, esbuildText) {
+  const literal = entryRaw.match(/["']([^"']+)["']/);
+  if (literal) return literal[1];
+  const name = entryRaw.trim();
+  const decl = esbuildText.match(new RegExp(`const\\s+${name}\\s*=\\s*path\\.join\\(([^)]*)\\)`));
+  if (!decl) {
+    throw new Error(`cannot resolve build entry ${entryRaw}: admission facts fail closed`);
+  }
+  return decl[1]
+    .match(/["']([^"']*)["']/g)
+    .map((s) => s.slice(1, -1))
+    .join("/");
+}
+
+function webAdmissionFacts({
+  pkg = livePkg,
+  esbuildText = liveEsbuildCfg,
+  scanEntryGraph = entryGraphImportsNode,
+} = {}) {
+  const builds = parseBuildConfigs(esbuildText);
+  const desktopBuild = builds.find((b) => /PRODUCTION_ENTRY_POINT|extension\.ts/.test(b.entryRaw));
+  if (!desktopBuild) {
+    throw new Error("no desktop/main build config found: admission facts fail closed");
+  }
+  const manifestMain = typeof pkg.main === "string";
+  const manifestBrowser = typeof pkg.browser === "string";
+  // The desktop main bundle keeps its own build; the browser bundle is the
+  // non-desktop build config. A declared browser entry with no browser
+  // bundle build is not browser-targeted and stays not-admitted.
+  const browserBuild = builds.find((b) => b !== desktopBuild);
+  const browserBundlePlatform = manifestBrowser && browserBuild ? browserBuild.platform : null;
+  const browserEntryImportsNode =
+    manifestBrowser && browserBuild
+      ? scanEntryGraph(resolveEntrySource(browserBuild.entryRaw, esbuildText))
+      : null;
   return {
-    manifestMain: typeof livePkg.main === "string",
-    manifestBrowser: typeof livePkg.browser === "string",
-    buildPlatform: /platform:\s*"node"/.test(liveEsbuildCfg) ? "node" : "browser",
-    browserEntryImportsNode:
-      "browser" in livePkg &&
-      Object.values(livePkg.browser).some((v) =>
-        /node:|vscode-languageclient\/node/.test(String(v)),
-      ),
+    manifestMain,
+    manifestBrowser,
+    desktopBuildPlatform: desktopBuild.platform,
+    browserBundlePlatform,
+    browserEntryImportsNode,
   };
 }
 
 function admitWebExtension(facts) {
   if (!facts.manifestMain) return { admitted: false, reason: "main-required" };
   if (!facts.manifestBrowser) return { admitted: false, reason: "node-main-only" };
-  if (facts.buildPlatform !== "browser") {
+  if (facts.browserBundlePlatform !== "browser") {
     return { admitted: false, reason: "browser-entry-node-platform" };
   }
   if (facts.browserEntryImportsNode) {
@@ -115,6 +232,16 @@ function assertPolicyDeclaresAdmissionLaw(policy) {
   );
   assert.match(
     rules,
+    /desktop main bundle keeps its node platform/,
+    "an admission rule must keep the builds dual: node main bundle, browser browser bundle",
+  );
+  assert.match(
+    rules,
+    /node-platform browser bundle is not a web extension/,
+    "a node-platform browser bundle must be rejected too",
+  );
+  assert.match(
+    rules,
     /no Node builtins|never spawns a child process/,
     "an admission rule must exclude Node imports and child processes from the web entry",
   );
@@ -122,6 +249,11 @@ function assertPolicyDeclaresAdmissionLaw(policy) {
     rules,
     /re-derived from the live manifest/,
     "admission must be a re-derived predicate, not a packaging-time claim",
+  );
+  assert.match(
+    rules,
+    /fail closed/,
+    "admission facts must fail closed, never default to a browser verdict",
   );
 }
 
@@ -133,9 +265,14 @@ function assertLiveStateGrounded(policy, facts) {
     "liveState.manifestBrowser must match the live manifest",
   );
   assert.equal(
-    live.buildPlatform,
-    facts.buildPlatform,
-    "liveState.buildPlatform must match the live esbuild config",
+    live.desktopBuildPlatform,
+    facts.desktopBuildPlatform,
+    "liveState.desktopBuildPlatform must match the live esbuild config",
+  );
+  assert.equal(
+    live.browserBundlePlatform,
+    facts.browserBundlePlatform ?? "absent",
+    "liveState.browserBundlePlatform must match the live esbuild config",
   );
   assert.equal(
     live.verdict,
@@ -154,25 +291,29 @@ function assertLiveStateGrounded(policy, facts) {
   );
 }
 
-test("VSW0-AC1 clean pass: the live build is not-admitted node-main-only and the predicate can admit", () => {
+// A compliant dual-entry product built from perturbed live inputs for the
+// non-vacuity twins: the desktop build and its node platform stay exactly as
+// shipped; only a browser entry declaration and a browser-targeted browser
+// bundle build are added.
+const dualEntryPkg = { ...structuredClone(livePkg), browser: "dist/web/extension.js" };
+const dualEntryEsbuild = (entry, platform) =>
+  `${liveEsbuildCfg}\nconst webBundleConfig = { entryPoints: ["${entry}"], platform: "${platform}" };\n`;
+
+test("VSW0-AC1 clean pass: the live build is not-admitted node-main-only with fail-closed live-derived facts", () => {
   const facts = webAdmissionFacts();
+  assert.deepEqual(facts, {
+    manifestMain: true,
+    manifestBrowser: false,
+    desktopBuildPlatform: "node",
+    browserBundlePlatform: null,
+    browserEntryImportsNode: null,
+  });
   assert.deepEqual(admitWebExtension(facts), {
     admitted: false,
     reason: "node-main-only",
   });
   assertPolicyDeclaresAdmissionLaw(entryPolicy);
   assertLiveStateGrounded(entryPolicy, facts);
-
-  // Non-vacuity: the same predicate admits a fully compliant manifest.
-  assert.deepEqual(
-    admitWebExtension({
-      manifestMain: true,
-      manifestBrowser: true,
-      buildPlatform: "browser",
-      browserEntryImportsNode: false,
-    }),
-    { admitted: true, reason: "admitted" },
-  );
 });
 
 test("VSW0-AC1 twin: web-admission-without-policy (dropping the both-entries rule) fails", () => {
@@ -185,38 +326,90 @@ test("VSW0-AC1 twin: web-admission-without-policy (dropping the both-entries rul
 });
 
 test("VSW0-AC1 twin: browser-only-entry is not admitted either", () => {
-  const verdict = admitWebExtension({
-    ...webAdmissionFacts(),
-    manifestMain: false,
-    manifestBrowser: true,
-  });
+  const pkg = { ...structuredClone(livePkg) };
+  delete pkg.main;
+  pkg.browser = "dist/web/extension.js";
+  const facts = webAdmissionFacts({ pkg });
+  assert.equal(facts.manifestMain, false);
+  const verdict = admitWebExtension(facts);
   assert.equal(verdict.admitted, false);
   assert.equal(verdict.reason, "main-required");
 });
 
-test("VSW0-AC1 twin: browser-entry-node-platform (browser entry declared, node build) fails", () => {
-  const verdict = admitWebExtension({
-    ...webAdmissionFacts(),
-    manifestBrowser: true,
+test("VSW0-AC1 twin: browser-entry-node-platform (browser entry declared, node-platform browser bundle) fails", () => {
+  const facts = webAdmissionFacts({
+    pkg: dualEntryPkg,
+    esbuildText: dualEntryEsbuild("src/activationGate.ts", "node"),
   });
-  assert.equal(verdict.admitted, false);
-  assert.equal(verdict.reason, "browser-entry-node-platform");
+  assert.equal(facts.browserBundlePlatform, "node");
+  assert.deepEqual(admitWebExtension(facts), {
+    admitted: false,
+    reason: "browser-entry-node-platform",
+  });
 });
 
-test("VSW0-AC1 twin: node-import-in-browser-entry fails admission", () => {
-  const verdict = admitWebExtension({
-    manifestMain: true,
-    manifestBrowser: true,
-    buildPlatform: "browser",
-    browserEntryImportsNode: true,
+test("VSW0-AC1 twin: browser-entry-node-platform (browser entry declared, no browser bundle build at all) fails", () => {
+  const facts = webAdmissionFacts({ pkg: dualEntryPkg });
+  assert.equal(facts.browserBundlePlatform, null);
+  assert.deepEqual(admitWebExtension(facts), {
+    admitted: false,
+    reason: "browser-entry-node-platform",
   });
-  assert.equal(verdict.admitted, false);
-  assert.equal(verdict.reason, "node-import-in-browser-entry");
+});
+
+test("VSW0-AC1 twin: node-import-in-browser-entry (the real desktop entry graph) fails admission", () => {
+  // The browser bundle targets the browser platform, but its entry is the
+  // real src/extension.ts whose live graph imports vscode-languageclient/node:
+  // the import fact is derived from that graph, not hand-set.
+  const facts = webAdmissionFacts({
+    pkg: dualEntryPkg,
+    esbuildText: dualEntryEsbuild("src/extension.ts", "browser"),
+  });
+  assert.equal(facts.browserEntryImportsNode, true);
+  assert.deepEqual(admitWebExtension(facts), {
+    admitted: false,
+    reason: "node-import-in-browser-entry",
+  });
+});
+
+test("VSW0-AC1 twin: node-import-in-browser-entry (a graph reaching a Node builtin) fails admission", () => {
+  const facts = webAdmissionFacts({
+    pkg: dualEntryPkg,
+    esbuildText: dualEntryEsbuild("src/sharedTsgoLaunch.ts", "browser"),
+  });
+  assert.equal(facts.browserEntryImportsNode, true);
+  assert.deepEqual(admitWebExtension(facts), {
+    admitted: false,
+    reason: "node-import-in-browser-entry",
+  });
+});
+
+test("VSW0-AC1 twin: dual-entry-admitted (main kept, browser-targeted bundle over a real clean entry graph) is the admitted shape", () => {
+  const facts = webAdmissionFacts({
+    pkg: dualEntryPkg,
+    esbuildText: dualEntryEsbuild("src/activationGate.ts", "browser"),
+  });
+  assert.equal(facts.desktopBuildPlatform, "node", "the desktop build keeps its node platform");
+  assert.equal(facts.browserBundlePlatform, "browser");
+  assert.equal(facts.browserEntryImportsNode, false, "derived from the real pure-tier entry graph");
+  assert.deepEqual(admitWebExtension(facts), { admitted: true, reason: "admitted" });
+});
+
+test("VSW0-AC1 twin: missing-platform-fact-fails-closed (dropping the platform value is an error, not a browser verdict)", () => {
+  const noPlatform = liveEsbuildCfg.replace(/platform:\s*["']node["'],/, "");
+  assert.doesNotMatch(noPlatform, /platform:/);
+  assert.throws(() => webAdmissionFacts({ esbuildText: noPlatform }), /fail closed/);
+});
+
+test("VSW0-AC1 twin: platform facts parse the declared value, never default (quoting drift is not fail-open)", () => {
+  const singleQuoted = liveEsbuildCfg.replace('platform: "node"', "platform: 'node'");
+  assert.equal(webAdmissionFacts({ esbuildText: singleQuoted }).desktopBuildPlatform, "node");
 });
 
 test("VSW0-AC1 twin: live-state-drift (policy claiming a shipped browser entry) fails", () => {
   const drifted = perturb(entryPolicy, (c) => {
     c.entrypoint.liveState.manifestBrowser = "dist/web/extension.js";
+    c.entrypoint.liveState.browserBundlePlatform = "browser";
   });
   assert.throws(
     () => assertLiveStateGrounded(drifted, webAdmissionFacts()),
@@ -308,18 +501,137 @@ test("VSW0-AC2 twin: status-term-drift (renamed term not joined by the modes) fa
 });
 
 // ---------------------------------------------------------------------------
-// Ratification: the feature contract joins VSC0 / BWH0 / DX0 exactly, the
+// VSW0-AC-OWNER: one final owner (expansion.vscode-web) pinned on the
+// ownership map and every delivered product, with an empty deletion
+// population and the retirement obligation stated (charter Binding
+// architecture + VSW0-AC-OWNER).
+// ---------------------------------------------------------------------------
+
+function assertFinalOwnerJoins(map = ownershipMap, products = [contract, entryPolicy, hostVocab]) {
+  assert.equal(map.contractNode, "VSW0", "the ownership map pins its contract node");
+  assert.equal(
+    map.finalOwner,
+    "expansion.vscode-web",
+    "one final owner: expansion.vscode-web (charter Binding architecture)",
+  );
+  assert.match(
+    map.finalOwnerStatement,
+    /expansion\.vscode-web owns this product outcome/,
+    "the final owner statement keeps producing owners with their existing owners",
+  );
+  assert.deepEqual(
+    map.deletionPopulationThisNode,
+    [],
+    "VSW0 is contract-only: the deletion population is empty",
+  );
+  assert.match(
+    map.retirementObligation,
+    /VSW0 itself retires nothing/,
+    "the retirement obligation is stated and binds the cutovers, not this node",
+  );
+  assert.equal(map.outcomes.length, 3, "exactly the three charter interfaces are owned");
+  for (const p of products) {
+    assert.equal(
+      p.finalOwner,
+      "expansion.vscode-web",
+      `${p.id}: the delivered product pins the same single final owner`,
+    );
+  }
+}
+
+test("VSW0-AC-OWNER clean pass: one final owner on the map and every delivered product", () => {
+  assertFinalOwnerJoins();
+});
+
+test("VSW0-AC-OWNER twin: owner-flipped (a second authority claiming the product) fails", () => {
+  const flipped = perturb(ownershipMap, (c) => {
+    c.finalOwner = "expansion.vscode-product";
+  });
+  assert.throws(() => assertFinalOwnerJoins(flipped), /one final owner/);
+});
+
+test("VSW0-AC-OWNER twin: split-authority (a delivered product under a different owner) fails", () => {
+  const split = perturb(contract, (c) => {
+    c.finalOwner = "expansion.vscode-product";
+  });
+  assert.throws(
+    () => assertFinalOwnerJoins(ownershipMap, [split, entryPolicy, hostVocab]),
+    /same single final owner/,
+  );
+});
+
+test("VSW0-AC-OWNER twin: missing-final-owner on a delivered product fails", () => {
+  const dropped = perturb(entryPolicy, (c) => {
+    delete c.finalOwner;
+  });
+  assert.throws(
+    () => assertFinalOwnerJoins(ownershipMap, [contract, dropped, hostVocab]),
+    /same single final owner/,
+  );
+});
+
+test("VSW0-AC-OWNER twin: premature-deletion (a route retired under VSW0) fails", () => {
+  const premature = perturb(ownershipMap, (c) => {
+    c.deletionPopulationThisNode = ["packages/vue-vscode/src/extension.ts"];
+  });
+  assert.throws(() => assertFinalOwnerJoins(premature), /deletion population/);
+});
+
+// ---------------------------------------------------------------------------
+// Ratification: the feature contract joins VSC0 (feature matrix, boundary
+// rules and module tiers), BWH0 (platform services, execution manifest) and
+// DX0 (receipt basis, host classes, exposure operations) exactly, the
 // entrypoint policy joins the live manifest exactly, and ownership is
 // single-owner docs-only.
 // ---------------------------------------------------------------------------
 
-function assertFeatureContractJoins(c) {
+function assertFeatureContractJoins(
+  c,
+  { dxOps = dxOperations, boundary = vscBoundary, bwhExec = bwhExecManifest } = {},
+) {
+  const boundaryRuleIds = new Set(boundary.rules.map((r) => r.id));
+  const boundaryModuleTier = Object.fromEntries(boundary.modules.map((m) => [m.path, m.tier]));
   const vscIds = vscFeatureMatrix.features.map((f) => f.id).sort();
   assert.deepEqual(
     c.featureRows.map((r) => r.id).sort(),
     vscIds,
     "featureRows must cover every VSC0 feature id exactly once (generated, not curated)",
   );
+  // The consumed VSC0 DesktopWebSharedBoundary rule ids join by id: a VSC0
+  // rename or drop of a consumed rule is a failing case here (F3).
+  assert.ok(
+    c.consumedBoundaryRules.length >= 2,
+    "the contract names the VSC0 boundary rules it consumes",
+  );
+  for (const ruleId of c.consumedBoundaryRules) {
+    assert.ok(
+      boundaryRuleIds.has(ruleId),
+      `consumed boundary rule ${ruleId} is missing from the VSC0 DesktopWebSharedBoundary`,
+    );
+  }
+  // semanticHostLaw mirrors the live BWH0 portabilityProof verdict and the
+  // exact proof-owner list (F5).
+  assert.equal(
+    c.semanticHostLaw.provedByBWH0,
+    bwhExec.portabilityProof.provesSemanticHost,
+    "semanticHostLaw must mirror the BWH0 portabilityProof semantic-host verdict",
+  );
+  assert.deepEqual(
+    [...c.semanticHostLaw.requires].sort(),
+    bwhSemanticHostRequires(bwhExec),
+    "semanticHostLaw.requires must equal the BWH0 semanticHostRequires node list",
+  );
+  for (const term of c.vocabulary.webDisposition) {
+    assert.ok(
+      c.vocabulary.webDispositionDefinitions[term],
+      `webDisposition term ${term} has no definition`,
+    );
+  }
+  const routeDispositions = [
+    "browser-local-route",
+    "gap-pending-class-port",
+    "gap-pending-semantic-host",
+  ];
   for (const row of c.featureRows) {
     const vsc = vscFeatures[row.id];
     assert.ok(vsc, `unknown VSC0 feature id: ${row.id}`);
@@ -336,6 +648,46 @@ function assertFeatureContractJoins(c) {
       c.vocabulary.webDisposition.includes(row.webDisposition),
       `${row.id}: unknown webDisposition ${row.webDisposition}`,
     );
+    // dx0ClassPortLaw (F1): a NativeOnly row is never browser-local-route or
+    // static-web-asset; gap dispositions exist only on NativeOnly rows.
+    if (row.vsc0Class === "NativeOnly") {
+      assert.ok(
+        !["browser-local-route", "static-web-asset"].includes(row.webDisposition),
+        `${row.id}: a NativeOnly row may not claim ${row.webDisposition} (dx0ClassPortLaw: labelled gap, companion or remote-native only until the DX0 amendment)`,
+      );
+    } else {
+      assert.ok(
+        !String(row.webDisposition).startsWith("gap-pending-"),
+        `${row.id}: gap dispositions exist only on NativeOnly rows (dx0ClassPortLaw)`,
+      );
+    }
+    if (row.webDisposition === "gap-pending-semantic-host") {
+      assert.match(
+        row.webEngine ?? "",
+        /WASM host/,
+        `${row.id}: gap-pending-semantic-host names the wasm semantic surface it waits on`,
+      );
+    }
+    // DX0 exposure-operation join (F1): where VSC0 pins a dx0Row, the row's
+    // disposition must track the live DX0 class/browserExecutable verdict.
+    const dx0Id = row.dx0Row ?? vsc.dx0Row;
+    if (dx0Id) {
+      const op = dxOps[dx0Id];
+      assert.ok(op, `${row.id}: joined DX0 operation ${dx0Id} does not exist`);
+      if (op.hostExecutionClass === "NativeOnly" && op.browserExecutable === false) {
+        assert.equal(
+          row.webDisposition,
+          "gap-pending-class-port",
+          `${row.id}: DX0 ${dx0Id} is NativeOnly and not browser-executable, so the row is a labelled gap until the DX0 class-port amendment`,
+        );
+      } else if (op.hostExecutionClass === "Portable" && op.browserExecutable === true) {
+        assert.notEqual(
+          row.webDisposition,
+          "gap-pending-class-port",
+          `${row.id}: DX0 ${dx0Id} is browser-executable; the gap disposition is stale — land the class-port update`,
+        );
+      }
+    }
     if (row.status === "absent") {
       assert.equal(row.routeOwner, null, `${row.id}: absent row has no owner`);
     } else {
@@ -345,8 +697,8 @@ function assertFeatureContractJoins(c) {
         `${row.id}: routeOwner must be a VSW train node`,
       );
     }
-    if (row.webDisposition === "browser-local-route") {
-      assert.ok(row.webEngine, `${row.id}: browser-local-route rows name their web engine`);
+    if (routeDispositions.includes(row.webDisposition)) {
+      assert.ok(row.webEngine, `${row.id}: ${row.webDisposition} rows name their web engine`);
     }
     if (row.webDisposition === "remote-native-only" || row.webDisposition === "companion-route") {
       assert.ok(
@@ -358,6 +710,34 @@ function assertFeatureContractJoins(c) {
         /browser-local/,
         `${row.id}: the override must name what it may not claim`,
       );
+    }
+    // DesktopWebSharedBoundary module-tier join (F4): a row planning a
+    // browser route that cites live desktop-tier modules must list them and
+    // name the VSW1 conversion or the desktop-by-design route — never
+    // host-neutral readiness.
+    if (routeDispositions.includes(row.webDisposition)) {
+      const desktopTierModules = (vsc.evidence ?? [])
+        .filter((e) => e.startsWith("packages/vue-vscode/src/"))
+        .map((e) => e.slice("packages/vue-vscode/src/".length))
+        .filter((m) => boundaryModuleTier[m] === "desktop")
+        .sort();
+      assert.deepEqual(
+        row.desktopTierModules ?? [],
+        desktopTierModules,
+        `${row.id}: desktopTierModules must list exactly the live desktop-tier VSC0 boundary modules it cites`,
+      );
+      if (desktopTierModules.length > 0) {
+        assert.match(
+          row.desktopTierRoute ?? "",
+          /VSW1|desktop-by-design/,
+          `${row.id}: a row citing desktop-tier modules must name the VSW1 conversion or the desktop-by-design route`,
+        );
+        assert.doesNotMatch(
+          `${row.note ?? ""} ${row.desktopTierRoute ?? ""}`,
+          /already host-neutral/,
+          `${row.id}: may not claim host-neutral readiness while citing desktop-tier modules`,
+        );
+      }
     }
     for (const svc of row.bwhServices ?? []) {
       assert.ok(bwhServiceIds.has(svc), `${row.id}: unknown BWH platform service ${svc}`);
@@ -448,6 +828,10 @@ function assertOwnershipJoins(dxMap = dxOwnership, vscMatrix = vscFeatureMatrix)
   assert.ok(vsc, "VSC0 feature matrix names VSW0 as a receiving amendment");
   assert.equal(vsc.productionCapable, false, "VSC0 keeps VSW0 docs-only");
   assert.deepEqual(vscMatrix.docsOnlyReceivers, ["VSW0"], "VSW0 stays the docs-only receiver list");
+  assert.ok(
+    bwhExecManifest.receivingAmendments.crossTrainDirect.includes("VSW0"),
+    "BWH0 browser-execution-manifest records VSW0 as a cross-train direct receiver",
+  );
   for (const a of hostVocab.receivingAmendments) {
     assert.match(a.receiver, /^VSW[1-6][A-Z]?$/, `unknown vocabulary receiver ${a.receiver}`);
     assert.equal(typeof a.productionCapable, "boolean");
@@ -458,6 +842,7 @@ test("VSW0 ratification clean pass: products join VSC0/BWH0/DX0 and the live man
   assertFeatureContractJoins(contract);
   assertEntryPolicyJoins(entryPolicy);
   assertOwnershipJoins();
+  assertFinalOwnerJoins();
 });
 
 test("VSW0 ratification twin: feature-row-missing fails coverage", () => {
@@ -472,6 +857,80 @@ test("VSW0 ratification twin: feature-disposition-drift (synonymous disposition)
     c.featureRows.find((r) => r.id === "css-intellisense").webDisposition = "portable-direct";
   });
   assert.throws(() => assertFeatureContractJoins(m), /unknown webDisposition/);
+});
+
+test("VSW0 ratification twin: nativeonly-claimed-browser-local fails the dx0ClassPortLaw join", () => {
+  const m = perturb(contract, (c) => {
+    c.featureRows.find((r) => r.id === "virtual-files-view").webDisposition = "browser-local-route";
+  });
+  assert.throws(() => assertFeatureContractJoins(m), /dx0ClassPortLaw/);
+});
+
+test("VSW0 ratification twin: gap-disposition-on-non-native-row fails", () => {
+  const m = perturb(contract, (c) => {
+    c.featureRows.find((r) => r.id === "provider-selection").webDisposition =
+      "gap-pending-class-port";
+  });
+  assert.throws(() => assertFeatureContractJoins(m), /only on NativeOnly rows/);
+});
+
+test("VSW0 ratification twin: dx0-browser-executable-drift (the DX0 class-port amendment landing) invalidates the stale gap label", () => {
+  const amended = structuredClone(dxOperations);
+  amended["vscode.source-map"].hostExecutionClass = "Portable";
+  amended["vscode.source-map"].browserExecutable = true;
+  assert.throws(() => assertFeatureContractJoins(contract, { dxOps: amended }), /stale/);
+});
+
+test("VSW0 ratification twin: semantic-host-evidence-drift (claiming the proof before BWH delivers it) fails", () => {
+  const m = perturb(contract, (c) => {
+    c.semanticHostLaw.provedByBWH0 = true;
+  });
+  assert.throws(() => assertFeatureContractJoins(m), /portabilityProof semantic-host verdict/);
+});
+
+test("VSW0 ratification twin: bwh0-semantic-host-requirement-drift (BWH0 changing the proof owners) fails", () => {
+  const drifted = structuredClone(bwhExecManifest);
+  drifted.portabilityProof.semanticHostRequires =
+    drifted.portabilityProof.semanticHostRequires.filter((s) => !s.startsWith("BWH2"));
+  assert.throws(() => assertFeatureContractJoins(contract, { bwhExec: drifted }), /requires/);
+});
+
+test("VSW0 ratification twin: boundary-rule-missing (VSC0 dropping a consumed boundary rule) fails", () => {
+  const dropped = structuredClone(vscBoundary);
+  dropped.rules = dropped.rules.filter((r) => r.id !== "browser-is-distinct-product");
+  assert.throws(() => assertFeatureContractJoins(contract, { boundary: dropped }), /boundary rule/);
+});
+
+test("VSW0 ratification twin: boundary-rule-unknown (citing a rule id VSC0 never had) fails", () => {
+  const m = perturb(contract, (c) => {
+    c.consumedBoundaryRules.push("browser-is-a-viewport");
+  });
+  assert.throws(() => assertFeatureContractJoins(m), /boundary rule/);
+});
+
+test("VSW0 ratification twin: desktop-tier-module-unconverted (hiding the desktop-tier citation) fails", () => {
+  const m = perturb(contract, (c) => {
+    delete c.featureRows.find((r) => r.id === "virtual-files-view").desktopTierModules;
+  });
+  assert.throws(() => assertFeatureContractJoins(m), /desktopTierModules/);
+});
+
+test("VSW0 ratification twin: host-neutral-claim-on-desktop-tier fails", () => {
+  const m = perturb(contract, (c) => {
+    c.featureRows.find((r) => r.id === "virtual-files-view").note =
+      "presentation/pure tiers are already host-neutral (VSC0 boundary)";
+  });
+  assert.throws(() => assertFeatureContractJoins(m), /host-neutral readiness/);
+});
+
+test("VSW0 ratification twin: vsc0 boundary module-tier drift must update the desktop-tier citation", () => {
+  const reclassified = structuredClone(vscBoundary);
+  reclassified.modules.find((m) => m.path === "UnifiedVirtualFilesProvider.ts").tier =
+    "presentation";
+  assert.throws(
+    () => assertFeatureContractJoins(contract, { boundary: reclassified }),
+    /desktopTierModules/,
+  );
 });
 
 test("VSW0 ratification twin: receipt-field-missing fails the DX0 field loop", () => {

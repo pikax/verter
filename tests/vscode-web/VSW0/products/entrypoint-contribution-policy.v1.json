@@ -3,21 +3,24 @@
   "schema": 1,
   "status": "ratified",
   "ratifiedBy": "VSW0",
+  "finalOwner": "expansion.vscode-web",
+  "finalOwnerStatement": "expansion.vscode-web owns this product outcome; VSW1 owns the browser entry build and VSW5 owns the packaging gate that enforces admission on real artifacts.",
   "sourceOfTruth": "packages/vue-vscode/package.json and packages/vue-vscode/esbuild.config.mjs re-read live by tests/vscode-web/VSW0/vsw0.test.mjs",
   "law": "A build with only a Node main entry cannot pass as a web extension (VSW0-AC1). Web admission requires a real browser entrypoint and a browser-targeted build; contribution compatibility is declared per category, never assumed.",
   "entrypoint": {
     "webAdmissionRules": [
       "the extension manifest must declare both main (Node extension host: desktop and remote) and browser (web extension host) entries; main-only is not a web extension and browser-only is not the desktop product",
-      "the browser entry bundle must target the browser platform and import no Node builtins and no vscode-languageclient/node (the Node transport stays desktop-owned per VSC0 transport-desktop-owned)",
+      "the builds stay dual: the desktop main bundle keeps its node platform while the browser entry bundle targets the browser platform — a node-platform browser bundle is not a web extension either — and the browser entry bundle imports no Node builtins and no vscode-languageclient/node (the Node transport stays desktop-owned per VSC0 transport-desktop-owned)",
       "the web entry never spawns a child process, never reads fs/os/process, and reaches native capability only through the explicitly selected companion route",
       "the browser entry lives at packages/vue-vscode/src/browser and host-neutral modules at packages/vue-vscode/src/shared: a sibling consumer of the same producers, never a fork of the desktop extension (VSC0 browser-is-distinct-product)",
-      "admission is a build predicate re-derived from the live manifest and build config, not a claim stamped at packaging time"
+      "admission is a build predicate re-derived from the live manifest and build config, not a claim stamped at packaging time, and its facts fail closed: a build config that declares no platform value is an error, never an implicit browser verdict"
     ],
     "liveState": {
       "manifestMain": "dist/extension.js (declared)",
       "manifestBrowser": "absent",
       "buildEntry": "src/extension.ts",
-      "buildPlatform": "node",
+      "desktopBuildPlatform": "node",
+      "browserBundlePlatform": "absent",
       "buildTarget": "node18",
       "verdict": "not-admitted: node-main-only",
       "evidence": ["packages/vue-vscode/package.json", "packages/vue-vscode/esbuild.config.mjs"]

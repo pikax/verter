@@ -3,12 +3,14 @@
   "schema": 1,
   "status": "ratified",
   "ratifiedBy": "VSW0",
+  "finalOwner": "expansion.vscode-web",
+  "finalOwnerStatement": "expansion.vscode-web owns this product outcome; every VSW consumer binds these status terms to the DX0 hostIdentity receipt field.",
   "sourceOfTruth": "packages/vue-vscode live tree joined to the DX0 product-receipt-basis hostIdentity field, the VSC0 host-separation contract and the BWH0 platform-host-services law",
   "law": "Browser-local and remote-native are distinct products with distinct receipts. The active host/backend is visible and correct in every browser-connected workspace (VSW0-AC2): a remote Node service serving a browser client is not browser-local parity.",
   "statusEnum": ["browser-local", "remote-native", "desktop-local", "companion-native"],
   "terms": {
     "browser-local": {
-      "definition": "Extension code executes in the browser web extension host (web worker) on the user's machine: vscode.dev / github.dev local web workers. Semantic work rides the BWH wasm host through in-memory platform services; the browser closure has no process, filesystem, socket or thread capability.",
+      "definition": "Extension code executes in the browser web extension host (web worker) on the user's machine: vscode.dev / github.dev local web workers. Semantic work rides the BWH wasm host through in-memory platform services only after the BWH semantic-host proof (BWH1..BWH6B; until then semantic surfaces are labelled gaps); the browser closure has no process, filesystem, socket or thread capability.",
       "derivesFrom": "executing entry = browser entry; workspace topology = local web workspace",
       "evidence": [
         "tests/browser-host/BWH0/products/platform-host-services.v1.json",
