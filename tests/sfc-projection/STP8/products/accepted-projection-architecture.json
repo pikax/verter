@@ -1,0 +1,56 @@
+{
+  "schema": "AcceptedProjectionArchitecture",
+  "version": 1,
+  "product": "AcceptedProjectionArchitecture",
+  "node": "STP8",
+  "kind": "lock",
+  "principles": {
+    "typeAnswersOwner": "TypeScript via TCM0R CertifiedTypeEngineBinding; no native type-answer substitution",
+    "defaultExportShape": "constructor-shaped; InstanceType<typeof Comp> preserved",
+    "oneUseOneSpecialization": true,
+    "logicalUseIdentity": "ComponentUseId, distinct from revision-qualified observations",
+    "separation": ["mapping geometry", "semantic origin", "edit spelling"],
+    "shippedValidFeatures": "RequiredCurrent"
+  },
+  "division": {
+    "projectionBackend": "VueProjectionBackend (crates/verter_compiler/src/framework_common/vue_projection_backend.rs): IDE companion only; PublicApi and Declarations uninhabited",
+    "constructorEmit": "STP16",
+    "specializationRuntime": "STP18",
+    "fullVueTypingAndIde": "STP59",
+    "svelteProfile": "STS0; full Svelte typing/IDE STS15",
+    "legacyRetirement": { "vue": "STP58", "svelte": "STS15" }
+  },
+  "acceptedProducts": [
+    "AcceptedProjectionArchitecture",
+    "AcceptedVueConstructorABI",
+    "AcceptedTopologyMatrix",
+    "HelperABI"
+  ],
+  "predecessors": [
+    { "node": "STP2", "products": ["ConstructorCompatibilityEvidence", "InstanceTypeCompatibilityTable"] },
+    { "node": "STP3", "products": ["CoupledInferenceEvidence", "InferenceWitnessSelection"] },
+    { "node": "STP4", "products": ["DialectTopologyEvidence", "ProjectionTopologyDecisionInputs"] },
+    { "node": "STP5", "products": ["MapperCapabilityEvidence", "DiagnosticOriginPolicy", "ObservationRolePolicy"] },
+    { "node": "STP6", "products": ["PackedConsumerFeasibility", "PublicDependencyClosurePolicy"] },
+    { "node": "STP7", "products": ["SecondFrameworkBoundaryEvidence", "ExecutionContextBoundaryContract"] }
+  ],
+  "charterHome": {
+    "planned": "roadmap/0.1.0-tama/contracts/sfc-typescript-projection.md",
+    "inRepo": "tests/sfc-projection/STP8/ (contract.ts, products/, protocol.mjs)",
+    "rationale": "b940abc1e removed the repository roadmap as database-owned; the ratified source contract lives with the sfc-projection family instead of recreating an unvalidated roadmap copy"
+  },
+  "receivingAmendments": [
+    { "id": "STP8-R-plan", "receiver": "STP9", "consumes": "AcceptedVueConstructorABI + AcceptedTopologyMatrix" },
+    { "id": "STP8-R-svelte", "receiver": "STS0", "consumes": "AcceptedProjectionArchitecture boundary products" },
+    { "id": "STP8-R-constructor", "receiver": "STP16", "consumes": "AcceptedVueConstructorABI selected candidate" },
+    { "id": "STP8-R-specialization", "receiver": "STP18", "consumes": "AcceptedVueConstructorABI inference transaction" },
+    { "id": "STP8-R-vue-terminal", "receiver": "STP59", "consumes": "HelperABI v1 + AcceptedTopologyMatrix" },
+    { "id": "STP8-R-vue-retire", "receiver": "STP58", "consumes": "recorded displaced call sites/helpers" },
+    { "id": "STP8-R-svelte-retire", "receiver": "STS15", "consumes": "recorded displaced call sites/helpers" }
+  ],
+  "noReverseEdges": ["TCM4", "BR0"],
+  "runtimeActivationAuthorized": false,
+  "newPublicHelperWithoutPredecessorEvidence": false,
+  "ac3Rationale": "STP8 owns contract artifacts only. State safety for owned state: harness probe runs are incremental=fresh; incomplete/configuration-missing/cancelled observations cannot warm complete caches; publication and edits stay with the existing provider/LSO snapshot authority.",
+  "ac4Rationale": "No production hot path changes; no helper expansion is emitted by this node. Generated text/helper size is unchanged and needs no invented timing claim."
+}

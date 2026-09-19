@@ -4750,6 +4750,25 @@ pub(crate) mod foundations_guards {
         // wrap, so the line-based extractor records the bare prefix).
         "pub mod input_basis",
         "pub use input_basis::",
+        // crates/verter_wasm/src/input_snapshot.rs — the browser
+        // acquisition boundary commits asynchronously-acquired rows
+        // through the session handoff core (AcquiredFile /
+        // CommittedInputHandoff / HandoffObserve, imported via the
+        // module path; no crate-root re-export of this family exists).
+        "pub mod input_handoff",
+        // crates/verter_wasm/src/lib.rs (input_snapshot_receipt) — the
+        // wasm commitInputSnapshot export binds its receipt to the
+        // host's platform-services profile through
+        // VerterHost::platform_services(), so PortableHostServices and
+        // its route vocabulary are named outside this crate.
+        "pub mod platform_services",
+        // tests/cases/g_session/cooperative_drive_seam.rs — the host
+        // load-seam discriminators (cancelled drive refuses
+        // ensure_loaded admission; constructor-time yield hook
+        // installed through HostConfig::cooperative_yield) drive
+        // VerterHost::cooperative_drive and implement its
+        // CooperativeYield hook from the integration binary.
+        "pub mod cooperative_scheduler",
         // tests/cases/g_misc0/invalidation_coverage.rs, tests/cases/g_misc0/invalidation_perf.rs
         "pub mod invalidation_domain",
         // tests/cases/g_misc0/invalidation_perf.rs (ImportedRegistryDb /
@@ -5461,6 +5480,10 @@ pub(crate) mod foundations_guards {
         (
             "crates/verter_lsp/src/audit_harness.rs",
             "LSP audit telemetry — `VERTER_LSP_AUDIT_TRACE_OUT` JSON-lines drainer. Off by default and gated behind the env var at the call site; mirrors the existing `VERTER_COMPONENT_META_AUDIT_JSON_OUT` drainer in `verter_session::component_meta_audit`.",
+        ),
+        (
+            "crates/verter_lsp/src/interaction_trace.rs",
+            "LSP interaction-trace telemetry — `VERTER_LSP_INTERACTION_TRACE_DUMP` JSON-lines drainer (writes the session Unix-ms correlation anchor, then one line per terminal trace under the traces lock). Off by default and gated behind the env var at construction; the same env-gated drainer category as `VERTER_LSP_AUDIT_TRACE_OUT` in `verter_lsp::audit_harness`. Harness tool output consumed by the WSP1L capture producer, never workspace/semantic state.",
         ),
         (
             "crates/verter_lsp/src/background_init.rs",

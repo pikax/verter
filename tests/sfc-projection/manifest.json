@@ -33,6 +33,10 @@
     {
       "id": "STP7",
       "manifest": "tests/sfc-projection/STP7/manifest.json"
+    },
+    {
+      "id": "STP8",
+      "manifest": "tests/sfc-projection/STP8/manifest.json"
     }
   ]
 }

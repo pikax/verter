@@ -86,3 +86,9 @@ description = "Include type provenance (where a type came from) in hover."
 [config."statistics.enabled"]
 default = false
 description = "Emit server-side resolution statistics."
+
+# --- WSP1L UI instrumentation (dx-harness Lapce driver correlation) ---
+
+[config."uiTrace.enabled"]
+default = false
+description = "WSP1L instrumentation: emit a one-time launch stamp (initialize epoch marker) that the dx-harness Lapce driver correlates with the server timeline. Off by default; the per-message LSP path is never touched."

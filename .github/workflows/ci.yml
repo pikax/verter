@@ -21,6 +21,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       proto: ${{ steps.filter.outputs.proto }}
       js: ${{ steps.filter.outputs.js }}
+      arch: ${{ steps.filter.outputs.arch }}
       wasm: ${{ steps.filter.outputs.wasm }}
       playground: ${{ steps.filter.outputs.playground }}
       vscode: ${{ steps.filter.outputs.vscode }}
@@ -104,6 +105,20 @@ jobs:
               # test:scripts validates the required BF2 dependencies in the
               # release graph; release-only changes must execute that guard.
               - '.github/workflows/release.yml'
+              - '.github/workflows/ci.yml'
+            # Gates the `architecture-health` lane (ARH0/ARH1 constitution
+            # verifiers). Their products join the live Rust tree — hotspot
+            # sources, crate Cargo manifests and the cross-crate consumer
+            # population derived from EVERY crate — so a product/verifier-only
+            # edit under tests/architecture-health/ and any Rust dependency or
+            # surface change must both run the guard. The js filter does not
+            # cover either input class, which is exactly how an ARH1 edit or a
+            # scheduler.rs change could skip the ratified contracts.
+            arch:
+              - 'tests/architecture-health/**'
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
               - '.github/workflows/ci.yml'
             # Gates `wasm-build` ALONE, which both builds the browser artifact
             # and verifies the committed carrier fixture against it. So this
@@ -807,6 +822,39 @@ jobs:
           fail-on-error: false
       - name: Verify package tarballs
         run: node scripts/verify-packages.mjs
+
+  # The ARH0/ARH1 constitution verifiers join their products to the live Rust
+  # tree (hotspot sources, crate manifests, the cross-crate consumer
+  # population derived from every crate), so this lane — not the js-filtered
+  # test:scripts job — is what runs the guards when a Rust dependency or
+  # surface change moves a ratified population, and when the products or the
+  # verifier themselves change. Node builtins only: no pnpm install, no
+  # build. Full history (fetch-depth: 0) so --provenance can prove the
+  # products' pinned candidate is a real ancestor of the checked-out head.
+  architecture-health:
+    name: Architecture health contracts
+    needs: detect-changes
+    if: needs.detect-changes.outputs.arch == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: ARH0 verify (responsibility and debt inventory)
+        run: node tests/architecture-health/ARH0/verify.mjs
+      - name: ARH0 dirty twins
+        run: node --test tests/architecture-health/ARH0/arh0.test.mjs
+      - name: ARH1 verify (dependency contracts + cutover register)
+        run: node tests/architecture-health/ARH1/verify.mjs
+      - name: ARH1 dirty twins
+        run: node --test tests/architecture-health/ARH1/arh1.test.mjs
+      - name: ARH1 pinned-candidate provenance
+        run: node tests/architecture-health/ARH1/verify.mjs --provenance
 
   svelte-oracle:
     name: Svelte Oracle (live, feature-gated)
@@ -2052,6 +2100,7 @@ jobs:
       - compiler-contracts
       - bf2-authoritative
       - js-build-test
+      - architecture-health
       - svelte-oracle
       - svelte-conformance
       - svelte-client-smokes

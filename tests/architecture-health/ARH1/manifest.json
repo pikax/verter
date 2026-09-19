@@ -1,0 +1,138 @@
+{
+  "node": "ARH1",
+  "kind": "constitution",
+  "products": ["ARH1DependencyContracts", "ARH1CutoverRegister"],
+  "cases": [
+    {
+      "id": "ARH1-hotspot-coverage",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "hotspot-without-contract",
+        "contract-without-inventory-row",
+        "duplicate-hotspot-contract",
+        "responsibility-dropped",
+        "responsibility-invented",
+        "authority-double-claimed",
+        "missing-authority-owner",
+        "authority-owner-unbound (the surviving owner must be a cohesive module of the same responsibility; a single-module hotspot keeps authority in place — an existing but unbound file is not authority)"
+      ]
+    },
+    {
+      "id": "ARH1-import-direction",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "import-drift (declared vs measured, both directions, for verter, external and crate-internal roots; use statements AND inline crate paths in code position — macro paths, derive paths, feature-gated aliases — are measured on the production-stripped, string-blanked text)",
+        "import-drift (test configuration stripped: cfg(test)/cfg(all(test, ..)) items never count as production direction)",
+        "forbidden-import (source — use or inline form — and Cargo.toml)",
+        "layer-violation",
+        "layer-rule-contradiction",
+        "layer-allowance-without-dependency (mayImport equals the live manifest both ways; an invented allowance is drift)",
+        "missing-layer-rule (every hotspot crate governed exactly once)",
+        "duplicate-layer-crate",
+        "layer-rule-population-drift (contiguous pinned ARH1-LAYER-1..n ids)",
+        "layer-crate-unexplained (a non-hotspot crate needs a nonHotspotRationale)",
+        "missing-importer"
+      ]
+    },
+    {
+      "id": "ARH1-constructor",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "missing-constructor",
+        "constructor-anchor-missing",
+        "constructor-without-rules",
+        "constructor-rationale-missing",
+        "constructor-population-drift (the primary type's Self-returning pub constructors are exactly the table; a deleted row is drift, and an emptied table over live constructors is drift equally — a rationale is only legal when the derived population is empty)"
+      ]
+    },
+    {
+      "id": "ARH1-state-lifetimes",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "bad-lifetime",
+        "state-without-owner",
+        "state-owner-missing",
+        "state-not-in-source",
+        "state-owner-without-declaration (declaration-based: every dotted field identifier, or one non-enclosing token, must be DECLARED in comment-stripped owner code — a consumer constructing the type or a file mentioning the state in comments is not the owner)"
+      ]
+    },
+    {
+      "id": "ARH1-surface",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "surface-declaration-drift",
+        "missing-surface-declaration (pinned to the derived parent module declaration)",
+        "surface-declaration-unpinned",
+        "surface-boundary-drift (a crate-visible module carries no cross-crate retained surface)",
+        "surface-item-missing",
+        "snapshot-count-drift (the recorded snapshot equals the live-derived file-wide counts exactly — pub fn and its test-hook subset, pub(crate) fn, pub types, pub/pub(crate) mods, pub fields of fully-pub structs — in every key, both directions; a stale, zeroed or key-stripped snapshot is drift)",
+        "surface-item-uncovered (a public module's pub-item population must be retained/narrowed/bulk-carried; deleted rows are drift)",
+        "retained-item-unconsumed",
+        "bad-narrow-target",
+        "missing-narrow-consumer",
+        "narrow-hook-without-reference-forms",
+        "narrow-consumer-without-reference (fn rows: qualified forms; field rows: type-qualified field use — an ambiguous field name counts only through the owning type's struct literal)",
+        "narrow-consumer-omitted (both joins)",
+        "importer-population-drift (exact cross-crate importer population for EVERY hotspot, both directions, comment mentions never count)",
+        "narrowed-item-consumer-unrecorded",
+        "assoc-item-unretained (qualified, receiver and binding-evidenced usage on retained types)",
+        "assoc-item-missing",
+        "narrow-field-without-owner-type"
+      ]
+    },
+    {
+      "id": "ARH1-split",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "split-retains-shared-state",
+        "state-double-owner",
+        "state-ownership-undeclared",
+        "cohesive-responsibility-invented",
+        "missing-cohesive-module",
+        "split-rationale-missing"
+      ]
+    },
+    {
+      "id": "ARH1-cutover",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "arh0-debt-undecided",
+        "cutover-route-missing",
+        "cutover-route-invented",
+        "duplicate-cutover-route",
+        "duplicate-satisfies",
+        "cutover-debt-unknown (a satisfies value no shipped ARH0 debt-register row carries)",
+        "cutover-debt-foreign (a satisfies value whose ARH0 decision owner is not ARH1)",
+        "cutover-row-unbound (every disposition binds exactly one recognized route/debt key)",
+        "cutover-row-double-keyed",
+        "cutover-without-disposition",
+        "missing-candidate-path",
+        "deletion-rationale-missing"
+      ]
+    },
+    {
+      "id": "ARH1-ratification",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "manifest-case-drift",
+        "manifest-product-drift",
+        "manifest-command-drift",
+        "obligation-producer-malformed",
+        "ac4-surface-uncovered",
+        "candidate-basis-drift (both products pin the same 40-hex commit; verify.mjs --provenance, run by the CI architecture-health lane, additionally proves the pinned commit is a real ancestor of the checked-out head)"
+      ]
+    }
+  ],
+  "verify": "node tests/architecture-health/ARH1/verify.mjs",
+  "test": "node --test tests/architecture-health/ARH1/arh1.test.mjs",
+  "runtimeCorrectness": false,
+  "notes": "Contract-only constitution (0 production LOC). The verifier (the sole owning interface, wired as the verify/test commands below) joins the shipped ARH0 predecessor products (responsibility map, debt register) and the live tree: hotspot coverage is exactly the ARH0 god-module population with exactly one contract per hotspot and no dropped or invented responsibility, and every authority row binds a cohesive module of the same responsibility (a single-module hotspot keeps authority in place; an existing but unbound file is not authority), the declared import direction equals the production import tree measured from each hotspot source (cfg(test) and cfg(all(test, ..)) items stripped before measuring; comments stripped; nested use groups expanded with prefix inheritance so brace-list items never classify as roots; use statements AND inline crate paths in code position — macro paths, derive paths, feature-gated aliases — measured on string-blanked text with turbofish, primitive and tool-lint noise excluded, inline crate::module::Item paths naming their crate-internal root exactly like use statements; verter, external and crate-internal roots all compared two-way; forbidden directions absent from the full source — test configuration included — and the layer rules equal the live Cargo manifests both ways with a pinned rule population: every hotspot crate governed exactly once, contiguous ids, non-hotspot crates declared with a rationale), constructor capability anchors bind real declarations and the constructor table equals the primary type's derived Self-returning pub constructors (an emptied table over live constructors is drift; a rationale is only legal when the derived population is empty), state-lifetime rows name live identifiers with one sole owner that DECLARES the state in comment-stripped code (comment mentions and enclosing-type names in consumer files never count), surface declarations are pinned against the derived parent module declaration, the recorded snapshot counts equal the live-derived file-wide counts exactly (a stale, zeroed or key-stripped snapshot is drift), and a public module's pub-item population must be retained/narrowed/bulk-carried, narrowing rows carry an exact consumer inventory (fn rows by qualified reference forms; field rows by type-qualified field use where an ambiguous field name counts only through the owning type's struct literal), the importers list of EVERY hotspot is the complete derived cross-crate population (direct, aliased and module-import path syntax with whole-segment matching; mirror-documentation mentions are never consumers) compared both directions, every referenced name is retained or migrated by the bulk row, every assoc item used on a retained type — qualified, receiver or binding-evidenced — is retained, cohesive splits cannot retain shared unrestricted state (ARH1-AC2), and every route (ARH0 debt rows naming ARH1, plus every declared narrowing route keyed per (candidate, narrow kind)) has exactly one cutover disposition carried by a row bound to exactly one recognized route/debt key with no duplicate route or debt decision, and every satisfied debt is a real ARH0 debt whose decision owner is ARH1 (the register can neither invent a debt nor take another owner's route). Both products pin the same 40-hex candidate basis; the CI architecture-health lane runs verify.mjs --provenance to prove the pinned commit is a real ancestor of the checked-out head. Owner/heir ids are structural references into the TAMA-controller-owned program DAG; this tree resolves them structurally only. Implementation of the contracts is bound to the named successors: ARH2 characterizes and re-derives populations, ARH3/ARH4 narrow, ARH11 removes residue, ARH12 adds the compile-time enforcement, DOC2 documents. Snapshot counts are live invariants: the verifier derives them from the measured tree on every run. Retained evidence spec: tests/architecture-health/evidence/ARH1/cases.md."
+}

@@ -1,0 +1,3 @@
+[verter-volt]
+uiTrace.enabled = true
+lsp.serverPath = '<verter-lsp>'

@@ -449,3 +449,98 @@ test("runGate passes only with matching native/browser evidence", async () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Async input acquisition → committed snapshot handoff (pure client half;
+// the committed-input core and its typed statuses are pinned natively in
+// crates/verter_wasm/src/input_snapshot.rs).
+// ---------------------------------------------------------------------------
+
+test("acquisitionWaveFailures reports every incoherent-wave shape", async () => {
+  const { acquisitionWaveFailures } = await import("../packages/browser-host/src/input-handoff.js");
+  assert.deepEqual(
+    acquisitionWaveFailures([{ canonical: "/a.ts", content: "a" }], ["/gone.ts"]),
+    [],
+  );
+  assert.ok(
+    acquisitionWaveFailures(
+      [
+        { canonical: "/a.ts", content: "1" },
+        { canonical: "/a.ts", content: "2" },
+        { canonical: "", content: "x" },
+      ],
+      [],
+    ).some((failure) => failure.includes("canonical")),
+  );
+  assert.ok(
+    acquisitionWaveFailures([{ canonical: "/a.ts", content: "1" }], ["/a.ts"]).some((failure) =>
+      failure.includes("both acquired and probed missing"),
+    ),
+  );
+  assert.deepEqual(acquisitionWaveFailures(null, []), ["files is not an array"]);
+  assert.deepEqual(acquisitionWaveFailures([], "nope"), ["missing is not an array"]);
+});
+
+test("acquireInputWave awaits the adapter once per canonical and never fetches on commit", async () => {
+  const { acquireInputWave, commitInputSnapshot } =
+    await import("../packages/browser-host/src/input-handoff.js");
+  const reads = [];
+  const wave = await acquireInputWave(
+    async (canonical) => {
+      reads.push(canonical);
+      return canonical === "/gone.ts" ? null : `content of ${canonical}`;
+    },
+    ["/a.ts", "/gone.ts"],
+  );
+  assert.deepEqual(reads, ["/a.ts", "/gone.ts"]);
+  assert.deepEqual(wave.files, [{ canonical: "/a.ts", content: "content of /a.ts" }]);
+  assert.deepEqual(wave.missing, ["/gone.ts"]);
+
+  const committed = [];
+  const host = {
+    commitInputSnapshot(files, missing) {
+      committed.push({ files, missing });
+      return { basisId: "b".repeat(64), files: files.length, missing: missing.length };
+    },
+  };
+  const receipt = commitInputSnapshot(host, wave);
+  assert.equal(committed.length, 1);
+  assert.equal(receipt.basisId, "b".repeat(64));
+});
+
+test("observeInputSnapshot raises typed NeedInputsError only for needInputs", async () => {
+  const { NeedInputsError, observeInputSnapshot, needInputsKeys } =
+    await import("../packages/browser-host/src/input-handoff.js");
+  const host = {
+    observeInputSnapshot(_basisId, canonical) {
+      if (canonical === "/present.ts") {
+        return { canonical, status: "file", content: "x" };
+      }
+      if (canonical === "/gone.ts") {
+        return { canonical, status: "absent" };
+      }
+      return { canonical, status: "needInputs" };
+    },
+  };
+  assert.deepEqual(host.observeInputSnapshot("basis", "/present.ts"), {
+    canonical: "/present.ts",
+    status: "file",
+    content: "x",
+  });
+  // Probed-missing is a complete negative, NOT an acquisition demand.
+  assert.deepEqual(observeInputSnapshot(host, "basis", "/gone.ts"), {
+    canonical: "/gone.ts",
+    status: "absent",
+  });
+  assert.throws(
+    () => observeInputSnapshot(host, "basis", "/never.ts"),
+    (error) => {
+      assert.ok(error instanceof NeedInputsError);
+      assert.deepEqual(error.keys, ["/never.ts"]);
+      assert.deepEqual(needInputsKeys(error), ["/never.ts"]);
+      return true;
+    },
+  );
+  // A non-NeedInputs error keeps its own shape.
+  assert.deepEqual(needInputsKeys(new Error("other")), []);
+});

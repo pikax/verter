@@ -11,6 +11,12 @@ export default defineConfig({
       "@verter/lsp-test-client": fileURLToPath(
         new URL("../lsp-test-client/src/index.ts", import.meta.url),
       ),
+      // Same hermeticity for the package's own sibling subpath: lapce sources
+      // import the jetbrains vocabulary via the self-referencing export, so
+      // resolve it to SOURCE here too (no prior dist build needed).
+      "@verter/dx-harness/jetbrains": fileURLToPath(
+        new URL("./jetbrains/index.ts", import.meta.url),
+      ),
     },
   },
   test: {

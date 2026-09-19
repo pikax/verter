@@ -41,6 +41,7 @@ mod compile_request_response;
 mod feasibility_probe_tests;
 #[cfg(test)]
 mod host_compile_request_tests;
+mod input_snapshot;
 mod typeinfo;
 use audit::{
     audit_record_list_to_json_string, audit_record_to_json_string, kind_matches_wasm,
@@ -505,6 +506,7 @@ fn normalize_compile_request_undefined_tags(request: JsValue) -> Result<JsValue,
 #[wasm_bindgen(js_name = VerterHost)]
 pub struct WasmVerterHost {
     inner: std::sync::Arc<host::VerterHost>,
+    input_snapshots: std::sync::Mutex<input_snapshot::InputSnapshotStore>,
 }
 
 impl WasmVerterHost {
@@ -548,6 +550,7 @@ impl WasmVerterHost {
             inner: std::sync::Arc::new(host::VerterHost::new_standalone(
                 ffi_config_to_host(ffi_config).map_err(ffi_err)?,
             )),
+            input_snapshots: std::sync::Mutex::new(input_snapshot::InputSnapshotStore::new()),
         })
     }
 
@@ -1380,11 +1383,159 @@ impl WasmVerterHost {
             to_wasm_value(&result)
         }))?
     }
+
+    // =========================================================================
+    // Committed input-snapshot handoff (browser acquisition boundary)
+    //
+    // The browser acquires file bytes asynchronously OUTSIDE any
+    // semantic callback, then hands the acquired rows here in one
+    // synchronous commit. Observations answer from the committed rows
+    // only: a requested-but-unacquired key is the typed `needInputs`
+    // status — never a synchronous fetch inside this boundary.
+    // =========================================================================
+
+    /// Commit one asynchronously-acquired input wave as an immutable
+    /// input snapshot and return its receipt.
+    ///
+    /// - `files` — array of `{ canonical, content }` rows captured by
+    ///   the asynchronous acquisition wave.
+    /// - `missing` — array of canonicals the wave probed and did not
+    ///   find. They are committed as explicit negatives, so later
+    ///   observations answer `absent` — a complete-negative distinct
+    ///   from `needInputs`.
+    ///
+    /// Returns `{ basisId, files, missing, executionHost, engineVersion }`.
+    /// `basisId` is the handle every later observation presents; the
+    /// receipt binds the execution host and the semantic-host engine
+    /// version this snapshot was committed under.
+    ///
+    /// This route writes no source and compiles nothing — registering
+    /// acquired bytes for compilation stays on `upsert`. An incoherent
+    /// wave (one canonical with two contents, or both acquired and
+    /// probed-missing) throws and stores nothing.
+    #[wasm_bindgen(js_name = "commitInputSnapshot")]
+    pub fn commit_input_snapshot(
+        &self,
+        files: JsValue,
+        missing: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WasmAcquiredRow {
+            canonical: String,
+            content: String,
+        }
+        let rows: Vec<WasmAcquiredRow> = parse_wasm_input(files)?;
+        let missing: Vec<String> = parse_wasm_input(missing)?;
+        let files: Vec<(String, String)> = rows
+            .into_iter()
+            .map(|row| (row.canonical, row.content))
+            .collect();
+        let stored = catch_panic(|| {
+            let mut store = self
+                .input_snapshots
+                .lock()
+                .map_err(|_| input_snapshot::InputSnapshotError::StorePoisoned)?;
+            store.commit(files, missing)
+        })?
+        .map_err(|error| ffi_err(&error))?;
+        let receipt = input_snapshot_receipt(stored, &self.inner);
+        to_wasm_value(&receipt)
+    }
+
+    /// Observe one canonical under a committed input snapshot.
+    ///
+    /// Returns `{ canonical, status }` where `status` is:
+    /// - `"file"` — committed bytes, with `content` carrying them;
+    /// - `"absent"` — the wave probed this key and recorded it missing;
+    /// - `"needInputs"` — the key was never acquired: the caller must
+    ///   run the next asynchronous acquisition wave. This boundary
+    ///   never fetches to fill the gap.
+    ///
+    /// An unknown `basisId` throws.
+    #[wasm_bindgen(js_name = "observeInputSnapshot")]
+    pub fn observe_input_snapshot(
+        &self,
+        basis_id: &str,
+        canonical: &str,
+    ) -> Result<JsValue, JsValue> {
+        let observed = catch_panic(|| {
+            let store = self
+                .input_snapshots
+                .lock()
+                .map_err(|_| input_snapshot::InputSnapshotError::StorePoisoned)?;
+            store.observe(basis_id, canonical)
+        })?
+        .map_err(|error| ffi_err(&error))?;
+        let observation = input_snapshot_observation(canonical.to_string(), observed);
+        to_wasm_value(&observation)
+    }
 }
 
 // =============================================================================
 // Helper functions
 // =============================================================================
+
+/// Receipt for one committed input snapshot. Binds the committed basis
+/// identity, the wave's row counts, and the execution host + engine
+/// version the snapshot was committed under.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WasmInputSnapshotReceipt {
+    basis_id: String,
+    files: usize,
+    missing: usize,
+    execution_host: String,
+    engine_version: String,
+}
+
+fn input_snapshot_receipt(
+    stored: input_snapshot::StoredInputSnapshot,
+    inner: &host::VerterHost,
+) -> WasmInputSnapshotReceipt {
+    let services = inner.platform_services();
+    WasmInputSnapshotReceipt {
+        basis_id: stored.basis_id_hex(),
+        files: stored.file_count(),
+        missing: stored.missing_count(),
+        execution_host: services.execution_host().as_str().to_string(),
+        engine_version: services.engine_version().to_string(),
+    }
+}
+
+/// One typed observation over a committed input snapshot.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WasmInputSnapshotObservation {
+    canonical: String,
+    status: &'static str,
+    content: Option<String>,
+}
+
+fn input_snapshot_observation(
+    canonical: String,
+    observed: input_snapshot::InputSnapshotObservationCore,
+) -> WasmInputSnapshotObservation {
+    match observed {
+        input_snapshot::InputSnapshotObservationCore::File { content } => {
+            WasmInputSnapshotObservation {
+                canonical,
+                status: "file",
+                content: Some(content),
+            }
+        }
+        input_snapshot::InputSnapshotObservationCore::Absent => WasmInputSnapshotObservation {
+            canonical,
+            status: "absent",
+            content: None,
+        },
+        input_snapshot::InputSnapshotObservationCore::NeedInputs => WasmInputSnapshotObservation {
+            canonical,
+            status: "needInputs",
+            content: None,
+        },
+    }
+}
 
 /// Build a `ScriptAnalysisSnapshot` from a `FileAnalysisSnapshot`.
 ///
@@ -1688,6 +1839,7 @@ mod tests {
             inner: std::sync::Arc::new(host::VerterHost::new_standalone(
                 host::HostConfig::default(),
             )),
+            input_snapshots: std::sync::Mutex::new(crate::input_snapshot::InputSnapshotStore::new()),
         };
         let _ = wasm_host
             .inner
@@ -1803,6 +1955,7 @@ mod tests {
             inner: std::sync::Arc::new(host::VerterHost::new_standalone(
                 host::HostConfig::default(),
             )),
+            input_snapshots: std::sync::Mutex::new(crate::input_snapshot::InputSnapshotStore::new()),
         };
         let _unsafe_update = wasm_host
             .inner

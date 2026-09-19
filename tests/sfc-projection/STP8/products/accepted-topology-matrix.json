@@ -1,0 +1,123 @@
+{
+  "schema": "AcceptedTopologyMatrix",
+  "version": 1,
+  "product": "AcceptedTopologyMatrix",
+  "node": "STP8",
+  "kind": "lock",
+  "frozen": true,
+  "dialects": [
+    { "id": "ts", "moduleShape": "authored-ts", "case": "STP4-external-owner" },
+    {
+      "id": "tsx",
+      "moduleShape": "preserve-as-jsx",
+      "angleAssertions": "no-jsx-rewrite",
+      "case": "STP4-tsx-authored"
+    },
+    {
+      "id": "js",
+      "moduleShape": "checkJs-per-file",
+      "policy": "@ts-check/@ts-nocheck",
+      "case": "STP4-js-checked"
+    },
+    { "id": "jsx", "moduleShape": "jsx-dialect", "case": "STP4-tsx-authored" }
+  ],
+  "supplementalFiles": {
+    "role": "checked-output",
+    "namedImportTarget": false,
+    "sharedLexicalScope": false,
+    "specifier": "*.vue.__template",
+    "hostAdmission": "host-admitted-virtual-unit",
+    "canonicalImportIdentity": "sfc-public-module",
+    "hostAdmittedVirtualUnit": true,
+    "compilerNamedSpecifier": "JsUnchecked.vue.__template",
+    "rejectCase": "STP4-supplemental-import"
+  },
+  "checkJs": {
+    "off": "script-diagnostics-suppressed-template-still-checked",
+    "on": "script-and-template-checked-with-source-anchors",
+    "projectAllowJs": true,
+    "perFilePolicy": "@ts-check/@ts-nocheck"
+  },
+  "normalScriptPlusSetup": "separate-modules",
+  "externalScripts": {
+    "ownership": "source-identity",
+    "checkedOncePerIdentity": true,
+    "importersDoNotDuplicateBody": true,
+    "acceptCase": "STP4-external-owner"
+  },
+  "vueLegality": {
+    "scriptSetupSrc": "reject",
+    "authority": "framework-legality",
+    "typescriptAcceptsGenerated": "not-sufficient",
+    "rejectCase": "STP4-illegal-vue"
+  },
+  "publicDependencyClosure": {
+    "policy": "STP6 PublicDependencyClosurePolicy",
+    "resolutionModes": ["bundler", "node16", "nodenext"],
+    "liftIntoPublishedDeclarations": [
+      "local-alias-capturing-generic-binders",
+      "imported-conditional-or-mapped-types",
+      "typeof-value-dependencies",
+      "exposed-functions",
+      "declaration-maps-to-shipped-authored-source"
+    ],
+    "retainWithoutSecondBodyCheck": [
+      "private-classes-not-part-of-public-surface",
+      "unique-symbols-not-exported"
+    ],
+    "forbidInPublishedDeclarations": [
+      "private-virtual-path",
+      "inaccessible-captured-type",
+      "compiler-named-supplemental",
+      "unpublished-checker-metadata"
+    ],
+    "typeOnlyCheckingContract": {
+      "required": false,
+      "ifRequiredMust": [
+        "emit-from-same-source-contract",
+        "ship-in-actual-declarations",
+        "survive-reexport",
+        "no-fabricated-runtime-property"
+      ],
+      "cannotExcuse": ["lost-vue-public-precision", "non-constructor-default-export"]
+    },
+    "hiddenMetadataInExports": false,
+    "hiddenMetadataInFiles": false,
+    "declarationMapsToShippedAuthoredSource": true
+  },
+  "diagnosticOrigins": {
+    "policy": "STP5 DiagnosticOriginPolicy",
+    "stockCliSource": "typescript-tsc",
+    "featureMaskDoesNotSuppress": true,
+    "synthesized": "report-with-generated-snippet-not-discard"
+  },
+  "editProvenance": {
+    "policy": "STP5 ObservationRolePolicy (joined: spanKinds must equal that product's spanKinds)",
+    "spanKinds": {
+      "verbatim": {
+        "edits": true,
+        "diagnostics": true,
+        "lengthPreserving": true
+      },
+      "atom": {
+        "edits": false,
+        "diagnostics": true,
+        "correspondence": "region-to-region"
+      },
+      "alias": {
+        "edits": false,
+        "diagnostics": "substitute-original-text",
+        "notRenameCodec": true,
+        "kebabPascalForbidden": true
+      }
+    },
+    "synthesized": "fail-closed-no-carrier-preimage",
+    "appliedEdits": "existing provider/LSO snapshot authority"
+  },
+  "executionContexts": {
+    "sameProgram": "shared ambient globals and compiler options (STP7 ExecutionContextBoundaryContract)",
+    "separateSupplementalFilesIsolateAmbient": false
+  },
+  "ac3Rationale": "STP8 freezes topology policy only. Incremental=fresh and stale/cancelled publication remain with B4R0 lineage, LSO snapshot publication, CCA1J projection route, and TCM0R observation identity.",
+  "ac4Rationale": "Topology freeze changes no hot path: one program still checks an external script once per source identity and no duplicate script-body checker is admitted."
+}
