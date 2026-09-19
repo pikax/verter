@@ -1,7 +1,7 @@
 use super::lifetime::SignatureStore;
 use super::provenance::{
     ArmIdentity, ConstituentSequence, DeclarationGroupId, DeclarationParentId, MappedConstituent,
-    OriginRelation, SignatureProvenance,
+    OriginRelation, SignatureProvenance, SourceLocatorId,
 };
 use super::test_support::intern_one_call;
 
@@ -12,8 +12,14 @@ fn effective_overload_order_is_cached_on_the_record() {
         DeclarationParentId::from_raw(4),
         1,
         7,
+        SourceLocatorId::from_raw(11),
     );
     assert_eq!(p.effective_overload_order.ordinal, 7);
+    assert_eq!(
+        p.source_locator,
+        SourceLocatorId::from_raw(11),
+        "authored provenance preserves the supplied source locator"
+    );
     assert_eq!(p.effective_overload_order.group, p.declaration_group);
     assert!(matches!(p.origin, OriginRelation::Authored));
 }

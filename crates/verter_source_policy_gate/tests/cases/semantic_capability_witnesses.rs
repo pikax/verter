@@ -40,5 +40,13 @@ mod semantic_api_wire_input_witness {
     use verter_session::semantic_query::SemanticNodeId;
     use verter_session::typeinfo::types::TypeArgList;
 
-    const _: fn(TypeArgList<'static>) -> &'static [SemanticNodeId] = |args| args;
+    fn identity(args: &'static [SemanticNodeId]) -> &'static [SemanticNodeId] {
+        args
+    }
+
+    // A function item coerces to this pointer type only when the
+    // parameter type is exactly `&'static [SemanticNodeId]`: a closure
+    // would still be accepted for any deref-capable or array-reference
+    // representation, an identity fn is not.
+    const _: fn(TypeArgList<'static>) -> &'static [SemanticNodeId] = identity;
 }

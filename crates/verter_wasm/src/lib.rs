@@ -1470,6 +1470,26 @@ impl WasmVerterHost {
         let observation = input_snapshot_observation(canonical.to_string(), observed);
         to_wasm_value(&observation)
     }
+
+    /// Release one committed input snapshot, dropping the file contents
+    /// it owns. Returns whether a snapshot was stored under `basisId`;
+    /// releasing an unknown or already released id answers `false`.
+    ///
+    /// Every basis stays addressable until it is released, so a host
+    /// that commits repeated acquisition waves must release the bases
+    /// it no longer observes or the snapshots accumulate for the life
+    /// of the host.
+    #[wasm_bindgen(js_name = "releaseInputSnapshot")]
+    pub fn release_input_snapshot(&self, basis_id: &str) -> Result<bool, JsValue> {
+        catch_panic(|| {
+            let mut store = self
+                .input_snapshots
+                .lock()
+                .map_err(|_| input_snapshot::InputSnapshotError::StorePoisoned)?;
+            Ok::<bool, input_snapshot::InputSnapshotError>(store.release(basis_id))
+        })?
+        .map_err(|error| ffi_err(&error))
+    }
 }
 
 // =============================================================================
