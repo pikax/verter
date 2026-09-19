@@ -800,3 +800,42 @@ fn parsed_core_ide_only_request_does_not_publish_a_runtime_artifact() {
     assert!(output.artifact(ProductKind::RuntimeServer).is_none());
     assert!(output.artifact(ProductKind::IdeCompanion).is_some());
 }
+
+#[test]
+fn projection_plan_is_source_backed_and_dormant_from_ide_route() {
+    const WITH_USE: &str = concat!(
+        "<script setup lang=\"ts\">\n",
+        "const x = 1;\n",
+        "</script>\n",
+        "<template>\n",
+        "  <Foo :bar=\"x\" />\n",
+        "</template>\n",
+    );
+    const WITH_COMMENT: &str = concat!(
+        "<script setup lang=\"ts\">\n",
+        "const x = 1;\n",
+        "</script>\n",
+        "<template>\n",
+        "  <!-- note -->\n",
+        "  <Foo :bar=\"x\" />\n",
+        "</template>\n",
+    );
+    let artifact = registered_artifact("file:///plan.vue", WITH_USE);
+    let plan = VueProjectionBackend.projection_plan(WITH_USE, &artifact, "file:///plan.vue");
+    assert!(plan.is_complete(), "{:?}", plan.completeness);
+    assert_eq!(plan.uses.len(), 1);
+    let commented = registered_artifact("file:///plan.vue", WITH_COMMENT);
+    let commented_plan =
+        VueProjectionBackend.projection_plan(WITH_COMMENT, &commented, "file:///plan.vue");
+    assert_eq!(plan.uses[0].id, commented_plan.uses[0].id);
+    let ide = VueProjectionBackend
+        .project_ide(
+            ide_grant(),
+            SIMPLE,
+            &registered_artifact("file:///grant-mint.vue", SIMPLE),
+            &ide_only_request("Simple.vue", false),
+            &VueProjectionInputs::default(),
+        )
+        .expect("existing IDE route stays on the companion path");
+    assert!(!ide.ide.code.is_empty());
+}

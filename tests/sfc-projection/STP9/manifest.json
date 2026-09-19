@@ -1,0 +1,63 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP9",
+  "kind": "implementation",
+  "products": [
+    "ProjectionPlan",
+    "BindingOriginId",
+    "ComponentUseId",
+    "GenericBinderRef",
+    "OrderedAttributeOp",
+    "BranchEdge"
+  ],
+  "mandatoryCases": [
+    "STP9-ids",
+    "STP9-shadow",
+    "STP9-type-free",
+    "STP9-complete-cache",
+    "STP9-determinism"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP9/probes/positive.ts",
+    "negative": "tests/sfc-projection/STP9/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STP9/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STP9/probes/tsconfig.json",
+    "hoverNeedle": "stp9HoverTarget",
+    "definitionNeedle": "stp9DefinitionTarget",
+    "expectedNegativeCode": 2345,
+    "expectedHoverType": "number",
+    "expectedInstanceType": "Comp<unknown, unknown>"
+  },
+  "cases": [
+    {
+      "id": "STP9-ids",
+      "disposition": "accept",
+      "twins": ["comment-insertion", "unrelated-sibling-insertion"]
+    },
+    {
+      "id": "STP9-shadow",
+      "disposition": "accept",
+      "twins": ["nested-slot-loop-same-spelling"]
+    },
+    {
+      "id": "STP9-type-free",
+      "disposition": "reject",
+      "twins": ["native-typeinfo", "native-assignability"]
+    },
+    {
+      "id": "STP9-complete-cache",
+      "disposition": "reject",
+      "twins": ["malformed-complete-cache", "unknown-syntax-complete-cache"]
+    },
+    {
+      "id": "STP9-determinism",
+      "disposition": "accept",
+      "twins": ["fresh-vs-incremental"]
+    }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP9 --engine all --require-all --json",
+  "test": "node --test tests/sfc-projection/STP9/plan.spec.ts",
+  "runtimeCorrectness": true,
+  "notes": "Source-backed ProjectionPlan and durable use identities. Logical ComponentUseId/BindingOriginId are lineage+scope+expression, not offsets or content hashes. Plan construction is syntax/obligation only (no TypeInfo/assignability). Incomplete/unknown-syntax observations cannot warm the complete-plan cache. Vue IDE routing stays on the existing companion path; this node exposes a dormant VueProjectionBackend::projection_plan for the qualification harness. STP58 owns atomic Vue activation."
+}

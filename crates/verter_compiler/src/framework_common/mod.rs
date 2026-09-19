@@ -23,6 +23,7 @@ pub mod carrier_compiler;
 pub mod catalog;
 pub(crate) mod generated_chunk;
 pub mod generated_identifier;
+pub mod projection_plan;
 #[doc(hidden)]
 pub mod registered_carrier_projection;
 mod registered_geometry_state;
@@ -62,6 +63,13 @@ pub use catalog::{
     TypedCapabilityRegistration,
 };
 pub use generated_identifier::{is_generated_identifier, GENERATED_IDENTIFIER_PREFIX};
+pub use projection_plan::{
+    build_projection_plan, build_projection_plan_incremental, incomplete_missing_parse,
+    plan_from_source, AdmittedExpressionId, BindingOrigin, BindingOriginId, BranchEdge,
+    BranchOutcome, CompleteCacheRefusal, CompletePlanCache, ComponentUse, ComponentUseId,
+    GenericBinderRef, Incompleteness, LexicalScopeId, ObligationKind, OrderedAttributeOp,
+    PlanCompleteness, PlanInput, PlanSnapshotId, ProjectionPlan, SyntaxObligation,
+};
 #[doc(hidden)]
 pub use registered_carrier_projection::FrameworkParseArtifact;
 pub use registered_carrier_projection::RegisteredCarrierPayload;
