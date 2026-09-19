@@ -319,6 +319,9 @@ async function activateExtension(context: ExtensionContext, session: ActivationS
   };
 
   const ensureTypeScriptPluginConfigured = (document?: TextDocument, force = false) => {
+    if (lifetime.isDisposed) {
+      return tsPluginPromise;
+    }
     if (tsPluginPromise) {
       if (force) tsPluginRefreshRequested = true;
       return tsPluginPromise;
@@ -352,6 +355,10 @@ async function activateExtension(context: ExtensionContext, session: ActivationS
           tsPluginConfigured ? "configured" : "retry",
         );
         tsPluginPromise = undefined;
+        if (lifetime.isDisposed) {
+          tsPluginRefreshRequested = false;
+          return;
+        }
         if (tsPluginRefreshRequested) {
           tsPluginRefreshRequested = false;
           tsPluginConfigured = false;
@@ -371,9 +378,17 @@ async function activateExtension(context: ExtensionContext, session: ActivationS
     lifetime.add(addNodeModulesChangedListener(getStartedClient));
     lifetime.add(addViteConfigChangedListener(getStartedClient));
     addVerterAnalysis(getStartedClient, lifetime);
-    setTimeout(() => {
+    const claudeNotifyTimer = setTimeout(() => {
+      if (lifetime.isDisposed) {
+        return;
+      }
       checkClaudeCodeAndNotify(context, log);
     }, 0);
+    lifetime.add({
+      dispose() {
+        clearTimeout(claudeNotifyTimer);
+      },
+    });
   };
 
   const ensureLanguageServerStarted = async () => {
@@ -410,6 +425,16 @@ async function activateExtension(context: ExtensionContext, session: ActivationS
           return runtime;
         }
         server = runtime;
+        lifetime.add({
+          dispose() {
+            runtime.stopHeartbeatTimer();
+            try {
+              void runtime.getClient().stop();
+            } catch {
+              // Deactivate may already have stopped this client.
+            }
+          },
+        });
         return runtime;
       })
       .catch((error) => {
@@ -2022,8 +2047,18 @@ function buildServerOptions(
   };
 }
 
+function bindClientStopOnce(client: LanguageClient): LanguageClient {
+  const originalStop = client.stop.bind(client);
+  let pending: Thenable<void> | undefined;
+  client.stop = ((timeout?: number) => {
+    pending ??= originalStop(timeout);
+    return pending;
+  }) as LanguageClient["stop"];
+  return client;
+}
+
 function createLanguageServer(serverOptions: ServerOptions, clientOptions: LanguageClientOptions) {
-  return new LanguageClient("verter", "Verter", serverOptions, clientOptions);
+  return bindClientStopOnce(new LanguageClient("verter", "Verter", serverOptions, clientOptions));
 }
 
 function getStatisticsInitialization(rootPath: string | undefined) {

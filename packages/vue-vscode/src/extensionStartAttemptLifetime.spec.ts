@@ -27,6 +27,14 @@ const mocks = vi.hoisted(() => {
     /** Park `start()` so a test can dispose the extension mid-start. */
     holdStart: false,
     releaseStart: undefined as (() => void) | undefined,
+    configurePluginHold: false,
+    releaseConfigurePlugin: undefined as (() => void) | undefined,
+    configurePluginConfigs: [] as unknown[],
+    closeListeners: [] as Array<(document: unknown) => void>,
+    infoMessages: [] as string[],
+    createdClients: [] as Array<{
+      handlers: Map<string, Array<(params: unknown) => void>>;
+    }>,
   };
   const configurationValues: Record<string, unknown> = {};
   return {
@@ -72,7 +80,10 @@ vi.mock("vscode", () => {
       }),
       onDidChangeActiveTextEditor: subscribe,
       activeTextEditor: undefined,
-      showInformationMessage: async () => undefined,
+      showInformationMessage: async (message: string) => {
+        mocks.state.infoMessages.push(message);
+        return undefined;
+      },
       showWarningMessage: async () => undefined,
       showErrorMessage: async (message: string) => {
         mocks.errorMessages.push(message);
@@ -100,7 +111,17 @@ vi.mock("vscode", () => {
       }),
       onDidOpenTextDocument: subscribe,
       onDidChangeTextDocument: subscribe,
-      onDidCloseTextDocument: subscribe,
+      onDidCloseTextDocument: (listener: (document: unknown) => void) => {
+        mocks.state.closeListeners.push(listener);
+        return {
+          dispose() {
+            const index = mocks.state.closeListeners.indexOf(listener);
+            if (index >= 0) {
+              mocks.state.closeListeners.splice(index, 1);
+            }
+          },
+        };
+      },
       onDidSaveTextDocument: subscribe,
       onDidChangeConfiguration: subscribe,
       onDidChangeWorkspaceFolders: subscribe,
@@ -118,7 +139,17 @@ vi.mock("vscode", () => {
     commands: {
       registerCommand: () => disposable(),
       registerTextEditorCommand: () => disposable(),
-      executeCommand: async () => undefined,
+      executeCommand: async (command: string, ...args: unknown[]) => {
+        if (command === "_typescript.configurePlugin") {
+          mocks.state.configurePluginConfigs.push(args[1]);
+          if (mocks.state.configurePluginHold) {
+            await new Promise<void>((resolve) => {
+              mocks.state.releaseConfigurePlugin = resolve;
+            });
+          }
+        }
+        return undefined;
+      },
     },
     languages: {
       createDiagnosticCollection: () => {
@@ -225,16 +256,24 @@ vi.mock("vscode", () => {
       ) {}
     },
     CodeActionKind: { QuickFix: { value: "quickfix" }, SourceOrganizeImports: { value: "source" } },
+    DecorationRangeBehavior: { OpenOpen: 0, ClosedClosed: 1, OpenClosed: 2, ClosedOpen: 3 },
+    OverviewRulerLane: { Left: 1, Center: 2, Right: 4, Full: 7 },
   };
 });
 
 vi.mock("vscode-languageclient/node", () => ({
   LanguageClient: class {
+    handlers = new Map<string, Array<(params: unknown) => void>>();
     constructor(_id: string, _name: string, _serverOptions: unknown, clientOptions: unknown) {
       mocks.state.createdClientOptions.push(clientOptions);
+      mocks.state.createdClients.push(this);
     }
     protocol2CodeConverter = {};
-    onNotification() {
+    onNotification(type: unknown, handler: (params: unknown) => void) {
+      const key = String(type);
+      const list = this.handlers.get(key) ?? [];
+      list.push(handler);
+      this.handlers.set(key, list);
       return { dispose: () => {} };
     }
     onRequest() {
@@ -266,7 +305,7 @@ vi.mock("vscode-languageclient/node", () => ({
   RevealOutputChannelOn: { Info: 1, Warn: 2, Error: 3, Never: 4 },
 }));
 
-import { workspace } from "vscode";
+import { window, workspace } from "vscode";
 import { activate, activateVueLanguageServer, deactivate } from "./extension";
 import { DEFAULT_RESTART_POLICY } from "./restart";
 
@@ -292,7 +331,31 @@ function makeContext() {
       get: (_key: string, fallback?: unknown) => fallback,
       update: async () => {},
     },
+    globalState: {
+      get: (_key: string, fallback?: unknown) => fallback,
+      update: async () => {},
+    },
   } as unknown as ActivateParams[0] & { subscriptions: { dispose(): unknown }[] };
+}
+
+function resetHostRuntimeMocks() {
+  mocks.statusBarItems.length = 0;
+  mocks.diagnosticCollections.length = 0;
+  mocks.errorMessages.length = 0;
+  mocks.state.startCalls = 0;
+  mocks.state.stopCalls = 0;
+  mocks.state.holdStart = false;
+  mocks.state.releaseStart = undefined;
+  mocks.state.configurePluginHold = false;
+  mocks.state.releaseConfigurePlugin = undefined;
+  mocks.state.configurePluginConfigs.length = 0;
+  mocks.state.closeListeners.length = 0;
+  mocks.state.infoMessages.length = 0;
+  mocks.state.createdClients.length = 0;
+  mocks.state.createdClientOptions.length = 0;
+  for (const key of Object.keys(mocks.configurationValues)) {
+    delete mocks.configurationValues[key];
+  }
 }
 
 const liveStatusBarItems = () => mocks.statusBarItems.filter((item) => !item.disposed).length;
@@ -300,18 +363,8 @@ const liveStatusBarItems = () => mocks.statusBarItems.filter((item) => !item.dis
 describe("language server start attempt lifetime", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    mocks.statusBarItems.length = 0;
-    mocks.diagnosticCollections.length = 0;
-    mocks.errorMessages.length = 0;
+    resetHostRuntimeMocks();
     mocks.state.startShouldFail = true;
-    mocks.state.startCalls = 0;
-    mocks.state.stopCalls = 0;
-    mocks.state.holdStart = false;
-    mocks.state.releaseStart = undefined;
-    mocks.state.createdClientOptions.length = 0;
-    for (const key of Object.keys(mocks.configurationValues)) {
-      delete mocks.configurationValues[key];
-    }
   });
 
   afterEach(() => {
@@ -466,14 +519,8 @@ describe("automatic restart bounding", () => {
 describe("disposal during an in-flight recovery", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    mocks.statusBarItems.length = 0;
-    mocks.diagnosticCollections.length = 0;
-    mocks.errorMessages.length = 0;
+    resetHostRuntimeMocks();
     mocks.state.startShouldFail = false;
-    mocks.state.startCalls = 0;
-    mocks.state.stopCalls = 0;
-    mocks.state.holdStart = false;
-    mocks.state.releaseStart = undefined;
   });
 
   afterEach(() => {
@@ -578,21 +625,14 @@ describe("language server ownership through runtime publication", () => {
     vi.useFakeTimers({
       toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval"],
     });
-    mocks.statusBarItems.length = 0;
-    mocks.diagnosticCollections.length = 0;
-    mocks.errorMessages.length = 0;
+    resetHostRuntimeMocks();
     mocks.state.startShouldFail = false;
-    mocks.state.startCalls = 0;
-    mocks.state.stopCalls = 0;
-    mocks.state.holdStart = false;
-    mocks.state.releaseStart = undefined;
-    mocks.state.createdClientOptions.length = 0;
-    for (const key of Object.keys(mocks.configurationValues)) {
-      delete mocks.configurationValues[key];
-    }
     mocks.configurationValues["verter.mcp.enabled"] = false;
     (workspace as { textDocuments: unknown[] }).textDocuments.length = 0;
     (workspace as { textDocuments: unknown[] }).textDocuments.push(vueDocument);
+    (window as { activeTextEditor?: { document: unknown } }).activeTextEditor = {
+      document: vueDocument,
+    };
   });
 
   afterEach(() => {
@@ -602,6 +642,7 @@ describe("language server ownership through runtime publication", () => {
       // Root may already be empty.
     }
     (workspace as { textDocuments: unknown[] }).textDocuments.length = 0;
+    (window as { activeTextEditor?: { document: unknown } }).activeTextEditor = undefined;
     vi.clearAllTimers();
     vi.useRealTimers();
   });
@@ -684,4 +725,148 @@ describe("language server ownership through runtime publication", () => {
     expect(mocks.state.stopCalls).toBe(1);
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it("stops a pending initial client only once when deactivate wins the start race", async () => {
+    const context = makeContext();
+    mocks.state.holdStart = true;
+
+    const activating = activate(context);
+    await waitForHeldStart();
+    await activating;
+    expect(mocks.state.startCalls).toBe(1);
+    expect(mocks.state.stopCalls).toBe(0);
+
+    deactivate();
+    mocks.state.releaseStart?.();
+    for (let i = 0; i < 40; i += 1) {
+      await Promise.resolve();
+    }
+
+    expect(mocks.state.stopCalls).toBe(1);
+    expect(mocks.state.startCalls).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("stops an already-started client when the session is replaced via subscriptions", async () => {
+    const context = makeContext();
+    await activate(context);
+    for (let i = 0; i < 40 && mocks.state.startCalls < 1; i += 1) {
+      await Promise.resolve();
+    }
+    expect(mocks.state.startCalls).toBe(1);
+    expect(mocks.state.stopCalls).toBe(0);
+
+    for (const subscription of context.subscriptions.splice(0)) {
+      subscription.dispose();
+    }
+    for (let i = 0; i < 20; i += 1) {
+      await Promise.resolve();
+    }
+    expect(mocks.state.stopCalls).toBe(1);
+
+    await activate(context);
+    for (let i = 0; i < 40 && mocks.state.startCalls < 2; i += 1) {
+      await Promise.resolve();
+    }
+    expect(mocks.state.startCalls).toBe(2);
+    expect(mocks.state.stopCalls).toBe(1);
+
+    deactivate();
+    for (let i = 0; i < 20; i += 1) {
+      await Promise.resolve();
+    }
+    expect(mocks.state.stopCalls).toBe(2);
+  });
+
+  it("does not let a disposed session's queued plugin refresh overwrite the live editor config", async () => {
+    const context = makeContext();
+    mocks.state.configurePluginHold = true;
+
+    await activate(context);
+    for (let i = 0; i < 10_000 && !mocks.state.releaseConfigurePlugin; i += 1) {
+      await Promise.resolve();
+    }
+    expect(mocks.state.releaseConfigurePlugin).toBeDefined();
+    expect(carrierSourceWrites()).toEqual([["/proj/App.vue"]]);
+
+    const closed = vueDocument;
+    (workspace as { textDocuments: unknown[] }).textDocuments.length = 0;
+    for (const listener of [...mocks.state.closeListeners]) {
+      listener(closed);
+    }
+
+    deactivate();
+
+    const replacement = {
+      ...vueDocument,
+      uri: {
+        scheme: "file",
+        fsPath: "/proj/New.vue",
+        toString: () => "file:///proj/New.vue",
+      },
+    };
+    (workspace as { textDocuments: unknown[] }).textDocuments.push(replacement);
+    (window as { activeTextEditor?: { document: unknown } }).activeTextEditor = {
+      document: replacement,
+    };
+    mocks.state.configurePluginHold = false;
+    await activate(context);
+    for (let i = 0; i < 40; i += 1) {
+      await Promise.resolve();
+    }
+
+    mocks.state.releaseConfigurePlugin?.();
+    for (let i = 0; i < 40; i += 1) {
+      await Promise.resolve();
+    }
+
+    expect(carrierSourceWrites()).toEqual([["/proj/App.vue"], ["/proj/New.vue"]]);
+  });
+
+  it("cancels Ready-triggered Claude notification work with its activation session", async () => {
+    const previousClaude = process.env.CLAUDE_CODE;
+    process.env.CLAUDE_CODE = "1";
+    try {
+      const context = makeContext();
+      await activate(context);
+      for (let i = 0; i < 40 && mocks.state.startCalls < 1; i += 1) {
+        await Promise.resolve();
+      }
+      fireLatestNotification("$/verter/ready", { gen: 1 });
+      expect(mocks.state.infoMessages).toEqual([]);
+
+      deactivate();
+
+      await activate(context);
+      for (let i = 0; i < 40 && mocks.state.startCalls < 2; i += 1) {
+        await Promise.resolve();
+      }
+      fireLatestNotification("$/verter/ready", { gen: 2 });
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(
+        mocks.state.infoMessages.filter((message) => message.includes("Claude Code detected")),
+      ).toHaveLength(1);
+    } finally {
+      if (previousClaude === undefined) {
+        delete process.env.CLAUDE_CODE;
+      } else {
+        process.env.CLAUDE_CODE = previousClaude;
+      }
+    }
+  });
 });
+
+function fireLatestNotification(type: string, params: unknown) {
+  const client = mocks.state.createdClients.at(-1);
+  for (const handler of client?.handlers.get(type) ?? []) {
+    handler(params);
+  }
+}
+
+function carrierSourceWrites(): string[][] {
+  return mocks.state.configurePluginConfigs.map((config) => {
+    const sources = (config as { activeCarrierSources?: unknown }).activeCarrierSources;
+    return Array.isArray(sources) ? (sources as string[]) : [];
+  });
+}
