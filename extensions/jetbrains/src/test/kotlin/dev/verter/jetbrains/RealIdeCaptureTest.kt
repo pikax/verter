@@ -61,9 +61,12 @@ class RealIdeCaptureTest : BasePlatformTestCase() {
         val paintNs = AtomicLong(-1)
         ApplicationManager.getApplication().invokeAndWait {
             val action = ActionManager.getInstance().getAction(VerterHealthAction.ACTION_ID)
+                ?: error("verter.Health is not registered on the test IDE")
             val start = System.nanoTime()
             ActionManager.getInstance().tryToExecute(action, null, null, "JBT1H", true)
-            PlatformTestUtil.dispatchAllInvocationEvents()
+            // 2025.3+ replacement for the removed dispatchAllInvocationEvents();
+            // drains IdeEventQueue and awaits background write actions.
+            PlatformTestUtil.dispatchAllInvocationEventsInIdeEventQueue()
             paintNs.set(System.nanoTime() - start)
         }
         return paintNs.get()
