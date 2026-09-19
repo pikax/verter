@@ -10,5 +10,6 @@
     "moduleResolution": "Bundler",
     "lib": ["ESNext"],
     "types": ["node"]
-  }
+  },
+  "references": [{ "path": "./tsconfig.jetbrains.json" }]
 }
