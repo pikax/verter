@@ -1,0 +1,30 @@
+{
+  "contractNode": "DOC7",
+  "finalOwner": "expansion.documentation:Documentation system, information architecture and executable examples; feature owners author feature truth",
+  "predecessor": "DOC1",
+  "receivingAmendments": [
+    { "receiver": "XSDK9", "product": "SDK authoring tools and executable reference extensions", "note": "XSDK9 supplies the six sdkGuides slots with executable examples and turns on the --sdk-gate release lane; the gate and slot model are authored here" },
+    { "receiver": "DOC9", "product": "Documentation navigation, accessibility and maintenance qualification", "note": "site nav for the sdk guide home stays with DOC9; the example-home index owns in-home navigation only" }
+  ],
+  "outcomes": [
+    { "id": "sdk-and-official-extension-guide-structure", "currentOwner": "DOC7", "finalOwner": "DOC7", "receivingAcceptance": "DOC7-AC1" },
+    { "id": "sdk-documentation-gate", "currentOwner": "DOC7", "finalOwner": "XSDK9", "receivingAcceptance": "DOC7-AC2" }
+  ],
+  "consumers": [
+    { "id": "docs-reference-harness", "path": "docs/scripts/reference-harness.mjs", "disposition": "extended", "owner": "DOC1" },
+    { "id": "sdk-guide-home", "path": "examples/reference/sdk", "disposition": "created", "owner": "DOC7" },
+    { "id": "example-manifest-sdk-section", "path": "examples/reference/manifest.json", "disposition": "extended", "owner": "DOC7" },
+    { "id": "docs-package-check", "path": "docs/package.json", "disposition": "consumed", "owner": "DOC1" },
+    { "id": "official-extension-pages", "path": "docs/editor", "disposition": "consumed", "owner": "DOC7" }
+  ],
+  "displacedRoutes": [],
+  "deletionPopulationThisNode": [],
+  "deletionRationale": "genuinely additive boundary: no SDK or official-extension guide structure, sdkGuides manifest section or SDK documentation gate existed before this node; shipped editor pages under docs/editor remain the sole official-extension truth and are linked, not duplicated",
+  "acRationales": {
+    "ac1": { "applicable": true, "evidence": "the DOC1 harness (docs/scripts/reference-harness.mjs) stays the sole owning interface; the sdkGuides manifest section, receipt.sdkGuides and the sdkGate option are validated only through validate() and pnpm --filter docs check invokes it unchanged" },
+    "ac2": { "applicable": true, "evidence": "a supplied slot bound to a static JSON-only sample fails with static-sdk-example; a supplied example without a shipped command or public import fails with sdk-example-without-entry; the --sdk-gate lane rejects any pending topic with sdk-gate-unsatisfied" },
+    "ac3": { "applicable": true, "evidence": "sdk pages join the source digest, so fresh versus incremental digest equality, edit/revert and perturbed-discovery canonical equality are proven on the extended boundary; cancellation reuses the harness abort paths; a missing topic page is a partial result and invalid or unbound slots are rejected" },
+    "ac4": { "applicable": true, "evidence": "examples/reference/sdk is the DOC1-tested public guide structure; pins, host/profile, permissions, uncertainty and migration notes live in sdk-docs-model.v1.json; every page records its pending status truthfully and links the shipped authority pages instead of restating them" },
+    "ac5": { "applicable": true, "evidence": "no latency/work/allocation/RSS budget is bound; the deletion population is empty with the rationale above; no required check is dropped" }
+  }
+}

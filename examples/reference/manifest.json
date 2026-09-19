@@ -39,5 +39,16 @@
       "executionClass": "NativeOnly",
       "proofClass": "static-proof"
     }
-  ]
+  ],
+  "sdkGuides": {
+    "index": "sdk/README.md",
+    "topics": [
+      { "id": "contribution", "page": "sdk/contribution.md", "status": "pending", "producingNode": "XSDK9" },
+      { "id": "isolation", "page": "sdk/isolation.md", "status": "pending", "producingNode": "XSDK9" },
+      { "id": "permissions", "page": "sdk/permissions.md", "status": "pending", "producingNode": "XSDK9" },
+      { "id": "packaging", "page": "sdk/packaging.md", "status": "pending", "producingNode": "XSDK9" },
+      { "id": "debugging", "page": "sdk/debugging.md", "status": "pending", "producingNode": "XSDK9" },
+      { "id": "compatibility", "page": "sdk/compatibility.md", "status": "pending", "producingNode": "XSDK9" }
+    ]
+  }
 }

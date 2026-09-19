@@ -9,7 +9,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
@@ -20,6 +20,16 @@ const DEFAULT_REPO_ROOT = resolve(SCRIPT_DIR, "..", "..");
 const SPECIFIER_RE = /(?:from\s+|import\s*\(\s*|require\s*\(\s*|import\s+)["']([^"']+)["']/g;
 const MD_LINK_RE = /\[[^\]]*]\(([^)]+)\)/g;
 const INTERNAL_DIR_RE = /^(packages\/[^/]+\/src\/|crates\/|scripts\/)/;
+
+const REQUIRED_SDK_GUIDE_TOPICS = [
+  "compatibility",
+  "contribution",
+  "debugging",
+  "isolation",
+  "packaging",
+  "permissions",
+];
+const EXECUTABLE_SOURCE_EXTENSIONS = new Set([".ts", ".mts", ".cts", ".js", ".mjs", ".cjs"]);
 
 export const HARNESS_ID = "docs-reference-harness";
 
@@ -302,6 +312,7 @@ export async function validate(options = {}) {
     engineIdentity: { node: process.version, harness: HARNESS_ID },
     hostIdentity: { platform: process.platform, arch: process.arch },
     examples: [],
+    sdkGuides: null,
     generatedReference: null,
     links: [],
     capabilities: [],
@@ -555,6 +566,194 @@ export async function validate(options = {}) {
   receipt.links.sort((a, b) => `${a.from}:${a.href}`.localeCompare(`${b.from}:${b.href}`));
   receipt.capabilities.sort((a, b) => `${a.id}:${a.surface}`.localeCompare(`${b.id}:${b.surface}`));
 
+  const sdkModel = manifest.sdkGuides ?? null;
+  if (sdkModel != null) {
+    if (signal?.aborted) {
+      receipt.completenessState = "cancelled";
+      receipt.errors = [...errors, err("cancelled", "validation aborted before sdk guide check")];
+      receipt.sourceRevisions.digest = sourceDigest(digestEntries);
+      return receipt;
+    }
+    const sdk = { gateEnforced: options.sdkGate === true, index: null, topics: [] };
+    const declaredTopics = Array.isArray(sdkModel.topics) ? sdkModel.topics : [];
+    const declaredIds = new Set(
+      declaredTopics.map((topic) => topic?.id).filter((id) => typeof id === "string"),
+    );
+    const missingTopics = REQUIRED_SDK_GUIDE_TOPICS.filter((id) => !declaredIds.has(id));
+    if (missingTopics.length > 0) {
+      fail(
+        err("sdk-model-incomplete", "sdk guide model is missing required charter topics", {
+          missing: missingTopics,
+        }),
+      );
+    }
+    for (const id of declaredIds) {
+      if (!REQUIRED_SDK_GUIDE_TOPICS.includes(id)) {
+        fail(
+          err("sdk-model-unknown-topic", "sdk guide topic is not part of the charter model", {
+            id,
+          }),
+        );
+      }
+    }
+
+    let listedPages = new Set();
+    const indexRelPath = sdkModel.index;
+    if (typeof indexRelPath !== "string" || !indexRelPath.endsWith(".md")) {
+      fail(err("sdk-index-missing", "sdk guide model declares no markdown index page"));
+    } else {
+      sdk.index = indexRelPath;
+      const indexAbs = join(examplesRoot, indexRelPath);
+      if (!exists(indexAbs)) {
+        fail(
+          err("sdk-page-missing", "sdk guide index page is missing", {
+            id: "index",
+            page: indexRelPath,
+          }),
+        );
+      } else {
+        const bytes = read(indexAbs);
+        digestEntries.push({ path: posixRel(repoRoot, indexAbs), bytes });
+        listedPages = new Set(
+          extractMarkdownHrefs(bytes)
+            .filter((href) => !/^[a-z]+:/i.test(href) && !href.startsWith("#"))
+            .map((href) => posixRel(examplesRoot, resolve(dirname(indexAbs), href.split("#")[0]))),
+        );
+      }
+    }
+
+    const orderedTopics = [...declaredTopics].sort((a, b) =>
+      String(a?.id ?? "").localeCompare(String(b?.id ?? "")),
+    );
+    for (const topic of orderedTopics) {
+      const id = typeof topic?.id === "string" ? topic.id : null;
+      if (!id) continue;
+      const pageRelPath = typeof topic.page === "string" ? topic.page : null;
+      let topicOk = true;
+      if (pageRelPath == null || !pageRelPath.endsWith(".md")) {
+        fail(
+          err("sdk-page-missing", "sdk guide topic declares no markdown page", { id, page: null }),
+        );
+        topicOk = false;
+      } else {
+        const pageAbs = join(examplesRoot, pageRelPath);
+        if (!exists(pageAbs)) {
+          fail(
+            err("sdk-page-missing", "sdk guide topic page is missing", { id, page: pageRelPath }),
+          );
+          topicOk = false;
+        } else {
+          if (!listedPages.has(pageRelPath)) {
+            fail(
+              err("sdk-page-unlisted", "sdk guide topic page is not listed by the index", {
+                id,
+                page: pageRelPath,
+              }),
+            );
+            topicOk = false;
+          }
+          const bytes = read(pageAbs);
+          digestEntries.push({ path: posixRel(repoRoot, pageAbs), bytes });
+          for (const href of extractMarkdownHrefs(bytes)) {
+            if (/^[a-z]+:/i.test(href) || href.startsWith("#")) continue;
+            const target = resolve(dirname(pageAbs), href.split("#")[0]);
+            receipt.links.push({ from: posixRel(repoRoot, pageAbs), href, ok: exists(target) });
+            if (!exists(target)) {
+              fail(
+                err("broken-link", "sdk guide page link does not resolve", {
+                  id,
+                  file: pageRelPath,
+                  href,
+                }),
+              );
+              topicOk = false;
+            }
+          }
+        }
+      }
+      const status = topic.status;
+      if (status !== "pending" && status !== "supplied") {
+        fail(
+          err("sdk-slot-status-invalid", "sdk guide slot status must be pending or supplied", {
+            id,
+            status: status ?? null,
+          }),
+        );
+        topicOk = false;
+      }
+      if (status === "pending") {
+        if (typeof topic.producingNode !== "string" || topic.producingNode.length === 0) {
+          fail(err("sdk-slot-unowned", "pending sdk guide slot names no producing node", { id }));
+          topicOk = false;
+        }
+        if (topic.exampleId != null) {
+          fail(
+            err("sdk-pending-slot-bound", "pending sdk guide slot must not present an example", {
+              id,
+              exampleId: topic.exampleId,
+            }),
+          );
+          topicOk = false;
+        }
+      } else if (status === "supplied") {
+        const example = topic.exampleId != null ? byId.get(topic.exampleId) : undefined;
+        if (example == null) {
+          fail(
+            err("sdk-slot-unbound", "supplied sdk guide slot binds no manifest example", {
+              id,
+              exampleId: topic.exampleId ?? null,
+            }),
+          );
+          topicOk = false;
+        } else {
+          const files = example.files ?? [];
+          const executable = files.some((file) => EXECUTABLE_SOURCE_EXTENSIONS.has(extname(file)));
+          if (!executable) {
+            fail(
+              err(
+                "static-sdk-example",
+                "supplied sdk guide example has no file with an executable extension",
+                { id, exampleId: topic.exampleId },
+              ),
+            );
+            topicOk = false;
+          }
+          const hasEntry =
+            (example.commands ?? []).length > 0 || (example.imports ?? []).length > 0;
+          if (!hasEntry) {
+            fail(
+              err(
+                "sdk-example-without-entry",
+                "supplied sdk guide example declares no shipped command or public import",
+                { id, exampleId: topic.exampleId },
+              ),
+            );
+            topicOk = false;
+          }
+        }
+      }
+      if (options.sdkGate === true && status !== "supplied") {
+        fail(
+          err("sdk-gate-unsatisfied", "the sdk documentation gate requires every topic supplied", {
+            id,
+            status: status ?? null,
+          }),
+        );
+        topicOk = false;
+      }
+      sdk.topics.push({
+        id,
+        page: pageRelPath,
+        status: status ?? null,
+        producingNode: topic.producingNode ?? null,
+        exampleId: topic.exampleId ?? null,
+        ok: topicOk,
+      });
+    }
+    receipt.links.sort((a, b) => `${a.from}:${a.href}`.localeCompare(`${b.from}:${b.href}`));
+    receipt.sdkGuides = sdk;
+  }
+
   const generatedRel =
     plan.generatedPages?.[0]?.path ?? "docs/generated/typeinfo-row-registry-counts.md";
   const generatedAbs = join(repoRoot, ...generatedRel.split("/"));
@@ -643,7 +842,10 @@ export async function validate(options = {}) {
   }
 
   const missing = errors.some(
-    (item) => item.code === "missing-source" || item.code === "partial-example",
+    (item) =>
+      item.code === "missing-source" ||
+      item.code === "partial-example" ||
+      item.code === "sdk-page-missing",
   );
   const stale = errors.some(
     (item) => item.code === "stale-generated" || item.code === "stale-cache",
@@ -662,6 +864,7 @@ export async function validate(options = {}) {
 export function canonicalizeReceipt(receipt) {
   const clone = JSON.parse(JSON.stringify(receipt));
   clone.examples?.sort((a, b) => a.id.localeCompare(b.id));
+  clone.sdkGuides?.topics?.sort((a, b) => a.id.localeCompare(b.id));
   clone.links?.sort((a, b) => `${a.from}:${a.href}`.localeCompare(`${b.from}:${b.href}`));
   clone.capabilities?.sort((a, b) => `${a.id}:${a.surface}`.localeCompare(`${b.id}:${b.surface}`));
   clone.errors?.sort((a, b) =>
@@ -674,7 +877,8 @@ export function canonicalizeReceipt(receipt) {
 
 async function main() {
   const skipTypeinfoCheck = process.argv.includes("--skip-typeinfo");
-  const receipt = await validate({ repoRoot: DEFAULT_REPO_ROOT, skipTypeinfoCheck });
+  const sdkGate = process.argv.includes("--sdk-gate");
+  const receipt = await validate({ repoRoot: DEFAULT_REPO_ROOT, skipTypeinfoCheck, sdkGate });
   const canonical = canonicalizeReceipt(receipt);
   if (receipt.completenessState !== "complete") {
     process.stderr.write(
@@ -684,7 +888,7 @@ async function main() {
     return;
   }
   process.stdout.write(
-    `${HARNESS_ID}: PASS examples=${canonical.examples.length} digest=${canonical.sourceRevisions.digest} lint=${canonical.generatedReference?.lintRuleCount}\n`,
+    `${HARNESS_ID}: PASS examples=${canonical.examples.length} sdk=${canonical.sdkGuides?.topics?.length ?? 0} digest=${canonical.sourceRevisions.digest} lint=${canonical.generatedReference?.lintRuleCount}\n`,
   );
 }
 
