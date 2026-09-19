@@ -7,10 +7,10 @@
   "rows": [
     {
       "id": "ARH0-DEBT-1",
-      "candidate": "packages/core",
-      "candidatePath": "packages/core",
-      "evidence": "directory contains only .gitignore; no package.json, no sources (products/codebase-inventory.json row with all-zero counts)",
-      "disposition": "delete the placeholder or populate it with a named purpose; decision required in the ARH1 visibility pass",
+      "candidate": "packages/core (deleted)",
+      "candidatePath": "tests/architecture-health/ARH1/products/cutover-register.json",
+      "evidence": "directory contained only .gitignore; no package.json, no sources (the codebase-inventory row with all-zero counts was removed in the same change). Deleted per the ARH1-CUT-1 cutover decision (row ARH1-CUT-1 of the referenced register, executed by ARH2); this row now points at that shipped disposition record because the debt site itself no longer exists in the tree",
+      "disposition": "decided and executed: physical deletion (ARH1-CUT-1, executed by ARH2 together with the ARH0 inventory population refresh in the same change)",
       "owner": { "id": "ARH1", "kind": "node" },
       "class": "unassigned-purpose"
     },
