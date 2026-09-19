@@ -27,6 +27,16 @@ export const SERVER_STAGE_ORDER: readonly ProtocolStage[] = [
 
 export type ProtocolDirection = "client_to_server" | "server_to_client";
 
+/** JSON-RPC RequestCancelled, as observed on the wire. */
+export const REQUEST_CANCELLED_CODE = -32800;
+
+/**
+ * Terminal state of one request's timeline. Failed and cancelled requests
+ * never carry a `complete` stamp: partial, pending, failed and cancelled stay
+ * distinct from complete (the client-side mirror of the server's TraceStatus).
+ */
+export type TraceStatus = "pending" | "complete" | "failed" | "cancelled";
+
 /** One framed JSON-RPC message. No source text. */
 export interface ProtocolWireEvent {
   readonly requestEpoch: number;
@@ -56,6 +66,7 @@ export interface InteractionTrace {
   readonly requestEpoch: number;
   readonly sourceEpoch: number | null;
   readonly method: string;
+  readonly status: TraceStatus;
   readonly stamps: readonly StageStamp[];
   readonly firstBlockedStage: ProtocolStage | null;
 }
@@ -124,6 +135,7 @@ export function combineInteractionTrace(
 ): InteractionTrace {
   const stamps = [...serverStamps];
   const matching = wire.filter((event) => event.requestEpoch === requestEpoch);
+  const response = matching.find((event) => event.kind === "response");
   const inbound = matching.find((event) => event.direction === "server_to_client");
   if (inbound && inbound.decodedMs != null && !stamps.some((s) => s.stage === "outbound_written")) {
     stamps.push({
@@ -136,9 +148,18 @@ export function combineInteractionTrace(
     requestEpoch,
     sourceEpoch,
     method,
+    status: traceTerminalStatus(response),
     stamps,
     firstBlockedStage: firstBlockedServerStage(stamps),
   };
+}
+
+/** A request's terminal state, read off its observed response (if any yet). */
+function traceTerminalStatus(response: ProtocolWireEvent | undefined): TraceStatus {
+  if (!response) return "pending";
+  if (response.errorCode === REQUEST_CANCELLED_CODE) return "cancelled";
+  if (response.errorCode !== undefined) return "failed";
+  return "complete";
 }
 
 export type ThroughputKind = "throughput" | "query" | "indeterminate";

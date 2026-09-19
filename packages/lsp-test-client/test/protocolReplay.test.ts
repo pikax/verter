@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   LspClient,
+  combineInteractionTrace,
   discriminateThroughputVsQuery,
   firstBlockedServerStage,
   rejectReplay,
@@ -98,6 +99,7 @@ describe("WSP1-AC2 throughput vs query", () => {
       requestEpoch: 1,
       sourceEpoch: null,
       method: "echo/method",
+      status: "complete" as const,
       stamps: [
         { stage: "request_received" as const, atMs: 0 },
         { stage: "provider_work" as const, atMs: 0.1 },
@@ -132,6 +134,70 @@ describe("WSP1-AC2 throughput vs query", () => {
     };
     expect(discriminateThroughputVsQuery(baseline, payload)).toBe("throughput");
     expect(discriminateThroughputVsQuery(baseline, query)).toBe("query");
+  });
+});
+
+describe("combineInteractionTrace terminal status", () => {
+  const requestEvent = (epoch: number): ProtocolWireEvent => ({
+    requestEpoch: epoch,
+    method: "echo/method",
+    direction: "client_to_server",
+    byteLength: 40,
+    encodeStartedMs: 1,
+    encodeCompletedMs: 1,
+    queuedMs: 1,
+    decodedMs: 1,
+    completedMs: null,
+    kind: "request",
+  });
+  const responseEvent = (epoch: number, errorCode?: number): ProtocolWireEvent => ({
+    requestEpoch: epoch,
+    method: "(response)",
+    direction: "server_to_client",
+    byteLength: 60,
+    encodeStartedMs: 5,
+    encodeCompletedMs: 5,
+    queuedMs: 5,
+    decodedMs: 5,
+    completedMs: errorCode === undefined ? 5 : null,
+    kind: "response",
+    ...(errorCode !== undefined ? { errorCode } : {}),
+  });
+  const stamps: StageStamp[] = [
+    { stage: "request_received", atMs: 1 },
+    { stage: "admitted", atMs: 1 },
+    { stage: "provider_work", atMs: 1 },
+    { stage: "serialize", atMs: 5, byteLength: 60 },
+    { stage: "outbound_enqueued", atMs: 5, byteLength: 60 },
+  ];
+
+  it("marks a successful round trip complete", () => {
+    const trace = combineInteractionTrace("echo/method", 1, null, stamps, [
+      requestEvent(1),
+      responseEvent(1),
+    ]);
+    expect(trace.status).toBe("complete");
+  });
+
+  it("marks a RequestCancelled response cancelled, not complete", () => {
+    const trace = combineInteractionTrace("echo/method", 1, null, stamps, [
+      requestEvent(1),
+      responseEvent(1, -32800),
+    ]);
+    expect(trace.status).toBe("cancelled");
+  });
+
+  it("marks any other error response failed", () => {
+    const trace = combineInteractionTrace("echo/method", 1, null, stamps, [
+      requestEvent(1),
+      responseEvent(1, -32603),
+    ]);
+    expect(trace.status).toBe("failed");
+  });
+
+  it("leaves a request without any response pending", () => {
+    const trace = combineInteractionTrace("echo/method", 1, null, stamps, [requestEvent(1)]);
+    expect(trace.status).toBe("pending");
   });
 });
 

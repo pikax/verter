@@ -6,6 +6,7 @@
 
 import {
   LspClient,
+  REQUEST_CANCELLED_CODE,
   combineInteractionTrace,
   discriminateThroughputVsQuery,
   emptyReplay,
@@ -19,6 +20,7 @@ import {
   type ReplayRejectReason,
   type StageStamp,
   type ThroughputKind,
+  type TraceStatus,
 } from "@verter/lsp-test-client";
 
 export {
@@ -33,6 +35,7 @@ export {
   type ReplayExpectation,
   type ReplayRejectReason,
   type ThroughputKind,
+  type TraceStatus,
 };
 
 export interface ProtocolReplayControls {
@@ -105,13 +108,30 @@ function countDuplicates(methods: readonly string[]): number {
   return dupes;
 }
 
-/** JSON-RPC RequestCancelled, as observed on the wire. */
-const REQUEST_CANCELLED_CODE = -32800;
-
 function countObservedCancellations(wire: readonly ProtocolWireEvent[]): number {
   return wire.filter(
     (event) => event.kind === "response" && event.errorCode === REQUEST_CANCELLED_CODE,
   ).length;
+}
+
+/**
+ * The run's terminal state, derived from the observed wire: a cancelled or
+ * failed request keeps the whole replay distinct from complete (the run-level
+ * mirror of the per-trace TraceStatus terminals).
+ */
+function observedCompletenessState(
+  wire: readonly ProtocolWireEvent[],
+): RecordedLspReplay["completenessState"] {
+  let cancelled = false;
+  let failed = false;
+  for (const event of wire) {
+    if (event.kind !== "response" || event.errorCode === undefined) continue;
+    if (event.errorCode === REQUEST_CANCELLED_CODE) cancelled = true;
+    else failed = true;
+  }
+  if (cancelled) return "cancelled";
+  if (failed) return "failed";
+  return "complete";
 }
 
 export function buildReplayFromWire(
@@ -156,19 +176,22 @@ export function buildReplayFromWire(
           byteLength: response.byteLength,
         });
       }
-      if (response.completedMs != null) {
+      // An error response closed the request without completing it: cancelled
+      // and failed traces never carry a complete stamp.
+      if (response.completedMs != null && response.errorCode === undefined) {
         stamps.push({ stage: "complete", atMs: response.completedMs });
       }
     }
     traces.push(combineInteractionTrace(method, epoch, null, stamps, events));
   }
   return emptyReplay({
-    completenessState: extra.completenessState ?? "complete",
+    completenessState: extra.completenessState ?? observedCompletenessState(wire),
     wire,
     traces,
     diagnosticsPublished: methods.filter((m) => m === "textDocument/publishDiagnostics").length,
     duplicateNotifications: countDuplicates(methods),
     providerPresent: methods.includes("$/verter/typeProviderStarted"),
+    cancelledRequests: countObservedCancellations(wire),
     ...extra,
   });
 }
@@ -213,7 +236,6 @@ export async function runProtocolReplay(
       const replay = buildReplayFromWire(wire, {
         unreadByteLength: unread,
         stalledReader: true,
-        completenessState: "complete",
       });
       // Server finished; the unread buffer is the blocked outbound/transport stage.
       return {
@@ -266,8 +288,6 @@ export async function runProtocolReplay(
     const replay = buildReplayFromWire(wire, {
       unreadByteLength: client.unreadByteLength,
       stalledReader: false,
-      cancelledRequests: countObservedCancellations(wire),
-      completenessState: "complete",
     });
     const blocked =
       replay.traces.map((trace) => trace.firstBlockedStage).find((stage) => stage != null) ??

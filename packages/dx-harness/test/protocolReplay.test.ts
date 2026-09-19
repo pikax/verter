@@ -161,6 +161,19 @@ describe("WSP1.2 live cancellation control", () => {
       (event) => event.kind === "response" && event.errorCode === -32800,
     );
     expect(observedCancels).toHaveLength(verdict.replay.cancelledRequests);
+    // Cancelled stays distinct from complete: the cancelled trace carries an
+    // explicit cancelled terminal, never a complete stamp, and the replay's
+    // terminal state reflects the observed cancellation.
+    const cancelledEpochs = new Set(observedCancels.map((event) => event.requestEpoch));
+    const cancelledTraces = verdict.replay.traces.filter((trace) =>
+      cancelledEpochs.has(trace.requestEpoch),
+    );
+    expect(cancelledTraces.length).toBeGreaterThanOrEqual(1);
+    for (const trace of cancelledTraces) {
+      expect(trace.status).toBe("cancelled");
+      expect(trace.stamps.some((stamp) => stamp.stage === "complete")).toBe(false);
+    }
+    expect(verdict.replay.completenessState).toBe("cancelled");
   });
 
   it("reports zero cancellations when nothing was cancelled", async () => {
@@ -170,6 +183,12 @@ describe("WSP1.2 live cancellation control", () => {
       timeoutMs: 8_000,
     });
     expect(verdict.replay.cancelledRequests).toBe(0);
+    expect(verdict.replay.completenessState).toBe("complete");
+    expect(verdict.replay.traces.length).toBeGreaterThanOrEqual(1);
+    for (const trace of verdict.replay.traces) {
+      expect(trace.status).toBe("complete");
+      expect(trace.stamps.some((stamp) => stamp.stage === "complete")).toBe(true);
+    }
   });
 });
 
@@ -205,5 +224,111 @@ describe("buildReplayFromWire", () => {
     expect(replay.diagnosticsPublished).toBe(2);
     expect(replay.duplicateNotifications).toBe(1);
     expect(rejectReplay(replay, { requireDiagnostics: true })).toBeNull();
+  });
+
+  it("never stamps a cancelled response complete and derives a cancelled terminal state", () => {
+    const wire: ProtocolWireEvent[] = [
+      {
+        requestEpoch: 1,
+        method: "echo/method",
+        direction: "client_to_server",
+        byteLength: 40,
+        encodeStartedMs: 1,
+        encodeCompletedMs: 1,
+        queuedMs: 1,
+        decodedMs: 1,
+        completedMs: null,
+        kind: "request",
+      },
+      {
+        requestEpoch: 1,
+        method: "(response)",
+        direction: "server_to_client",
+        byteLength: 60,
+        encodeStartedMs: 50,
+        encodeCompletedMs: 50,
+        queuedMs: 50,
+        decodedMs: 50,
+        completedMs: 50,
+        kind: "response",
+        errorCode: -32800,
+      },
+    ];
+    const replay = buildReplayFromWire(wire);
+    expect(replay.cancelledRequests).toBe(1);
+    expect(replay.completenessState).toBe("cancelled");
+    const trace = replay.traces.find((candidate) => candidate.requestEpoch === 1);
+    expect(trace).toBeDefined();
+    expect(trace!.status).toBe("cancelled");
+    expect(trace!.stamps.some((stamp) => stamp.stage === "complete")).toBe(false);
+  });
+
+  it("marks a run with a non-cancellation error response failed, not complete", () => {
+    const wire: ProtocolWireEvent[] = [
+      {
+        requestEpoch: 1,
+        method: "echo/method",
+        direction: "client_to_server",
+        byteLength: 40,
+        encodeStartedMs: 1,
+        encodeCompletedMs: 1,
+        queuedMs: 1,
+        decodedMs: 1,
+        completedMs: null,
+        kind: "request",
+      },
+      {
+        requestEpoch: 1,
+        method: "(response)",
+        direction: "server_to_client",
+        byteLength: 60,
+        encodeStartedMs: 5,
+        encodeCompletedMs: 5,
+        queuedMs: 5,
+        decodedMs: 5,
+        completedMs: 5,
+        kind: "response",
+        errorCode: -32603,
+      },
+    ];
+    const replay = buildReplayFromWire(wire);
+    expect(replay.completenessState).toBe("failed");
+    const trace = replay.traces.find((candidate) => candidate.requestEpoch === 1);
+    expect(trace!.status).toBe("failed");
+    expect(trace!.stamps.some((stamp) => stamp.stage === "complete")).toBe(false);
+  });
+
+  it("stamps a successful response complete and keeps the run complete", () => {
+    const wire: ProtocolWireEvent[] = [
+      {
+        requestEpoch: 1,
+        method: "echo/method",
+        direction: "client_to_server",
+        byteLength: 40,
+        encodeStartedMs: 1,
+        encodeCompletedMs: 1,
+        queuedMs: 1,
+        decodedMs: 1,
+        completedMs: null,
+        kind: "request",
+      },
+      {
+        requestEpoch: 1,
+        method: "(response)",
+        direction: "server_to_client",
+        byteLength: 60,
+        encodeStartedMs: 5,
+        encodeCompletedMs: 5,
+        queuedMs: 5,
+        decodedMs: 5,
+        completedMs: 5,
+        kind: "response",
+      },
+    ];
+    const replay = buildReplayFromWire(wire);
+    expect(replay.completenessState).toBe("complete");
+    const trace = replay.traces.find((candidate) => candidate.requestEpoch === 1);
+    expect(trace!.status).toBe("complete");
+    expect(trace!.stamps.some((stamp) => stamp.stage === "complete")).toBe(true);
   });
 });

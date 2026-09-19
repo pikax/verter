@@ -337,7 +337,9 @@ export class LspClient {
       encodeCompletedMs: decodedMs,
       queuedMs: decodedMs,
       decodedMs,
-      completedMs: decodedMs,
+      // An error response closed the request without completing it; the
+      // terminal state travels as errorCode, never as a completion timestamp.
+      completedMs: errorCode !== undefined ? null : decodedMs,
       kind,
       ...(errorCode !== undefined ? { errorCode } : {}),
     });

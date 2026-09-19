@@ -16,6 +16,7 @@
  */
 export { LspClient, type LspClientOptions } from "./lspClient.js";
 export {
+  REQUEST_CANCELLED_CODE,
   SERVER_STAGE_ORDER,
   WSP1_UNAVAILABLE_METRICS,
   combineInteractionTrace,
@@ -32,6 +33,7 @@ export {
   type ReplayRejectReason,
   type StageStamp,
   type ThroughputKind,
+  type TraceStatus,
 } from "./protocolReplay.js";
 export { StderrBuffer, type StderrBufferOptions } from "./stderrBuffer.js";
 export {
