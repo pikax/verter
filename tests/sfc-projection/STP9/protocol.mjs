@@ -206,6 +206,16 @@ export function evaluateRejectTwins({
 
 const CASE_TEST_RE = /test result: (ok|FAILED)\. (\d+) passed; (\d+) failed/;
 
+export function parseCargoSummary(stdout) {
+  const match = String(stdout || "").match(CASE_TEST_RE);
+  if (!match) return null;
+  return {
+    ok: match[1] === "ok",
+    passed: Number(match[2]),
+    failed: Number(match[3]),
+  };
+}
+
 export function runProjectionPlanRustTests(repoRoot = REPO_ROOT) {
   const result = spawnSync(
     "cargo",
@@ -243,8 +253,16 @@ export function assertRustCases(run) {
     }
     return errors;
   }
-  if (run.ok) return errors;
   const output = run.stdout || "";
+  const summary = parseCargoSummary(output);
+  if (!summary || run.status !== 0 || !summary.ok || summary.passed === 0) {
+    const detail = summary
+      ? `status=${run.status} passed=${summary.passed} failed=${summary.failed}`
+      : `status=${run.status} (no cargo summary)`;
+    for (const id of STP9_MANDATORY_CASES) {
+      errors.push(err(id, "rust-case", `cargo test did not execute mandatory cases (${detail})`));
+    }
+  }
   for (const [caseId, filter] of Object.entries(RUST_CASE_FILTERS)) {
     const failed = output.includes(`${filter} ... FAILED`) || output.includes(`'${filter}'`);
     const passed = output.includes(`${filter} ... ok`);
@@ -257,15 +275,6 @@ export function assertRustCases(run) {
         ),
       );
     }
-  }
-  if (errors.length === 0) {
-    errors.push(
-      err(
-        "STP9-determinism",
-        "rust-case",
-        `cargo test -p verter_compiler --lib projection_plan failed (status=${run.status})`,
-      ),
-    );
   }
   return errors;
 }

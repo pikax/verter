@@ -29,15 +29,16 @@
   },
   "identities": {
     "ComponentUseId": {
-      "inputs": ["SourceUnitId lineage", "lexical scope", "component expression", "occurrence among matching uses"],
+      "inputs": ["SourceUnitId lineage", "lexical scope", "component expression", "ancestor path", "operation signature", "occurrence among matching uses"],
       "notInputs": ["byte offsets", "content hashes alone", "generated companion text"]
     },
     "BindingOriginId": {
       "inputs": ["SourceUnitId lineage", "lexical scope", "binder kind", "spelling"],
-      "distinctNestedSameSpelling": true
+      "distinctNestedSameSpelling": true,
+      "distinctSiblingSameSpelling": true
     },
     "BranchEdge": {
-      "inputs": ["expression identity", "outcome", "lexical environment"],
+      "inputs": ["expression identity", "outcome", "lexical environment", "preceding excluded conditions"],
       "forbidden": ["concatenated condition strings", "native flow graph"]
     },
     "OrderedAttributeOp": {
