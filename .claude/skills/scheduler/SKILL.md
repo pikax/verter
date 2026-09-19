@@ -1,6 +1,6 @@
 ---
 name: scheduler
-description: Verter scheduler — Scheduler, submit_request/submit_batch/submit_batch_atomic (atomic DAG admission via driver-drained NewRequestBatch + shared admission core + deferred DedupJoinerEvent), wait_batch (input-order), live TaskKind (Source/Analysis/Artifact), CPU vs I/O pool routing, host-injected SchedulerCpuPool/SchedulerIoPool + separate host-owned HostCpuPool coordinator (shared by every host batch API), account_batch_submission; plus the landed-but-unwired leaf substrate (CpuConcurrencySemaphore/CpuConcurrencyPermit, CancellationToken, opaque SchedulerCacheId newtype, caller-side DedupeHook trait, SubmissionResult) and the not-yet-implemented cache-runtime DAG design target (KeyedJob/CacheNodeDagNode/SchedulerCpuPool/submit_dag/DAG submission)
+description: Verter scheduler — Scheduler, submit_request/submit_batch/submit_batch_atomic (atomic DAG admission via driver-drained NewRequestBatch + shared admission core + deferred DedupJoinerEvent), wait_batch (input-order), live TaskKind (Source/Analysis/Artifact), owner-affine CPU vs I/O pool routing (OwnerCommand<Cpu/Io>, bounded SchedulerCpuPool::try_submit via try_acquire_owned), host-injected SchedulerCpuPool/SchedulerIoPool + separate host-owned HostCpuPool coordinator (shared by every host batch API), account_batch_submission, Admission<T>; plus the landed-but-unwired leaf substrate (CancellationToken, opaque SchedulerCacheId newtype, caller-side DedupeHook trait) and the not-yet-implemented cache-runtime DAG design target (KeyedJob/CacheNodeDagNode/submit_dag/DAG submission)
 ---
 
 # Scheduler
@@ -9,7 +9,9 @@ Concise reference for the `verter_scheduler` crate.
 
 **Live** surface (current tree): the `submit_request` / `submit_batch` /
 `submit_batch_atomic` submission API, the live `TaskKind` variant set
-(`Source` / `Analysis` / `Artifact`), CPU vs I/O pool routing, and dual
+(`Source` / `Analysis` / `Artifact`), owner-affine CPU vs I/O pool routing
+(`OwnerCommand<Cpu>` / `OwnerCommand<Io>`, bounded
+`SchedulerCpuPool::try_submit` via `try_acquire_owned`), and dual
 pool isolation — the host-injected scheduler stage `cpu_pool` (+ `io_pool`)
 plus the separate host-owned `HostCpuPool` coordinator shared by every host
 batch API, with per-batch `account_batch_submission` accounting. *Dual pool
@@ -258,26 +260,29 @@ than one upsert per file. Per-call worker count is NOT a parameter of
 `HostCpuPool` (`HostConfig::host_cpu_threads`); see *Dual pool
 isolation*.
 
-A **leaf substrate** for the cache-runtime DAG design has LANDED but is
-UNWIRED (no submission path takes it as an argument yet): the
-hand-rolled `CpuConcurrencySemaphore` + `CpuConcurrencyPermit`
-(`cpu_concurrency.rs`), the `CancellationToken` (`cancellation.rs`), the
-opaque `SchedulerCacheId` newtype relocated into `cache_id.rs`, the
-caller-side `DedupeHook` trait + `DedupeJoiner` + `NoDedupeHook`
-(`dedupe_hook.rs`), and the `SubmissionResult<T>` substrate (`Admitted` /
-`DedupeJoined` / `Backpressured`). These primitives are correct and
-tested in isolation; the submission API does not yet consume them.
-Sections below describe each.
+A **leaf substrate** for the cache-runtime DAG design has LANDED. G3
+wired `CpuConcurrencySemaphore` as the scheduler CPU **transport bound**:
+`SchedulerCpuPool::try_submit(OwnerCommand<Cpu>)` calls
+`try_acquire_owned` before `rayon::spawn` and returns `Full` when
+saturated (`SchedulerCpuPool::new(threads, transport_capacity)`, floored
+at `threads * 4`, must dominate `dag_budget.cpu`). `Admission<T>` is the
+named admission-outcome type. Still UNWIRED as a submission-path
+argument: `CancellationToken` (`cancellation.rs`), the opaque
+`SchedulerCacheId` newtype in `cache_id.rs`, and the caller-side
+`DedupeHook` trait + `DedupeJoiner` + `NoDedupeHook` (`dedupe_hook.rs`).
+The live submit entry points still return `CompletionHandle` /
+`BatchHandle`, not `Admission`. Sections below describe each.
 
 The rest of the **cache-runtime DAG design target** is still NOT on the
 tree: the `submit_dag` / `CacheNodeDag` DAG surface, the `KeyedJob` /
 `CacheNodeDagNode` types, the expanded `Load` / `Parse` / `CacheNode`
-`TaskKind` variants on `SchedulerCpuPool`, the `SchedulerCpuPool` /
-`SchedulerIoPool` typed pools, DAG semantics (dependency gating,
-priority inheritance, cancellation propagation, bounded admission /
-backpressure), and the wiring of `CpuConcurrencySemaphore` onto DAG
-node dispatch. Every section describing those un-landed surfaces carries
-an explicit "Not yet implemented" banner.
+`TaskKind` variants, DAG semantics (dependency gating, priority
+inheritance, cancellation propagation, bounded admission / backpressure),
+and the wiring of `CpuConcurrencySemaphore` onto DAG *node* dispatch
+(the CPU *transport* wiring is live — see above). Every section
+describing those un-landed surfaces carries an explicit "Not yet
+implemented" banner. The typed `SchedulerCpuPool` / `SchedulerIoPool`
+pools and owner-affine `try_submit` are on the current tree.
 
 Binding implementation spec: `.claude/skills/type-cache-architecture/SKILL.md`
 (Blocks 6 and 7). When in doubt, the plan wins; this skill derives from
@@ -350,21 +355,21 @@ crate.
 
 The submission path probes the hook before admission. On `Some`, the
 caller blocks on the existing flight and the scheduler skips enqueue
-(surfaced as `SubmissionResult::DedupeJoined`, see *SubmissionResult
+(surfaced as `Admission::DedupeJoined`, see *Admission
 substrate*); on `None`, the submission proceeds to admission. The
 scheduler never imports any concrete in-flight-table type from a
 higher-level crate. Wiring the hook into `submit_request` / `submit_dag`
 as an explicit `&dyn DedupeHook` argument on those entry points is a
 future sub-block — the trait substrate is landed and unwired.
 
-## SubmissionResult substrate
+## Admission substrate
 
-`SubmissionResult<T>` (`scheduler.rs`, LANDED) is the typed result of a
+`Admission<T>` (`scheduler.rs`, LANDED) is the typed result of a
 submission attempt, generic over the success-handle type `T`. Exactly
 three variants — no speculative fourth case:
 
 ```rust
-pub enum SubmissionResult<T> {
+pub enum Admission<T> {
     /// Admitted into the DAG; carries the caller's handle.
     Admitted(T),
     /// Collapsed onto an in-flight flight by a caller-side
@@ -376,10 +381,10 @@ pub enum SubmissionResult<T> {
 }
 ```
 
-Landed substrate, UNWIRED: the live submission entry points
+Landed substrate, UNWIRED onto the live entry points:
 (`submit_request` / `submit_batch` / `submit_batch_atomic`) still return
 their existing `CompletionHandle` / `BatchHandle` shapes, not
-`SubmissionResult`. Routing those entry points through `SubmissionResult`
+`Admission`. Routing those entry points through `Admission`
 is a future sub-block.
 
 ## CancellationToken substrate
@@ -503,7 +508,10 @@ separate channel-backed I/O pool preserves source-load isolation.
   for CPU stage
   execution: the driver dispatches the live `TaskKind::Source` CPU step
   (the parse folded into `Source`) plus `TaskKind::Analysis` and
-  `TaskKind::Artifact` onto it via nonblocking `cpu_pool.try_submit(...)`.
+  `TaskKind::Artifact` onto it via nonblocking
+  `cpu_pool.try_submit(OwnerCommand::cpu(...))`. Construct with
+  `SchedulerCpuPool::new(threads, transport_capacity)` (floored at
+  `threads * 4`); transport capacity must dominate `dag_budget.cpu`.
   Workers register
   `CallerKind::CpuWorker` so `wait_or_drive` routes them to the
   cooperative-pump branch. The host likewise constructs and injects the
@@ -632,10 +640,11 @@ coordinator pool's worker count is sized once at host construction (from
 the host's CPU-thread config) and reused across every batch call, and the
 scheduler's stage `cpu_pool` runs at its configured concurrency.
 
-The `CpuConcurrencySemaphore` / `CpuConcurrencyPermit` TYPES are LANDED
-(`crates/verter_scheduler/src/cpu_concurrency.rs`) and tested in
-isolation, but UNWIRED — no submission path or DAG node consumes a
-semaphore handle yet.
+The `CpuConcurrencySemaphore` / `OwnedCpuConcurrencyPermit` TYPES are
+LANDED (`crates/verter_scheduler/src/cpu_concurrency.rs`) and G3-wired as
+the scheduler CPU transport: `SchedulerCpuPool::try_submit` takes an
+owned permit before spawn. The per-task `acquire()` handle on a
+`CacheNodeDagNode` (Block 7) is still UNWIRED.
 
 > **Not yet implemented.** The `Scheduler::cpu_concurrency_semaphore(n)`
 > constructor method and per-call concurrency capping on
@@ -886,7 +895,7 @@ DAG contract:
 - **Bounded admission / backpressure.** The ready queue is bounded by
   `MAX_READY_QUEUE_DEPTH = 64` (`crates/verter_scheduler/src/queue.rs`).
   When full, additional submissions either block or return
-  `SubmissionResult::Backpressure` per caller preference.
+  `Admission::Backpressured` per caller preference.
   `Scheduler::ready_queue_depth()` exposes the current bounded depth for
   observability only.
 - **In-flight dedupe inside a DAG.** Two nodes in the same DAG sharing a

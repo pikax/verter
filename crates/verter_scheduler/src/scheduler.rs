@@ -83,11 +83,9 @@ impl SchedulerConfig {
     ///
     /// This is the SINGLE budget-resolution authority. Both
     /// [`SchedulerDag::with_budget`] (admission ceiling) and the host's
-    /// [`SchedulerIoPool`](crate::pool::SchedulerIoPool) transport
-    /// sizing read it, so the IO transport capacity always dominates the
-    /// same `io` budget the ledger admits against — keeping the DAG
-    /// ledger the sole admission gate (the IO channel never becomes a
-    /// second admission authority).
+    /// pool transport sizing read it, so CPU and IO transports always
+    /// dominate the same class budget the ledger admits against —
+    /// keeping the DAG ledger the sole admission gate.
     pub fn resolved_dag_budget(&self) -> DagCapacityBudget {
         self.dag_budget.unwrap_or(DagCapacityBudget {
             cpu: self.cpu_threads.max(1) as u32,
@@ -804,22 +802,23 @@ impl ScopedCacheFlight {
 
 /// Typed result of a submission attempt.
 ///
-/// Generic over the success-handle type `T` (the handle the submission
-/// path hands back on admission). The three variants are exactly the
-/// admission outcomes — there is no speculative fourth case:
+/// Named charter boundary [`Admission`]. Generic over the success-handle
+/// type `T` (the handle the submission path hands back on admission).
+/// The three variants are exactly the admission outcomes — there is no
+/// speculative fourth case:
 ///
-/// - [`Admitted`](SubmissionResult::Admitted) — the submission was
-///   admitted into the DAG; carries the caller's handle.
-/// - [`DedupeJoined`](SubmissionResult::DedupeJoined) — a caller-side
+/// - [`Admitted`](Admission::Admitted) — the submission was admitted
+///   into the DAG; carries the caller's handle.
+/// - [`DedupeJoined`](Admission::DedupeJoined) — a caller-side
 ///   [`DedupeHook`](crate::dedupe_hook::DedupeHook) probe matched an
 ///   already-in-flight equivalent, so the submission collapsed onto it
 ///   before reaching the DAG; carries the opaque
 ///   [`DedupeJoiner`](crate::dedupe_hook::DedupeJoiner).
-/// - [`Backpressured`](SubmissionResult::Backpressured) — admission was
+/// - [`Backpressured`](Admission::Backpressured) — admission was
 ///   declined under the existing capacity ledger WITHOUT mutating
 ///   readiness. The caller retries or blocks on capacity.
 #[derive(Debug)]
-pub enum SubmissionResult<T> {
+pub enum Admission<T> {
     /// Admitted into the DAG; carries the caller's handle.
     Admitted(T),
     /// Collapsed onto an in-flight flight by a caller-side dedupe probe.
@@ -1508,9 +1507,9 @@ impl Scheduler {
     // feature in `[dev-dependencies]`.
 
     /// Build default scheduler pools sized from `config`, matching the
-    /// host's construction (CPU pool = `cpu_threads`; IO pool =
-    /// `io_threads` workers with transport capacity ≥
-    /// `resolved_dag_budget().io`).
+    /// host's construction (CPU/IO worker counts from `cpu_threads` /
+    /// `io_threads`; each transport capacity dominates the matching
+    /// `resolved_dag_budget()` class).
     #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
     fn default_test_pools(
         config: &SchedulerConfig,
@@ -1518,10 +1517,10 @@ impl Scheduler {
         Arc<crate::pool::SchedulerCpuPool>,
         Arc<crate::pool::SchedulerIoPool>,
     ) {
-        let io_budget = config.resolved_dag_budget().io as usize;
+        let budget = config.resolved_dag_budget();
         (
-            crate::pool::SchedulerCpuPool::new(config.cpu_threads),
-            crate::pool::SchedulerIoPool::new(config.io_threads, io_budget),
+            crate::pool::SchedulerCpuPool::new(config.cpu_threads, budget.cpu as usize),
+            crate::pool::SchedulerIoPool::new(config.io_threads, budget.io as usize),
         )
     }
 
@@ -5705,7 +5704,8 @@ impl Scheduler {
             drop(task);
             return Err(err);
         }
-        self.io_pool.try_submit(task)
+        self.io_pool
+            .try_submit(crate::owner_command::OwnerCommand::io(task))
     }
 
     /// Submit an Analysis/Artifact task to the injected CPU pool. See
@@ -5720,7 +5720,8 @@ impl Scheduler {
             drop(task);
             return Err(err);
         }
-        self.cpu_pool.try_submit(task)
+        self.cpu_pool
+            .try_submit(crate::owner_command::OwnerCommand::cpu(task))
     }
 
     /// Read + clear the one-shot test-only pool-submit fault. Returns
@@ -5820,9 +5821,10 @@ impl Scheduler {
             test_injected,
             "scheduler pool submit returned {err:?} at the dispatch site: the DAG \
              capacity ledger reserves the {task_kind:?} permit in next_ready_for_pump \
-             before producing the ReadyJob, and the IO transport is sized to dominate \
-             dag_budget.io, so the pool is never genuinely full here — a Full/Closed \
-             result is an invariant violation, not backpressure"
+             before producing the ReadyJob, and each transport is sized to dominate \
+             its matching dag_budget (CPU dominates dag_budget.cpu, IO dominates \
+             dag_budget.io). Full/Closed is an invariant violation (fail-closed), \
+             not backpressure"
         );
         let error = crate::job::SchedulerError::StageFailed {
             file_id: canonical.to_string(),
@@ -6348,8 +6350,9 @@ impl Scheduler {
 
     /// Execute a stage on a worker (rayon thread or inline).
     ///
-    /// This is a static method so it can be called from rayon::spawn closures
-    /// without holding a reference to &self. All shared state is passed explicitly.
+    /// This is a static method so it can be called from owner-affine CPU
+    /// pool tasks without holding a reference to &self. All shared state
+    /// is passed explicitly.
     ///
     /// `failed_blocker_deps` carries [`crate::dag::FailedDepRecord`]
     /// entries for every prerequisite that the producer terminalized
@@ -20279,6 +20282,30 @@ mod tests {
                 "injected IO transport capacity ({cap}) must dominate the resolved \
                  dag_budget.io (16) so the channel never becomes a second admission \
                  authority; an io_threads*4-only transport (capacity 4) would FAIL this"
+            );
+        }
+
+        /// G3-AC2: CPU transport is sized from the same resolved DAG
+        /// budget the ledger admits against, matching the IO rail.
+        #[test]
+        fn injected_cpu_transport_dominates_explicit_dag_budget_cpu() {
+            let config = SchedulerConfig {
+                cpu_threads: 1,
+                io_threads: 1,
+                dag_budget: Some(DagCapacityBudget { cpu: 16, io: 8 }),
+            };
+            let loader = Arc::new(MemorySourceLoader::new());
+            let sched = Scheduler::test_with_executor(
+                config,
+                loader,
+                Arc::new(crate::executor::DefaultExecutor),
+            );
+            let cap = sched.cpu_pool.transport_capacity();
+            assert!(
+                cap >= 16,
+                "injected CPU transport capacity ({cap}) must dominate the resolved \
+                 dag_budget.cpu (16) so the pool never becomes a second admission \
+                 authority; a cpu_threads*4-only transport (capacity 4) would FAIL this"
             );
         }
 
