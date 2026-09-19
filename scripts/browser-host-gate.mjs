@@ -25,6 +25,7 @@ import {
   nodeGlobalsPresent,
   canonicalizeTypeInfo,
 } from "../packages/browser-host/src/index.js";
+import { pnpmCommand, resolvePnpm } from "./gate-internals.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const defaultRepoRoot = path.dirname(scriptDir);
@@ -185,6 +186,42 @@ function defaultSpawn(command, args, options) {
     maxBuffer: 64 * 1024 * 1024,
     windowsHide: true,
     shell: false,
+    windowsVerbatimArguments: options.windowsVerbatimArguments,
+  });
+}
+
+function spawnFailureDetail(result) {
+  const output = (result.stderr || result.stdout || "").trim();
+  const code = result.error?.code;
+  const message = result.error?.message;
+  const bits = [code, output || message].filter(Boolean);
+  return (bits.join(": ") || `status ${result.status ?? "null"}`).slice(-2000);
+}
+
+function spawnPnpm(spawn, args, options) {
+  const env = options.env ?? process.env;
+  const pnpmPath = resolvePnpm(env);
+  if (pnpmPath === null) {
+    return {
+      status: 1,
+      stdout: "",
+      stderr: "pnpm not found on PATH",
+      error: { code: "ENOENT", message: "pnpm not found on PATH" },
+    };
+  }
+  const launch = pnpmCommand(pnpmPath, args, undefined, env);
+  if (launch.setupFail) {
+    return {
+      status: 1,
+      stdout: "",
+      stderr: launch.detail,
+      error: { code: "SETUP_FAIL", message: launch.detail },
+    };
+  }
+  return spawn(launch.cmd, launch.args, {
+    cwd: options.cwd,
+    env,
+    windowsVerbatimArguments: launch.windowsVerbatimArguments,
   });
 }
 
@@ -301,11 +338,11 @@ export async function runGate({
 
   if (!skipBuild) {
     log("building @verter/wasm (bindgen, not wasm-opt)");
-    const build = spawn("pnpm", ["--filter", "@verter/wasm", "build:dev"], { cwd: repoRoot });
+    const build = spawnPnpm(spawn, ["--filter", "@verter/wasm", "build:dev"], { cwd: repoRoot });
     if ((build.status ?? 1) !== 0) {
       return {
         ok: false,
-        failures: [`wasm build failed: ${(build.stderr || build.stdout || "").slice(-2000)}`],
+        failures: [`wasm build failed: ${spawnFailureDetail(build)}`],
       };
     }
   }

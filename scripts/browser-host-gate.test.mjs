@@ -94,9 +94,20 @@ function makeSandbox() {
   return root;
 }
 
+function isPnpmLaunch(command) {
+  const base = path.basename(String(command)).toLowerCase();
+  return (
+    base === "pnpm" ||
+    base === "pnpm.cmd" ||
+    base === "pnpm.exe" ||
+    base === "pnpm.bat" ||
+    base === "cmd.exe"
+  );
+}
+
 function spawnOk(tree = "serde v1.0.0\n", native = receipt()) {
   return (command, args) => {
-    if (command === "pnpm") return { status: 0, stdout: "", stderr: "" };
+    if (isPnpmLaunch(command)) return { status: 0, stdout: "", stderr: "" };
     if (command === "cargo" && args[0] === "tree") return { status: 0, stdout: tree, stderr: "" };
     if (command === "cargo" && args[0] === "test") {
       return { status: 0, stdout: `${RECEIPT_MARKER}${JSON.stringify(native)}\n`, stderr: "" };
@@ -313,6 +324,41 @@ test("runGate fails closed when an operation is an empty array", async () => {
     });
     assert.equal(outcome.ok, false);
     assert.ok(outcome.failures.some((row) => /empty array \(BWH1-AC2\)/.test(row)));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runGate default build launches pnpm via cmd.exe on win32 and surfaces spawn error.code", async () => {
+  const root = makeSandbox();
+  try {
+    const launched = [];
+    const outcome = await runGate({
+      repoRoot: root,
+      skipBuild: false,
+      spawn: (command, args) => {
+        launched.push({ command, args });
+        return {
+          status: null,
+          error: { code: "ENOENT", message: "spawn ENOENT" },
+          stdout: "",
+          stderr: "",
+        };
+      },
+      playwrightModule: {},
+      runBrowsers: browsersAll(),
+    });
+    assert.equal(outcome.ok, false);
+    assert.ok(
+      outcome.failures.some((row) => /wasm build failed:.*ENOENT/.test(row)),
+      JSON.stringify(outcome.failures),
+    );
+    assert.equal(launched.length, 1);
+    assert.notEqual(path.basename(launched[0].command).toLowerCase(), "pnpm");
+    if (process.platform === "win32") {
+      assert.match(path.basename(launched[0].command), /cmd\.exe/i);
+      assert.ok(launched[0].args.some((arg) => /pnpm/i.test(String(arg))));
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

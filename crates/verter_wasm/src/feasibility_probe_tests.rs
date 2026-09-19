@@ -177,7 +177,8 @@ pub(crate) fn native_feasibility_receipt() -> Value {
     let query = json!([{
         "decl": TYPEINFO_SYMBOL,
         "kind": format!("{:?}", query_record.kind),
-        "hasRecord": true,
+        "hasRecord": query_record.capture_state
+            == verter_audit::AuditCaptureState::ActiveStored,
     }]);
 
     json!({
@@ -229,6 +230,11 @@ fn bwh1_native_feasibility_probe() {
             .as_array()
             .is_some_and(|rows| !rows.is_empty()),
         "query results must not be empty"
+    );
+    assert_eq!(
+        operations["query"][0]["hasRecord"],
+        json!(true),
+        "audit-enabled probe must derive hasRecord from ActiveStored"
     );
     assert!(
         !receipt["identities"]["typeinfo"].is_null(),
