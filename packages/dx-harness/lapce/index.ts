@@ -1,0 +1,113 @@
+/**
+ * `@verter/dx-harness/lapce` — real-Lapce UI instrumentation and interaction
+ * driver (WSP1L). Correlates Lapce UI event-loop / decode / apply / paint
+ * timings with the WSP1 server InteractionTrace, refuses protocol-smoke-only
+ * certification, and never counts the hermetic fixture host as a real client.
+ */
+
+export {
+  LAPCE_FIXTURE_HOST,
+  LAPCE_REAL_HOST,
+  REJECTED_LAPCE_UI_HOSTS,
+  SCRIPTED_STEP_KINDS,
+  UI_STAGE_ORDER,
+  VERSION_MANIFEST_SCHEMA,
+  isRejectedLapceUiHost,
+  type AutomationPath,
+  type CaptureProvenance,
+  type LapceHostKind,
+  type LapceUiRun,
+  type LapceVersionManifest,
+  type RealClientClaimVerdict,
+  type Certification,
+  type RejectedLapceUiHost,
+  type ScriptedStep,
+  type ScriptedStepKind,
+  type ServerCorrelation,
+  type UiInteractionRecord,
+  type UiStage,
+  type UiStageStamp,
+  type UiStallEvidence,
+  type UiTimeline,
+  type VersionManifestItem,
+} from "./types.js";
+
+export {
+  COMPLETENESS_STATES,
+  isCompletenessState,
+  measuredMetric,
+  metricValue,
+  unknownMetric,
+  type CompletenessState,
+  type Metric,
+  type ProductReceiptBasis,
+} from "@verter/dx-harness/jetbrains";
+
+export {
+  buildUiTimeline,
+  compareScriptedTimelines,
+  correlateServerTrace,
+  detectUiStallWithImmediateServer,
+  type BlockedStageVerdict,
+  type FirstBlockedStageKind,
+  type NoiseBound,
+  type ServerImmediacyBound,
+  type StallThreshold,
+  type TimelineComparison,
+} from "./timeline.js";
+
+export {
+  PINNED_LAPCE_VERSION_MANIFEST,
+  versionsMatchPinnedManifest,
+  type ManifestDrift,
+} from "./manifest.js";
+
+export {
+  LAUNCH_STAMP_MESSAGE_PREFIX,
+  UI_STAMP_MESSAGE_PREFIX,
+  collectStampMessages,
+  isStampMessage,
+  parseLaunchStampMessage,
+  parseLaunchStampValue,
+  parseUiStampMessage,
+  parseUiStampValue,
+  stampUnixMsToTimelineMs,
+  uiStampDigest,
+  type LaunchStampPayload,
+  type LaunchStampPhase,
+  type StampClockAnchor,
+  type StampMessages,
+  type UiStampPayload,
+} from "./stamp.js";
+
+export {
+  DRIVEN_STEP_SERVER_METHOD,
+  DrivenLapceHost,
+  buildDrivenCaptureArtifact,
+  correlateServerTraces,
+  driveLapceSession,
+  loadRecordedLapceCapture,
+  writeDrivenCaptureArtifact,
+  type CorrelatedCapture,
+  type DrivenCaptureArtifact,
+  type DrivenLapceSession,
+  type DrivenLapceSessionOptions,
+  type RecordedLapceCapture,
+} from "./producer.js";
+
+export {
+  FIXTURE_AUTOMATION_PATH,
+  GUI_INSTRUMENTATION_UNAVAILABLE_REASON,
+  REAL_LAPCE_AUTOMATION_PATH,
+  FixtureLapceHost,
+  LapceInteractionDriver,
+  RealLapceHost,
+  assertCertified,
+  assertRealLapceProductClaim,
+  carriesRealClientEvidence,
+  certifyRun,
+  type FixtureLapceHostOptions,
+  type LapceHost,
+  type LapceInteractionDriverOptions,
+  type RealLapceCaptureSession,
+} from "./driver.js";

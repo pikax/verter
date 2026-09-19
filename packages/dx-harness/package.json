@@ -30,12 +30,17 @@
       "types": "./dist/jetbrains/index.d.ts",
       "import": "./dist/jetbrains/index.js",
       "default": "./dist/jetbrains/index.js"
+    },
+    "./lapce": {
+      "types": "./dist/lapce/index.d.ts",
+      "import": "./dist/lapce/index.js",
+      "default": "./dist/lapce/index.js"
     }
   },
   "scripts": {
-    "build": "npx shx rm -rf dist tsconfig.tsbuildinfo tsconfig.jetbrains.tsbuildinfo && tsc -b --force",
+    "build": "npx shx rm -rf dist tsconfig.tsbuildinfo tsconfig.jetbrains.tsbuildinfo tsconfig.lapce.tsbuildinfo && tsc -b --force",
     "dev": "tsc -b --watch",
-    "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo tsconfig.jetbrains.tsbuildinfo",
+    "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo tsconfig.jetbrains.tsbuildinfo tsconfig.lapce.tsbuildinfo",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "test": "pnpm run typecheck && vitest --run",
     "test:unit": "pnpm run typecheck && vitest --run --exclude '**/*Integration.test.ts'",

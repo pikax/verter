@@ -5479,6 +5479,10 @@ pub(crate) mod foundations_guards {
             "LSP audit telemetry — `VERTER_LSP_AUDIT_TRACE_OUT` JSON-lines drainer. Off by default and gated behind the env var at the call site; mirrors the existing `VERTER_COMPONENT_META_AUDIT_JSON_OUT` drainer in `verter_session::component_meta_audit`.",
         ),
         (
+            "crates/verter_lsp/src/interaction_trace.rs",
+            "LSP interaction-trace telemetry — `VERTER_LSP_INTERACTION_TRACE_DUMP` JSON-lines drainer (writes the session Unix-ms correlation anchor, then one line per terminal trace under the traces lock). Off by default and gated behind the env var at construction; the same env-gated drainer category as `VERTER_LSP_AUDIT_TRACE_OUT` in `verter_lsp::audit_harness`. Harness tool output consumed by the WSP1L capture producer, never workspace/semantic state.",
+        ),
+        (
             "crates/verter_lsp/src/background_init.rs",
             "background-initialization unit tests stage tsconfig/source files in temp directories to verify snapshot publication; test fixtures only.",
         ),

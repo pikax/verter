@@ -186,6 +186,29 @@ every Verter editor client ships). All are optional; defaults shown:
 "statistics.enabled" = false         # server-side resolution statistics (opt-in)
 ```
 
+### Instrumentation (WSP1L)
+
+`uiTrace.enabled = false` (default) keeps the volt silent. When set, the volt
+writes **one** `verter launch-stamp {json}` line to the plugin host's stderr at
+`initialize` — never a UI notification, so the measured event loop is not
+perturbed. Lapce does not forward plugin stderr verbatim: `lapce-proxy` renders
+every plugin stderr write through its `tracing` log (target
+`lapce_proxy::plugin::wasi::<author>::<name>`, DEBUG level), so the capture
+session reads the stamp from the client's daily `data/logs/lapce.*.log`, or
+from the client process's own output by launching it with
+`LAPCE_LOG=lapce_proxy=debug`. In every rendering the stamp is the trailing
+message field of the formatted log line (verified against Lapce 0.4.6);
+`@verter/dx-harness/lapce` accepts it both as a raw line and embedded in a host
+log line (`collectStampMessages`), and joins the Unix-ms stamp clock to the WSP1
+server timeline only through a capture-recorded clock anchor
+(`stampUnixMsToTimelineMs`). An instrumented Lapce client build emits
+`verter ui-stamp {json}` lines for input-dispatch/decode/apply/paint
+observations on the same request/source epoch basis (`parseUiStampMessage`);
+until a reference-client capture exists that channel stays recorded unavailable
+— the driver never synthesizes it, and the launch stamp alone never attributes
+UI decode/apply/paint timings. The per-message LSP path is never touched, and
+no semantic logic lives in the volt.
+
 ## How to verify it works
 
 1. Open a `.vue` or `.svelte` file in a project that has `typescript@7`

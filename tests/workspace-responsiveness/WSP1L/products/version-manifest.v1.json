@@ -1,0 +1,27 @@
+{
+  "schema": "lapce-version-manifest.v1",
+  "items": [
+    {
+      "item": "lapce-client",
+      "version": "0.4.6+Nightly.126d356",
+      "status": "pinned",
+      "reason": "the recorded WSP1L reference build: Lapce v0.4.6 with the WSP1L instrumentation patch (packages/dx-harness/lapce/instrumented-client/lapce-0.4.6-wsp1l.patch), sealed in tests/workspace-responsiveness/WSP1L/products/real-client-capture.v1.json"
+    },
+    {
+      "item": "verter-plugin-adapter",
+      "version": "0.1.0",
+      "status": "pinned"
+    },
+    {
+      "item": "verter-lsp-server",
+      "version": "0.0.1-beta.5",
+      "status": "pinned"
+    },
+    {
+      "item": "provider-engines-and-modes",
+      "version": "tsgo",
+      "status": "pinned"
+    }
+  ],
+  "recordedAs": "tests/workspace-responsiveness/WSP1L/products/version-manifest.v1.json"
+}
