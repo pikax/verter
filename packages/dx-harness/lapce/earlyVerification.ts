@@ -253,9 +253,56 @@ export function isProviderEnginePin(pin: string): boolean {
   return /\d+\.\d+/.test(pin.trim());
 }
 
+const REQUIRED_ORACLE_FAMILIES = ["completion", "definition", "diagnostics"] as const;
+
 function typedAnswersMatch(oracle: SemanticOracleObservation): boolean {
-  if (oracle.typedAnswers.length === 0) return false;
-  return oracle.typedAnswers.every((answer) => answer.match);
+  for (const kind of REQUIRED_ORACLE_FAMILIES) {
+    const rows = oracle.typedAnswers.filter((answer) => answer.kind === kind);
+    if (rows.length === 0) return false;
+    if (!rows.every((answer) => answer.match)) return false;
+  }
+  return true;
+}
+
+export function observationIdentity(run: LargeRunObservation): {
+  readonly sourceRevisions: string;
+  readonly projectConfiguration: string;
+  readonly engineIdentity: string;
+  readonly hostIdentity: string;
+} {
+  return {
+    sourceRevisions: run.workload.sourcePin,
+    projectConfiguration: run.workload.configurationPin,
+    engineIdentity: `verter-lsp ${run.serverBuildPin} / ${run.providerEnginePin}`,
+    hostIdentity:
+      run.captureProvenance !== undefined
+        ? `real-lapce:${run.captureProvenance.lapceClientVersion}`
+        : run.hostKind,
+  };
+}
+
+export function receiptBindsObservation(
+  receipt: ProductReceiptBasis,
+  run: LargeRunObservation,
+): boolean {
+  const expected = observationIdentity(run);
+  return (
+    receipt.sourceRevisions === expected.sourceRevisions &&
+    receipt.projectConfiguration === expected.projectConfiguration &&
+    receipt.engineIdentity === expected.engineIdentity &&
+    receipt.hostIdentity === expected.hostIdentity
+  );
+}
+
+/** Join the observed provider kind to an authoritative engine version (never a forged notification field). */
+export function pinProviderEngine(
+  oracle: Pick<CapturedSemanticOracle, "providerKind">,
+  authoritativeVersion: string,
+): string {
+  const kind = oracle.providerKind?.trim() ?? "";
+  const version = authoritativeVersion.trim();
+  if (kind === "" || !isProviderEnginePin(version)) return "";
+  return `${kind} ${version}`;
 }
 
 function driveComplete(run: LargeRunObservation): boolean {
@@ -348,40 +395,11 @@ export function qualifyIssue93EarlyVerification(
         "a duplicated or displaced authority is a wrong-complete",
     };
   }
-  const runCompleteness = completenessVerdict(largeRun.completenessState, "largeRun");
-  if (runCompleteness !== null) return runCompleteness;
-  const receiptCompleteness = completenessVerdict(
-    input.receiptBasis.completenessState,
-    "receiptBasis",
-  );
-  if (receiptCompleteness !== null) return receiptCompleteness;
   if (largeRun.usedSleepForReadiness) {
     return {
       status: "failed",
       rule: "sleep-as-readiness",
       reason: "sleep-as-readiness is forbidden; the run is not real-editor evidence",
-    };
-  }
-  if (isRejectedLapceUiHost(largeRun.hostKind) || largeRun.protocolSmokeOnly) {
-    return {
-      status: "unverified",
-      rule: "protocol-smoke",
-      reason:
-        "a protocol launch smoke cannot certify this node (WSP1B.1); " +
-        "current-client qualification stays unverified",
-    };
-  }
-  if (
-    largeRun.workload.class !== "large-project" ||
-    largeRun.workload.vueFileCount < LARGE_PROJECT_MIN_VUE_FILES ||
-    largeRun.workload.sourcePin.trim() === ""
-  ) {
-    return {
-      status: "unverified",
-      rule: "unpinned-workload",
-      reason:
-        "the large-project scenario is unpinned or below the authored-1k floor; " +
-        "a two-file smoke cannot stand in for it (WSP1B-AC3)",
     };
   }
   if (largeRun.uiStallDetected && largeRun.serverImmediate) {
@@ -411,6 +429,35 @@ export function qualifyIssue93EarlyVerification(
       reason:
         "the qualified run must preserve diagnostic counts and required typed answers " +
         "against the complete semantic oracle with required features enabled",
+    };
+  }
+  const runCompleteness = completenessVerdict(largeRun.completenessState, "largeRun");
+  if (runCompleteness !== null) return runCompleteness;
+  const receiptCompleteness = completenessVerdict(
+    input.receiptBasis.completenessState,
+    "receiptBasis",
+  );
+  if (receiptCompleteness !== null) return receiptCompleteness;
+  if (isRejectedLapceUiHost(largeRun.hostKind) || largeRun.protocolSmokeOnly) {
+    return {
+      status: "unverified",
+      rule: "protocol-smoke",
+      reason:
+        "a protocol launch smoke cannot certify this node (WSP1B.1); " +
+        "current-client qualification stays unverified",
+    };
+  }
+  if (
+    largeRun.workload.class !== "large-project" ||
+    largeRun.workload.vueFileCount < LARGE_PROJECT_MIN_VUE_FILES ||
+    largeRun.workload.sourcePin.trim() === ""
+  ) {
+    return {
+      status: "unverified",
+      rule: "unpinned-workload",
+      reason:
+        "the large-project scenario is unpinned or below the authored-1k floor; " +
+        "a two-file smoke cannot stand in for it (WSP1B-AC3)",
     };
   }
   if (largeRun.oracle.diagnosticCount.status === "unknown") {
@@ -460,6 +507,24 @@ export function qualifyIssue93EarlyVerification(
       rule: "unpinned-workload",
       reason:
         "client/server/provider versions must be pinned to immutable build identities before qualification",
+    };
+  }
+  if (largeRun.duration.status !== "measured") {
+    return {
+      status: "unverified",
+      rule: "unpinned-workload",
+      reason: `duration unavailable: ${
+        largeRun.duration.status === "unknown" ? largeRun.duration.reason : "not measured"
+      }`,
+    };
+  }
+  if (!receiptBindsObservation(input.receiptBasis, largeRun)) {
+    return {
+      status: "failed",
+      rule: "stale-basis",
+      reason:
+        "receipt source/project/engine/host identity does not bind this observation; " +
+        "another basis cannot certify the current run",
     };
   }
   return {
@@ -542,10 +607,13 @@ export interface CapturedSemanticOracle {
   readonly diagnosticUris: readonly string[];
   readonly diagnosticsByUri: readonly CapturedDiagnosticSet[];
   readonly completionLabels: readonly string[];
+  readonly completionPending: boolean;
   readonly definitionLocations: readonly DefinitionLocation[];
+  readonly definitionPending: boolean;
   readonly definitionUris: readonly string[];
   readonly outboundBytes: number;
   readonly providerPid: number | null;
+  readonly providerKind: string | null;
   readonly providerVersion: string | null;
 }
 
@@ -575,6 +643,22 @@ function textDocumentUri(params: unknown): string | null {
   if (!isRecord(params)) return null;
   const doc = params.textDocument;
   return stringField(doc, "uri") ?? stringField(params, "uri");
+}
+
+function textDocumentVersion(params: unknown): number | null {
+  if (!isRecord(params)) return null;
+  return numberField(params.textDocument, "version") ?? numberField(params, "version");
+}
+
+interface TrackedDocument {
+  version: number | null;
+  open: boolean;
+}
+
+interface MethodOracle<T> {
+  seq: number;
+  pending: boolean;
+  value: T;
 }
 
 function asRange(value: unknown): LspRange | null {
@@ -663,28 +747,71 @@ function definitionLocationsFrom(result: unknown): DefinitionLocation[] {
  * Outbound bytes are the UTF-8 JSON bodies of `read from lsp:` records
  * (server → client). Client ingress (`write to lsp:`) is not outbound.
  *
- * Completion and definition answers are the latest response for that method
- * (joined by JSON-RPC id to the originating request), including empty/error
- * replies. Diagnostics keep the latest versioned population per URI.
+ * Completion and definition answers are the freshest *request* for that method
+ * (joined by JSON-RPC id). A later request that is still pending, or that
+ * returned empty/error, is authoritative even if an older success arrives last.
+ * Diagnostics bind to the current open document lifetime and version.
  */
 export function extractCapturedSemanticOracle(
   capturedLines: readonly string[],
 ): CapturedSemanticOracle {
   const diagnosticsByUri = new Map<string, CapturedDiagnosticSet>();
-  let lastCompletion: string[] = [];
-  let lastDefinitions: DefinitionLocation[] = [];
+  const documents = new Map<string, TrackedDocument>();
   let outboundBytes = 0;
   let providerPid: number | null = null;
-  let providerVersion: string | null = null;
-  const pendingById = new Map<string | number, { readonly method: string }>();
+  let providerKind: string | null = null;
+  let nextSeq = 0;
+  const pendingById = new Map<string | number, { readonly method: string; readonly seq: number }>();
+  const latestSeq = { completion: 0, definition: 0 };
+  let completion: MethodOracle<string[]> = { seq: 0, pending: false, value: [] };
+  let definition: MethodOracle<DefinitionLocation[]> = { seq: 0, pending: false, value: [] };
+
+  const trackRequest = (method: string, id: string | number): void => {
+    nextSeq += 1;
+    pendingById.set(id, { method, seq: nextSeq });
+    if (method === "textDocument/completion") {
+      latestSeq.completion = nextSeq;
+      completion = { seq: nextSeq, pending: true, value: [] };
+    }
+    if (method === "textDocument/definition") {
+      latestSeq.definition = nextSeq;
+      definition = { seq: nextSeq, pending: true, value: [] };
+    }
+  };
+
+  const applyDocumentLifecycle = (written: Record<string, unknown>): void => {
+    const method = stringField(written, "method");
+    if (method === null) return;
+    const params = written.params;
+    const uri = textDocumentUri(params);
+    if (uri === null) return;
+    if (method === "textDocument/didOpen") {
+      documents.set(uri, { version: textDocumentVersion(params), open: true });
+      diagnosticsByUri.delete(uri);
+      return;
+    }
+    if (method === "textDocument/didChange") {
+      const previous = documents.get(uri);
+      documents.set(uri, {
+        version: textDocumentVersion(params) ?? previous?.version ?? null,
+        open: previous?.open ?? true,
+      });
+      return;
+    }
+    if (method === "textDocument/didClose") {
+      documents.set(uri, { version: null, open: false });
+      diagnosticsByUri.delete(uri);
+    }
+  };
 
   for (const line of capturedLines) {
     const written = extractLspJson(line, "write to lsp:");
     if (isRecord(written)) {
+      applyDocumentLifecycle(written);
       const id = idField(written);
       const method = stringField(written, "method");
       if (id !== null && method !== null) {
-        pendingById.set(id, { method });
+        trackRequest(method, id);
       }
     }
     const read = extractLspJson(line, "read from lsp:");
@@ -703,39 +830,50 @@ export function extractCapturedSemanticOracle(
         : [];
       const version = numberField(read.params, "version");
       if (uri !== null) {
-        const previous = diagnosticsByUri.get(uri);
-        if (
-          previous === undefined ||
-          version === null ||
-          previous.version === null ||
-          version >= previous.version
-        ) {
-          diagnosticsByUri.set(uri, { uri, version, count, messages });
+        const doc = documents.get(uri);
+        if (doc !== undefined) {
+          if (!doc.open) continue;
+          if (version !== null && doc.version !== null && version !== doc.version) continue;
+        } else {
+          const previous = diagnosticsByUri.get(uri);
+          if (
+            previous !== undefined &&
+            version !== null &&
+            previous.version !== null &&
+            version < previous.version
+          ) {
+            continue;
+          }
         }
+        diagnosticsByUri.set(uri, { uri, version, count, messages });
       }
     }
     if (method === "$/verter/tsgoStarted" && isRecord(read.params)) {
       if (typeof read.params.pid === "number") providerPid = read.params.pid;
-      const version =
-        stringField(read.params, "version") ?? stringField(read.params, "typescriptVersion");
-      if (version !== null) providerVersion = version;
     }
     if (method === "$/verter/typeProviderStarted" && isRecord(read.params)) {
       if (typeof read.params.pid === "number") providerPid = read.params.pid;
-      const version =
-        stringField(read.params, "version") ?? stringField(read.params, "typescriptVersion");
-      if (version !== null) providerVersion = version;
+      const kind = stringField(read.params, "kind");
+      if (kind !== null) providerKind = kind;
     }
     const id = idField(read);
     if (id !== null && pendingById.has(id)) {
       const pending = pendingById.get(id)!;
       pendingById.delete(id);
       const failed = read.error !== undefined;
-      if (pending.method === "textDocument/completion") {
-        lastCompletion = failed ? [] : completionLabelsFrom(result);
+      if (pending.method === "textDocument/completion" && pending.seq === latestSeq.completion) {
+        completion = {
+          seq: pending.seq,
+          pending: false,
+          value: failed ? [] : completionLabelsFrom(result),
+        };
       }
-      if (pending.method === "textDocument/definition") {
-        lastDefinitions = failed ? [] : definitionLocationsFrom(result);
+      if (pending.method === "textDocument/definition" && pending.seq === latestSeq.definition) {
+        definition = {
+          seq: pending.seq,
+          pending: false,
+          value: failed ? [] : definitionLocationsFrom(result),
+        };
       }
     }
   }
@@ -745,12 +883,15 @@ export function extractCapturedSemanticOracle(
     diagnosticCount: diagnosticSets.reduce((sum, set) => sum + set.count, 0),
     diagnosticUris: diagnosticSets.map((set) => set.uri),
     diagnosticsByUri: diagnosticSets,
-    completionLabels: lastCompletion,
-    definitionLocations: lastDefinitions,
-    definitionUris: lastDefinitions.map((location) => location.uri),
+    completionLabels: completion.value,
+    completionPending: completion.pending,
+    definitionLocations: definition.value,
+    definitionPending: definition.pending,
+    definitionUris: definition.value.map((location) => location.uri),
     outboundBytes,
     providerPid,
-    providerVersion,
+    providerKind,
+    providerVersion: null,
   };
 }
 
@@ -767,14 +908,16 @@ export function typedAnswersFromOracle(
   oracle: CapturedSemanticOracle,
   expected: SemanticOracleExpectation = ISSUE93_ORACLE_EXPECTATION,
 ): TypedAnswer[] {
-  const completionMatch = expected.completionLabels.every((label) =>
-    oracle.completionLabels.includes(label),
-  );
-  const definitionMatch = oracle.definitionLocations.some((location) => {
-    if (!uriPathEndsWith(location.uri, expected.definition.uriSuffix)) return false;
-    if (expected.definition.range === undefined) return true;
-    return location.range !== null && rangesEqual(location.range, expected.definition.range);
-  });
+  const completionMatch =
+    !oracle.completionPending &&
+    expected.completionLabels.every((label) => oracle.completionLabels.includes(label));
+  const definitionMatch =
+    !oracle.definitionPending &&
+    oracle.definitionLocations.some((location) => {
+      if (!uriPathEndsWith(location.uri, expected.definition.uriSuffix)) return false;
+      if (expected.definition.range === undefined) return true;
+      return location.range !== null && rangesEqual(location.range, expected.definition.range);
+    });
   const expectedDiagnosticEntries = Object.entries(expected.diagnosticsByUriSuffix);
   const observedDiagnosticCounts = expectedDiagnosticEntries.map(([suffix, count]) => {
     const set = oracle.diagnosticsByUri.find((row) => uriPathEndsWith(row.uri, suffix));

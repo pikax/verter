@@ -25,7 +25,9 @@ import {
   issue93EarlyVerification,
   loadRecordedLapceCapture,
   paintMetricFromRun,
+  pinProviderEngine,
   qualifyIssue93EarlyVerification,
+  receiptBindsObservation,
   typedAnswersFromOracle,
   uriPathEndsWith,
   RealLapceHost,
@@ -86,10 +88,12 @@ const ORACLE_OK: SemanticOracleObservation = {
   requiredFeaturesEnabled: true,
 };
 
+const SERVER_PIN = `sha256:${"ab".repeat(32)}`;
+
 const RECEIPT: ProductReceiptBasis = {
-  sourceRevisions: "candidate:test",
-  projectConfiguration: "large-project",
-  engineIdentity: "verter-lsp 0.0.1-beta.5",
+  sourceRevisions: LARGE_WORKLOAD.sourcePin,
+  projectConfiguration: LARGE_WORKLOAD.configurationPin,
+  engineIdentity: `verter-lsp ${SERVER_PIN} / 7.0.2`,
   hostIdentity: "real-lapce:0.4.6+Nightly.126d356",
   completenessState: "complete",
 };
@@ -117,8 +121,6 @@ const CHURN_KINDS = [
   "navigate",
   "close",
 ] as const;
-
-const SERVER_PIN = `sha256:${"ab".repeat(32)}`;
 
 function largeRun(overrides: Partial<LargeRunObservation> = {}): LargeRunObservation {
   return {
@@ -266,7 +268,10 @@ describe("WSP1B-AC2 — semantic oracle on the same basis", () => {
         definitionUris: ["file:///ws/Fixture.vue"],
         outboundBytes: 12,
         providerPid: 1,
-        providerVersion: "7.0.2",
+        providerKind: "tsgo",
+        providerVersion: null,
+        completionPending: false,
+        definitionPending: false,
       },
       ISSUE93_ORACLE_EXPECTATION,
     );
@@ -639,8 +644,13 @@ describe("captured-line semantic oracle extract", () => {
       })}`,
       `prefix read from lsp: ${JSON.stringify({
         jsonrpc: "2.0",
+        method: "$/verter/typeProviderStarted",
+        params: { pid: 4242, kind: "tsgo" },
+      })}`,
+      `prefix read from lsp: ${JSON.stringify({
+        jsonrpc: "2.0",
         method: "$/verter/tsgoStarted",
-        params: { pid: 4242, version: "7.0.2" },
+        params: { pid: 4242 },
       })}`,
     ];
     const oracle = extractCapturedSemanticOracle(lines);
@@ -648,7 +658,9 @@ describe("captured-line semantic oracle extract", () => {
     expect(oracle.completionLabels).toEqual(["greeting", "user", "message"]);
     expect(oracle.definitionUris).toEqual(["file:///ws/Fixture.vue"]);
     expect(oracle.providerPid).toBe(4242);
-    expect(oracle.providerVersion).toBe("7.0.2");
+    expect(oracle.providerKind).toBe("tsgo");
+    expect(oracle.providerVersion).toBeNull();
+    expect(pinProviderEngine(oracle, "7.0.2")).toBe("tsgo 7.0.2");
     expect(oracle.outboundBytes).toBeGreaterThan(0);
     const answers = typedAnswersFromOracle(oracle, ISSUE93_ORACLE_EXPECTATION);
     expect(answers.every((answer) => answer.match)).toBe(true);
@@ -755,5 +767,209 @@ describe("paintMetricFromRun", () => {
       ],
     });
     expect(metric.status).toBe("unknown");
+  });
+});
+
+const writeLsp = (payload: unknown) => `prefix write to lsp: ${JSON.stringify(payload)}`;
+const readLsp = (payload: unknown) => `prefix read from lsp: ${JSON.stringify(payload)}`;
+const completionResult = {
+  isIncomplete: false,
+  items: [{ label: "greeting" }, { label: "user" }, { label: "message" }],
+};
+
+describe("WSP1B receipt identity binds the observation", () => {
+  it("fails when receipt identities are unrelated to the run", () => {
+    expect(receiptBindsObservation(RECEIPT, largeRun())).toBe(true);
+    const verdict = qualifyIssue93EarlyVerification(
+      input({
+        receiptBasis: {
+          sourceRevisions: "other-repo@deadbeef",
+          projectConfiguration: "unrelated-tsconfig",
+          engineIdentity: "tsserver 5.0.0",
+          hostIdentity: "vscode-1.0",
+          completenessState: "complete",
+        },
+      }),
+    );
+    expect(verdict.status).not.toBe("qualified");
+    expect(verdict.status).toBe("failed");
+    expect(verdict.rule).toBe("stale-basis");
+  });
+});
+
+describe("WSP1B complete semantic oracle families", () => {
+  it("fails when definition and diagnostics families are omitted", () => {
+    const verdict = qualifyIssue93EarlyVerification(
+      input({
+        largeRun: largeRun({
+          oracle: {
+            ...ORACLE_OK,
+            typedAnswers: [
+              {
+                kind: "completion",
+                expected: ["greeting", "user", "message"],
+                observed: ["greeting", "user", "message"],
+                match: true,
+              },
+            ],
+          },
+        }),
+      }),
+    );
+    expect(verdict.status).toBe("failed");
+    expect(verdict.rule).toBe("WSP1B-AC2");
+  });
+});
+
+describe("WSP1B detected failures survive partial evidence", () => {
+  it("fails a UI stall with an immediate server even when the run is partial", () => {
+    const verdict = qualifyIssue93EarlyVerification(
+      input({
+        largeRun: largeRun({
+          completenessState: "partial",
+          uiStallDetected: true,
+          serverImmediate: true,
+        }),
+      }),
+    );
+    expect(verdict.status).toBe("failed");
+    expect(verdict.rule).toBe("WSP1B-AC1");
+  });
+
+  it("fails a detected stall before reporting an unpinned workload", () => {
+    const verdict = qualifyIssue93EarlyVerification(
+      input({
+        largeRun: largeRun({
+          uiStallDetected: true,
+          serverImmediate: false,
+          workload: { ...LARGE_WORKLOAD, vueFileCount: 2, sourcePin: "" },
+        }),
+      }),
+    );
+    expect(verdict.status).toBe("failed");
+    expect(verdict.rule).toBe("WSP1B-AC3");
+    expect(verdict.rule).not.toBe("unpinned-workload");
+  });
+});
+
+describe("WSP1B duration is a pinned basis member", () => {
+  it("stays unverified when duration is unknown", () => {
+    const verdict = qualifyIssue93EarlyVerification(
+      input({
+        largeRun: largeRun({ duration: unknownMetric("session clock unavailable") }),
+      }),
+    );
+    expect(verdict.status).not.toBe("qualified");
+    expect(verdict.status).toBe("unverified");
+    expect(verdict.rule).toBe("unpinned-workload");
+  });
+});
+
+describe("captured-line request freshness and document lifetime", () => {
+  it("selects the freshest completion request, not a later older reply", () => {
+    const lines = [
+      writeLsp({ jsonrpc: "2.0", method: "textDocument/completion", id: 900 }),
+      writeLsp({ jsonrpc: "2.0", method: "textDocument/completion", id: 901 }),
+      readLsp({ jsonrpc: "2.0", id: 901, result: { isIncomplete: false, items: [] } }),
+      readLsp({ jsonrpc: "2.0", id: 900, result: completionResult }),
+    ];
+    const oracle = extractCapturedSemanticOracle(lines);
+    expect(oracle.completionLabels).toEqual([]);
+    expect(oracle.completionPending).toBe(false);
+    expect(
+      typedAnswersFromOracle(oracle).find((answer) => answer.kind === "completion")?.match,
+    ).toBe(false);
+  });
+
+  it("treats an unanswered newer completion request as pending", () => {
+    const lines = [
+      writeLsp({ jsonrpc: "2.0", method: "textDocument/completion", id: 900 }),
+      readLsp({ jsonrpc: "2.0", id: 900, result: completionResult }),
+      writeLsp({ jsonrpc: "2.0", method: "textDocument/completion", id: 901 }),
+    ];
+    const oracle = extractCapturedSemanticOracle(lines);
+    expect(oracle.completionPending).toBe(true);
+    expect(oracle.completionLabels).toEqual([]);
+    expect(
+      typedAnswersFromOracle(oracle).find((answer) => answer.kind === "completion")?.match,
+    ).toBe(false);
+  });
+
+  it("drops diagnostics that do not match the current document version", () => {
+    const uri = "file:///ws/Fixture.vue";
+    const lines = [
+      writeLsp({
+        jsonrpc: "2.0",
+        method: "textDocument/didOpen",
+        params: { textDocument: { uri, version: 1 } },
+      }),
+      writeLsp({
+        jsonrpc: "2.0",
+        method: "textDocument/didChange",
+        params: { textDocument: { uri, version: 2 }, contentChanges: [] },
+      }),
+      readLsp({
+        jsonrpc: "2.0",
+        method: "textDocument/publishDiagnostics",
+        params: { uri, version: 1, diagnostics: [] },
+      }),
+    ];
+    const oracle = extractCapturedSemanticOracle(lines);
+    expect(oracle.diagnosticsByUri.find((set) => set.uri === uri)).toBeUndefined();
+  });
+
+  it("resets diagnostics on close and reopen", () => {
+    const uri = "file:///ws/Fixture.vue";
+    const seven = Array.from({ length: 7 }, (_, i) => ({ message: `d${i}` }));
+    const lines = [
+      writeLsp({
+        jsonrpc: "2.0",
+        method: "textDocument/didOpen",
+        params: { textDocument: { uri, version: 9 } },
+      }),
+      readLsp({
+        jsonrpc: "2.0",
+        method: "textDocument/publishDiagnostics",
+        params: { uri, version: 9, diagnostics: seven },
+      }),
+      writeLsp({
+        jsonrpc: "2.0",
+        method: "textDocument/didClose",
+        params: { textDocument: { uri } },
+      }),
+      writeLsp({
+        jsonrpc: "2.0",
+        method: "textDocument/didOpen",
+        params: { textDocument: { uri, version: 1 } },
+      }),
+      readLsp({
+        jsonrpc: "2.0",
+        method: "textDocument/publishDiagnostics",
+        params: { uri, version: 1, diagnostics: [] },
+      }),
+    ];
+    const oracle = extractCapturedSemanticOracle(lines);
+    expect(oracle.diagnosticsByUri.find((set) => set.uri === uri)?.count).toBe(0);
+    expect(oracle.diagnosticCount).toBe(0);
+  });
+
+  it("ignores invented version fields on production provider-start notifications", () => {
+    const oracle = extractCapturedSemanticOracle([
+      readLsp({
+        jsonrpc: "2.0",
+        method: "$/verter/tsgoStarted",
+        params: { pid: 11, version: "9.9.9", typescriptVersion: "9.9.9" },
+      }),
+      readLsp({
+        jsonrpc: "2.0",
+        method: "$/verter/typeProviderStarted",
+        params: { pid: 11, kind: "tsgo", version: "9.9.9" },
+      }),
+    ]);
+    expect(oracle.providerPid).toBe(11);
+    expect(oracle.providerKind).toBe("tsgo");
+    expect(oracle.providerVersion).toBeNull();
+    expect(pinProviderEngine(oracle, "7.0.2")).toBe("tsgo 7.0.2");
+    expect(pinProviderEngine({ providerKind: null }, "7.0.2")).toBe("");
   });
 });

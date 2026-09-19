@@ -34,7 +34,9 @@ import {
   issue93CarryForwardCase,
   issue93EarlyVerification,
   loadRecordedLapceCapture,
+  observationIdentity,
   paintMetricFromRun,
+  pinProviderEngine,
   stallOnImmediateServer,
   typedAnswersFromOracle,
   versionsMatchPinnedManifest,
@@ -49,6 +51,13 @@ const repoRoot = path.resolve(here, "../../..");
 function arg(name, fallback) {
   const at = process.argv.indexOf(`--${name}`);
   return at !== -1 ? process.argv[at + 1] : fallback;
+}
+
+function workspaceTypescriptVersion(root) {
+  const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+  const raw = pkg.devDependencies?.typescript ?? pkg.dependencies?.typescript ?? "";
+  const match = String(raw).match(/\d+\.\d+(?:\.\d+)?/);
+  return match ? match[0] : "";
 }
 
 const lapceBin = path.resolve(arg("lapce"));
@@ -164,13 +173,15 @@ try {
     stallThreshold: { stallThresholdMs: 5_000, recordedAs: "WSP1B large-project stall threshold" },
     immediacyBound: { maxServerTotalMs: 5_000, recordedAs: "WSP1B large-project immediacy bound" },
     protocolSmokePassed: true,
-    completenessState: "partial",
+    completenessState: "pending",
     receiptBasis: {
-      sourceRevisions: `recorded-capture:${recorded.provenance.sessionId}`,
-      projectConfiguration: "wsp-equal-work-synthetic-sfc-slice count=2615",
-      engineIdentity: "verter-lsp (pinned manifest)",
+      sourceRevisions:
+        "test-corpora/perf/synthetic-15k/generator/generate.mjs generatorVersion=1.1.0 count=2615 seed=0x5eed15",
+      projectConfiguration:
+        "planted Fixture.vue + Helper.vue under a tsconfig that includes the generated corpus",
+      engineIdentity: "verter-lsp (pending pin)",
       hostIdentity: `real-lapce:${recorded.provenance.lapceClientVersion}`,
-      completenessState: "partial",
+      completenessState: "pending",
     },
     capture: { provenance: recorded.provenance, uiStamps: recorded.session.uiStamps },
   });
@@ -182,13 +193,79 @@ try {
   const lastStamp = Math.max(...recorded.session.uiStamps.map((stamp) => stamp.atUnixMs));
   const durationMs = lastStamp - session.startedUnixMs;
   const serverBuildPin = `sha256:${createHash("sha256").update(readFileSync(serverBin)).digest("hex")}`;
-  const providerEnginePin = capturedOracle.providerVersion ?? "";
+  const providerEnginePin = pinProviderEngine(capturedOracle, workspaceTypescriptVersion(repoRoot));
   const versionsPinned =
     versionsMatchPinnedManifest(recorded.versions).ok &&
     isSha256BuildPin(serverBuildPin) &&
     isProviderEnginePin(providerEnginePin);
   const realClientEvidence = carriesRealClientEvidence(run);
-  const completenessState = "partial";
+  const duration = measuredMetric(durationMs, "ms");
+  const resources = {
+    clientPaint: paintMetricFromRun(run),
+    providerProcessCost: unknownMetric(
+      capturedOracle.providerPid === null
+        ? "no $/verter/typeProviderStarted pid observed"
+        : `provider pid ${capturedOracle.providerPid} observed; CPU not sampled`,
+    ),
+    outboundBytes: measuredMetric(capturedOracle.outboundBytes, "bytes"),
+    retainedMemory: unknownMetric("process-tree RSS not sampled on this capture"),
+  };
+  const driveOk =
+    sameDocumentReopen &&
+    recorded.steps.some((step) => step.kind === "type") &&
+    recorded.steps.filter((step) => step.kind === "type").length >= 3 &&
+    recorded.steps.filter((step) => step.kind === "complete").length >= 3;
+  const resourcesMeasured = Object.values(resources).every(
+    (metric) => metric.status === "measured",
+  );
+  const completenessState =
+    driveOk &&
+    versionsPinned &&
+    realClientEvidence &&
+    resourcesMeasured &&
+    duration.status === "measured"
+      ? "complete"
+      : "partial";
+  const workload = {
+    id: "wsp-equal-work-synthetic-sfc-slice",
+    class: "large-project",
+    vueFileCount: PRIMEVUE_EQUIVALENT_VUE_FILES,
+    sourcePin:
+      "test-corpora/perf/synthetic-15k/generator/generate.mjs generatorVersion=1.1.0 count=2615 seed=0x5eed15",
+    configurationPin:
+      "planted Fixture.vue + Helper.vue under a tsconfig that includes the generated corpus",
+    privateCorpusLabel: "operator PrimeVue 2615 Vue files (unlabeled, not published)",
+  };
+  const largeRun = {
+    hostKind: run.hostKind,
+    protocolSmokeOnly: false,
+    uiStallDetected: stall.uiStallDetected,
+    serverImmediate: stall.serverImmediate,
+    realClientEvidence,
+    completenessState,
+    usedSleepForReadiness: false,
+    versionsPinned,
+    serverBuildPin,
+    providerEnginePin,
+    interactionKinds: recorded.steps.map((step) => step.kind),
+    reopenAfterClose: true,
+    sameDocumentReopen,
+    diagnosticsObserved: capturedOracle.diagnosticsByUri.some((set) => set.count > 0),
+    duration,
+    workload,
+    oracle: {
+      diagnosticCount: measuredMetric(capturedOracle.diagnosticCount, "count"),
+      typedAnswers,
+      requiredFeaturesEnabled: true,
+    },
+    resources,
+    claimsIssue93Fixed: false,
+    finalOwner: "expansion.workspace-responsiveness",
+    duplicatedAuthority: false,
+    captureProvenance: recorded.provenance,
+    observedUiStamps: recorded.session.uiStamps,
+  };
+  const identity = observationIdentity(largeRun);
 
   const verification = issue93EarlyVerification({
     smallSmoke: {
@@ -196,58 +273,9 @@ try {
       uiStallDetected: false,
       vueFileCount: 2,
     },
-    largeRun: {
-      hostKind: run.hostKind,
-      protocolSmokeOnly: false,
-      uiStallDetected: stall.uiStallDetected,
-      serverImmediate: stall.serverImmediate,
-      realClientEvidence,
-      completenessState,
-      usedSleepForReadiness: false,
-      versionsPinned,
-      serverBuildPin,
-      providerEnginePin,
-      interactionKinds: recorded.steps.map((step) => step.kind),
-      reopenAfterClose: true,
-      sameDocumentReopen,
-      diagnosticsObserved: capturedOracle.diagnosticsByUri.some((set) => set.count > 0),
-      duration: measuredMetric(durationMs, "ms"),
-      workload: {
-        id: "wsp-equal-work-synthetic-sfc-slice",
-        class: "large-project",
-        vueFileCount: PRIMEVUE_EQUIVALENT_VUE_FILES,
-        sourcePin:
-          "test-corpora/perf/synthetic-15k/generator/generate.mjs generatorVersion=1.1.0 count=2615 seed=0x5eed15",
-        configurationPin:
-          "planted Fixture.vue + Helper.vue under a tsconfig that includes the generated corpus",
-        privateCorpusLabel: "operator PrimeVue 2615 Vue files (unlabeled, not published)",
-      },
-      oracle: {
-        diagnosticCount: measuredMetric(capturedOracle.diagnosticCount, "count"),
-        typedAnswers,
-        requiredFeaturesEnabled: true,
-      },
-      resources: {
-        clientPaint: paintMetricFromRun(run),
-        providerProcessCost: unknownMetric(
-          capturedOracle.providerPid === null
-            ? "no $/verter/tsgoStarted pid observed"
-            : `provider pid ${capturedOracle.providerPid} observed; CPU not sampled`,
-        ),
-        outboundBytes: measuredMetric(capturedOracle.outboundBytes, "bytes"),
-        retainedMemory: unknownMetric("process-tree RSS not sampled on this capture"),
-      },
-      claimsIssue93Fixed: false,
-      finalOwner: "expansion.workspace-responsiveness",
-      duplicatedAuthority: false,
-      captureProvenance: recorded.provenance,
-      observedUiStamps: recorded.session.uiStamps,
-    },
+    largeRun,
     receiptBasis: {
-      sourceRevisions: `recorded-capture:${recorded.provenance.sessionId}`,
-      projectConfiguration: "wsp-equal-work-synthetic-sfc-slice count=2615",
-      engineIdentity: `verter-lsp ${serverBuildPin} / ${providerEnginePin || "provider-unpinned"}`,
-      hostIdentity: `real-lapce:${recorded.provenance.lapceClientVersion}`,
+      ...identity,
       completenessState,
     },
   });
