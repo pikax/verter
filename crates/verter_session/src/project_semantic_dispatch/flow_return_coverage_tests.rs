@@ -1953,8 +1953,8 @@ fn optional_member_read_return_is_the_stripped_member_or_undefined() {
         CALLS,
         "callOptionalDeclaredChainMemberRead",
         TypeExpr::union(vec![
-            TypeExpr::Primitive(PrimitiveName::Undefined),
             number(),
+            TypeExpr::Primitive(PrimitiveName::Undefined),
         ]),
     );
 }
@@ -2765,8 +2765,8 @@ fn two_yielded_settled_calls_keep_both_literal_constituents() {
             type_arguments: Arc::from(
                 vec![
                     TypeExpr::union(vec![
-                        TypeExpr::number_literal(1.0),
                         TypeExpr::number_literal(2.0),
+                        TypeExpr::number_literal(1.0),
                     ]),
                     string(),
                     TypeExpr::Primitive(PrimitiveName::Unknown),
@@ -2817,8 +2817,8 @@ fn two_awaited_fresh_literal_arms_keep_both_literal_constituents() {
             name: Arc::from("Promise"),
             type_arguments: Arc::from(
                 vec![TypeExpr::union(vec![
-                    TypeExpr::number_literal(1.0),
                     TypeExpr::number_literal(2.0),
+                    TypeExpr::number_literal(1.0),
                 ])]
                 .into_boxed_slice(),
             ),

@@ -342,7 +342,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// A node kind keyed by already-interned input nodes (`ProjectPath` /
     /// `ProjectMember` / `IndexedAccess` rooted at `base`; `KeyOf` /
     /// `MappedType` / `Conditional` / `NormalizeUnion` /
-    /// `NormalizeIntersection` over their input nodes) produces a result
+    /// `ReduceIntersection` over their input nodes) produces a result
     /// whose identity transitively depends on the file content each
     /// file-derived input was lowered from. The input node's origin scope
     /// — recorded in the arena sidecar at intern time — names that file
@@ -10217,7 +10217,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// contributing source member whenever the input had more than one
     /// member — lattice-extreme and proven-disjoint folds included — so
     /// provenance recovery finds the pre-canonical input set even after
-    /// absorption / dedup / sorting (`NormalizeIntersection([string,
+    /// absorption / dedup / sorting (`ReduceIntersection([string,
     /// number])` records `string` and `number` on the shared `never`).
     /// Edges landing on a shared `Global` primitive are accepted growth:
     /// the derivation store deduplicates identical edges, and each edge is
@@ -10230,17 +10230,49 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.build_normalize_composite(members, /* is_union */ true)
     }
 
-    /// Intersection normalization — the `NormalizeIntersection` query
-    /// builder. Same canonical routing, evidence threading, and origin-edge
-    /// discipline as [`Self::build_normalize_union`]; the algebra
-    /// additionally applies the intersection lattice laws and the
-    /// PROVEN-disjoint scalar collapse (`string & number = never`).
-    pub(super) fn build_normalize_intersection(
+    /// Ordered intersection reduction — the `ReduceIntersection` query
+    /// builder. Same evidence threading and origin-edge discipline as
+    /// [`Self::build_normalize_union`]; the algebra additionally applies
+    /// the intersection lattice laws and the PROVEN-disjoint scalar
+    /// collapse (`string & number = never`). Operand order is preserved.
+    pub(super) fn build_reduce_intersection(
         &self,
-        members: &Arc<[SemanticNodeId]>,
+        input: crate::semantic_query::IntersectionInputRef,
+        _purpose: crate::semantic_query::IntersectionPurpose,
+        _context: crate::semantic_query::SemanticContextId,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        verter_audit::attribute!(NormalizeIntersection);
-        self.build_normalize_composite(members, /* is_union */ false)
+        verter_audit::attribute!(ReduceIntersection);
+        if let Some(steps) = input.as_steps() {
+            let mut members: Vec<SemanticNodeId> = Vec::with_capacity(steps.len());
+            for step in steps.iter() {
+                match *step {
+                    crate::semantic_query::IntersectionTerm::Value(id) => members.push(id),
+                    crate::semantic_query::IntersectionTerm::EvaluateSubgroup {
+                        input: nested,
+                        purpose,
+                    } => {
+                        let nested_key =
+                            crate::semantic_query::SemanticQueryKey::ReduceIntersection {
+                                input: nested,
+                                purpose,
+                                context: _context,
+                            };
+                        match self.execute_read(nested_key).value {
+                            crate::semantic_query::QueryResult::Value(node) => members.push(node),
+                            crate::semantic_query::QueryResult::Recursive(node) => {
+                                members.push(node)
+                            }
+                            crate::semantic_query::QueryResult::Error(_) => {}
+                        }
+                    }
+                }
+            }
+            let members: Arc<[SemanticNodeId]> = Arc::from(members.into_boxed_slice());
+            self.build_normalize_composite(&members, /* is_union */ false)
+        } else {
+            let members: Arc<[SemanticNodeId]> = Arc::from(input.as_ordered_values());
+            self.build_normalize_composite(&members, /* is_union */ false)
+        }
     }
 
     /// Shared body of the two normalization builders.
@@ -10252,7 +10284,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let composite = if is_union {
             super::canonical_algebra::canonical_union(self.graph(), members)
         } else {
-            super::canonical_algebra::canonical_intersection(self.graph(), members)
+            super::canonical_algebra::intern_ordered_intersection(self.graph(), members)
         };
         let node = composite.node;
         let fence = self.project_generation_signature();
@@ -11673,7 +11705,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// Per-arm logic mirrors §3.2 body sketch:
     /// - `DefineProps` / `WithDefaults`: 0 args → `Opaque(Miss)`;
-    ///   1 arg → arg unchanged; ≥2 args → `NormalizeIntersection`.
+    ///   1 arg → arg unchanged; ≥2 args → `ReduceIntersection`.
     /// - `DefineEmits`: dispatch `type_args[0]` through `ProjectPath`
     ///   in the caller's mode. Returns the projected surface; the
     ///   consumer (`extract_component_meta` at
@@ -11792,9 +11824,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else if type_args.len() == 1 {
                     QueryResult::Value(type_args[0])
                 } else {
-                    let read = self.execute_read(SemanticQueryKey::NormalizeIntersection {
-                        members: Arc::clone(type_args),
-                    });
+                    let read = self.execute_read(SemanticQueryKey::reduce_intersection_operands(
+                        Arc::clone(type_args),
+                    ));
                     crate::component_meta_audit::merge_dep_signature_into_local_fence(
                         &mut local_fence,
                         &read.dep_signature,
@@ -11882,7 +11914,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // AND from the `type_args` nodes — every arm derives its value
         // from `type_args` (returned directly for `DefineProps` /
         // `WithDefaults` 1-arg and `DefineExpose` / `DefineOptions`;
-        // `NormalizeIntersection`-normalised for the ≥2-arg props arms;
+        // `ReduceIntersection`-normalised for the ≥2-arg props arms;
         // `ProjectPath`-projected for `DefineEmits` / `DefineSlots` /
         // `DefineModel`). When a type argument is file-derived from
         // another canonical the result transitively depends on that
@@ -11922,7 +11954,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         .with_observed_self_roots(observed_self_roots);
         // Fold the nested macro-payload reads' metadata onto the build
         // output so a budget/walker partial in a nested
-        // `NormalizeIntersection` / `ProjectPath` read taints this macro
+        // `ReduceIntersection` / `ProjectPath` read taints this macro
         // payload result (and suppresses the component-meta warm gate),
         // while a benign non-cacheable nested read still refuses inner-memo
         // admission without falsely marking this result partial.
@@ -11942,7 +11974,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// union / intersection CONSTRUCTION routes here, and this routes through
     /// the canonical algebra
     /// ([`canonical_algebra::canonical_union`] /
-    /// [`canonical_algebra::canonical_intersection`]) — recursive flattening,
+    /// [`canonical_algebra::intern_ordered_intersection`]) — recursive flattening,
     /// lattice absorption, structural `T | T = T`, proven-disjoint scalar
     /// intersection collapse. The canonicalization's freshness evidence is
     /// deposited ambiently on the active cold-build taint frame
@@ -11955,13 +11987,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
         members: &[SemanticNodeId],
         is_union: bool,
     ) -> SemanticNodeId {
-        let composite = if is_union {
-            super::canonical_algebra::canonical_union(self.graph(), members)
+        if is_union {
+            let composite = super::canonical_algebra::canonical_union(self.graph(), members);
+            self.deposit_canonical_evidence(composite.evidence);
+            composite.node
         } else {
-            super::canonical_algebra::canonical_intersection(self.graph(), members)
-        };
-        self.deposit_canonical_evidence(composite.evidence);
-        composite.node
+            match self
+                .execute_read(
+                    crate::semantic_query::SemanticQueryKey::reduce_intersection_operands(
+                        std::sync::Arc::from(members.to_vec().into_boxed_slice()),
+                    ),
+                )
+                .value
+            {
+                crate::semantic_query::QueryResult::Value(node) => node,
+                crate::semantic_query::QueryResult::Recursive(node) => node,
+                crate::semantic_query::QueryResult::Error(_) => {
+                    let composite = super::canonical_algebra::intern_ordered_intersection(
+                        self.graph(),
+                        members,
+                    );
+                    self.deposit_canonical_evidence(composite.evidence);
+                    composite.node
+                }
+            }
+        }
     }
 
     /// Whether a member-wise composite REBUILD may re-decide its arm list

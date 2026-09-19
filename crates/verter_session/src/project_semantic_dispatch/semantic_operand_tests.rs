@@ -3146,6 +3146,7 @@ fn intersection_and_union_bases_carry_the_residual_path_into_their_arms() {
             ("Instantiate", 3),
             ("LowerLocator", 3),
             ("ProjectPath", 1),
+            ("ReduceIntersection", 1),
             ("ResolveDecl", 2),
         ]
         .into_iter()

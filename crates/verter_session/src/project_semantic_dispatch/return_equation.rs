@@ -137,8 +137,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 _ => leaves.push(*node),
             }
         }
-        leaves.sort_by_key(|node| node.0);
-        leaves.dedup();
+        crate::semantic_query::stable_key::sort_by_stable_key(graph, &mut leaves);
+        leaves.dedup_by(|a, b| crate::semantic_query::stable_key::provably_equal(graph, *a, *b));
         let normalized = self.intern_normalized_union_or_intersection(&leaves, true);
         match graph.node_data(normalized).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.to_vec(),

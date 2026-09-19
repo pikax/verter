@@ -187,9 +187,13 @@ struct Probe {
 }
 
 const PROBE_TABLE: &[Probe] = &[
+    // Multi-arm union expectations below list arms in `VerterStableV1`
+    // `(fingerprint, exact)` order — number `0.0` keys before `1.0`, and
+    // `undefined` (an intrinsic) keys before the `1.0` literal — not in
+    // flow-discovery order.
     Probe {
         function: "regionAccumulator",
-        expected: Expected::Whole(|| union(vec![number(1.0), number(0.0)])),
+        expected: Expected::Whole(|| union(vec![number(0.0), number(1.0)])),
         discriminates: "the consequent region ends its own path at the `return`, so the \
                         trailing return is a SECOND contributor; a region minted reachable \
                         would join `undefined`, and one minted unreachable would drop the \
@@ -204,14 +208,14 @@ const PROBE_TABLE: &[Probe] = &[
     },
     Probe {
         function: "bodyFromRootRegion",
-        expected: Expected::Whole(|| union(vec![number(1.0), primitive(PrimitiveName::Undefined)])),
+        expected: Expected::Whole(|| union(vec![primitive(PrimitiveName::Undefined), number(1.0)])),
         discriminates: "the body takes its fact from the root region — the guarded return \
                         leaves the end point reachable, so `undefined` joins and the literal \
                         does not widen",
     },
     Probe {
         function: "evaluatorRefinement",
-        expected: Expected::Whole(|| union(vec![number(1.0), number(0.0)])),
+        expected: Expected::Whole(|| union(vec![number(0.0), number(1.0)])),
         discriminates: "only the evaluator can see that the case tests EXHAUST the \
                         discriminant; without that refinement the no-matching-case path \
                         survives and joins `undefined`",
@@ -219,7 +223,7 @@ const PROBE_TABLE: &[Probe] = &[
     Probe {
         function: "nestedBodyRefinement",
         expected: Expected::CallableReturn(|| {
-            union(vec![number(1.0), primitive(PrimitiveName::Undefined)])
+            union(vec![primitive(PrimitiveName::Undefined), number(1.0)])
         }),
         discriminates: "the NESTED body's own fact crosses into its own join — a dropped \
                         nested fact loses the arrow's `undefined` arm while the outer body \
@@ -227,7 +231,7 @@ const PROBE_TABLE: &[Probe] = &[
     },
     Probe {
         function: "switchCaseBreak",
-        expected: Expected::Whole(|| union(vec![number(1.0), primitive(PrimitiveName::Undefined)])),
+        expected: Expected::Whole(|| union(vec![primitive(PrimitiveName::Undefined), number(1.0)])),
         discriminates: "the `default` clause's `break` is what reaches past the switch; \
                         without that fact a defaulted switch reads as ending every path and \
                         the sole literal widens to `number`",

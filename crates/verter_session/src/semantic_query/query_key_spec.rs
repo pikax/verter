@@ -679,12 +679,12 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "",
             admission: AdmissionSpec::Singleflight,
         },
-        // NormalizeIntersection { members } — structural intersection
-        // normalization over already-resolved member nodes; no demand payload.
+        // ReduceIntersection { input, purpose, context } — ordered
+        // intersection reduction over an explicit construction input.
         SemanticQueryKeySpec {
-            variant: SemanticQueryKeyTag::NormalizeIntersection,
+            variant: SemanticQueryKeyTag::ReduceIntersection,
             lifecycle: KeyLifecycle::Live,
-            context_shape: "(members)",
+            context_shape: "(input,purpose,context)",
             value_domain: SemanticQueryValueTag::TypeNode,
             env_dims: EnvDimSpec::Static(env_structural()),
             allowed_demand: AxisMask::empty(),

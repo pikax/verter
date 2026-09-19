@@ -6963,7 +6963,7 @@ const props = defineProps<{
         [
             vec!["direct-a".to_string(), "direct-b".to_string()],
             vec!["alias-a".to_string(), "alias-b".to_string()],
-            vec!["closed".to_string(), "transformed-extra".to_string()],
+            vec!["transformed-extra".to_string(), "closed".to_string()],
             vec![],
             vec![],
         ],
@@ -7020,7 +7020,7 @@ const props = defineProps<{
             "transformed",
             "Transformed",
             vec!["Transformed"],
-            vec!["closed", "transformed-extra"],
+            vec!["transformed-extra", "closed"],
         ),
     ] {
         let row = facts

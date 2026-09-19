@@ -76,7 +76,15 @@ pub use semantic_context::{
     SemanticContext, SemanticContextId, SemanticOrderPolicyId, SemanticPolicySet,
     SemanticPolicySetId, SemanticUnionMembersKey,
 };
+pub mod intersection_input;
+pub use intersection_input::{
+    IntersectionInputId, IntersectionInputRef, IntersectionPurpose, IntersectionRecipe,
+    IntersectionTerm,
+};
 pub mod outcome;
+pub mod stable_key;
+#[cfg(test)]
+mod stable_key_tests;
 pub use outcome::{
     DependencyProofId, DiagnosticRecipeSetId, IncompleteReason, OutcomeEvidence, OutcomeEvidenceId,
     QueryOutcome, Ready, RecoveryProvenanceId, ResultEvaluationContextId, CONTEXT_FREE_EVALUATION,
@@ -6857,10 +6865,10 @@ pub enum RelationKind {
     /// `S` is assignable to `T` — the default relation TS checks at
     /// assignments / argument passing.
     Assignable,
-    /// `S` is a subtype of `T`. REFUSED by the reducer (undecided).
+    /// `S` is a subtype of `T`. Graph-native structural decision; not a
+    /// silent assignability forward.
     Subtype,
-    /// `S` is a strict subtype of `T` (no `any`/`unknown` widening).
-    /// REFUSED by the reducer (undecided).
+    /// `S` is a strict subtype of `T`: subtype holds and the reverse does not.
     StrictSubtype,
     /// `S` and `T` are mutually identical. LIVE, bounded to the NOMINAL
     /// axis: a `unique symbol` subject decides against another one by its
@@ -7216,6 +7224,9 @@ pub struct RelationContext {
     pub substitution: SubstitutionCanonicalHash,
     /// Reduction context relation descent runs under (§2.7:717).
     pub projection_reduction: ProjectionReductionContext,
+    /// Context-owned policy set and order domain. Changing it invalidates
+    /// a resident `Relate` parent together with its leaf.
+    pub semantic_context: SemanticContextId,
 }
 
 impl Default for RelationContext {
@@ -7230,6 +7241,7 @@ impl Default for RelationContext {
             project_identity: HashValue::default(),
             substitution: SubstitutionCanonicalHash::empty(),
             projection_reduction: ProjectionReductionContext::structural_transit(),
+            semantic_context: SemanticContextId::production(),
         }
     }
 }
@@ -7636,8 +7648,12 @@ pub enum SemanticQueryKey {
     NormalizeUnion {
         members: Arc<[SemanticNodeId]>,
     },
-    NormalizeIntersection {
-        members: Arc<[SemanticNodeId]>,
+    /// Ordered intersection reduction over an explicit construction input.
+    /// Binary inputs allocate no recipe. Grouping is the input recipe.
+    ReduceIntersection {
+        input: IntersectionInputRef,
+        purpose: IntersectionPurpose,
+        context: SemanticContextId,
     },
     /// Selector-aware projection of one authored object-construction program.
     ///
@@ -7732,7 +7748,7 @@ pub enum SemanticQueryKey {
     /// NOT build per-kind member objects itself. The one-engine
     /// `build_resolve_macro_payload` dispatch is:
     /// - `DefineProps` / `WithDefaults`: 0 args → `Opaque(Miss)`; 1 arg
-    ///   → arg unchanged; ≥2 args → `NormalizeIntersection`.
+    ///   → arg unchanged; ≥2 args → `ReduceIntersection`.
     /// - `DefineEmits` / `DefineSlots` / `DefineModel`: dispatch
     ///   `type_args[0]` through `ProjectPath` in the caller's mode and
     ///   return the projected surface. Per-kind member construction
@@ -8261,7 +8277,7 @@ pub enum SemanticQueryKeyTag {
     Conditional,
     TypeOf,
     NormalizeUnion,
-    NormalizeIntersection,
+    ReduceIntersection,
     ProjectObjectSpread,
     ProjectPath,
     Relate,
@@ -8298,7 +8314,7 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::Conditional,
         SemanticQueryKeyTag::TypeOf,
         SemanticQueryKeyTag::NormalizeUnion,
-        SemanticQueryKeyTag::NormalizeIntersection,
+        SemanticQueryKeyTag::ReduceIntersection,
         SemanticQueryKeyTag::ProjectObjectSpread,
         SemanticQueryKeyTag::ProjectPath,
         SemanticQueryKeyTag::Relate,
@@ -8337,7 +8353,7 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::Conditional => "Conditional",
             SemanticQueryKeyTag::TypeOf => "TypeOf",
             SemanticQueryKeyTag::NormalizeUnion => "NormalizeUnion",
-            SemanticQueryKeyTag::NormalizeIntersection => "NormalizeIntersection",
+            SemanticQueryKeyTag::ReduceIntersection => "ReduceIntersection",
             SemanticQueryKeyTag::ProjectObjectSpread => "ProjectObjectSpread",
             SemanticQueryKeyTag::ProjectPath => "ProjectPath",
             SemanticQueryKeyTag::Relate => "Relate",
@@ -8402,6 +8418,17 @@ impl SemanticQueryKeyTag {
 }
 
 impl SemanticQueryKey {
+    /// Checker-reduction `ReduceIntersection` over a flat operand list.
+    /// Binary/unary/empty lists allocate no recipe.
+    #[must_use]
+    pub fn reduce_intersection_operands(members: Arc<[SemanticNodeId]>) -> Self {
+        Self::ReduceIntersection {
+            input: IntersectionInputRef::from_operands(&members),
+            purpose: IntersectionPurpose::CheckerReduction,
+            context: SemanticContextId::production(),
+        }
+    }
+
     /// The content-free discriminant tag for this key. EXHAUSTIVE by
     /// construction — a new enum variant cannot compile until it gains a tag
     /// arm here, which is the mechanism that keeps the spec table honest.
@@ -8417,9 +8444,7 @@ impl SemanticQueryKey {
             SemanticQueryKey::Conditional { .. } => SemanticQueryKeyTag::Conditional,
             SemanticQueryKey::TypeOf { .. } => SemanticQueryKeyTag::TypeOf,
             SemanticQueryKey::NormalizeUnion { .. } => SemanticQueryKeyTag::NormalizeUnion,
-            SemanticQueryKey::NormalizeIntersection { .. } => {
-                SemanticQueryKeyTag::NormalizeIntersection
-            }
+            SemanticQueryKey::ReduceIntersection { .. } => SemanticQueryKeyTag::ReduceIntersection,
             SemanticQueryKey::ProjectObjectSpread { .. } => {
                 SemanticQueryKeyTag::ProjectObjectSpread
             }

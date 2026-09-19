@@ -117,7 +117,7 @@ pub static SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS: AtomicU64 = AtomicU64::new(0
 ///   6 = Conditional
 ///   7 = TypeOf
 ///   8 = NormalizeUnion
-///   9 = NormalizeIntersection
+///   9 = ReduceIntersection
 ///  10 = ProjectObjectSpread
 ///  11 = ProjectPath
 ///  12 = Relate
@@ -153,7 +153,7 @@ pub const DISPATCH_OPERATOR_KIND_LABELS: [&str; DISPATCH_OPERATOR_KIND_COUNT] = 
     "Conditional",
     "TypeOf",
     "NormalizeUnion",
-    "NormalizeIntersection",
+    "ReduceIntersection",
     "ProjectObjectSpread",
     "ProjectPath",
     "Relate",
@@ -378,7 +378,7 @@ pub fn kind_index_for_key(key: &crate::semantic_query::SemanticQueryKey) -> usiz
         SemanticQueryKey::Conditional { .. } => 6,
         SemanticQueryKey::TypeOf { .. } => 7,
         SemanticQueryKey::NormalizeUnion { .. } => 8,
-        SemanticQueryKey::NormalizeIntersection { .. } => 9,
+        SemanticQueryKey::ReduceIntersection { .. } => 9,
         SemanticQueryKey::ProjectObjectSpread { .. } => 10,
         SemanticQueryKey::ProjectPath { .. } => 11,
         SemanticQueryKey::Relate { .. } => 12,
@@ -876,9 +876,9 @@ mod tests {
         let normalize_union = SemanticQueryKey::NormalizeUnion {
             members: Arc::from(Vec::new().into_boxed_slice()),
         };
-        let normalize_intersection = SemanticQueryKey::NormalizeIntersection {
-            members: Arc::from(Vec::new().into_boxed_slice()),
-        };
+        let normalize_intersection = SemanticQueryKey::reduce_intersection_operands(Arc::from(
+            Vec::new().into_boxed_slice(),
+        ));
         let project_object_spread = SemanticQueryKey::ProjectObjectSpread {
             program: dummy_node,
             selector: crate::semantic_query::ObjectProjectionSelector::Surface,

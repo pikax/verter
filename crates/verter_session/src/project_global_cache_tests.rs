@@ -1502,11 +1502,15 @@ fn derived_semantic_query_records_project_generation_anchor_slice11() {
         members: members.clone(),
     };
     let _ = dispatch.execute_type_node(key.clone());
-    // After canonicalization, the on-memo key is sorted — fetch via the
-    // same sorted identity.
+    // After canonicalization, the on-memo key holds the members in
+    // `VerterStableV1` order — fetch via the same stable-key identity the
+    // canonical layer sorted by, never the retired arena-id sort.
     let mut sorted: Vec<SemanticNodeId> = members.iter().copied().collect();
-    sorted.sort_by_key(|id| id.0);
-    sorted.dedup();
+    crate::semantic_query::stable_key::sort_by_stable_key(graph, &mut sorted);
+    sorted.dedup_by(|a, b| {
+        crate::semantic_query::stable_key::stable_key_for_node(graph, *a)
+            == crate::semantic_query::stable_key::stable_key_for_node(graph, *b)
+    });
     let lookup_key = SemanticQueryKey::NormalizeUnion {
         members: Arc::from(sorted.into_boxed_slice()),
     };
