@@ -52,5 +52,5 @@
   "verify": "node scripts/sfc-projection/verify-node.mjs --node STP7 --engine all --require-all --json",
   "test": "node --test tests/sfc-projection/STP7/framework-boundary.spec.ts",
   "runtimeCorrectness": true,
-  "notes": "Proof/qualification. Uses the existing Svelte ProjectionBackend; does not implement a production second-framework product or Astro/MDX/Lit frontend. Expected reject-twin failures are harness data."
+  "notes": "Proof/qualification. Uses the existing Svelte ProjectionBackend; does not implement a production second-framework product or Astro/MDX/Lit frontend. Expected reject-twin failures are harness data. probes.expectedInstanceType names the function-shaped component interface declared in probes/positive.ts (pinned by the STP7 protocol); the Vue-constructor-shaped harness Instance check intentionally does not apply, and the live realm check requires --engine all."
 }

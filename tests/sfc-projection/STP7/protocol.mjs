@@ -125,6 +125,14 @@ export function loadStp7Product(name) {
   return JSON.parse(fs.readFileSync(path.join(STP7_DIR, "products", name), "utf8"));
 }
 
+function loadStp7Manifest() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(STP7_DIR, "manifest.json"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
 function tokenIndex(haystack, token, from = 0) {
   return haystack.indexOf(token, from);
 }
@@ -164,6 +172,28 @@ export function assertSvelteShape(source) {
     }
   }
   return errors;
+}
+
+// The harness Instance observation is Vue-constructor-shaped (InstanceType<typeof Comp>) and is
+// deliberately not asserted for STP7's function-shaped Component; this pin keeps the manifest's
+// schema-required probes.expectedInstanceType from drifting silently instead; it must name the
+// component interface the positive probe actually declares.
+export function assertInstanceShapePin(source, expectedInstanceType) {
+  const match = typeof source === "string" ? source.match(/^export interface (\w+)/m) : null;
+  const declared = match ? match[1] : null;
+  if (!declared || declared !== expectedInstanceType) {
+    return [
+      err(
+        "STP7-svelte-shape",
+        "instance-type-drift",
+        `manifest probes.expectedInstanceType ${JSON.stringify(expectedInstanceType)} must name ` +
+          `the function-shaped component interface declared in probes/positive.ts (found ` +
+          `${JSON.stringify(declared)}); the Vue-constructor-shaped harness Instance check does ` +
+          "not apply to STP7",
+      ),
+    ];
+  }
+  return [];
 }
 
 export function validateSharedRecord(record) {
@@ -587,7 +617,11 @@ export async function evaluateStp7(input = {}) {
   const errors = [];
   errors.push(...validateStp7Products());
   const positiveAbs = path.join(STP7_DIR, "probes", "positive.ts");
-  errors.push(...assertSvelteShape(fs.readFileSync(positiveAbs, "utf8")));
+  const positiveSource = fs.readFileSync(positiveAbs, "utf8");
+  errors.push(...assertSvelteShape(positiveSource));
+  errors.push(
+    ...assertInstanceShapePin(positiveSource, loadStp7Manifest()?.probes?.expectedInstanceType),
+  );
   errors.push(...scanSharedOrigins());
   errors.push(...assertTwoWayHoles(CLEAN_HOLES));
   errors.push(...evaluateRejectTwins());

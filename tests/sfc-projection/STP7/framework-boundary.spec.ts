@@ -14,6 +14,7 @@ import {
   DIRTY_REALM,
   DIRTY_REUSE,
   DIRTY_SCOPE,
+  assertInstanceShapePin,
   assertRealmLeak,
   assertSvelteShape,
   assertTwoWayHoles,
@@ -42,6 +43,28 @@ test("STP7-svelte-shape dirty twin: a Vue constructor class is rejected", () => 
   ].join("\n");
   const errors = assertSvelteShape(dirty);
   assert.ok(errors.some((error) => error.caseId === "STP7-svelte-shape"));
+});
+
+test("STP7-svelte-shape: manifest expectedInstanceType stays pinned to the declared fixture shape", () => {
+  const source = fs.readFileSync(path.join(HERE, "probes", "positive.ts"), "utf8");
+  const manifest = JSON.parse(fs.readFileSync(path.join(HERE, "manifest.json"), "utf8"));
+  const expected = manifest.probes.expectedInstanceType;
+  assert.equal(assertInstanceShapePin(source, expected).length, 0);
+  const drifted = assertInstanceShapePin(source, "VueConstructorShim");
+  assert.ok(
+    drifted.some(
+      (error) => error.caseId === "STP7-svelte-shape" && error.code === "instance-type-drift",
+    ),
+    JSON.stringify(drifted),
+  );
+  const renamed = assertInstanceShapePin(
+    source.replace("export interface Svelte5Component", "export interface SvelteComponent"),
+    expected,
+  );
+  assert.ok(
+    renamed.some((error) => error.code === "instance-type-drift"),
+    JSON.stringify(renamed),
+  );
 });
 
 test("STP7-reuse: shared origins do not require Vue constructor/ref/directive/emit", () => {

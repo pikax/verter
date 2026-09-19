@@ -1705,10 +1705,18 @@ async function evaluateStp7Node({ repoRoot, resolvedEngines, skipProbes, runnabl
     return { errors };
   }
   const jsEngine = resolvedEngines.find((engine) => engine.kind === "javascript");
-  let ts = null;
-  if (jsEngine) {
-    ts = loadJsTypeScript(jsEngine, repoRoot);
+  if (!jsEngine) {
+    errors.push(
+      err(
+        "STP7-realm",
+        "missing-js-engine",
+        "STP7 live same-program ambient-leak check needs a javascript-kind engine; " +
+          "run with --engine all instead of silently skipping assertRealmLeak",
+      ),
+    );
+    return { errors };
   }
+  const ts = loadJsTypeScript(jsEngine, repoRoot);
   const stp7 = await protocol.evaluateStp7({ ts });
   errors.push(...stp7.errors);
   return { errors };
@@ -1862,7 +1870,8 @@ rename codecs, query-snapshot reuse, Verter-as-stock-CLI claims, duplicate
 guards, version-label capability, and dormant-product complete claims. STP7
 rejects Vue-constructor shims on Svelte Component, Vue-only shared records,
 one-way hole maps, same-program ambient-isolation claims, and full Astro/MDX/Lit
-support advertisements.
+support advertisements; its live realm check requires a javascript-kind engine,
+so a native-only --engine selection is rejected rather than skipped.
 `;
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

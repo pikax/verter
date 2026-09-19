@@ -654,6 +654,22 @@ test("STP7 verify: svelte shape, holes, realm, reuse, and scope on both engines"
   assert.equal(result.incremental, "fresh");
 });
 
+test("STP7 verify: engine selection without a javascript engine is rejected", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP7",
+    engine: "ts-native",
+    requireAll: true,
+  });
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (error) => error.caseId === "STP7-realm" && error.code === "missing-js-engine",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
 test("STP7 --require-all does not demand STP1 cases", async () => {
   const result = await verifyNode({
     repoRoot: REPO_ROOT,
