@@ -1004,9 +1004,10 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
 /// answered because the per-contributor fact rail rejects on warm read. This is the
 /// end-to-end proof of that rail for the external path. The residual
 /// torn-contributor skip (`source_env_unobservable`) is unreachable on a
-/// cold external fold: the external path pre-loads EVERY `known_canonicals()`
-/// before the `ExternalSpecifier` scan, so every augmenter is servable and
-/// its artifact key fresh, and the shared folder observes its facts.
+/// cold external fold: augmenter IndexedReady is published at artifact
+/// ingestion (upsert / injected-root completeness), so every augmenter
+/// this harness upserts is servable and its artifact key fresh, and the
+/// shared folder observes its facts.
 ///
 /// Discrimination: a regression that dropped the external fold's
 /// per-contributor `FileWholeHash` observation from the parent read-set would
@@ -1259,8 +1260,8 @@ fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end
 /// `/use.ts::U` parent could WARM-PUBLISH a torn / partial merged surface.
 ///
 /// A torn/unhealable/unservable augmenter cannot be constructed through the
-/// public host API (the external path pre-loads every `known_canonicals()`
-/// before the `ExternalSpecifier` scan), so the torn state is driven
+/// public host API (this harness upserts every augmenter, and ingestion
+/// publishes IndexedReady for those files), so the torn state is driven
 /// deterministically through the `for_tests` injection knob — the same
 /// established pattern as the relation-overflow / materialize-overflow knobs.
 /// The knob taints a NON-EMPTY contribution set (both `Cfg` augmenters still
@@ -1312,8 +1313,9 @@ fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
 
     // COLD-build the `/use.ts::U` Instantiate under a fresh view and report the
     // resulting `CacheRead.cache_suppress`. No warm-up: the first cold build
-    // populates the augmentation index (the external path pre-loads every
-    // `known_canonicals()`), so `Cfg` resolves through the external fold.
+    // populates the augmentation index from artifacts already ingested
+    // (this harness upserts every augmenter), so `Cfg` resolves through
+    // the external fold.
     let suppress_of = |view: &crate::resolver_store::HostStoreView| -> bool {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);

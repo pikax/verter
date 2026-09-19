@@ -618,6 +618,7 @@ impl VerterHost {
         if let HostWorkerPoolSource::Shared(worker_pools) = &worker_pool_source {
             worker_pools.record_host_shell_created();
         }
+        host.ingest_injected_ambient_roots(None);
         host
     }
 
@@ -1044,6 +1045,45 @@ impl VerterHost {
     ) -> Option<verter_workspace::workspace_snapshot::ProjectId> {
         let root = self.workspace().published_root()?;
         root.snapshot.owners_for_file(canonical).first().copied()
+    }
+
+    /// Ingest injected program-root `.d.ts` / ambient-lib files that were
+    /// never upserted so their global contributions land at IndexedReady
+    /// publication, not on the lookup path.
+    /// Configured `files` index for `canonical`, or `u32::MAX` when the
+    /// path was discovered by include/globs (unordered inputs are then
+    /// normalized by canonical spelling).
+    pub(crate) fn declaration_sequence_rank(&self, canonical: &str) -> u32 {
+        let Some(pid) = self.resolve_project_for_canonical(canonical) else {
+            return u32::MAX;
+        };
+        let Some(root) = self.workspace().published_root() else {
+            return u32::MAX;
+        };
+        match &root.snapshot.project(pid).payload {
+            verter_workspace::workspace_snapshot::ProjectPayload::Configured {
+                membership, ..
+            } => membership
+                .spec
+                .files
+                .iter()
+                .position(|file| file.as_str() == canonical)
+                .map(|index| index as u32)
+                .unwrap_or(u32::MAX),
+            _ => u32::MAX,
+        }
+    }
+
+    pub(crate) fn ingest_injected_ambient_roots(&self, except: Option<&str>) {
+        for member in self.workspace().snapshot_canonicals() {
+            if except == Some(member.as_str()) {
+                continue;
+            }
+            if member.ends_with(".d.ts") || member.starts_with("ambient:/") {
+                let _ = self.ensure_loaded(&member);
+                let _ = self.ensure_indexed_ready_serve(&member);
+            }
+        }
     }
 
     /// Host-owned scratch cache for the typeinfo

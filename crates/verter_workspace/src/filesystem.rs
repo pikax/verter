@@ -2229,6 +2229,14 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         self.engine.known_canonicals()
     }
 
+    fn snapshot_canonicals(&self) -> Vec<String> {
+        self.engine.snapshot_canonicals()
+    }
+
+    fn overlay_canonicals(&self) -> Vec<String> {
+        self.engine.overlay_canonicals()
+    }
+
     fn dependency_snapshot(
         &self,
         canonical_id: &str,

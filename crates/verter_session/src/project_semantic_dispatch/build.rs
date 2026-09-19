@@ -3735,7 +3735,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             contributor_nodes,
             contributor_roots,
             source_env_unobservable,
-        } = self.collect_augmentation_contributions(target, decl_name.as_ref(), &[], context)?;
+        } = self.collect_augmentation_contributions(
+            target,
+            decl_name.as_ref(),
+            &[],
+            context,
+            decl_canonical.as_ref(),
+        )?;
 
         // Tainted-EMPTY collection: augmenters targeted this decl but every
         // contribution was unobservable. Keep the base body UNCHANGED (no false
@@ -3814,6 +3820,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         decl_name: &str,
         type_arguments: &[SemanticNodeId],
         context: crate::semantic_query::ProjectionReductionContext,
+        request_canonical: &str,
     ) -> Option<AugmentationContributions> {
         use crate::file_artifact_store::{AugmentationTargetKey, AugmentationTargetKind};
         use verter_semantic::analysis::type_eval::AugmentationScopeKind;
@@ -3896,7 +3903,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         crate::resolver_core::resolver_context::observe_fan_out(
             crate::resolver_core::FactVersionRef::RouteSurface(
                 crate::resolver_core::RouteSurfaceFactRef {
-                    canonical_id: shape_attribution,
+                    canonical_id: shape_attribution.clone(),
                     key: crate::resolver_core::route_db::build_module_augmentation_index_shape_fact_key(
                         &target,
                     ),
@@ -3906,12 +3913,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ),
         );
 
-        let allow_automatic_libs = !host.semantic_compiler_options_for("").no_lib;
+        let options = host.semantic_compiler_options_for(request_canonical);
+        let allow_automatic_libs = !options.no_lib;
+        let selected_libs: rustc_hash::FxHashSet<String> = options
+            .effective_lib_file_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
         let population_hit = artifact_store.global_contributor_index().snapshot().lookup(
             &target,
             decl_name,
             overlay_discriminator,
             allow_automatic_libs,
+        );
+        crate::resolver_core::resolver_context::observe_fan_out(
+            crate::resolver_core::FactVersionRef::RouteSurface(
+                crate::resolver_core::RouteSurfaceFactRef {
+                    canonical_id: shape_attribution.clone(),
+                    key: crate::global_contributors::population_contributor_fact_key(
+                        &target, decl_name,
+                    ),
+                    lane: verter_semantic::facts::FactLane::Semantic,
+                    expected_hash: population_hit.fingerprint,
+                },
+            ),
         );
         let has_file_scope = population_hit.entries.iter().any(|entry| {
             matches!(
@@ -3937,7 +3962,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // fast exact-key path instead of re-healing every call.
         let mut refreshed_keys: Vec<(usize, crate::file_artifact_store::FileArtifactKey)> =
             Vec::new();
-        for (augmenter_idx, augmenter) in augmenter_set.entries.iter().enumerate() {
+        let mut augmenter_order: Vec<usize> = (0..augmenter_set.entries.len()).collect();
+        augmenter_order.sort_by(|&left, &right| {
+            let left_entry = &augmenter_set.entries[left];
+            let right_entry = &augmenter_set.entries[right];
+            host.declaration_sequence_rank(left_entry.canonical().as_ref())
+                .cmp(&host.declaration_sequence_rank(right_entry.canonical().as_ref()))
+                .then_with(|| {
+                    left_entry
+                        .canonical()
+                        .as_ref()
+                        .cmp(right_entry.canonical().as_ref())
+                })
+                .then_with(|| {
+                    left_entry
+                        .parse_stable_hash
+                        .cmp(&right_entry.parse_stable_hash)
+                })
+        });
+        for augmenter_idx in augmenter_order {
+            let augmenter = &augmenter_set.entries[augmenter_idx];
             let augmenter_canonical = augmenter.canonical();
             let Some(indexed) = self
                 .ctx
@@ -4183,12 +4227,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
             );
         }
 
-        for entry in population_hit.entries.iter() {
+        let mut file_scope: Vec<_> = population_hit.entries.iter().collect();
+        file_scope.sort_by(|left, right| {
+            host.declaration_sequence_rank(left.artifact_key.canonical.as_ref())
+                .cmp(&host.declaration_sequence_rank(right.artifact_key.canonical.as_ref()))
+                .then_with(|| {
+                    left.artifact_key
+                        .canonical
+                        .as_ref()
+                        .cmp(right.artifact_key.canonical.as_ref())
+                })
+        });
+        for entry in file_scope {
             if !matches!(
                 entry.origin,
                 crate::global_contributors::ContributorOrigin::FileScopeInterface
+                    | crate::global_contributors::ContributorOrigin::FileScopeNamespace
             ) {
                 continue;
+            }
+            if entry.is_automatic_lib {
+                let name = entry
+                    .artifact_key
+                    .canonical
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or("");
+                if !selected_libs.contains(name) {
+                    continue;
+                }
             }
             let canonical = entry.artifact_key.canonical.as_ref();
             let Some(indexed) = self
@@ -4208,6 +4275,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let effective_artifact_key = refreshed_key
                 .clone()
                 .unwrap_or_else(|| entry.artifact_key.clone());
+            if entry.origin == crate::global_contributors::ContributorOrigin::FileScopeNamespace
+                && population_hit.entries.iter().any(|other| {
+                    other.origin
+                        == crate::global_contributors::ContributorOrigin::FileScopeInterface
+                        && other.artifact_key.canonical == entry.artifact_key.canonical
+                        && other.symbol.as_ref() == entry.symbol.as_ref()
+                })
+            {
+                continue;
+            }
             let Some(bundle) = self.ctx.prepared_decl_bundle(canonical) else {
                 source_env_unobservable = true;
                 continue;
@@ -4249,7 +4326,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         canonical_id: Arc::clone(&entry.artifact_key.canonical),
                         owner: entry.owner,
                         symbol: Arc::from(decl_name),
-                        space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+                        space: if entry.origin
+                            == crate::global_contributors::ContributorOrigin::FileScopeNamespace
+                        {
+                            verter_type_expr::locators::LocatorSymbolSpace::Namespace
+                        } else {
+                            verter_type_expr::locators::LocatorSymbolSpace::Type
+                        },
                     },
                     path: Arc::from(
                         Vec::<verter_type_expr::locators::TypeBodyPathStep>::new()
@@ -4418,7 +4501,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `cross_file_augmentation_merge_equivalence_tests::external_module_augmentation_warm_parent_rejects_contributor_content_edit_end_to_end`.
             contributor_roots: _,
             source_env_unobservable,
-        } = self.collect_augmentation_contributions(target, name, &[], context)?;
+        } = self.collect_augmentation_contributions(target, name, &[], context, scope_canonical)?;
         // A torn contributor (unobservable source-env identity — a
         // torn/unhealable/unservable augmenter) is SERVED but must NEVER be
         // warm-admitted. This carrier is interned mid-reference-resolution and
@@ -10968,6 +11051,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
+            {
+                let host = self.ctx.host_for_fact_tracer_install();
+                let workspace = host.workspace();
+                workspace
+                    .overlay_canonicals()
+                    .into_iter()
+                    .chain(workspace.snapshot_canonicals())
+                    .find(|canonical| {
+                        !canonical.starts_with("ambient:/")
+                            && (canonical.ends_with(".ts")
+                                || canonical.ends_with(".tsx")
+                                || canonical.ends_with(".d.ts"))
+                    })
+                    .unwrap_or_default()
+            }
+            .as_str(),
         )
         else {
             return Some(Vec::new());

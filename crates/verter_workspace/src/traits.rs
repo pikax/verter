@@ -567,6 +567,18 @@ pub trait WorkspaceRead: Send + Sync {
         Vec::new()
     }
 
+    /// Injected/published snapshot members, not overlay buffers.
+    /// Population completeness for never-upserted ambient roots uses this
+    /// listing; it must not increment [`crate::known_canonicals_calls`].
+    fn snapshot_canonicals(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Open overlay buffers, not snapshot members. Uncounted.
+    fn overlay_canonicals(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// R22 contract: transitive importers of `edited`. The reverse
     /// import graph serves reachability GC + LSP affected-files
     /// reporting + diagnostics; it is **never** wired to cache

@@ -4948,6 +4948,14 @@ impl Engine {
         seen.into_iter().collect()
     }
 
+    pub(crate) fn snapshot_canonicals(&self) -> Vec<String> {
+        self.snapshot.read().ids().map(str::to_owned).collect()
+    }
+
+    pub(crate) fn overlay_canonicals(&self) -> Vec<String> {
+        self.overlay.read().ids().map(str::to_owned).collect()
+    }
+
     // ── Ambient lib registration ──
 
     /// Register an ambient lib via the CAS loop (`ambient_lib::cas_register`).

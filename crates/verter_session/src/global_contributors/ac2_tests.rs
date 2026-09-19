@@ -1,4 +1,4 @@
-//! V3-AC2 — coherence under concurrency.
+//! Coherence of global contributor snapshots under concurrent publication.
 
 use std::sync::Arc;
 
@@ -188,5 +188,23 @@ fn racing_reader_sees_old_or_new_never_a_partial_set() {
             .entries
             .len(),
         2
+    );
+}
+
+#[test]
+fn publication_pins_epoch_before_reading_membership() {
+    let store = FileArtifactStore::new();
+    let index = store.global_contributor_index();
+    publish(
+        &store,
+        "/a.d.ts",
+        "export {};\ndeclare global { interface Window { a: 1 } }\n",
+    );
+    let before = index.snapshot().revision;
+    index.publish(index.snapshot().program_snapshot, || u64::MAX);
+    assert_eq!(
+        index.snapshot().revision,
+        before,
+        "a publication must abandon when the live epoch moved after the pin"
     );
 }

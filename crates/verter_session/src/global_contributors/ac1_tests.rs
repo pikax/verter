@@ -1,4 +1,4 @@
-//! V3-AC1 — first-contributor transitions.
+//! First-contributor transitions for global symbol populations.
 
 use std::sync::Arc;
 
@@ -148,7 +148,7 @@ fn no_lib_excludes_automatic_lib_files_only() {
     let store = FileArtifactStore::new();
     publish(
         &store,
-        "lib.es5.d.ts",
+        "ambient:/t/lib.es5.d.ts",
         "interface Array<T> { length: number }\n",
     );
     publish(
@@ -156,8 +156,9 @@ fn no_lib_excludes_automatic_lib_files_only() {
         "/user.d.ts",
         "export {};\ndeclare global { interface Array<T> { user: true } }\n",
     );
-    assert!(is_automatic_lib_canonical("lib.es5.d.ts"));
+    assert!(is_automatic_lib_canonical("ambient:/t/lib.es5.d.ts"));
     assert!(!is_automatic_lib_canonical("/user.d.ts"));
+    assert!(!is_automatic_lib_canonical("/src/lib.helpers.d.ts"));
 
     let with_libs = store.global_contributor_index().snapshot().lookup(
         &AugmentationTargetKind::GlobalAugmentation,
@@ -194,4 +195,79 @@ fn cancelled_publication_does_not_install_a_stale_positive() {
 #[test]
 fn global_tag_is_the_declare_global_sentinel() {
     assert_eq!(GLOBAL_AUGMENTATION_TAG, "$global");
+}
+
+fn classify(source: &str) -> FileModuleKind {
+    let state = ShallowFileState::service_backed_for_test(source);
+    let src: Arc<str> = Arc::from(source);
+    let indexed =
+        IndexedReady::new_for_test_with_state(state.whole_hash, state, Arc::clone(&src), src);
+    classify_module_kind(&indexed)
+}
+
+#[test]
+fn nested_namespace_export_is_a_script() {
+    assert_eq!(
+        classify("namespace N { export interface X {} }\n"),
+        FileModuleKind::Script
+    );
+}
+
+#[test]
+fn dynamic_import_does_not_make_a_module() {
+    assert_eq!(
+        classify("import(\"./lazy\");\ninterface Window { x: 1 }\n"),
+        FileModuleKind::Script
+    );
+}
+
+#[test]
+fn trailing_export_empty_makes_a_module() {
+    assert_eq!(
+        classify("interface Window { x: 1 }\nexport {};\n"),
+        FileModuleKind::Module
+    );
+}
+
+#[test]
+fn same_canonical_replacement_keeps_one_live_version() {
+    let store = FileArtifactStore::new();
+    publish(
+        &store,
+        "/global.d.ts",
+        "export {};\ndeclare global { interface Function { a: 1 } }\n",
+    );
+    publish(
+        &store,
+        "/global.d.ts",
+        "export {};\ndeclare global { interface Function { b: 2 } }\n",
+    );
+    assert_eq!(lookup_global(&store, "Function").entries.len(), 1);
+}
+
+#[test]
+fn type_and_namespace_spaces_have_distinct_fingerprints() {
+    let store = FileArtifactStore::new();
+    publish(
+        &store,
+        "/script.ts",
+        "interface N { x: 1 }\nnamespace N { export const v = 1; }\n",
+    );
+    let types = store.global_contributor_index().snapshot().lookup_in_space(
+        &AugmentationTargetKind::GlobalAugmentation,
+        "N",
+        None,
+        true,
+        verter_semantic::facts::SymbolSpace::Type,
+    );
+    let namespaces = store.global_contributor_index().snapshot().lookup_in_space(
+        &AugmentationTargetKind::GlobalAugmentation,
+        "N",
+        None,
+        true,
+        verter_semantic::facts::SymbolSpace::Namespace,
+    );
+    assert_eq!(types.entries.len(), 1);
+    assert_eq!(namespaces.entries.len(), 1);
+    assert_ne!(types.fingerprint, namespaces.fingerprint);
 }

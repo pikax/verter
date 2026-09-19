@@ -1,4 +1,4 @@
-//! V3-AC3 — no whole-program scan on the lookup path.
+//! Lookup of a global symbol performs no whole-program membership scan.
 
 use std::sync::Arc;
 
@@ -114,5 +114,51 @@ fn lookup_does_not_call_known_canonicals() {
         verter_workspace::known_canonicals_calls(),
         0,
         "augmentation lookup must not scan known_canonicals"
+    );
+}
+
+#[test]
+fn injected_unimported_ambient_is_ingested_without_upserting_it() {
+    let workspace = std::sync::Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    workspace.inject_file(
+        "/ambient-test.d.ts".to_owned(),
+        Arc::from("declare module \"ambient-test\" { export const x: number }\n"),
+    );
+    let host = VerterHost::new(HostConfig::default(), workspace);
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some("/use.ts".to_owned()),
+            input_id: "/use.ts".to_owned(),
+            source: Arc::from("import { x } from \"ambient-test\"; export const y = x;\n"),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("consumer upsert");
+    assert!(
+        host.project_type_store()
+            .indexed()
+            .get_any("/ambient-test.d.ts")
+            .is_some(),
+        "injected ambient .d.ts must be IndexedReady after consumer upsert"
+    );
+    let hit = host
+        .project_type_store()
+        .indexed()
+        .global_contributor_index()
+        .snapshot()
+        .lookup_in_space(
+            &AugmentationTargetKind::ExternalSpecifier(
+                crate::file_artifact_store::InternedSpecifier::from("ambient-test"),
+            ),
+            "x",
+            None,
+            true,
+            verter_semantic::facts::SymbolSpace::Value,
+        );
+    assert!(
+        !hit.entries.is_empty(),
+        "an injected unimported ambient .d.ts must enter the population without being upserted"
     );
 }

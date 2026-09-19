@@ -1041,10 +1041,7 @@ impl VerterHost {
                 committed_generation,
             );
         }
-        // Ingest the upserted file's IndexedReady so global contributor
-        // facts are published at mutation time, not by a lookup-time
-        // program-membership scan.
-        let _ = self.ensure_indexed_ready_serve(&canonical_id);
+        self.ingest_injected_ambient_roots(Some(canonical_id.as_ref()));
         self.bump_store_view_epoch();
         crate::host_manage::push_cache_drained_at_upsert("store_view_epoch", &canonical_id);
         Ok((result, workspace_commit))
