@@ -32,6 +32,10 @@ async fn with_protocol_trace<T>(
     if let Ok(value) = result.as_ref() {
         let n = u64::from(byte_len(value));
         span.mark_with_bytes(ProtocolStage::OutboundEnqueued, Some(n));
+        span.finish_ok();
+    } else {
+        // A failed request keeps a terminal state distinct from complete.
+        span.fail();
     }
     result
 }

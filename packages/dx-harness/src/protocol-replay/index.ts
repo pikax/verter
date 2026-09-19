@@ -51,6 +51,9 @@ export interface ProtocolReplayControls {
 export function controlsToFakeServerEnv(controls: ProtocolReplayControls): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { FAKE_STAY_ALIVE: "1" };
   if (controls.slowReader) env.FAKE_SERVER_COMPLETE_STDERR = "1";
+  // Cancellation needs a request still in flight when $/cancelRequest arrives;
+  // default to a short delay unless the caller pinned one.
+  if (controls.cancellation && !controls.queryDelayMs) env.FAKE_QUERY_DELAY_MS = "200";
   if (controls.queryDelayMs) env.FAKE_QUERY_DELAY_MS = String(controls.queryDelayMs);
   if (controls.payloadBytes) env.FAKE_PAYLOAD_BYTES = String(controls.payloadBytes);
   if (controls.dependencyStorm) {
@@ -100,6 +103,15 @@ function countDuplicates(methods: readonly string[]): number {
     if (next > 1 && method === "textDocument/publishDiagnostics") dupes += 1;
   }
   return dupes;
+}
+
+/** JSON-RPC RequestCancelled, as observed on the wire. */
+const REQUEST_CANCELLED_CODE = -32800;
+
+function countObservedCancellations(wire: readonly ProtocolWireEvent[]): number {
+  return wire.filter(
+    (event) => event.kind === "response" && event.errorCode === REQUEST_CANCELLED_CODE,
+  ).length;
 }
 
 export function buildReplayFromWire(
@@ -222,7 +234,16 @@ export async function runProtocolReplay(
     );
 
     if (controls.cancellation) {
-      client.sendNotification("$/cancelRequest", { id: 1 });
+      // Live control: put a request in flight, cancel it by its real JSON-RPC
+      // id, and let the server answer. The recorded count comes from the
+      // observed wire below, never from this flag.
+      const requestId = client.peekNextRequestId();
+      const outcome = client.sendRequest("echo/method", { n: 1 }, timeout).then(
+        () => undefined,
+        (err: Error) => err,
+      );
+      client.sendNotification("$/cancelRequest", { id: requestId });
+      await outcome;
     }
     if (controls.dependencyStorm || controls.longChurn) {
       client.sendNotification(controls.longChurn ? "$/test/churn" : "$/test/storm", {});
@@ -245,7 +266,7 @@ export async function runProtocolReplay(
     const replay = buildReplayFromWire(wire, {
       unreadByteLength: client.unreadByteLength,
       stalledReader: false,
-      cancelledRequests: controls.cancellation ? 1 : 0,
+      cancelledRequests: countObservedCancellations(wire),
       completenessState: "complete",
     });
     const blocked =

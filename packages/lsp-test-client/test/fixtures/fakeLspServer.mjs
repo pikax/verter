@@ -20,6 +20,9 @@
 //                        how the client answered an unsolicited server request.
 //   FAKE_PROVOKE_METHOD  method name for the provoked server→client request.
 //   FAKE_QUERY_DELAY_MS  delay before answering non-lifecycle requests.
+//   $/cancelRequest {id}  cancelling an in-flight request id makes the fixture
+//                        answer that request with JSON-RPC error -32800
+//                        (RequestCancelled) once its delay elapses.
 //   FAKE_PAYLOAD_BYTES   pad echo results to at least this many payload bytes.
 //   FAKE_BURST_ON=<m>    on notification <m>, emit FAKE_BURST_COUNT `$/test/burst` notes.
 //   FAKE_BURST_COUNT     count of burst notifications (default 0).
@@ -33,6 +36,8 @@ import process from "node:process";
 const env = process.env;
 const SEP = String.fromCharCode(1); // SOH delimiter between stderr lines
 const PROVOKE_REQUEST_ID = 9001; // id of the server→client request FAKE_PROVOKE_ON sends
+const REQUEST_CANCELLED = -32800;
+const cancelledIds = new Set(); // request ids cancelled via $/cancelRequest
 
 function write(payload) {
   const body = Buffer.from(JSON.stringify(payload), "utf-8");
@@ -112,6 +117,9 @@ function handle(msg) {
       if (keepAlive) clearInterval(keepAlive);
       process.exit(0);
     }
+    if (method === "$/cancelRequest" && params && params.id !== undefined) {
+      cancelledIds.add(params.id);
+    }
     if (method === env.FAKE_EMIT_ON) {
       notify("$/test/note", { kind: "nomatch", value: 1 });
       notify("$/test/note", { kind: "match", value: 42 });
@@ -162,6 +170,17 @@ function handle(msg) {
   if (env.FAKE_NO_RESPONSE === "1") return;
 
   const sendEcho = () => {
+    if (cancelledIds.has(id)) {
+      write({
+        jsonrpc: "2.0",
+        id,
+        error: { code: REQUEST_CANCELLED, message: "request cancelled" },
+      });
+      if (env.FAKE_SERVER_COMPLETE_STDERR === "1") {
+        process.stderr.write("server-complete\n");
+      }
+      return;
+    }
     const payloadBytes = Number.parseInt(env.FAKE_PAYLOAD_BYTES ?? "0", 10);
     const pad = payloadBytes > 0 ? "x".repeat(payloadBytes) : undefined;
     write({ jsonrpc: "2.0", id, result: { echo: params ?? null, pad } });

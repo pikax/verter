@@ -54,6 +54,19 @@ pub struct StageStamp {
     pub byte_length: Option<u64>,
 }
 
+/// Terminal state of one request's timeline. Failed and cancelled requests
+/// never carry a `complete` stamp: partial, pending, failed and cancelled stay
+/// distinct from complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceStatus {
+    #[default]
+    Pending,
+    Complete,
+    Failed,
+    Cancelled,
+}
+
 /// One request's timeline, keyed by request epoch and optional source epoch.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +75,7 @@ pub struct InteractionTrace {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_epoch: Option<u64>,
     pub method: String,
+    pub status: TraceStatus,
     pub stamps: Vec<StageStamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_blocked_stage: Option<ProtocolStage>,
@@ -123,6 +137,7 @@ impl InteractionTraceLog {
             request_epoch: epoch,
             source_epoch,
             method: method.to_string(),
+            status: TraceStatus::Pending,
             stamps: vec![StageStamp {
                 stage: ProtocolStage::RequestReceived,
                 at_ms: self.now_ms(),
@@ -167,7 +182,10 @@ impl InteractionTraceLog {
     }
 }
 
-/// RAII span for one request. Drop records `complete` and the first blocked stage.
+/// RAII span for one request. The terminal state is recorded explicitly:
+/// [`TraceSpan::finish_ok`] on success, [`TraceSpan::fail`] on error. A span
+/// dropped while still live was cancelled or abandoned mid-flight and is
+/// recorded as `cancelled` — never as a completion.
 pub struct TraceSpan<'a> {
     log: &'a InteractionTraceLog,
     epoch: u64,
@@ -197,22 +215,32 @@ impl TraceSpan<'_> {
         });
     }
 
-    pub fn finish(self) {
-        drop(self);
+    /// Record a successful completion: appends the `complete` stamp and
+    /// computes the first blocked stage over the observed server stamps.
+    pub fn finish_ok(self) {
+        self.record_terminal(TraceStatus::Complete, true);
     }
-}
 
-impl Drop for TraceSpan<'_> {
-    fn drop(&mut self) {
+    /// Record a failed request. No `complete` stamp and no blocking analysis:
+    /// a failure must not masquerade as a completed timeline.
+    pub fn fail(self) {
+        self.record_terminal(TraceStatus::Failed, false);
+    }
+
+    fn record_terminal(&self, status: TraceStatus, stamp_complete: bool) {
         if !self.live {
             return;
         }
         let at_ms = self.log.now_ms();
         self.log.with_trace(self.epoch, |trace| {
-            if !trace
-                .stamps
-                .iter()
-                .any(|stamp| stamp.stage == ProtocolStage::Complete)
+            if trace.status != TraceStatus::Pending {
+                return;
+            }
+            if stamp_complete
+                && !trace
+                    .stamps
+                    .iter()
+                    .any(|stamp| stamp.stage == ProtocolStage::Complete)
             {
                 trace.stamps.push(StageStamp {
                     stage: ProtocolStage::Complete,
@@ -220,15 +248,32 @@ impl Drop for TraceSpan<'_> {
                     byte_length: None,
                 });
             }
-            trace.first_blocked_stage = first_blocked_server_stage(&trace.stamps);
+            trace.status = status;
+            trace.first_blocked_stage = match status {
+                TraceStatus::Complete => first_blocked_server_stage(&trace.stamps),
+                _ => None,
+            };
         });
+    }
+}
+
+impl Drop for TraceSpan<'_> {
+    fn drop(&mut self) {
+        // Cancellation or abandonment: no `complete` stamp, no blocking verdict.
+        self.record_terminal(TraceStatus::Cancelled, false);
     }
 }
 
 /// First server stage whose gap to the next observed later stage dominates.
 ///
-/// Missing `outbound_written` after `outbound_enqueued` is treated as a
-/// blocked outbound queue (stalled reader) even when `complete` is immediate.
+/// Computed over server-observed stamps only. The server cannot observe its
+/// own transport write — `outbound_written` never appears in a server-side
+/// snapshot (it is hydrated from client decode stamps when the harness
+/// combines timelines) — so a missing `outbound_written` is NOT evidence of a
+/// blocked outbound queue here. The stalled-reader rule (enqueued without
+/// written) lives in the harness's combined-timeline analysis instead; applying
+/// it to server-only stamps would blame the outbound queue for every healthy
+/// traced request.
 pub fn first_blocked_server_stage(stamps: &[StageStamp]) -> Option<ProtocolStage> {
     if stamps.is_empty() {
         return None;
@@ -242,16 +287,6 @@ pub fn first_blocked_server_stage(stamps: &[StageStamp]) -> Option<ProtocolStage
         }
     }
     by_stage.sort_by_key(|(stage, _)| stage.rank());
-
-    let has_enqueued = by_stage
-        .iter()
-        .any(|(stage, _)| *stage == ProtocolStage::OutboundEnqueued);
-    let has_written = by_stage
-        .iter()
-        .any(|(stage, _)| *stage == ProtocolStage::OutboundWritten);
-    if has_enqueued && !has_written {
-        return Some(ProtocolStage::OutboundEnqueued);
-    }
 
     const BLOCK_MS: f64 = 1.0;
     let mut worst: Option<(ProtocolStage, f64)> = None;
@@ -297,7 +332,7 @@ mod tests {
             let span = log.begin("textDocument/hover", Some(11));
             span.mark_with_bytes(ProtocolStage::Serialize, Some(128));
             span.mark(ProtocolStage::OutboundEnqueued);
-            span.mark(ProtocolStage::OutboundWritten);
+            span.finish_ok();
         }
         let snap = log.snapshot();
         assert_eq!(snap.traces.len(), 1);
@@ -305,6 +340,7 @@ mod tests {
         assert_eq!(trace.request_epoch, 1);
         assert_eq!(trace.source_epoch, Some(11));
         assert_eq!(trace.method, "textDocument/hover");
+        assert_eq!(trace.status, TraceStatus::Complete);
         let json = serde_json::to_string(trace).expect("trace serializes");
         assert!(!json.contains("sourceText"));
         assert!(!json.contains("fileContents"));
@@ -312,7 +348,11 @@ mod tests {
     }
 
     #[test]
-    fn stalled_outbound_is_first_blocked_even_when_complete_is_immediate() {
+    fn healthy_request_without_write_observation_has_no_blocked_stage() {
+        // Production stamps never include `outbound_written` (the transport
+        // write is invisible to the service layer), so a fast healthy request
+        // must not blame the outbound queue — the missing-written rule belongs
+        // to the harness's combined timelines, not server-only stamps.
         let stamps = vec![
             StageStamp {
                 stage: ProtocolStage::RequestReceived,
@@ -340,15 +380,13 @@ mod tests {
                 byte_length: None,
             },
         ];
-        assert_eq!(
-            first_blocked_server_stage(&stamps),
-            Some(ProtocolStage::OutboundEnqueued)
-        );
+        assert_eq!(first_blocked_server_stage(&stamps), None);
     }
 
     #[test]
     fn provider_work_dominates_when_it_is_the_long_gap() {
         // Stamps are stage *starts*. The 40ms dwell is inside provider_work.
+        // No `outbound_written`: the server never observes its own write.
         let stamps = vec![
             StageStamp {
                 stage: ProtocolStage::RequestReceived,
@@ -373,11 +411,6 @@ mod tests {
             StageStamp {
                 stage: ProtocolStage::OutboundEnqueued,
                 at_ms: 40.3,
-                byte_length: Some(16),
-            },
-            StageStamp {
-                stage: ProtocolStage::OutboundWritten,
-                at_ms: 40.4,
                 byte_length: Some(16),
             },
             StageStamp {
@@ -417,11 +450,6 @@ mod tests {
                 byte_length: Some(1_000_000),
             },
             StageStamp {
-                stage: ProtocolStage::OutboundWritten,
-                at_ms: 12.4,
-                byte_length: Some(1_000_000),
-            },
-            StageStamp {
                 stage: ProtocolStage::Complete,
                 at_ms: 12.5,
                 byte_length: None,
@@ -434,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_finalizes_complete() {
+    fn finish_ok_records_complete_and_blocking() {
         let log = InteractionTraceLog::new(8);
         log.set_enabled(true);
         {
@@ -444,12 +472,59 @@ mod tests {
             while spin.elapsed() < Duration::from_millis(2) {
                 std::hint::spin_loop();
             }
+            span.finish_ok();
         }
         let trace = &log.snapshot().traces[0];
+        assert_eq!(trace.status, TraceStatus::Complete);
         assert!(trace
             .stamps
             .iter()
             .any(|stamp| stamp.stage == ProtocolStage::Complete));
         assert!(trace.stamps[0].at_ms <= trace.stamps.last().unwrap().at_ms);
+    }
+
+    #[test]
+    fn fail_records_failed_without_complete_stamp() {
+        let log = InteractionTraceLog::new(8);
+        log.set_enabled(true);
+        {
+            let span = log.begin("textDocument/hover", None);
+            span.mark(ProtocolStage::ProviderWork);
+            span.fail();
+        }
+        let trace = &log.snapshot().traces[0];
+        assert_eq!(trace.status, TraceStatus::Failed);
+        assert!(!trace
+            .stamps
+            .iter()
+            .any(|stamp| stamp.stage == ProtocolStage::Complete));
+        assert_eq!(trace.first_blocked_stage, None);
+    }
+
+    #[test]
+    fn dropped_live_span_is_cancelled_not_complete() {
+        let log = InteractionTraceLog::new(8);
+        log.set_enabled(true);
+        {
+            let span = log.begin("textDocument/hover", None);
+            span.mark(ProtocolStage::ProviderWork);
+            drop(span);
+        }
+        let trace = &log.snapshot().traces[0];
+        assert_eq!(trace.status, TraceStatus::Cancelled);
+        assert!(!trace
+            .stamps
+            .iter()
+            .any(|stamp| stamp.stage == ProtocolStage::Complete));
+        assert_eq!(trace.first_blocked_stage, None);
+    }
+
+    #[test]
+    fn in_flight_request_snapshots_as_pending() {
+        let log = InteractionTraceLog::new(8);
+        log.set_enabled(true);
+        let span = log.begin("textDocument/hover", None);
+        assert_eq!(log.snapshot().traces[0].status, TraceStatus::Pending);
+        span.finish_ok();
     }
 }

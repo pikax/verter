@@ -39,6 +39,11 @@ export interface ProtocolWireEvent {
   readonly decodedMs: number | null;
   readonly completedMs: number | null;
   readonly kind: "request" | "response" | "notification";
+  /**
+   * JSON-RPC error code when this is an error response (e.g. -32800
+   * RequestCancelled). Absent on successful responses and non-responses.
+   */
+  readonly errorCode?: number;
 }
 
 export interface StageStamp {

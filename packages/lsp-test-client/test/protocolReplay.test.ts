@@ -10,6 +10,7 @@ import {
   rejectReplay,
   emptyReplay,
   type LspClientOptions,
+  type ProtocolWireEvent,
   type StageStamp,
 } from "../src/index.js";
 
@@ -43,6 +44,38 @@ describe("WSP1-AC1 stalled client reader", () => {
     client.resumeReads();
     const result = await pending;
     expect(result.echo).toEqual({ n: 1 });
+  });
+});
+
+describe("wire request epochs", () => {
+  it("correlate each response with its request by JSON-RPC id", async () => {
+    const wire: ProtocolWireEvent[] = [];
+    const client = makeClient(
+      { FAKE_STAY_ALIVE: "1" },
+      { onWireEvent: (event) => wire.push(event) },
+    );
+    await client.initialize({ processId: null, rootUri: null, capabilities: {} }, 8_000);
+    await client.sendRequest("echo/method", { n: 1 }, 8_000);
+    await client.sendRequest("echo/method", { n: 2 }, 8_000);
+
+    const requests = wire.filter(
+      (event) => event.kind === "request" && event.method === "echo/method",
+    );
+    const responses = wire.filter((event) => event.kind === "response");
+    expect(requests).toHaveLength(2);
+    // initialize + the two echo round-trips all resolved.
+    expect(responses).toHaveLength(3);
+    // Every request shares its epoch with exactly one response, so a combined
+    // timeline joins the pair instead of splitting into per-message traces.
+    for (const request of requests) {
+      expect(
+        wire.filter(
+          (event) => event.kind === "response" && event.requestEpoch === request.requestEpoch,
+        ),
+      ).toHaveLength(1);
+    }
+    // Distinct requests keep distinct epochs.
+    expect(new Set(requests.map((event) => event.requestEpoch)).size).toBe(2);
   });
 });
 

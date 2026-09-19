@@ -91,6 +91,14 @@ export class LspClient {
   private readsStalled: boolean;
   private readonly onWireEvent?: (event: ProtocolWireEvent) => void;
   private wireEpoch = 1;
+  /**
+   * JSON-RPC id → requestEpoch, one map per id namespace (client- and
+   * server-initiated requests number ids independently and may collide). A
+   * response reuses its request's epoch so replay correlates the pair into one
+   * combined timeline instead of one trace per message.
+   */
+  private readonly outboundRequestEpochs = new Map<number | string, number>();
+  private readonly inboundRequestEpochs = new Map<number | string, number>();
 
   constructor(
     name: string,
@@ -265,8 +273,21 @@ export class LspClient {
         : payload && "method" in payload
           ? "notification"
           : "response";
+    // A request opens a wire epoch; the response we write for a server→client
+    // request reuses that request's epoch (matched by JSON-RPC id in the
+    // server-initiated namespace).
+    let requestEpoch: number;
+    if (kind === "request") {
+      requestEpoch = this.wireEpoch++;
+      this.outboundRequestEpochs.set(payload.id, requestEpoch);
+    } else if (kind === "response") {
+      requestEpoch = this.inboundRequestEpochs.get(payload.id) ?? this.wireEpoch++;
+      this.inboundRequestEpochs.delete(payload.id);
+    } else {
+      requestEpoch = this.wireEpoch++;
+    }
     this.onWireEvent({
-      requestEpoch: this.wireEpoch++,
+      requestEpoch,
       method,
       direction: "client_to_server",
       byteLength,
@@ -293,8 +314,22 @@ export class LspClient {
         : msg && "method" in msg
           ? "notification"
           : "response";
+    // A response inherits its request's epoch (client-initiated namespace), so
+    // the pair builds one combined timeline per request in replay.
+    let requestEpoch: number;
+    let errorCode: number | undefined;
+    if (kind === "response") {
+      requestEpoch = this.outboundRequestEpochs.get(msg.id) ?? this.wireEpoch++;
+      this.outboundRequestEpochs.delete(msg.id);
+      if (typeof msg?.error?.code === "number") errorCode = msg.error.code;
+    } else if (kind === "request") {
+      requestEpoch = this.wireEpoch++;
+      this.inboundRequestEpochs.set(msg.id, requestEpoch);
+    } else {
+      requestEpoch = this.wireEpoch++;
+    }
     this.onWireEvent({
-      requestEpoch: this.wireEpoch++,
+      requestEpoch,
       method,
       direction: "server_to_client",
       byteLength,
@@ -304,6 +339,7 @@ export class LspClient {
       decodedMs,
       completedMs: decodedMs,
       kind,
+      ...(errorCode !== undefined ? { errorCode } : {}),
     });
   }
 
@@ -357,6 +393,16 @@ export class LspClient {
         });
       }
     }
+  }
+
+  /**
+   * The JSON-RPC id the next {@link sendRequest} will allocate. Ids are
+   * otherwise internal to this client; exposing the next one lets a caller
+   * correlate a notification (e.g. `$/cancelRequest`) with the request it
+   * targets, sending the request immediately after the peek.
+   */
+  peekNextRequestId(): number {
+    return this.nextId;
   }
 
   sendRequest<T = any>(method: string, params?: any, timeout = this.defaultTimeout): Promise<T> {
