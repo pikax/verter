@@ -1,3 +1,3 @@
-export { default, Comp } from "./concrete";
-export { default as Generic } from "./generic";
-export type { Row } from "./row";
+export { default, Comp } from "./concrete.js";
+export { default as Generic } from "./generic.js";
+export type { Row } from "./row.js";

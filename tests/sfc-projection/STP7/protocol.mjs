@@ -44,6 +44,15 @@ export const SHARED_ORIGIN_FILES = Object.freeze([
 
 export const RECEIVING_OBLIGATION_IDS = Object.freeze(["ASTP", "MDXP", "LITP", "SvelteKit"]);
 
+/** Every mandatory case and the disposition its boundary evidence must record. */
+export const MANDATORY_CASE_DISPOSITIONS = Object.freeze({
+  "STP7-svelte-shape": "accept",
+  "STP7-holes": "accept",
+  "STP7-realm": "reject",
+  "STP7-reuse": "reject",
+  "STP7-scope-claim": "reject",
+});
+
 export const CLEAN_SHARED = Object.freeze({
   adapter: "svelte",
   publicShape: 'import("svelte").Component',
@@ -497,16 +506,27 @@ export function validateStp7Products({
       errors.push(err("STP7-reuse", "vue-only-required", `sharedOrigins.${field} must be false`));
     }
   }
-  const evidenceIds = new Set((evidence?.cases || []).map((row) => row.id));
-  for (const id of [
-    "STP7-svelte-shape",
-    "STP7-holes",
-    "STP7-realm",
-    "STP7-reuse",
-    "STP7-scope-claim",
-  ]) {
-    if (!evidenceIds.has(id)) {
+  const evidenceRows = new Map();
+  for (const row of evidence?.cases || []) {
+    if (!row || typeof row.id !== "string") continue;
+    if (evidenceRows.has(row.id)) {
+      errors.push(err(row.id, "duplicate-case", `boundary evidence lists ${row.id} twice`));
+      continue;
+    }
+    evidenceRows.set(row.id, row);
+  }
+  for (const [id, disposition] of Object.entries(MANDATORY_CASE_DISPOSITIONS)) {
+    const row = evidenceRows.get(id);
+    if (!row) {
       errors.push(err(id, "removed-fixture", `boundary evidence missing ${id}`));
+    } else if (row.disposition !== disposition) {
+      errors.push(
+        err(
+          id,
+          "disposition-drift",
+          `boundary evidence ${id} must be ${disposition}, got ${JSON.stringify(row.disposition)}`,
+        ),
+      );
     }
   }
   errors.push(
