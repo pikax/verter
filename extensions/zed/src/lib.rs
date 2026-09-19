@@ -955,6 +955,12 @@ mod manifest_tests {
     /// the file that ships next to the crate.
     const EXTENSION_TOML: &str = include_str!("../extension.toml");
 
+    /// The marketplace package's manifest. Every editor package carries the
+    /// SAME distribution version (`scripts/set-ide-version.mjs` writes it into
+    /// both files), so this — not a literal that drifts on every `bump-ide`
+    /// run — is what the manifest's version is pinned against.
+    const VSCODE_PACKAGE_JSON: &str = include_str!("../../../packages/vue-vscode/package.json");
+
     fn manifest() -> toml::Value {
         toml::from_str(EXTENSION_TOML).expect("extension.toml must be valid TOML")
     }
@@ -974,10 +980,15 @@ mod manifest_tests {
             Some(1),
             "schema_version must be 1"
         );
+        let vscode_package: serde_json::Value = serde_json::from_str(VSCODE_PACKAGE_JSON)
+            .expect("packages/vue-vscode/package.json must be valid JSON");
+        let distribution_version = vscode_package
+            .get("version")
+            .and_then(serde_json::Value::as_str);
         assert_eq!(
             manifest.get("version").and_then(toml::Value::as_str),
-            Some("0.1.0"),
-            "version must be 0.1.0"
+            distribution_version,
+            "extension.toml version must match the editor distribution version in packages/vue-vscode/package.json"
         );
     }
 
