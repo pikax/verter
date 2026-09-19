@@ -301,11 +301,17 @@ impl ProjectionEmission {
         }
         let checking_text = transform.build_string();
         let mapping = MappingProduct::of(transform);
-        assemble(checking_text, mapping, observations, Some(plan))
+        assemble(
+            checking_text,
+            mapping,
+            observations,
+            Some(binding_from_plan(plan)),
+        )
     }
 
     /// Attempt to keep a previous mapping when checking text is unchanged.
     /// Unchanged text with moved source positions is [`EmissionRefusal::StaleMap`].
+    /// A previous plan binding is retained so authored observations stay valid.
     pub fn reuse_mapping(
         previous: &Self,
         transform: &CodeTransform<'_>,
@@ -316,7 +322,12 @@ impl ProjectionEmission {
         if checking_text == previous.checking_text && current != previous.mapping {
             return Err(EmissionRefusal::StaleMap);
         }
-        assemble(checking_text, current, observations, None)
+        assemble(
+            checking_text,
+            current,
+            observations,
+            binding_from_previous(previous),
+        )
     }
 
     #[must_use]
@@ -516,11 +527,33 @@ pub fn compose_source_chain(
     transform.chain_source_map(upstream)
 }
 
+struct EmissionBinding<'a> {
+    snapshot: &'a PlanSnapshotId,
+    input_basis: &'a InputBasisId,
+    plan: Option<&'a ProjectionPlan>,
+}
+
+fn binding_from_plan(plan: &ProjectionPlan) -> EmissionBinding<'_> {
+    EmissionBinding {
+        snapshot: &plan.snapshot,
+        input_basis: &plan.input_basis,
+        plan: Some(plan),
+    }
+}
+
+fn binding_from_previous(previous: &ProjectionEmission) -> Option<EmissionBinding<'_>> {
+    Some(EmissionBinding {
+        snapshot: previous.snapshot.as_ref()?,
+        input_basis: previous.input_basis.as_ref()?,
+        plan: None,
+    })
+}
+
 fn assemble(
     checking_text: String,
     mapping: MappingProduct,
     mut observations: Vec<RoleQualifiedObservation>,
-    plan: Option<&ProjectionPlan>,
+    binding: Option<EmissionBinding<'_>>,
 ) -> Result<ProjectionEmission, EmissionRefusal> {
     for observation in &observations {
         if observation.generated.start > observation.generated.end
@@ -550,24 +583,30 @@ fn assemble(
             });
         }
         if observation.origin.is_authored() {
-            let Some(plan) = plan else {
+            let Some(binding) = binding.as_ref() else {
                 return Err(EmissionRefusal::UnboundOrigin);
             };
-            if !origin_matches_plan(plan, &observation.origin) {
+            if !origin_matches_binding(binding, &observation.origin) {
                 return Err(EmissionRefusal::UnboundOrigin);
             }
         }
     }
     let text_revision = mint_text_revision(&checking_text);
-    let correspondence_revision = mint_correspondence_revision(&mapping, &observations, plan);
+    let correspondence_revision = mint_correspondence_revision(
+        &mapping,
+        &observations,
+        binding
+            .as_ref()
+            .map(|binding| (binding.snapshot, binding.input_basis)),
+    );
     Ok(ProjectionEmission {
         checking_text,
         text_revision,
         correspondence_revision,
         mapping,
         observations,
-        snapshot: plan.map(|plan| plan.snapshot.clone()),
-        input_basis: plan.map(|plan| plan.input_basis.clone()),
+        snapshot: binding.as_ref().map(|binding| binding.snapshot.clone()),
+        input_basis: binding.as_ref().map(|binding| binding.input_basis.clone()),
     })
 }
 
@@ -613,10 +652,24 @@ fn origin_matches_plan(plan: &ProjectionPlan, origin: &ProjectionOrigin) -> bool
         && ids_in_plan(plan, origin)
 }
 
+fn origin_matches_binding(binding: &EmissionBinding<'_>, origin: &ProjectionOrigin) -> bool {
+    if let Some(plan) = binding.plan {
+        return origin_matches_plan(plan, origin);
+    }
+    origin.snapshot.as_ref() == Some(binding.snapshot)
+        && origin.input_basis.as_ref() == Some(binding.input_basis)
+}
+
 fn plan_matches_transform(plan: &ProjectionPlan, canonical_id: &str, source: &str) -> bool {
     let source_id = carrier_source_id(canonical_id);
     let revision = carrier_revision(source);
-    let snapshot = mint_snapshot(&source_id, &revision, &plan.template_unit, None, None);
+    let snapshot = mint_snapshot(
+        &source_id,
+        &revision,
+        &plan.template_unit,
+        plan.parse_key.as_ref(),
+        plan.syntax_profile.as_ref(),
+    );
     snapshot == plan.snapshot
 }
 
@@ -806,7 +859,7 @@ fn mint_text_revision(checking_text: &str) -> CheckingTextRevision {
 fn mint_correspondence_revision(
     mapping: &MappingProduct,
     observations: &[RoleQualifiedObservation],
-    plan: Option<&ProjectionPlan>,
+    snapshot: Option<(&PlanSnapshotId, &InputBasisId)>,
 ) -> CorrespondenceRevision {
     let mut encoder = CanonicalEncoder::new(CORR_REV_DOMAIN);
     encoder.field_u32(1, mapping.projected_len());
@@ -866,11 +919,11 @@ fn mint_correspondence_revision(
         encoder.field_u32(20, anchor.projected);
         encoder.field_u32(21, anchor.carrier);
     }
-    match plan {
-        Some(plan) => {
+    match snapshot {
+        Some((snapshot, input_basis)) => {
             encoder.field_u32(22, 1);
-            encoder.field_bytes(23, plan.snapshot.canonical_bytes());
-            encoder.field_bytes(24, plan.input_basis.canonical_bytes());
+            encoder.field_bytes(23, snapshot.canonical_bytes());
+            encoder.field_bytes(24, input_basis.canonical_bytes());
         }
         None => {
             encoder.field_u32(22, 0);
@@ -1892,6 +1945,40 @@ mod tests {
         assert!(
             matches!(mismatched_carrier, Err(EmissionRefusal::UnboundOrigin)),
             "plan snapshot does not match transform original: {mismatched_carrier:?}"
+        );
+    }
+
+    #[test]
+    fn stp10_reuse_mapping_preserves_plan_binding() {
+        let allocator = Allocator::default();
+        let plan = role_plan();
+        let origin = authored_in(&plan);
+        let ct = CodeTransform::new(ROLE_SFC, &allocator);
+        let span = vfor_alias_span(ROLE_SFC);
+        let observations = vec![RoleQualifiedObservation::new(
+            span,
+            ObservationRole::Hover,
+            origin,
+        )];
+        let previous =
+            ProjectionEmission::from_plan(&ct, &plan, ROLE_CANONICAL, observations.clone())
+                .expect("plan-bound emission");
+        assert_eq!(previous.snapshot(), Some(&plan.snapshot));
+        let reused =
+            ProjectionEmission::reuse_mapping(&previous, &ct, observations.clone()).expect("reuse");
+        assert_eq!(reused.snapshot(), previous.snapshot());
+        assert_eq!(reused.input_basis(), previous.input_basis());
+        assert_eq!(
+            reused.correspondence_revision(),
+            previous.correspondence_revision()
+        );
+
+        let unbound = ProjectionEmission::from_operation(&ct, Vec::new()).expect("unbound");
+        assert!(unbound.snapshot().is_none());
+        let dirty = ProjectionEmission::reuse_mapping(&unbound, &ct, observations);
+        assert!(
+            matches!(dirty, Err(EmissionRefusal::UnboundOrigin)),
+            "reuse of an unbound emission cannot admit authored origins: {dirty:?}"
         );
     }
 }

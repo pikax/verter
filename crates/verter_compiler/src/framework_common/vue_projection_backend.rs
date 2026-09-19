@@ -129,16 +129,17 @@ impl VueProjectionBackend {
         }
     }
 
-    /// Checking text and correspondence from one CodeTransform record, with
-    /// role-qualified origins. Dormant relative to [`Self::project_ide`]:
-    /// qualification harnesses call this path directly. STP58 owns Vue
-    /// atomic activation.
+    /// Checking text and correspondence from one CodeTransform record, bound
+    /// to `plan`. Dormant relative to [`Self::project_ide`]: qualification
+    /// harnesses call this path directly. STP58 owns Vue atomic activation.
     pub fn projection_emission(
         &self,
         transform: &CodeTransform<'_>,
+        plan: &ProjectionPlan,
+        canonical_id: &str,
         observations: Vec<RoleQualifiedObservation>,
     ) -> Result<ProjectionEmission, EmissionRefusal> {
-        ProjectionEmission::from_operation(transform, observations)
+        ProjectionEmission::from_plan(transform, plan, canonical_id, observations)
     }
 }
 
