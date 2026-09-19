@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { builtinModules } from "node:module";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../../..");
@@ -89,10 +90,23 @@ const filesExist = (rels) => {
 // (which VS Code defines as absent-or-path, not a bundler remap map).
 // ---------------------------------------------------------------------------
 
-const NODE_IMPORT_RE =
-  /^(?:node:|assert|buffer|child_process|cluster|crypto|dgram|dns|events|fs|http|https|module|net|os|path|readline|stream|tls|url|util|vm|worker_threads|zlib)(?:\/|$)/;
+// The Node builtin set is the runtime's own inventory, never a hand-kept
+// subset: a builtin the list forgot (process, timers, perf_hooks, ...) would
+// otherwise admit a browser entry that imports it.
+const NODE_BUILTINS = new Set(builtinModules);
+function isNodeBuiltinImport(spec) {
+  if (spec.startsWith("node:")) return true;
+  return NODE_BUILTINS.has(spec) || NODE_BUILTINS.has(spec.split("/")[0]);
+}
+// Static import/export-from, side-effect import, require(...) and dynamic
+// import(...) all carry a module specifier the bundler resolves.
 const IMPORT_SPEC_RE =
-  /(?:import|export)\s+(?!type\b)[^;'"]*?from\s*["']([^"']+)["']|import\s+["']([^"']+)["']|require\(\s*["']([^"']+)["']\s*\)/g;
+  /(?:import|export)\s+(?!type\b)[^;'"]*?from\s*["']([^"']+)["']|import\s+["']([^"']+)["']|require\(\s*["']([^"']+)["']\s*\)|import\(\s*["']([^"']+)["']\s*\)/g;
+function moduleSpecifiers(src) {
+  const specs = [];
+  for (const m of src.matchAll(IMPORT_SPEC_RE)) specs.push(m[1] ?? m[2] ?? m[3] ?? m[4]);
+  return specs;
+}
 
 function resolveModuleFile(spec) {
   for (const candidate of [spec, `${spec}.ts`, `${spec}.tsx`, `${spec}/index.ts`]) {
@@ -123,9 +137,8 @@ function entryGraphImportsNode(entryRel) {
     } catch {
       throw new Error(`browser entry source not readable: ${rel}`);
     }
-    for (const m of src.matchAll(IMPORT_SPEC_RE)) {
-      const spec = m[1] ?? m[2] ?? m[3];
-      if (NODE_IMPORT_RE.test(spec) || spec === "vscode-languageclient/node") return true;
+    for (const spec of moduleSpecifiers(src)) {
+      if (isNodeBuiltinImport(spec) || spec === "vscode-languageclient/node") return true;
       if (spec.startsWith(".")) {
         const joined = path.posix
           .join(path.posix.dirname(rel), spec)
@@ -147,18 +160,53 @@ function entryGraphImportsNode(entryRel) {
  * never an implicit browser verdict.
  */
 function parseBuildConfigs(esbuildText) {
-  const chunks = esbuildText.split("entryPoints:").slice(1);
-  if (chunks.length === 0) {
+  const literals = [];
+  const re = /entryPoints:/g;
+  for (let m = re.exec(esbuildText); m; m = re.exec(esbuildText)) {
+    literals.push(enclosingObjectLiteral(esbuildText, m.index));
+  }
+  if (literals.length === 0) {
     throw new Error("no build config found in esbuild config: admission facts fail closed");
   }
-  return chunks.map((chunk, i) => {
-    const platform = chunk.match(/platform:\s*["']([^"']+)["']/);
+  return literals.map((literal, i) => {
+    // The platform is read from the object literal that owns the
+    // entryPoints key, wherever the key sits inside it: a platform declared
+    // before entryPoints is this build's, not the previous build's.
+    const platform = literal.match(/platform:\s*["']([^"']+)["']/);
     if (!platform) {
       throw new Error(`build config #${i + 1} declares no platform: admission facts fail closed`);
     }
-    const entry = chunk.match(/\[([^\]]*)\]/);
+    const entry = literal.slice(literal.indexOf("entryPoints:")).match(/\[([^\]]*)\]/);
     return { platform: platform[1], entryRaw: entry ? entry[1].trim() : "" };
   });
+}
+
+/** The innermost `{ ... }` object literal containing `index`, as text. */
+function enclosingObjectLiteral(text, index) {
+  let depth = 0;
+  let open = -1;
+  for (let i = index; i >= 0; i--) {
+    if (text[i] === "}") depth++;
+    else if (text[i] === "{") {
+      if (depth === 0) {
+        open = i;
+        break;
+      }
+      depth--;
+    }
+  }
+  if (open === -1) {
+    throw new Error("entryPoints outside an object literal: admission facts fail closed");
+  }
+  depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === "{") depth++;
+    else if (text[i] === "}") {
+      depth--;
+      if (depth === 0) return text.slice(open, i + 1);
+    }
+  }
+  throw new Error("unterminated build config object literal: admission facts fail closed");
 }
 
 /** Resolves a build entry expression to a source path under the package. */
@@ -395,6 +443,31 @@ test("VSW0-AC1 twin: dual-entry-admitted (main kept, browser-targeted bundle ove
   assert.deepEqual(admitWebExtension(facts), { admitted: true, reason: "admitted" });
 });
 
+test("VSW0-AC1 twin: platform-before-entrypoints (key order inside the owning build literal) reads that literal", () => {
+  const reordered = `${liveEsbuildCfg}\nconst webBundleConfig = { platform: "browser", entryPoints: ["src/activationGate.ts"] };\n`;
+  const facts = webAdmissionFacts({ pkg: dualEntryPkg, esbuildText: reordered });
+  assert.equal(facts.desktopBuildPlatform, "node", "the desktop build keeps its own platform");
+  assert.equal(facts.browserBundlePlatform, "browser", "the browser build owns its platform key");
+  assert.deepEqual(admitWebExtension(facts), { admitted: true, reason: "admitted" });
+});
+
+test("VSW0-AC1 twin: dynamic-import-of-a-node-builtin is a Node import specifier", () => {
+  assert.deepEqual(
+    moduleSpecifiers(`export async function load() { return await import("node:fs"); }`),
+    ["node:fs"],
+  );
+  assert.ok(isNodeBuiltinImport("node:fs"));
+});
+
+test("VSW0-AC1 twin: an unprefixed builtin outside any hand-kept shortlist (process) is a Node import", () => {
+  for (const spec of ["process", "timers", "perf_hooks", "fs/promises", "node:test"]) {
+    assert.ok(isNodeBuiltinImport(spec), `${spec} is a Node builtin`);
+  }
+  for (const spec of ["vue", "vscode", "./activationGate", "vscode-languageclient/browser"]) {
+    assert.equal(isNodeBuiltinImport(spec), false, `${spec} is not a Node builtin`);
+  }
+});
+
 test("VSW0-AC1 twin: missing-platform-fact-fails-closed (dropping the platform value is an error, not a browser verdict)", () => {
   const noPlatform = liveEsbuildCfg.replace(/platform:\s*["']node["'],/, "");
   assert.doesNotMatch(noPlatform, /platform:/);
@@ -451,15 +524,19 @@ function assertHostStatusLaw(vocab) {
   assert.match(vocab.law, /visible and correct/, "the law restates the AC2 visibility obligation");
 }
 
-test("VSW0-AC2 clean pass: vocabulary terms, visibility binding and non-parity law hold", () => {
-  assertHostStatusLaw(hostVocab);
-  // Every mode and vocabulary receiver joins real status terms.
-  for (const mode of contract.hostModes) {
+// Every mode and vocabulary receiver joins real status terms.
+function assertHostModesJoinVocabulary(c, vocab) {
+  for (const mode of c.hostModes) {
     assert.ok(
-      hostVocab.statusEnum.includes(mode.hostStatus),
+      vocab.statusEnum.includes(mode.hostStatus),
       `host mode ${mode.mode} uses unknown status ${mode.hostStatus}`,
     );
   }
+}
+
+test("VSW0-AC2 clean pass: vocabulary terms, visibility binding and non-parity law hold", () => {
+  assertHostStatusLaw(hostVocab);
+  assertHostModesJoinVocabulary(contract, hostVocab);
   assert.equal(contract.hostModes.length, 3, "exactly the three charter execution placements");
   const browserLocalMode = contract.hostModes.find((m) => m.hostStatus === "browser-local");
   assert.equal(browserLocalMode.existsToday, false, "no browser-local mode exists today (AC1)");
@@ -494,9 +571,12 @@ test("VSW0-AC2 twin: status-term-drift (renamed term not joined by the modes) fa
   });
   const mode = contract.hostModes.find((m) => m.hostStatus === "browser-local");
   assert.ok(mode, "the contract still names the browser-local mode");
+  // The renamed term loses its definition, and separately the host modes no
+  // longer join the vocabulary: each discriminator fires on its own.
+  assert.throws(() => assertHostStatusLaw(drifted), /has no definition/);
   assert.throws(
-    () => assertHostStatusLaw(drifted) || assert.ok(drifted.statusEnum.includes(mode.hostStatus)),
-    /unknown status browser-local|has no definition/,
+    () => assertHostModesJoinVocabulary(contract, drifted),
+    /unknown status browser-local/,
   );
 });
 
@@ -530,6 +610,11 @@ function assertFinalOwnerJoins(map = ownershipMap, products = [contract, entryPo
     "the retirement obligation is stated and binds the cutovers, not this node",
   );
   assert.equal(map.outcomes.length, 3, "exactly the three charter interfaces are owned");
+  assert.deepEqual(
+    map.outcomes.map((o) => o.id).sort(),
+    products.map((p) => p.id).sort(),
+    "the owned outcome ids are exactly the delivered product ids",
+  );
   for (const p of products) {
     assert.equal(
       p.finalOwner,
@@ -541,6 +626,23 @@ function assertFinalOwnerJoins(map = ownershipMap, products = [contract, entryPo
 
 test("VSW0-AC-OWNER clean pass: one final owner on the map and every delivered product", () => {
   assertFinalOwnerJoins();
+});
+
+test("VSW0-AC-OWNER twin: outcome-id-drift (an owned outcome renamed away from its product) fails", () => {
+  const drifted = perturb(ownershipMap, (m) => {
+    m.outcomes.find((o) => o.id === "HostStatusVocabulary").id = "HostStatusVocabularyV2";
+  });
+  assert.throws(() => assertFinalOwnerJoins(drifted), /exactly the delivered product ids/);
+});
+
+test("VSW0-AC-OWNER twin: product-id-drift (a delivered product renamed away from its outcome) fails", () => {
+  const renamed = perturb(entryPolicy, (p) => {
+    p.id = "BrowserEntrypointPolicy";
+  });
+  assert.throws(
+    () => assertFinalOwnerJoins(ownershipMap, [contract, renamed, hostVocab]),
+    /exactly the delivered product ids/,
+  );
 });
 
 test("VSW0-AC-OWNER twin: owner-flipped (a second authority claiming the product) fails", () => {
