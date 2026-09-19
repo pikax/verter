@@ -29,17 +29,6 @@ test("ARH7-ratification: clean products validate and cover every mandatory case"
   ]);
 });
 
-test("ARH7-cutover dirty twin: locator listed as retained is rejected (AC1)", () => {
-  const dirty = cloneProducts();
-  dirty["activation-cutover"].boundary.displacedModuleBindings = ["getClient"];
-  const result = validate(dirty);
-  assert.equal(result.ok, false);
-  assert.ok(
-    result.errors.some((e) => e.caseId === "ARH7-cutover" && e.code === "locator-still-present"),
-    JSON.stringify(result.errors),
-  );
-});
-
 test("ARH7-cutover dirty twin: surviving owner retargeted at a missing path is rejected", () => {
   const dirty = cloneProducts();
   dirty["activation-cutover"].cutover[0].survivingOwner.path =

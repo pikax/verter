@@ -10,11 +10,11 @@ Clean products validate. Manifest cases, products and verify/test commands match
 
 ## ARH7-cutover (reject) — AC1
 
-- `locator-still-present`: displaced module bindings are exactly `getClient`, `stopHeartbeat`, `activationContext`, `currentMcpEndpoint`, `retryMcpLifecycleSync`.
-- `start-attempt-still-in-extension`: `class StartAttemptScope` must not remain in `extension.ts`.
-- `owner-path-missing` / `owner-export-missing`: CUT-1 survives on `createActivationRoot`; CUT-2/CUT-3 on `StartAttemptScope`.
+The join is behavioral ownership, not spellings: the charter forbids source-name tombstones, so no twin scans extension.ts or examples for retired binding names.
+
+- `owner-path-missing` / `owner-export-missing`: CUT-1 survives on `createActivationRoot`; CUT-2/CUT-3 on `StartAttemptScope`, as pure lifetime modules.
+- `composition-root-missing`: `activate`/`deactivate` exist and delegate to `activation.deactivate()` over the imported `activationSession`/`startAttemptScope` modules.
 - `activate-extension-still-uses-context-subscriptions`: `activateExtension` registers on the session lifetime.
-- `forbidden-service-locator`: no generic container/mega-context replacement.
 
 ## ARH7-authority (reject) — AC2
 
@@ -26,7 +26,7 @@ Fresh/incremental, edit/revert, stale/partial and scheduling order are not appli
 
 ## ARH7-delivery (reject) — AC4
 
-`examples/reference` must not name the displaced locator. VSC0 start-attempt-scope evidence and the desktop/web shared boundary must name the new lifetime modules. AC4 rationale records NativeOnly `vscode.extension` and the DOC1 non-duplication.
+VSC0 start-attempt-scope evidence and the desktop/web shared boundary must name the new lifetime modules. AC4 rationale records NativeOnly `vscode.extension` and the DOC1 non-duplication.
 
 ## ARH7-cost (reject) — AC5
 

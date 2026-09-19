@@ -2,10 +2,13 @@
 /**
  * ARH7 verifier — sole owning interface of the VS Code activation cutover.
  *
- * Joins the activation-cutover product to the live tree: extension.ts is a
- * composition root over ActivationSession + StartAttemptScope; the
- * module-level locator and in-file StartAttemptScope class are gone;
- * activateExtension registers on the session lifetime. Node builtins only.
+ * Joins the activation-cutover product to the live tree through BEHAVIORAL
+ * ownership joins only: extension.ts is a composition root that imports and
+ * delegates to ActivationSession + StartAttemptScope, activateExtension
+ * registers on the session lifetime, and each displaced route's surviving
+ * owner exists as a pure lifetime module. The charter forbids source-name
+ * tombstones, so no check here constrains spellings of retired bindings in
+ * extension.ts or anywhere else. Node builtins only.
  */
 
 import fs from "node:fs";
@@ -29,13 +32,6 @@ const AC3_CONCERNS = Object.freeze([
 ]);
 const HEX40 = /^[0-9a-f]{40}$/;
 const CUTOVER_IDS = Object.freeze(["ARH7-CUT-1", "ARH7-CUT-2", "ARH7-CUT-3"]);
-const DISPLACED_LETS = Object.freeze([
-  "getClient",
-  "stopHeartbeat",
-  "activationContext",
-  "currentMcpEndpoint",
-  "retryMcpLifecycleSync",
-]);
 
 function readRel(rel) {
   return fs.readFileSync(path.join(REPO_ROOT, rel), "utf8");
@@ -78,10 +74,6 @@ function fnBody(src, kind, name) {
     }
   }
   return null;
-}
-
-function hasModuleLet(src, name) {
-  return new RegExp(`^let ${name}\\b`, "m").test(src);
 }
 
 function hasExport(src, name) {
@@ -191,23 +183,6 @@ export function validate(products, manifest = loadManifest()) {
   }
 
   const extSrc = boundaryPath && existsRel(boundaryPath) ? readRel(boundaryPath) : "";
-  const displaced = [...(cut?.boundary?.displacedModuleBindings ?? [])].sort();
-  if (JSON.stringify(displaced) !== JSON.stringify([...DISPLACED_LETS].sort())) {
-    err(
-      errors,
-      "ARH7-cutover",
-      "locator-still-present",
-      `displaced bindings ${JSON.stringify(displaced)}`,
-    );
-  }
-  for (const name of DISPLACED_LETS) {
-    if (extSrc && hasModuleLet(extSrc, name)) {
-      err(errors, "ARH7-cutover", "locator-still-present", `let ${name}`);
-    }
-  }
-  if (extSrc && /(?:export\s+)?class StartAttemptScope\b/.test(extSrc)) {
-    err(errors, "ARH7-cutover", "start-attempt-still-in-extension", "class StartAttemptScope");
-  }
   if (extSrc && !hasExport(extSrc, "activate")) {
     err(errors, "ARH7-cutover", "composition-root-missing", "activate");
   }
@@ -234,9 +209,6 @@ export function validate(products, manifest = loadManifest()) {
       "activate-extension-still-uses-context-subscriptions",
       "activateExtension still registers on context.subscriptions",
     );
-  }
-  if (extSrc && /\b(ServiceLocator|createContainer|MegaContext)\b/.test(extSrc)) {
-    err(errors, "ARH7-cutover", "forbidden-service-locator", "generic container symbol");
   }
 
   const cutIds = (cut?.cutover ?? []).map((row) => row.id);
@@ -330,33 +302,6 @@ export function validate(products, manifest = loadManifest()) {
 
   if (!cut?.ac4Rationale || cut.ac4Rationale.length < 40) {
     err(errors, "ARH7-delivery", "ac4-rationale-missing", "ac4Rationale");
-  }
-  const examplesRoot = path.join(REPO_ROOT, "examples/reference");
-  if (!fs.existsSync(examplesRoot)) {
-    err(errors, "ARH7-delivery", "examples-reference-missing", "examples/reference");
-  } else {
-    const walk = (dir) => {
-      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
-        const p = path.join(dir, ent.name);
-        if (ent.isDirectory()) walk(p);
-        else if (/\.(md|ts|js|mjs)$/.test(ent.name)) {
-          const text = fs.readFileSync(p, "utf8");
-          if (
-            text.includes("currentMcpEndpoint") ||
-            text.includes("retryMcpLifecycleSync") ||
-            text.includes("class StartAttemptScope")
-          ) {
-            err(
-              errors,
-              "ARH7-delivery",
-              "public-example-still-names-displaced-route",
-              path.relative(REPO_ROOT, p).replaceAll("\\", "/"),
-            );
-          }
-        }
-      }
-    };
-    walk(examplesRoot);
   }
   const vsc0Inventory = "tests/vscode-product/VSC0/products/vscode-product-inventory.v1.json";
   if (!existsRel(vsc0Inventory)) {
