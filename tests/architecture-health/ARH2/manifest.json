@@ -1,0 +1,102 @@
+{
+  "node": "ARH2",
+  "kind": "implementation",
+  "products": ["ARH2Characterization", "ARH2ComplexityMeasurements"],
+  "cases": [
+    {
+      "id": "ARH2-population",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "predecessor-drift (the shipped ARH0 and ARH1 validate() implementations run live inside this verifier on every execution; a drifted predecessor population fails here with the drifted node)",
+        "hotspot-population-drift (against the ARH1 hotspot contracts and the ARH0 god-module candidates, both directions)",
+        "responsibility-dropped",
+        "responsibility-invented",
+        "population-count-drift (ARH0 inventory crates/packages, ARH1 hotspot contracts, ARH0 god-module candidates: every committed count equals the live derivation)",
+        "structural-population-drift",
+        "structural-file-missing",
+        "structural-loc-drift (recorded fileLoc equals the live line count of each hotspot)"
+      ]
+    },
+    {
+      "id": "ARH2-deletion",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "deletion-not-executed (packages/core still on disk)",
+        "deletion-inventory-row-stale",
+        "deletion-debt-row-stale",
+        "deletion-cutover-row-stale (no shipped product may still bind the deleted path as a path-typed field)",
+        "deletion-debt-unknown",
+        "deletion-cutover-unknown",
+        "deletion-key-mismatch",
+        "deletion-owner-mismatch (the executing owner of the cutover row is ARH2)",
+        "deletion-refresh-path-missing",
+        "deletion-rationale-missing"
+      ]
+    },
+    {
+      "id": "ARH2-characterization",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "hotspot-missing",
+        "hotspot-crate-unknown (the lane's crate is a live workspace member)",
+        "hotspot-without-pins",
+        "pin-command-not-canonical",
+        "pin-filter-malformed",
+        "pin-without-witnesses",
+        "witness-file-missing",
+        "witness-test-missing",
+        "witness-not-a-test (a #[test]/#[tokio::test] attribute must sit by the declaration)",
+        "pin-filter-selects-nothing (the filter is a substring of the witness's nextest id under module-path semantics)",
+        "route-characterization-cardinality (every ARH3/ARH4 narrowing cutover row is characterized exactly once before its heir narrows it)",
+        "route-characterization-invented",
+        "route-path-mismatch",
+        "route-owner-mismatch",
+        "route-without-pins",
+        "route-surface-drift (the scheduler field items and the pub fn test_* hook population join the ARH1 narrowing populations exactly)",
+        "route-surface-not-live (a characterized narrowed field must still be a live pub field: the surface is characterized BEFORE narrowing)",
+        "ac3-concern-missing",
+        "ac3-concern-without-evidence",
+        "ac3-concern-invented"
+      ]
+    },
+    {
+      "id": "ARH2-separation",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "dimension-cardinality (each of the four charter dimensions exactly once)",
+        "dimension-invented",
+        "dimension-without-separation",
+        "dimension-without-measures",
+        "dimension-commits-wall-clock (no wall-clock/RSS/speedup number may be committed in a dimension row)",
+        "gate-cell-unknown (every cited mechanism cell is a locked cell of performance-gates.toml)",
+        "behavior-lane-unbound (every pinned characterization lane is recorded in the behavior dimension)",
+        "behavior-lane-invented (every recorded lane is a real pin)",
+        "runner-class-unbound (the number policy binds the locked [runner] class)",
+        "threshold-block-missing (ARH0-DEBT-5 requires the ratified basis before ARH12 extends the guard)",
+        "threshold-guard-missing",
+        "threshold-guard-unknown",
+        "threshold-ceiling-mismatch (the ratified ceiling equals the live guard ceiling)",
+        "threshold-basis-drift (the over-threshold production-file count and the hotspot membership are re-derived live)"
+      ]
+    },
+    {
+      "id": "ARH2-ratification",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "manifest-case-drift",
+        "manifest-product-drift",
+        "manifest-command-drift",
+        "candidate-basis-drift (both products pin the same 40-hex commit; verify.mjs --provenance, run by the CI architecture-health lane, additionally proves the pinned commit is a real ancestor of the checked-out head)"
+      ]
+    }
+  ],
+  "verify": "node tests/architecture-health/ARH2/verify.mjs",
+  "test": "node --test tests/architecture-health/ARH2/arh2.test.mjs",
+  "runtimeCorrectness": false,
+  "notes": "Implementation node of the architecture-health train; production footprint is zero beyond the packages/core deletion (ARH1-CUT-1 executed) — the delivered code is this harness and the two products. Behavioral characterization binds existing discriminating cargo nextest lanes (the sole owning interface joining the ARH0/ARH1 products to the live tree) to every ARH1 hotspot responsibility and every narrowing route ARH3/ARH4 own; the lanes are the targeted-domain gate commands and were run green on the reviewed candidate. Complexity measurements separate production behavior, clean/warm build time, test cost and application latency: structural counts are deterministic invariants re-derived live on every run, wall-clock dimensions bind to the locked performance-gates.toml cells on their bound runner class, and no timing number is committed. The god-module threshold basis (33 production files over the live 4000-LOC guard ceiling, five of them the characterized hotspots) ratifies what ARH0-DEBT-5 requires before ARH12 extends the existing guard — no second status system. The predecessor populations are re-derived by running the shipped ARH0/ARH1 verifiers live inside this one. Retained evidence spec: tests/architecture-health/evidence/ARH2/cases.md."
+}

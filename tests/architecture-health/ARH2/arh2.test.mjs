@@ -1,0 +1,491 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+import {
+  loadManifest,
+  loadProducts,
+  mandatoryCases,
+  selectedCaseIds,
+  validate,
+  validateProvenance,
+} from "./verify.mjs";
+
+const clean = loadProducts();
+
+const cloneProducts = () => structuredClone(clean);
+
+const hotspot = (products, path) =>
+  products["characterization"].hotspots.find((h) => h.path === path);
+
+test("ARH2-ratification: clean products validate and cover every mandatory case surface", () => {
+  const result = validate(clean);
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.deepEqual(mandatoryCases().sort(), [
+    "ARH2-characterization",
+    "ARH2-deletion",
+    "ARH2-population",
+    "ARH2-ratification",
+    "ARH2-separation",
+  ]);
+  // The live re-derivation claims are real: predecessor validates ran inside.
+  assert.ok(clean["characterization"].ac3.concerns.length === 5);
+  assert.ok(clean["complexity-measurements"].structural.length === 5);
+});
+
+test("ARH2-population dirty twin: dropped hotspot is rejected (AC1)", () => {
+  const dirty = cloneProducts();
+  const hotspots = dirty["characterization"].hotspots;
+  hotspots.splice(
+    hotspots.findIndex((h) => h.path.endsWith("build.rs")),
+    1,
+  );
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-population" && e.code === "hotspot-population-drift",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-population dirty twin: invented responsibility is rejected (AC1)", () => {
+  const dirty = cloneProducts();
+  const h = hotspot(dirty, "crates/verter_scheduler/src/scheduler.rs");
+  h.responsibilities.push({
+    responsibility: "template codegen",
+    survivingOwner: "crates/verter_scheduler/src/scheduler.rs",
+  });
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-population" && e.code === "responsibility-invented",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-population dirty twin: dropped responsibility is rejected (AC1)", () => {
+  const dirty = cloneProducts();
+  const h = hotspot(dirty, "crates/verter_scheduler/src/scheduler.rs");
+  h.responsibilities.splice(
+    h.responsibilities.findIndex((r) => r.responsibility === "batch coordination"),
+    1,
+  );
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-population" && e.code === "responsibility-dropped",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-population dirty twin: stale structural LOC is rejected (live invariant)", () => {
+  const dirty = cloneProducts();
+  const row = dirty["complexity-measurements"].structural.find((r) =>
+    r.path.endsWith("semantic_query.rs"),
+  );
+  row.fileLoc += 1;
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH2-population" &&
+        e.code === "structural-loc-drift" &&
+        e.detail.includes("semantic_query.rs"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-population dirty twin: stale population count is rejected (live invariant)", () => {
+  const dirty = cloneProducts();
+  dirty["complexity-measurements"].populations.arh0Inventory.packages += 1;
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH2-population" &&
+        e.code === "population-count-drift" &&
+        e.detail.includes("packages"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-deletion dirty twin: unexecuted deletion is rejected (AC1)", () => {
+  const dirty = cloneProducts();
+  dirty["characterization"].deletion.deletedPath = "crates/verter_scheduler";
+  // A path that exists: the deletion must be proven executed against the tree.
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.caseId === "ARH2-deletion" && e.code === "deletion-not-executed"),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-deletion dirty twin: unknown satisfied debt is rejected", () => {
+  const dirty = cloneProducts();
+  dirty["characterization"].deletion.satisfies = "ARH0-DEBT-99";
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.caseId === "ARH2-deletion" && e.code === "deletion-debt-unknown"),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-deletion dirty twin: cutover row ownership must stay ARH2's", () => {
+  const dirty = cloneProducts();
+  dirty["characterization"].deletion.cutoverRow = "ARH1-CUT-2";
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.caseId === "ARH2-deletion" && e.code.startsWith("deletion-")),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-deletion: the executed path is absent from the tree and from every shipped product", () => {
+  const deleted = clean["characterization"].deletion.deletedPath;
+  assert.equal(fs.existsSync(deleted), false);
+  const arh0Inventory = fs.readFileSync(
+    new URL("../ARH0/products/codebase-inventory.json", import.meta.url),
+    "utf8",
+  );
+  assert.ok(!arh0Inventory.includes(`"module": "${deleted}"`));
+  const arh0Debt = fs.readFileSync(
+    new URL("../ARH0/products/debt-register.json", import.meta.url),
+    "utf8",
+  );
+  assert.ok(!arh0Debt.includes(`"candidatePath": "${deleted}"`));
+  const arh1Cutover = fs.readFileSync(
+    new URL("../ARH1/products/cutover-register.json", import.meta.url),
+    "utf8",
+  );
+  assert.ok(!arh1Cutover.includes(`"candidatePath": "${deleted}"`));
+});
+
+test("ARH2-characterization dirty twin: witness naming a nonexistent test is rejected (AC2)", () => {
+  const dirty = cloneProducts();
+  const h = hotspot(dirty, "crates/verter_scheduler/src/scheduler.rs");
+  h.pins[0].witnesses[0].test = "dag_tests_phantom_witness";
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-characterization" && e.code === "witness-test-missing",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: a filter that selects nothing is rejected (AC2)", () => {
+  const dirty = cloneProducts();
+  const h = hotspot(dirty, "crates/verter_session/src/semantic_query.rs");
+  h.pins[0].filter = "unrelated_module";
+  h.pins[0].command = `cargo nextest -p verter_session ${h.pins[0].filter}`;
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-characterization" && e.code === "pin-filter-selects-nothing",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: witness without a test attribute is rejected (AC2)", () => {
+  const dirty = cloneProducts();
+  const h = hotspot(dirty, "crates/verter_scheduler/src/scheduler.rs");
+  // A real fn of the file, but not a test: the mod-level use statement
+  // `use crate::source_loader::MemorySourceLoader;` never carries #[test].
+  h.pins[0].witnesses[0] = {
+    file: "crates/verter_scheduler/src/dag_tests.rs",
+    test: "work_node_identity_has_exactly_three_variants",
+  };
+  // That one IS a test; point the filter check away by using a non-test fn.
+  h.pins[0].witnesses[0].test = "next_ready";
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.caseId === "ARH2-characterization"),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: dropped narrowing-route characterization is rejected (AC1)", () => {
+  const dirty = cloneProducts();
+  const routes = dirty["characterization"].routes;
+  routes.splice(
+    routes.findIndex((r) => r.cutoverRow === "ARH1-CUT-3"),
+    1,
+  );
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH2-characterization" &&
+        e.code === "route-characterization-cardinality" &&
+        e.detail.includes("ARH1-CUT-3"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: duplicated route characterization is rejected (AC1)", () => {
+  const dirty = cloneProducts();
+  const routes = dirty["characterization"].routes;
+  routes.push(structuredClone(routes.find((r) => r.cutoverRow === "ARH1-CUT-4")));
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH2-characterization" &&
+        e.code === "route-characterization-cardinality" &&
+        e.detail.includes("ARH1-CUT-4"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: pre-narrowing surface that is no longer pub is rejected", () => {
+  const dirty = cloneProducts();
+  const route = dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-2");
+  route.surface.items = ["tombstones", "generation_floors", "deferred_blocker_ids", "node"];
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        (e.code === "route-surface-drift" || e.code === "route-surface-not-live") &&
+        e.caseId === "ARH2-characterization",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: missing AC3 concern is rejected (AC3)", () => {
+  const dirty = cloneProducts();
+  const concerns = dirty["characterization"].ac3.concerns;
+  concerns.splice(
+    concerns.findIndex((c) => c.concern === "edit/revert"),
+    1,
+  );
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH2-characterization" &&
+        e.code === "ac3-concern-missing" &&
+        e.detail.includes("edit/revert"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: AC3 evidence naming a missing file is rejected (AC3)", () => {
+  const dirty = cloneProducts();
+  const concerns = dirty["characterization"].ac3.concerns;
+  concerns.find((c) => c.concern === "cancellation").evidence[0].file =
+    "crates/verter_scheduler/src/gone.rs";
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-characterization" && e.code === "witness-file-missing",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-separation dirty twin: dropped dimension is rejected (charter separation)", () => {
+  const dirty = cloneProducts();
+  const dims = dirty["complexity-measurements"].dimensions;
+  dims.splice(
+    dims.findIndex((d) => d.id === "application-latency"),
+    1,
+  );
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH2-separation" &&
+        e.code === "dimension-cardinality" &&
+        e.detail.includes("application-latency"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-separation dirty twin: invented gate cell is rejected (AC5)", () => {
+  const dirty = cloneProducts();
+  const dims = dirty["complexity-measurements"].dimensions;
+  dims.find((d) => d.id === "application-latency").mechanisms = ["B6_INVENTED_CELL"];
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.caseId === "ARH2-separation" && e.code === "gate-cell-unknown"),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-separation dirty twin: committed wall-clock number is rejected (AC5)", () => {
+  const dirty = cloneProducts();
+  const dims = dirty["complexity-measurements"].dimensions;
+  dims.find((d) => d.id === "test-cost").wallNs = 12345;
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-separation" && e.code === "dimension-commits-wall-clock",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-separation dirty twin: lane recorded in the dimension but pinned nowhere is rejected", () => {
+  const dirty = cloneProducts();
+  const dims = dirty["complexity-measurements"].dimensions;
+  dims
+    .find((d) => d.id === "production-behavior")
+    .mechanisms.push("cargo nextest -p verter_scheduler phantom_lane");
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-separation" && e.code === "behavior-lane-invented",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-separation dirty twin: pinned lane missing from the dimension is rejected", () => {
+  const dirty = cloneProducts();
+  const dims = dirty["complexity-measurements"].dimensions;
+  const lanes = dims.find((d) => d.id === "production-behavior").mechanisms;
+  lanes.splice(lanes.indexOf("cargo nextest -p verter_session stable_key_tests"), 1);
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.caseId === "ARH2-separation" && e.code === "behavior-lane-unbound"),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-separation dirty twin: drifted over-threshold count is rejected (live invariant)", () => {
+  const dirty = cloneProducts();
+  dirty["complexity-measurements"].godModuleBasis.productionFilesOverThreshold = 32;
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.caseId === "ARH2-separation" && e.code === "threshold-basis-drift"),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-separation dirty twin: threshold ceiling detached from the live guard is rejected", () => {
+  const dirty = cloneProducts();
+  dirty["complexity-measurements"].thresholds[0].defaultMaxLines = 5000;
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-separation" && e.code === "threshold-ceiling-mismatch",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-ratification dirty twin: manifest recording an unimplemented case is rejected (AC1)", () => {
+  const dirtyManifest = structuredClone(loadManifest());
+  dirtyManifest.cases.push({
+    id: "ARH2-phantom",
+    disposition: "reject",
+    twins: ["clean products"],
+  });
+  const result = validate(cloneProducts(), dirtyManifest);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.caseId === "ARH2-ratification" && e.code === "manifest-case-drift"),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-ratification dirty twin: manifest dropping an implemented case is rejected (AC1)", () => {
+  const dirtyManifest = structuredClone(loadManifest());
+  const idx = dirtyManifest.cases.findIndex((c) => c.id === "ARH2-separation");
+  dirtyManifest.cases.splice(idx, 1);
+  const result = validate(cloneProducts(), dirtyManifest);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH2-ratification" &&
+        e.code === "manifest-case-drift" &&
+        e.detail.includes("ARH2-separation"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-ratification dirty twin: a different existing script is not the canonical verify command", () => {
+  const dirtyManifest = structuredClone(loadManifest());
+  dirtyManifest.verify = "node scripts/affected-tests.mjs";
+  const result = validate(cloneProducts(), dirtyManifest);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH2-ratification" &&
+        e.code === "manifest-command-drift" &&
+        e.detail.includes("canonical"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-ratification dirty twin: diverging candidate pins are rejected", () => {
+  const dirty = cloneProducts();
+  dirty["complexity-measurements"].candidate = "0".repeat(40);
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-ratification" && e.code === "candidate-basis-drift",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-provenance: the pinned candidate is a 40-hex ancestor commit of HEAD", () => {
+  const candidate = clean["characterization"].candidate;
+  assert.match(candidate, /^[0-9a-f]{40}$/);
+  assert.deepEqual(validateProvenance(candidate), { ok: true });
+  assert.equal(validateProvenance("0".repeat(40)).ok, false);
+});
+
+test("ARH2-verify CLI: the manifest verify command runs validate() and exits 0 on the clean tree", () => {
+  const verifyPath = fileURLToPath(new URL("./verify.mjs", import.meta.url));
+  const stdout = execFileSync(process.execPath, [verifyPath], { encoding: "utf8" });
+  assert.match(stdout, /ARH2 verify: PASS/);
+});
+
+test("ARH2-verify CLI: --provenance accepts on the clean tree (CI lane shape)", () => {
+  const verifyPath = fileURLToPath(new URL("./verify.mjs", import.meta.url));
+  const stdout = execFileSync(process.execPath, [verifyPath, "--provenance"], { encoding: "utf8" });
+  assert.match(stdout, /ARH2 verify: PASS/);
+});
