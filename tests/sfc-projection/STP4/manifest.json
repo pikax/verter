@@ -1,0 +1,94 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP4",
+  "kind": "proof",
+  "products": ["DialectTopologyEvidence", "ProjectionTopologyDecisionInputs"],
+  "mandatoryCases": [
+    "STP4-js-unchecked",
+    "STP4-js-checked",
+    "STP4-tsx-authored",
+    "STP4-supplemental-import",
+    "STP4-external-owner",
+    "STP4-illegal-vue"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP4/probes/js-unchecked-script.js",
+    "negative": "tests/sfc-projection/STP4/probes/reject-supplemental-import.ts",
+    "cleanTwin": "tests/sfc-projection/STP4/probes/js-unchecked-script.js",
+    "tsconfig": "tests/sfc-projection/STP4/probes/tsconfig.json",
+    "hoverNeedle": "stp4HoverTarget",
+    "definitionNeedle": "stp4DefinitionTarget",
+    "expectedNegativeCode": 2306,
+    "expectedHoverType": "string",
+    "expectedInstanceType": "Comp"
+  },
+  "cases": [
+    {
+      "id": "STP4-js-unchecked",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP4/probes/js-unchecked-script.js",
+      "hoverNeedle": "stp4HoverTarget",
+      "expectedHoverType": "string",
+      "files": ["tests/sfc-projection/STP4/probes/js-unchecked-template.ts"],
+      "fileExpectedCodes": {
+        "tests/sfc-projection/STP4/probes/js-unchecked-template.ts": 2322
+      },
+      "twins": ["@ts-nocheck script", "independently-checked template"]
+    },
+    {
+      "id": "STP4-js-checked",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP4/probes/accept-js-checked.ts",
+      "expectedInstanceType": "Comp",
+      "hoverNeedle": "stp4HoverTarget",
+      "expectedHoverType": "string",
+      "files": [
+        "tests/sfc-projection/STP4/probes/js-checked-script-error.js",
+        "tests/sfc-projection/STP4/probes/js-checked-template-error.ts"
+      ],
+      "fileExpectedCodes": {
+        "tests/sfc-projection/STP4/probes/js-checked-script-error.js": 2322,
+        "tests/sfc-projection/STP4/probes/js-checked-template-error.ts": 2322
+      },
+      "twins": ["@ts-check script", "template source anchors"]
+    },
+    {
+      "id": "STP4-tsx-authored",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP4/probes/accept-tsx-authored.tsx",
+      "hoverNeedle": "stp4HoverTarget",
+      "expectedHoverType": "number",
+      "twins": ["authored TSX", "TS angle assertion", "JSX dialect"]
+    },
+    {
+      "id": "STP4-supplemental-import",
+      "disposition": "reject",
+      "file": "tests/sfc-projection/STP4/probes/reject-supplemental-import.ts",
+      "dirtyTwin": "tests/sfc-projection/STP4/probes/accept-public-import.ts",
+      "expectedCode": 2306,
+      "twins": ["compiler-named supplemental", "public SFC module"]
+    },
+    {
+      "id": "STP4-external-owner",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP4/probes/accept-external-owner.ts",
+      "expectedInstanceType": "Comp",
+      "hoverNeedle": "stp4HoverTarget",
+      "expectedHoverType": "number",
+      "twins": ["OwnerA", "OwnerB", "shared logic source identity"]
+    },
+    {
+      "id": "STP4-illegal-vue",
+      "disposition": "reject",
+      "file": "tests/sfc-projection/STP4/probes/reject-illegal-vue.ts",
+      "dirtyTwin": "tests/sfc-projection/STP4/probes/illegal-setup-src.generated.ts",
+      "expectedCode": 2307,
+      "twins": ["script-setup src", "TypeScript-accepted generated code"]
+    }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP4 --engine all --require-all --json",
+  "test": "node --test scripts/sfc-projection/verify-node.test.mjs",
+  "runtimeCorrectness": true,
+  "notes": "Proof of script-dialect and multi-source topology feasibility. Does not implement production projection topology. Expected failures are harness data."
+}

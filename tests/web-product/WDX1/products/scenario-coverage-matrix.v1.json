@@ -1,0 +1,321 @@
+{
+  "id": "scenario-coverage-matrix.v1",
+  "schema": 1,
+  "node": "WDX1",
+  "finalOwner": "expansion.web-product-convergence",
+  "fixtureDomains": ["configuration", "css", "mixed-framework", "security", "worker"],
+  "routingEvidenceClass": "static-proof",
+  "claimBasis": "none",
+  "routing": [
+    {
+      "recommendation": "AGT0",
+      "train": "expansion.agent-product",
+      "cases": [],
+      "pendingScenarioOwner": "AGT0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "ALP0",
+      "train": "framework.alpine",
+      "cases": [],
+      "pendingScenarioOwner": "ALP0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "ANG0",
+      "train": "framework.angular",
+      "cases": ["WDX1-FIX-mixed-framework-001"],
+      "pendingScenarioOwner": null,
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "AST0",
+      "train": "framework.astro",
+      "cases": ["WDX1-FIX-mixed-framework-001"],
+      "pendingScenarioOwner": null,
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "AX0",
+      "train": "expansion.accessibility-intelligence",
+      "cases": [],
+      "pendingScenarioOwner": "AX0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "CENV0",
+      "train": "expansion.config-env",
+      "cases": ["WDX1-FIX-configuration-001"],
+      "pendingScenarioOwner": null,
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "CSS0",
+      "train": "expansion.css-intelligence",
+      "cases": ["WDX1-FIX-css-001"],
+      "pendingScenarioOwner": null,
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "CWB0",
+      "train": "expansion.component-workbench",
+      "cases": [],
+      "pendingScenarioOwner": "CWB0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "DATA0",
+      "train": "extensions.document-languages",
+      "cases": [],
+      "pendingScenarioOwner": "DATA0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "DBG0",
+      "train": "expansion.web-debugger",
+      "cases": [],
+      "pendingScenarioOwner": "DBG0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "DIAL0",
+      "train": "expansion.embedded-dialects",
+      "cases": [],
+      "pendingScenarioOwner": "DIAL0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "DOC5",
+      "train": "expansion.documentation",
+      "cases": [],
+      "pendingScenarioOwner": "DOC5",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "DX1",
+      "train": "expansion.product-observability",
+      "cases": [],
+      "pendingScenarioOwner": "DX1",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "ENV0",
+      "train": "expansion.runtime-environments",
+      "cases": ["WDX1-FIX-worker-001"],
+      "pendingScenarioOwner": null,
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "GLM0",
+      "train": "framework.ember-glimmer",
+      "cases": [],
+      "pendingScenarioOwner": "GLM0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "GQL0",
+      "train": "extensions.graphql",
+      "cases": [],
+      "pendingScenarioOwner": "GQL0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "HTX0",
+      "train": "framework.htmx",
+      "cases": [],
+      "pendingScenarioOwner": "HTX0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "I18N0",
+      "train": "extensions.i18n",
+      "cases": [],
+      "pendingScenarioOwner": "I18N0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "LIT0",
+      "train": "framework.lit",
+      "cases": [],
+      "pendingScenarioOwner": "LIT0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "MDX0",
+      "train": "framework.mdx",
+      "cases": [],
+      "pendingScenarioOwner": "MDX0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "MIG0",
+      "train": "expansion.migrations",
+      "cases": [],
+      "pendingScenarioOwner": "MIG0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "MRK0",
+      "train": "framework.marko",
+      "cases": [],
+      "pendingScenarioOwner": "MRK0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "NXT0",
+      "train": "profiles.nextjs",
+      "cases": [],
+      "pendingScenarioOwner": "NXT0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "OAPI0",
+      "train": "extensions.openapi",
+      "cases": [],
+      "pendingScenarioOwner": "OAPI0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "PRE0",
+      "train": "framework.preact",
+      "cases": [],
+      "pendingScenarioOwner": "PRE0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "PWA0",
+      "train": "extensions.pwa",
+      "cases": [],
+      "pendingScenarioOwner": "PWA0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "QWK0",
+      "train": "framework.qwik",
+      "cases": [],
+      "pendingScenarioOwner": "QWK0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "RCT0",
+      "train": "framework.react",
+      "cases": ["WDX1-FIX-mixed-framework-001"],
+      "pendingScenarioOwner": null,
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "RTI0",
+      "train": "expansion.runtime-inspector",
+      "cases": [],
+      "pendingScenarioOwner": "RTI0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "SEC0",
+      "train": "expansion.web-security",
+      "cases": ["WDX1-FIX-security-001"],
+      "pendingScenarioOwner": null,
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "SEO0",
+      "train": "extensions.document-metadata",
+      "cases": [],
+      "pendingScenarioOwner": "SEO0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "SLD0",
+      "train": "framework.solid",
+      "cases": [],
+      "pendingScenarioOwner": "SLD0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "STN0",
+      "train": "framework.stencil",
+      "cases": [],
+      "pendingScenarioOwner": "STN0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "TST0",
+      "train": "expansion.testing-product",
+      "cases": [],
+      "pendingScenarioOwner": "TST0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "TW0",
+      "train": "expansion.utility-css",
+      "cases": ["WDX1-FIX-css-001"],
+      "pendingScenarioOwner": null,
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "WBC0",
+      "train": "expansion.web-compat",
+      "cases": [],
+      "pendingScenarioOwner": "WBC0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "WDX1",
+      "train": "expansion.web-product-convergence",
+      "cases": ["WDX1-INT-evidence-001"],
+      "pendingScenarioOwner": null,
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "WPF0",
+      "train": "expansion.web-performance",
+      "cases": [],
+      "pendingScenarioOwner": "WPF0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "WSI0",
+      "train": "expansion.workspace-intelligence",
+      "cases": [],
+      "pendingScenarioOwner": "WSI0",
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "XEC0",
+      "train": "expansion.execution-services",
+      "cases": ["WDX1-FIX-worker-001"],
+      "pendingScenarioOwner": null,
+      "claimBasis": "none"
+    },
+    {
+      "recommendation": "XSDK0",
+      "train": "expansion.extension-sdk",
+      "cases": [],
+      "pendingScenarioOwner": "XSDK0",
+      "claimBasis": "none"
+    }
+  ],
+  "integratedScenarioEvidence": {
+    "case": "WDX1-INT-evidence-001",
+    "verify": "node tests/web-product/WDX1/verify.mjs",
+    "domainsCovered": ["configuration", "css", "mixed-framework", "security", "worker"]
+  },
+  "lifecycleRouting": {
+    "touchedBoundary": "the scenario fixture index and routing products are static artifacts recomputed fresh on every validation: no long-lived state, query cache or map is created or mutated",
+    "demonstratedHere": {
+      "staleRejection": "a recording whose basis.sourceDigest no longer equals the recomputed fixture digest is rejected (WDX1-AC2 stale-recording)",
+      "partialRejection": "a fixture case without identity or without expected results is rejected (WDX1-AC3 partial-fixture)",
+      "deterministicOrdering": "canonicalRouting sorts cases, sources, producers and recordings so perturbed discovery order yields an identical routing projection (WDX1-AC3)"
+    },
+    "notApplicableHere": {
+      "freshVersusIncremental": "no incremental store exists to diverge: every validate() run recomputes digests and routing from the authored files",
+      "editRevert": "fixture edits are ordinary authored-file edits validated on the next run; reverting a source restores the prior digest and un-stales the recording",
+      "cancellation": "validation is synchronous static checking and spawns no runtime work to cancel"
+    },
+    "downstreamOwners": ["WDX2", "WDX3"]
+  },
+  "resourceRationale": "the scenario harness is synchronous static validation over small authored files: no latency, allocation or RSS budget is bound here; the ratified performance methodology binds when a producing train first measures on real workloads",
+  "uncertaintyNotes": "No capability, framework, version-support or performance claim is made at this node: every routing row keeps claimBasis none, the advertised catalog remains the historical vue/svelte families, and all fixture expectations stay pinned-pending-terminal until their owning terminal records runtime observation under the ProductReceiptBasis. Migration notes: none, the boundary is additive with an empty deletion population and no displaced route.",
+  "deletionPopulationThisNode": [],
+  "displacedRoutes": []
+}

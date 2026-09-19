@@ -3819,6 +3819,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         use verter_semantic::analysis::type_eval::AugmentationScopeKind;
 
         let host = self.ctx.host_for_fact_tracer_install();
+        // Store-view / workspace-default basis: the warm-validate
+        // `AugmentationTargetKey` is recomposed from the sealed store
+        // view's `project_env_root` (workspace-default env + identity).
+        // Request-ambient keys split populate vs validate and miss on
+        // replay when no request is installed. Per-canonical target
+        // identity must move populate and validate together.
         let env_hashes = host.host_view_env_hashes();
         let project_identity = host.host_view_project_identity();
 
@@ -11486,13 +11492,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(crate) fn structural_reduce_context(
         &self,
     ) -> crate::semantic_query::StructuralReduceContext {
-        let host = self.ctx.host_for_fact_tracer_install();
-        let env = host.host_view_env_hashes();
+        let env = self.request_view_env_hashes();
         crate::semantic_query::StructuralReduceContext {
             resolve_env_hash: env.resolve_env_hash,
             type_env_hash: env.type_env_hash,
             lib_env_hash: env.lib_env_hash,
-            project_identity: host.host_view_project_identity().fold_u32(),
+            project_identity: self.request_view_project_identity().fold_u32(),
         }
     }
     /// Production constructor for the env-bearing
@@ -11503,13 +11508,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(crate) fn template_literal_reduce_context(
         &self,
     ) -> crate::semantic_query::TemplateLiteralReduceContext {
-        let host = self.ctx.host_for_fact_tracer_install();
-        let env = host.host_view_env_hashes();
+        let env = self.request_view_env_hashes();
         crate::semantic_query::TemplateLiteralReduceContext {
             resolve_env_hash: env.resolve_env_hash,
             type_env_hash: env.type_env_hash,
             lib_env_hash: env.lib_env_hash,
-            project_identity: host.host_view_project_identity().fold_u32(),
+            project_identity: self.request_view_project_identity().fold_u32(),
         }
     }
 

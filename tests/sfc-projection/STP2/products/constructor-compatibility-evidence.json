@@ -1,0 +1,62 @@
+{
+  "schema": "ConstructorCompatibilityEvidence",
+  "version": 1,
+  "product": "ConstructorCompatibilityEvidence",
+  "node": "STP2",
+  "kind": "proof",
+  "vue": { "package": "vue", "version": "3.6.0-rc.5", "source": "package.json" },
+  "syntaxControl": {
+    "id": "Foo",
+    "path": "tests/sfc-projection/STP2/probes/foo-control.ts",
+    "spelling": "declare class Foo<T = unknown> { constructor(props?: { test: T }) }",
+    "observable": "readonly value: T"
+  },
+  "specializationKinds": [
+    {
+      "id": "unbound-extraction",
+      "spelling": "InstanceType<typeof Comp>",
+      "case": "STP2-instance-generic"
+    },
+    {
+      "id": "explicit-specialization",
+      "spelling": "InstanceType<typeof Comp<number>>",
+      "alias": "const NumberComp = Comp<number>",
+      "case": "STP2-instance-explicit"
+    },
+    {
+      "id": "props-inferred-construction",
+      "spelling": "new Comp({ test: 0 })",
+      "case": "STP2-constructor-inferred",
+      "construction": "typechecking-only"
+    },
+    {
+      "id": "template-use",
+      "spelling": "createApp/h/TSX",
+      "case": "STP2-vue-utilities"
+    }
+  ],
+  "forbidden": [
+    "broad-construct-overload",
+    "callable-sfc-default-export",
+    "erased-generic-relation",
+    "checker-only-constructor-parameter",
+    "reduced-fake-ComponentPublicInstance"
+  ],
+  "productionOwner": "STP16",
+  "abiOwner": "STP8",
+  "ac3UntouchedOwners": ["B4R0", "LSO0", "CCA1J", "TCM0R"],
+  "ac3Rationale": "Proof fixtures and harness observations only. Incremental=fresh and stale/cancelled publication for production projection remain with B4R0 lineage, LSO snapshot publication, CCA1J projection route, and TCM0R observation identity.",
+  "ac4UntouchedOwners": ["CCA1J", "CCA1H"],
+  "ac4Rationale": "STP2 does not change production projection hot paths. Bounded parse/check/emit stays with the existing ProjectionBackend route.",
+  "publicOptionsStaticBehavior": {
+    "applicable": false,
+    "untouchedOwners": ["STP16"],
+    "rationale": "Constructor-shaped declare class Comp has no Vue option-API statics (props/emits/options). Those remain with production constructor emit (STP16). Public constructor role is observed via Component assignability, parameterized ComponentPublicInstance assignability, and typechecking-only `new Comp({ msg })`."
+  },
+  "componentPublicInstanceAssignability": {
+    "form": "parameterized",
+    "unparameterizedDefault": "not-assignable",
+    "rationale": "InstanceType<typeof Comp> assigns to Vue ComponentPublicInstance with the component's props/exposed type arguments. The default ComponentPublicInstance (empty type args) is not assignable from a typed constructor instance because $props/$emit variance; that is Vue's generic default, not a reduced fake CPI."
+  },
+  "timingClaim": "none"
+}

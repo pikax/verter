@@ -1637,4 +1637,222 @@ defineSlots<TabsSlots<T>>()
     expect(leadingSlot!.type).toContain("item");
     expect(leadingSlot!.type).toContain("ui");
   });
+
+  it("extracts exposed refs and functions without a terminal materialization error", async () => {
+    const checker = await createRuntimeChecker("native-eval-ecrv8-expose");
+    checker.updateFile(
+      "Expose.vue",
+      `<script setup lang="ts">
+import { ref } from "vue";
+
+const value = ref(0);
+
+function focus() {
+  value.value += 1;
+}
+
+function reset() {
+  value.value = 0;
+}
+
+defineExpose({ focus, reset, value });
+</script>
+<template>
+  <div>{{ value }}</div>
+</template>`,
+    );
+    await settleNativeProject();
+
+    const meta = await checker.getComponentMeta("Expose.vue");
+    const names = meta.exposed.map((member) => member.name);
+    expect(names).toEqual(expect.arrayContaining(["focus", "reset", "value"]));
+    expect(meta.exposed).toHaveLength(3);
+    const native = meta._verter!.exposed;
+    expect(native).toHaveLength(3);
+    for (const member of native) {
+      expect(member.name).toBeTruthy();
+      expect(member.type).toBeDefined();
+    }
+    for (const name of ["focus", "reset"] as const) {
+      const member = native.find((row) => row.name === name);
+      expect(member).toBeDefined();
+      expect(member!.type.kind).not.toBe("unknown");
+    }
+    const value = native.find((member) => member.name === "value");
+    expect(value).toBeDefined();
+    expect(value!.type.kind).toBe("unknown");
+  });
+
+  it("extracts an exposed ref and computed without a terminal materialization error", async () => {
+    const checker = await createRuntimeChecker("native-eval-ecrv8-expose-ref-computed");
+    checker.updateFile(
+      "ExposeRef.vue",
+      `<script setup lang="ts">
+import { computed, ref } from "vue";
+
+const query = ref("");
+const isEmpty = computed(() => query.value.length === 0);
+
+function clear(): void {
+  query.value = "";
+}
+
+defineExpose({ query, isEmpty, clear });
+</script>
+<template>
+  <input v-model="query" />
+</template>`,
+    );
+    await settleNativeProject();
+
+    const meta = await checker.getComponentMeta("ExposeRef.vue");
+    expect(meta.exposed.map((member) => member.name)).toEqual(
+      expect.arrayContaining(["query", "isEmpty", "clear"]),
+    );
+    expect(meta.exposed).toHaveLength(3);
+    const native = meta._verter!.exposed;
+    expect(native).toHaveLength(3);
+    const clear = native.find((row) => row.name === "clear");
+    expect(clear).toBeDefined();
+    expect(clear!.type.kind).not.toBe("unknown");
+    for (const name of ["query", "isEmpty"] as const) {
+      const member = native.find((row) => row.name === name);
+      expect(member).toBeDefined();
+      expect(member!.type).toBeDefined();
+      expect(member!.type.kind).toBe("unknown");
+    }
+  });
+
+  it("retains PropType factory-default declared types", async () => {
+    const checker = await createRuntimeChecker("native-eval-ecrv8-factory-defaults");
+    checker.updateFile(
+      "Factory.vue",
+      `<script setup lang="ts">
+import type { PropType } from "vue";
+
+interface Filter {
+  field: string;
+  value: string;
+}
+
+const props = defineProps({
+  filters: {
+    type: Array as PropType<Filter[]>,
+    default: () => [],
+  },
+  pagination: {
+    type: Object as PropType<{ page: number; size: number }>,
+    default: () => ({ page: 1, size: 20 }),
+  },
+  scope: {
+    type: String as PropType<"all" | "active">,
+    required: true,
+  },
+  unlabeled: String,
+});
+</script>
+<template>
+  <div>{{ props.scope }}</div>
+</template>`,
+    );
+    await settleNativeProject();
+
+    const meta = await checker.getComponentMeta("Factory.vue");
+    const nativeProps = meta._verter!.props;
+
+    const unlabeled = nativeProps.find((prop) => prop.name === "unlabeled");
+    expect(unlabeled?.type).toEqual({ kind: "primitive", name: "string" });
+
+    const filters = nativeProps.find((prop) => prop.name === "filters");
+    expect(filters).toBeDefined();
+    expect(JSON.stringify(filters!.type)).not.toContain('"unknown"');
+    expect(filters!.type.kind).not.toBe("unknown");
+
+    const pagination = nativeProps.find((prop) => prop.name === "pagination");
+    expect(pagination).toBeDefined();
+    expect(JSON.stringify(pagination!.type)).toContain("page");
+    expect(JSON.stringify(pagination!.type)).toContain("size");
+
+    const scope = nativeProps.find((prop) => prop.name === "scope");
+    expect(scope).toBeDefined();
+    expect(JSON.stringify(scope!.type)).toContain("all");
+    expect(JSON.stringify(scope!.type)).toContain("active");
+  });
+
+  it("retains nested and optional multi-payload emit parameters", async () => {
+    const checker = await createRuntimeChecker("native-eval-ecrv8-emits-multi");
+    checker.updateFile(
+      "Emits.vue",
+      `<script setup lang="ts">
+const emit = defineEmits<{
+  move: [x: number, y: number];
+  toggle: [value?: boolean];
+  "item-click": [id: number, meta: { shift: boolean }];
+}>();
+</script>
+<template>
+  <button type="button" @click="emit('move', 1, 2)">go</button>
+</template>`,
+    );
+    await settleNativeProject();
+
+    const meta = await checker.getComponentMeta("Emits.vue");
+    const events = meta._verter!.events;
+    const move = events.find((event) => event.name === "move");
+    expect(move?.payload).toMatchObject({
+      kind: "tuple",
+      elements: [
+        { kind: "primitive", name: "number" },
+        { kind: "primitive", name: "number" },
+      ],
+    });
+    const toggle = events.find((event) => event.name === "toggle");
+    expect(toggle?.payload).toBeDefined();
+    expect(JSON.stringify(toggle!.payload)).toContain("boolean");
+    const click = events.find((event) => event.name === "item-click");
+    expect(JSON.stringify(click?.payload)).toContain("shift");
+  });
+
+  it("scalar and batch entrypoints agree on the public result", async () => {
+    const checker = await createRuntimeChecker("native-eval-ecrv8-scalar-batch");
+    const source = `<script setup lang="ts">
+import { ref } from "vue";
+const count = ref(0);
+function ping() {}
+defineProps({ label: String });
+defineExpose({ count, ping });
+</script>
+<template><div /></template>`;
+    checker.updateFile("Agree.vue", source);
+    await settleNativeProject();
+
+    const scalar = await checker.getComponentMeta("Agree.vue");
+    const [batched] = await checker.getComponentMetaBatch(["Agree.vue"]);
+    expect(batched.exposed.map((member) => member.name).sort()).toEqual(
+      scalar.exposed.map((member) => member.name).sort(),
+    );
+    expect(batched.props.map((prop) => prop.name)).toEqual(scalar.props.map((prop) => prop.name));
+    expect(batched._verter!.props.map((prop) => prop.type)).toEqual(
+      scalar._verter!.props.map((prop) => prop.type),
+    );
+    expect(batched._verter!.exposed.map((member) => member.type)).toEqual(
+      scalar._verter!.exposed.map((member) => member.type),
+    );
+  });
+
+  it("a control component without expose, factory defaults, or multi-payload emits still extracts", async () => {
+    const checker = await createRuntimeChecker("native-eval-ecrv8-control");
+    checker.updateFile(
+      "Control.vue",
+      `<script setup lang="ts">
+defineProps<{ label: string }>()
+</script>
+<template><p>{{ label }}</p></template>`,
+    );
+    await settleNativeProject();
+    const meta = await checker.getComponentMeta("Control.vue");
+    expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
+    expect(meta.exposed).toEqual([]);
+    expect(meta.events).toEqual([]);
+  });
 });

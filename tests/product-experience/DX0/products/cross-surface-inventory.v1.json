@@ -1,0 +1,239 @@
+{
+  "id": "cross-surface-inventory.v1",
+  "schema": 1,
+  "capturedAt": {
+    "baselineHead": "e1ce8256c7b2e4afed138cd4cad4b7eac6602e79",
+    "note": "DX0.1 inventory of actual current commands, analyses, compiler outputs, lint/format operations, TypeInfo queries, semantic/flow facts, mappings, provider modes and editor clients. Canonical capability truth stays in roadmap/0.1.0-tama/catalogs/product-surface-catalog.toml; this inventory adds surface-level exposure facts, not a second catalog."
+  },
+  "clients": [
+    {
+      "id": "vscode",
+      "kind": "full TypeScript extension (verter-vscode)",
+      "launch": "native verter-lsp over stdio; binary precedence e2e copy > setting > dev target > bundled > PATH; optional verter-mcp HTTP spawn",
+      "capabilities": "16 contributed commands, virtual-file/source-map/component-tree/analysis/routes views, decorations, TS server plugin, MCP setup command",
+      "commands": [
+        "verter.showOutputChannel",
+        "verter.restartLanguageServer",
+        "verter.selectTypeProvider",
+        "verter.showCompiledCodeToSide",
+        "verter.writeVirtualFiles",
+        "verter.showStatistics",
+        "verter.showRecentAuditRecords",
+        "verter.openVirtualFile",
+        "verter.showSourceMapForFile",
+        "verter.refreshVirtualFiles",
+        "verter.refreshAnalysis",
+        "verter.refreshRoutes",
+        "verter.showSourceMapVisualization",
+        "verter.goToComponent",
+        "verter.goToParentFile",
+        "verter.setupMcpForClaudeCode"
+      ],
+      "evidence": ["packages/vue-vscode/package.json", "packages/vue-vscode/src/extension.ts"],
+      "tests": ["packages/vue-vscode/e2e/acceptance/launch.ts"]
+    },
+    {
+      "id": "nvim",
+      "kind": "pure Lua config over the Neovim 0.11+ built-in LSP client",
+      "launch": "verter-lsp from PATH or cmd_path; --type-provider=<auto|tsgo|tsserver|off> with root strictly last; fail-closed on missing binary",
+      "capabilities": "shared six-key initOptions parity; opt-out semantic tokens; save-notify watcher replacement",
+      "evidence": ["editors/nvim/lua/verter/config.lua", "editors/nvim/README.md"],
+      "tests": [
+        "editors/nvim/tests/config_spec.lua",
+        "editors/nvim/tests/smoke_spec.lua",
+        "crates/verter-editor-client/tests/cases/nvim_config_contract.rs"
+      ]
+    },
+    {
+      "id": "helix",
+      "kind": "languages.toml snippet for the built-in native LSP client",
+      "launch": "command verter-lsp, args --type-provider=tsgo; root via initialize workspaceFolders",
+      "capabilities": "six-key initOptions parity config table; vue/svelte language-server binding",
+      "evidence": ["editors/helix/languages.toml", "editors/helix/README.md"],
+      "tests": ["crates/verter-editor-client/tests/cases/helix_config_contract.rs"]
+    },
+    {
+      "id": "lapce",
+      "kind": "wasm32-wasip1 volt launcher (verter-volt)",
+      "launch": "PLUGIN_RPC.start_lsp once; serverPath override > opt-in PATH lookup > loud fail; shared argv with trailing workspace root",
+      "capabilities": "typeProvider clamp to tsgo|off; filtered serverArgs; six-key parity",
+      "evidence": ["extensions/lapce/src/lib.rs", "extensions/lapce/README.md"],
+      "tests": ["extensions/lapce/examples/contract_plan.rs"]
+    },
+    {
+      "id": "zed",
+      "kind": "wasm32-wasip2 extension launcher",
+      "launch": "language_server_command + initialization options; binary.path override > opt-in worktree PATH lookup > loud fail",
+      "capabilities": "binary.arguments/env merge; six-key parity; language-server-only manifest (no grammars)",
+      "evidence": ["extensions/zed/src/lib.rs", "extensions/zed/README.md"],
+      "tests": ["extensions/zed/examples/contract_plan.rs"]
+    }
+  ],
+  "preservedClients": {
+    "ids": ["vscode", "nvim", "helix", "lapce", "zed"],
+    "rule": "All five were checked before this constitution proposed anything. Replacement or retirement of any client requires its own charter and receiving amendment; DX0 proposes no replacement."
+  },
+  "sharedLaunchContract": {
+    "owner": "crates/verter-editor-client",
+    "evidence": ["crates/verter-editor-client/src/args.rs", "crates/verter-editor-client/src/init_options.rs"],
+    "initOptionKeys": ["lint", "inlayHints", "viteConfig", "experimental", "hover", "statistics"]
+  },
+  "terminals": [
+    {
+      "id": "verter-lsp",
+      "kind": "npm launcher over the native Rust LSP server (crates/verter_lsp)",
+      "capabilities": "LSP capabilities declared in crates/verter_lsp/src/capabilities.rs (hover, definition, typeDefinition, references, rename, push diagnostics, completion, semanticTokens full, formatting, onTypeFormatting, codeAction, codeLens, inlayHint, callHierarchy, workspaceSymbol, colorProvider, linkedEditingRange, documentSymbol, signatureHelp, foldingRange, selectionRange, documentLink, documentHighlight) plus custom methods",
+      "customMethods": [
+        "$/onDidChangeTsOrJsFile",
+        "$/onFileChanged",
+        "$/verter/watcherStateChanged",
+        "$/getCompiledCode",
+        "$/verter/documentStructure",
+        "$/verter/getStatistics",
+        "$/verter/getVirtualFiles",
+        "$/verter/getAnalysis",
+        "$/verter/getProjectOverview",
+        "$/verter/getBindingTypes",
+        "$/verter/getComponentParents",
+        "$/verter/documentDropEdit",
+        "$/verter/getRouteTree",
+        "$/verter/getComponentMeta",
+        "$/verter/getComponentMetaSurface",
+        "$/verter/getComponentMetaTypeExpansion",
+        "$/verter/audit/getRecord",
+        "$/verter/audit/getRecent"
+      ],
+      "evidence": ["crates/verter_lsp/src/capabilities.rs", "crates/verter_lsp/src/main.rs", "packages/verter-lsp/package.json"]
+    },
+    {
+      "id": "verter-tsc",
+      "kind": "npm launcher over the native Rust CLI (crates/verter_tsc); vue-tsc replacement",
+      "capabilities": "-p/--project, -b/--build, --noEmit (default), declaration emit, --listFiles/--listEmittedFiles; tsgo-only engine >=7.0.2 <7.1.0, no tsc fallback",
+      "evidence": ["crates/verter_tsc/src/main.rs", "packages/verter-tsc/package.json"]
+    },
+    {
+      "id": "verter-mcp",
+      "kind": "npm launcher over the native Rust MCP server (crates/verter_mcp)",
+      "capabilities": "agent tool surface defined by #[tool] handlers in crates/verter_mcp/src/server.rs (categories: summary, files, analysis, css, diagnostics, compilation, cross-file, runtime hints, refactoring, types, docs, routing, stores, ssr, baseline/testing); canonical table mcp/README.md",
+      "evidence": ["crates/verter_mcp/src/server.rs", "mcp/README.md", "packages/verter-mcp/package.json"]
+    }
+  ],
+  "browser": {
+    "id": "playground",
+    "engines": {
+      "compiler": "@verter/wasm VerterHost (local bundle / GitHub nightly / jsDelivr selector)",
+      "typescript": "typescript@6.0.3 pinned in packages/playground/package.json, bundled into the Monaco web worker; never a CDN engine"
+    },
+    "operations": [
+      "carrier/TS compile with JS/CSS output, SSR pass, per-stage timings",
+      "compiler diagnostics",
+      "per-file lint with per-rule disable",
+      "analysis snapshot (imports, bindings, template usage, CSS)",
+      "public API / declaration projection outputs",
+      "TS hover/completions/definition/references/highlights/rename via the browser worker (hover and completions merge native analysis into the default answer, and the Diagnostics tab merges compiler+lint with TypeScript; all three are catalogued partial/promotionBlocked in the feature exposure contract)",
+      "outline, code actions, CSS selector match matrix, template AST, CSS var flow, dependency graph, source map view",
+      "sandboxed preview with import map"
+    ],
+    "absent": [
+      "tsgo or any TS>=7 engine (fail-closed; no WASM tsgo exists)",
+      "native checker",
+      "project-wide lint/typecheck aggregates",
+      "formatter",
+      "component-meta panel (removed; legacy URL modes remap to analysis)",
+      "flow facts"
+    ],
+    "evidence": [
+      "packages/playground/package.json",
+      "packages/playground/src/core/compiler.ts",
+      "packages/playground/src/editor/tsWorker.ts",
+      "packages/playground/src/editor/inContextLs.ts",
+      "packages/playground/src/editor/wasmTsgoFailClosed.spec.ts"
+    ]
+  },
+  "analysis": {
+    "lint": {
+      "ruleCount": 187,
+      "ruleCountBasis": "registry.register occurrences in crates/verter_diagnostics/src/rules/mod.rs",
+      "surfaces": ["LSP diagnostics bridge", "MCP lint_file/lint_project/get_quick_fixes + --lint-preset", "NAPI/bench call sites"],
+      "standaloneCli": false,
+      "evidence": ["crates/verter_diagnostics/src/rules/mod.rs", "crates/verter_diagnostics/src/linter.rs"]
+    },
+    "format": {
+      "userFacingCli": false,
+      "lspSurface": "structural-only SFC formatting; content formatting explicitly delegated to Prettier/dprint",
+      "evidence": ["crates/verter_lsp/src/features/formatting.rs"]
+    },
+    "flowFacts": {
+      "userVisibleEdges": ["audited flow-return payloads via $/verter/audit/getRecord and getRecent"],
+      "internal": true,
+      "evidence": ["crates/verter_session/src/host_flow_return_audit.rs"]
+    },
+    "providerModes": ["auto", "tsgo", "shared-tsgo", "tsserver", "editor-tsserver", "extension", "off"],
+    "providerModesEvidence": ["crates/verter_lsp/src/main.rs"],
+    "typeInfoQueries": {
+      "protocolGraphOperations": [
+        "resolve-symbol",
+        "evaluate-expression",
+        "project-path",
+        "relate",
+        "framework-surfaces",
+        "expand-around",
+        "flow-narrowing-at",
+        "contextual-type-at"
+      ],
+      "jsBindings": "@verter/typeinfo wraps the Rust host typeinfo substrate: list symbols, resolve named symbol, evaluate type expression",
+      "mcpTools": ["get_framework_surface", "get_component_types", "get_type_errors"],
+      "lspCustomMethods": ["$/verter/getBindingTypes"],
+      "rail": "inspection (Verter-native type inspection; never replacement TypeScript answers)",
+      "evidence": [
+        "crates/verter_protocol/proto/verter/v1/typeinfo.proto",
+        "packages/typeinfo/package.json",
+        "crates/verter_mcp/src/server.rs",
+        "crates/verter_lsp/src/main.rs"
+      ]
+    },
+    "mappings": {
+      "vscodeCommands": ["verter.showSourceMapForFile", "verter.showSourceMapVisualization"],
+      "playground": "source-map view over compiled output (packages/playground/src/core/sourcemap.ts)",
+      "rail": "inspection (generated coordinates presented as mapped compiler output, never authored coordinates)",
+      "evidence": ["packages/vue-vscode/package.json", "packages/playground/src/core/sourcemap.ts"]
+    },
+    "typeScriptPlugin": {
+      "id": "@verter/typescript-plugin",
+      "role": "TS server plugin resolving .vue/.svelte carrier imports to *.verter.ts virtual files",
+      "evidence": ["packages/typescript-plugin/readme.md"]
+    }
+  },
+  "playgroundGaps": [
+    {
+      "operation": "tsc.project-check.vue + tsc.project-check.svelte",
+      "catalogSurfaces": ["vue.tsc.project_check", "svelte.tsc.project_check"],
+      "status": "missing",
+      "evidence": ["packages/playground/src/editor/inContextLs.ts", "packages/playground/src/editor/wasmTsgoFailClosed.spec.ts"]
+    },
+    {
+      "operation": "project-wide host lint",
+      "catalogSurfaces": ["vue.host_lint", "svelte.host_lint"],
+      "status": "partial",
+      "evidence": ["packages/playground/src/core/store.ts"]
+    },
+    {
+      "operation": "component-meta scalar/batch",
+      "catalogSurfaces": ["vue.component_meta.scalar", "vue.component_meta.batch", "svelte.component_meta.scalar", "svelte.component_meta.batch"],
+      "status": "missing",
+      "evidence": ["packages/playground/src/output/ComponentMetaPanel.spec.ts"]
+    },
+    {
+      "operation": "document formatting",
+      "catalogSurfaces": [],
+      "status": "missing",
+      "evidence": ["crates/verter_lsp/src/features/formatting.rs"]
+    },
+    {
+      "operation": "flow-fact inspection",
+      "catalogSurfaces": [],
+      "status": "missing",
+      "evidence": ["crates/verter_session/src/host_flow_return_audit.rs"]
+    }
+  ]
+}

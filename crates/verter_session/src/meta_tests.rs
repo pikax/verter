@@ -3650,10 +3650,10 @@ fn the_tsx_lane_emits_for_every_flow_return_degradation_class() {
             )
             .unwrap();
         let host = project.host();
-        // The LSP's own IDE profile (`Documents::tsx_profile`). A default
-        // (BUNDLER) profile normalized with the TSX bit still demands runtime
-        // PROP CONSTRUCTORS, so a test written that way measures the runtime
-        // lane's constructor demand and calls it the TSX lane.
+        // The LSP's own IDE profile (`Documents::tsx_profile`). IDE
+        // normalization strips STYLE/SCRIPT/TEMPLATE so a leftover bundler
+        // target cannot admit runtime-render; this test still uses the LSP
+        // profile so it measures the hover/TSX lane.
         let profile = crate::types::CompileProfile {
             source_map: true,
             target: crate::CompileTarget::IDE | crate::CompileTarget::TEMPLATE_DATA,
@@ -29955,6 +29955,137 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
                 .is_none()
             && analysis.accepted_props[0].publication.evidence().is_none(),
         "display text without a locator must not mint authored evidence"
+    );
+}
+
+/// ECRV8-AC3: `UnraisableSource` on Exposed / PublicInstanceMember publishes
+/// the centralized typed unsupported outcome for that slot and keeps sibling
+/// members. The whole request stays `Ok`.
+#[test]
+fn component_meta_output_exposed_unraisable_source_degrades_per_member() {
+    use verter_semantic::analysis::component_meta as cm;
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", "<template><div /></template>")
+        .unwrap();
+    let host = project.host();
+    let bad = authored_decl_body_source("/definitely-missing.ts", "NoSuchType");
+    let healthy = closed_ref_source("Healthy");
+
+    let mut analysis = blank_output_analysis();
+    analysis.exposed.push(cm::ExposedAnalysis {
+        name: "bad".to_string(),
+        type_source: verter_type_expr::facts::SourcePosition::Present(bad.clone()),
+        type_expansion: None,
+        description: None,
+        tags: Vec::new(),
+    });
+    analysis.exposed.push(cm::ExposedAnalysis {
+        name: "ok".to_string(),
+        type_source: verter_type_expr::facts::SourcePosition::Present(healthy.clone()),
+        type_expansion: None,
+        description: None,
+        tags: Vec::new(),
+    });
+    analysis.public_instance = Some(cm::PublicInstanceAnalysis {
+        members: vec![
+            cm::PublicInstanceMemberAnalysis {
+                name: "bad".to_string(),
+                kind: cm::PublicInstanceMemberKind::Exposed,
+                type_source: verter_type_expr::facts::SourcePosition::Present(bad),
+                type_expansion: None,
+                raw_type: None,
+                description: None,
+                tags: Vec::new(),
+            },
+            cm::PublicInstanceMemberAnalysis {
+                name: "ok".to_string(),
+                kind: cm::PublicInstanceMemberKind::Exposed,
+                type_source: verter_type_expr::facts::SourcePosition::Present(healthy),
+                type_expansion: None,
+                raw_type: None,
+                description: None,
+                tags: Vec::new(),
+            },
+        ],
+        completeness: cm::PublicInstanceCompleteness::Exact,
+    });
+
+    let output = crate::meta_resolve::projectors::build_component_meta_output(
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
+    )
+    .expect("UnraisableSource on Exposed/PublicInstanceMember must not fail the request");
+    let lanes = output.into_parts().2.into_lanes();
+    let unsupported = TypeExpr::Unknown(UnknownValue::missing_output());
+    let healthy_ty = TypeExpr::Ref {
+        name: Arc::from("Healthy"),
+        type_arguments: Arc::from([]),
+    };
+    assert_eq!(
+        lanes.exposed,
+        vec![unsupported.clone(), healthy_ty.clone()],
+        "unraisable exposed[0] is typed unsupported; sibling stays live"
+    );
+    assert_eq!(
+        lanes.public_instance_members,
+        vec![unsupported, healthy_ty],
+        "unraisable public-instance[0] is typed unsupported; sibling stays live"
+    );
+}
+
+/// ECRV8-AC3 boundary: a non-`UnraisableSource` failure on Exposed still
+/// fails the whole output; the per-member degrade does not swallow it.
+#[test]
+fn component_meta_output_exposed_required_source_unavailable_still_fails_closed() {
+    use verter_semantic::analysis::component_meta as cm;
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", "<template><div /></template>")
+        .unwrap();
+    let host = project.host();
+
+    let mut analysis = blank_output_analysis();
+    analysis.exposed.push(cm::ExposedAnalysis {
+        name: "failed".to_string(),
+        type_source: verter_type_expr::facts::SourcePosition::Failed(
+            verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
+        ),
+        type_expansion: None,
+        description: None,
+        tags: Vec::new(),
+    });
+    analysis.exposed.push(cm::ExposedAnalysis {
+        name: "ok".to_string(),
+        type_source: verter_type_expr::facts::SourcePosition::Present(closed_ref_source("Healthy")),
+        type_expansion: None,
+        description: None,
+        tags: Vec::new(),
+    });
+
+    let err = crate::meta_resolve::projectors::build_component_meta_output(
+        host,
+        "/App.vue",
+        analysis,
+        None,
+        crate::meta_resolve::PublishedCompleteness::COMPLETE,
+    )
+    .expect_err("RequiredSourceUnavailable on Exposed must still fail the output");
+    assert_eq!(
+        err.lane,
+        crate::meta_resolve::ComponentMetaOutputLane::Exposed
+    );
+    assert_eq!(err.index, 0);
+    assert!(
+        matches!(
+            err.failure,
+            crate::meta_resolve::ComponentMetaOutputFailure::RequiredSourceUnavailable { .. }
+        ),
+        "degrade arm is UnraisableSource-only, got {:?}",
+        err.failure
     );
 }
 

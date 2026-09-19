@@ -13,8 +13,8 @@
 //! admits into the family memo. A `LegacyFallback` always suppresses
 //! admission (`cache_suppress`); it marks `result_is_partial` iff any of
 //! its reasons is partial (every reason except the hop-limit polarity
-//! fallback). The family also carries the live-generation gate, so a
-//! bare project-generation bump rejects a warm candidate.
+//! fallback). A bare project-generation bump rejects a warm candidate
+//! through `FactVersionRef::ProjectGeneration` on the published carrier.
 
 use std::sync::Arc;
 

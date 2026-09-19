@@ -5,7 +5,7 @@
   "contract": {
     "path": "docs/arch/signature-kernel.md",
     "revision": "4.1",
-    "sha256": "97735eb2f8cf658d25c4b6c81e799d3cda0a6cb96a237189f77e521564ed3839"
+    "sha256": "d53307cac5bdedae3342cafdc6dab98223b613c3168c8484ee8e2d6434625564"
   },
   "oracle": {
     "typescript": "7.0.2",
@@ -54,5 +54,17 @@
   },
   "out_of_scope": [
     "typescript 7.1.0-dev nightlies (moving target; their content-mapper work is unrelated to this train)"
-  ]
+  ],
+  "boxcar": {
+    "crate": "boxcar",
+    "version": "0.2.14",
+    "msrv": "1.72.0",
+    "workspace_msrv": "1.92",
+    "targets": [
+      "native",
+      "wasm32-unknown-unknown"
+    ],
+    "initialization": "push stores a fully constructed T; count() is not a published-handle range; the adapter publishes a handle only after the record is initialized and the shard map records it",
+    "atomics": "0.2.8 added platforms without 64-bit atomics (wasm32-unknown-unknown included)"
+  }
 }

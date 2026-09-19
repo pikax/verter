@@ -46,6 +46,9 @@ on:
       - "scripts/verify-packages.mjs"
       - "scripts/bump.mjs"
       - "packages/vue-vscode/package.mjs"
+      - "scripts/githubctl/clean-room.mjs"
+      - "scripts/githubctl/tests/clean-room.test.mjs"
+      - "scripts/lib/publish-set.mjs"
 
 # Never let a rehearsal cancel or queue behind a real release.
 concurrency:
@@ -74,7 +77,7 @@ jobs:
       - name: Validate release workflow and package contracts
         run: pnpm --filter verter-vscode exec vitest run src/releasePackaging.spec.ts
       - name: Validate release rehearsal control plane
-        run: node --test scripts/githubctl/tests/release-plan.test.mjs
+        run: node --test scripts/githubctl/tests/clean-room.test.mjs
 
   dry-run:
     name: Release dry run

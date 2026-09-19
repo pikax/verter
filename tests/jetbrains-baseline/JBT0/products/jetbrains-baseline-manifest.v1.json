@@ -1,0 +1,167 @@
+{
+  "id": "jetbrains-baseline-manifest.v1",
+  "schema": 1,
+  "vocabulary": ["comparatorId", "ide", "plugins", "engines", "settings", "corpus", "alternateModes", "captureState", "owner"],
+  "receiptBasis": {
+    "reuses": "ProductReceiptBasis v1 (DX0): sourceRevisions, projectConfiguration, engineIdentity, hostIdentity, completenessState",
+    "evidence": ["tests/product-experience/DX0/products/product-receipt-basis.v1.json"]
+  },
+  "captureStates": ["captured", "pending-capture"],
+  "rules": [
+    "The comparator is official WebStorm as shipped, in its recommended/default mode, benchmarked with diagnostics and all required features enabled; a comparator configuration with diagnostics disabled is invalid and voids every measurement produced from it (JBT0-AC1).",
+    "An alternate service-powered mode is a separate recorded comparator row marked alternate; it never substitutes for the default row and the default is never weakened.",
+    "A pin value is either captured from the installed official product (captureState captured, with value and captureRoute) or absent (pending-capture, with the named owner responsible); there is no third state and a guessed value is never admissible.",
+    "A superiority evaluation may not rest on any pending-capture pin; the gate stays closed until every manifest pin the evaluation reads is captured.",
+    "Deleting or weakening a captured pin to dodge a non-regression condition is forbidden; a pin changes only through a new capture with a new captureRoute.",
+    "The manifest adds no second status store and no new receipt machinery; it binds the DX0 vocabulary.",
+    "Installation presence, protocol smoke, or a screenshot is not comparator evidence; the measured comparator product is the real IDE doing its required work."
+  ],
+  "comparators": [
+    {
+      "id": "webstorm.recommended-default",
+      "mode": "recommended-default",
+      "alternate": false,
+      "ide": {
+        "slot": "official WebStorm product identity",
+        "value": null,
+        "captureState": "pending-capture",
+        "owner": "JBT1H",
+        "captureRoute": "read from the installed product's About/build dialog through the JBT1H real-IDE harness"
+      },
+      "build": {
+        "slot": "official WebStorm build number",
+        "value": null,
+        "captureState": "pending-capture",
+        "owner": "JBT1H",
+        "captureRoute": "installed-product build number reported by the JBT1H real-IDE harness"
+      },
+      "plugins": [
+        {
+          "slot": "official Vue support plugin (id, version, bundled state)",
+          "value": null,
+          "captureState": "pending-capture",
+          "owner": "JBT1H",
+          "captureRoute": "installed-plugin list read from the running official IDE by the JBT1H harness"
+        }
+      ],
+      "engines": [
+        {
+          "slot": "official TypeScript/language-service engine identity and version executing web-language support",
+          "value": null,
+          "captureState": "pending-capture",
+          "owner": "JBT1H",
+          "captureRoute": "running-engine identity reported by the official IDE through the JBT1H harness"
+        }
+      ],
+      "settings": {
+        "profile": "recommended defaults as shipped",
+        "diagnosticsEnabled": true,
+        "attestation": {
+          "required": true,
+          "content": "every comparator run attests diagnostics and all required features enabled; without the attestation the run is void (JBT0-AC1)",
+          "capturedProfile": {
+            "value": null,
+            "captureState": "pending-capture",
+            "owner": "JBT1H",
+            "captureRoute": "exported effective settings of the measured official installation"
+          }
+        },
+        "deviationsFromDefaults": []
+      },
+      "corpus": {
+        "binding": "the pinned comparison corpus shared with the SuperiorityPredicate methodology: representative real projects and libraries plus adversarial cases, chosen before optimization (JBT0.3), with pinned revisions",
+        "population": {
+          "value": null,
+          "captureState": "pending-capture",
+          "owner": "JBT1H",
+          "captureRoute": "corpus fixture set pinned by the JBT1H fixture driver; WSP1 owns the equal-work instrumentation consumed alongside it"
+        }
+      }
+    },
+    {
+      "id": "webstorm.service-powered",
+      "mode": "alternate-service-powered",
+      "alternate": true,
+      "note": "recorded alternate service-powered official mode, if the measured product offers one; a full comparator row with its own settings and engine pins; never the default row and never a substitute for it",
+      "ide": {
+        "slot": "official WebStorm product identity (service-powered mode)",
+        "value": null,
+        "captureState": "pending-capture",
+        "owner": "JBT1H",
+        "captureRoute": "read from the installed product through the JBT1H real-IDE harness"
+      },
+      "plugins": [
+        {
+          "slot": "plugins participating in the service-powered mode (id, version, state)",
+          "value": null,
+          "captureState": "pending-capture",
+          "owner": "JBT1H",
+          "captureRoute": "installed-plugin list read from the running official IDE by the JBT1H harness"
+        }
+      ],
+      "engines": [
+        {
+          "slot": "engine identities executing in the service-powered mode",
+          "value": null,
+          "captureState": "pending-capture",
+          "owner": "JBT1H",
+          "captureRoute": "running-engine identity reported by the official IDE through the JBT1H harness"
+        }
+      ],
+      "settings": {
+        "profile": "the alternate mode's documented opt-in configuration",
+        "diagnosticsEnabled": true,
+        "attestation": {
+          "required": true,
+          "content": "alternate-mode runs carry the same diagnostics-enabled attestation; a weakened alternate row is invalid (JBT0-AC1)",
+          "capturedProfile": {
+            "value": null,
+            "captureState": "pending-capture",
+            "owner": "JBT1H",
+            "captureRoute": "exported effective settings of the measured official installation in the alternate mode"
+          }
+        },
+        "deviationsFromDefaults": []
+      },
+      "corpus": {
+        "binding": "same pinned corpus as the default row; comparator rows never differ by corpus",
+        "population": {
+          "value": null,
+          "captureState": "pending-capture",
+          "owner": "JBT1H",
+          "captureRoute": "corpus fixture set pinned by the JBT1H fixture driver"
+        }
+      }
+    }
+  ],
+  "adapterState": {
+    "extensions/jetbrains": {
+      "state": "skeleton-inert",
+      "note": "JBT1 landed the Gradle plugin skeleton pinned to WebStorm 2026.2.3: a loading plugin with a health action only, no semantic features. It stays inert until its activation boundary (JBT2 owns the lifecycle); the sole semantic entry remains verter-lsp. The scaffolding is deleted once JBT2 owns the lifecycle. JBT1H's real-IDE harness captures this row's IDE pins.",
+      "evidence": ["extensions/jetbrains/README.md", "extensions/jetbrains/gradle.properties", "tests/jetbrains-product/JBT1/products/ide-support-range.v1.json"]
+    },
+    "packages/dx-harness/jetbrains": {
+      "state": "harness-present",
+      "note": "JBT1H landed the real-IDE comparison harness and fixture driver (paired-run recorder, process-tree and UI application/paint capture, Platform-test-framework IDE driver). It captures versions and comparison rows; it does not evaluate superiority (JBT10/JBT11) or workflow parity (JBT9). No second semantic engine. Installed-product About-dialog pins stay pending-capture: the platform test IDE is not that capture route.",
+      "evidence": [
+        "packages/dx-harness/jetbrains/index.ts",
+        "packages/dx-harness/test/jetbrainsHarness.test.ts",
+        "extensions/jetbrains/src/test/kotlin/dev/verter/jetbrains/RealIdeCaptureTest.kt"
+      ]
+    },
+    "semanticEntry": {
+      "state": "verter-lsp only",
+      "note": "the sole semantic entry for editor clients remains the native verter-lsp through the shared editor-client initialization contract; a second semantic engine inside the client is forbidden",
+      "evidence": ["packages/verter-lsp/package.json", "crates/verter-editor-client/src/init_options.rs"]
+    }
+  },
+  "evidence": [
+    "roadmap/0.1.0-tama/contracts/product-experience.md",
+    "tests/product-experience/DX0/products/product-receipt-basis.v1.json",
+    "packages/verter-lsp/package.json",
+    "crates/verter-editor-client/src/init_options.rs",
+    "packages/dx-harness/package.json",
+    "extensions/lapce/README.md",
+    "extensions/zed/README.md"
+  ]
+}

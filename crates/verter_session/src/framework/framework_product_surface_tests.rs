@@ -1415,8 +1415,9 @@ fn the_diagnostics_route_answers_from_the_compile_slot_it_names() {
 
 /// A request identity that asks for BOTH the runtime products and the IDE
 /// product is ATOMIC over the products it asked for: when its runtime surface
-/// is refused it publishes NO product at all — no runtime module, no CSS, and
-/// no IDE/TSX artifact.
+/// is refused it publishes NO runtime product at all — no runtime module and
+/// no CSS. `ensure_ide_compiled` is an IDE product request: leftover bundler
+/// bits on the caller profile are stripped, so the IDE surface still answers.
 ///
 /// The refusal is a property of the REQUESTED-PRODUCT SET, not of the source.
 /// Four controls keep this from being satisfiable by "never publish anything":
@@ -1450,9 +1451,12 @@ fn a_refused_combined_request_publishes_no_product_at_all() {
         }
     }
 
-    /// The combined request publishes NOTHING: the runtime node is the typed
-    /// refusal carrying the compiler's own code, every other node is absent,
-    /// and the IDE product is neither cached nor ensurable.
+    /// The combined *runtime* request publishes NOTHING: the runtime node is
+    /// the typed refusal carrying the compiler's own code and every other
+    /// virtual node is absent. `ensure_ide_compiled` is an IDE product request
+    /// even when the caller profile still carries bundler bits: leftover
+    /// STYLE/SCRIPT/TEMPLATE demand is stripped at IDE normalization, so the
+    /// IDE surface still answers.
     #[track_caller]
     fn assert_combined_publishes_nothing(
         label: &str,
@@ -1481,23 +1485,22 @@ fn a_refused_combined_request_publishes_no_product_at_all() {
             );
         }
 
+        let ensured = host
+            .ensure_ide_compiled(canonical, profile)
+            .unwrap_or_else(|error| {
+                panic!("[{label}] IDE-ensure on a refused combined identity: {error:?}")
+            });
         assert!(
-            host.get_ide(canonical, profile).is_none(),
-            "[{label}] the IDE/TSX product was published under the refused combined identity"
+            ensured,
+            "[{label}] IDE-ensure reported no IDE surface on a refused combined identity"
         );
-        match host.ensure_ide_compiled(canonical, profile) {
-            Err(HostError::RuntimeSurfaceRefused {
-                diagnostic_code, ..
-            }) => assert_eq!(
-                diagnostic_code, expected_code,
-                "[{label}] the IDE-ensure refusal names a different surface than the runtime one"
-            ),
-            other => panic!(
-                "[{label}] the combined request's IDE-ensure must be a typed \
-                 RuntimeSurfaceRefused — a refused request publishing an IDE projection is the \
-                 mixed outcome this test forbids. Got: {other:?}"
-            ),
-        }
+        let ide = host.get_ide(canonical, profile).unwrap_or_else(|| {
+            panic!("[{label}] no IDE product after ensure on a refused combined identity")
+        });
+        assert!(
+            !ide.code.is_empty(),
+            "[{label}] IDE-ensure published an empty product on a refused combined identity"
+        );
     }
 
     /// The IDE-only identity on the SAME source still publishes: it asked for
@@ -2201,4 +2204,188 @@ fn reading_a_target_excluded_node_under_a_warm_identity_does_not_recompile() {
             "[{label}] the requested IDE product went missing"
         );
     }
+}
+
+/// Product-surface isolation: a projection / metadata / analysis request must
+/// not demand a runtime-render capability it does not consume. The public IDE
+/// route starts from the host-default bundler profile (native `ensureIdeCompiled`
+/// / hover's compile step after profile normalization); leftover STYLE/SCRIPT/
+/// TEMPLATE bits must not pull the runtime emitter into that request.
+///
+/// Runtime compilation of each unsupported construct still fails with its
+/// existing typed code (AC3). A control free of those constructs is unchanged.
+fn isolation_cells() -> Vec<(
+    &'static str,
+    &'static str,
+    &'static str,
+    CompileProfile,
+    &'static str,
+)> {
+    vec![
+        (
+            "nav",
+            "/probe/IsoNav.svelte",
+            "<script>let count = $state(0);</script>\n<nav>home</nav>\n<p>{count}</p>\n",
+            bundler_profile(false),
+            "svelte-runtime-unsupported-element",
+        ),
+        (
+            "bind-this",
+            "/probe/IsoBindThis.svelte",
+            "<script>let refs = []; let count = $state(0);</script>\n<div bind:this={refs[0]}></div>\n<p>{count}</p>\n",
+            bundler_profile(false),
+            "svelte-runtime-unsupported-binding",
+        ),
+        (
+            "server-generate",
+            "/probe/IsoServer.svelte",
+            SVELTE_STYLED,
+            ssr_profile(),
+            "svelte-runtime-unsupported-server-generate",
+        ),
+    ]
+}
+
+fn hover_profile() -> CompileProfile {
+    CompileProfile {
+        target: crate::CompileTarget::IDE | crate::CompileTarget::TEMPLATE_DATA,
+        ..CompileProfile::default()
+    }
+}
+
+fn assert_useful_projection(
+    label: &str,
+    host: &VerterHost,
+    canonical: &str,
+    profile: &CompileProfile,
+) {
+    let ensured = host
+        .ensure_ide_compiled(canonical, profile)
+        .unwrap_or_else(|error| panic!("[{label}] projection request: {error:?}"));
+    assert!(
+        ensured,
+        "[{label}] projection request reported no IDE surface"
+    );
+    let ide = host.get_ide(canonical, profile).unwrap_or_else(|| {
+        panic!("[{label}] hover/get_ide returned none after a successful ensure")
+    });
+    assert!(
+        !ide.code.is_empty(),
+        "[{label}] projection result was empty"
+    );
+    assert!(
+        ide.code.contains("{count}") || ide.code.contains("count"),
+        "[{label}] projection dropped the rest of the file: {}",
+        ide.code
+    );
+}
+
+fn assert_useful_metadata_and_analysis(label: &str, host: &VerterHost, canonical: &str) {
+    let public_api = host
+        .get_public_api_with_mode(canonical, PublicApiMode::Public, None)
+        .unwrap_or_else(|error| panic!("[{label}] metadata/public-api: {error:?}"));
+    assert!(
+        public_api.is_some(),
+        "[{label}] metadata request returned no public-api result"
+    );
+    let analysis = host
+        .get_analysis(canonical)
+        .unwrap_or_else(|| panic!("[{label}] lint/analysis request returned none"));
+    assert!(
+        !analysis.bindings.is_empty(),
+        "[{label}] analysis/lint snapshot had no bindings for the rest of the file"
+    );
+}
+
+#[test]
+fn product_requests_do_not_consume_runtime_render_capability() {
+    for (label, canonical, source, runtime_profile, expected_code) in isolation_cells() {
+        let host = host_with(canonical, source, verter_language::FileLanguage::svelte());
+
+        let main = read_node(&host, canonical, VirtualNodeKind::Main, &runtime_profile);
+        assert_eq!(
+            main,
+            NodeOutcome::Refused {
+                diagnostic_code: expected_code.to_string()
+            },
+            "[{label}] runtime compilation must still refuse with the existing typed code"
+        );
+
+        // Native/public IDE route: host-default bundler profile, same as
+        // `ensureIdeCompiled` / `getIde` over NAPI (no caller target).
+        assert_useful_projection(
+            &format!("{label}/default-profile"),
+            &host,
+            canonical,
+            &CompileProfile::default(),
+        );
+        // LSP hover compile step: IDE + TEMPLATE_DATA.
+        assert_useful_projection(
+            &format!("{label}/hover-profile"),
+            &host,
+            canonical,
+            &hover_profile(),
+        );
+        assert_useful_metadata_and_analysis(label, &host, canonical);
+    }
+
+    // Control: a file free of unsupported runtime constructs is unchanged
+    // on both the runtime and the product surfaces.
+    let control = "/probe/IsoControl.svelte";
+    let host = host_with(
+        control,
+        "<script>let count = $state(0);</script>\n<div>{count}</div>\n",
+        verter_language::FileLanguage::svelte(),
+    );
+    match read_node(
+        &host,
+        control,
+        VirtualNodeKind::Main,
+        &bundler_profile(false),
+    ) {
+        NodeOutcome::Published { code_len, .. } => {
+            assert!(code_len > 0, "control runtime module was empty")
+        }
+        other => panic!("control runtime compilation must still succeed, got {other:?}"),
+    }
+    assert_useful_projection(
+        "control/default-profile",
+        &host,
+        control,
+        &CompileProfile::default(),
+    );
+    assert_useful_projection("control/hover-profile", &host, control, &hover_profile());
+    assert_useful_metadata_and_analysis("control", &host, control);
+
+    // Vue shares the same IDE-normalization admission site. A `<nav>` Vue
+    // SFC must keep answering projection / metadata / analysis when the
+    // caller starts from the host-default bundler profile.
+    let vue = "/probe/IsoNav.vue";
+    let host = host_with(
+        vue,
+        "<script setup>\nconst count = 1\n</script>\n<template><nav>{{ count }}</nav><p>{{ count }}</p></template>\n",
+        verter_language::FileLanguage::vue(),
+    );
+    match read_node(&host, vue, VirtualNodeKind::Main, &bundler_profile(false)) {
+        NodeOutcome::Published { code_len, .. } => {
+            assert!(code_len > 0, "vue runtime module was empty")
+        }
+        other => panic!("vue runtime compilation must still succeed, got {other:?}"),
+    }
+    let ensured = host
+        .ensure_ide_compiled(vue, &CompileProfile::default())
+        .unwrap_or_else(|error| panic!("[vue-nav] projection request: {error:?}"));
+    assert!(
+        ensured,
+        "[vue-nav] projection request reported no IDE surface"
+    );
+    let ide = host
+        .get_ide(vue, &CompileProfile::default())
+        .unwrap_or_else(|| panic!("[vue-nav] get_ide returned none"));
+    assert!(
+        !ide.code.is_empty() && (ide.code.contains("count") || ide.code.contains("nav")),
+        "[vue-nav] projection dropped the rest of the file: {}",
+        ide.code
+    );
+    assert_useful_metadata_and_analysis("vue-nav", &host, vue);
 }

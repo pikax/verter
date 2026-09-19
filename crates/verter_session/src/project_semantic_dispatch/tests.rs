@@ -1581,7 +1581,8 @@ fn scc_member_drain_keeps_the_exact_root_candidate_across_sibling_warm_promotion
     let sibling_generation = warm_host.project_type_store().current_project_generation();
     assert_ne!(
         root_generation, sibling_generation,
-        "the sibling candidate must miss the root transaction's generation gate"
+        "the sibling candidate's ProjectGeneration carrier fact must miss \
+         the root transaction's live generation"
     );
 
     let graph = Arc::clone(primary_host.project_type_store().semantic_graph());
@@ -1593,7 +1594,15 @@ fn scc_member_drain_keeps_the_exact_root_candidate_across_sibling_warm_promotion
     let member_key = dispatch.relate_key_for(number, unknown);
     graph.insert_relation_payload_for_tests(
         root_key.clone(),
-        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        // The carrier fact discriminates across generations: production
+        // relation carriers always fold the dispatch ProjectGeneration
+        // fence, so the empty-signature form is unrepresentative. The
+        // sibling entry validates only in the warm reader's generation.
+        crate::fact_signature_helpers::ReadSetSignature::new(Arc::from([
+            crate::resolver_core::FactVersionRef::ProjectGeneration {
+                generation: sibling_generation,
+            },
+        ])),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
         graph.relation_payload_for_tests(RelationOutcome::NotAssignable),
         sibling_generation,

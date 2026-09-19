@@ -438,7 +438,7 @@ fn materialize_component_meta_output_types<'a>(
         )?);
     }
     for (index, exposed) in analysis.exposed.iter().enumerate() {
-        lanes.exposed.push(memo.materialize_output_lane_slot(
+        match memo.materialize_output_lane_slot(
             dispatch,
             cap,
             scope,
@@ -446,21 +446,46 @@ fn materialize_component_meta_output_types<'a>(
             index,
             None,
             &exposed.type_source,
-        )?);
+        ) {
+            Ok(ty) => lanes.exposed.push(ty),
+            // An unmaterializable exposed member must not fail the whole
+            // component: keep the member and publish the existing typed
+            // unsupported outcome for that slot.
+            Err(error)
+                if matches!(
+                    error.failure,
+                    crate::meta_resolve::ComponentMetaOutputFailure::UnraisableSource
+                ) =>
+            {
+                lanes.exposed.push(missing_source_output_type_expr());
+            }
+            Err(error) => return Err(error),
+        }
     }
     if let Some(public_instance) = analysis.public_instance.as_ref() {
         for (index, member) in public_instance.members.iter().enumerate() {
-            lanes
-                .public_instance_members
-                .push(memo.materialize_output_lane_slot(
-                    dispatch,
-                    cap,
-                    scope,
-                    Lane::PublicInstanceMember,
-                    index,
-                    None,
-                    &member.type_source,
-                )?);
+            match memo.materialize_output_lane_slot(
+                dispatch,
+                cap,
+                scope,
+                Lane::PublicInstanceMember,
+                index,
+                None,
+                &member.type_source,
+            ) {
+                Ok(ty) => lanes.public_instance_members.push(ty),
+                Err(error)
+                    if matches!(
+                        error.failure,
+                        crate::meta_resolve::ComponentMetaOutputFailure::UnraisableSource
+                    ) =>
+                {
+                    lanes
+                        .public_instance_members
+                        .push(missing_source_output_type_expr());
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
     for (index, entry) in analysis.type_registry.iter().enumerate() {

@@ -1,0 +1,61 @@
+{
+  "id": "superiority-predicate.v1",
+  "schema": 1,
+  "conjunction": ["workflow-parity", "measured-advantage", "verter-specific-semantic-tooling"],
+  "conjunctionRule": "all clauses must hold; the predicate is evaluated only over the full gate and no clause may be waived by another clause passing",
+  "clauses": {
+    "workflow-parity": {
+      "consumes": "required-workflow-matrix.v1",
+      "requirement": "parity-or-better on every required workflow row",
+      "owner": "JBT9"
+    },
+    "measured-advantage": {
+      "owner": "JBT10",
+      "metricSet": [
+        "real-client-responsiveness (actual client application/paint, not server-side latency alone)",
+        "provider-process-cpu (semantic provider processes, both sides)",
+        "provider-process-wall",
+        "outbound-bytes (wire bytes for the same interactions)",
+        "retained-memory"
+      ],
+      "thresholds": "predeclared margins in the shared performance contract (WSP lineage); recorded before measurement, never selected post-hoc",
+      "singleBenchmarkCertifies": false,
+      "noPostHocSubsetSelection": true
+    },
+    "verter-specific-semantic-tooling": {
+      "requirement": "at least one differentiating Verter semantic capability the official product does not provide, demonstrated executable and exposed per DX0 section 6 (executable route, source-linked explanation, reproducible scenario, observable error state), not merely registered",
+      "owner": "JBT11"
+    }
+  },
+  "methodology": {
+    "equalWorkCorpus": "WSP's equal-work corpus and the shared-contract limits, with all required features enabled on both sides per the manifest attestation",
+    "instrumentationOwner": "WSP1",
+    "comparatorMode": {
+      "row": "webstorm.recommended-default",
+      "diagnosticsEnabled": true,
+      "weakenedComparatorAllowed": false,
+      "note": "a comparator with diagnostics disabled voids the campaign (JBT0-AC1)"
+    },
+    "sameBasis": "identical source revisions, corpus and host hardware in one campaign; every run binds the DX0 ProductReceiptBasis; old-source, old-project, old-engine, old-worker and wrong-handle runs are rejected on both sides",
+    "unavailableMetrics": {
+      "policy": "label-with-reason",
+      "guessedZeros": false,
+      "silentOmission": false,
+      "note": "unavailable metrics are labelled with a reason; never guessed as zeros and never silently omitted"
+    },
+    "incrementalVsFresh": "where the adapter changes caching, mapping, snapshots, result handles or incremental publication, incremental and fresh execution are compared on the same basis; JBT1H owns the harness binding and JBT10 owns the comparative qualification (JBT0-AC-BASIS)",
+    "requiredWork": "a performance result obtained by doing less required work is void and triggers the claiming node's abort/replan condition",
+    "claimScope": "claims are scoped to the measured matrix rows and corpus; no general performance claim follows from a compiler microbenchmark"
+  },
+  "thinLspPlugin": {
+    "status": "starting-point-only",
+    "certifiesAnything": false,
+    "note": "a thin LSP plugin reaching the IDE through verter-lsp satisfies no clause of this predicate by itself (JBT0.4)"
+  },
+  "evaluationRequiresCapturedPins": true,
+  "terminalOwner": "JBT11 evaluates the conjunction; installation, protocol smoke, or screenshot evidence certifies nothing (DX0 section 9 lineage)",
+  "evidence": [
+    "roadmap/0.1.0-tama/contracts/product-experience.md",
+    "tests/product-experience/DX0/products/product-receipt-basis.v1.json"
+  ]
+}

@@ -20,10 +20,13 @@
 //! host-constructed and injected; the scheduler owns no pool
 //! construction:
 //!
-//! - [`SchedulerCpuPool`](pool::SchedulerCpuPool) — executes
-//!   `TaskKind::{Parse, Analysis, Artifact}` stage CPU work. Its workers
-//!   register as [`CallerKind::CpuWorker`](caller_kind::CallerKind) so
-//!   the cooperative pump may inline-execute ready dependencies on the
+//! - [`CpuPool`](pool::CpuPool) / [`SchedulerCpuPool`](pool::SchedulerCpuPool)
+//!   — executes `TaskKind::{Parse, Analysis, Artifact}` stage CPU work
+//!   via owner-affine [`OwnerCommand<Cpu>`](owner_command::OwnerCommand).
+//!   Fire-and-forget submit is bounded (CPU transport dominates the DAG
+//!   CPU budget). Its workers register as
+//!   [`CallerKind::CpuWorker`](caller_kind::CallerKind) so the
+//!   cooperative pump may inline-execute ready dependencies on the
 //!   same thread.
 //! - [`SchedulerIoPool`](pool::SchedulerIoPool) — executes
 //!   `TaskKind::Load` (source-content load) work. Workers register as
@@ -119,6 +122,8 @@ pub mod job;
 pub mod node;
 pub mod overlay;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod owner_command;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod pool;
 pub mod request_context;
 pub mod scheduler;
@@ -136,10 +141,13 @@ pub use host_cpu_pool::HostCpuPool;
 /// Host-constructed scheduler worker pools (native-only). The host
 /// builds these and injects them into every `Scheduler` constructor.
 #[cfg(not(target_arch = "wasm32"))]
+pub use owner_command::{Cpu, Io, OwnerCommand, Provider};
+#[cfg(not(target_arch = "wasm32"))]
 pub use pool::{
-    SchedulerCpuPool, SchedulerIoPool, SchedulerPoolSubmitError, SchedulerPoolSubmitResult,
-    SchedulerPoolTask,
+    CpuPool, SchedulerCpuPool, SchedulerIoPool, SchedulerPoolSubmitError,
+    SchedulerPoolSubmitResult, SchedulerPoolTask,
 };
+pub use scheduler::Admission;
 
 /// Re-export of the test-only `host_cpu_pool_token` reader. Gated behind
 /// the `test-support` feature so production binaries cannot reach the

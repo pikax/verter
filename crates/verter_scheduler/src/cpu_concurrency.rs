@@ -1,13 +1,13 @@
-//! Per-call CPU-concurrency limiter.
+//! CPU-pool transport bound.
 //!
 //! [`CpuConcurrencySemaphore`] is a hand-rolled counting semaphore built
 //! from a `parking_lot::Mutex<usize>` (the count of free permits) plus a
-//! `parking_lot::Condvar`. It LAYERS on top of the scheduler pool size +
-//! DAG capacity: a submission holds a semaphore handle on each of its CPU
-//! work nodes, and a worker acquires a *fresh* [`CpuConcurrencyPermit`]
-//! per CPU task immediately before executing it. The permit releases on
-//! `Drop` (RAII), so the slot is returned even if the task panics during
-//! execution.
+//! `parking_lot::Condvar`. It is the scheduler CPU pool's bounded
+//! transport — the analogue of the I/O pool's bounded channel — sized to
+//! dominate the DAG CPU admission budget so the DAG remains the sole
+//! admission gate. [`SchedulerCpuPool::try_submit`](crate::pool::SchedulerCpuPool::try_submit)
+//! takes an owned permit at enqueue; the permit releases on `Drop`
+//! (RAII) when the spawned task finishes, including panic unwind.
 //!
 //! # Why hand-rolled, not `parking_lot::Semaphore`
 //!
@@ -24,6 +24,8 @@
 //!   acquire).
 //! - There is a single source of truth for available permits — the
 //!   `Mutex<usize>` count — so the limiter never disagrees with itself.
+
+use std::sync::Arc;
 
 use parking_lot::{Condvar, Mutex};
 
@@ -128,8 +130,27 @@ impl CpuConcurrencySemaphore {
         CpuConcurrencyPermit { semaphore: self }
     }
 
+    /// Nonblocking acquire of an owned permit that can move into a
+    /// `'static` pool task. Returns `None` when no slot is free — the
+    /// CPU pool maps that onto [`crate::pool::SchedulerPoolSubmitError::Full`]
+    /// instead of enqueueing unbounded rayon work.
+    #[must_use = "the returned OwnedCpuConcurrencyPermit holds a slot until it is dropped"]
+    pub fn try_acquire_owned(self: &Arc<Self>) -> Option<OwnedCpuConcurrencyPermit> {
+        let mut available = self.available.lock();
+        #[cfg(test)]
+        self.attempt_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if *available == 0 {
+            return None;
+        }
+        *available -= 1;
+        Some(OwnedCpuConcurrencyPermit {
+            semaphore: Arc::clone(self),
+        })
+    }
+
     /// Returns one permit to the pool and wakes one waiter. Called only
-    /// by [`CpuConcurrencyPermit::drop`].
+    /// by permit `Drop` impls.
     fn release(&self) {
         let mut available = self.available.lock();
         *available += 1;
@@ -156,6 +177,21 @@ impl Drop for CpuConcurrencyPermit<'_> {
     }
 }
 
+/// An owned RAII permit that can move into a `'static` CPU-pool task.
+///
+/// Same slot accounting as [`CpuConcurrencyPermit`], but the semaphore
+/// is held by `Arc` so the permit does not borrow the pool.
+#[must_use = "dropping the permit immediately releases the slot, defeating the limit"]
+pub struct OwnedCpuConcurrencyPermit {
+    semaphore: Arc<CpuConcurrencySemaphore>,
+}
+
+impl Drop for OwnedCpuConcurrencyPermit {
+    fn drop(&mut self) {
+        self.semaphore.release();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +208,23 @@ mod tests {
             assert_eq!(*sem.available.lock(), 0, "permit taken");
         }
         assert_eq!(*sem.available.lock(), 1, "permit returned on drop");
+    }
+
+    #[test]
+    fn try_acquire_owned_none_when_empty_some_after_release() {
+        let sem = Arc::new(CpuConcurrencySemaphore::new(1));
+        let held = sem
+            .try_acquire_owned()
+            .expect("first owned acquire must succeed");
+        assert!(
+            sem.try_acquire_owned().is_none(),
+            "G3-AC1: a saturated CPU transport must refuse rather than enqueue unbounded"
+        );
+        drop(held);
+        assert!(
+            sem.try_acquire_owned().is_some(),
+            "releasing the owned permit must free the slot"
+        );
     }
 
     #[test]

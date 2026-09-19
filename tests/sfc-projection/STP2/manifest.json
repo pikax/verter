@@ -1,0 +1,113 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP2",
+  "kind": "proof",
+  "products": ["ConstructorCompatibilityEvidence", "InstanceTypeCompatibilityTable"],
+  "mandatoryCases": [
+    "STP2-instance-concrete",
+    "STP2-instance-generic",
+    "STP2-instance-explicit",
+    "STP2-constructor-escape",
+    "STP2-vue-utilities",
+    "STP2-not-callable",
+    "STP2-constructor-inferred",
+    "STP2-explicit-input-mismatch"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP2/probes/accept-instance-concrete.ts",
+    "negative": "tests/sfc-projection/STP2/probes/reject-not-callable.ts",
+    "cleanTwin": "tests/sfc-projection/STP2/probes/accept-instance-concrete.ts",
+    "tsconfig": "tests/sfc-projection/STP2/probes/tsconfig.json",
+    "hoverNeedle": "stp2HoverTarget",
+    "definitionNeedle": "stp2DefinitionTarget",
+    "expectedNegativeCode": 2348,
+    "expectedHoverType": "() => void",
+    "expectedInstanceType": "Comp"
+  },
+  "cases": [
+    {
+      "id": "STP2-instance-concrete",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP2/probes/accept-instance-concrete.ts",
+      "expectedInstanceType": "Comp",
+      "hoverNeedle": "stp2HoverTarget",
+      "expectedHoverType": "() => void",
+      "files": [
+        "tests/sfc-projection/STP2/probes/reject-wrong-emit-payload.ts",
+        "tests/sfc-projection/STP2/probes/reject-leaked-setup.ts"
+      ],
+      "fileExpectedCodes": {
+        "tests/sfc-projection/STP2/probes/reject-wrong-emit-payload.ts": 2554,
+        "tests/sfc-projection/STP2/probes/reject-leaked-setup.ts": 2339
+      },
+      "twins": ["imported .vue InstanceType", "any", "vacuous-never"]
+    },
+    {
+      "id": "STP2-instance-generic",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP2/probes/accept-instance-generic.ts",
+      "expectedInstanceType": "Comp<unknown>",
+      "hoverNeedle": "stp2HoverTarget",
+      "expectedHoverType": "unknown",
+      "files": ["tests/sfc-projection/STP2/probes/reject-constraint.ts"],
+      "expectedCode": 2322,
+      "twins": ["unbound generic", "constraint violation"]
+    },
+    {
+      "id": "STP2-instance-explicit",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP2/probes/accept-instance-explicit.ts",
+      "expectedInstanceType": "Comp<number>",
+      "hoverNeedle": "stp2HoverTarget",
+      "expectedHoverType": "number",
+      "twins": ["Comp<number>", "Foo<number>"]
+    },
+    {
+      "id": "STP2-constructor-escape",
+      "disposition": "reject",
+      "file": "tests/sfc-projection/STP2/probes/reject-constructor-escape-clean.ts",
+      "dirtyTwin": "tests/sfc-projection/STP2/probes/reject-constructor-escape.ts",
+      "expectedCode": 2353,
+      "twins": ["typed constructor", "broad overload"]
+    },
+    {
+      "id": "STP2-vue-utilities",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP2/probes/accept-vue-utilities.tsx",
+      "hoverNeedle": "stp2HoverTarget",
+      "expectedHoverType": "string",
+      "files": ["tests/sfc-projection/STP2/probes/reject-foreign-utility.tsx"],
+      "expectedCode": 2322,
+      "twins": ["createApp", "h", "TSX"]
+    },
+    {
+      "id": "STP2-not-callable",
+      "disposition": "reject",
+      "file": "tests/sfc-projection/STP2/probes/reject-not-callable.ts",
+      "dirtyTwin": "tests/sfc-projection/STP2/probes/reject-callable-sfc.ts",
+      "expectedCode": 2348,
+      "dirtyExpectedCode": 2344,
+      "twins": ["constructor default export", "callable SFC"]
+    },
+    {
+      "id": "STP2-constructor-inferred",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP2/probes/accept-constructor-inferred.ts",
+      "hoverNeedle": "stp2HoverTarget",
+      "expectedHoverType": "number",
+      "twins": ["new Comp({ test: 0 })", "Foo control", "independent sibling"]
+    },
+    {
+      "id": "STP2-explicit-input-mismatch",
+      "disposition": "reject",
+      "file": "tests/sfc-projection/STP2/probes/reject-explicit-input-mismatch.ts",
+      "expectedCode": 2322,
+      "twins": ["Comp<number>", "NumberComp alias"]
+    }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP2 --engine all --require-all --json",
+  "test": "node --test scripts/sfc-projection/verify-node.test.mjs",
+  "runtimeCorrectness": true,
+  "notes": "Proof of constructor-shaped Vue default-export feasibility using actual Vue types. Does not implement STP16 production emit. Expected failures are harness data."
+}

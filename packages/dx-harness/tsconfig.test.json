@@ -4,7 +4,7 @@
   // `strict` bar. The runtime `tsc -b` excludes `test`; this `--noEmit` pass is the
   // additive gate that catches latent test-type drift the dist build never sees.
   "extends": "./tsconfig.json",
-  "include": ["./src", "./test"],
+  "include": ["./src", "./test", "./jetbrains"],
   "exclude": ["dist", "node_modules"],
   "compilerOptions": {
     // Typecheck only — never emit and never write incremental state. `rootDir: ".."`

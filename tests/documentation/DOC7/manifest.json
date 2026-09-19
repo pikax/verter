@@ -1,0 +1,62 @@
+{
+  "node": "DOC7",
+  "kind": "implementation",
+  "products": [
+    "docs/scripts/reference-harness.mjs sdkGuides validation and sdkGate option (sole owning interface extended)",
+    "examples/reference/sdk guide structure home (six charter topics plus index)",
+    "examples/reference/manifest.json sdkGuides section (slot model with pending/supplied statuses)",
+    "sdk-docs-model.v1 machine product"
+  ],
+  "cases": [
+    {
+      "id": "DOC7-AC1",
+      "disposition": "reject",
+      "twins": [
+        "clean tree passes and reports the sdk guide model truthfully",
+        "the six charter topics are declared pending with a named producing node",
+        "the required topic set is enforced in both directions"
+      ]
+    },
+    {
+      "id": "DOC7-AC2",
+      "disposition": "reject",
+      "twins": [
+        "a supplied slot bound to a static sample manifest without an executable extension fails",
+        "a supplied slot whose example declares no runnable entry fails",
+        "the sdk documentation gate rejects pending topics",
+        "the sdk documentation gate passes once every topic is supplied executably"
+      ]
+    },
+    {
+      "id": "DOC7-AC3",
+      "disposition": "reject",
+      "twins": [
+        "perturbed discovery order yields an identical canonical receipt",
+        "sdk pages participate in the source digest for incremental equality",
+        "edit fails and revert restores a complete receipt",
+        "a missing topic page is a partial result",
+        "a supplied slot bound to an unknown example fails",
+        "a pending slot without a producing node fails",
+        "a pending slot that presents an example fails",
+        "a broken link inside a topic page fails",
+        "a topic page the index does not list fails"
+      ]
+    },
+    {
+      "id": "DOC7-AC4",
+      "disposition": "accept",
+      "twins": [
+        "the sdk guide home and product record the delivery contract"
+      ]
+    },
+    {
+      "id": "DOC7-AC5",
+      "disposition": "accept",
+      "twins": [
+        "the sdk guide home and product record the delivery contract"
+      ]
+    }
+  ],
+  "runtimeCorrectness": false,
+  "notes": "Implementation node: SDK and official-extension guide structure plus the SDK documentation gate model, delivered through the DOC1 harness. Static-proof only; all six topic slots are pending until XSDK9 lands executable examples. Official-extension truth stays in docs/editor pages, which topic pages link. No second capability matrix; no screenshots or roadmap claims."
+}

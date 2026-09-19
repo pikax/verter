@@ -1,0 +1,66 @@
+{
+  "schema": "interactive-slo-catalog.v1",
+  "ratifiedBy": "WSP0",
+  "status": "ratified",
+  "tiers": ["1k", "10k", "50k"],
+  "denominators": {
+    "equivalentWork": ["same workload tier", "same project membership", "same enabled features", "same diagnostic publication", "same machine manifest"],
+    "correctness": "an SLO is met only when the operation's semantic answer stays complete: all RequiredCurrent features enabled, full diagnostics, full membership, no truncation"
+  },
+  "provenanceRules": {
+    "allowedAtRatification": "pinned-candidate-target",
+    "promotion": "a numeric budget becomes a measured SLO only through a WSP1 run against a recorded reference machine",
+    "fabrication": "a budget claiming measured provenance with no recorded machine manifest is invalid"
+  },
+  "rows": [
+    {
+      "operation": "editor.typing_input_to_paint",
+      "surfaceFamily": "editor",
+      "clientBudget": { "1k": { "p50": 16, "p99": 50 }, "10k": { "p50": 16, "p99": 50 }, "50k": { "p50": 33, "p99": 100 } },
+      "serverBudget": { "1k": { "p50": 32, "p99": 100 }, "10k": { "p50": 64, "p99": 200 }, "50k": { "p50": 128, "p99": 400 } },
+      "rationale": "keystroke-to-paint stays inside one to two frames at every tier; the server budget is diagnostic evidence only"
+    },
+    {
+      "operation": "editor.hover_present",
+      "surfaceFamily": "editor",
+      "clientBudget": { "1k": { "p50": 50, "p99": 150 }, "10k": { "p50": 100, "p99": 300 }, "50k": { "p50": 200, "p99": 600 } },
+      "serverBudget": { "1k": { "p50": 40, "p99": 120 }, "10k": { "p50": 80, "p99": 250 }, "50k": { "p50": 160, "p99": 500 } },
+      "rationale": "hover is a read; presentation must not wait for unrelated publication work"
+    },
+    {
+      "operation": "editor.completion_present",
+      "surfaceFamily": "editor",
+      "clientBudget": { "1k": { "p50": 100, "p99": 300 }, "10k": { "p50": 150, "p99": 500 }, "50k": { "p50": 300, "p99": 1000 } },
+      "serverBudget": { "1k": { "p50": 80, "p99": 250 }, "10k": { "p50": 120, "p99": 400 }, "50k": { "p50": 250, "p99": 800 } },
+      "rationale": "interactive authoring aid; partial lists are a completeness state, never a silent subset"
+    },
+    {
+      "operation": "editor.diagnostic_paint_after_edit",
+      "surfaceFamily": "editor",
+      "clientBudget": { "1k": { "p50": 100, "p99": 500 }, "10k": { "p50": 200, "p99": 1000 }, "50k": { "p50": 500, "p99": 2000 } },
+      "serverBudget": { "1k": { "p50": 80, "p99": 400 }, "10k": { "p50": 160, "p99": 800 }, "50k": { "p50": 400, "p99": 1600 } },
+      "rationale": "diagnostics arrive complete per edit; dropping or truncating them to meet timing is forbidden"
+    },
+    {
+      "operation": "editor.save_to_lint_report",
+      "surfaceFamily": "editor",
+      "clientBudget": { "1k": { "p50": 500, "p99": 2000 }, "10k": { "p50": 1000, "p99": 5000 }, "50k": { "p50": 3000, "p99": 15000 } },
+      "serverBudget": { "1k": { "p50": 400, "p99": 1600 }, "10k": { "p50": 800, "p99": 4000 }, "50k": { "p50": 2500, "p99": 12000 } },
+      "rationale": "explicit save is a coarser interaction than typing but still interactive-tier, not batch"
+    },
+    {
+      "operation": "editor.rename_apply",
+      "surfaceFamily": "editor",
+      "clientBudget": { "1k": { "p50": 200, "p99": 1000 }, "10k": { "p50": 500, "p99": 2500 }, "50k": { "p50": 1500, "p99": 8000 } },
+      "serverBudget": { "1k": { "p50": 160, "p99": 800 }, "10k": { "p50": 400, "p99": 2000 }, "50k": { "p50": 1200, "p99": 6400 } },
+      "rationale": "rename is an authored cross-file edit transaction; atomicity is not traded for timing"
+    }
+  ],
+  "acceptance": {
+    "ac1": "every row carries a client-domain budget; a server-only measurement can never certify the row",
+    "ac2": "no row is met by reduced features, hidden truncation or reduced membership; denominators are part of the SLO",
+    "acBasis": "downstream runtime-test owner is WSP1 (registered in-train successor); PER0, WPF0 and JBT1 bind through their own charters",
+    "acResource": "equal-work corpus and limits live in the shared contract; unavailable metrics are labelled, never guessed",
+    "acExposure": "introduced operations: none; every row measures an existing product-surface operation family"
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "schema": "issue93-evidence-plan.v1",
+  "ratifiedBy": "WSP0",
+  "status": "ratified",
+  "originalIssue": {
+    "id": 93,
+    "opened": "2026-07-25",
+    "reportedFacts": ["large codebase", "suspected excess LSP information"],
+    "disposition": "unverified",
+    "rootCauseStatus": "not-proved",
+    "rule": "stays labelled unverified, never fixed, until reproduced under the ratified workload matrix"
+  },
+  "versionCapture": [
+    { "item": "lapce-client", "version": null, "status": "to-record-before-reproduction" },
+    { "item": "verter-lsp-server", "version": null, "status": "to-record-before-reproduction" },
+    { "item": "verter-plugin-adapter", "version": null, "status": "to-record-before-reproduction" },
+    { "item": "provider-engines-and-modes", "version": null, "status": "to-record-before-reproduction" },
+    { "item": "enabled-features", "version": null, "status": "to-record-before-reproduction" },
+    { "item": "os-and-machine-manifest", "version": null, "status": "to-record-before-reproduction" }
+  ],
+  "timelines": [
+    {
+      "domain": "client",
+      "clock": "client-process monotonic timestamps",
+      "spans": ["input event", "payload received", "decoded", "applied", "painted"]
+    },
+    {
+      "domain": "server",
+      "clock": "server-process monotonic timestamps with internal phase spans",
+      "spans": ["request received", "phase boundaries", "response sent"]
+    },
+    {
+      "domain": "provider",
+      "clock": "provider-process monotonic timestamps per engine",
+      "spans": ["work dispatched", "work completed", "cost attributed"]
+    }
+  ],
+  "timelineLaw": {
+    "correlation": "spans correlate only through shared trace identity",
+    "serverAloneCannotCertify": true,
+    "crossDomainComparison": "raw timestamps from different clock domains are never differenced directly"
+  },
+  "phases": [
+    { "id": "capture", "owner": "WSP0", "state": "complete", "output": "this evidence plan and the version-capture checklist" },
+    { "id": "reproduce", "owner": "WSP1", "state": "pending", "output": "reproduction under the ratified workload matrix on a recorded reference machine, or a recorded failure to reproduce" },
+    { "id": "isolate", "owner": "WSP1+PER0", "state": "pending", "output": "attribution of the reproduced cost to client, server, provider, scheduler or publication" },
+    { "id": "repair", "owner": "implementing-nodes", "state": "pending", "output": "owned fixes with equal-work before/after evidence on the same basis" },
+    { "id": "verify", "owner": "WSP1", "state": "pending", "output": "SLO re-measurement on the recorded machine; JBT1 owns the JetBrains harness; client-terminal claims require the actual clients" }
+  ],
+  "rawFailureRetention": "all raw failed measurements are retained; anecdotal responsiveness claims are replaced by the constitution, not joined by it"
+}

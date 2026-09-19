@@ -30,7 +30,7 @@ jobs:
       svelte_client_smokes: ${{ steps.filter.outputs.svelte_client_smokes }}
       svelte_perf: ${{ steps.filter.outputs.svelte_perf }}
       editors: ${{ steps.filter.outputs.editors }}
-      tama: ${{ steps.filter.outputs.tama }}
+      jetbrains: ${{ steps.filter.outputs.jetbrains }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v4
@@ -98,6 +98,8 @@ jobs:
               - 'scripts/compiler-ci-lane-selftest.mjs'
               - 'scripts/provider-ci*.mjs'
               - 'scripts/svelte-golden-lib.mjs'
+              - 'scripts/browser-host-gate.mjs'
+              - 'scripts/browser-host-gate.test.mjs'
               - 'crates/verter_compiler/tests/svelte_oracle_corpus/**'
               # test:scripts validates the required BF2 dependencies in the
               # release graph; release-only changes must execute that guard.
@@ -127,6 +129,10 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - 'packages/wasm/**'
+              - 'packages/browser-host/**'
+              - 'scripts/browser-host-gate.mjs'
+              - 'scripts/browser-host-gate.test.mjs'
+              - 'tests/browser-host/**'
               - '.cargo/**'
               - '.github/workflows/ci.yml'
             playground:
@@ -262,6 +268,15 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
+            # JetBrains plugin lane (JBT1+): the pinned Gradle build resolves
+            # its own WebStorm SDK; only the plugin tree, its gate and the
+            # supported-IDE declaration feed it.
+            jetbrains:
+              - 'extensions/jetbrains/**'
+              - 'scripts/jetbrains-gate.mjs'
+              - 'scripts/jetbrains-gate.test.mjs'
+              - 'tests/jetbrains-product/**'
+              - '.github/workflows/ci.yml'
             svelte_perf:
               - 'crates/verter_compiler/**'
               - 'crates/verter_parser/**'
@@ -276,151 +291,6 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
-            tama:
-              - 'roadmap/0.1.0-tama/**'
-              - '.claude/skills/multi-agent-orchestration/**'
-              - 'CLAUDE.md'
-              - '.github/workflows/ci.yml'
-              # The paths below are inputs to the closure-register VALIDATOR,
-              # not only to the Rust lane that re-runs those records' tests.
-              # `--check` reads these bytes directly: a negative control's
-              # replaced text must occur exactly once in its subject, a
-              # directory-counted record's selection is re-derived by reading
-              # its fixture directory, and every cited fixture, evidence anchor,
-              # and package manifest must resolve. An ordinary Rust-only change
-              # can therefore turn `--check` red, so this lane has to be
-              # eligible on it — otherwise the break merges green here and
-              # surfaces later on an unrelated roadmap pull request, attributed
-              # to an author who touched none of it. The validator refuses an
-              # artifact it opens that no pattern here covers, so this list can
-              # never be too narrow; it is kept at file granularity anyway, so
-              # that it is not needlessly too broad either. Two crate trees are
-              # listed whole because the instrument cites the crate ROOT — one
-              # as a fixture directory whose contents are counted, the other as
-              # an evidence anchor for a record covering the crate's whole test
-              # surface — and a root is only covered by its own subtree pattern.
-              - 'crates/verter_identity/**'
-              - 'crates/verter_session/**'
-              # The mapping-product geometry the instrument cites at file
-              # granularity: one record's evidence anchor and negative-control
-              # subject, plus the case file that record executes.
-              - 'crates/verter_compiler/Cargo.toml'
-              - 'crates/verter_compiler/src/code_transform/mapping_product.rs'
-              - 'crates/verter_compiler/src/code_transform/mapping_product_tests.rs'
-              - 'crates/verter_compile_contracts/Cargo.toml'
-              - 'crates/verter_type_runtime/Cargo.toml'
-              - 'crates/verter_type_runtime/tests/main.rs'
-              - 'crates/verter_protocol/Cargo.toml'
-              - 'crates/verter_protocol/tests/cases/typeinfo_proto_roundtrip.rs'
-              # The lane that re-runs those crates' tests spells its own selection
-              # `-E "$VERTER_NEXTEST_FILTER"` and computes that value from these
-              # scripts, so the narrowing this instrument publishes resolves
-              # through them. A change to any of them changes what that lane
-              # selects, which is exactly the kind of change this view has to be
-              # re-derived on — a change to the core filter can turn this job red
-              # until the affected record is re-derived, which is the intended
-              # cost of publishing a narrowing nobody re-checks. The entry file
-              # alone is not enough: the excluded package set and the name-scoped
-              # selectors this instrument decomposes are declared in the modules
-              # it imports, so the whole first-party import graph is listed here
-              # exactly as the validator cites it.
-              - 'scripts/provider-ci*.mjs'
-              - 'scripts/gate-internals.mjs'
-              # Same reason for the compile-contract lane: the owner set it
-              # iterates is declared in this script, the instrument resolves a
-              # record's own owner against that list, and dropping an entry
-              # changes which records that lane still refreshes.
-              - 'scripts/compile-contracts.mjs'
-              # The probe-state manifests and promotion join records whose
-              # citations the validation-probe authority validator checks.
-              - 'crates/verter_validation_probe/manifest/**'
-              - 'crates/verter_validation_probe/join/**'
-              # Inputs to the semantic-memory-budget validator, for the same
-              # reason as the closure-register inputs above: it opens these
-              # bytes directly. The locked gate file supplies the ratified
-              # baseline it re-cites, including the recorded measurements and
-              # the cell's own metric limits; the benchmark harness IS the
-              # measured corpus and is re-hashed to decide whether that
-              # recorded measurement is still equivalent work on this tree;
-              # the audit site schema is the closed vocabulary its metric
-              # rows must come from; and the production field lists of
-              # `VerterHost` and of every struct its `delegated` fields reach
-              # (`ProjectTypeStore`, `SemanticGraphStore`,
-              # `UnifiedResolverRuntime`, `FallthroughResolverState`,
-              # `FrameworkRegistration`, `FrameworkScriptCaches` and the rest)
-              # are the INDEPENDENT retained-storage inventory the allocation
-              # classes are checked for completeness against, so adding a
-              # host-lifetime field to any of them turns this job red until
-              # the contract accounts for it. The session, semantic,
-              # workspace, scheduler and language source trees are taken
-              # whole because the allocation-owner and emitter anchors are
-              # spread across them, and the audit tree is taken whole rather
-              # than just its attribution subtree because the live memory
-              # observations resolve `memory.rs` as well; renaming one of
-              # those owners turns this job red on purpose — the contract has
-              # to be repinned, not left describing a symbol that no longer
-              # exists. That validator refuses any repository path it reads,
-              # and any first-party module it or its lane scripts import, that
-              # no pattern here covers, so this block cannot silently fall
-              # behind what the contract cites or runs.
-              - 'performance-gates.toml'
-              # Product-surface catalog: advertised docs and package
-              # entrypoints the L0 validator re-resolves, so a new advertised
-              # surface without a catalog row turns this job red.
-              - 'docs/index.md'
-              - 'docs/api-stability.md'
-              - 'docs/guide/getting-started.md'
-              - 'docs/guide/linting.md'
-              - 'docs/guide/performance.md'
-              - 'packages/unplugin/package.json'
-              - 'packages/component-meta/package.json'
-              - 'packages/verter-tsc/package.json'
-              - 'packages/verter-lsp/package.json'
-              - 'packages/vue-vscode/package.json'
-              - 'packages/typeinfo/package.json'
-              - 'packages/nuxt/package.json'
-              - 'packages/verter-mcp/package.json'
-              - 'packages/native/package.json'
-              - 'crates/verter_audit/src/**'
-              - 'crates/verter_bench/examples/attribution_baseline.rs'
-              - 'crates/verter_session/src/**'
-              - 'crates/verter_semantic/src/**'
-              - 'crates/verter_workspace/src/**'
-              - 'crates/verter_scheduler/src/**'
-              - 'crates/verter_language/src/**'
-              - 'crates/verter_compiler/src/code_transform/code_transform.rs'
-              - 'crates/verter_compiler/src/code_transform/source_map.rs'
-              - 'crates/verter_napi/src/**'
-              - 'crates/verter_wasm/src/**'
-              - 'crates/verter_lsp/src/**'
-
-  tama-roadmap:
-    name: Tama Roadmap
-    needs: detect-changes
-    if: needs.detect-changes.outputs.tama == 'true'
-    runs-on: ubuntu-latest
-    # Focused validator tests run here; repository mutation replay is manual.
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v5
-      - name: Validate DAG-managed files
-        run: |
-          node roadmap/0.1.0-tama/tools/validate-program-dag.mjs --strict
-          node --test roadmap/0.1.0-tama/tools/implementation-ledger.test.mjs
-          node --test roadmap/0.1.0-tama/tools/ledger.test.mjs
-          node roadmap/0.1.0-tama/tools/closure-register.mjs --check
-          node --test roadmap/0.1.0-tama/tools/closure-register.test.mjs
-          node --test roadmap/0.1.0-tama/tools/closure-replay.test.mjs
-          node roadmap/0.1.0-tama/tools/validate-probe-authorities.mjs --manifest crates/verter_validation_probe/manifest --join crates/verter_validation_probe/join
-          node --test roadmap/0.1.0-tama/tools/validate-probe-authorities.test.mjs
-          node roadmap/0.1.0-tama/tools/validate-semantic-memory-budget.mjs
-          node --test roadmap/0.1.0-tama/tools/semantic-memory-budget.test.mjs
-          node roadmap/0.1.0-tama/tools/validate-product-surface-catalog.mjs
-          node --test roadmap/0.1.0-tama/tools/product-surface-catalog.test.mjs
-      - name: CI aggregate completeness
-        run: |
-          node scripts/check-ci-aggregate.mjs
-          node --test scripts/check-ci-aggregate.test.mjs
 
   # ---------------------------------------------------------------------------
   # `dtolnay/rust-toolchain@1.97.1` (not `@stable`) in every job below, and in
@@ -605,6 +475,10 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
+          # This job never pnpm-installs. setup-node@v5 otherwise auto-caches
+          # from package.json#packageManager and the post-step save fails with
+          # "Path(s) specified in the action for caching do(es) not exist".
+          package-manager-cache: false
       - name: Anti-binary-growth integration-test layout
         run: node scripts/check-integration-test-layout.mjs
       - name: Install cargo-nextest
@@ -911,6 +785,12 @@ jobs:
         # so `pnpm -r run test` never reaches these specs — same convention as
         # the carrier-routing guards step above.
         run: pnpm run test:scripts
+      - name: CI aggregate completeness
+        # Every job in this workflow must be listed in the `CI Required`
+        # aggregate; the checker fails this lane when one is missing.
+        run: |
+          node scripts/check-ci-aggregate.mjs
+          node --test scripts/check-ci-aggregate.test.mjs
       - name: Binary distribution guards (platform packages + release wiring)
         # Each binary family's platform matrix reconciled against its platform
         # packages, the release build matrix, and the derived publish set. Run
@@ -1244,6 +1124,42 @@ jobs:
         run: pnpm run build:ts
       - name: Test @verter/wasm
         run: pnpm --filter @verter/wasm test
+
+  # ---------------------------------------------------------------------------
+  # Browser-host-domain gate (BWH1). Builds nothing itself: wasm-build already
+  # produced the session artifact. This lane re-runs the wasm32 census, the
+  # native same-fixture probe, and Chromium/Firefox/WebKit workers over that
+  # artifact. Missing browsers, exports, tests or empty operation arrays fail.
+  # ---------------------------------------------------------------------------
+  browser-host:
+    name: Browser host (feasibility gate)
+    needs: [detect-changes, wasm-build]
+    if: needs.detect-changes.outputs.wasm == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: browser-host
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: wasm-build
+          path: packages/wasm
+      - name: Install Playwright browsers (Chromium, Firefox, WebKit)
+        run: pnpm --filter @verter/playground exec playwright install chromium firefox webkit --with-deps
+      - name: Run the browser-host-domain gate
+        run: node scripts/browser-host-gate.mjs --skip-build
 
   # ---------------------------------------------------------------------------
   # The ONE debug build of the Rust binaries every editor/DX integration job
@@ -2072,6 +1988,40 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # JetBrains plugin lane (JBT1): the pinned extensions/jetbrains Gradle
+  # build. The jetbrains-product gate profile starts here — it runs the real
+  # JVM tests against the pinned WebStorm SDK, the plugin verifier (failure on
+  # every level, pinned build only) and installable packaging, and fails
+  # closed on a missing JDK/SDK, missing build output or missing test
+  # evidence. No Rust toolchain and no pnpm install are needed: the gate is a
+  # plain Node script driving the pinned Gradle wrapper.
+  # ---------------------------------------------------------------------------
+  jetbrains-plugin:
+    name: JetBrains plugin (pinned WebStorm SDK)
+    needs: [detect-changes]
+    if: needs.detect-changes.outputs.jetbrains == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      # This lane never installs the JS workspace. setup-node@v5 otherwise
+      # auto-caches from package.json#packageManager and fails looking up
+      # `pnpm` (the rust-test-build job documents the same gotcha).
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Run the jetbrains-product gate (JVM tests, verifier, packaging)
+        run: node scripts/jetbrains-gate.mjs
+
+  # ---------------------------------------------------------------------------
   # Aggregate gate. The ruleset must require the check named "CI Required"
   # (this job's `name:`) and nothing else. `scripts/check-ci-aggregate.mjs`
   # statically enforces that every job in this workflow is listed in its
@@ -2091,7 +2041,6 @@ jobs:
     timeout-minutes: 5
     needs:
       - detect-changes
-      - tama-roadmap
       - rust-fmt
       - proto-fmt
       - rust-clippy
@@ -2122,6 +2071,8 @@ jobs:
       - editor-lapce
       - editor-zed
       - editor-neovim
+      - jetbrains-plugin
+      - browser-host
     steps:
       - name: Verify no dependency failed
         env:

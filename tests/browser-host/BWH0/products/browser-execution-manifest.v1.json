@@ -1,0 +1,361 @@
+{
+  "id": "browser-execution-manifest.v1",
+  "schema": 1,
+  "vocabulary": {
+    "operationId": "DX0 feature-exposure-contract.v1.json operation ids only; BWH0 mints no parallel operation namespace, and hostExecutionClass, answerRail and browserAdmitted must equal the joined DX0 row, and an admitted row must disclose a joined DX0 playground.unlabelledAnalysisMerge pin with its promotionBlocked state (verify.mjs enforces id, class, rail, browserExecutable and merge-pin equality)",
+    "hostExecutionClass": ["Portable", "NativeOnly", "ExternalOwner"],
+    "vocabularySource": "DX0 host-execution-class.v1.json; synonymous lowercase restatements describe but never define classes",
+    "completenessState": "ProductReceiptBasis.completenessState (complete, complete-empty, partial, pending, unsupported, ambiguous, failed, cancelled, stale)"
+  },
+  "portabilityProof": {
+    "wasmBuildProves": "the compiler/session surface only: compileRequest, getAnalysis, getDocumentStructure, getPublicApi, computeCrossFileOptimizations, virtual workspace, typeinfo, audit, per-file lint",
+    "provesSemanticHost": false,
+    "semanticHostRequires": [
+      "BWH1 recurring semantic-host feasibility and build proof",
+      "BWH2 portable platform-services boundary",
+      "BWH6 browser TypeScript provider over the shared host",
+      "BWH6B projection-backed checking qualification"
+    ],
+    "substrateLaw": "substrate exports are build facts of the Portable product, not admitted operations; an operation becomes browser-admitted only through its DX0 feature-exposure-contract row (no class change happens by moving code)",
+    "substrateExports": [
+      {
+        "export": "compileRequest",
+        "route": "VerterHost.compileRequest (packages/wasm)",
+        "evidence": ["crates/verter_wasm/src/lib.rs", "packages/wasm/src/index.ts"]
+      },
+      {
+        "export": "getAnalysis",
+        "route": "VerterHost.getAnalysis",
+        "evidence": ["crates/verter_wasm/src/lib.rs"]
+      },
+      {
+        "export": "getDocumentStructure",
+        "route": "VerterHost.getDocumentStructure",
+        "evidence": ["crates/verter_wasm/src/lib.rs"]
+      },
+      {
+        "export": "getPublicApi",
+        "route": "VerterHost.getPublicApi",
+        "evidence": ["crates/verter_wasm/src/lib.rs"]
+      },
+      {
+        "export": "computeCrossFileOptimizations",
+        "route": "VerterHost.computeCrossFileOptimizations (only in-repo caller today is packages/unplugin, a native bundler consumer; recorded as substrate, not as a browser operation)",
+        "evidence": ["crates/verter_wasm/src/lib.rs", "packages/unplugin/src/index.ts"]
+      },
+      {
+        "export": "virtual-workspace",
+        "route": "VerterHost.resolve/upsert/remove/listVirtualFiles (in-memory virtual workspace; no ambient-library reads on wasm32)",
+        "evidence": ["crates/verter_wasm/src/lib.rs", "crates/verter_session/src/host_construction.rs"]
+      },
+      {
+        "export": "host-compile-request-wire",
+        "route": "host_compile_request_from_wire / host_compile_request_from_js",
+        "evidence": ["crates/verter_wasm/src/lib.rs"]
+      },
+      {
+        "export": "typeinfo-bindings",
+        "route": "crates/verter_wasm/src/typeinfo.rs wasm_bindgen bindings; a compiler-substrate build fact only — the DX0 typeinfo.graph-operations row stays NativeOnly (browserExecutable false) until a producer-owned Portable port with a receiving-owner amendment",
+        "evidence": ["crates/verter_wasm/src/typeinfo.rs"]
+      },
+      {
+        "export": "audit",
+        "route": "crates/verter_wasm audit exports",
+        "evidence": ["crates/verter_wasm/src/lib.rs"]
+      }
+    ],
+    "evidence": ["crates/verter_wasm/src/lib.rs", "packages/playground/src/editor/inContextLs.ts"]
+  },
+  "operations": [
+    {
+      "id": "playground.compile-carrier",
+      "hostExecutionClass": "Portable",
+      "engine": "none (Verter compiler WASM)",
+      "browserAdmitted": true,
+      "crossOriginIsolationRequired": false,
+      "sharedArrayBufferRequired": false,
+      "answerRail": "none",
+      "route": "playground compile dispatch over the WASM host (packages/playground/src/core/compiler.ts); the WASM exports it rides on are recorded in portabilityProof.substrateExports",
+      "evidence": [
+        "packages/playground/src/core/compiler.ts",
+        "crates/verter_wasm/src/lib.rs"
+      ],
+      "receiptBasis": {
+        "sourceRevisions": "the virtual-workspace file revisions submitted with the compile request (WASM host in-memory workspace; no ambient filesystem reads on wasm32)",
+        "projectConfiguration": "the in-browser playground profile: framework profile and compiler options carried on the request; no tsconfig/filesystem project identity exists in-browser",
+        "engineIdentity": "none (Verter compiler WASM)",
+        "hostIdentity": "browser runtime plus WASM build selector (packages/playground/src/core/wasmLoader.ts; DX0 ProductReceiptBasis wasm-build-selector substrate)",
+        "completenessState": "DX0 ProductReceiptBasis completenessStates; complete-empty is a successful empty answer; partial/pending/unsupported/ambiguous/failed/cancelled/stale are distinct and never published as complete; stale/wrong-handle results are rejected before display (invalidation/lifetime law)"
+      }
+    },
+    {
+      "id": "playground.lint-file",
+      "hostExecutionClass": "Portable",
+      "engine": "none (Verter compiler WASM)",
+      "browserAdmitted": true,
+      "crossOriginIsolationRequired": false,
+      "sharedArrayBufferRequired": false,
+      "answerRail": "inspection",
+      "route": "per-file Verter lint through the WASM host (relintFile); project-wide lint stays the unadmitted mcp.lint-project gap",
+      "evidence": [
+        "packages/playground/src/core/compiler.ts",
+        "crates/verter_wasm/src/lib.rs",
+        "crates/verter_diagnostics/src/rules/mod.rs"
+      ],
+      "receiptBasis": {
+        "sourceRevisions": "the active file revision submitted for lint (WASM host in-memory workspace)",
+        "projectConfiguration": "the in-browser playground profile: lint preset and per-rule disables carried on the request; no filesystem project identity exists in-browser",
+        "engineIdentity": "none (Verter compiler WASM)",
+        "hostIdentity": "browser runtime plus WASM build selector (packages/playground/src/core/wasmLoader.ts)",
+        "completenessState": "DX0 ProductReceiptBasis completenessStates; complete-empty is a successful empty answer; partial/pending/unsupported/ambiguous/failed/cancelled/stale are distinct and never published as complete; stale/wrong-handle results are rejected before display"
+      }
+    },
+    {
+      "id": "playground.hover",
+      "hostExecutionClass": "Portable",
+      "engine": "typescript@6.0.3 (pinned at build time)",
+      "browserAdmitted": true,
+      "crossOriginIsolationRequired": false,
+      "sharedArrayBufferRequired": false,
+      "answerRail": "semantic",
+      "route": "Monaco hover provider over the pinned in-browser TypeScript worker; the engine is externally owned TypeScript executing inside the Portable product (DX0 models the row Portable with semanticAuthority typescript)",
+      "qualificationOwner": "BWH6, BWH6B",
+      "unlabelledAnalysisMerge": {
+        "promotionBlocked": true,
+        "comparisonRailSelection": "absent",
+        "note": "DX0 pins this admitted route as partial with promotion blocked: provideHover concatenates the pinned worker's hover with unlabelled compiler-analysis hover into one default contents array (feature-exposure-contract.v1.json playground.unlabelledAnalysisMerge). Admission is conditioned on that pin — this row never records a single TS-worker authority over the live merge — and promotion follows DX0's labelled-split blockedUntil route; the cutover must not retain two active semantic authorities"
+      },
+      "evidence": [
+        "packages/playground/src/editor/lspProviders.ts",
+        "packages/playground/src/editor/tsWorker.ts",
+        "packages/playground/src/editor/tsService.ts"
+      ],
+      "receiptBasis": {
+        "sourceRevisions": "the active editor file content and virtual-workspace revisions handed to the pinned typescript@6.0.3 worker",
+        "projectConfiguration": "in-browser per-file scope: no tsconfig project; compiler options and framework profile supplied by the playground",
+        "engineIdentity": "typescript@6.0.3 (pinned at build time)",
+        "hostIdentity": "browser runtime; the pinned in-browser worker is the executing host of the semantic engine (packages/playground/src/editor/tsWorker.ts)",
+        "completenessState": "DX0 ProductReceiptBasis completenessStates; complete-empty is a successful empty answer; partial/pending/unsupported/ambiguous/failed/cancelled/stale are distinct and never published as complete; stale/wrong-handle results are rejected before display"
+      }
+    },
+    {
+      "id": "playground.completion",
+      "hostExecutionClass": "Portable",
+      "engine": "typescript@6.0.3 (pinned at build time)",
+      "browserAdmitted": true,
+      "crossOriginIsolationRequired": false,
+      "sharedArrayBufferRequired": false,
+      "answerRail": "semantic",
+      "route": "Monaco completion provider over the pinned in-browser TypeScript worker; the engine is externally owned TypeScript executing inside the Portable product",
+      "qualificationOwner": "BWH6, BWH6B",
+      "unlabelledAnalysisMerge": {
+        "promotionBlocked": true,
+        "comparisonRailSelection": "absent",
+        "note": "DX0 pins this admitted route as partial with promotion blocked: provideCompletionItems concatenates compiler-analysis and template completions with the pinned worker's completions into one default suggestions array (feature-exposure-contract.v1.json playground.unlabelledAnalysisMerge). Admission is conditioned on that pin — this row never records a single TS-worker authority over the live merge — and promotion follows DX0's labelled-split blockedUntil route; the cutover must not retain two active semantic authorities"
+      },
+      "evidence": [
+        "packages/playground/src/editor/lspProviders.ts",
+        "packages/playground/src/editor/tsWorker.ts",
+        "packages/playground/src/editor/tsService.ts"
+      ],
+      "receiptBasis": {
+        "sourceRevisions": "the active editor file content and virtual-workspace revisions handed to the pinned typescript@6.0.3 worker",
+        "projectConfiguration": "in-browser per-file scope: no tsconfig project; compiler options and framework profile supplied by the playground",
+        "engineIdentity": "typescript@6.0.3 (pinned at build time)",
+        "hostIdentity": "browser runtime; the pinned in-browser worker is the executing host of the semantic engine (packages/playground/src/editor/tsWorker.ts)",
+        "completenessState": "DX0 ProductReceiptBasis completenessStates; complete-empty is a successful empty answer; partial/pending/unsupported/ambiguous/failed/cancelled/stale are distinct and never published as complete; stale/wrong-handle results are rejected before display"
+      }
+    },
+    {
+      "id": "playground.diagnostics",
+      "hostExecutionClass": "Portable",
+      "engine": "typescript@6.0.3 (pinned at build time)",
+      "browserAdmitted": true,
+      "crossOriginIsolationRequired": false,
+      "sharedArrayBufferRequired": false,
+      "answerRail": "semantic",
+      "route": "per-file TypeScript diagnostics over the pinned in-browser worker (Diagnostics tab); the engine is externally owned TypeScript executing inside the Portable product",
+      "qualificationOwner": "BWH6, BWH6B",
+      "unlabelledAnalysisMerge": {
+        "promotionBlocked": true,
+        "comparisonRailSelection": "absent",
+        "note": "DX0 pins this admitted route as partial with promotion blocked: the Diagnostics tab and its badge concatenate compiler and lint diagnostics with the pinned worker's TypeScript diagnostics into one default answer (feature-exposure-contract.v1.json playground.unlabelledAnalysisMerge). Admission is conditioned on that pin — this row never records a single TS-worker authority over the live merge — and promotion follows DX0's labelled-split blockedUntil route; the cutover must not retain two active semantic authorities"
+      },
+      "evidence": [
+        "packages/playground/src/editor/tsService.ts",
+        "packages/playground/src/editor/tsWorker.ts",
+        "packages/playground/src/output/DiagnosticsPanel.vue"
+      ],
+      "receiptBasis": {
+        "sourceRevisions": "the active editor file content and virtual-workspace revisions handed to the pinned typescript@6.0.3 worker",
+        "projectConfiguration": "in-browser per-file scope: no tsconfig project; compiler options and framework profile supplied by the playground",
+        "engineIdentity": "typescript@6.0.3 (pinned at build time)",
+        "hostIdentity": "browser runtime; the pinned in-browser worker is the executing host of the semantic engine (packages/playground/src/editor/tsWorker.ts)",
+        "completenessState": "DX0 ProductReceiptBasis completenessStates; complete-empty is a successful empty answer; partial/pending/unsupported/ambiguous/failed/cancelled/stale are distinct and never published as complete; stale/wrong-handle results are rejected before display"
+      }
+    },
+    {
+      "id": "playground.rename",
+      "hostExecutionClass": "Portable",
+      "engine": "typescript@6.0.3 (pinned at build time)",
+      "browserAdmitted": true,
+      "crossOriginIsolationRequired": false,
+      "sharedArrayBufferRequired": false,
+      "answerRail": "none",
+      "route": "Monaco rename provider over the pinned in-browser TypeScript worker; the engine is externally owned TypeScript executing inside the Portable product",
+      "evidence": [
+        "packages/playground/src/editor/lspProviders.ts",
+        "packages/playground/src/editor/tsWorker.ts"
+      ],
+      "receiptBasis": {
+        "sourceRevisions": "the active editor file content and virtual-workspace revisions handed to the pinned typescript@6.0.3 worker",
+        "projectConfiguration": "in-browser per-file scope: no tsconfig project; compiler options and framework profile supplied by the playground",
+        "engineIdentity": "typescript@6.0.3 (pinned at build time)",
+        "hostIdentity": "browser runtime; the pinned in-browser worker is the executing host of the semantic engine (packages/playground/src/editor/tsWorker.ts)",
+        "completenessState": "DX0 ProductReceiptBasis completenessStates; complete-empty is a successful empty answer; partial/pending/unsupported/ambiguous/failed/cancelled/stale are distinct and never published as complete; stale/wrong-handle results are rejected before display"
+      }
+    },
+    {
+      "id": "playground.source-map-view",
+      "hostExecutionClass": "Portable",
+      "engine": "none (Verter compiler WASM)",
+      "browserAdmitted": true,
+      "crossOriginIsolationRequired": false,
+      "sharedArrayBufferRequired": false,
+      "answerRail": "inspection",
+      "route": "playground source-map view over the compiled carrier output (packages/playground/src/core/sourcemap.ts)",
+      "evidence": [
+        "packages/playground/src/core/sourcemap.ts",
+        "packages/playground/src/core/compiler.ts"
+      ],
+      "receiptBasis": {
+        "sourceRevisions": "the compiled carrier output's input basis: the virtual-workspace file revisions of the compile request the source map was generated from",
+        "projectConfiguration": "the in-browser playground profile carried on the compile request (framework profile, compiler options)",
+        "engineIdentity": "none (Verter compiler WASM)",
+        "hostIdentity": "browser runtime plus WASM build selector (packages/playground/src/core/wasmLoader.ts)",
+        "completenessState": "DX0 ProductReceiptBasis completenessStates; complete-empty is a successful empty answer; partial/pending/unsupported/ambiguous/failed/cancelled/stale are distinct and never published as complete; stale/wrong-handle results are rejected before display"
+      }
+    },
+    {
+      "id": "tsc.engine-tsgo",
+      "hostExecutionClass": "ExternalOwner",
+      "engine": "tsgo >=7.0.2, <7.1.0 (native terminal only)",
+      "browserAdmitted": false,
+      "crossOriginIsolationRequired": false,
+      "sharedArrayBufferRequired": false,
+      "answerRail": "semantic",
+      "route": "none in-browser; fail-closed (tsgo: false for every TypeScript major); native terminal or explicitly selected local-native companion (DX4/DX5)",
+      "blockedUntil": "DX1 registration plus a producer-owned browser port with its own evidence (DX0 class-change rule) or the DX4/DX5 companion route; BWH1..BWH6B own the qualification",
+      "evidence": [
+        "packages/playground/src/editor/inContextLs.ts",
+        "packages/playground/src/editor/wasmTsgoFailClosed.spec.ts"
+      ],
+      "receiptBasis": {
+        "sourceRevisions": "no browser result exists; native execution binds its own input basis under the producing owner (crates/verter_tsc)",
+        "projectConfiguration": "no browser project identity; native project checks bind tsconfig and provider mode under the producing owner",
+        "engineIdentity": "tsgo >=7.0.2, <7.1.0 (native terminal only)",
+        "hostIdentity": "native terminal or explicitly selected local-native companion; never a browser runtime",
+        "completenessState": "unsupported in-browser by design: any browser-facing presentation is a labelled gap, and a claimed browser result without a shipped build is rejected (DX0-AC2 lineage)"
+      }
+    },
+    {
+      "id": "inspection.flow-return",
+      "hostExecutionClass": "NativeOnly",
+      "engine": "none (native flow/semantic solving)",
+      "browserAdmitted": false,
+      "crossOriginIsolationRequired": false,
+      "sharedArrayBufferRequired": false,
+      "answerRail": "inspection",
+      "route": "native flow facts stay inspection-rail NativeOnly answers (DX0 rails policy); no browser route",
+      "blockedUntil": "BWH3 WASM semantic session exports with their own evidence",
+      "evidence": [
+        "roadmap/0.1.0-tama/contracts/product-experience.md",
+        "crates/verter_session/src/host_flow_return_audit.rs"
+      ],
+      "receiptBasis": {
+        "sourceRevisions": "no browser result exists; native flow-return audit records bind the input basis (partiality/degradation tags in verter_audit)",
+        "projectConfiguration": "native session project identity under the producing owner",
+        "engineIdentity": "none (native flow/semantic solving)",
+        "hostIdentity": "native process only; never a browser runtime",
+        "completenessState": "native audit payloads carry their own partiality tags; any browser-facing projection is a labelled gap until BWH3, and partial/stale answers are never published as complete"
+      }
+    },
+    {
+      "id": "typeinfo.graph-operations",
+      "hostExecutionClass": "NativeOnly",
+      "engine": "none (native typeinfo substrate; wasm bindings are compiler-substrate build facts only)",
+      "browserAdmitted": false,
+      "crossOriginIsolationRequired": false,
+      "sharedArrayBufferRequired": false,
+      "answerRail": "inspection",
+      "route": "no browser consumer exists: packages/wasm and packages/playground have no typeinfo consumer; the crates/verter_wasm/src/typeinfo.rs bindings are substrate build facts (portabilityProof.substrateExports), not an admission",
+      "blockedUntil": "a producer-owned Portable port with its own DX0 receiving-owner amendment and @verter/wasm or playground consumer evidence (no class change happens by moving code)",
+      "evidence": [
+        "roadmap/0.1.0-tama/contracts/product-experience.md",
+        "crates/verter_wasm/src/typeinfo.rs"
+      ],
+      "receiptBasis": {
+        "sourceRevisions": "no browser result exists; the native substrate binds the session input basis under the producing owner",
+        "projectConfiguration": "native session project identity under the producing owner",
+        "engineIdentity": "none (native typeinfo substrate; wasm bindings are compiler-substrate build facts only)",
+        "hostIdentity": "native process only; never a browser runtime",
+        "completenessState": "unsupported in-browser by design: admitting it Portable without a producer-owned port is a class-change relabel that is rejected, never published as a capability"
+      }
+    },
+    {
+      "id": "mcp.lint-project",
+      "hostExecutionClass": "NativeOnly",
+      "engine": "none (native lint over a real project)",
+      "browserAdmitted": false,
+      "crossOriginIsolationRequired": false,
+      "sharedArrayBufferRequired": false,
+      "answerRail": "inspection",
+      "route": "project-wide lint requires a real workspace; per-file browser lint is the separate admitted playground.lint-file row",
+      "blockedUntil": "BWH4 browser VFS/snapshot adapter + BWH9 tool services, or explicitly selected local-native execution (DX4/DX5)",
+      "evidence": ["roadmap/0.1.0-tama/contracts/product-experience.md"],
+      "receiptBasis": {
+        "sourceRevisions": "no browser result exists; native lint binds the real workspace's input basis under the producing owner",
+        "projectConfiguration": "native project identity: lint preset and vite-config trust state under the producing owner",
+        "engineIdentity": "none (native lint over a real project)",
+        "hostIdentity": "native process only; never a browser runtime",
+        "completenessState": "unsupported in-browser by design until BWH4/BWH9; a labelled gap is never published as a capability"
+      }
+    },
+    {
+      "id": "lsp.format-document",
+      "hostExecutionClass": "NativeOnly",
+      "engine": "content formatting delegated to Prettier/dprint inside the native LSP feature (structural SFC formatting is Verter's)",
+      "browserAdmitted": false,
+      "crossOriginIsolationRequired": false,
+      "sharedArrayBufferRequired": false,
+      "answerRail": "none",
+      "route": "registered playground gap with promotion blocked (DX0 §7); no browser formatting route today",
+      "blockedUntil": "DX1 registration + executable route and replay case (BWH9)",
+      "evidence": ["roadmap/0.1.0-tama/contracts/product-experience.md"],
+      "receiptBasis": {
+        "sourceRevisions": "no browser result exists; native formatting binds the document revision under the producing owner",
+        "projectConfiguration": "native formatter configuration under the producing owner",
+        "engineIdentity": "content formatting delegated to Prettier/dprint inside the native LSP feature (structural SFC formatting is Verter's)",
+        "hostIdentity": "native process only; never a browser runtime",
+        "completenessState": "unsupported in-browser by design until BWH9; a labelled gap is never published as a capability"
+      }
+    }
+  ],
+  "rules": [
+    "Operation identity is DX0's: every id is a feature-exposure-contract.v1.json row id, and hostExecutionClass, answerRail and browserAdmitted equal the joined DX0 row's hostExecutionClass, answerRail and browserExecutable. A divergence is a validation failure requiring a DX0 receiving-owner amendment, never a manifest relabel (no class change happens by moving code).",
+    "Every DX0 row with browserExecutable true must appear here admitted (join completeness); BWH0 introduces no operation without a DX0 row, so AC-EXPOSURE traceability holds by construction and DX1 registration obligations attach to the rows that add browser execution, not to this manifest.",
+    "browserAdmitted requires the DX0 Portable class plus a baseline-no-isolation compatibility row; crossOriginIsolationRequired and sharedArrayBufferRequired are false on every admitted row, and a true value rejects the admission (BWH0-AC2).",
+    "A NativeOnly row may be presented in a browser product only as explicitly selected local-native execution (DX4/DX5 companion route) or as a labelled gap; claiming it browser-executable without a shipped build is rejected (DX0-AC2 lineage).",
+    "Every row binds source/project/configuration/profile, execution host and engine version, its completeness state and invalidation/lifetime rules through DX0's ProductReceiptBasis.",
+    "portabilityProof.substrateExports records the WASM compiler host's build surface; substrate exports are build facts, not admitted operations (BWH0-AC3).",
+    "A compiler-WASM build never proves semantic-host portability (BWH0-AC3); semantic-host claims cite BWH1..BWH6B evidence."
+  ],
+  "receivingAmendments": {
+    "train": [
+      "BWH1", "BWH2", "BWH3", "BWH4", "BWH5", "BWH6", "BWH6B",
+      "BWH7", "BWH7E", "BWH8", "BWH9", "BWH10", "BWH11"
+    ],
+    "crossTrainDirect": ["EPR1", "PG0", "VSW0"],
+    "rule": "amendments are recorded before code; no reverse edges into the product-observability train; combined-graph validation runs after every amendment."
+  }
+}

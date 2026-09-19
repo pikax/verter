@@ -1260,17 +1260,20 @@ fn runtime_main_request_on_a_refused_special_element_is_an_explicit_refusal_scop
         Err(e) => panic!("unexpected error for the refused runtime request: {e:?}"),
     }
 
-    // The refusing identity published NOTHING — not even the IDE projection.
+    // The refusing *runtime* identity published no runtime product.
+    // `ensure_ide_compiled` is an IDE product request: leftover
+    // STYLE/SCRIPT/TEMPLATE bits are stripped at IDE normalization, so the
+    // IDE surface still answers.
+    let ensured = host
+        .ensure_ide_compiled("/src/Refused.svelte", &profile)
+        .expect("IDE-ensure on a refused runtime identity is an IDE product request");
     assert!(
-        matches!(
-            host.ensure_ide_compiled("/src/Refused.svelte", &profile),
-            Err(HostError::RuntimeSurfaceRefused { .. })
-        ),
-        "the refusing identity must not publish an IDE projection beside its typed refusal"
+        ensured,
+        "IDE-ensure reported no IDE surface on a refused runtime identity"
     );
     assert!(
-        host.get_ide("/src/Refused.svelte", &profile).is_none(),
-        "the refusing identity published no product, so nothing is cached to peek"
+        host.get_ide("/src/Refused.svelte", &profile).is_some(),
+        "IDE-ensure must populate the normalized slot even when the caller profile still carries bundler bits"
     );
 
     // A SEPARATE IDE-only identity STILL resolves: it asked for no runtime
@@ -1559,20 +1562,20 @@ fn cached_runtime_refusal_satisfies_a_main_demand_without_recompute() {
          recompile (cold runs: {cold_after_first} -> {cold_after_second})"
     );
 
-    // The refusal is TERMINAL for the requesting identity: it published no
-    // product, so that identity has no IDE projection either.
+    // The refusal is TERMINAL for the runtime Main demand. `ensure_ide_compiled`
+    // is an IDE product request: leftover bundler bits are stripped, so the
+    // IDE surface still answers under the same caller profile.
+    let ensured = host
+        .ensure_ide_compiled("/src/RefusedCached.svelte", &profile)
+        .expect("IDE-ensure on a refused runtime identity is an IDE product request");
     assert!(
-        matches!(
-            host.ensure_ide_compiled("/src/RefusedCached.svelte", &profile),
-            Err(HostError::RuntimeSurfaceRefused { .. })
-        ),
-        "the refusing identity must report its refusal from the IDE-ensure path too, \
-         never publish an IDE projection beside it"
+        ensured,
+        "IDE-ensure reported no IDE surface on a refused runtime identity"
     );
     assert!(
         host.get_ide("/src/RefusedCached.svelte", &profile)
-            .is_none(),
-        "the refusing identity published no product, so nothing is cached to peek"
+            .is_some(),
+        "IDE-ensure must populate the normalized slot even when the caller profile still carries bundler bits"
     );
 
     // A SEPARATE IDE-only identity on the same source asks for no runtime

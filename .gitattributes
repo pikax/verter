@@ -38,6 +38,14 @@ tests/fixtures/**           text eol=lf
 crates/*/tests/fixtures/**  text eol=lf
 packages/*/tests/fixtures/** text eol=lf
 .integration-tests/**       text eol=lf
+
+# Gradle (extensions/jetbrains): `gradlew` must stay LF or the Linux CI lane
+# cannot execute it; the wrapper jar and distribution zips are binary.
+gradlew                     text eol=lf
+gradlew.bat                 text eol=crlf
+*.kts                       text eol=lf
+*.properties                text eol=lf
+*.jar                       binary
 # The Svelte oracle corpus lives outside `tests/fixtures/` (under
 # `svelte_oracle_corpus/fixtures/` + `…/goldens/`); its fixtures embed
 # INTENTIONAL control chars (a literal LF / CR inside a `class="…"`), so a
@@ -75,9 +83,3 @@ crates/*/tests/svelte_oracle_corpus/codegen/**  text eol=lf
 # Pre-existing rule (preserved)
 .github/workflows/*.lock.yml linguist-generated=true merge=ours
 
-# Trusted implementation ledger: deterministic semantic merge (schema 2, one
-# line per node). Register the driver once per clone:
-#   git config merge.tama-ledger.name "Tama implementation ledger merge"
-#   git config merge.tama-ledger.driver "node roadmap/0.1.0-tama/tools/merge-ledger.mjs %O %A %B --driver"
-# Without the driver configured, git falls back to the normal text merge.
-roadmap/0.1.0-tama/authority/state/implemented.toml merge=tama-ledger

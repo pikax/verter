@@ -1,0 +1,36 @@
+{
+  "contractNode": "DOC0",
+  "finalOwner": "expansion.documentation:Documentation system, information architecture and executable examples; feature owners author feature truth",
+  "companionConstitutions": [
+    { "node": "DX0", "sharedContract": "contracts/product-experience.md", "status": "received", "note": "profile, execution-class, receipt-basis and truthfulness vocabulary reused" },
+    { "node": "WDX0", "sharedContract": "contracts/web-product-expansion-v1.md", "status": "pending amendment", "note": "sibling author of the claim-law sections; documentation claim rules defer to it where they overlap" }
+  ],
+  "receivingAmendments": [
+    { "receiver": "DOC1", "product": "Executable example and reference-validation harness", "productionCapable": true },
+    { "receiver": "DOC2", "product": "Architecture and contributor documentation", "productionCapable": true },
+    { "receiver": "DOC3", "product": "Generated public API, CLI and configuration reference", "productionCapable": true },
+    { "receiver": "DOC4", "product": "Installation, coexistence and first-project guides", "productionCapable": true },
+    { "receiver": "DOC5", "product": "Web-product guide templates and executable journeys", "productionCapable": true },
+    { "receiver": "DOC6", "product": "Framework support and migration documentation model", "productionCapable": true },
+    { "receiver": "DOC7", "product": "SDK and official-extension documentation model", "productionCapable": true },
+    { "receiver": "DOC8", "product": "Operations, diagnostics and reproducible support guides", "productionCapable": true },
+    { "receiver": "DOC9", "product": "Documentation navigation, accessibility and maintenance qualification", "productionCapable": true },
+    { "receiver": "DOC10", "product": "Added-portfolio documentation acceptance", "productionCapable": true },
+    { "receiver": "WDX0", "product": "Web-product ownership and claim constitution", "productionCapable": false }
+  ],
+  "outcomes": [
+    { "id": "versioned-information-architecture", "currentOwner": "DOC0", "finalOwner": "DOC9", "receivingAcceptance": "DOC0-AC4" },
+    { "id": "generated-capability-api-config-reference", "currentOwner": "DOC0", "finalOwner": "DOC3", "receivingAcceptance": "DOC0-AC2" },
+    { "id": "executable-examples-and-release-selected-checks", "currentOwner": "DOC1", "finalOwner": "DOC1", "receivingAcceptance": "DOC1-AC1" }
+  ],
+  "displacedRoutes": [],
+  "deletionPopulationThisNode": [],
+  "deletionRationale": "genuinely additive boundary: ownership and policy are ratified onto an estate that keeps its current pages, generators and build routes; superseded-route retirement belongs to the successor implementations (DOC3 generated reference replacing hand-curated API prose at its own cutover, DOC9 navigation disposition for un-navigated pages)",
+  "acRationales": {
+    "ac1": { "applicable": true, "evidence": "every docs markdown file and package manifest has exactly one inventory row with owner, audience, doc type and version basis; closed against the live tree by tests/documentation/DOC0/verify.mjs" },
+    "ac2": { "applicable": true, "evidence": "the vscode-marketplace-listing roadmap claim is the one live labelled non-published row; published user-page and user-audience repository-document bytes are re-read every run, so an unlabelled, unrowed or working-install-step mention of it — or an unowned public API page or private-package API page — fails validation" },
+    "ac3": { "applicable": false, "rationale": "DOC0 touches no state, query, map or runtime boundary (0 production LOC across 0 production files); fresh-versus-incremental equivalence, edit/revert, cancellation, stale/partial rejection and deterministic ordering are bound to the successor runtime owners (DOC1 harness, DOC3 generation) through contracts/web-product-expansion-v1.md §13 and are not fabricated here" },
+    "ac4": { "applicable": true, "evidence": "producer obligations for DOC1-tested public examples/reference, permissions, uncertainty and migration notes are specified in contracts/web-product-expansion-v1.md §5-§9; a contract-only node specifies them for its producers" },
+    "ac5": { "applicable": false, "rationale": "no new latency, work, allocation or RSS budget is introduced, so none is bound or measured; the deletion population is empty with the rationale above and no capability is narrowed" }
+  }
+}

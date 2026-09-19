@@ -1,0 +1,49 @@
+{
+  "id": "WDX1-FIX-css-001",
+  "domain": "css",
+  "title": "Cascade layers, custom properties and utility classes",
+  "sources": ["src/app.css", "src/utilities.html"],
+  "profileIdentity": {
+    "profile": "web-standards-css",
+    "css": "css-2024",
+    "utilityProfile": { "name": "tailwind", "version": "4.1.0" }
+  },
+  "buildIdentity": {
+    "target": "static-conformance-fixture",
+    "harness": "web-product-scenario-harness",
+    "schema": 1
+  },
+  "expectedResults": [
+    {
+      "dimension": "parse",
+      "source": "src/app.css",
+      "expectation": "the @layer base, components statement and the layered .card rule parse with the declared layer order recorded",
+      "terminalProofClass": "runtime-observation"
+    },
+    {
+      "dimension": "semantic-facts",
+      "source": "src/app.css",
+      "expectation": "the --brand custom property resolves to oklch(0.62 0.17 258) for .card through var(--brand)",
+      "terminalProofClass": "runtime-observation"
+    },
+    {
+      "dimension": "diagnostics",
+      "source": "src/app.css",
+      "expectation": "the :where(.card, .panel) selector computes zero specificity so the layered .card background wins the cascade decision",
+      "terminalProofClass": "runtime-observation"
+    },
+    {
+      "dimension": "semantic-facts",
+      "source": "src/utilities.html",
+      "expectation": "the flex, items-center, gap-2, p-4 and md:p-6 utility classes resolve to their generated declarations under the pinned tailwind@4.1.0 profile",
+      "terminalProofClass": "runtime-observation"
+    },
+    {
+      "dimension": "exposure",
+      "source": "src/app.css",
+      "expectation": "an unsupported CSS at-rule surfaces as an explicit completeness state through the standard result envelope, never as silence",
+      "terminalProofClass": "static-proof"
+    }
+  ],
+  "producers": ["expansion.css-intelligence", "expansion.utility-css"]
+}

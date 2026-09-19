@@ -1,0 +1,47 @@
+{
+  "id": "audience-surface-map.v1",
+  "profileVocabulary": { "source": "contracts/product-experience.md", "profiles": ["editor", "browser", "cli", "agent", "inspection"] },
+  "executionClassVocabulary": { "source": "contracts/product-experience.md", "classes": ["Portable", "NativeOnly", "ExternalOwner"] },
+  "rows": [
+    {
+      "profile": "browser",
+      "executionClass": "Portable",
+      "documentationSurfaces": ["playground link in site nav", "docs/guide/features.md", "docs/guide/getting-started.md"],
+      "audiences": ["user"],
+      "rule": "documentation must not claim a browser-executable route for a NativeOnly operation"
+    },
+    {
+      "profile": "editor",
+      "executionClass": "NativeOnly",
+      "documentationSurfaces": ["docs/editor/vscode.md", "docs/editor/other-editors.md", "docs/editor/lsp-features.md", "docs/editor/settings.md"],
+      "audiences": ["user"],
+      "rule": "VS Code settings and LSP features are documented against the shipped extension and verter-lsp versions"
+    },
+    {
+      "profile": "cli",
+      "executionClass": "NativeOnly",
+      "documentationSurfaces": ["docs/api/native.md", "docs/configuration.md", "docs/lint-rules.md"],
+      "audiences": ["user", "contributor"],
+      "rule": "CLI and config reference is generated from owning schemas by DOC3"
+    },
+    {
+      "profile": "agent",
+      "executionClass": "NativeOnly",
+      "documentationSurfaces": ["CLAUDE.md", "AGENTS.md", ".claude/skills/", "docs/editor/mcp-server.md"],
+      "audiences": ["agent"],
+      "rule": "agent documents are repository-facing shared sources, never published as user site pages"
+    },
+    {
+      "profile": "inspection",
+      "executionClass": "NativeOnly",
+      "documentationSurfaces": ["docs/audit-footprint/", "docs/evidence/"],
+      "audiences": ["contributor"],
+      "rule": "inspection-rail material stays contributor-facing and labelled per product-experience.md §5"
+    }
+  ],
+  "audienceAssignment": {
+    "user": "published site sections and README",
+    "contributor": "contributing, arch, evidence, audit-footprint, plans, generated, internal packages",
+    "agent": "CLAUDE.md, AGENTS.md, .claude/skills/"
+  }
+}

@@ -16,13 +16,10 @@ totals to match old transcripts. Adding a test does not require
 updating closure counts or pins. Recorded transcripts remain internally checked
 historical evidence; they are not a claim that the current checkout was replayed.
 
-Repository mutation replay is explicit: use the **Closure Control Replay**
-workflow (`workflow_dispatch`) or run
-`node --test roadmap/0.1.0-tama/tools/closure-controls.test.mjs` with its toolchain
-prerequisites installed. It is not part of `CI Required`. The focused driver
-tests in `closure-replay.test.mjs` require a nonempty, successful clean run and
-a detected mutation, with source restoration; current inventory totals may vary.
-See the [maintainer policy](../../../roadmap/0.1.0-tama/decisions/2026-09-08-closure-replay-policy.md).
+There is no repository-side roadmap, closure register or mutation-replay
+lane: the program DAG and its decision records are owned by the TAMA
+controller database, and routine CI is the only executable evidence lane.
+Do not add a test that loads a repository DAG, ledger or charter tree.
 
 ## Server Cleanup
 
@@ -119,7 +116,7 @@ Behavioral code changes use TDD. Documentation, generated projections, formattin
 
 Test file/module/test names, comments, fixtures, snapshots, assertion messages, and guard diagnostics describe the lasting behavior or regression boundary. They never name an architecture program/revision, roadmap/DAG, node/block/train identifier, plan phase/stage, implementation sequence, cutover stage, or deletion history. A test for work coordinated by `CCA1`, for example, names the capability or failing behavior and contains no `CCA1` reference.
 
-A comment may supplement that durable explanation with a GitHub issue only when the issue records a specific independently reported product defect and is outside the DAG-controlled `[[github_issue]]` mappings. Never cite a DAG-managed issue, PR, node, charter, or ledger row in code or tests; the DAG coordinates delivery and is not the defect contract.
+A comment may supplement that durable explanation with a GitHub issue only when the issue records a specific independently reported product defect and is outside the DAG-controlled issue mappings. Never cite a DAG-managed issue, PR, node, charter, or ledger row in code or tests; the DAG coordinates delivery and is not the defect contract.
 
 ### Test Economy
 

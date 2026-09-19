@@ -421,8 +421,15 @@ export function ensureRequiredWindowsDebugSidecars({
 // path STRING (data), not a host path join, so it stays correct when the Windows branch runs on a POSIX
 // self-test host. The POSIX branch is UNCHANGED — the resolved `pnpmPath` is directly executable.
 // ----------------------------------------------------------------------------------------------------
-export function pnpmInstallCommand(
+function quoteWindowsCmdArg(arg) {
+  const text = String(arg);
+  if (!/[\s"]/.test(text)) return text;
+  return `"${text.replace(/"/g, '\\"')}"`;
+}
+
+export function pnpmCommand(
   pnpmPath,
+  extraArgs,
   windows = IS_WINDOWS,
   env = process.env,
   isFileFn = defaultIsFile,
@@ -439,13 +446,23 @@ export function pnpmInstallCommand(
           `(a CWD-search hazard). Set a valid \`ComSpec\` or \`SystemRoot\` and re-run the gate.`,
       };
     }
+    const rest = extraArgs.map(quoteWindowsCmdArg).join(" ");
     return {
       cmd: cmdProcessor,
-      args: ["/d", "/s", "/c", `""${pnpmPath}" install --frozen-lockfile"`],
+      args: ["/d", "/s", "/c", `""${pnpmPath}" ${rest}"`],
       windowsVerbatimArguments: true,
     };
   }
-  return { cmd: pnpmPath, args: ["install", "--frozen-lockfile"] };
+  return { cmd: pnpmPath, args: extraArgs };
+}
+
+export function pnpmInstallCommand(
+  pnpmPath,
+  windows = IS_WINDOWS,
+  env = process.env,
+  isFileFn = defaultIsFile,
+) {
+  return pnpmCommand(pnpmPath, ["install", "--frozen-lockfile"], windows, env, isFileFn);
 }
 
 // Canonical, content-addressed Vue macro oracle verification. The gate owns

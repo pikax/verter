@@ -1,0 +1,89 @@
+{
+  "node": "WDX0",
+  "kind": "constitution",
+  "products": [
+    "web-product-disposition-matrix.v1 (41 recommendations, 39-edge qualification fan-in)",
+    "evidence-class-policy.v1 (static-proof / runtime-observation / estimate)",
+    "historical-completions preservation (ledger authority, vue/svelte catalog, preserved contracts)",
+    "web-product-ownership-map.json",
+    "contracts/web-product-expansion-v1.md",
+    "plans/expansion-web-product-convergence.md"
+  ],
+  "cases": [
+    {
+      "id": "WDX0-AC1",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "two-final-owners",
+        "train-owns-two-recommendations",
+        "unknown-disposition",
+        "portfolio-class-drift",
+        "head-terminal-mismatch",
+        "qualification-fan-in-drift",
+        "missing-recommendation-row"
+      ]
+    },
+    {
+      "id": "WDX0-AC2",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "proof-claimed-as-support",
+        "runtime-claim-at-ratification",
+        "claim-basis-drift",
+        "exclusion-without-reason",
+        "estimate-may-claim-completion",
+        "catalog-family-drift",
+        "catalog-count-drift",
+        "evidence-class-drift"
+      ]
+    },
+    {
+      "id": "WDX0-AC3",
+      "disposition": "accept",
+      "twins": [
+        "clean products",
+        "missing-ac-basis-owner",
+        "missing-ac-resource-rationale"
+      ]
+    },
+    {
+      "id": "WDX0-AC4",
+      "disposition": "accept",
+      "twins": [
+        "clean products",
+        "missing-examples-obligation",
+        "missing-evidence-file"
+      ]
+    },
+    {
+      "id": "WDX0-AC5",
+      "disposition": "accept",
+      "twins": [
+        "clean products",
+        "nonempty-deletion-population",
+        "displaced-route"
+      ]
+    },
+    {
+      "id": "WDX0-ratification",
+      "disposition": "accept",
+      "twins": [
+        "clean products",
+        "missing-contract-marker",
+        "missing-plan",
+        "node-profile-drift",
+        "zero-budget-violation",
+        "missing-ledger-row",
+        "receiver-count-drift",
+        "docs-only-production-capable",
+        "historical-anchor-not-implemented",
+        "preserved-contract-missing",
+        "unknown-owner"
+      ]
+    }
+  ],
+  "runtimeCorrectness": false,
+  "notes": "Contract-only node: 0 production LOC. WDX0-AC3 binds fresh-vs-incremental, edit/revert, cancellation and ordering runtime cases to WDX1/WDX2/WDX3 instead of fabricating one here. WDX0-AC5 adds no performance budget; the ratified methodology binds when a producing train first measures. The harness grounds itself in the live repository (authority DAG, implementation ledger, capability-surface catalog families and count, preserved contracts, evidence index), so drift in any of them is a failing case, not a stale pass."
+}

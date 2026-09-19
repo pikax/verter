@@ -303,17 +303,17 @@ test("doctor reports missing issue capability and issues no clearance", () => {
   );
 });
 
-test("githubctl doctor --fake and check stay offline", () => {
+test("githubctl doctor --fake stays offline and retired commands are rejected", () => {
   const doctor = spawnSync(process.execPath, [CLI, "doctor", "--fake"], { encoding: "utf8" });
   assert.equal(doctor.status, 0, doctor.stderr);
   const report = JSON.parse(doctor.stdout);
   assert.equal(report.ok, true);
   assert.equal(report.capabilities.issues, true);
-  const check = spawnSync(process.execPath, [CLI, "check"], { encoding: "utf8" });
-  assert.equal(check.status, 0, check.stderr);
-  const inventory = JSON.parse(check.stdout);
-  assert.equal(inventory.kind, "MinimalGitHubWorkflow");
-  assert.equal(inventory.sync_issues_available, true);
+  const retired = spawnSync(process.execPath, [CLI, "sync-issues", "--check"], {
+    encoding: "utf8",
+  });
+  assert.equal(retired.status, 1);
+  assert.match(retired.stderr, /unknown command sync-issues/u);
 });
 
 test("expected capability misses do not throw from inspectCapabilities", () => {

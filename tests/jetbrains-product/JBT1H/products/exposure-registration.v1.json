@@ -1,0 +1,66 @@
+{
+  "id": "jbt1h-exposure-registration.v1",
+  "schema": 1,
+  "node": "JBT1H",
+  "dx1": "schema owned by DX1; this file registers the comparison operations and keeps product promotion blocked until an executable playground adapter and replay case exist (JBT1H-AC-EXPOSURE)",
+  "operations": [
+    {
+      "id": "jetbrains.comparison.paired-run",
+      "profile": "inspection",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "comparison",
+      "maturity": "internal",
+      "exposure": { "state": "registered" },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "DX1 exposure descriptor plus a typed explorer/replay case over a real-jetbrains-ide capture",
+          "replayCase": "packages/dx-harness/test/jetbrainsHarness.test.ts swapped-order campaign"
+        }
+      },
+      "browserExecutable": false,
+      "nativeExecution": "explicitly selected pinned WebStorm Platform test-framework (or later robot) session, never an inactive card"
+    },
+    {
+      "id": "jetbrains.comparison.ui-paint",
+      "profile": "inspection",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "comparison",
+      "maturity": "internal",
+      "exposure": { "state": "registered" },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "DX1 exposure descriptor plus replay of a measured ui-apply-paint capture",
+          "replayCase": "extensions/jetbrains RealIdeCaptureTest EDT paint"
+        }
+      },
+      "browserExecutable": false
+    },
+    {
+      "id": "jetbrains.comparison.process-tree",
+      "profile": "inspection",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "comparison",
+      "maturity": "internal",
+      "exposure": { "state": "registered" },
+      "playground": {
+        "status": "missing",
+        "promotionBlocked": true,
+        "blockedUntil": {
+          "route": "DX1 exposure descriptor plus replay of a provider-attributed memory row",
+          "replayCase": "packages/dx-harness/test/jetbrainsHarness.test.ts JBT1H-AC2"
+        }
+      },
+      "browserExecutable": false
+    }
+  ],
+  "semanticOperationsIntroduced": [],
+  "rules": [
+    "These operations are comparison-rail measurement, not a second semantic/type/project engine.",
+    "Product promotion stays blocked until DX1 executable exposure exists.",
+    "A mock LSP client is not an exposure of jetbrains.comparison.ui-paint."
+  ]
+}

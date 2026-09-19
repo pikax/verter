@@ -2423,12 +2423,20 @@ impl VerterHost {
     /// `get_ide` peek) MUST first add the `TSX` bit. Adding it is idempotent for
     /// an already-IDE profile (the LSP `tsx_profile`), so the normalized
     /// `profile_hash` is stable across both paths: `ensure_ide_compiled`
-    /// populates exactly the slot `get_ide` peeks. Every other knob
-    /// (source-map, production, SSR, overrides) is preserved verbatim, so the
-    /// IDE projection still reflects the caller's source-map / production
-    /// choices.
+    /// populates exactly the slot `get_ide` peeks.
+    ///
+    /// Runtime-module demand (`CompileTarget::needs_runtime_module` /
+    /// `without_runtime_module`) is stripped here. Leaving those bits set on
+    /// an IDE product request makes `compile_entry` admit a runtime-render
+    /// capability the projection does not consume, so an unsupported runtime
+    /// construct fail-closes the whole IDE request. Non-runtime bits
+    /// (TEMPLATE_DATA, TSC) and every other knob (source-map, production, SSR
+    /// flag, overrides) stay, so the IDE projection still reflects the
+    /// caller's source-map / production choices without demanding runtime
+    /// codegen.
     fn ide_normalized_profile(profile: &CompileProfile) -> CompileProfile {
         let mut normalized = profile.clone();
+        normalized.target = normalized.target.without_runtime_module();
         normalized.target |= crate::CompileTarget::TSX;
         normalized
     }
@@ -2445,20 +2453,18 @@ impl VerterHost {
     /// * `Ok(true)` — `(canonical, profile)` now has a cached `CachedTsx` (an
     ///   immediate [`get_ide`](Self::get_ide) returns `Some`). This holds
     ///   WHENEVER the carrier has an IDE surface — even when the caller passed a
-    ///   bundler / runtime profile with no `TSX` bit.
+    ///   bundler / runtime profile with no `TSX` bit. Leftover runtime target
+    ///   bits are stripped by [`Self::ide_normalized_profile`], so this path
+    ///   never admits a runtime-render capability.
     /// * `Ok(false)` — the loaded file has NO IDE projection surface (e.g. a
     ///   non-carrier / a carrier that declined IDE): no error, simply nothing
     ///   to project. `Ok(false)` means a genuine no-IDE-surface, never "the
     ///   caller's profile happened to lack the TSX target", and never a
     ///   refusal.
-    /// * `Err(HostError::RuntimeSurfaceRefused)` — the caller's profile ALSO
-    ///   asked for a runtime product and the carrier fail-closed on it. The
-    ///   transaction committed nothing, so there is no IDE artifact to report:
-    ///   that is a real failure of this request, NOT a "no IDE surface" answer,
-    ///   and it is never collapsed into `Ok(false)`. A profile that asks for the
-    ///   IDE product alone cannot reach this arm.
-    /// * `Err(_)` — any other real failure (missing source, compile error, …); a
-    ///   real failure is NEVER collapsed into `Ok(false)`.
+    /// * `Err(_)` — a real failure (missing source, compile error, …); a real
+    ///   failure is NEVER collapsed into `Ok(false)`. Runtime-surface refusal
+    ///   belongs to a runtime-demanding identity (`get_virtual_file` Main,
+    ///   host-backed compile with STYLE/SCRIPT/TEMPLATE), not this path.
     ///
     /// `get_ide` stays a PURE cached read — it never computes on read; this is
     /// the explicit ensure path callers invoke first.
@@ -3947,4 +3953,55 @@ pub(super) fn publish_runtime_nodes(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod ide_normalization_tests {
+    use super::*;
+    use crate::types::CompileProfile;
+    use crate::CompileTarget;
+
+    #[test]
+    fn ide_normalized_default_profile_never_needs_runtime_module() {
+        let normalized = VerterHost::ide_normalized_profile(&CompileProfile::default());
+        assert!(
+            !normalized.target.needs_runtime_module(),
+            "IDE normalization must strip every bit needs_runtime_module admits; leftover demand was {:?}",
+            normalized.target
+        );
+        assert!(
+            normalized.target.needs_tsx(),
+            "IDE normalization must still request the TSX surface"
+        );
+    }
+
+    #[test]
+    fn ide_normalized_profile_strips_every_runtime_module_bit_and_keeps_non_runtime() {
+        for bit in [
+            CompileTarget::STYLE,
+            CompileTarget::SCRIPT,
+            CompileTarget::TEMPLATE,
+            CompileTarget::RUNTIME_MODULE,
+            CompileTarget::BUNDLER,
+        ] {
+            let profile = CompileProfile {
+                target: bit | CompileTarget::TSX | CompileTarget::TEMPLATE_DATA,
+                ..CompileProfile::default()
+            };
+            let normalized = VerterHost::ide_normalized_profile(&profile);
+            assert!(
+                !normalized.target.needs_runtime_module(),
+                "{bit:?} survived IDE normalization: {:?}",
+                normalized.target
+            );
+            assert!(
+                normalized.target.needs_tsx(),
+                "{bit:?}: TSX bit was dropped"
+            );
+            assert!(
+                normalized.target.needs_template_data(),
+                "{bit:?}: TEMPLATE_DATA is not runtime-module demand and must stay"
+            );
+        }
+    }
 }

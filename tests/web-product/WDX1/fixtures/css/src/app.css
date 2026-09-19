@@ -1,0 +1,15 @@
+@layer base, components;
+
+:root {
+  --brand: oklch(0.62 0.17 258);
+}
+
+@layer components {
+  .card {
+    background: var(--brand);
+  }
+}
+
+:where(.card, .panel) {
+  margin-block: 0;
+}

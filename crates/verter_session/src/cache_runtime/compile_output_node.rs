@@ -405,21 +405,16 @@ impl ArtifactNode for CompileOutputNodePureContent {
         }
     }
 
-    /// Validate a published entry against the caller's view. For
-    /// pure-content mode this is a trivial generation gate — the
-    /// env-hash dimensions in the key already discriminate every
-    /// observable env-state change.
+    /// Content-addressed warm validity: env-hash dimensions in the key
+    /// already discriminate every observable env-state change, so key
+    /// identity IS validity (no generation-only oracle).
     fn validate(
         &self,
         _key: &Self::Key,
         entry: &CacheEntry<Self::Value>,
-        cx: &ComputeCtx<'_>,
+        _cx: &ComputeCtx<'_>,
     ) -> Option<Self::Value> {
-        if entry.validated_at_generation == cx.generation() {
-            Some(entry.value.clone())
-        } else {
-            None
-        }
+        Some(entry.value.clone())
     }
 }
 

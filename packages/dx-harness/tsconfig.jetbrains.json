@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "include": ["./jetbrains"],
+  "exclude": ["dist", "node_modules", "test"],
+  "compilerOptions": {
+    "outDir": "./dist/jetbrains",
+    "rootDir": "./jetbrains",
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ESNext"],
+    "types": ["node"],
+    "tsBuildInfoFile": "./tsconfig.jetbrains.tsbuildinfo"
+  }
+}

@@ -37,6 +37,8 @@ use wasm_bindgen::prelude::*;
 
 mod audit;
 mod compile_request_response;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod feasibility_probe_tests;
 #[cfg(test)]
 mod host_compile_request_tests;
 mod typeinfo;

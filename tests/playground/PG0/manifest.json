@@ -1,0 +1,71 @@
+{
+  "node": "PG0",
+  "kind": "constitution",
+  "products": [
+    "PlaygroundFeatureMatrix v1 (playground-feature-matrix.v1.json: operationCoverage joined to every DX0 feature-exposure-contract id with class/rail/browserExecutable/status/promotionBlocked equality plus the joined replayCase, blockedUntil route and replay case, and unlabelledAnalysisMerge pins; the thirteen featureFamilies (the twelve PG0.2 families plus the audit-provenance descriptor-gap family owning the App.vue Why? control) with derived familyState and route owners, missing families citing DX0 gap evidence only; displacedRoute.tabs mapping every live Output.vue tab mode plus the ssr insert, and displacedRoute.appNav mapping every live App.vue Output|Why? nav control, to its owning family and panel)",
+    "WorkbenchSession model v1 (workbench-session.v1.json: sources, project, engine/profile, operation and view state binding the DX0 product-receipt-basis field set verbatim)",
+    "ProducerPromotionRule v1 (producer-promotion-rule.v1.json: descriptor-registration, executable-route, replay-case and receipt-binding preconditions; native-only companion clause; future clause; DX1 and PG1-PG17 receiving amendments)",
+    "workbench-ownership-map.v1 (final owner, displaced-route cutover, deletion population, AC bindings)"
+  ],
+  "cases": [
+    {
+      "id": "PG0-AC1",
+      "disposition": "reject",
+      "twins": [
+        "clean matrix joins every DX0 operation exactly once with descriptor equality",
+        "promoted-operation-row-removed",
+        "workbench-status-drift",
+        "execution-class-drift",
+        "promotionblocked-dropped-on-blocked-op",
+        "promoted-feature-without-route-owner-or-obligation",
+        "merge-pin-dropped-on-live-merge-row",
+        "single-ts-worker-authority-route-obligation",
+        "replaycase-dropped-from-row",
+        "missing-family-cites-unrelated-live-panel",
+        "orphan-operation-not-claimed-by-family"
+      ]
+    },
+    {
+      "id": "PG0-AC2",
+      "disposition": "reject",
+      "twins": [
+        "future family (performance) names PG14 and claims no shipping operation",
+        "future-family-claims-shipping-operation",
+        "missing-family-presented-as-partial",
+        "future-family-without-named-producer"
+      ]
+    },
+    {
+      "id": "PG0-AC-OWNER",
+      "disposition": "reject",
+      "twins": [
+        "one final owner and three delivered interfaces",
+        "matrix vocabulary equals the DX0 enums (no parallel namespace)",
+        "PG0 recorded as contract-only receiver in the DX0 ownership map",
+        "pg0-flipped-production-capable twin fails the contract-only receiver predicate",
+        "session-model drops a receipt-basis field binding",
+        "promotion rule loses the native-only companion clause",
+        "promotion rule loses a precondition id or duplicates a receiver"
+      ]
+    },
+    {
+      "id": "PG0-grounding",
+      "disposition": "reject",
+      "twins": [
+        "every cited evidence path exists in the live repository",
+        "the displaced curated tab list is characterized in Output.vue",
+        "every Output.vue allTabs mode plus the ssr insert is family-owned via displacedRoute.tabs",
+        "every App.vue Output|Why? nav control is owned via displacedRoute.appNav (Why? mounts AuditTree.vue)",
+        "tab-mode-unowned-by-any-family",
+        "tab-panel-dropped-from-owning-family-evidence",
+        "appnav-why-control-unowned",
+        "appnav-panel-dropped-from-owning-family-evidence",
+        "appnav-why-attached-to-missing-family",
+        "each family cites at least one preservation evidence path",
+        "cutover stays with PG2 and this node deletes nothing"
+      ]
+    }
+  ],
+  "runtimeCorrectness": false,
+  "notes": "Contract/inventory node: 0 production LOC, 0 production files. PG0-AC-BASIS: no caching/mapping/snapshot behavior changes here; receipt-binding and incremental-vs-fresh runtime tests are bound to PG2 (generated explorer equality), PG12 (session replay) and PG16 (browser qualification) as downstream test owners. PG0-AC-RESOURCE: no hot paths or UI touched; the performance family's equal-work corpus and real-client cost accounting bind to PG14. PG0-AC-EXPOSURE: DX1 owns the registration schema; until it ships, schema and replay cases are registered in playground-feature-matrix.v1 and promotion stays blocked on executable exposure; native-only routes require explicitly selected native execution (DX4/DX5 companion), never an inactive card. The harness grounds itself in the shipped DX0/BWH0 products and live repository sources only (no roadmap/DAG store; the repository roadmap was removed by b940abc1e and the DAG is database-owned), so descriptor drift, vocabulary drift or evidence-path drift fails rather than stales. The displaced manually curated compiler-demo tab list (Output.vue allTabs) is characterized, preserved and cut over by PG2 against this matrix."
+}

@@ -384,6 +384,10 @@ pub(in crate::dag) struct DagNode {
 
 /// Lightweight dependency key — the subset of [`WorkNodeIdentity`]
 /// the DAG uses for edge gating. Cheap to clone, hashable.
+///
+/// Resource capacity is not a DAG predecessor. Admission lives on
+/// [`DagCapacityBudget`] and the owner-affine pool transports; a
+/// capacity edge cannot be represented in this enum (G3-AC1).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DepKey {
     /// A specific file-stage completion.

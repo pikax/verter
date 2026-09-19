@@ -1,0 +1,62 @@
+{
+  "id": "portability-cut-list.v1",
+  "schema": 1,
+  "contractNode": "BWH1",
+  "law": "Cuts found by the feasibility artifact are assigned to named existing owners. BWH1 does not locally substitute a missing producer or introduce a second authority. An incompatible core dependency that needs a semantic redesign is a receiving-owner amendment before production mutation (BWH1.3).",
+  "cuts": [
+    {
+      "id": "analyze-with-audit-indexed-ready",
+      "symptom": "VerterHost.analyzeWithAudit throws on wasm32: scheduler-backed IndexedReady is not built for the target",
+      "owner": "BWH3 (WASM semantic session and lifetime exports); BWH2 (portable platform-services boundary / scheduling seam)",
+      "evidence": ["crates/verter_wasm/src/lib.rs"],
+      "redesignRequired": false
+    },
+    {
+      "id": "napi-css-preprocessor-three-way",
+      "symptom": "prepareStyleForPreprocessor / transformVueStyle / analyzeStyle require Node and are absent from the WASM host",
+      "owner": "BWH9 (browser lint, formatting and registered tool services) and the existing diagnostics/CSS producing owner",
+      "evidence": ["crates/verter_wasm/src/lib.rs"],
+      "redesignRequired": false
+    },
+    {
+      "id": "durable-artifact-store",
+      "symptom": "FileArtifactStore / env-hash durable cache roots are native; wasm32 is in-memory only",
+      "owner": "BWH8 (browser cache, artifact loading and offline integrity)",
+      "evidence": ["tests/browser-host/BWH0/products/platform-host-services.v1.json"],
+      "redesignRequired": false
+    },
+    {
+      "id": "tsgo-native-engine",
+      "symptom": "capabilityForWasm pins tsgo:false; native tsgo is not a WebWorker engine",
+      "owner": "BWH6 / BWH6B (browser TypeScript provider and projection-backed checking); DX4/DX5 companion route for explicitly selected native execution",
+      "evidence": ["tests/browser-host/BWH0/products/browser-execution-manifest.v1.json"],
+      "redesignRequired": false
+    },
+    {
+      "id": "typeinfo-not-admitted-portable",
+      "symptom": "listSymbols / resolveSymbolWithAudit / resolveFrameworkSurfaceWithAudit execute as compiler-substrate bindings but DX0 typeinfo.graph-operations stays NativeOnly",
+      "owner": "existing typeinfo producing owner; Portable admission is a receiving-owner amendment plus BWH3 consumer evidence",
+      "evidence": ["tests/browser-host/BWH0/products/browser-execution-manifest.v1.json"],
+      "redesignRequired": false
+    },
+    {
+      "id": "ambient-library-io",
+      "symptom": "ambient-library reads are compiled out on wasm32; only the host-provided virtual workspace is readable",
+      "owner": "BWH4 (browser virtual filesystem and project snapshot adapter); BWH2 (I/O service class)",
+      "evidence": ["tests/browser-host/BWH0/products/platform-host-services.v1.json"],
+      "redesignRequired": false
+    },
+    {
+      "id": "threaded-scheduler",
+      "symptom": "driver thread, CPU/IO pools and rayon batch compile are compiled out; wasm uses sync inline drive",
+      "owner": "BWH2 (boundary); BWH5 (worker protocol and optional threaded strategy)",
+      "evidence": ["tests/browser-host/BWH0/products/platform-host-services.v1.json"],
+      "redesignRequired": false
+    }
+  ],
+  "redesignAmendments": [],
+  "rules": [
+    "A reduced-semantic stub must not be retained as the product (BWH1.2); these cuts record seams, they do not ship a fake TypeInfo.",
+    "BWH1.3: an incompatible core dependency requiring a semantic redesign is recorded here as redesignRequired true and filed at its existing owner before production mutation. None were found on the captured candidate: the session host already builds for wasm32-unknown-unknown."
+  ]
+}

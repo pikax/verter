@@ -1,6 +1,7 @@
 use super::outcome::{
     DependencyProofId, IncompleteReason, OutcomeEvidence, OutcomeEvidenceId, QueryOutcome, Ready,
-    CONTEXT_FREE_EVIDENCE, EMPTY_DIAGNOSTICS, EMPTY_PROOF, NO_RECOVERY,
+    ResultEvaluationContextId, CONTEXT_FREE_EVALUATION, CONTEXT_FREE_EVIDENCE, EMPTY_DIAGNOSTICS,
+    EMPTY_PROOF, NO_RECOVERY,
 };
 use super::{QueryError, QueryResult};
 
@@ -14,6 +15,12 @@ fn reserved_ids_are_stable_and_distinct_from_recorded_evidence() {
     let recorded = OutcomeEvidenceId::from_raw(1);
     assert!(!recorded.is_context_free());
     assert_ne!(recorded, CONTEXT_FREE_EVIDENCE);
+    assert_eq!(
+        CONTEXT_FREE_EVALUATION,
+        ResultEvaluationContextId::from_raw(0)
+    );
+    assert!(CONTEXT_FREE_EVALUATION.is_context_free());
+    assert!(!ResultEvaluationContextId::from_raw(1).is_context_free());
 }
 
 #[test]

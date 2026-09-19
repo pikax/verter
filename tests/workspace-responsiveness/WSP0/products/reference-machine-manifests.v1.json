@@ -1,0 +1,30 @@
+{
+  "schema": "reference-machine-manifests.v1",
+  "ratifiedBy": "WSP0",
+  "status": "ratified",
+  "machineClasses": ["reference-client-machine", "headless-ci-machine"],
+  "manifestRequirements": [
+    { "field": "cpuClass", "required": true },
+    { "field": "physicalCores", "required": true },
+    { "field": "memoryGiB", "required": true },
+    { "field": "storageClass", "required": true },
+    { "field": "os", "required": true },
+    { "field": "client.identity", "required": "reference-client-machine" },
+    { "field": "client.version", "required": "reference-client-machine" },
+    { "field": "server.binary", "required": true },
+    { "field": "server.version", "required": true },
+    { "field": "providerEngines[].engine", "required": true },
+    { "field": "providerEngines[].version", "required": true },
+    { "field": "providerEngines[].mode", "required": true },
+    { "field": "enabledFeatures", "required": true, "mustBe": "all-required-current" },
+    { "field": "workloadIds", "required": true },
+    { "field": "thermalState", "required": false }
+  ],
+  "machines": [],
+  "populationStatus": "empty-at-ratification",
+  "recordingOwner": "WSP1",
+  "comparisonLaw": {
+    "sameBasisOnly": "results from unmanifested or cross-manifest bases never compare",
+    "incrementalVsFresh": "compared only on the same machine manifest and the same recorded basis"
+  }
+}

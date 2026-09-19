@@ -1,0 +1,47 @@
+{
+  "schema": "InferenceWitnessSelection",
+  "version": 1,
+  "product": "InferenceWitnessSelection",
+  "node": "STP3",
+  "selectedWitness": "whole-signature-contextual-construction",
+  "rejectedWitness": "split-inference-plus-post-specialization",
+  "rule": "every-inference-contributing-channel-stays-in-the-inference-transaction",
+  "inferenceTransaction": [
+    "rows",
+    "project",
+    "modelValue",
+    "onChange",
+    "onUpdate:modelValue",
+    "slot-default",
+    "expose-value"
+  ],
+  "postSpecializationOnly": [
+    "excess-key-and-fallthrough-validation",
+    "hover-definition-references"
+  ],
+  "preserveAuthoredSignaturesWhen": ["imported-types", "conditional-types"],
+  "orderedOperations": {
+    "kinds": ["v-bind", "v-on", "static", "bound", "model"],
+    "listenerAccumulation": "intersect-overloads",
+    "forbiddenListenerPolicy": "last-write-wins",
+    "independentPermutation": "type-preserving",
+    "optionalSpreads": "accumulate-when-present"
+  },
+  "useIdentity": {
+    "logical": "ComponentUseId",
+    "oneUseOneSpecialization": true,
+    "distinctFromRevisionObservations": true
+  },
+  "comparison": {
+    "wholeSignature": {
+      "id": "whole-signature-contextual-construction",
+      "case": "STP3-coupled",
+      "result": "T-and-U-inferred-together"
+    },
+    "splitWitness": {
+      "id": "split-inference-plus-post-specialization",
+      "case": "STP3-inference-only-channel",
+      "result": "callback-only-T-lost"
+    }
+  }
+}

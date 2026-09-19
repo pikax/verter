@@ -9,6 +9,30 @@
     {
       "id": "STP1",
       "manifest": "tests/sfc-projection/STP1/manifest.json"
+    },
+    {
+      "id": "STP2",
+      "manifest": "tests/sfc-projection/STP2/manifest.json"
+    },
+    {
+      "id": "STP3",
+      "manifest": "tests/sfc-projection/STP3/manifest.json"
+    },
+    {
+      "id": "STP4",
+      "manifest": "tests/sfc-projection/STP4/manifest.json"
+    },
+    {
+      "id": "STP5",
+      "manifest": "tests/sfc-projection/STP5/manifest.json"
+    },
+    {
+      "id": "STP6",
+      "manifest": "tests/sfc-projection/STP6/manifest.json"
+    },
+    {
+      "id": "STP7",
+      "manifest": "tests/sfc-projection/STP7/manifest.json"
     }
   ]
 }

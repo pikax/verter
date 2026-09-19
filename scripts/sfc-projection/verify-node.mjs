@@ -24,14 +24,89 @@ const SCHEMA_PATH = "scripts/sfc-projection/manifest.schema.json";
 const TYPE_FLAGS_ANY = 1;
 const TYPE_FLAGS_NEVER = 262144;
 
-export const MANDATORY_CASES = Object.freeze([
-  "STP1-inventory",
-  "STP1-zero-selection",
-  "STP1-clean-twin",
-  "STP1-types",
-  "STP1-provenance",
-  "STP1-harness",
-]);
+export const NODE_MANDATORY_CASES = Object.freeze({
+  STP1: Object.freeze([
+    "STP1-inventory",
+    "STP1-zero-selection",
+    "STP1-clean-twin",
+    "STP1-types",
+    "STP1-provenance",
+    "STP1-harness",
+  ]),
+  STP2: Object.freeze([
+    "STP2-instance-concrete",
+    "STP2-instance-generic",
+    "STP2-instance-explicit",
+    "STP2-constructor-escape",
+    "STP2-vue-utilities",
+    "STP2-not-callable",
+    "STP2-constructor-inferred",
+    "STP2-explicit-input-mismatch",
+  ]),
+  STP3: Object.freeze([
+    "STP3-coupled",
+    "STP3-wrong-channel",
+    "STP3-inference-only-channel",
+    "STP3-order-independent",
+    "STP3-ordered-merge",
+    "STP3-fresh-uses",
+  ]),
+  STP4: Object.freeze([
+    "STP4-js-unchecked",
+    "STP4-js-checked",
+    "STP4-tsx-authored",
+    "STP4-supplemental-import",
+    "STP4-external-owner",
+    "STP4-illegal-vue",
+  ]),
+  STP5: Object.freeze([
+    "STP5-encoding",
+    "STP5-guard-duplicate",
+    "STP5-alias-edit",
+    "STP5-stale-target",
+    "STP5-raw-cli",
+    "STP5-capability",
+  ]),
+  STP6: Object.freeze([
+    "STP6-package-instance",
+    "STP6-package-generics",
+    "STP6-hidden-metadata",
+    "STP6-closure",
+    "STP6-decl-map",
+    "STP6-resolution",
+  ]),
+  STP7: Object.freeze([
+    "STP7-svelte-shape",
+    "STP7-holes",
+    "STP7-realm",
+    "STP7-reuse",
+    "STP7-scope-claim",
+  ]),
+});
+
+export const MANDATORY_CASES = NODE_MANDATORY_CASES.STP1;
+
+export function canonicalMandatoryCases(nodeId) {
+  return NODE_MANDATORY_CASES[nodeId] || [];
+}
+
+export const STP3_MANDATORY_CASES = NODE_MANDATORY_CASES.STP3;
+export const STP4_MANDATORY_CASES = NODE_MANDATORY_CASES.STP4;
+export const STP5_MANDATORY_CASES = NODE_MANDATORY_CASES.STP5;
+export const STP6_MANDATORY_CASES = NODE_MANDATORY_CASES.STP6;
+export const STP7_MANDATORY_CASES = NODE_MANDATORY_CASES.STP7;
+
+function usesCaseFileRunner(nodeId) {
+  return nodeId === "STP2" || nodeId === "STP3" || nodeId === "STP4" || nodeId === "STP6";
+}
+
+export function mandatoryCasesFor(nodeManifest) {
+  const nodeId = nodeManifest?.node;
+  const canonical = canonicalMandatoryCases(nodeId);
+  if (canonical.length) return [...canonical];
+  if (!nodeId || nodeId === "STP1") return [...MANDATORY_CASES];
+  return [...(nodeManifest?.mandatoryCases || [])];
+}
 
 const REQUIRED_PROBE_STRINGS = Object.freeze([
   "positive",
@@ -132,7 +207,9 @@ export function validateProbeManifest(doc, { role }) {
       );
     } else {
       const declared = new Set(doc.mandatoryCases);
-      for (const id of MANDATORY_CASES) {
+      const canonical = canonicalMandatoryCases(doc.node);
+      const required = canonical.length ? canonical : mandatoryCasesFor(doc);
+      for (const id of required) {
         if (!declared.has(id)) {
           errors.push(
             err(
@@ -274,6 +351,411 @@ export function assertInventoryComplete(inventory, obligation, repoRoot) {
     if (!families.has(family)) {
       errors.push(err("STP1-inventory", "removed-fixture", `inventory missing family ${family}`));
     }
+  }
+  return errors;
+}
+
+const STP2_SPECIALIZATION_KINDS = Object.freeze([
+  "unbound-extraction",
+  "explicit-specialization",
+  "props-inferred-construction",
+  "template-use",
+]);
+
+export function assertStp2Products(repoRoot, nodeManifest) {
+  const errors = [];
+  const declared = new Set(nodeManifest?.products || []);
+  for (const product of ["ConstructorCompatibilityEvidence", "InstanceTypeCompatibilityTable"]) {
+    if (!declared.has(product)) {
+      errors.push(err("STP2-instance-concrete", "removed-fixture", `missing product ${product}`));
+    }
+  }
+  const evidenceRel = "tests/sfc-projection/STP2/products/constructor-compatibility-evidence.json";
+  const tableRel = "tests/sfc-projection/STP2/products/instance-type-compatibility-table.json";
+  const evidenceAbs = repoPath(repoRoot, evidenceRel);
+  const tableAbs = repoPath(repoRoot, tableRel);
+  if (!fs.existsSync(evidenceAbs)) {
+    errors.push(err("STP2-instance-concrete", "removed-fixture", `missing ${evidenceRel}`));
+    return errors;
+  }
+  if (!fs.existsSync(tableAbs)) {
+    errors.push(err("STP2-instance-concrete", "removed-fixture", `missing ${tableRel}`));
+    return errors;
+  }
+  const evidence = readJson(evidenceAbs);
+  const table = readJson(tableAbs);
+  if (evidence.schema !== "ConstructorCompatibilityEvidence") {
+    errors.push(
+      err("STP2-instance-concrete", "removed-fixture", "ConstructorCompatibilityEvidence schema"),
+    );
+  }
+  if (table.schema !== "InstanceTypeCompatibilityTable") {
+    errors.push(
+      err("STP2-instance-concrete", "removed-fixture", "InstanceTypeCompatibilityTable schema"),
+    );
+  }
+  const kinds = new Set((evidence.specializationKinds || []).map((row) => row.id));
+  for (const kind of STP2_SPECIALIZATION_KINDS) {
+    if (!kinds.has(kind)) {
+      errors.push(
+        err("STP2-instance-generic", "removed-fixture", `missing specialization kind ${kind}`),
+      );
+    }
+  }
+  const tableIds = new Set((table.rows || []).map((row) => row.id));
+  for (const id of NODE_MANDATORY_CASES.STP2) {
+    if (!tableIds.has(id)) {
+      errors.push(
+        err("STP2-instance-concrete", "removed-fixture", `compatibility table missing ${id}`),
+      );
+    }
+  }
+  errors.push(...assertFooSyntaxControl(evidence));
+  if (!String(evidence.publicOptionsStaticBehavior?.rationale || "").trim()) {
+    errors.push(
+      err(
+        "STP2-instance-concrete",
+        "removed-fixture",
+        "missing public options/static behavior rationale",
+      ),
+    );
+  }
+  if (!String(evidence.componentPublicInstanceAssignability?.rationale || "").trim()) {
+    errors.push(
+      err(
+        "STP2-instance-concrete",
+        "removed-fixture",
+        "missing ComponentPublicInstance assignability rationale",
+      ),
+    );
+  }
+  return errors;
+}
+
+export function assertFooSyntaxControl(evidence) {
+  if (!String(evidence?.syntaxControl?.spelling || "").includes("declare class Foo")) {
+    return [err("STP2-instance-explicit", "removed-fixture", "missing Foo syntax control")];
+  }
+  return [];
+}
+
+const STP3_BINDERS = Object.freeze([
+  "default",
+  "const",
+  "variadic",
+  "dependent",
+  "higher-rank-slot",
+  "generic-parent",
+]);
+
+const STP3_INFERENCE_CHANNELS = Object.freeze(["rows", "project", "modelValue"]);
+
+export function assertStp3Products(repoRoot, nodeManifest) {
+  const errors = [];
+  const declared = new Set(nodeManifest?.products || []);
+  for (const product of ["CoupledInferenceEvidence", "InferenceWitnessSelection"]) {
+    if (!declared.has(product)) {
+      errors.push(err("STP3-coupled", "removed-fixture", `missing product ${product}`));
+    }
+  }
+  const evidenceRel = "tests/sfc-projection/STP3/products/coupled-inference-evidence.json";
+  const selectionRel = "tests/sfc-projection/STP3/products/inference-witness-selection.json";
+  const evidenceAbs = repoPath(repoRoot, evidenceRel);
+  const selectionAbs = repoPath(repoRoot, selectionRel);
+  if (!fs.existsSync(evidenceAbs)) {
+    errors.push(err("STP3-coupled", "removed-fixture", `missing ${evidenceRel}`));
+    return errors;
+  }
+  if (!fs.existsSync(selectionAbs)) {
+    errors.push(err("STP3-coupled", "removed-fixture", `missing ${selectionRel}`));
+    return errors;
+  }
+  const evidence = readJson(evidenceAbs);
+  const selection = readJson(selectionAbs);
+  if (evidence.schema !== "CoupledInferenceEvidence") {
+    errors.push(err("STP3-coupled", "removed-fixture", "CoupledInferenceEvidence schema"));
+  }
+  if (selection.schema !== "InferenceWitnessSelection") {
+    errors.push(err("STP3-coupled", "removed-fixture", "InferenceWitnessSelection schema"));
+  }
+  if (selection.selectedWitness !== "whole-signature-contextual-construction") {
+    errors.push(
+      err(
+        "STP3-coupled",
+        "removed-fixture",
+        "selected witness is not whole-signature construction",
+      ),
+    );
+  }
+  if (selection.rejectedWitness !== "split-inference-plus-post-specialization") {
+    errors.push(
+      err("STP3-inference-only-channel", "removed-fixture", "rejected split witness missing"),
+    );
+  }
+  const binders = new Set((evidence.binders || []).map((row) => row.id));
+  for (const binder of STP3_BINDERS) {
+    if (!binders.has(binder)) {
+      errors.push(err("STP3-coupled", "removed-fixture", `missing binder ${binder}`));
+    }
+  }
+  const channels = new Set((evidence.channels || []).map((row) => row.id));
+  for (const channel of STP3_INFERENCE_CHANNELS) {
+    if (!channels.has(channel)) {
+      errors.push(err("STP3-coupled", "removed-fixture", `missing inference channel ${channel}`));
+    }
+  }
+  const evidenceIds = new Set((evidence.cases || []).map((row) => row.id));
+  for (const id of NODE_MANDATORY_CASES.STP3) {
+    if (!evidenceIds.has(id)) {
+      errors.push(err("STP3-coupled", "removed-fixture", `coupled evidence missing ${id}`));
+    }
+  }
+  if (!String(evidence.constructorSpelling || "").includes("declare class Comp")) {
+    errors.push(err("STP3-coupled", "removed-fixture", "missing coupled constructor spelling"));
+  }
+  if (!String(evidence.ac3Rationale || "").trim()) {
+    errors.push(err("STP3-coupled", "removed-fixture", "missing AC3 untouched-owner rationale"));
+  }
+  if (!String(evidence.ac4Rationale || "").trim()) {
+    errors.push(err("STP3-coupled", "removed-fixture", "missing AC4 untouched-owner rationale"));
+  }
+  if (selection.orderedOperations?.forbiddenListenerPolicy !== "last-write-wins") {
+    errors.push(
+      err(
+        "STP3-ordered-merge",
+        "removed-fixture",
+        "ordered operations must forbid last-write-wins",
+      ),
+    );
+  }
+  return errors;
+}
+
+const STP4_DIALECTS = Object.freeze(["ts", "tsx", "js", "jsx"]);
+
+export function assertStp4Products(repoRoot, nodeManifest) {
+  const errors = [];
+  const declared = new Set(nodeManifest?.products || []);
+  for (const product of ["DialectTopologyEvidence", "ProjectionTopologyDecisionInputs"]) {
+    if (!declared.has(product)) {
+      errors.push(err("STP4-js-unchecked", "removed-fixture", `missing product ${product}`));
+    }
+  }
+  const evidenceRel = "tests/sfc-projection/STP4/products/dialect-topology-evidence.json";
+  const inputsRel = "tests/sfc-projection/STP4/products/projection-topology-decision-inputs.json";
+  const evidenceAbs = repoPath(repoRoot, evidenceRel);
+  const inputsAbs = repoPath(repoRoot, inputsRel);
+  if (!fs.existsSync(evidenceAbs)) {
+    errors.push(err("STP4-js-unchecked", "removed-fixture", `missing ${evidenceRel}`));
+    return errors;
+  }
+  if (!fs.existsSync(inputsAbs)) {
+    errors.push(err("STP4-js-unchecked", "removed-fixture", `missing ${inputsRel}`));
+    return errors;
+  }
+  const evidence = readJson(evidenceAbs);
+  const inputs = readJson(inputsAbs);
+  if (evidence.schema !== "DialectTopologyEvidence") {
+    errors.push(err("STP4-js-unchecked", "removed-fixture", "DialectTopologyEvidence schema"));
+  }
+  if (inputs.schema !== "ProjectionTopologyDecisionInputs") {
+    errors.push(
+      err("STP4-js-unchecked", "removed-fixture", "ProjectionTopologyDecisionInputs schema"),
+    );
+  }
+  const dialects = new Set((evidence.dialects || []).map((row) => row.id));
+  for (const dialect of STP4_DIALECTS) {
+    if (!dialects.has(dialect)) {
+      errors.push(err("STP4-tsx-authored", "removed-fixture", `missing dialect ${dialect}`));
+    }
+  }
+  const checkJs = new Set((evidence.checkJs || []).map((row) => row.id));
+  if (!checkJs.has("off")) {
+    errors.push(err("STP4-js-unchecked", "removed-fixture", "missing checkJs off policy"));
+  }
+  if (!checkJs.has("on")) {
+    errors.push(err("STP4-js-checked", "removed-fixture", "missing checkJs on policy"));
+  }
+  const evidenceIds = new Set((evidence.cases || []).map((row) => row.id));
+  for (const id of NODE_MANDATORY_CASES.STP4) {
+    if (!evidenceIds.has(id)) {
+      errors.push(err("STP4-js-unchecked", "removed-fixture", `dialect evidence missing ${id}`));
+    }
+  }
+  if (!String(evidence.constructorSpelling || "").includes("declare class Comp")) {
+    errors.push(
+      err("STP4-js-unchecked", "removed-fixture", "missing dialect constructor spelling"),
+    );
+  }
+  if (!String(evidence.ac3Rationale || "").trim()) {
+    errors.push(
+      err("STP4-js-unchecked", "removed-fixture", "missing AC3 untouched-owner rationale"),
+    );
+  }
+  if (!String(evidence.ac4Rationale || "").trim()) {
+    errors.push(
+      err("STP4-js-unchecked", "removed-fixture", "missing AC4 untouched-owner rationale"),
+    );
+  }
+  if (inputs.supplementalFiles?.namedImportTarget !== false) {
+    errors.push(
+      err(
+        "STP4-supplemental-import",
+        "removed-fixture",
+        "supplemental files must not be named import targets",
+      ),
+    );
+  }
+  if (inputs.supplementalFiles?.sharedLexicalScope !== false) {
+    errors.push(
+      err(
+        "STP4-supplemental-import",
+        "removed-fixture",
+        "supplemental files must not share a lexical scope",
+      ),
+    );
+  }
+  if (inputs.externalScripts?.checkedOncePerIdentity !== true) {
+    errors.push(
+      err("STP4-external-owner", "removed-fixture", "external scripts must be checked once"),
+    );
+  }
+  if (inputs.vueLegality?.scriptSetupSrc !== "reject") {
+    errors.push(err("STP4-illegal-vue", "removed-fixture", "script-setup src must stay rejected"));
+  }
+  if (inputs.vueLegality?.authority !== "framework-legality") {
+    errors.push(
+      err("STP4-illegal-vue", "removed-fixture", "script-setup src must be framework legality"),
+    );
+  }
+  if (inputs.vueLegality?.typescriptAcceptsGenerated !== "not-sufficient") {
+    errors.push(
+      err(
+        "STP4-illegal-vue",
+        "removed-fixture",
+        "TypeScript accepting generated code is not Vue legality",
+      ),
+    );
+  }
+  if (inputs.jsxRewrite?.tsAngleAssertion !== "no-jsx-rewrite") {
+    errors.push(
+      err("STP4-tsx-authored", "removed-fixture", "TS angle assertions must not be JSX-rewritten"),
+    );
+  }
+  return errors;
+}
+
+const STP6_CONSUMPTION_MODES = Object.freeze([
+  "direct-import",
+  "alias",
+  "barrel",
+  "namespace",
+  "project-references",
+  "package-exports",
+]);
+
+const STP6_RESOLUTION_MODES = Object.freeze(["bundler", "node16", "nodenext"]);
+
+export function assertStp6Products(repoRoot, nodeManifest) {
+  const errors = [];
+  const declared = new Set(nodeManifest?.products || []);
+  for (const product of ["PackedConsumerFeasibility", "PublicDependencyClosurePolicy"]) {
+    if (!declared.has(product)) {
+      errors.push(err("STP6-package-instance", "removed-fixture", `missing product ${product}`));
+    }
+  }
+  const feasibilityRel = "tests/sfc-projection/STP6/products/packed-consumer-feasibility.json";
+  const closureRel = "tests/sfc-projection/STP6/products/public-dependency-closure-policy.json";
+  const feasibilityAbs = repoPath(repoRoot, feasibilityRel);
+  const closureAbs = repoPath(repoRoot, closureRel);
+  if (!fs.existsSync(feasibilityAbs)) {
+    errors.push(err("STP6-package-instance", "removed-fixture", `missing ${feasibilityRel}`));
+    return errors;
+  }
+  if (!fs.existsSync(closureAbs)) {
+    errors.push(err("STP6-closure", "removed-fixture", `missing ${closureRel}`));
+    return errors;
+  }
+  const feasibility = readJson(feasibilityAbs);
+  const closure = readJson(closureAbs);
+  if (feasibility.schema !== "PackedConsumerFeasibility") {
+    errors.push(
+      err("STP6-package-instance", "removed-fixture", "PackedConsumerFeasibility schema"),
+    );
+  }
+  if (closure.schema !== "PublicDependencyClosurePolicy") {
+    errors.push(err("STP6-closure", "removed-fixture", "PublicDependencyClosurePolicy schema"));
+  }
+  const modes = new Set((feasibility.consumptionModes || []).map((row) => row.id));
+  for (const mode of STP6_CONSUMPTION_MODES) {
+    if (!modes.has(mode)) {
+      errors.push(
+        err("STP6-package-instance", "removed-fixture", `missing consumption mode ${mode}`),
+      );
+    }
+  }
+  const resolutions = new Set((feasibility.resolutionModes || []).map((row) => row.id));
+  for (const mode of STP6_RESOLUTION_MODES) {
+    if (!resolutions.has(mode)) {
+      errors.push(err("STP6-resolution", "removed-fixture", `missing resolution mode ${mode}`));
+    }
+  }
+  const evidenceIds = new Set((feasibility.cases || []).map((row) => row.id));
+  for (const id of NODE_MANDATORY_CASES.STP6) {
+    if (!evidenceIds.has(id)) {
+      errors.push(err("STP6-package-instance", "removed-fixture", `feasibility missing ${id}`));
+    }
+  }
+  if (!String(feasibility.constructorSpelling || "").includes("declare class Comp")) {
+    errors.push(
+      err("STP6-package-instance", "removed-fixture", "missing packed constructor spelling"),
+    );
+  }
+  if (feasibility.package?.producerWorkspaceResolution !== false) {
+    errors.push(
+      err(
+        "STP6-package-instance",
+        "removed-fixture",
+        "packed consumer must not use producer workspace resolution",
+      ),
+    );
+  }
+  if (!String(feasibility.ac3Rationale || "").trim()) {
+    errors.push(
+      err("STP6-package-instance", "removed-fixture", "missing AC3 untouched-owner rationale"),
+    );
+  }
+  if (!String(feasibility.ac4Rationale || "").trim()) {
+    errors.push(
+      err("STP6-package-instance", "removed-fixture", "missing AC4 untouched-owner rationale"),
+    );
+  }
+  if (closure.typeOnlyCheckingContract?.required !== false) {
+    errors.push(
+      err(
+        "STP6-hidden-metadata",
+        "removed-fixture",
+        "type-only checking contract must not be required for precision",
+      ),
+    );
+  }
+  if (closure.declarationMaps?.sourcesMustBePackRelativeAuthoredFiles !== true) {
+    errors.push(
+      err(
+        "STP6-decl-map",
+        "removed-fixture",
+        "declaration maps must target shipped authored source",
+      ),
+    );
+  }
+  if (closure.hiddenMetadata?.inExports !== false || closure.hiddenMetadata?.inFiles !== false) {
+    errors.push(
+      err(
+        "STP6-hidden-metadata",
+        "removed-fixture",
+        "unpublished sidecar must stay out of the pack",
+      ),
+    );
   }
   return errors;
 }
@@ -431,6 +913,29 @@ function offsetOf(text, needle) {
   return pos;
 }
 
+function identifierPattern(name) {
+  const escaped = String(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![A-Za-z0-9_$])${escaped}(?![A-Za-z0-9_$])`);
+}
+
+export function hasIdentifier(text, name) {
+  if (!name) return false;
+  return identifierPattern(name).test(text);
+}
+
+export function identifierOffset(text, name) {
+  if (!name) return -1;
+  const match = identifierPattern(name).exec(text);
+  return match ? match.index : -1;
+}
+
+export function resolveDefinitionName(text, probes = {}) {
+  const needle = probes.definitionNeedle;
+  if (needle && hasIdentifier(text, needle)) return needle;
+  if (hasIdentifier(text, "Comp")) return "Comp";
+  return null;
+}
+
 function jsTypeFlags(ts, type) {
   return type?.flags ?? 0;
 }
@@ -447,7 +952,7 @@ function createJsProgram(ts, fileAbs, options, checkCounts, fileKey) {
   return ts.createProgram({ rootNames: [fileAbs], options, host });
 }
 
-function runJsFile(ts, fileAbs, options, checkCounts, fileKey) {
+function runJsFile(ts, fileAbs, options, checkCounts, fileKey, probes = {}) {
   const program = createJsProgram(ts, fileAbs, options, checkCounts, fileKey);
   const sf = program.getSourceFile(fileAbs);
   const checker = program.getTypeChecker();
@@ -456,16 +961,22 @@ function runJsFile(ts, fileAbs, options, checkCounts, fileKey) {
     .filter((diag) => diag.file && path.resolve(diag.file.fileName) === path.resolve(fileAbs))
     .map(normalizeDiag);
   const text = fs.readFileSync(fileAbs, "utf8");
-  const observations = observeJs(ts, checker, sf, text);
+  const observations = observeJs(ts, checker, sf, text, probes);
   return { diags, observations };
 }
 
-function observeJs(ts, checker, sf, text) {
+function instanceTypeAlias(text) {
+  const match = text.match(/export type (\w+)\s*=\s*InstanceType/);
+  return match ? match[1] : null;
+}
+
+function observeJs(ts, checker, sf, text, probes = {}) {
   const out = { types: {}, hover: null, definition: null, references: 0, edits: [] };
   if (!sf) return out;
-  const instancePos = text.indexOf("export type Instance");
-  if (instancePos >= 0) {
-    const node = findIdentifier(ts, sf, "Instance");
+  const alias =
+    instanceTypeAlias(text) || (text.includes("export type Instance") ? "Instance" : null);
+  if (alias) {
+    const node = findIdentifier(ts, sf, alias);
     if (node) {
       const type = checker.getTypeAtLocation(node);
       out.types.Instance = {
@@ -474,26 +985,27 @@ function observeJs(ts, checker, sf, text) {
       };
     }
   }
-  const hoverPos = text.indexOf("stp1HoverTarget");
-  if (hoverPos >= 0) {
-    const node = findIdentifier(ts, sf, "stp1HoverTarget");
+  const hoverName = probes.hoverNeedle || "stp1HoverTarget";
+  if (text.includes(hoverName)) {
+    const node = findIdentifier(ts, sf, hoverName);
     if (node) {
       const type = checker.getTypeAtLocation(node);
       out.hover = {
-        name: "stp1HoverTarget",
+        name: hoverName,
         printed: checker.typeToString(type),
         flags: jsTypeFlags(ts, type),
         pos: node.getStart(sf),
       };
     }
   }
-  const defNode = findIdentifier(ts, sf, "Comp");
+  const defName = resolveDefinitionName(text, probes);
+  const defNode = defName ? findIdentifier(ts, sf, defName) : null;
   if (defNode) {
     const sym = checker.getSymbolAtLocation(defNode);
-    out.definition = { name: sym?.getName?.() || "Comp", pos: defNode.getStart(sf) };
-    out.edits = [{ name: "Comp", pos: defNode.getStart(sf), end: defNode.getEnd() }];
+    out.definition = { name: sym?.getName?.() || defName, pos: defNode.getStart(sf) };
+    out.edits = [{ name: defName, pos: defNode.getStart(sf), end: defNode.getEnd() }];
   }
-  out.references = countIdentifier(ts, sf, "Comp");
+  out.references = defName ? countIdentifier(ts, sf, defName) : 0;
   return out;
 }
 
@@ -535,8 +1047,8 @@ export function runJsEngine(resolved, probes, repoRoot) {
   const positive = repoPath(repoRoot, probes.positive);
   const negative = repoPath(repoRoot, probes.negative);
   const checkCounts = {};
-  const pos = runJsFile(ts, positive, options, checkCounts, probes.positive);
-  const neg = runJsFile(ts, negative, options, checkCounts, probes.negative);
+  const pos = runJsFile(ts, positive, options, checkCounts, probes.positive, probes);
+  const neg = runJsFile(ts, negative, options, checkCounts, probes.negative, probes);
   return {
     engine: pin.id,
     positive: pos,
@@ -588,9 +1100,9 @@ function observeNative(project, fileAbs, probes, checkCounts, fileKey) {
   const diags = nativeSemanticDiagnostics(project, fileAbs, checkCounts, fileKey);
   const text = fs.readFileSync(fileAbs, "utf8");
   const observations = { types: {}, hover: null, definition: null, references: 0, edits: [] };
-  const instanceNeedle = "Instance";
-  if (text.includes("export type Instance")) {
-    const pos = offsetOf(text, "export type Instance") + "export type ".length;
+  const alias = instanceTypeAlias(text);
+  if (alias) {
+    const pos = offsetOf(text, `export type ${alias}`) + "export type ".length;
     const type = project.checker.getTypeAtPosition(fileAbs, pos);
     if (type) {
       observations.types.Instance = {
@@ -599,30 +1111,36 @@ function observeNative(project, fileAbs, probes, checkCounts, fileKey) {
       };
     }
   }
-  if (text.includes(probes.hoverNeedle)) {
-    const pos = offsetOf(text, probes.hoverNeedle);
+  const hoverName = probes.hoverNeedle || "stp1HoverTarget";
+  if (text.includes(hoverName)) {
+    const pos = offsetOf(text, hoverName);
     const type = project.checker.getTypeAtPosition(fileAbs, pos);
     if (type) {
       observations.hover = {
-        name: probes.hoverNeedle,
+        name: hoverName,
         printed: project.checker.typeToString(type),
         flags: type.flags ?? 0,
         pos,
       };
     }
   }
-  if (text.includes("Comp")) {
-    const pos = offsetOf(text, "class Comp") + "class ".length;
-    const sym = project.checker.getSymbolAtPosition(fileAbs, pos);
-    observations.definition = { name: sym?.name || "Comp", pos };
-    observations.edits = [{ name: "Comp", pos, end: pos + 4 }];
+  const defName = resolveDefinitionName(text, probes);
+  let defPos = null;
+  if (defName) {
+    const identPos = identifierOffset(text, defName);
+    defPos = identPos >= 0 ? identPos : offsetOf(text, defName);
+  }
+  if (defPos != null) {
+    const sym = project.checker.getSymbolAtPosition(fileAbs, defPos);
+    observations.definition = { name: sym?.name || defName, pos: defPos };
+    observations.edits = [{ name: defName, pos: defPos, end: defPos + defName.length }];
     let refs = [];
     try {
       refs = sym ? project.checker.getReferencesToSymbolInFile(fileAbs, sym) : [];
     } catch {
       refs = [];
     }
-    observations.references = Array.isArray(refs) ? refs.length : text.split("Comp").length - 1;
+    observations.references = Array.isArray(refs) ? refs.length : text.split(defName).length - 1;
   }
   return { diags, observations };
 }
@@ -649,20 +1167,337 @@ export function assertCheckCounts(checkCounts, engineId, probeFiles, max = 1) {
   return errors;
 }
 
-function evaluateHarnessRun(run, probes, engineId, { maxChecksPerFile = 1 } = {}) {
+export function caseProbeFiles(cases = []) {
+  const files = [];
+  for (const row of cases) {
+    if (row.file) files.push(row.file);
+    if (row.dirtyTwin) files.push(row.dirtyTwin);
+    if (Array.isArray(row.files)) files.push(...row.files);
+  }
+  return [...new Set(files.map(posix))];
+}
+
+function sourceFileOf(program, absPath) {
+  const want = path.resolve(absPath);
+  for (const sf of program.getSourceFiles()) {
+    if (path.resolve(sf.fileName) === want) return sf;
+  }
+  return program.getSourceFile(absPath) || null;
+}
+
+function loadJsTsconfig(ts, tsconfigAbs) {
+  const raw = ts.readConfigFile(tsconfigAbs, ts.sys.readFile);
+  if (raw.error) {
+    throw new Error(ts.flattenDiagnosticMessageText(raw.error.messageText, "\n"));
+  }
+  return ts.parseJsonConfigFileContent(
+    raw.config,
+    ts.sys,
+    path.dirname(tsconfigAbs),
+    undefined,
+    tsconfigAbs,
+  );
+}
+
+export function runJsStp2(resolved, probes, repoRoot, cases) {
+  const ts = loadJsTypeScript(resolved, repoRoot);
+  const tsconfigAbs = repoPath(repoRoot, probes.tsconfig);
+  const parsed = loadJsTsconfig(ts, tsconfigAbs);
+  const host = ts.createCompilerHost(parsed.options, true);
+  const program = ts.createProgram({
+    rootNames: parsed.fileNames,
+    options: parsed.options,
+    host,
+  });
+  const checker = program.getTypeChecker();
+  const checkCounts = {};
+  const files = {};
+  const wanted = caseProbeFiles(cases);
+  if (probes.positive) wanted.unshift(posix(probes.positive));
+  if (probes.negative) wanted.push(posix(probes.negative));
+  const unique = [...new Set(wanted)];
+  for (const rel of unique) {
+    const abs = repoPath(repoRoot, rel);
+    bumpCheckCount(checkCounts, rel);
+    const sf = sourceFileOf(program, abs);
+    const text = fs.existsSync(abs) ? fs.readFileSync(abs, "utf8") : "";
+    const diags = [];
+    if (sf) {
+      diags.push(
+        ...program
+          .getSemanticDiagnostics(sf)
+          .concat(program.getSyntacticDiagnostics(sf))
+          .map(normalizeDiag),
+      );
+    }
+    files[rel] = {
+      diags,
+      observations: observeJs(ts, checker, sf, text, probes),
+    };
+  }
+  return {
+    engine: resolved.id,
+    positive: files[posix(probes.positive)],
+    negative: files[posix(probes.negative)],
+    files,
+    checkCounts,
+  };
+}
+
+export async function runNativeStp2(resolved, probes, repoRoot, cases) {
+  const { API } = await loadNativeApi(repoRoot);
+  const probesDir = path.dirname(repoPath(repoRoot, probes.tsconfig));
+  const tsconfig = repoPath(repoRoot, probes.tsconfig);
+  const api = new API({ tsserverPath: resolved.executable, cwd: probesDir });
+  try {
+    const snap = api.updateSnapshot({ openProject: tsconfig });
+    const project = snap.getProject(tsconfig);
+    if (!project) {
+      throw new Error(`native engine did not open ${posix(probes.tsconfig)}`);
+    }
+    const checkCounts = {};
+    const files = {};
+    const wanted = caseProbeFiles(cases);
+    if (probes.positive) wanted.unshift(posix(probes.positive));
+    if (probes.negative) wanted.push(posix(probes.negative));
+    const unique = [...new Set(wanted)];
+    for (const rel of unique) {
+      const abs = repoPath(repoRoot, rel);
+      files[rel] = observeNative(project, abs, probes, checkCounts, rel);
+    }
+    snap.dispose();
+    return {
+      engine: resolved.id,
+      positive: files[posix(probes.positive)],
+      negative: files[posix(probes.negative)],
+      files,
+      checkCounts,
+    };
+  } finally {
+    api.close();
+  }
+}
+
+function fileResult(run, rel) {
+  return run.files?.[posix(rel)] || null;
+}
+
+function extraExpectedCode(row, extraRel) {
+  const key = posix(extraRel);
+  const keyed = row.fileExpectedCodes?.[key] ?? row.fileExpectedCodes?.[extraRel];
+  if (Number.isInteger(keyed)) return keyed;
+  if (Number.isInteger(row.expectedCode)) return row.expectedCode;
+  return null;
+}
+
+function evaluateStp2Run(run, probes, cases, engineId, { maxChecksPerFile = 1 } = {}) {
+  const errors = [];
+  const measured = [];
+  for (const row of cases) {
+    const caseId = row.id;
+    const primary = row.file ? fileResult(run, row.file) : null;
+    if (row.file && !primary) {
+      errors.push(err(caseId, "missing-probes", `${engineId} missing probe ${row.file}`));
+      continue;
+    }
+    if (row.file) measured.push(row.file);
+    if (row.disposition === "accept") {
+      errors.push(
+        ...assertCleanTwin(primary.diags, { fileLabel: `${engineId} ${caseId}` }).map((item) => ({
+          ...item,
+          caseId,
+        })),
+      );
+      if (row.expectedInstanceType) {
+        const instance = primary.observations.types.Instance;
+        if (!instance) {
+          errors.push(err(caseId, "vacuous-type", `${engineId} missing Instance type`));
+        } else {
+          errors.push(
+            ...assertExactType({
+              actual: instance.printed,
+              expected: row.expectedInstanceType,
+              flags: instance.flags,
+            }).map((item) => ({ ...item, caseId })),
+          );
+        }
+      }
+      if (row.expectedHoverType) {
+        const hover = primary.observations.hover;
+        const needle = row.hoverNeedle || probes.hoverNeedle;
+        if (
+          !hover ||
+          (needle && hover.name !== needle && hover.printed !== row.expectedHoverType)
+        ) {
+          if (!hover) {
+            errors.push(err(caseId, "type-mismatch", `${engineId} missing hover type`));
+          } else {
+            errors.push(
+              ...assertExactType({
+                actual: hover.printed,
+                expected: row.expectedHoverType,
+                flags: hover.flags,
+              }).map((item) => ({ ...item, caseId })),
+            );
+          }
+        } else {
+          errors.push(
+            ...assertExactType({
+              actual: hover.printed,
+              expected: row.expectedHoverType,
+              flags: hover.flags,
+            }).map((item) => ({ ...item, caseId })),
+          );
+        }
+      }
+      if (!primary.observations.definition) {
+        errors.push(err(caseId, "missing-definition", `${engineId} missing definition target`));
+      } else if (
+        probes.definitionNeedle &&
+        primary.observations.definition.name !== probes.definitionNeedle
+      ) {
+        errors.push(
+          err(
+            caseId,
+            "missing-definition",
+            `${engineId} definition target ${primary.observations.definition.name} is not ${probes.definitionNeedle}`,
+          ),
+        );
+      }
+      if ((primary.observations.edits || []).length === 0) {
+        errors.push(err(caseId, "missing-edit", `${engineId} missing edit participation`));
+      }
+      if (
+        !Number.isInteger(primary.observations.references) ||
+        primary.observations.references < 1
+      ) {
+        errors.push(
+          err(caseId, "missing-references", `${engineId} missing references participation`),
+        );
+      }
+      if (Array.isArray(row.files)) {
+        for (const extraRel of row.files) {
+          measured.push(extraRel);
+          const extra = fileResult(run, extraRel);
+          const expectedCode = extraExpectedCode(row, extraRel);
+          if (!Number.isInteger(expectedCode)) {
+            errors.push(
+              err(
+                caseId,
+                "missing-negative",
+                `${engineId} ${extraRel} has no expectedCode/fileExpectedCodes entry`,
+              ),
+            );
+            continue;
+          }
+          const anchored = (extra?.diags || []).filter((diag) => diag.code === expectedCode);
+          if (anchored.length === 0) {
+            errors.push(
+              err(
+                caseId,
+                "missing-negative",
+                `${engineId} ${extraRel} lacked TS${expectedCode}; got ${JSON.stringify(extra?.diags || [])}`,
+              ),
+            );
+          }
+        }
+      }
+    } else {
+      const expectedCode = row.expectedCode;
+      const anchored = (primary.diags || []).filter((diag) => diag.code === expectedCode);
+      if (!Number.isInteger(expectedCode) || anchored.length === 0) {
+        errors.push(
+          err(
+            caseId,
+            "missing-negative",
+            `${engineId} ${row.file} lacked anchored TS${expectedCode}; got ${JSON.stringify(primary.diags)}`,
+          ),
+        );
+      }
+      if (row.dirtyTwin) {
+        measured.push(row.dirtyTwin);
+        const dirty = fileResult(run, row.dirtyTwin);
+        if (!dirty) {
+          errors.push(
+            err(caseId, "missing-probes", `${engineId} missing dirty twin ${row.dirtyTwin}`),
+          );
+        } else if (Number.isInteger(row.dirtyExpectedCode)) {
+          const dirtyAnchored = (dirty.diags || []).filter(
+            (diag) => diag.code === row.dirtyExpectedCode,
+          );
+          if (dirtyAnchored.length === 0) {
+            errors.push(
+              err(
+                caseId,
+                "missing-negative",
+                `${engineId} dirty twin ${row.dirtyTwin} lacked TS${row.dirtyExpectedCode}; got ${JSON.stringify(dirty.diags)}`,
+              ),
+            );
+          }
+        } else if ((dirty.diags || []).some((diag) => diag.code === expectedCode)) {
+          errors.push(
+            err(
+              caseId,
+              "unrelated-generated-error",
+              `${engineId} dirty twin ${row.dirtyTwin} unexpectedly reported TS${expectedCode}`,
+            ),
+          );
+        }
+      }
+      if (Array.isArray(row.files)) {
+        for (const extraRel of row.files) {
+          measured.push(extraRel);
+          const extra = fileResult(run, extraRel);
+          const extraCode = extraExpectedCode(row, extraRel);
+          if (!Number.isInteger(extraCode)) {
+            errors.push(
+              err(
+                caseId,
+                "missing-negative",
+                `${engineId} ${extraRel} has no expectedCode/fileExpectedCodes entry`,
+              ),
+            );
+            continue;
+          }
+          const extraAnchored = (extra?.diags || []).filter((diag) => diag.code === extraCode);
+          if (extraAnchored.length === 0) {
+            errors.push(
+              err(
+                caseId,
+                "missing-negative",
+                `${engineId} ${extraRel} lacked TS${extraCode}; got ${JSON.stringify(extra?.diags || [])}`,
+              ),
+            );
+          }
+        }
+      }
+    }
+  }
+  errors.push(...assertCheckCounts(run.checkCounts, engineId, measured, maxChecksPerFile));
+  return errors;
+}
+
+function evaluateHarnessRun(
+  run,
+  probes,
+  engineId,
+  { maxChecksPerFile = 1, requireInstanceType = true } = {},
+) {
   const errors = [];
   errors.push(...assertCleanTwin(run.positive.diags, { fileLabel: `${engineId} clean twin` }));
   const instance = run.positive.observations.types.Instance;
-  if (!instance) {
-    errors.push(err("STP1-types", "vacuous-type", `${engineId} missing Instance type`));
-  } else {
-    errors.push(
-      ...assertExactType({
-        actual: instance.printed,
-        expected: probes.expectedInstanceType,
-        flags: instance.flags,
-      }),
-    );
+  if (requireInstanceType) {
+    if (!instance) {
+      errors.push(err("STP1-types", "vacuous-type", `${engineId} missing Instance type`));
+    } else {
+      errors.push(
+        ...assertExactType({
+          actual: instance.printed,
+          expected: probes.expectedInstanceType,
+          flags: instance.flags,
+        }),
+      );
+    }
   }
   const hover = run.positive.observations.hover;
   if (!hover) {
@@ -678,6 +1513,17 @@ function evaluateHarnessRun(run, probes, engineId, { maxChecksPerFile = 1 } = {}
   }
   if (!run.positive.observations.definition) {
     errors.push(err("STP1-harness", "missing-definition", `${engineId} missing definition target`));
+  } else if (
+    probes.definitionNeedle &&
+    run.positive.observations.definition.name !== probes.definitionNeedle
+  ) {
+    errors.push(
+      err(
+        "STP1-harness",
+        "missing-definition",
+        `${engineId} definition target ${run.positive.observations.definition.name} is not ${probes.definitionNeedle}`,
+      ),
+    );
   }
   if ((run.positive.observations.edits || []).length === 0) {
     errors.push(err("STP1-harness", "missing-edit", `${engineId} missing edit participation`));
@@ -780,6 +1626,18 @@ export async function verifyNode(options) {
   const inventory = options.inventory || readJson(repoPath(repoRoot, rootLoad.manifest.inventory));
   const obligation = options.obligation || loadObligation(repoRoot, inventory);
   errors.push(...assertInventoryComplete(inventory, obligation, repoRoot));
+  if (nodeId === "STP2") {
+    errors.push(...assertStp2Products(repoRoot, nodeLoad.manifest));
+  }
+  if (nodeId === "STP3") {
+    errors.push(...assertStp3Products(repoRoot, nodeLoad.manifest));
+  }
+  if (nodeId === "STP4") {
+    errors.push(...assertStp4Products(repoRoot, nodeLoad.manifest));
+  }
+  if (nodeId === "STP6") {
+    errors.push(...assertStp6Products(repoRoot, nodeLoad.manifest));
+  }
 
   const matrix =
     options.engineMatrix || readJson(repoPath(repoRoot, rootLoad.manifest.engineMatrix));
@@ -825,13 +1683,26 @@ export async function verifyNode(options) {
     }
   } else if (shouldRun) {
     const maxChecksPerFile = methodology?.boundedWork?.maxChecksPerFilePerEngine ?? 1;
+    const caseFiles = usesCaseFileRunner(nodeId);
     for (const engine of resolvedEngines) {
-      const run =
-        engine.kind === "javascript"
+      const run = caseFiles
+        ? engine.kind === "javascript"
+          ? runJsStp2(engine, probes, repoRoot, cases)
+          : await runNativeStp2(engine, probes, repoRoot, cases)
+        : engine.kind === "javascript"
           ? runJsEngine(engine, probes, repoRoot)
           : await runNativeEngine(engine, probes, repoRoot);
       harnessRuns.push(run);
-      errors.push(...evaluateHarnessRun(run, probes, engine.id, { maxChecksPerFile }));
+      if (caseFiles) {
+        errors.push(...evaluateStp2Run(run, probes, cases, engine.id, { maxChecksPerFile }));
+      } else {
+        errors.push(
+          ...evaluateHarnessRun(run, probes, engine.id, {
+            maxChecksPerFile,
+            requireInstanceType: nodeId !== "STP7",
+          }),
+        );
+      }
     }
     if (harnessRuns.length === 0) {
       errors.push(err("STP1-harness", "missing-probes", "zero probe executions"));
@@ -839,13 +1710,46 @@ export async function verifyNode(options) {
   }
 
   if (options.requireAll) {
-    for (const id of MANDATORY_CASES) {
+    const required = mandatoryCasesFor(nodeLoad.manifest);
+    for (const id of required) {
       if (!selected.includes(id)) {
         errors.push(
           err("STP1-zero-selection", "zero-cases", `mandatory case ${id} was not selected`),
         );
       }
     }
+  }
+
+  let capabilityRows = [];
+  if (nodeId === "STP5") {
+    const stp5 = await evaluateStp5Node({
+      repoRoot,
+      resolvedEngines,
+      harnessRuns,
+      skipProbes: options.skipProbes,
+      runnable,
+    });
+    errors.push(...stp5.errors);
+    capabilityRows = stp5.capabilityRows;
+  }
+
+  if (nodeId === "STP6") {
+    const stp6 = await evaluateStp6Node({
+      repoRoot,
+      resolvedEngines,
+      skipProbes: options.skipProbes,
+    });
+    errors.push(...stp6.errors);
+  }
+
+  if (nodeId === "STP7") {
+    const stp7 = await evaluateStp7Node({
+      repoRoot,
+      resolvedEngines,
+      skipProbes: options.skipProbes,
+      runnable,
+    });
+    errors.push(...stp7.errors);
   }
 
   return summarize({
@@ -857,7 +1761,168 @@ export async function verifyNode(options) {
     repoRoot,
     inventory,
     methodology,
+    nodeManifest: nodeLoad.manifest,
+    capabilityRows,
   });
+}
+
+export function probeMapperHost(engine, { helpTextHasMapperHost }) {
+  const id = engine?.id || "unknown";
+  const version = engine?.version || "unknown";
+  if (!engine?.executable) {
+    return {
+      present: false,
+      performed: false,
+      method: null,
+      evidence: `${id}@${version} mapper-host probe skipped: no executable`,
+    };
+  }
+  const spawned =
+    engine.kind === "native"
+      ? spawnSync(engine.executable, ["--help"], {
+          encoding: "utf8",
+          windowsHide: true,
+          timeout: 20000,
+        })
+      : spawnSync(process.execPath, [engine.executable, "--help"], {
+          encoding: "utf8",
+          windowsHide: true,
+          timeout: 20000,
+        });
+  if (spawned.error && !spawned.stdout && !spawned.stderr) {
+    return {
+      present: false,
+      performed: false,
+      method: "tsc --help",
+      evidence: `${id}@${version} tsc --help probe failed: ${spawned.error.message}`,
+    };
+  }
+  const text = `${spawned.stdout || ""}${spawned.stderr || ""}`;
+  const present = helpTextHasMapperHost(text);
+  return {
+    present,
+    performed: true,
+    method: "tsc --help",
+    evidence: present
+      ? "executable-selected-build"
+      : `${id}@${version} tsc --help has no content mapper host (--runExternalCode / contentMappers)`,
+  };
+}
+
+function observationFromRun(run) {
+  return {
+    diagnostics: (run?.negative?.diags || []).length > 0,
+    hover: Boolean(run?.positive?.observations?.hover),
+    definition: Boolean(run?.positive?.observations?.definition),
+    references: (run?.positive?.observations?.references || 0) > 0,
+    edits: (run?.positive?.observations?.edits || []).length > 0,
+  };
+}
+
+async function evaluateStp7Node({ repoRoot, resolvedEngines, skipProbes, runnable }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STP7/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  const errors = [];
+  if (skipProbes) {
+    const stp7 = await protocol.evaluateStp7();
+    errors.push(...stp7.errors);
+    return { errors };
+  }
+  if (!runnable) {
+    errors.push(err("STP7-svelte-shape", "missing-probes", "STP7 omitted runnable probes"));
+    return { errors };
+  }
+  if (resolvedEngines.length === 0) {
+    errors.push(
+      err("STP7-svelte-shape", "missing-probes", "STP7 selected zero engines for boundary proof"),
+    );
+    return { errors };
+  }
+  const jsEngine = resolvedEngines.find((engine) => engine.kind === "javascript");
+  if (!jsEngine) {
+    errors.push(
+      err(
+        "STP7-realm",
+        "missing-js-engine",
+        "STP7 live same-program ambient-leak check needs a javascript-kind engine; " +
+          "run with --engine all instead of silently skipping assertRealmLeak",
+      ),
+    );
+    return { errors };
+  }
+  const ts = loadJsTypeScript(jsEngine, repoRoot);
+  const stp7 = await protocol.evaluateStp7({ ts });
+  errors.push(...stp7.errors);
+  return { errors };
+}
+
+async function evaluateStp5Node({ repoRoot, resolvedEngines, harnessRuns, skipProbes, runnable }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STP5/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  const errors = [];
+  if (skipProbes) {
+    errors.push(...protocol.assertEncodingIdentity());
+    errors.push(...protocol.assertCleanGeometry());
+    errors.push(...protocol.evaluateRejectTwins());
+    errors.push(...protocol.validateStp5Products());
+    return { errors, capabilityRows: [] };
+  }
+  if (!runnable) {
+    errors.push(err("STP5-capability", "missing-probes", "STP5 omitted runnable probes"));
+    return { errors, capabilityRows: [] };
+  }
+  if (resolvedEngines.length === 0) {
+    errors.push(
+      err("STP5-capability", "missing-probes", "STP5 selected zero engines for capability rows"),
+    );
+    return { errors, capabilityRows: [] };
+  }
+  const engines = resolvedEngines.map((engine) => {
+    const probe = probeMapperHost(engine, protocol);
+    const run = harnessRuns.find((row) => row.engine === engine.id);
+    return {
+      mapperHostPresent: probe.present,
+      mapperHostEvidence: probe.evidence,
+      observation: observationFromRun(run),
+      engineId: engine.id,
+      engineVersion: engine.version,
+    };
+  });
+  const stp5 = await protocol.evaluateStp5({ engines });
+  errors.push(...stp5.errors);
+  return { errors, capabilityRows: stp5.capabilityRows };
+}
+
+async function evaluateStp6Node({ repoRoot, resolvedEngines, skipProbes }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STP6/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  const jsPin = resolvedEngines.find((engine) => engine.kind === "javascript");
+  let ts = null;
+  if (jsPin) {
+    ts = loadJsTypeScript(jsPin, repoRoot);
+  }
+  const stp6 = await protocol.evaluateStp6({
+    ts,
+    repoRoot,
+    skipLive: skipProbes || !ts,
+  });
+  const errors = [...stp6.errors];
+  if (!skipProbes && !ts) {
+    errors.push(
+      err(
+        "STP6-resolution",
+        "missing-probes",
+        "STP6 live packed-consumer resolution needs the ts-js engine",
+      ),
+    );
+  }
+  return { errors };
 }
 
 function summarize({
@@ -869,19 +1934,53 @@ function summarize({
   repoRoot,
   inventory,
   methodology,
+  nodeManifest,
+  capabilityRows = [],
 }) {
   const ok = errors.length === 0;
+  const required = mandatoryCasesFor(nodeManifest || { node: options.node });
   const selectedCaseIds = new Set(selected);
   if (ok) {
-    for (const id of MANDATORY_CASES) selectedCaseIds.add(id);
+    for (const id of required) selectedCaseIds.add(id);
   } else {
     for (const error of errors) selectedCaseIds.add(error.caseId);
   }
   const probeSizes = {};
-  for (const rel of [
+  const probeFiles = [
+    nodeManifest?.probes?.positive,
+    nodeManifest?.probes?.negative,
     "tests/sfc-projection/STP1/probes/positive.ts",
     "tests/sfc-projection/STP1/probes/negative.ts",
-  ]) {
+    "tests/sfc-projection/STP2/probes/accept-instance-concrete.ts",
+    "tests/sfc-projection/STP2/probes/accept-instance-generic.ts",
+    "tests/sfc-projection/STP2/probes/accept-instance-explicit.ts",
+    "tests/sfc-projection/STP2/probes/accept-constructor-inferred.ts",
+    "tests/sfc-projection/STP2/probes/accept-vue-utilities.tsx",
+    "tests/sfc-projection/STP2/probes/reject-not-callable.ts",
+    "tests/sfc-projection/STP2/probes/reject-constructor-escape-clean.ts",
+    "tests/sfc-projection/STP2/probes/reject-explicit-input-mismatch.ts",
+    "tests/sfc-projection/STP3/probes/accept-coupled.ts",
+    "tests/sfc-projection/STP3/probes/reject-wrong-channel.ts",
+    "tests/sfc-projection/STP3/probes/reject-inference-only-split.ts",
+    "tests/sfc-projection/STP3/probes/reject-order-independent.ts",
+    "tests/sfc-projection/STP3/probes/reject-ordered-merge.ts",
+    "tests/sfc-projection/STP3/probes/reject-fresh-uses.ts",
+    "tests/sfc-projection/STP4/probes/accept-js-unchecked.ts",
+    "tests/sfc-projection/STP4/probes/accept-js-checked.ts",
+    "tests/sfc-projection/STP4/probes/accept-tsx-authored.tsx",
+    "tests/sfc-projection/STP4/probes/reject-supplemental-import.ts",
+    "tests/sfc-projection/STP4/probes/accept-external-owner.ts",
+    "tests/sfc-projection/STP4/probes/reject-illegal-vue.ts",
+    "tests/sfc-projection/STP6/probes/accept-package-instance.ts",
+    "tests/sfc-projection/STP6/probes/accept-package-generics.ts",
+    "tests/sfc-projection/STP6/probes/accept-decl-map.ts",
+    "tests/sfc-projection/STP6/probes/accept-resolution.ts",
+    "tests/sfc-projection/STP6/probes/reject-hidden-metadata.ts",
+    "tests/sfc-projection/STP6/probes/reject-closure.ts",
+    "tests/sfc-projection/STP7/probes/positive.ts",
+    "tests/sfc-projection/STP7/probes/negative.ts",
+  ].filter(Boolean);
+  for (const rel of probeFiles) {
     const abs = repoPath(repoRoot, rel);
     if (fs.existsSync(abs)) probeSizes[rel] = fs.statSync(abs).size;
   }
@@ -894,7 +1993,7 @@ function summarize({
     platform: `${os.platform()}-${os.arch()}`,
     inputRevision: inputRevision(repoRoot),
     selectedCaseIds: [...selectedCaseIds],
-    mandatoryCases: [...MANDATORY_CASES],
+    mandatoryCases: required,
     engines: resolvedEngines.map((engine) => ({
       id: engine.id,
       label: engine.label,
@@ -920,6 +2019,7 @@ function summarize({
       checkCounts: run.checkCounts,
     })),
     errors,
+    capabilityRows,
   };
 }
 
@@ -927,15 +2027,22 @@ export function selectedCaseIds(result) {
   return [...(result.selectedCaseIds || [])];
 }
 
-const HELP = `ProjectionProbeRunner — STP1 feature inventory and engine probe harness
+const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary)
 
 USAGE
-  node scripts/sfc-projection/verify-node.mjs --node STP1 [--engine all|ts-js|ts-native] [--require-all] [--json]
+  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
 vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted
 executable under the same engine label, omitted probes, non-exact type matches,
-missing references, and duplicate file checks.
+missing references, and duplicate file checks. STP5 additionally rejects Alias
+rename codecs, query-snapshot reuse, Verter-as-stock-CLI claims, duplicate
+guards, version-label capability, and dormant-product complete claims. STP6
+rejects unpublished-metadata precision and private virtual declaration paths.
+STP7 rejects Vue-constructor shims on Svelte Component, Vue-only shared records,
+one-way hole maps, same-program ambient-isolation claims, and full Astro/MDX/Lit
+support advertisements; its live realm check requires a javascript-kind engine,
+so a native-only --engine selection is rejected rather than skipped.
 `;
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -949,7 +2056,7 @@ if (isMain) {
   if (args.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   else if (result.ok) {
     process.stdout.write(
-      `STP1 verify: PASS cases=${result.selectedCaseIds.join(",")} engines=${result.engines
+      `${result.node} verify: PASS cases=${result.selectedCaseIds.join(",")} engines=${result.engines
         .map((engine) => `${engine.id}:${posix(engine.executable)}`)
         .join(",")}\n`,
     );

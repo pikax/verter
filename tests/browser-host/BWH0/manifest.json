@@ -1,0 +1,90 @@
+{
+  "node": "BWH0",
+  "kind": "constitution",
+  "products": [
+    "BrowserExecutionManifest v1",
+    "PlatformHostServices",
+    "BrowserCompatibilityMatrix",
+    "Dependency-closure inventory",
+    "contracts/browser-execution.md",
+    "plans/expansion-browser-host.md"
+  ],
+  "cases": [
+    {
+      "id": "BWH0-AC1",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "native-import-allowed",
+        "forbidden-crate-declared",
+        "session-native-gates-lost",
+        "false-native-import",
+        "missing-closure-census",
+        "closure-evidence-missing"
+      ]
+    },
+    {
+      "id": "BWH0-AC2",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "isolation-required",
+        "sab-prerequisite",
+        "threaded-wasm-prerequisite",
+        "missing-baseline",
+        "engine-isolation-required",
+        "live-isolation-usage",
+        "production-isolation-unrecorded",
+        "production-isolation-drift",
+        "production-isolation-prerequisite"
+      ]
+    },
+    {
+      "id": "BWH0-AC3",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "wasm-build-claimed-semantic-proof",
+        "tsgo-browser-admitted",
+        "unqualified-ts-authority",
+        "fail-closed-regression"
+      ]
+    },
+    {
+      "id": "BWH0-ratification",
+      "disposition": "accept",
+      "twins": [
+        "clean products",
+        "missing-contract-marker",
+        "missing-plan",
+        "native-only-admission",
+        "unblocked-native-gap",
+        "class-vocabulary-drift",
+        "missing-service-class",
+        "seam-fact-drift",
+        "missing-receiver",
+        "unregistered-conflict-domain",
+        "ledger-row-missing",
+        "missing-boundary-row",
+        "missing-admitted-row",
+        "id-vocabulary-drift",
+        "dx0-join-missing",
+        "dx0-class-drift",
+        "dx0-rail-drift",
+        "dx0-admission-drift",
+        "dx0-coverage-drift",
+        "dx0-side-drift",
+        "dx0-merge-hidden",
+        "dx0-merge-drift",
+        "dx0-merge-pin-drift",
+        "missing-receipt-basis",
+        "receipt-basis-field-missing",
+        "receipt-basis-engine-drift",
+        "missing-substrate-export",
+        "substrate-evidence-missing"
+      ]
+    }
+  ],
+  "runtimeCorrectness": false,
+  "notes": "Contract/inventory node: 0 production LOC. BWH0-AC1's build-blocking predicate is validated against declared wasm32 dependency edges and target gates (live-read manifests and seam sources); BWH1 owns the recurring semantic-host build proof that re-runs the closure census (cargo tree command recorded in the inventory product). BWH0-AC-BASIS: no caching/mapping/snapshot behavior changes here; incremental-vs-fresh runtime comparisons are bound to BWH1 (build proof) and BWH8 (browser cache/artifact integrity) as downstream test owners. BWH0-AC-RESOURCE: no hot paths or UI touched; the WSP equal-work obligation binds to BWH11/VSW5 for real-client claims. BWH0-AC-EXPOSURE: DX1 owns the registration schema; every operation this train exposes supplies DX1 registration, executable playground adapter and replay case before promotion. The harness grounds itself in the live repository (authority DAG, conflict-domain catalog, implementation ledger, wasm/session manifests, platform seam sources, playground engine pins, isolation-free sources and the deployed netlify.toml isolation headers) and joins every manifest row to the DX0 feature-exposure-contract (id, hostExecutionClass, answerRail, browserExecutable, and the playground.unlabelledAnalysisMerge/promotionBlocked pin on admitted rows) and the DX0 ProductReceiptBasis field set, so drift in any of them is a failing case, not a stale pass."
+}

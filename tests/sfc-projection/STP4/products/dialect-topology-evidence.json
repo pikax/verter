@@ -1,0 +1,87 @@
+{
+  "schema": "DialectTopologyEvidence",
+  "version": 1,
+  "product": "DialectTopologyEvidence",
+  "node": "STP4",
+  "kind": "proof",
+  "vue": { "package": "vue", "version": "3.6.0-rc.5", "source": "package.json" },
+  "constructorSpelling": "declare class Comp { constructor(props?: { count?: number | string }) }",
+  "dialects": [
+    { "id": "ts", "lang": "ts", "case": "STP4-external-owner" },
+    { "id": "tsx", "lang": "tsx", "case": "STP4-tsx-authored" },
+    { "id": "js", "lang": "js", "case": "STP4-js-checked" },
+    { "id": "jsx", "lang": "jsx", "case": "STP4-tsx-authored" }
+  ],
+  "checkJs": [
+    {
+      "id": "off",
+      "policy": "@ts-nocheck",
+      "scriptDiagnostics": "suppressed",
+      "templateDiagnostics": "reported",
+      "case": "STP4-js-unchecked"
+    },
+    {
+      "id": "on",
+      "policy": "@ts-check",
+      "scriptDiagnostics": "reported",
+      "templateDiagnostics": "reported",
+      "sourceAnchors": "owning-file",
+      "case": "STP4-js-checked"
+    }
+  ],
+  "allowJs": true,
+  "jsdocGenerics": true,
+  "angleAssertions": {
+    "ts": "no-jsx-rewrite",
+    "tsx": "jsx"
+  },
+  "cases": [
+    {
+      "id": "STP4-js-unchecked",
+      "disposition": "accept",
+      "observables": ["nocheck-script", "template-TS2322"]
+    },
+    {
+      "id": "STP4-js-checked",
+      "disposition": "accept",
+      "observables": ["checkJs-script-TS2322", "template-TS2322", "JSDoc-generic"]
+    },
+    {
+      "id": "STP4-tsx-authored",
+      "disposition": "accept",
+      "observables": ["authored-tsx", "ts-angle-assertion", "jsx-dialect"]
+    },
+    {
+      "id": "STP4-supplemental-import",
+      "disposition": "reject",
+      "reason": "compiler-named-supplemental-is-not-a-public-module",
+      "observables": ["TS2306-not-a-module", "public-.vue-import"]
+    },
+    {
+      "id": "STP4-external-owner",
+      "disposition": "accept",
+      "observables": ["OwnerA", "OwnerB", "shared-logic-identity", "checked-once"]
+    },
+    {
+      "id": "STP4-illegal-vue",
+      "disposition": "reject",
+      "reason": "script-setup-src-framework-legality",
+      "observables": ["TS2307-no-projection", "generated-ts-accepted"]
+    }
+  ],
+  "forbidden": [
+    "supplemental-named-import-target",
+    "shared-lexical-scope-across-modules",
+    "duplicate-script-body-checker",
+    "script-setup-src-accepted-because-tsc-accepts-generated",
+    "per-fixture-compiler-options",
+    "jsx-rewrite-of-ts-angle-assertions"
+  ],
+  "productionOwner": "STP12",
+  "abiOwner": "STP8",
+  "ac3UntouchedOwners": ["B4R0", "LSO0", "CCA1J", "TCM0R"],
+  "ac3Rationale": "Proof fixtures and harness observations only. Incremental=fresh and stale/cancelled publication for production projection remain with B4R0 lineage, LSO snapshot publication, CCA1J projection route, and TCM0R observation identity.",
+  "ac4UntouchedOwners": ["CCA1J", "CCA1H"],
+  "ac4Rationale": "STP4 does not change production projection hot paths. Bounded parse/check/emit stays with the existing ProjectionBackend route. One program checks an external script once under its source identity.",
+  "timingClaim": "none"
+}

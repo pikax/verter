@@ -16,6 +16,8 @@ Runs on push to `main` and on pull requests. Uses [dorny/paths-filter](https://g
 - **Proto changes** -- `proto-fmt` regenerates with the pinned `buf`/`oxfmt` tools and byte-compares the complete committed TypeScript binding tree
 - **JS changes** (`packages/**`, `package.json`, etc.) -- `js-build-test`
 - **WASM changes** (`crates/verter_compiler/**`, `crates/verter_wasm/**`) -- `wasm-build`
+- **Browser-host changes** (`packages/browser-host/**`, `scripts/browser-host-gate*.mjs`, `tests/browser-host/**`, plus the wasm filter) -- `browser-host` runs `node scripts/browser-host-gate.mjs --skip-build` after `wasm-build`: wasm32 census, native same-fixture probe, Chromium/Firefox/WebKit workers; missing browsers, exports, tests or empty operation arrays fail
+- **JetBrains plugin changes** (`extensions/jetbrains/**`, `scripts/jetbrains-gate*.mjs`, `tests/jetbrains-product/**`) -- `jetbrains-plugin` runs `node scripts/jetbrains-gate.mjs` on a JDK 21 runner: the pinned Gradle build's real JVM tests (including JBT1H real-IDE capture hooks), the IntelliJ plugin verifier (every failure level, pinned WebStorm build only) and installable packaging, failing closed on missing JDK/SDK, build output or test evidence. The comparison recorder (`packages/dx-harness/jetbrains`) is typechecked and unit-tested on the `dx-harness-hermetic` lane; that job is the Node side of the jetbrains-product profile.
 
 Most jobs run independently. Core nextest alone consumes the shared archive.
 Real tsserver/tsgo provider tests run serially with libtest in their own jobs so
@@ -169,15 +171,74 @@ internal). `verter-tsc` is npm-only -- its only consumption path is `npx` inside
 a Node project, whereas `verter-lsp` and `verter-mcp` must be launchable by
 editors and agent hosts on machines with no Node at all.
 
+### Release IDE (`release-ide.yml`)
+
+The editor distribution's lane: every editor Verter supports, on one version,
+triggered by an `ide/v*` tag. It publishes the two halves of "using Verter in an
+editor":
+
+1. **The VS Code Marketplace.** Five platform VSIXes (linux x64/arm64, darwin
+   x64/arm64, win32 x64), each carrying its own `verter-lsp`, `verter-mcp` and
+   napi binding, packaged by the same `packages/vue-vscode/package.mjs` the
+   monorepo release uses and published with `vsce publish --packagePath` under
+   the `vscode-marketplace` environment (`verter.verter-vscode`).
+2. **Every other editor.** Helix, Zed, Lapce and nvim have no store between
+   them: they launch the engine directly. The GitHub Release for the tag carries
+   `verter-lsp-<platform>` and `verter-mcp-<platform>` for all seven targets —
+   including the two musl ones, which have no vsce target at all.
+
+**One version for all of them**, because every editor package is a launcher for
+the same `verter-lsp` build — the VSIX embeds it, the Zed extension and the
+Lapce volt spawn it, Helix and nvim run it directly. `ide/vX.Y.Z` is what makes
+"which engine is in my editor?" answerable, and
+`scripts/set-ide-version.mjs` writes that version into all three editor
+manifests: `packages/vue-vscode/package.json`, `extensions/zed/extension.toml`
+and `extensions/lapce/volt.toml`.
+
+Registry publication for Zed (`zed-industries/extensions`) and Lapce
+(plugins.lapce.dev) is a roadmap item in their READMEs. When it lands it is a
+job in this workflow, against this same tag — not a lane of its own.
+
+It validates that the tag agrees with the editor manifests before it builds
+anything, and `scripts/set-ide-version.mjs --check` refuses a prerelease version
+there and then: the Marketplace takes plain `MAJOR.MINOR.PATCH` and `vsce` would
+otherwise reject it an hour later, after seven cross-compiles.
+`workflow_dispatch` runs it as a rehearsal — everything is built and packaged,
+nothing is published, because the Marketplace has no unpublish.
+
+The relay shim is a VSIX internal and is deliberately **not** a release asset.
+The `verter-lsp` / `@verter/lsp-*` npm packages and the crates stay on the
+monorepo's version line and are published by `release.yml`.
+
 ### Release Tag (`release-tag.yml`)
 
-Triggered on every push to `main`. Turns a version commit into the tag that triggers `release.yml`:
+Triggered on every push to `main`. Turns a version commit into the tag that
+triggers that lane's release workflow. The **scope** of the release commit names
+the lane; `scripts/release-lanes.mjs` is the table of them, and the workflow
+itself is lane-agnostic:
 
-1. Exits cleanly unless the HEAD commit message matches `release: v<version>`
-2. Reads the workspace version from the tree and fails if it disagrees with the message
-3. Exits cleanly if the tag `v<version>` already exists (idempotency)
-4. Verifies the full release surface (`scripts/set-version.mjs --check` and `scripts/check-versions.mjs`)
-5. Creates and pushes the annotated tag `v<version>`
+| Commit subject                | Tag                 | Version source                     | Workflow             |
+| ----------------------------- | ------------------- | ---------------------------------- | -------------------- |
+| `release: v<version>`         | `v<version>`        | `Cargo.toml [workspace.package]`   | `release.yml`        |
+| `release(ide): v<version>`    | `ide/v<version>`    | the editor manifests               | `release-ide.yml`    |
+
+1. Exits cleanly unless the HEAD commit subject matches `release: v<version>` or
+   `release(<lane>): v<version>`
+2. Asks the lane table where that lane's version lives, reads it from the tree,
+   and fails if it disagrees with the message
+3. Exits cleanly if the lane's tag already exists (idempotency)
+4. Runs that lane's own verification — the monorepo's is
+   `scripts/set-version.mjs --check` plus `scripts/check-versions.mjs`; the
+   editors' is `scripts/set-ide-version.mjs --check`
+5. Creates and pushes the annotated tag
+
+A release commit naming a lane that does not exist **fails** rather than doing
+nothing: a typo'd scope is a release nobody notices never happened.
+
+Adding a lane — when a package moves onto its own version line — is an entry in
+`scripts/release-lanes.mjs` plus the workflow that listens on its tag. Nothing
+in `release-tag.yml` changes. `node scripts/release-lanes.mjs list` prints the
+current table.
 
 See [Publishing a Release](#publishing-a-release) for the full flow.
 
@@ -211,6 +272,14 @@ Pre-releases are published with `--tag <channel>` to avoid polluting the `latest
 
 ### Publishing a Release
 
+The repository publishes on two independent version lines — the monorepo
+(crates.io + npm) and the editor distribution (the Marketplace + the engine
+binaries every other editor launches) — and both follow the same shape: bump
+locally, push to `main`, `release-tag.yml` tags, the lane's workflow publishes.
+`node scripts/release-lanes.mjs list` prints them.
+
+#### The monorepo
+
 Releases start from a local version bump and end with an automatic tag:
 
 1. Run `pnpm bump`. The script computes the next version from the conventional
@@ -241,6 +310,42 @@ Releases start from a local version bump and end with an automatic tag:
    including the CHANGELOG commit the release workflow pushes — it is a no-op.
 6. The tag push triggers the `release.yml` workflow, which publishes
    everything.
+
+#### The editor distribution
+
+Every editor package ships on one version. `packages/vue-vscode` is
+`private: true` and `MARKETPLACE_ONLY` so it is not in the npm publish set, and
+the Zed/Lapce manifests are not npm packages at all — `pnpm bump` moves none of
+them:
+
+1. Run `pnpm bump:ide`. It computes the next version from the conventional
+   commits touching the editor payload (`crates/`, `packages/`, `extensions/`)
+   since the last `ide/v*` tag, or takes an explicit one:
+   `pnpm bump:ide -- 0.2.0`. `--dry-run` prints without changing anything. There
+   is no `--prerelease`: Marketplace versions are plain `MAJOR.MINOR.PATCH`, and
+   VS Code's own pre-release channel is an odd minor, which is just an explicit
+   version.
+2. It writes the version with `scripts/set-ide-version.mjs` into all three
+   editor manifests — `packages/vue-vscode/package.json` (from `MARKETPLACE_ONLY`
+   in `scripts/lib/publish-set.mjs`), `extensions/zed/extension.toml` and
+   `extensions/lapce/volt.toml` — verifies them, refuses a dirty tree and a
+   version that is not greater than the current one, and creates exactly one
+   commit: `release(ide): v<version>`. No tag, no push.
+3. Review the commit and push it to `main`.
+4. `release-tag.yml` tags `ide/v<version>`.
+5. The tag triggers `release-ide.yml`: the extension suite runs, seven LSP and
+   MCP targets and five napi targets are cross-compiled, five VSIXes are
+   packaged and published to the Marketplace, and the GitHub Release for the tag
+   carries the VSIXes plus the per-platform engine binaries every other editor
+   launches.
+
+The manifests were versioned separately before the lane existed (the extension
+at 0.0.2, the Zed extension and the Lapce volt at 0.1.0). `pnpm bump:ide` takes
+the **highest** of them as the current version and says so, so the first unified
+release moves all three forward and none of them backwards.
+
+To rehearse it without publishing, dispatch `release-ide.yml` manually — the dry
+run builds and packages everything and cannot reach the Marketplace.
 
 ### Publishing locally
 
@@ -329,11 +434,13 @@ native -> lsp -> wasm (bindgen + wasm-opt) -> ts packages
 
 ## Required GitHub Secrets
 
-| Secret                 | Purpose                              |
-| ---------------------- | ------------------------------------ |
-| `NETLIFY_AUTH_TOKEN`   | Netlify playground deployment        |
-| `NETLIFY_SITE_ID`      | Netlify site identification          |
-| `CARGO_REGISTRY_TOKEN` | crates.io publishing                 |
-| `NPM_TOKEN`            | npm publishing (with `--provenance`) |
+| Secret                  | Purpose                                                     |
+| ----------------------- | ----------------------------------------------------------- |
+| `NETLIFY_AUTH_TOKEN`    | Netlify playground deployment                               |
+| `NETLIFY_SITE_ID`       | Netlify site identification                                 |
+| `CARGO_REGISTRY_TOKEN`  | crates.io publishing                                        |
+| `NPM_TOKEN`             | npm publishing (with `--provenance`)                        |
+| `VSCE_PAT`              | VS Code Marketplace publishing (`verter.verter-vscode`)      |
+| `RELEASE_TAG_SSH_KEY`   | the deploy key `release-tag.yml` pushes tags with, so the tag push starts a release workflow (a push made with `GITHUB_TOKEN` never does) |
 
 The `GITHUB_TOKEN` is automatically provided for GitHub Release creation, nightly asset management, and PR comments.

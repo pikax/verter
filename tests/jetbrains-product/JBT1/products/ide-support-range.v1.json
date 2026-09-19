@@ -1,0 +1,47 @@
+{
+  "id": "ide-support-range.v1",
+  "schema": 1,
+  "node": "JBT1",
+  "charterSource": "JBT1.3: declare supported IDE editions/build ranges from JBT0; unsupported editions are not claimed",
+  "basis": "JBT0 pins official WebStorm (recommended-default mode) as the comparator product; this declaration claims build support for that product's pinned branch only. Comparator capture pins (installed build, bundled plugins, engine identity) stay JBT1H pending-capture slots and are NOT claimed here.",
+  "pluginId": "com.verter.jetbrains",
+  "supportedEditions": [
+    {
+      "product": "WebStorm",
+      "productCode": "WS",
+      "sdkVersion": "2026.2.3",
+      "buildNumber": "262.10968.77",
+      "sinceBuild": "262.10968",
+      "untilBuild": "262.*",
+      "rangeBasis": "the 2026.2 bugfix branch of the pinned build; patch releases within the branch do not change the platform API surface, and every build outside it is unsupported"
+    }
+  ],
+  "unsupportedEditionsNotClaimed": [
+    "WebStorm builds before 262.10968 and every non-2026.2 platform branch",
+    "IntelliJ IDEA Community",
+    "IntelliJ IDEA Ultimate",
+    "PhpStorm",
+    "PyCharm",
+    "Rider",
+    "Android Studio",
+    "every other IntelliJ-Platform product"
+  ],
+  "rules": [
+    "The plugin builds, tests, verifies and packages against the pinned edition only; a green gate on any other edition is not claimed and must not be reported as support.",
+    "The declared range lives in exactly two repository places that must agree: this file and extensions/jetbrains/gradle.properties; scripts/jetbrains-gate.mjs fails the gate on drift between them, and the build itself refuses a platformType that is not WS.",
+    "Widening the range or adding an edition requires new plugin-verifier evidence for every added edition before the claim exists (JBT1-AC3).",
+    "This declaration claims build support only; comparator measurement, real-IDE capture and install/boot evidence belong to the JBT1H harness."
+  ],
+  "repositoryPins": {
+    "gradleProperties": "extensions/jetbrains/gradle.properties",
+    "buildDefinition": "extensions/jetbrains/build.gradle.kts",
+    "packagedDescriptor": "META-INF/plugin.xml inside the buildPlugin distribution (since-build/until-build patched from gradle.properties at build time)",
+    "gate": "scripts/jetbrains-gate.mjs"
+  },
+  "evidence": [
+    "tests/jetbrains-baseline/JBT0/products/jetbrains-baseline-manifest.v1.json",
+    "extensions/jetbrains/gradle.properties",
+    "extensions/jetbrains/build.gradle.kts",
+    "scripts/jetbrains-gate.mjs"
+  ]
+}
