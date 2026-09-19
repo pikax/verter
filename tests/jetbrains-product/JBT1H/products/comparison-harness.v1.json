@@ -46,7 +46,7 @@
   },
   "receiptBasis": {
     "reuses": "ProductReceiptBasis v1 (DX0)",
-    "freshVsIncremental": "same sourceRevisions, projectConfiguration, engineIdentity and hostIdentity; mismatched basis is not comparable"
+    "freshVsIncremental": "all five basis fields equal: sourceRevisions, projectConfiguration, engineIdentity, hostIdentity and completenessState; a mismatch in any field is not comparable (matching non-complete states stay comparable; only publishing them as complete is forbidden)"
   },
   "evidence": [
     "packages/dx-harness/jetbrains/index.ts",
