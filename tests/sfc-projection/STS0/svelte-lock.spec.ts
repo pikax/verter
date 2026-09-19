@@ -127,6 +127,16 @@ test("STS0-policy-lock: every supported profile has explicit checking and publis
     assertPolicyLock(droppedUncheckedLegacy).some((error) => error.code === "missing-policy"),
     "deleting the unchecked legacy-JS instance profile was not rejected",
   );
+  const relabeledLegacy = cloneJson(POLICY());
+  const relabeledLegacyRow = relabeledLegacy.profiles.find(
+    (row) => row.id === "svelte-ts-instance-legacy",
+  );
+  assert.ok(relabeledLegacyRow, "legacy instance profile row must exist");
+  relabeledLegacyRow.semantics = "runes";
+  assert.ok(
+    assertPolicyLock(relabeledLegacy).some((error) => error.code === "mode-mismatch"),
+    "relabeling a legacy instance profile as runes was not rejected for a mode mismatch",
+  );
 });
 
 test("STS0-policy-lock: runes selection and refusals join the official options population", () => {
@@ -320,6 +330,18 @@ test("STS0-svelte-inventory: mode-shared features stay both and legacy-only stay
   assert.ok(
     assertModeClassification(legacyAsBoth).some((error) => error.code === "mode-misclassified"),
     "marking export let mode-shared was not rejected",
+  );
+  const functionShapeAsRunes = cloneJson(INVENTORY());
+  const functionShapeRow = functionShapeAsRunes.rows.find(
+    (row) => row.id === "component-function-shape",
+  );
+  assert.ok(functionShapeRow, "component-function-shape row must exist");
+  functionShapeRow.semantics = "runes";
+  assert.ok(
+    assertModeClassification(functionShapeAsRunes).some(
+      (error) => error.code === "mode-misclassified",
+    ),
+    "classifying the Svelte 5 function component ABI as runes-only was not rejected",
   );
   // Historical family naming must not force the legal-mode classification.
   const clean = assertSvelteInventory(INVENTORY());

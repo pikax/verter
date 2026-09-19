@@ -562,7 +562,7 @@
     {
       "id": "component-function-shape",
       "family": "component",
-      "semantics": "runes",
+      "semantics": "both",
       "requiredCurrent": true,
       "path": "tests/sfc-projection/STS0/probes/positive.ts",
       "surface": "probe-fixture"
@@ -576,5 +576,5 @@
       "surface": "conformance-fixture"
     }
   ],
-  "notes": "Historical feature families (the legacy- id prefix) are naming only; legal-mode support is carried per row by semantics, pinned by the mode-paired compiler controls under probes/modes/. Store auto-subscription, transitions/actions/animate, snippets, event attributes, attachments and the class/style directives are mode-shared (semantics both); the on:click directive and <slot> outlets are legal in BOTH modes and merely deprecated in runes mode (event_directive_deprecated / slot_element_deprecated), which the controls keep distinct from genuine unsupported-mode rejection; export let stays legacy-only (legacy_export_invalid in runes mode). A rune mislabeled as legacy fails STS0-svelte-inventory. Population recordedRows are recorded import evidence, never an acceptance gate: completeness is identity-based only. selectedMembers join imported fixtures, official suites and the pinned benchmark smoke inventory to mandatory owning rows, and every RequiredCurrent feature row must keep at least one selected member citing it as owner, so no selected population (official, css, compiler, harness, benchmarks) can silently lose its ownership joins."
+  "notes": "Historical feature families (the legacy- id prefix) are naming only; legal-mode support is carried per row by semantics, pinned by the mode-paired compiler controls under probes/modes/. Store auto-subscription, transitions/actions/animate, snippets, event attributes, attachments, the class/style directives and the Svelte 5 function component ABI are mode-shared (semantics both); the on:click directive and <slot> outlets are legal in BOTH modes and merely deprecated in runes mode (event_directive_deprecated / slot_element_deprecated), which the controls keep distinct from genuine unsupported-mode rejection; export let stays legacy-only (legacy_export_invalid in runes mode). A rune mislabeled as legacy fails STS0-svelte-inventory. Population recordedRows are recorded import evidence, never an acceptance gate: completeness is identity-based only. selectedMembers join imported fixtures, official suites and the pinned benchmark smoke inventory to mandatory owning rows, and every RequiredCurrent feature row must keep at least one selected member citing it as owner, so no selected population (official, css, compiler, harness, benchmarks) can silently lose its ownership joins."
 }

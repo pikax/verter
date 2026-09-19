@@ -29,6 +29,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use serde_json::Value;
+use verter_compiler::compile_request::svelte::SvelteRunesRequest;
 use verter_compiler::compile_request::{
     CompileProduct, CompileRequest, FrameworkCompileRequest, IdeProductRequest,
     SvelteCompileRequest,
@@ -268,6 +269,7 @@ struct ProfileRow {
     publishing: String,
     evidence_path: String,
     published_symbols: Vec<String>,
+    semantics: String,
 }
 
 fn load_profile_rows() -> Vec<ProfileRow> {
@@ -289,6 +291,7 @@ fn load_profile_rows() -> Vec<ProfileRow> {
             checking: row["checking"].as_str().unwrap_or_default().to_string(),
             publishing: row["publishing"].as_str().unwrap_or_default().to_string(),
             evidence_path: row["evidencePath"].as_str().unwrap_or_default().to_string(),
+            semantics: row["semantics"].as_str().unwrap_or_default().to_string(),
             published_symbols: row["publishedSymbols"]
                 .as_array()
                 .map(|symbols| {
@@ -364,10 +367,21 @@ fn ide_grant() -> ProductExecutionGrant {
         .expect("the projection leg was admitted")
 }
 
-fn ide_only_request(filename: &str) -> CompileRequest {
+fn runes_request(semantics: &str) -> Option<SvelteRunesRequest> {
+    match semantics {
+        "runes" => Some(SvelteRunesRequest::True),
+        "legacy" => Some(SvelteRunesRequest::False),
+        _ => Some(SvelteRunesRequest::Infer),
+    }
+}
+
+fn ide_only_request(filename: &str, semantics: &str) -> CompileRequest {
     CompileRequest::new(
         vec![CompileProduct::IdeCompanion(IdeProductRequest::default())],
-        FrameworkCompileRequest::Svelte(SvelteCompileRequest::default()),
+        FrameworkCompileRequest::Svelte(SvelteCompileRequest {
+            runes: runes_request(semantics),
+            ..Default::default()
+        }),
         None,
         Some(filename.to_string()),
         None,
@@ -379,14 +393,14 @@ fn ide_only_request(filename: &str) -> CompileRequest {
 
 /// Project a `.svelte` source through the OWNED CCA1I backend and return the
 /// real generated carrier (code, is_jsx).
-fn project_through_owned_backend(source: &str) -> (String, bool) {
+fn project_through_owned_backend(source: &str, semantics: &str) -> (String, bool) {
     let artifact = svelte_artifact("file:///sts0-profile.svelte", source);
     let companion = SvelteProjectionBackend
         .project_ide(
             ide_grant(),
             source,
             &artifact,
-            &ide_only_request("Sts0Profile.svelte"),
+            &ide_only_request("Sts0Profile.svelte", semantics),
             &SvelteProjectionInputs,
         )
         .unwrap_or_else(|e| panic!("the owned backend must project the profile fixture: {e:?}"));
@@ -443,7 +457,7 @@ fn carrier_for(row: &ProfileRow) -> CarrierSpec {
 fn carrier_from_evidence(row: &ProfileRow, evidence: String) -> CarrierSpec {
     let check_js = row.checking == "engine-checked" && row.dialect == "js";
     if row.file_kind == ".svelte" {
-        let (code, is_jsx) = project_through_owned_backend(&evidence);
+        let (code, is_jsx) = project_through_owned_backend(&evidence, &row.semantics);
         let ext = if is_jsx { "jsx" } else { "tsx" };
         CarrierSpec {
             entry: format!("Sts0{}.svelte.{ext}", slug(&row.id)),
@@ -574,6 +588,7 @@ fn run_engine(
     "jsxImportSource": "vue",
     "strict": true,
     "skipLibCheck": true,
+    "pretty": false,
     "allowImportingTsExtensions": true,{js_opts}{check_opts}{decl_opts}
     "paths": {{
       "@verter/svelte-jsx/jsx-runtime": ["{shim}/jsx-runtime.d.ts"],
@@ -601,6 +616,8 @@ fn run_engine(
             .arg(launcher)
             .arg("-p")
             .arg(&project)
+            .arg("--pretty")
+            .arg("false")
             .current_dir(root)
             .output()
             .unwrap_or_else(|e| panic!("run {} through node: {e}", engine.label))
@@ -608,6 +625,8 @@ fn run_engine(
         Command::new(launcher)
             .arg("-p")
             .arg(&project)
+            .arg("--pretty")
+            .arg("false")
             .current_dir(root)
             .output()
             .unwrap_or_else(|e| panic!("run {} directly: {e}", engine.label))
@@ -645,6 +664,35 @@ fn gather_declarations(dir: &Path, out: &mut String) {
             out.push('\n');
         }
     }
+}
+
+/// A publication-rename twin holds only when the renamed program still
+/// checks *and* the old spelling is gone. An unrelated diagnostic that
+/// emits no/partial declarations cannot satisfy the experiment.
+fn publication_rename_holds(run: &EngineRun, old_symbol: &str) -> bool {
+    run.ok && !names_symbol(&run.declaration_text, old_symbol)
+}
+
+#[test]
+fn publication_rename_does_not_pass_on_unrelated_check_failure() {
+    let unrelated = EngineRun {
+        ok: false,
+        output: "error TS2322: Type 'string' is not assignable to type 'number'.\n".to_string(),
+        declaration_text: String::new(),
+    };
+    assert!(
+        !publication_rename_holds(&unrelated, "moduleAnswer"),
+        "an unrelated diagnostic that emits no declarations must not satisfy the publication-rename twin"
+    );
+    let renamed = EngineRun {
+        ok: true,
+        output: String::new(),
+        declaration_text: "export declare const moduleAnswer__sts0_removed: number;\n".to_string(),
+    };
+    assert!(
+        publication_rename_holds(&renamed, "moduleAnswer"),
+        "a clean renamed program that dropped the old spelling must satisfy the publication-rename twin"
+    );
 }
 
 /// Whether `text` carries `symbol` as a whole identifier (a renamed
@@ -984,10 +1032,11 @@ fn publication_surfaces_publish_and_survive_renames_on_both_claimed_engines() {
                             return;
                         };
                         assert!(
-                            !names_symbol(&run.declaration_text, &symbol),
-                            "renaming export {symbol} must remove it from the emitted declarations of profile {} on {}:\n{}",
+                            publication_rename_holds(&run, &symbol),
+                            "renaming export {symbol} must still check and drop the old spelling from the emitted declarations of profile {} on {}:\n{}\n--- declarations:\n{}",
                             row.id,
                             engine.label,
+                            run.output,
                             run.declaration_text
                         );
                     }

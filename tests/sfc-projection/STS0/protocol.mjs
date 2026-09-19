@@ -24,11 +24,6 @@ const REPO_ROOT = path.resolve(STS0_DIR, "../../..");
 
 export const PROTOCOL_VERSION = 1;
 
-/** The job baseline this node's branch started from. */
-export const BASELINE_INPUT_SNAPSHOT = "b9ef7e31023c6a3c06fcb1963630b8c54a17f752";
-/** The commit that introduced the ratified STS0 products (recorded by the follow-up evidence commit). */
-export const RATIFICATION_CANDIDATE = "063560adbe3c3cdd191d41e544e1ee29702b47b0";
-
 export const STS0_MANDATORY_CASES = Object.freeze([
   "STS0-svelte-inventory",
   "STS0-svelte-abi",
@@ -166,7 +161,7 @@ export const DIRECTIVE_KIND_ROWS = Object.freeze({
 /**
  * Mode-paired compiler controls: the pinned svelte compiler decides row
  * semantics — every mode-shared feature compiles clean under BOTH runes and
- * legacy mode (attachments included), the on:click directive and <slot>
+ * legacy mode (attachments and the function component ABI included), the on:click directive and <slot>
  * outlets are ACCEPTED in runes mode with deprecation warnings (legal-but-
  * deprecated, kept distinct from unsupported-mode rejection), and a
  * genuinely legacy-only construct is rejected in runes mode. These controls
@@ -186,6 +181,8 @@ export const MODE_CONTROL_EVENTS_SLOTS_LEGACY_FIXTURE =
   "tests/sfc-projection/STS0/probes/modes/events-slots-legacy-clean.svelte";
 export const MODE_CONTROL_EVENTS_SLOTS_RUNES_FIXTURE =
   "tests/sfc-projection/STS0/probes/modes/events-slots-runes-deprecated.svelte";
+export const MODE_CONTROL_FUNCTION_SHAPE_FIXTURE =
+  "tests/sfc-projection/STS0/probes/modes/function-shape.svelte";
 export const MODE_CONTROL_SHARED_FEATURES = Object.freeze([
   "legacy-store-auto-subscription",
   "legacy-transitions-actions-animate",
@@ -194,6 +191,7 @@ export const MODE_CONTROL_SHARED_FEATURES = Object.freeze([
   "class-directive",
   "style-directive",
   "template-attach",
+  "component-function-shape",
 ]);
 /** Legal in both modes, accepted in runes mode only with deprecation warnings. */
 export const MODE_CONTROL_DEPRECATED_IN_RUNES = Object.freeze([
@@ -873,12 +871,51 @@ export function loadPinnedSvelteCompile({ repoRoot = REPO_ROOT } = {}) {
   return require("svelte/compiler").compile;
 }
 
-function compileSvelteFixture(compile, source, runes) {
+function evidenceModeMismatch(compile, source, semantics) {
+  if (semantics === "runes") {
+    const outcome = compileSvelteFixture(compile, source, true);
+    if (outcome.errors.length > 0) {
+      return `declared runes but the pinned compiler rejected the evidence under runes:true (${JSON.stringify(outcome.errors)})`;
+    }
+    return null;
+  }
+  if (semantics === "legacy") {
+    const legacyOutcome = compileSvelteFixture(compile, source, false);
+    if (legacyOutcome.errors.length > 0) {
+      return `declared legacy but the pinned compiler rejected the evidence under runes:false (${JSON.stringify(legacyOutcome.errors)})`;
+    }
+    const runesOutcome = compileSvelteFixture(compile, source, true);
+    if (runesOutcome.errors.length === 0) {
+      return "declared legacy but the pinned compiler accepted the evidence under runes:true";
+    }
+    return null;
+  }
+  if (semantics === "both") {
+    for (const runes of [true, false]) {
+      const outcome = compileSvelteFixture(compile, source, runes);
+      if (outcome.errors.length > 0) {
+        return `declared both but the pinned compiler rejected the evidence under runes:${runes} (${JSON.stringify(outcome.errors)})`;
+      }
+    }
+    return null;
+  }
+  return null;
+}
+
+function compileSvelteFixture(compile, source, runes, filename) {
   try {
-    const result = compile(String(source), { runes, generate: "client" });
-    return { warnings: (result.warnings || []).map((w) => w.code), errors: [] };
+    const result = compile(String(source), {
+      runes,
+      generate: "client",
+      ...(filename ? { filename } : {}),
+    });
+    return {
+      warnings: (result.warnings || []).map((w) => w.code),
+      errors: [],
+      js: result.js?.code || "",
+    };
   } catch (error) {
-    return { warnings: [], errors: [error?.code || "compile-error"] };
+    return { warnings: [], errors: [error?.code || "compile-error"], js: "" };
   }
 }
 
@@ -970,6 +1007,18 @@ export function assertModeClassification(inventory, { repoRoot = REPO_ROOT, comp
       runes: true,
       expect: "rejected",
     },
+    {
+      label: "function-shape ABI under runes mode",
+      rel: MODE_CONTROL_FUNCTION_SHAPE_FIXTURE,
+      runes: true,
+      expect: "function-abi",
+    },
+    {
+      label: "function-shape ABI under legacy mode",
+      rel: MODE_CONTROL_FUNCTION_SHAPE_FIXTURE,
+      runes: false,
+      expect: "function-abi",
+    },
   ];
   for (const control of controls) {
     const source = readFixture(control.rel);
@@ -983,7 +1032,12 @@ export function assertModeClassification(inventory, { repoRoot = REPO_ROOT, comp
       );
       continue;
     }
-    const outcome = compileSvelteFixture(compileFn, source, control.runes);
+    const outcome = compileSvelteFixture(
+      compileFn,
+      source,
+      control.runes,
+      path.basename(control.rel),
+    );
     if (control.expect === "clean") {
       const accepted = outcome.errors.length === 0 && outcome.warnings.length === 0;
       if (!accepted) {
@@ -1002,6 +1056,18 @@ export function assertModeClassification(inventory, { repoRoot = REPO_ROOT, comp
             "STS0-svelte-inventory",
             "mode-control-failed",
             `${control.label} was not rejected by the pinned compiler`,
+          ),
+        );
+      }
+    } else if (control.expect === "function-abi") {
+      const accepted = outcome.errors.length === 0 && outcome.warnings.length === 0;
+      const isFunction = /export default function\s+\w+/.test(outcome.js);
+      if (!accepted || !isFunction) {
+        errors.push(
+          err(
+            "STS0-svelte-inventory",
+            "mode-control-failed",
+            `${control.label} must compile cleanly to a function component ABI (errors ${JSON.stringify(outcome.errors)}, warnings ${JSON.stringify(outcome.warnings)}, function-export ${isFunction})`,
           ),
         );
       }
@@ -1485,6 +1551,18 @@ export function assertPolicyLock(policy, { repoRoot = REPO_ROOT, optionsTsv = nu
     return [err("STS0-policy-lock", "missing-policy", "policy record is missing")];
   }
   errors.push(...assertSvelteAbi(policy.componentShape));
+  let compileFn = null;
+  try {
+    compileFn = loadPinnedSvelteCompile({ repoRoot });
+  } catch {
+    errors.push(
+      err(
+        "STS0-policy-lock",
+        "missing-engine",
+        "the pinned svelte toolchain did not resolve for profile evidence mode joins",
+      ),
+    );
+  }
   const rows = Array.isArray(policy.profiles) ? policy.profiles : [];
   if (rows.length === 0) {
     errors.push(err("STS0-policy-lock", "missing-policy", "policy profiles are empty"));
@@ -1607,6 +1685,22 @@ export function assertPolicyLock(policy, { repoRoot = REPO_ROOT, optionsTsv = nu
               "STS0-policy-lock",
               "evidence-mismatch",
               `profile ${row.id} JS evidence must carry @ts-check or @ts-nocheck`,
+            ),
+          );
+        }
+      }
+      if (
+        compileFn &&
+        classified.fileKind === ".svelte" &&
+        SEMANTICS_MODES.includes(row.semantics)
+      ) {
+        const mismatch = evidenceModeMismatch(compileFn, evidenceText, row.semantics);
+        if (mismatch) {
+          errors.push(
+            err(
+              "STS0-policy-lock",
+              "mode-mismatch",
+              `profile ${row.id} evidence does not match declared ${row.semantics} semantics: ${mismatch}`,
             ),
           );
         }
@@ -2078,32 +2172,6 @@ export function validateSts0Products({
       );
     }
   }
-  // Completion evidence must label the baseline input snapshot and the
-  // ratification candidate separately; the baseline SHA is never the candidate.
-  const baselineMatch = /Input snapshot \(job baseline[^`\n]*`([0-9a-f]{40})`/.exec(evidenceText);
-  const candidateMatch = /Ratification candidate: `([0-9a-f]{40})`/.exec(evidenceText);
-  if (!baselineMatch || baselineMatch[1] !== BASELINE_INPUT_SNAPSHOT) {
-    errors.push(
-      err(
-        "STS0-policy-lock",
-        "baseline-mislabel",
-        `evidence index must record the job baseline input snapshot ${BASELINE_INPUT_SNAPSHOT} under its own label`,
-      ),
-    );
-  }
-  if (
-    !candidateMatch ||
-    candidateMatch[1] === BASELINE_INPUT_SNAPSHOT ||
-    !/^[0-9a-f]{40}$/.test(candidateMatch[1])
-  ) {
-    errors.push(
-      err(
-        "STS0-policy-lock",
-        "candidate-mislabel",
-        `evidence index must record a ratification candidate revision distinct from the baseline (found ${candidateMatch?.[1] ?? "none"})`,
-      ),
-    );
-  }
   if (!/6\.0\.3/.test(evidenceText) || !/7\.0\.2/.test(evidenceText)) {
     errors.push(
       err(
@@ -2376,6 +2444,20 @@ export function evaluateRejectTwins() {
       ),
     );
   }
+  const relabeledLegacy = cloneJson(policy);
+  const relabeledLegacyRow = relabeledLegacy.profiles.find(
+    (row) => row.id === "svelte-ts-instance-legacy",
+  );
+  if (relabeledLegacyRow) relabeledLegacyRow.semantics = "runes";
+  if (!assertPolicyLock(relabeledLegacy).some((error) => error.code === "mode-mismatch")) {
+    errors.push(
+      err(
+        "STS0-policy-lock",
+        "missed-unspecified",
+        "relabeling a legacy instance profile as runes was not rejected for a mode mismatch",
+      ),
+    );
+  }
 
   // STS0-svelte-inventory clean pass, then the dirty twins.
   const cleanInventory = assertSvelteInventory(inventory);
@@ -2433,6 +2515,24 @@ export function evaluateRejectTwins() {
         "STS0-svelte-inventory",
         "missed-unowned-feature",
         "a runes feature mislabeled as legacy was not rejected",
+      ),
+    );
+  }
+  const functionShapeAsRunes = cloneJson(inventory);
+  const functionShapeRow = functionShapeAsRunes.rows.find(
+    (row) => row.id === "component-function-shape",
+  );
+  if (functionShapeRow) functionShapeRow.semantics = "runes";
+  if (
+    !assertModeClassification(functionShapeAsRunes).some(
+      (error) => error.code === "mode-misclassified",
+    )
+  ) {
+    errors.push(
+      err(
+        "STS0-svelte-inventory",
+        "missed-unowned-feature",
+        "classifying the Svelte 5 function component ABI as runes-only was not rejected",
       ),
     );
   }

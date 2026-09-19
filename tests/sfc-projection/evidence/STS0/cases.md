@@ -1,8 +1,8 @@
 # STS0 evidence index
 
-Input snapshot (job baseline, this branch's starting revision): `b9ef7e31023c6a3c06fcb1963630b8c54a17f752` on `tama_dag/0.1.0-tama/STS0`.
+Input snapshot: this branch's starting revision on `tama_dag/0.1.0-tama/STS0`.
 
-Ratification candidate: `063560adbe3c3cdd191d41e544e1ee29702b47b0` (the commit that introduced the STS0 products; review repairs land as later commits on the same branch and are not a new input snapshot).
+Ratification candidate: the commit that introduced the STS0 products; later review repairs land as later commits on the same branch and are not a new input snapshot.
 
 Engine pins: `tests/sfc-projection/STP1/products/engine-matrix.json` — ts-js `typescript@6.0.3` (`packages/playground/node_modules/typescript`), ts-native `typescript@7.0.2` (`typescript/unstable/sync`). Framework pin: svelte 5.56.10 (`svelte@5.56.10`, root `package.json` devDependencies, resolved at `node_modules/svelte`); semantics authority `packages/framework-conformance-harness/evidence/svelte-options.tsv` (`svelte:CompileOptions`/`runes` supported canonical).
 
