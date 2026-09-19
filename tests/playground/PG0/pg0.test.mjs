@@ -60,6 +60,29 @@ function perturb(obj, mutate) {
   return copy;
 }
 
+// PG0-AC-OWNER predicates, factored so the twins re-run the exact
+// discriminator the clean products pass instead of asserting the mutation.
+function assertPg0ContractOnlyReceiver(map) {
+  const self = map.receivingAmendments.find((a) => a.receiver === "PG0");
+  assert.ok(self, "DX0 ownership map names PG0 as a receiver");
+  assert.equal(
+    self.productionCapable,
+    false,
+    "PG0 is a contract-only receiver; PG1+ own workbench production",
+  );
+}
+
+function assertNativeOnlyClauseHolds(rule) {
+  assert.ok(
+    rule.nativeOnlyClause.includes("explicitly selected native execution"),
+    "native-only clause requires real explicitly selected native execution",
+  );
+  assert.ok(
+    rule.nativeOnlyClause.includes("inactive"),
+    "native-only clause forbids the inactive-card presentation",
+  );
+}
+
 // The core PG0-AC1 join, factored so the twins reuse the exact discriminator.
 function assertMatrixJoinsDX(m) {
   const dxIds = dxContract.operations.map((o) => o.id);
@@ -89,6 +112,52 @@ function assertMatrixJoinsDX(m) {
       dx.playground.promotionBlocked === undefined ? false : dx.playground.promotionBlocked,
       `${row.dxOperationId}: promotionBlocked drift`,
     );
+    // PG0-AC-EXPOSURE: the replay case is registered here, joined from DX0.
+    assert.equal(row.replayCase, dx.exposure.replayCase, `${row.dxOperationId}: replayCase drift`);
+    if (dx.playground.promotionBlocked) {
+      assert.equal(
+        row.blockedUntilRoute,
+        dx.playground.blockedUntil.route,
+        `${row.dxOperationId}: blockedUntil route drift`,
+      );
+      assert.equal(
+        row.blockedUntilReplayCase,
+        dx.playground.blockedUntil.replayCase,
+        `${row.dxOperationId}: blockedUntil replayCase drift`,
+      );
+    }
+    const dxMerge = dx.playground.unlabelledAnalysisMerge;
+    if (dxMerge) {
+      assert.ok(
+        row.unlabelledAnalysisMerge,
+        `${row.dxOperationId}: DX0 pins an unlabelledAnalysisMerge that the matrix row must disclose`,
+      );
+      assert.equal(
+        row.unlabelledAnalysisMerge.comparisonRailSelection,
+        dxMerge.comparisonRailSelection,
+        `${row.dxOperationId}: merge comparisonRailSelection drift`,
+      );
+      assert.equal(
+        row.unlabelledAnalysisMerge.defect,
+        dxMerge.defect,
+        `${row.dxOperationId}: merge defect drift`,
+      );
+      assert.deepEqual(
+        row.unlabelledAnalysisMerge.evidence,
+        dxMerge.evidence,
+        `${row.dxOperationId}: merge evidence drift`,
+      );
+      assert.match(
+        row.routeObligation,
+        /labelled split/,
+        `${row.dxOperationId}: routeObligation must carry the DX0 labelled-split route, not a single TS-worker authority over the live merge`,
+      );
+      assert.match(
+        row.routeObligation,
+        /comparisonRail/,
+        `${row.dxOperationId}: routeObligation must name the comparisonRail selection`,
+      );
+    }
     assert.match(
       row.routeOwner ?? "",
       /^PG\d/,
@@ -130,6 +199,18 @@ function assertFamiliesConsistent(m) {
     } else if (fam.familyState === "missing") {
       assert.ok(allMissing, `${fam.id}: missing family must have ops and all of them missing`);
       assert.ok(fam.futureProducer, `${fam.id}: missing family names its route plan`);
+      // A missing family's preservation evidence is the DX0 gap evidence for
+      // its own operations (or an explicit descriptorGap), never an unrelated
+      // live panel passed off as the missing producer's surface.
+      const dxEvidence = new Set(
+        fam.dxOperations.flatMap((id) => dxOps[id]?.playground?.evidence ?? []),
+      );
+      for (const p of fam.preservationEvidence) {
+        assert.ok(
+          dxEvidence.has(p),
+          `${fam.id}: preservation evidence ${p} is not DX0 gap evidence for its operations`,
+        );
+      }
     } else if (fam.familyState === "future") {
       assert.ok(states.length === 0, `${fam.id}: future family claims shipping operations`);
       assert.ok(fam.futureProducer, `${fam.id}: future family names its producing node (PG0-AC2)`);
@@ -199,6 +280,38 @@ test("PG0-AC1 twin: a promoted feature with no route owner or obligation fails",
   assert.throws(() => assertMatrixJoinsDX(m), /routeOwner|routeObligation/);
 });
 
+test("PG0-AC1 twin: dropping the unlabelledAnalysisMerge pin from a live-merge row fails", () => {
+  const m = perturb(matrix, (c) => {
+    delete c.operationCoverage.find((r) => r.dxOperationId === "playground.hover")
+      .unlabelledAnalysisMerge;
+  });
+  assert.throws(() => assertMatrixJoinsDX(m), /unlabelledAnalysisMerge/);
+});
+
+test("PG0-AC1 twin: a single TS-worker authority routeObligation over a live merge fails", () => {
+  const m = perturb(matrix, (c) => {
+    c.operationCoverage.find((r) => r.dxOperationId === "playground.hover").routeObligation =
+      "Monaco language-service adapter over the browser host; engine identity stays the pinned browser typescript worker and is disclosed on the result";
+  });
+  assert.throws(() => assertMatrixJoinsDX(m), /labelled-split|comparisonRail/);
+});
+
+test("PG0-AC1 twin: a row that drops its joined replay case fails", () => {
+  const m = perturb(matrix, (c) => {
+    delete c.operationCoverage.find((r) => r.dxOperationId === "playground.completion").replayCase;
+  });
+  assert.throws(() => assertMatrixJoinsDX(m), /replayCase drift/);
+});
+
+test("PG0-AC1 twin: a missing family citing an unrelated live panel as preservation evidence fails", () => {
+  const m = perturb(matrix, (c) => {
+    c.featureFamilies.find((f) => f.id === "workbench.family.typeinfo").preservationEvidence = [
+      "packages/playground/src/output/AnalysisPanel.vue",
+    ];
+  });
+  assert.throws(() => assertFamiliesConsistent(m), /is not DX0 gap evidence/);
+});
+
 test("PG0-AC2 clean pass and twins: future is future, never success", () => {
   // Clean: the performance family is future with a named producer and no ops.
   const perf = familyRows["workbench.family.performance"];
@@ -257,21 +370,18 @@ test("PG0-AC-OWNER: one final owner, vocabulary reuse, no parallel namespaces", 
   }
 
   // PG0 appears in DX0's ownership map as a contract-only receiver.
-  const self = dxOwnership.receivingAmendments.find((a) => a.receiver === "PG0");
-  assert.ok(self, "DX0 ownership map names PG0 as a receiver");
-  assert.equal(
-    self.productionCapable,
-    false,
-    "PG0 is a contract-only receiver; PG1+ own workbench production",
-  );
+  assertPg0ContractOnlyReceiver(dxOwnership);
 
-  // Twin: flipping PG0 to production-capable must be caught.
+  // Twin: flipping PG0 to production-capable fails the same predicate the
+  // ratified map passes (the discriminator re-runs, not just the mutation).
   const flipped = perturb(dxOwnership, (c) => {
     c.receivingAmendments.find((a) => a.receiver === "PG0").productionCapable = true;
   });
-  const flippedSelf = flipped.receivingAmendments.find((a) => a.receiver === "PG0");
-  assert.equal(flippedSelf.productionCapable, true); // the twin itself is the mutated fact
-  assert.notDeepEqual(flippedSelf, self, "twin must differ from the ratified map row");
+  assert.throws(
+    () => assertPg0ContractOnlyReceiver(flipped),
+    /contract-only receiver/,
+    "flipped map must fail the contract-only receiver predicate",
+  );
 });
 
 test("PG0 session model binds the receipt basis verbatim and adds no engine", () => {
@@ -311,8 +421,7 @@ test("PG0 promotion rule: native-only companion clause and DX1 precondition", ()
     "replay-case",
     "receipt-binding",
   ]);
-  assert.ok(promotion.rule.nativeOnlyClause.includes("explicitly selected native execution"));
-  assert.ok(promotion.rule.nativeOnlyClause.includes("inactive"));
+  assertNativeOnlyClauseHolds(promotion.rule);
   assert.ok(promotion.rule.futureClause.includes("future"));
   assert.ok(promotion.rule.enforcement.some((e) => e.startsWith("PG0-AC1")));
   // Every receiving amendment is a real PG-train node or DX1.
@@ -323,11 +432,16 @@ test("PG0 promotion rule: native-only companion clause and DX1 precondition", ()
   const receivers = promotion.receivingAmendments.map((a) => a.receiver);
   assert.equal(new Set(receivers).size, receivers.length, "duplicate receiver amendment");
 
-  // Twin: removing the native-only companion clause breaks the rule.
+  // Twin: removing the native-only companion clause fails the same predicate
+  // the ratified rule passes.
   const weakened = perturb(promotion, (c) => {
     c.rule.nativeOnlyClause = "native features show a disabled card";
   });
-  assert.ok(!weakened.rule.nativeOnlyClause.includes("explicitly selected native execution"));
+  assert.throws(
+    () => assertNativeOnlyClauseHolds(weakened.rule),
+    /explicitly selected native execution/,
+    "weakened clause must fail the native-only predicate",
+  );
 });
 
 test("PG0 grounding: cited evidence paths exist in the live repository", () => {
@@ -356,4 +470,61 @@ test("PG0 displaced-route cutover stays with PG2 and deletes nothing here", () =
   assert.ok(matrix.displacedRoute.deletionPopulationThisNode.startsWith("empty"));
   assert.equal(ownership.displacedRoutes.length, 1);
   assert.equal(ownership.displacedRoutes[0].cutoverOwner, "PG2");
+});
+
+// Every live Output.vue tab mode (allTabs plus the ssr insert) must map to a
+// family that cites the tab's panel as preservation evidence, so no
+// user-visible surface loses its surviving producer at the PG2 cutover.
+function assertDisplacedTabsOwned(m, outputVue) {
+  const allTabsBlock = outputVue.match(/const allTabs[\s\S]*?\];/);
+  assert.ok(allTabsBlock, "the curated allTabs list is where it lives in Output.vue");
+  const liveModes = new Set([...allTabsBlock[0].matchAll(/mode:\s*"([^"]+)"/g)].map((mt) => mt[1]));
+  assert.match(outputVue, /\{ mode: "ssr", label: "SSR" \}/, "the ssr insert is characterized");
+  liveModes.add("ssr");
+  assert.deepEqual(
+    m.displacedRoute.tabs.map((t) => t.mode).sort(),
+    [...liveModes].sort(),
+    "displacedRoute.tabs must cover exactly the live Output.vue tab modes (no tab without a family owner)",
+  );
+  const byFamily = Object.fromEntries(m.featureFamilies.map((f) => [f.id, f.preservationEvidence]));
+  for (const t of m.displacedRoute.tabs) {
+    assert.ok(byFamily[t.family], `tab ${t.mode}: unknown family ${t.family}`);
+    assert.ok(
+      fs.existsSync(path.join(REPO_ROOT, t.panel)),
+      `tab ${t.mode}: panel missing in live tree: ${t.panel}`,
+    );
+    assert.ok(
+      byFamily[t.family].includes(t.panel),
+      `tab ${t.mode}: panel ${t.panel} is not preservation evidence of family ${t.family}`,
+    );
+  }
+}
+
+test("PG0 displaced tabs: every Output.vue allTabs mode plus the ssr insert has an owning family", () => {
+  const outputVue = fs.readFileSync(
+    path.join(REPO_ROOT, "packages/playground/src/output/Output.vue"),
+    "utf8",
+  );
+  assertDisplacedTabsOwned(matrix, outputVue);
+
+  // Twin 1: an unowned tab mode (cssMatch detached from the matrix) fails.
+  const m1 = perturb(matrix, (c) => {
+    c.displacedRoute.tabs = c.displacedRoute.tabs.filter((t) => t.mode !== "cssMatch");
+  });
+  assert.throws(
+    () => assertDisplacedTabsOwned(m1, outputVue),
+    /displacedRoute\.tabs must cover exactly/,
+  );
+
+  // Twin 2: a tab whose panel is dropped from its owning family's evidence fails.
+  const m2 = perturb(matrix, (c) => {
+    const fam = c.featureFamilies.find((f) => f.id === "workbench.family.compiler-ir-mappings");
+    fam.preservationEvidence = fam.preservationEvidence.filter(
+      (p) => p !== "packages/playground/src/output/CssMatchPanel.vue",
+    );
+  });
+  assert.throws(
+    () => assertDisplacedTabsOwned(m2, outputVue),
+    /is not preservation evidence of family/,
+  );
 });
